@@ -1,0 +1,22 @@
+name_model = "debugmodel"
+project = "/tmp/debug"
+metric_logger_type = "dummy"
+type_model = "llama2"
+
+[train]
+micro_bs = 8
+attn_fn = "math"
+sequence_packing = false
+
+
+[optim]
+batch_size = 16
+warmup_steps = 10
+total_steps = 4
+
+[data]
+fake = true
+
+[diloco]
+inner_steps = 2
+

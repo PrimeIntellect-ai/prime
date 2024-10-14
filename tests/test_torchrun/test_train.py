@@ -1,5 +1,7 @@
 import copy
 import os
+from pathlib import Path
+import pickle
 import subprocess
 import pytest
 import socket
@@ -96,3 +98,62 @@ def test_packing(packing: bool):
     num_gpus = [2, 1]
     packing_arg = "--train.sequence_packing" if packing else "--no-train.sequence_packing"
     _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=[packing_arg])
+
+
+def test_ckpt(tmp_path: Path):
+    """
+    This test just check that we can load the ckpt and resume the training
+    """
+    num_gpus = [1, 2]
+
+    ckpt_path = tmp_path / "ckpt"
+    logging_path_1 = tmp_path / "logging_base"
+    _test_multi_gpu(
+        num_gpus,
+        "debug/exact.toml",
+        extra_args=[
+            "--ckpt.path",
+            f"{ckpt_path}",
+            "--ckpt.interval",
+            "20",
+            "--diloco.inner_steps",
+            "20",
+            "--optim.total_steps",
+            "30",
+            "--project",
+            f"{logging_path_1}",
+        ],
+    )
+
+    logging_path_2 = tmp_path / "logging_resume"
+    _test_multi_gpu(
+        num_gpus,
+        "debug/exact.toml",
+        extra_args=[
+            "--ckpt.resume",
+            f"{ckpt_path / 'step_20'}",
+            "--diloco.inner_steps",
+            "20",
+            "--optim.total_steps",
+            "30",
+            "--project",
+            f"{logging_path_2}",
+        ],
+    )
+
+    with open(logging_path_1, "rb") as f:
+        log1 = pickle.load(f)
+    with open(logging_path_2, "rb") as f:
+        log2 = pickle.load(f)
+
+    print(log1)
+    print(log2)
+
+    log1 = {data["step"]: [data["Loss"], data["inner_lr"]] for data in log1 if "Loss" in data.keys()}
+    log2 = {data["step"]: [data["Loss"], data["inner_lr"]] for data in log2 if "Loss" in data.keys()}
+
+    common_step = set(log1.keys()) & set(log2.keys())
+
+    for step in common_step:
+        assert log1[step][0] == log2[step][0], f"Loss at step {step} is different"
+        assert log1[step][1] == log2[step][1], f"Lr at step {step} is different"

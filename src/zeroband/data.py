@@ -1,3 +1,4 @@
+import copy
 import random
 from typing import Any, Generator, Optional, List, Dict, TypedDict, Union
 from pydantic_config import BaseConfig
@@ -37,22 +38,37 @@ class DataConfig(BaseConfig):
 class FakeTokenizedDataset(IterableDataset):
     """This is a dummy dataset that generates random sequences of length seq_len and vocab_size"""
 
+    buffer = 10_000
+
     def __init__(self, seq_len: int, vocab_size: int):
         self.seq_len = seq_len
         self.vocab_size = vocab_size
         assert vocab_size > 3, "Vocab size must be greater than 3"
 
-    def __iter__(self) -> Generator[dict[str, Any], Any, None]:
-        while True:
+        self.data = []
+        for _ in range(self.buffer):
             len_ = random.randint(1, self.seq_len)
             input_ids = torch.randint(3, self.vocab_size, (len_,)).tolist()
-            yield {"input_ids": input_ids}
+            data = {"input_ids": input_ids}
+            self.data.append(data)
+
+        self.data_to_yield = copy.deepcopy(self.data)
+
+    def __iter__(self) -> Generator[dict[str, Any], Any, None]:
+        # we reduce the buffer by 1 each time we yield
+        # if we arrive at the end we reset the buffer
+        # this allow to be reproducible with ckpt
+        while True:
+            if len(self.data_to_yield) == 0:
+                self.data_to_yield = copy.deepcopy(self.data)
+            yield self.data_to_yield.pop(0)
 
     def state_dict(self):
-        return {}
+        return {"data_to_yield": self.data_to_yield, "data": self.data}
 
     def load_state_dict(self, state_dict):
-        pass
+        self.data_to_yield = state_dict["data_to_yield"]
+        self.data = state_dict["data"]
 
 
 class BatchOutput(TypedDict):

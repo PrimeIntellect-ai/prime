@@ -158,11 +158,12 @@ void ring_allreduce(
         }
     }
     
-    for (int i = 0; i < BUFFER_COUNT; ++i) {
-        std::tie(send_buffer[0], send_lookup_buffer[0]) = uniform_8bit_quantize(chunks[i + rank * BUFFER_COUNT], true);
-        auto& chunk = chunks[i + rank * BUFFER_COUNT];
-        auto& lookup = send_lookup_buffer[0];
-        auto& indices = send_buffer[0];
+    // Quantize your chunk to be consistent
+    for (int step = 1; step <= BUFFER_COUNT; ++step) {
+        std::tie(send_buffer[step % BUFFER_COUNT], send_lookup_buffer[step % BUFFER_COUNT]) = uniform_8bit_quantize(chunks[BUFFER_COUNT - step + rank * BUFFER_COUNT], true);
+        auto& chunk = chunks[BUFFER_COUNT - step + rank * BUFFER_COUNT];
+        auto& lookup = send_lookup_buffer[step % BUFFER_COUNT];
+        auto& indices = send_buffer[step % BUFFER_COUNT];
 
         fast_index_set_omp<float>(
             static_cast<float*>(chunk.data_ptr()),
@@ -174,13 +175,13 @@ void ring_allreduce(
 
     // Reset buffers for the second phase
     recv_buffer.clear();
-    send_buffer.clear();
-    send_lookup_buffer.clear();
+    //send_buffer.clear();
+    //send_lookup_buffer.clear();
     recv_lookup_buffer.clear();
     for (int i = 0; i < BUFFER_COUNT; ++i) {
         recv_buffer.push_back(torch::empty_like(chunks[0], torch::kUInt8));
-        send_buffer.push_back(torch::Tensor());
-        send_lookup_buffer.push_back(torch::Tensor());
+        //send_buffer.push_back(torch::Tensor());
+        //send_lookup_buffer.push_back(torch::Tensor());
         recv_lookup_buffer.push_back(torch::empty({256}, chunks[0].options()));
     }
     std::fill(send_work.begin(), send_work.end(), nullptr);
@@ -211,8 +212,12 @@ void ring_allreduce(
 
         if (step <= (world_size - 1) * BUFFER_COUNT) {
             // Quantize and send
-            // todo(jackmin): this quantization is redundant, we should be able to reuse the quantized values we just received
-            std::tie(send_buffer[step % BUFFER_COUNT], send_lookup_buffer[step % BUFFER_COUNT]) = uniform_8bit_quantize(chunks[send_chunk], false);
+            // todo(jackmin): this copy breaks things
+            // todo(jackmin): we can also go even faster by not copying at all
+            if (step > BUFFER_COUNT) {
+                send_buffer[step % BUFFER_COUNT].copy_(recv_buffer[step % BUFFER_COUNT]);
+                send_lookup_buffer[step % BUFFER_COUNT].copy_(recv_lookup_buffer[step % BUFFER_COUNT]);
+            }
 
             std::vector<torch::Tensor> send_tensors = {send_lookup_buffer[step % BUFFER_COUNT]};
             send_lookup_work[step % BUFFER_COUNT] = group->send(send_tensors, send_rank, step + 1000);

@@ -140,7 +140,7 @@ class Diloco:
 
         self._logger.debug("sync inner model")
         for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
-            param.data.to_local().copy_(param_offloaded.data.to_local())
+            param.data.to_local().copy_(param_offloaded.data.to_local(), non_blocking=True)
 
     def get_offloaded_param(self, model: nn.Module) -> list[nn.Parameter]:
         """
@@ -167,7 +167,7 @@ class Diloco:
             data_tensor = self.offloaded_data_flat_tensor.as_strided(target.size(), target.stride(), current_offset)
             grad_tensor = self.offloaded_grad_flat_tensor.as_strided(target.size(), target.stride(), current_offset)
             current_offset += data_tensor.numel()
-            data_tensor.copy_(target)
+            data_tensor.copy_(target, non_blocking=True)
 
             offloaded_param = nn.Parameter(
                 DTensor.from_local(

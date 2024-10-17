@@ -17,6 +17,7 @@ from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
 from zeroband.comms import ElasticDeviceMesh
 from zeroband.loss import cross_entropy_max_z_loss
+from zeroband.models.llama.model import AttnFn
 
 from zeroband.utils import (
     GPUMemoryMonitor,
@@ -72,7 +73,7 @@ class TrainConfig(BaseConfig):
     memory_profiler: MemoryProfilerConfig | None = None
 
     sequence_packing: bool = True
-    attn_fn: Literal["flash", "sdpa"] = "flash"
+    attn_fn: AttnFn = AttnFn.FLASH
 
     @model_validator(mode="after")
     def validate_attn_fn(self):

@@ -1,5 +1,7 @@
 import copy
 import os
+from pathlib import Path
+import pickle
 import subprocess
 import pytest
 import socket
@@ -30,7 +32,7 @@ def gpus_to_use(num_nodes, num_gpu, rank):
     return ",".join(map(str, range(rank * num_gpu, (rank + 1) * num_gpu)))
 
 
-def _test_multi_gpu(num_gpus, config, extra_args=[]):
+def _test_multi_gpu(num_gpus, config, extra_args=[], diloco: bool = False):
     num_nodes, num_gpu = num_gpus[0], num_gpus[1]
 
     processes = []
@@ -48,6 +50,18 @@ def _test_multi_gpu(num_gpus, config, extra_args=[]):
 
         env = copy.deepcopy(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = gpus_to_use(num_nodes, num_gpu, i)
+        env["ZERO_BAND_LOG_LEVEL"] = "DEBUG"
+
+        if diloco:
+            extra_env = {
+                "GLOBAL_RANK": str(i),
+                "GLOBAL_UNIQUE_ID": str(i),
+                "GLOBAL_ADDR": "localhost",
+                "GLOBAL_PORT": str(ports[0]),
+                "GLOBAL_WORLD_SIZE": str(num_nodes),
+            }
+            env.update(extra_env)
+
         process1 = subprocess.Popen(cmd, env=env)
         processes.append(process1)
 
@@ -65,7 +79,7 @@ def test_multi_gpu(num_gpus):
 @pytest.mark.parametrize("num_gpus", [[1, 2], [2, 2]])
 def test_multi_gpu_diloco(num_gpus):
     # we don't test 1,1 and 2,1 because 1 solo gpu failed with fsdp
-    _test_multi_gpu(num_gpus, "debug/diloco.toml")
+    _test_multi_gpu(num_gpus, "debug/diloco.toml", diloco=True)
 
 
 def test_act_ckpt():
@@ -83,7 +97,7 @@ def test_act_ckpt_num():
 )  # not adding CINT8 because the compile is too slow
 def test_all_reduce_diloco(backend: Compression):
     num_gpus = [2, 1]
-    _test_multi_gpu(num_gpus, "debug/diloco.toml", extra_args=["--diloco.compression", backend.value])
+    _test_multi_gpu(num_gpus, "debug/diloco.toml", extra_args=["--diloco.compression", backend.value], diloco=True)
 
 
 def test_z_loss():
@@ -96,3 +110,62 @@ def test_packing(packing: bool):
     num_gpus = [2, 1]
     packing_arg = "--train.sequence_packing" if packing else "--no-train.sequence_packing"
     _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=[packing_arg])
+
+
+def test_ckpt(tmp_path: Path):
+    """
+    This test just check that we can load the ckpt and resume the training
+    """
+    num_gpus = [1, 2]
+
+    ckpt_path = tmp_path / "ckpt"
+    logging_path_1 = tmp_path / "logging_base"
+    _test_multi_gpu(
+        num_gpus,
+        "debug/exact.toml",
+        extra_args=[
+            "--ckpt.path",
+            f"{ckpt_path}",
+            "--ckpt.interval",
+            "20",
+            "--diloco.inner_steps",
+            "20",
+            "--optim.total_steps",
+            "30",
+            "--project",
+            f"{logging_path_1}",
+        ],
+    )
+
+    logging_path_2 = tmp_path / "logging_resume"
+    _test_multi_gpu(
+        num_gpus,
+        "debug/exact.toml",
+        extra_args=[
+            "--ckpt.resume",
+            f"{ckpt_path / 'step_20'}",
+            "--diloco.inner_steps",
+            "20",
+            "--optim.total_steps",
+            "30",
+            "--project",
+            f"{logging_path_2}",
+        ],
+    )
+
+    with open(logging_path_1, "rb") as f:
+        log1 = pickle.load(f)
+    with open(logging_path_2, "rb") as f:
+        log2 = pickle.load(f)
+
+    print(log1)
+    print(log2)
+
+    log1 = {data["step"]: [data["Loss"], data["inner_lr"]] for data in log1 if "Loss" in data.keys()}
+    log2 = {data["step"]: [data["Loss"], data["inner_lr"]] for data in log2 if "Loss" in data.keys()}
+
+    common_step = set(log1.keys()) & set(log2.keys())
+
+    for step in common_step:
+        assert log1[step][0] == log2[step][0], f"Loss at step {step} is different"
+        assert log1[step][1] == log2[step][1], f"Lr at step {step} is different"

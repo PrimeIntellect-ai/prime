@@ -12,18 +12,26 @@
 
 
 from dataclasses import dataclass
+from enum import Enum
 from importlib.util import find_spec
-from typing import Literal, Optional, Tuple
+from typing import Optional, Tuple
 from einops import rearrange
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from zeroband.models.norms import build_norm
+from zeroband.utils.logging import get_logger
 
 flash_attn_available = find_spec("flash_attn") is not None
 if flash_attn_available:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
+
+
+class AttnFn(Enum):
+    FLASH = "flash"
+    SDPA = "sdpa"
+    MATH = "math"
 
 
 @dataclass
@@ -45,7 +53,7 @@ class ModelArgs:
     depth_init: bool = True
     norm_type: str = "fused_rmsnorm"
 
-    attn_fn: Literal["sdpa", "flash"] = "sdpa"
+    attn_fn: AttnFn = AttnFn.SDPA
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
@@ -166,6 +174,10 @@ class Attention(nn.Module):
 
         self.attn_fn = model_args.attn_fn
 
+        if self.attn_fn == AttnFn.MATH:
+            logger = get_logger()
+            logger.info("Using math SDPA which is exact and reproducible but slow. Should be used for debugging only.")
+
         self.wq = nn.Linear(model_args.dim, model_args.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
@@ -260,11 +272,14 @@ class Attention(nn.Module):
     def self_attention(
         self, xq: torch.Tensor, xk: torch.Tensor, xv: torch.Tensor, seqlens: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if self.attn_fn == "sdpa":
+        if self.attn_fn == AttnFn.SDPA:
             if seqlens is not None:
                 raise NotImplementedError("SDPA with seqlens is not implemented.")
             return self._sdpa_attention(xq, xk, xv)
-        elif self.attn_fn == "flash":
+        elif self.attn_fn == AttnFn.MATH:
+            with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+                return self._sdpa_attention(xq, xk, xv)
+        elif self.attn_fn == AttnFn.FLASH:
             if not flash_attn_available:
                 raise RuntimeError("Flash attention is not available. Please install flash_attn.")
             if seqlens is not None:

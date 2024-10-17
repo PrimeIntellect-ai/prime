@@ -62,9 +62,8 @@ def test_multi_gpu(num_gpus):
     _test_multi_gpu(num_gpus, "debug/normal.toml")
 
 
-@pytest.mark.parametrize("num_gpus", [[1, 2], [2, 2]])
+@pytest.mark.parametrize("num_gpus", [[2, 1], [2, 2]])
 def test_multi_gpu_diloco(num_gpus):
-    # we don't test 1,1 and 2,1 because 1 solo gpu failed with fsdp
     _test_multi_gpu(num_gpus, "debug/diloco.toml")
 
 

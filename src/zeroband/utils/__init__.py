@@ -101,7 +101,7 @@ class PerfCounter:
 TENSOR_SIG_SAMPLE_SIZE = 100
 
 
-def get_tensor_signature(a: torch.Tensor | torch.nn.Parameter) -> str:
+def get_tensor_signature(a: torch.Tensor | torch.nn.Parameter, full_dtensor: bool = True) -> str:
     """
     Get the tensor signature
     """
@@ -109,7 +109,10 @@ def get_tensor_signature(a: torch.Tensor | torch.nn.Parameter) -> str:
         a = a.data
 
     if isinstance(a, DTensor):
-        a = a.full_tensor()
+        if full_dtensor:
+            a = a.full_tensor()
+        else:
+            a = a.to_local()
 
     if a.numel() < TENSOR_SIG_SAMPLE_SIZE:
         b = a.as_strided(size=(a.numel(),), stride=(1,))

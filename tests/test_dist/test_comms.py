@@ -10,7 +10,7 @@ import multiprocessing as mp
 def test_elastic_device_mesh_no_global(world_size: int, random_available_port: int, mock_env):
     def foo(**kwargs):
         with mock_env(**kwargs):
-            edm = ElasticDeviceMesh()
+            edm = ElasticDeviceMesh(enable=False)
 
             rank = int(kwargs["RANK"])
             a = torch.arange(3) * (rank + 1)

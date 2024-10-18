@@ -11,10 +11,62 @@ from transformers import AutoTokenizer
 import math
 from pathlib import Path
 from safetensors.torch import save_file
+import json
+from zeroband.models.llama import ModelArgs
+from transformers import LlamaConfig
 
 
 class ExportConfig(Config):
-    save_format: Literal["pt", "safetensors"]
+    save_format: Literal["pt", "safetensors"] = "safetensors"
+    torch_dtype: Literal["float32", "bfloat16"] = "bfloat16"
+
+
+def remap_keys_llama(k: str) -> str:
+    return ("model." if "output.weight" not in k else "") + k.replace("tok_embeddings", "embed_tokens").replace(
+        "attention.wq", "self_attn.q_proj"
+    ).replace("attention.wk", "self_attn.k_proj").replace("attention.wv", "self_attn.v_proj").replace(
+        "attention.wo", "self_attn.o_proj"
+    ).replace("attention_norm", "input_layernorm").replace("feed_forward.w3", "mlp.up_proj").replace(
+        "feed_forward.w2", "mlp.down_proj"
+    ).replace("feed_forward.w1", "mlp.gate_proj").replace("ffn_norm", "post_attention_layernorm").replace(
+        "output.weight", "lm_head.weight"
+    )
+
+
+def _get_ffn_dim(hidden_dim: int, ffn_dim_multiplier: float, multiple_of: int) -> int:
+    hidden_dim = int(8 * hidden_dim / 3)
+    # custom dim factor multiplier
+    if ffn_dim_multiplier is not None:
+        hidden_dim = int(ffn_dim_multiplier * hidden_dim)
+    hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+    return hidden_dim
+
+
+def convert_config_zb_to_hf(zb_config: ModelArgs) -> LlamaConfig:
+    config = LlamaConfig()
+    config.hidden_size = zb_config.dim
+    config.num_hidden_layers = zb_config.n_layers
+    config.num_attention_heads = zb_config.n_heads
+    config.num_key_value_heads = zb_config.n_kv_heads
+    config.vocab_size = zb_config.vocab_size
+    config.intermediate_size = _get_ffn_dim(zb_config.dim, zb_config.ffn_dim_multiplier, zb_config.multiple_of)
+    config.rms_norm_eps = zb_config.norm_eps
+    config.rope_theta = float(zb_config.rope_theta)
+    config.max_position_embeddings = zb_config.max_seq_len
+    config.bos_token_id = 128000
+    config.eos_token_id = [128001, 128008, 128009]
+    config.architectures = ["LlamaForCausalLM"]
+
+    # Rope scaling
+    config.rope_scaling = {
+        "factor": 8.0,
+        "low_freq_factor": 1.0,
+        "high_freq_factor": 4.0,
+        "original_max_position_embeddings": 8192,
+        "rope_type": "llama3",
+    }
+
+    return config
 
 
 def main(config: ExportConfig):
@@ -37,6 +89,8 @@ def main(config: ExportConfig):
         seq_length=config.data.seq_length,
         attn_fn=config.train.attn_fn,
     )
+    config = convert_config_zb_to_hf(model_config)
+    config.to_json_file(save_path / "config.json")
 
     logger.info("Before load: %s", get_module_signature(model))
 
@@ -58,19 +112,35 @@ def main(config: ExportConfig):
     state_keys = list(state_dict.keys())
     shard_size = int(math.ceil(len(state_keys) / num_shards))
 
+    index_json = {}
+    total_size = 0
+    state_dict = {remap_keys_llama(k): v for k, v in state_dict.items()}
+    if config.torch_dtype == "bfloat16":
+        state_dict = {k: v.to(torch.bfloat16) for k, v in state_dict.items()}
     logger.info("Saving model to %d shards", num_shards)
     for i in range(num_shards):
+        _file = save_path / f"model-{i:04}-of-{num_shards:04}.{config.save_format}"
         start = i * shard_size
-        end = (i + 1) * shard_size
-        if i == 9:
-            end = len(state_keys)
+        end = min((i + 1) * shard_size, len(state_keys))
         shard = {k: state_dict[k] for k in state_keys[start:end]}
+
+        index_json.update({k: _file.name for k in shard.keys()})
+        total_size += sum(p.numel() for p in shard.values())
         if config.save_format == "pt":
-            torch.save(shard, str(save_path / f"model-{i:04}-of-{num_shards:04}.pt"))
+            torch.save(shard, _file)
         else:
-            save_file(
-                shard, str(save_path / f"model-{i:04}-of-{num_shards:04}.safetensors"), metadata=dict(format="pt")
-            )
+            save_file(shard, _file, metadata=dict(format="pt"))
+
+    json.dump(
+        {
+            "weight_map": index_json,
+            "metadata": {
+                "total_size": total_size * (2 if config.torch_dtype == "bfloat16" else 4),
+            },
+        },
+        (save_path / "model.safetensors.index.json").open("w"),
+        indent=2,
+    )
 
 
 if __name__ == "__main__":

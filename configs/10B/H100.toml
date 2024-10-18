@@ -32,4 +32,4 @@ compression = "uint8"
 interval = 100
 topk = 40
 path = "outputs_10B_zero_band"
-# remote_data_path = "gs://checkpoints_pi/10b_data/"
+remote_data_path = "gs://checkpoints_pi/10b/data/"

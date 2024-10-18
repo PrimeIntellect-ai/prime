@@ -15,5 +15,5 @@ total_steps = 4
 fake = true
 
 [diloco]
-inner_steps = 2
+inner_steps = 5
 

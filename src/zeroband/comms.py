@@ -137,6 +137,7 @@ class ElasticDeviceMesh:
         )
 
         self._global_leader = self.world_info.global_rank == 0
+        self._logger.info(f"[{self.world_info.global_unique_id}] Global leader: {self._global_leader}")
         self.global_store = dist.TCPStore(
             host_name=self.world_info.global_addr,
             port=self.world_info.global_port + self.world_info.rank,

@@ -30,11 +30,12 @@ def gpus_to_use(num_nodes, num_gpu, rank):
     return ",".join(map(str, range(rank * num_gpu, (rank + 1) * num_gpu)))
 
 
-def _test_multi_gpu(num_gpus, config, extra_args=[]):
+def _test_multi_gpu(num_gpus, config, extra_args=[], diloco=False):
     num_nodes, num_gpu = num_gpus[0], num_gpus[1]
 
     processes = []
     ports = get_random_available_port_list(num_nodes)
+    new_port = get_random_available_port(1)
     for i in range(num_nodes):
         cmd = [
             "torchrun",
@@ -47,7 +48,20 @@ def _test_multi_gpu(num_gpus, config, extra_args=[]):
         ]
 
         env = copy.deepcopy(os.environ)
+
+        if diloco:
+            new_env = {
+                "GLOBAL_RANK": str(i),
+                "GLOBAL_UNIQUE_ID": str(i),
+                "GLOBAL_ADDR": "localhost",
+                "GLOBAL_WORLD_SIZE": str(num_nodes),
+                "GLOBAL_PORT": str(new_port),
+            }
+            env.update(new_env)
+
         env["CUDA_VISIBLE_DEVICES"] = gpus_to_use(num_nodes, num_gpu, i)
+        env["ZERO_BAND_LOG_LEVEL"] = "DEBUG"
+
         process1 = subprocess.Popen(cmd, env=env)
         processes.append(process1)
 
@@ -62,10 +76,9 @@ def test_multi_gpu(num_gpus):
     _test_multi_gpu(num_gpus, "debug/normal.toml")
 
 
-@pytest.mark.parametrize("num_gpus", [[1, 2], [2, 2]])
+@pytest.mark.parametrize("num_gpus", [[2, 1], [2, 2]])
 def test_multi_gpu_diloco(num_gpus):
-    # we don't test 1,1 and 2,1 because 1 solo gpu failed with fsdp
-    _test_multi_gpu(num_gpus, "debug/diloco.toml")
+    _test_multi_gpu(num_gpus, "debug/diloco.toml", diloco=True)
 
 
 def test_act_ckpt():
@@ -78,12 +91,10 @@ def test_act_ckpt_num():
     _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=["--train.ac_ckpt", "2"])
 
 
-@pytest.mark.parametrize(
-    "backend", [Compression.NO, Compression.UINT8]
-)  # not adding CINT8 because the compile is too slow
+@pytest.mark.parametrize("backend", [Compression.NO, Compression.UINT8])
 def test_all_reduce_diloco(backend: Compression):
     num_gpus = [2, 1]
-    _test_multi_gpu(num_gpus, "debug/diloco.toml", extra_args=["--diloco.compression", backend.value])
+    _test_multi_gpu(num_gpus, "debug/diloco.toml", extra_args=["--diloco.compression", backend.value], diloco=True)
 
 
 def test_z_loss():

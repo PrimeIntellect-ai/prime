@@ -330,19 +330,22 @@ def train(config: Config):
             loss_batch = 0
             z_loss_batch = 0
 
-            maybe_dest_rank = elastic_device_mesh.live_recovery.should_send_ckpt_to()
-            if maybe_dest_rank is not None:
-                logger.info(f"Start live recovery to rank {maybe_dest_rank}")
-                if config.train.log_model_hash:
-                    logger.info(
-                        f"live recovery outer optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}"
-                    )
-                    logger.info(f"live recovery outer model hash: {get_tensor_list_signature(diloco.param_list_cpu)}")
-                    logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
+            if config.diloco is not None:
+                maybe_dest_rank = elastic_device_mesh.live_recovery.should_send_ckpt_to()
+                if maybe_dest_rank is not None:
+                    logger.info(f"Start live recovery to rank {maybe_dest_rank}")
+                    if config.train.log_model_hash:
+                        logger.info(
+                            f"live recovery outer optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}"
+                        )
+                        logger.info(
+                            f"live recovery outer model hash: {get_tensor_list_signature(diloco.param_list_cpu)}"
+                        )
+                        logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
 
-                ckpt_manager.send_ckpt_to_peer(elastic_device_mesh.global_pg, maybe_dest_rank)
+                    ckpt_manager.send_ckpt_to_peer(elastic_device_mesh.global_pg, maybe_dest_rank)
 
-                elastic_device_mesh.live_recovery.reset()
+                    elastic_device_mesh.live_recovery.reset()
 
             for grad_acc_step in range(gradient_accumulation_steps):
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1

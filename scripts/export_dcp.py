@@ -68,7 +68,7 @@ def main(config: ExportConfig):
         if config.save_format == "pt":
             torch.save(shard, str(save_path / f"model-{i:04}-of-{num_shards:04}.pt"))
         else:
-            save_file(shard, str(save_path / f"model-{i:04}-of-{num_shards:04}.pt"))
+            save_file(shard, str(save_path / f"model-{i:04}-of-{num_shards:04}.safetensors"))
 
 
 if __name__ == "__main__":

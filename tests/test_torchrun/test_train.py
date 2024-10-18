@@ -91,9 +91,7 @@ def test_act_ckpt_num():
     _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=["--train.ac_ckpt", "2"])
 
 
-@pytest.mark.parametrize(
-    "backend", [Compression.NO, Compression.UINT8]
-)  # not adding CINT8 because the compile is too slow
+@pytest.mark.parametrize("backend", [Compression.NO, Compression.UINT8])
 def test_all_reduce_diloco(backend: Compression):
     num_gpus = [2, 1]
     _test_multi_gpu(num_gpus, "debug/diloco.toml", extra_args=["--diloco.compression", backend.value], diloco=True)

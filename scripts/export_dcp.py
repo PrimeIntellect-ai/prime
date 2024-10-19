@@ -89,8 +89,8 @@ def main(config: ExportConfig):
         seq_length=config.data.seq_length,
         attn_fn=config.train.attn_fn,
     )
-    config = convert_config_zb_to_hf(model_config)
-    config.to_json_file(save_path / "config.json")
+    hf_config = convert_config_zb_to_hf(model_config)
+    hf_config.to_json_file(save_path / "config.json")
 
     logger.info("Before load: %s", get_module_signature(model))
 
@@ -107,16 +107,17 @@ def main(config: ExportConfig):
 
     num_shards = int(sum(p.numel() for p in model.parameters()) / 1e9)
     state_dict = model.state_dict()
-    if "freqs_cis" in state_dict:  # This should not be persisted
-        del state_dict["freqs_cis"]
-    state_keys = list(state_dict.keys())
-    shard_size = int(math.ceil(len(state_keys) / num_shards))
 
     index_json = {}
     total_size = 0
     state_dict = {remap_keys_llama(k): v for k, v in state_dict.items()}
     if config.torch_dtype == "bfloat16":
         state_dict = {k: v.to(torch.bfloat16) for k, v in state_dict.items()}
+
+    if "freqs_cis" in state_dict:  # This should not be persisted
+        del state_dict["freqs_cis"]
+    state_keys = list(state_dict.keys())
+    shard_size = int(math.ceil(len(state_keys) / num_shards))
     logger.info("Saving model to %d shards", num_shards)
     for i in range(num_shards):
         _file = save_path / f"model-{i:04}-of-{num_shards:04}.{config.save_format}"

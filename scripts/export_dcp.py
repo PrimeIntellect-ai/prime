@@ -1,3 +1,4 @@
+import requests
 import torch
 from typing import Literal
 import torch.distributed.checkpoint as dcp
@@ -142,6 +143,15 @@ def main(config: ExportConfig):
         (save_path / "model.safetensors.index.json").open("w"),
         indent=2,
     )
+
+    # Tokenizer
+    for _file in ["tokenizer.json", "special_tokens_map.json", "tokenizer_config.json"]:
+        with (save_path / _file).open("wb") as f:
+            f.write(
+                requests.get(
+                    f"https://huggingface.co/PrimeIntellect/Meta-Llama-3.1-8B-Instruct-FP8/resolve/main/{_file}?download=true"
+                ).content
+            )
 
 
 if __name__ == "__main__":

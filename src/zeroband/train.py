@@ -1,6 +1,7 @@
 import os
 from typing import Literal
 import time
+import psutil
 from pydantic import model_validator
 
 import torch
@@ -414,6 +415,7 @@ def train(config: Config):
                 # might need to tweak this as some worker might fail to join the all reduce later
                 training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
 
+            mem_usage = psutil.virtual_memory().percent
             metrics = {
                 "Loss": loss_batch.item(),
                 "step": training_progress.step,
@@ -421,6 +423,7 @@ def train(config: Config):
                 "Perplexity": torch.exp(loss_batch).item(),
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
+                "mem_usage": mem_usage,
             }
             if config.optim.z_loss:
                 metrics["z_loss"] = z_loss_batch.item()
@@ -439,6 +442,7 @@ def train(config: Config):
                     100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
                 )
                 log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
+                log += f", mem_usage: {mem_usage:.2f}"
 
             if config.diloco is not None:
                 metrics["num_peers"] = elastic_device_mesh.global_pg.size()

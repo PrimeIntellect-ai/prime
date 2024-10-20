@@ -23,8 +23,8 @@ def main():
     print(f"Total physical RAM: {total_ram / (1024**3):.2f} GB")
 
     # Start with 1% of total RAM
-    initial_percentage = 25
-    percentage_increment = 25
+    initial_percentage = 50
+    percentage_increment = 10
     current_percentage = initial_percentage
 
     tensors = []

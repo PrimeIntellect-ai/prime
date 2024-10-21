@@ -361,10 +361,7 @@ class CkptManager:
 
             if self.config.data_version == "v2":
                 data_path = os.path.join(ckpt_path, "data")
-                os.makedirs(data_path, exist_ok=True)
-                with open(os.path.join(data_path, f"_{self.world_info.local_rank}.pt"), "wb") as f:
-                    state = {"data_loader": self.dataloader.state_dict()}
-                    torch.save(state, f)
+                self.save_data_v2(data_path, self.dataloader, self.world_info.local_rank)
 
                 non_error_barrier()
 
@@ -380,6 +377,13 @@ class CkptManager:
                     self._async_save_remote(data_path, latest_remote_data_path, blocking=False)
 
         gc.collect()
+
+    @staticmethod
+    def save_data_v2(data_path: str, dataloader, local_rank: int):
+        os.makedirs(data_path, exist_ok=True)
+        with open(os.path.join(data_path, f"_{local_rank}.pt"), "wb") as f:
+            state = {"data_loader": dataloader.state_dict()}
+            torch.save(state, f)
 
     def _async_save_remote(self, ckpt_path: str, remote_ckpt_path: str, blocking: bool = True) -> None:
         """asyncronously rsync a ckpt folder to a remote location. Using fsspec to handle remote cloud storage without to install

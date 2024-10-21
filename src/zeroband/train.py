@@ -14,6 +14,8 @@ from transformers import AutoTokenizer
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 
 import torch.distributed as dist
+import pyarrow as pa
+
 from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
 from zeroband.comms import ElasticDeviceMesh
@@ -563,5 +565,7 @@ if __name__ == "__main__":
 
     config = Config(**parse_argv())
     logger.debug(f"config: {config.model_dump()}")
+
+    pa.jemalloc_set_decay_ms(0)
 
     train(config)

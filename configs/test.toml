@@ -1,0 +1,18 @@
+name_model = "debugmodel"
+project = "debug_150m_zero_band"
+type_model = "llama2"
+
+[train]
+micro_bs = 4  # change this base on the gpu
+
+[data]
+seq_length = 8192
+dataset_name_or_paths = "PrimeIntellect/fineweb-edu,PrimeIntellect/fineweb,PrimeIntellect/StackV1-popular,mlfoundations/dclm-baseline-1.0-parquet,open-web-math/open-web-math"
+dataset_ratio = "55:10:20:10:5"
+num_workers = 8
+
+[optim]
+batch_size = 128
+warmup_steps = 1000
+total_steps = 88_000
+lr = 4e-4

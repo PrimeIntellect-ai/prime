@@ -123,17 +123,14 @@ export HF_HUB_ETAG_TIMEOUT=500
 
 ## Pre-downloading datasets
 Streaming datasets from huggingface hub can sometimes result in http 443 errors which will crash the training process.
-To avoid them, you can pre-download the dataset with git lfs. (Which does not seem to have a rate limit at present.)
-You will first need to add your machine's SSH key to your authorized SSH keys on huggingface hub: https://huggingface.co/settings/keys.
-You can then clone the dataset repository without pulling the LFS files.
-We provide a script that takes `dataset_name`, `data_world_size` and `data_rank` and outputs a command that will `git rm` all parquet files that are not going to be seen by the given data rank.
-You can then execute the script to perform all the `git rm` and pull the remaining files from LFS.
+To avoid them, you can pre-download the dataset.
 
-Here is an example that pulls all the files in `PrimeIntellect/fineweb-edu` which are used by `data_rank` 5 in a training with `data_world_size` of 12.
+Here is an example that downloads all the files in `PrimeIntellect/fineweb-edu` which are used by `data_rank` 5 in a training with `data_world_size` of 12.
 ```bash
-export GIT_LFS_SKIP_SMUDGE=1
-git clone git@hf.co:datasets/PrimeIntellect/fineweb-edu
-cd fineweb-edu/
-python3 ../subset_data.py --dataset_name PrimeIntellect/fineweb-edu --data_world_size 12 --data_rank 5
-bash rm-unused.sh
+python3 scripts/subset_data.py --dataset_name PrimeIntellect/fineweb-edu --data_world_size 12 --data_rank 5
+```
+
+For info about the arguments to the script, do:
+```bash
+python3 scripts/subset_data.py --help
 ```

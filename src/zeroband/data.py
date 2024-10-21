@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset, Dataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.distributed.checkpoint.stateful import Stateful
+import pyarrow as pa
 
 from datasets import load_dataset, interleave_datasets, load_dataset_builder, BuilderConfig
 from datasets.distributed import split_dataset_by_node
@@ -72,6 +73,11 @@ class SequencePackingDataSet(IterableDataset, Stateful):
         self.max_seq_length = max_seq_length
         self.eos_token = eos_token
 
+        self.interval_log = 100
+        self.i = 0
+
+        pa.jemalloc_set_decay_ms(0)
+
     def __iter__(self) -> Generator[BatchOutput, Any, None]:
         inputs_ids = []
         labels = []
@@ -104,6 +110,10 @@ class SequencePackingDataSet(IterableDataset, Stateful):
                 inputs_ids = []
                 labels = []
                 seqlens = []
+
+                self.i += 1
+                if self.i % self.interval_log == 0:
+                    logger.info(f"py_arrow_memory: {pa.total_allocated_bytes() / 1024**3:.2f} GB")
 
     def state_dict(self):
         return self.dataset.state_dict()

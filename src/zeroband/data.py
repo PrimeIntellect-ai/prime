@@ -76,7 +76,7 @@ class SequencePackingDataSet(IterableDataset, Stateful):
         self.interval_log = 100
         self.i = 0
 
-        # pa.jemalloc_set_decay_ms(0)
+        pa.jemalloc_set_decay_ms(0)
 
     def __iter__(self) -> Generator[BatchOutput, Any, None]:
         inputs_ids = []

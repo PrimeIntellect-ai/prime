@@ -67,7 +67,7 @@ def skip_data(config: Config):
                 next(train_dataloader_iterator)
 
         total_steps += num_inner_steps
-
+        logger.info("total steps: %d", total_steps)
         if total_steps >= config.optim.total_steps:
             break
 

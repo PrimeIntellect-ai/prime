@@ -122,18 +122,44 @@ export HF_HUB_ETAG_TIMEOUT=500
 ```
 
 ## Pre-downloading datasets
-Streaming datasets from huggingface hub can sometimes result in http 443 errors which will crash the training process.
-To avoid them, you can pre-download the dataset with git lfs. (Which does not seem to have a rate limit at present.)
-You will first need to add your machine's SSH key to your authorized SSH keys on huggingface hub: https://huggingface.co/settings/keys.
-You can then clone the dataset repository without pulling the LFS files.
-We provide a script that takes `dataset_name`, `data_world_size` and `data_rank` and outputs a command that will `git rm` all parquet files that are not going to be seen by the given data rank.
-You can then execute the script to perform all the `git rm` and pull the remaining files from LFS.
 
-Here is an example that pulls all the files in `PrimeIntellect/fineweb-edu` which are used by `data_rank` 5 in a training with `data_world_size` of 12.
+To avoid potential issues that can occur when streaming datasets from the Hugging Face hub during training, you can pre-download the dataset using our custom script. This script efficiently downloads the required files for your specific data rank and world size configuration.
+
+### Usage
+
+Run the `subset_data.py` script with the appropriate parameters:
+
 ```bash
-export GIT_LFS_SKIP_SMUDGE=1
-git clone git@hf.co:datasets/PrimeIntellect/fineweb-edu
-cd fineweb-edu/
-python3 ../subset_data.py --dataset_name PrimeIntellect/fineweb-edu --data_world_size 12 --data_rank 5
-bash rm-unused.sh
+python scripts/subset_data.py --dataset_name <dataset_name> --data_world_size <world_size> --data_rank <rank> --output_dir <output_directory>
 ```
+
+### Parameters
+
+- `--dataset_name`: The name of the dataset on Hugging Face (e.g., "allenai/c4:en,PrimeIntellect/fineweb-edu")
+- `--data_world_size`: Total number of data ranks in your training setup
+- `--data_rank`: The specific rank for which to download data (0 to data_world_size - 1)
+- `--output_dir`: Directory where the downloaded files will be stored
+- `--dry_run`: (Optional) If set, the script will simulate the download process without actually downloading data
+- `--max_shards`: (Optional) Maximum number of shards to download (default is 1000)
+
+### Example
+
+To download files for data rank 5 in a training setup with data world size of 12:
+
+```bash
+python scripts/subset_data.py --dataset_name allenai/c4:en,PrimeIntellect/fineweb-edu --data_world_size 12 --data_rank 5 --output_dir ./datasets
+```
+
+This command will:
+1. Download the English subset of the C4 dataset and the PrimeIntellect/fineweb-edu dataset
+2. Process approximately 1/12th of each dataset, starting from the 5th shard
+3. Save the downloaded files in the `./datasets` directory
+
+### Notes
+
+- The script uses the Hugging Face Datasets library to handle downloads, ensuring compatibility with various dataset structures.
+- Downloaded data is saved in parquet format for efficient storage and future loading.
+- For datasets with multiple configurations or splits, the script will attempt to use the appropriate one (e.g., "en" for C4).
+- If you encounter any issues with access to datasets, ensure you're logged in to Hugging Face and have the necessary permissions.
+
+By using this script to pre-download your datasets, you can ensure a smoother and more reliable training process, especially when dealing with large-scale distributed training scenarios.

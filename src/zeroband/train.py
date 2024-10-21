@@ -570,6 +570,4 @@ if __name__ == "__main__":
     config = Config(**parse_argv())
     logger.debug(f"config: {config.model_dump()}")
 
-    pa.jemalloc_set_decay_ms(0)
-
     train(config)

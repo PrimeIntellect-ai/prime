@@ -418,6 +418,8 @@ def train(config: Config):
                 training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
 
             mem_usage = psutil.virtual_memory()
+            py_arrow_memory = pa.total_allocated_bytes()
+
             metrics = {
                 "Loss": loss_batch.item(),
                 "step": training_progress.step,
@@ -427,6 +429,7 @@ def train(config: Config):
                 "time": time.time(),
                 "mem_usage": mem_usage.percent,
                 "mem_usage_available": mem_usage.available,
+                "py_arrow_memory": py_arrow_memory,
             }
             if config.optim.z_loss:
                 metrics["z_loss"] = z_loss_batch.item()
@@ -447,6 +450,7 @@ def train(config: Config):
                 log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
                 log += f", mem_usage: {mem_usage.percent:.2f}"
                 log += f", available: {mem_usage.available:.2f}"
+                log += f", py_arrow_memory: {py_arrow_memory:.2f}"
 
             if config.diloco is not None:
                 metrics["num_peers"] = elastic_device_mesh.global_pg.size()

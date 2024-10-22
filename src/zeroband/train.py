@@ -1,6 +1,7 @@
 import os
 from typing import Literal
 import time
+import psutil
 from pydantic import model_validator
 
 import torch
@@ -13,6 +14,8 @@ from transformers import AutoTokenizer
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 
 import torch.distributed as dist
+import pyarrow as pa
+
 from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
 from zeroband.comms import ElasticDeviceMesh
@@ -414,6 +417,9 @@ def train(config: Config):
                 # might need to tweak this as some worker might fail to join the all reduce later
                 training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
 
+            mem_usage = psutil.virtual_memory()
+            py_arrow_memory = pa.total_allocated_bytes()
+
             metrics = {
                 "Loss": loss_batch.item(),
                 "step": training_progress.step,
@@ -421,6 +427,9 @@ def train(config: Config):
                 "Perplexity": torch.exp(loss_batch).item(),
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
+                "mem_usage": mem_usage.percent,
+                "mem_usage_available": mem_usage.available,
+                "py_arrow_memory": py_arrow_memory,
             }
             if config.optim.z_loss:
                 metrics["z_loss"] = z_loss_batch.item()
@@ -439,6 +448,9 @@ def train(config: Config):
                     100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
                 )
                 log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
+                log += f", mem_usage: {mem_usage.percent:.2f}"
+                log += f", available: {mem_usage.available:.2f}"
+                log += f", py_arrow_memory: {py_arrow_memory:.2f}"
 
             if config.diloco is not None:
                 metrics["num_peers"] = elastic_device_mesh.global_pg.size()
@@ -453,6 +465,14 @@ def train(config: Config):
 
             if config.train.memory_profiler is not None:
                 memory_profiler.step()
+
+            if mem_usage.available < 5 * 1024**3:  # 5GB
+                logger.info(f"mem_usage_available: {mem_usage.available} below 5GB, triggering 10GB allocation")
+                a = torch.zeros(10 * 5 * 1024**3, device="cpu", dtype=torch.uint8)  # 10 * 5GB
+                mem_usage = psutil.virtual_memory()
+
+                logger.info(f"mem_usage_available: {mem_usage.available}")
+                del a
 
         if config.diloco is not None:
             if config.train.log_model_hash:

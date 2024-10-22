@@ -96,6 +96,7 @@ class Config(BaseConfig):
     project: str = "zeroband"
     run_id: str | None = None
     metric_logger_type: Literal["wandb", "dummy"] = "wandb"
+    wandb_resume: bool = False
 
     # sub config
     diloco: DilocoConfig | None = None
@@ -289,7 +290,7 @@ def train(config: Config):
         metric_logger = logger_cls(
             project=config.project,
             config={"config": config.model_dump(), "world_info": world_info.json()},
-            resume=False,
+            resume=config.wandb_resume,
         )
 
     if config.train.memory_monitor:

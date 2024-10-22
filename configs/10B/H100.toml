@@ -1,5 +1,6 @@
 name_model = "10B"
 project = "10B_zero_band"
+wandb_resume = true
 
 [train]
 micro_bs = 1
@@ -22,7 +23,8 @@ z_loss = true
 seq_length = 8192
 dataset_name_or_paths = "/data/datasets/fineweb-edu,/data/datasets/fineweb,/data/datasets/StackV1-popular,/data/datasets/dclm-baseline-1.0-parquet,/data/datasets/open-web-math"
 dataset_ratio = "55:10:20:10:5"
-num_workers = 8
+num_workers = 4
+reverse_data_files = true
 
 [diloco]
 inner_steps = 100

@@ -1,11 +1,17 @@
+import copy
 import torch
-from zeroband.data import SequencePackingDataSet
+from zeroband.data import InterleaveDataset, ParquetDataset, SequencePackingDataSet
 from torch.utils.data import DataLoader
 from zeroband.data import load_all_datasets, DataConfig, logger as data_logger
 from collections import Counter
 from itertools import chain
 import pytest
 import logging
+import pyarrow as pa
+import pyarrow.parquet as pq
+from faker import Faker
+from typing import List
+import string
 
 
 @pytest.mark.parametrize(
@@ -89,7 +95,7 @@ def test_squence_packing():
             return len(self.data)
 
         def __getitem__(self, index):
-            return {'input_ids': self.data[index]}
+            return {"input_ids": self.data[index]}
 
     MAX_SEQ_LEN = 8
     dataset = SequencePackingDataSet(FakeDataset(), max_seq_length=MAX_SEQ_LEN, eos_token=0)
@@ -106,3 +112,99 @@ def test_squence_packing():
 
     assert input_ids == [[6, 1, 2, 3, 4, 6, 3, 3], [3, 2, 1, 2, 1, 4, 5, 3]]
     assert labels == [[1, 2, 3, 4, 0, 3, 3, 4], [2, 0, 2, 0, 4, 5, 3, 4]]
+
+
+class SimpleTokenizer:
+    def __init__(self):
+        # Create vocabulary: a-z (0-25) and unknown token (26)
+        self.char_to_id = {char: idx for idx, char in enumerate(string.ascii_lowercase)}
+        self.unknown_token = 26
+
+    def encode(self, text: str) -> List[int]:
+        """Convert text to list of token ids"""
+        return [self.char_to_id.get(char.lower(), self.unknown_token) for char in text]
+
+
+@pytest.fixture
+def fake_sentences():
+    """Generate 500 fake sentences (100 per file * 5 files)"""
+    fake = Faker()
+    return [fake.sentence() for _ in range(500)]
+
+
+@pytest.fixture
+def parquet_files(tmp_path, fake_sentences):
+    """Create 5 parquet files with 100 sentences each"""
+    files = []
+    for i in range(5):
+        # Create data for this file
+        start_idx = i * 100
+        sentences = fake_sentences[start_idx : start_idx + 100]
+
+        # Create arrow table
+        table = pa.Table.from_arrays([pa.array(sentences)], names=["text"])
+
+        # Write to parquet file
+        file_path = tmp_path / f"data_{i}.parquet"
+        pq.write_table(table, file_path)
+        files.append(str(file_path))
+
+    return files
+
+
+@pytest.fixture
+def tokenizer():
+    """Get a simple character-based tokenizer"""
+    return SimpleTokenizer()
+
+
+def test_parquet_dataset_ckpt(parquet_files, tokenizer, fake_sentences):
+    # Create first dataset and iterate halfway
+    dataset1 = ParquetDataset(parquet_files, tokenizer)
+    halfway_point = 100
+
+    for _, data in zip(range(halfway_point), dataset1):
+        pass
+    # Save state
+    state_dict = dataset1.state_dict()
+
+    # Create new dataset and load state
+    dataset2 = ParquetDataset(parquet_files, tokenizer)
+    dataset2.load_state_dict(state_dict)
+
+    max_to_yield = 200
+    # Continue first dataset
+
+    for _, data1, data2 in zip(range(max_to_yield), dataset1, dataset2):
+        assert data1["input_ids"] == data2["input_ids"]
+
+
+def test_interleave_dataset_ckpt(parquet_files, tokenizer):
+    # Split parquet files into two groups to create two datasets
+    files1 = parquet_files[:2]  # First two files
+    files2 = parquet_files[2:4]  # Next two files
+
+    # Create first dataset and iterate halfway
+    dataset1 = InterleaveDataset(
+        [ParquetDataset(files1, tokenizer), ParquetDataset(files2, tokenizer)], probabilities=[0.5, 0.5]
+    )
+
+    halfway_point = 100
+
+    for _, data in zip(range(halfway_point), dataset1):
+        pass
+    # Save state
+    state_dict = dataset1.state_dict()
+
+    # Create new dataset and load state
+    dataset2 = InterleaveDataset(
+        [ParquetDataset(files1, tokenizer), ParquetDataset(files2, tokenizer)], probabilities=[0.5, 0.5]
+    )
+    dataset2.load_state_dict(state_dict=copy.deepcopy(state_dict))
+
+    assert dataset1.state_dict() == dataset2.state_dict()
+
+    max_to_yield = 250
+
+    for _, data1, data2 in zip(range(max_to_yield), dataset1, dataset2):
+        assert data1["input_ids"] == data2["input_ids"]

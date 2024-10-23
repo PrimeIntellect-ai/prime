@@ -1,5 +1,9 @@
+from dataclasses import dataclass, asdict
+import os
 import random
 from typing import Any, Generator, Optional, List, Dict, TypedDict, Union
+import functools
+
 from pydantic_config import BaseConfig
 from zeroband.utils.logging import get_logger
 
@@ -10,8 +14,9 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.distributed.checkpoint.stateful import Stateful
 
 from datasets import load_dataset, interleave_datasets, load_dataset_builder, BuilderConfig
-from datasets.distributed import split_dataset_by_node
-import functools
+from pyarrow import parquet as pq
+from transformers import PreTrainedTokenizer
+
 
 TEST_VOCAB_SIZE = 1024
 
@@ -143,14 +148,19 @@ def get_dataloader(
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
     else:
-        ds = load_all_datasets(data_config=data_config, split="train")
+        # ds = load_all_datasets(data_config=data_config, split="train")
 
-        def tokenize_function(data):
-            outputs = tokenizer(data["text"], truncation=True, max_length=data_config.seq_length)
-            return outputs
+        # def tokenize_function(data):
+        #     outputs = tokenizer(data["text"], truncation=True, max_length=data_config.seq_length)
+        #     return outputs
 
-        tokenized_datasets = ds.map(tokenize_function, batched=True, remove_columns=["text", "attention_mask"])
-        train_dataset = split_dataset_by_node(tokenized_datasets, world_size=world_size, rank=rank)
+        # tokenized_datasets = ds.map(tokenize_function, batched=True, remove_columns=["text", "attention_mask"])
+        # train_dataset = split_dataset_by_node(tokenized_datasets, world_size=world_size, rank=rank)
+
+        train_dataset = ParquetDataset(
+            files=[os.path.join("data0", f) for f in os.listdir("data0")],
+            tokenizer=tokenizer,
+        )
 
     dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
 
@@ -257,3 +267,105 @@ def load_all_datasets(data_config: DataConfig, split: str, max_samples: Optional
     logger.info(f"Train dataset:\n{ds}")
 
     return ds
+
+
+@dataclass
+class PQDatasetState:
+    files: List[str]
+    current_index: int
+
+
+class ParquetDataset(IterableDataset, Stateful):
+    """
+    this class is a wrapper around a parquet dataset compatible with datasets and statefull compatible. The dataset is infinite and will restart from the last state if the iterator is exhausted.
+    TODO:
+    * [ ] handle mutli proc dataloader pytorch
+    """
+
+    def __init__(self, files: List[str], tokenizer: PreTrainedTokenizer):
+        self.state = PQDatasetState(files=files, current_index=0)
+        self._init_parquet()
+        self.tokenizer = tokenizer
+
+    def _init_parquet(self):
+        self.pq_dataset = pq.ParquetDataset(self.state.files, memory_map=True)
+        self.table = self.pq_dataset.read()["text"]
+
+    def __iter__(self):
+        while True:
+            row = self.table[self.state.current_index]
+            self.state.current_index += 1
+
+            yield {"input_ids": self.tokenizer.encode(str(row))}
+            if self.state.current_index >= len(self.table):
+                self.state.current_index = 0
+
+    def state_dict(self):
+        return asdict(self.state)
+
+    def load_state_dict(self, state_dict):
+        self.state = PQDatasetState(**state_dict)
+        self._init_parquet()
+
+
+@dataclass
+class InterleaveDatasetState:
+    probabilities: List[float]
+    current_index: int
+    seed: int
+
+
+class InterleaveDataset(IterableDataset, Stateful):
+    """This class take a list of datasets and interleave them. It is stateful and can be used with pytorch dataloader.
+
+    It draw a sample from each dataset with a probability given by the probabilities list.
+
+    The state can be saved and restored. Under the hood we just fast forward the random generator to the current position.
+    """
+
+    def __init__(self, datasets: List[ParquetDataset], probabilities: Optional[List[float]] = None, seed: int = 42):
+        assert len(datasets) > 0, "At least one dataset is required"
+        assert len(datasets) == len(probabilities), "The number of datasets and probabilities must be the same"
+
+        self.datasets = datasets
+
+        self.state = InterleaveDatasetState(current_index=0, seed=seed, probabilities=probabilities)
+
+        self.datasets = datasets
+
+        self.state = InterleaveDatasetState(current_index=0, seed=seed, probabilities=probabilities)
+        self._init_random_state()
+
+    def _init_random_state(self):
+        """Initialize random generator and advance to current position"""
+        ...
+        self.random_generator = random.Random(self.state.seed)
+        # Advance the RNG to the current position
+        for _ in range(self.state.current_index):
+            self._get_dataset_to_yield_from()
+
+    def _get_dataset_to_yield_from(self):
+        return self.random_generator.choices(range(len(self.datasets)), weights=self.state.probabilities, k=1)[0]
+
+    def __iter__(self):
+        data_iters = [iter(dataset) for dataset in self.datasets]
+        while True:
+            dataset_to_yield_from = self._get_dataset_to_yield_from()
+
+            sample = next(data_iters[dataset_to_yield_from])
+            self.state.current_index += 1
+
+            yield sample
+
+    def state_dict(self):
+        state = {"interleave_state": asdict(self.state)}
+
+        for i, dataset in enumerate(self.datasets):
+            state[f"dataset_{i}"] = dataset.state_dict()
+        return state
+
+    def load_state_dict(self, state_dict):
+        self.state = InterleaveDatasetState(**state_dict["interleave_state"])
+        for i, dataset in enumerate(self.datasets):
+            dataset.load_state_dict(state_dict[f"dataset_{i}"])
+        self._init_random_state()

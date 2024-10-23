@@ -1,5 +1,4 @@
 from dataclasses import dataclass, asdict
-import os
 import random
 from typing import Any, Generator, Optional, List, Dict, TypedDict, Union
 import functools
@@ -13,7 +12,7 @@ from torch.utils.data import IterableDataset, Dataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.distributed.checkpoint.stateful import Stateful
 
-from datasets import load_dataset, interleave_datasets, load_dataset_builder, BuilderConfig
+from datasets import load_dataset_builder, BuilderConfig
 from pyarrow import parquet as pq
 from transformers import PreTrainedTokenizer
 
@@ -31,7 +30,6 @@ class DataConfig(BaseConfig):
     seq_length: int = 1024
     fake: bool = False
     num_workers: int = 4
-    streaming: bool = True
     max_train_samples: Optional[int] = None
     max_eval_samples: Optional[int] = None
     dataset_ratio: Optional[str] = None
@@ -138,137 +136,6 @@ def collate_fn(samples: list[dict[str, torch.LongTensor]]) -> dict[str, torch.Lo
     }
 
 
-def get_dataloader(
-    tokenizer,
-    world_size: int,
-    rank: int,
-    batch_size: int,
-    data_config: DataConfig,
-) -> DataLoader:
-    if data_config.fake:
-        train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
-    else:
-        # ds = load_all_datasets(data_config=data_config, split="train")
-
-        # def tokenize_function(data):
-        #     outputs = tokenizer(data["text"], truncation=True, max_length=data_config.seq_length)
-        #     return outputs
-
-        # tokenized_datasets = ds.map(tokenize_function, batched=True, remove_columns=["text", "attention_mask"])
-        # train_dataset = split_dataset_by_node(tokenized_datasets, world_size=world_size, rank=rank)
-
-        train_dataset = ParquetDataset(
-            files=[os.path.join("data0", f) for f in os.listdir("data0")],
-            tokenizer=tokenizer,
-        )
-
-    dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
-
-    return StatefulDataLoader(
-        dataset,
-        batch_size=batch_size,
-        collate_fn=collate_fn,
-        num_workers=data_config.num_workers,
-    )
-
-
-@functools.lru_cache(maxsize=None)
-def _get_ds_config_dict(path: str, name: Optional[str] = None) -> Dict[str, BuilderConfig]:
-    ds_builder = load_dataset_builder(path=path, name=name)
-    return ds_builder.builder_configs
-
-
-def _get_datafiles(path: str, name: Optional[str] = None, split: str = "train") -> List[str]:
-    builder_config = _get_ds_config_dict(path=path, name=name)
-    if name is None or len(name) == 0:
-        if "default" not in builder_config:
-            logger.warning(f"Default config not found for {path}. Using first config.")
-            name = next(iter(builder_config.keys()))
-        else:
-            name = "default"
-    return builder_config[name].data_files[split]
-
-
-def _nice_print(kwargs: Dict[str, Union[str, List[str]]]) -> str:
-    def _foo(a):
-        if isinstance(a, list):
-            return str(a[:5]) + "..." + str(a[-5:]) if len(a) > 10 else str(a)
-        return str(a)
-
-    return str({k: _foo(v) for k, v in kwargs.items()})
-
-
-def _load_datasets(
-    dataset_names: str,
-    split: str,
-    data_rank: Optional[int] = None,
-    data_world_size: Optional[int] = None,
-    streaming: bool = True,
-    probabilities: Optional[List[float]] = None,
-    reverse_data_files: bool = False,
-) -> Dataset:
-    logger.debug(dataset_names)
-    ds_args = []
-    for _ds in dataset_names.split(","):
-        _ds_name, _, _ds_config = _ds.partition(":")
-        _ds_args = {"path": _ds_name}
-        if _ds_config:
-            _ds_args["name"] = _ds_config
-        _data_files = _get_datafiles(_ds_name, _ds_config, split)
-        if reverse_data_files:
-            _data_files = _data_files[::-1]
-            _ds_args["data_files"] = _data_files
-        if data_rank is not None and data_world_size is not None:
-            _ds_args["data_files"] = _data_files[data_rank::data_world_size]
-        ds_args.append(_ds_args)
-
-    # logger.debug(f"Datasets ({split}):\n" + "\n".join(map(_nice_print, ds_args)))
-    # logger.debug(f"Probabilities: {probabilities}")
-    logger.debug(f"Loading datasets{' in streaming mode' if streaming else ''}")
-    datasets = []
-    for ds_arg in ds_args:
-        # logger.debug(f"Loading dataset: {ds_arg}")
-        _ds = load_dataset(**ds_arg, split=split, streaming=streaming)
-        _ds = _ds.remove_columns([i for i in _ds.column_names if i not in ["text"]])
-        datasets.append(_ds)
-        # logger.debug(f"Loaded dataset: {ds_arg}")
-
-    ds = interleave_datasets(datasets=datasets, probabilities=probabilities, stopping_strategy="all_exhausted")
-    logger.info(f"Loaded datasets ({split})")
-    return ds
-
-
-def _get_probabilities(data_config: DataConfig) -> Optional[List[float]]:
-    if data_config.dataset_ratio is None:
-        return None
-    if len(data_config.dataset_name_or_paths.split(",")) != len(data_config.dataset_ratio.split(":")):
-        raise ValueError("Number of datasets and dataset ratios must be the same")
-    nums = [float(i) for i in data_config.dataset_ratio.split(":")]
-    denom = sum(nums)
-    return [i / denom for i in nums]
-
-
-def load_all_datasets(data_config: DataConfig, split: str, max_samples: Optional[int] = None) -> IterableDataset:
-    """Load all datasets and interleave them"""
-    if max_samples is not None and not data_config.streaming:
-        split = f"{split}[:{max_samples}]"
-    ds = _load_datasets(
-        dataset_names=data_config.dataset_name_or_paths,
-        split=split,
-        data_rank=data_config.data_rank,
-        data_world_size=data_config.data_world_size,
-        streaming=data_config.streaming,
-        probabilities=_get_probabilities(data_config),
-        reverse_data_files=data_config.reverse_data_files,
-    )
-    if max_samples is not None and data_config.streaming:
-        if data_config.max_train_samples is not None:
-            ds = ds.take(data_config.max_train_samples)
-    logger.info(f"Train dataset:\n{ds}")
-
-    return ds
-
-
 @dataclass
 class PQDatasetState:
     files: List[str]
@@ -330,10 +197,6 @@ class InterleaveDataset(IterableDataset, Stateful):
         self.datasets = datasets
 
         self.state = InterleaveDatasetState(current_index=0, seed=seed, probabilities=probabilities)
-
-        self.datasets = datasets
-
-        self.state = InterleaveDatasetState(current_index=0, seed=seed, probabilities=probabilities)
         self._init_random_state()
 
     def _init_random_state(self):
@@ -369,3 +232,122 @@ class InterleaveDataset(IterableDataset, Stateful):
         for i, dataset in enumerate(self.datasets):
             dataset.load_state_dict(state_dict[f"dataset_{i}"])
         self._init_random_state()
+
+
+def get_dataloader(
+    tokenizer,
+    world_size: int,
+    rank: int,
+    batch_size: int,
+    data_config: DataConfig,
+) -> DataLoader:
+    if data_config.fake:
+        train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
+    else:
+        train_dataset = load_all_datasets(
+            data_config=data_config, split="train", tokenizer=tokenizer, rank=rank, world_size=world_size
+        )
+
+    dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
+
+    return StatefulDataLoader(
+        dataset,
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        num_workers=data_config.num_workers,
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def _get_ds_config_dict(path: str, name: Optional[str] = None) -> Dict[str, BuilderConfig]:
+    ds_builder = load_dataset_builder(path=path, name=name)
+    return ds_builder.builder_configs
+
+
+def _get_datafiles(path: str, name: Optional[str] = None, split: str = "train") -> List[str]:
+    builder_config = _get_ds_config_dict(path=path, name=name)
+    if name is None or len(name) == 0:
+        if "default" not in builder_config:
+            logger.warning(f"Default config not found for {path}. Using first config.")
+            name = next(iter(builder_config.keys()))
+        else:
+            name = "default"
+    return builder_config[name].data_files[split]
+
+
+def _nice_print(kwargs: Dict[str, Union[str, List[str]]]) -> str:
+    def _foo(a):
+        if isinstance(a, list):
+            return str(a[:5]) + "..." + str(a[-5:]) if len(a) > 10 else str(a)
+        return str(a)
+
+    return str({k: _foo(v) for k, v in kwargs.items()})
+
+
+def _load_datasets(
+    dataset_names: str,
+    split: str,
+    tokenizer: PreTrainedTokenizer,
+    data_rank: Optional[int] = None,
+    data_world_size: Optional[int] = None,
+    streaming: bool = True,
+    probabilities: Optional[List[float]] = None,
+    reverse_data_files: bool = False,
+) -> InterleaveDataset:
+    logger.debug(dataset_names)
+    ds_args = []
+    for _ds in dataset_names.split(","):
+        _ds_name, _, _ds_config = _ds.partition(":")
+        _ds_args = {"path": _ds_name}
+        if _ds_config:
+            _ds_args["name"] = _ds_config
+        _data_files = _get_datafiles(_ds_name, _ds_config, split)
+        if reverse_data_files:
+            _data_files = _data_files[::-1]
+            _ds_args["data_files"] = _data_files
+        if data_rank is not None and data_world_size is not None:
+            _ds_args["data_files"] = _data_files[data_rank::data_world_size]
+        ds_args.append(_ds_args)
+
+    # logger.debug(f"Datasets ({split}):\n" + "\n".join(map(_nice_print, ds_args)))
+    # logger.debug(f"Probabilities: {probabilities}")
+    logger.debug(f"Loading datasets{' in streaming mode' if streaming else ''}")
+    datasets = []
+    for ds_arg in ds_args:
+        logger.debug(f"Loading dataset: {ds_arg['data_files']}")
+        _ds = ParquetDataset(files=ds_arg["data_files"], tokenizer=tokenizer)
+        datasets.append(_ds)
+
+    ds = InterleaveDataset(datasets=datasets, probabilities=probabilities)
+
+    logger.info(f"Loaded datasets ({split})")
+    return ds
+
+
+def _get_probabilities(data_config: DataConfig) -> Optional[List[float]]:
+    if data_config.dataset_ratio is None:
+        return None
+    if len(data_config.dataset_name_or_paths.split(",")) != len(data_config.dataset_ratio.split(":")):
+        raise ValueError("Number of datasets and dataset ratios must be the same")
+    nums = [float(i) for i in data_config.dataset_ratio.split(":")]
+    denom = sum(nums)
+    return [i / denom for i in nums]
+
+
+def load_all_datasets(
+    data_config: DataConfig, split: str, tokenizer: PreTrainedTokenizer, rank: int, world_size: int
+) -> InterleaveDataset:
+    """Load all datasets and interleave them"""
+    ds = _load_datasets(
+        dataset_names=data_config.dataset_name_or_paths,
+        split=split,
+        data_rank=rank,
+        data_world_size=world_size,
+        probabilities=_get_probabilities(data_config),
+        reverse_data_files=data_config.reverse_data_files,
+        tokenizer=tokenizer,
+    )
+
+    logger.info(f"Train dataset:\n{ds}")
+
+    return ds

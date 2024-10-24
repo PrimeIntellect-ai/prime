@@ -327,6 +327,22 @@ class CkptManager:
             if remote and self.config.remote is not None:
                 self._async_save_remote(step_ckpt_path, remote_ckpt_path)
 
+    def save_inner(self, ckpt_path: str):
+        self.wait_for_blocking_job()
+
+        step_ckpt_path = os.path.join(ckpt_path, f"step_{self.training_progress.step}", "inner_ckpt")
+
+        states = {
+            "model": ModelWrapper(self.model),
+            "optimizer": OptimizerWrapper(self.model, self.optimizer),
+            "scheduler": self.scheduler,
+            "training_progress": self.training_progress,
+        }
+
+        dcp.save(states, checkpoint_id=step_ckpt_path)
+
+        self._logger.info(f"Saved inner checkpoint to {step_ckpt_path}")
+
     def _save(self, ckpt_path: str):
         self.wait_for_blocking_job()
 
@@ -351,7 +367,6 @@ class CkptManager:
             ## 1. v1: save the dataloader in the same file as the outer optimizer
             ## 2. v2: save the dataloader in a data folder inside the ckpt path
 
-            ## the next part is a fix so that each rank save a different dataloader rank. It not efficient because it reads the state two times from disk
             with open(os.path.join(ckpt_path, f"__{self.world_info.local_rank}_0.pt"), "wb") as f:
                 state = {"data_loader": self.dataloader.state_dict()} if self.config.data_version == "v1" else {}
                 if self.diloco_offloaded_optimizer:

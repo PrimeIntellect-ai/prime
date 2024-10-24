@@ -1,3 +1,4 @@
+from collections import deque
 from typing import Any
 from zeroband.utils.logging import get_logger
 import aiohttp
@@ -41,7 +42,7 @@ class HttpMonitor:
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
 
-        self._pending_tasks = []
+        self._pending_tasks = deque()
 
     def _remove_duplicates(self):
         seen = set()

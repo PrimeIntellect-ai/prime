@@ -1,6 +1,6 @@
 import copy
 import torch
-from zeroband.data import InterleaveDataset, ParquetDataset, SequencePackingDataSet
+from zeroband.data import InterleaveDataset, ParquetDataset, SequencePackingDataSet, collate_fn
 from torch.utils.data import DataLoader
 from zeroband.data import load_all_datasets, DataConfig, logger as data_logger
 from collections import Counter
@@ -12,6 +12,7 @@ import pyarrow.parquet as pq
 from faker import Faker
 from typing import List
 import string
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 
 @pytest.mark.parametrize(
@@ -134,9 +135,9 @@ def fake_sentences():
 
 @pytest.fixture
 def parquet_files(tmp_path, fake_sentences):
-    """Create 5 parquet files with 100 sentences each"""
+    """Create 10 parquet files with 100 sentences each"""
     files = []
-    for i in range(5):
+    for i in range(10):
         # Create data for this file
         start_idx = i * 100
         sentences = fake_sentences[start_idx : start_idx + 100]
@@ -158,7 +159,7 @@ def tokenizer():
     return SimpleTokenizer()
 
 
-def test_parquet_dataset_ckpt(parquet_files, tokenizer, fake_sentences):
+def test_parquet_dataset_ckpt(parquet_files, tokenizer):
     # Create first dataset and iterate halfway
     dataset1 = ParquetDataset(parquet_files, tokenizer)
     halfway_point = 100
@@ -177,6 +178,31 @@ def test_parquet_dataset_ckpt(parquet_files, tokenizer, fake_sentences):
 
     for _, data1, data2 in zip(range(max_to_yield), dataset1, dataset2):
         assert data1["input_ids"] == data2["input_ids"]
+
+
+def test_sequence_packing_dataset_ckpt(parquet_files, tokenizer):
+    dataset1 = SequencePackingDataSet(ParquetDataset(parquet_files, tokenizer), max_seq_length=16, eos_token=0)
+
+    halfway_point = 100
+
+    for _, data in zip(range(halfway_point), dataset1):
+        pass
+    # Save state
+    state_dict = dataset1.state_dict()
+
+    # Create new dataset and load state
+    dataset2 = SequencePackingDataSet(ParquetDataset(parquet_files, tokenizer), max_seq_length=16, eos_token=0)
+    dataset2.load_state_dict(state_dict)
+
+    assert dataset1.state_dict() == dataset2.state_dict()
+
+    max_to_yield = 199
+    # Continue first dataset
+
+    for _, data1, data2 in zip(range(max_to_yield), dataset1, dataset2):
+        assert (data1["input_ids"] == data2["input_ids"]).all()
+        assert (data1["labels"] == data2["labels"]).all()
+        assert data1["seqlens"] == data2["seqlens"]
 
 
 def test_interleave_dataset_ckpt(parquet_files, tokenizer):
@@ -208,3 +234,35 @@ def test_interleave_dataset_ckpt(parquet_files, tokenizer):
 
     for _, data1, data2 in zip(range(max_to_yield), dataset1, dataset2):
         assert data1["input_ids"] == data2["input_ids"]
+
+
+@pytest.mark.parametrize("num_workers", [0, 2])
+def test_dataloader_parquet_dataset(parquet_files, tokenizer, num_workers):
+    dataset = SequencePackingDataSet(ParquetDataset(parquet_files, tokenizer), max_seq_length=8, eos_token=0)
+
+    loader = StatefulDataLoader(dataset, batch_size=8, num_workers=num_workers, collate_fn=collate_fn)
+
+    total_samples = 100
+
+    for _, _batch in zip(range(total_samples), loader):
+        ...
+
+    # Save state
+    state_dict = loader.state_dict()
+
+    # Create new loader and load state
+    dataset2 = SequencePackingDataSet(ParquetDataset(parquet_files, tokenizer), max_seq_length=8, eos_token=0)
+
+    loader2 = StatefulDataLoader(dataset2, batch_size=8, num_workers=num_workers, collate_fn=collate_fn)
+
+    print(state_dict)
+
+    loader2.load_state_dict(state_dict)
+
+    warmup = 10
+
+    for i, batch1, batch2 in zip(range(total_samples), loader, loader2):
+        if i > warmup:
+            assert (batch1["input_ids"] == batch2["input_ids"]).all()
+            assert (batch1["labels"] == batch2["labels"]).all()
+            assert (batch1["seqlens"] == batch2["seqlens"]).all()

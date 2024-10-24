@@ -7,9 +7,9 @@ micro_bs = 4  # change this base on the gpu
 
 [data]
 seq_length = 8192
-dataset_name_or_paths = "PrimeIntellect/fineweb-edu,PrimeIntellect/fineweb,PrimeIntellect/StackV1-popular,mlfoundations/dclm-baseline-1.0-parquet,open-web-math/open-web-math"
-dataset_ratio = "55:10:20:10:5"
-num_workers = 8
+dataset_name_or_paths = "/data/datasets/open-web-math"
+dataset_ratio = "100"
+num_workers = 1
 
 [optim]
 batch_size = 128

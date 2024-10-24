@@ -65,6 +65,13 @@ class BatchOutput(TypedDict):
     seqlens: list[int]
 
 
+@dataclass
+class SequencePackingDataSetState:
+    inputs_ids: list[int]
+    labels: list[int]
+    seqlens: list[int]
+
+
 class SequencePackingDataSet(IterableDataset, Stateful):
     """
     This class wrap a dataset and wrap it into an iterable that return sequence of max_seq_length
@@ -76,11 +83,9 @@ class SequencePackingDataSet(IterableDataset, Stateful):
         self.max_seq_length = max_seq_length
         self.eos_token = eos_token
 
-    def __iter__(self) -> Generator[BatchOutput, Any, None]:
-        inputs_ids = []
-        labels = []
-        seqlens = []
+        self.state = SequencePackingDataSetState(inputs_ids=[], labels=[], seqlens=[])
 
+    def __iter__(self) -> Generator[BatchOutput, Any, None]:
         for og_sample in self.dataset:
             og_sample: list[int] = og_sample["input_ids"]
 
@@ -88,32 +93,35 @@ class SequencePackingDataSet(IterableDataset, Stateful):
             sample_inputs_ids = og_sample[:-1]
             sample_labels = og_sample[1:]
 
-            token_remaining = self.max_seq_length - len(inputs_ids)
+            token_remaining = self.max_seq_length - len(self.state.inputs_ids)
 
             if len(sample_inputs_ids) < token_remaining:
-                inputs_ids.extend(sample_inputs_ids)
-                labels.extend(sample_labels)
-                seqlens.append(len(sample_inputs_ids))
+                self.state.inputs_ids.extend(sample_inputs_ids)
+                self.state.labels.extend(sample_labels)
+                self.state.seqlens.append(len(sample_inputs_ids))
 
             else:
-                inputs_ids.extend(sample_inputs_ids[:token_remaining])
-                labels.extend(sample_labels[:token_remaining])
-                seqlens.append(token_remaining)
+                self.state.inputs_ids.extend(sample_inputs_ids[:token_remaining])
+                self.state.labels.extend(sample_labels[:token_remaining])
+                self.state.seqlens.append(token_remaining)
 
-                yield {
-                    "input_ids": torch.Tensor(inputs_ids).to(dtype=torch.long),
-                    "labels": torch.Tensor(labels).to(dtype=torch.long),
-                    "seqlens": seqlens,
+                data = {
+                    "input_ids": torch.Tensor(self.state.inputs_ids).to(dtype=torch.long),
+                    "labels": torch.Tensor(self.state.labels).to(dtype=torch.long),
+                    "seqlens": self.state.seqlens,
                 }
-                inputs_ids = []
-                labels = []
-                seqlens = []
+                self.state.inputs_ids = []
+                self.state.labels = []
+                self.state.seqlens = []
+
+                yield data
 
     def state_dict(self):
-        return self.dataset.state_dict()
+        return {"dataset": self.dataset.state_dict(), "state": asdict(self.state)}
 
     def load_state_dict(self, state_dict):
-        self.dataset.load_state_dict(state_dict)
+        self.dataset.load_state_dict(state_dict["dataset"])
+        self.state = SequencePackingDataSetState(**state_dict["state"])
 
 
 def collate_fn(samples: list[dict[str, torch.LongTensor]]) -> dict[str, torch.LongTensor]:
@@ -150,29 +158,50 @@ class ParquetDataset(IterableDataset, Stateful):
     """
 
     def __init__(self, files: List[str], tokenizer: PreTrainedTokenizer):
-        self.state = PQDatasetState(files=files, current_index=0)
-        self._init_parquet()
+        self.arg_files = files
         self.tokenizer = tokenizer
 
-    def _init_parquet(self):
-        self.pq_dataset = pq.ParquetDataset(self.state.files, memory_map=True)
-        self.table = self.pq_dataset.read()["text"]
+        self.state = None
+        self.table = None
+
+    def _lazy_init(self):
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            files = self.arg_files[worker_info.id :: worker_info.num_workers]
+        else:
+            files = self.arg_files
+
+        self.state = PQDatasetState(files=files, current_index=0)
+
+        self.pq_dataset, self.table = self._init_parquet(files)
+
+    @staticmethod
+    def _init_parquet(files=list[str]):
+        pq_dataset = pq.ParquetDataset(files, memory_map=True)
+        table = pq_dataset.read()["text"]
+        return pq_dataset, table
 
     def __iter__(self):
+        # we lazy init the parquet dataset to get the worker info from dataloader multi process
+        if self.table is None:
+            self._lazy_init()  #
+
         while True:
             row = self.table[self.state.current_index]
-            self.state.current_index += 1
 
-            yield {"input_ids": self.tokenizer.encode(str(row))}
+            self.state.current_index += 1
             if self.state.current_index >= len(self.table):
                 self.state.current_index = 0
 
-    def state_dict(self):
-        return asdict(self.state)
+            yield {"input_ids": self.tokenizer.encode(str(row))}
+
+    def state_dict(self) -> dict[str, Any]:
+        return asdict(self.state) if self.state is not None else {}
 
     def load_state_dict(self, state_dict):
         self.state = PQDatasetState(**state_dict)
-        self._init_parquet()
+        self.pq_dataset, self.table = self._init_parquet(self.state.files)
+        print(f"len(table): {len(self.table)}, current_index: {self.state.current_index}")
 
 
 @dataclass

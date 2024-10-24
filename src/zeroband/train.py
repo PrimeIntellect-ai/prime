@@ -360,7 +360,6 @@ def train(config: Config):
                     seqlens = batch["seqlens"].to("cuda")
                     # seqlens has a dynamic shape but fixed dimension, this allow to still torch compile
                     # https://pytorch.org/docs/stable/torch.compiler_dynamic_shapes.html
-                    logger.debug(f"seqlens: {seqlens.shape}")
                     torch._dynamo.mark_dynamic(seqlens, 0)
                 else:
                     seqlens = None

@@ -36,6 +36,7 @@ class DataConfig(BaseConfig):
     data_rank: Optional[int] = None
     data_world_size: Optional[int] = None
     reverse_data_files: bool = False
+    memory_map: bool = True
 
 
 class FakeTokenizedDataset(IterableDataset):
@@ -157,12 +158,14 @@ class ParquetDataset(IterableDataset, Stateful):
     * [ ] handle mutli proc dataloader pytorch
     """
 
-    def __init__(self, files: List[str], tokenizer: PreTrainedTokenizer):
+    def __init__(self, files: List[str], tokenizer: PreTrainedTokenizer, memory_map=True):
         self.arg_files = files
         self.tokenizer = tokenizer
 
         self.state = None
         self.table = None
+
+        self.memory_map = memory_map
 
     def _lazy_init(self):
         worker_info = torch.utils.data.get_worker_info()
@@ -173,11 +176,11 @@ class ParquetDataset(IterableDataset, Stateful):
 
         self.state = PQDatasetState(files=files, current_index=0)
 
-        self.pq_dataset, self.table = self._init_parquet(files)
+        self.pq_dataset, self.table = self._init_parquet(files, memory_map=self.memory_map)
 
     @staticmethod
-    def _init_parquet(files=list[str]):
-        pq_dataset = pq.ParquetDataset(files, memory_map=True)
+    def _init_parquet(files=list[str], memory_map=True):
+        pq_dataset = pq.ParquetDataset(files, memory_map=memory_map)
         table = pq_dataset.read()["text"]
         return pq_dataset, table
 
@@ -200,7 +203,7 @@ class ParquetDataset(IterableDataset, Stateful):
 
     def load_state_dict(self, state_dict):
         self.state = PQDatasetState(**state_dict)
-        self.pq_dataset, self.table = self._init_parquet(self.state.files)
+        self.pq_dataset, self.table = self._init_parquet(self.state.files, memory_map=self.memory_map)
         print(f"len(table): {len(self.table)}, current_index: {self.state.current_index}")
 
 
@@ -322,6 +325,7 @@ def _load_datasets(
     streaming: bool = True,
     probabilities: Optional[List[float]] = None,
     reverse_data_files: bool = False,
+    memory_map: bool = True,
 ) -> InterleaveDataset:
     logger.debug(dataset_names)
     ds_args = []
@@ -344,7 +348,7 @@ def _load_datasets(
     datasets = []
     for ds_arg in ds_args:
         logger.debug(f"Loading dataset: {ds_arg['data_files']}")
-        _ds = ParquetDataset(files=ds_arg["data_files"], tokenizer=tokenizer)
+        _ds = ParquetDataset(files=ds_arg["data_files"], tokenizer=tokenizer, memory_map=memory_map)
         datasets.append(_ds)
 
     ds = InterleaveDataset(datasets=datasets, probabilities=probabilities)
@@ -375,6 +379,7 @@ def load_all_datasets(
         probabilities=_get_probabilities(data_config),
         reverse_data_files=data_config.reverse_data_files,
         tokenizer=tokenizer,
+        memory_map=data_config.memory_map,
     )
 
     logger.info(f"Train dataset:\n{ds}")

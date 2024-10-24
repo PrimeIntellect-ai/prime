@@ -108,14 +108,6 @@ class Config(BaseConfig):
     ckpt: CkptConfig = CkptConfig()
 
     @model_validator(mode="after")
-    def ckpt_diloco_step(self):
-        if self.ckpt is not None and self.ckpt.interval is not None and self.diloco is not None:
-            assert (
-                self.ckpt.interval % self.diloco.inner_steps == 0
-            ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
-        return self
-
-    @model_validator(mode="after")
     def validate_live_recovery_rank_src(self):
         if self.ckpt is not None and self.ckpt.live_recovery_rank_src is not None and self.diloco is None:
             raise ValueError("live_recovery_rank_src is only supported with diloco")
@@ -129,11 +121,6 @@ def train(config: Config):
 
     assert batch_size % config.train.micro_bs == 0
     gradient_accumulation_steps = batch_size // config.train.micro_bs
-
-    if config.ckpt is not None and config.ckpt.interval is not None and config.diloco is not None:
-        assert (
-            config.ckpt.interval % config.diloco.inner_steps == 0
-        ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
 
     if config.type_model == "llama2":
         tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
@@ -454,6 +441,17 @@ def train(config: Config):
 
             if config.train.memory_profiler is not None:
                 memory_profiler.step()
+
+            if (
+                config.ckpt is not None
+                and training_progress.step > 0
+                and training_progress.step % num_inner_steps != 0
+                and training_progress.step % config.ckpt.interval == 0
+            ):
+                logger.info(
+                    f"Saving inner step ckpt at {training_progress.step}. This will only save the inner model and optimizer"
+                )
+                ckpt_manager.save_inner(ckpt_path=config.ckpt.path)
 
         if config.diloco is not None:
             if config.train.log_model_hash:

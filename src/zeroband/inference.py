@@ -1,3 +1,4 @@
+from collections import defaultdict
 import os
 
 import torch
@@ -107,10 +108,10 @@ def train(config: Config):
 
         torch.distributed.checkpoint.load(states, checkpoint_id="/data/10b/step_27700/diloco_0")
 
+    loss_datasets = defaultdict(list)
+
     for name, train_dataloader in train_dataloaders.items():
         train_dataloader_iterator = iter(train_dataloader)
-
-        loss_datasets = []
 
         for inner_step in range(config.optim.total_steps):
             loss_batch = 0
@@ -162,9 +163,10 @@ def train(config: Config):
 
             logger.debug(f"loss: {loss_batch.item()}")
 
-            loss_datasets.append(loss_batch.item())
+            loss_datasets[name].append(loss_batch.item())
 
-        logger.info(f"loss over {name}: {sum(loss_datasets)/len(loss_datasets)}")
+    for name, loss_dataset in loss_datasets.items():
+        logger.info(f"loss over {name}: {sum(loss_dataset)/len(loss_dataset)}")
 
 
 if __name__ == "__main__":

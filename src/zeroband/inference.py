@@ -46,7 +46,7 @@ def train(config: Config):
 
     logger.debug("tokenizer loaded")
 
-    train_dataloader = get_dataloader(
+    train_dataloaders = get_dataloader(
         tokenizer=tokenizer,
         world_size=world_info.world_size,
         rank=world_info.rank,
@@ -107,55 +107,64 @@ def train(config: Config):
 
         torch.distributed.checkpoint.load(states, checkpoint_id="/data/10b/step_27700/diloco_0")
 
-    train_dataloader_iterator = iter(train_dataloader)
+    for name, train_dataloader in train_dataloaders.items():
+        train_dataloader_iterator = iter(train_dataloader)
 
-    for inner_step in range(config.optim.total_steps):
-        loss_batch = 0
-        z_loss_batch = 0
+        loss_datasets = []
 
-        for grad_acc_step in range(gradient_accumulation_steps):
-            is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-            # no sync if we are accumulating gradients
-            model.set_requires_gradient_sync(not is_accumulating)
+        for inner_step in range(config.optim.total_steps):
+            loss_batch = 0
+            z_loss_batch = 0
 
-            batch = next(train_dataloader_iterator)
-            input_ids = batch["input_ids"].to("cuda")
-            labels = batch["labels"].to("cuda")
-            if config.train.sequence_packing:
-                seqlens = batch["seqlens"].to("cuda")
-                # seqlens has a dynamic shape but fixed dimension, this allow to still torch compile
-                # https://pytorch.org/docs/stable/torch.compiler_dynamic_shapes.html
-                torch._dynamo.mark_dynamic(seqlens, 0)
-            else:
-                seqlens = None
+            for grad_acc_step in range(gradient_accumulation_steps):
+                is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
+                # no sync if we are accumulating gradients
+                model.set_requires_gradient_sync(not is_accumulating)
 
-            with torch.inference_mode():
-                logits = model(tokens=input_ids, seqlens=seqlens).contiguous()
+                batch = next(train_dataloader_iterator)
+                input_ids = batch["input_ids"].to("cuda")
+                labels = batch["labels"].to("cuda")
+                if config.train.sequence_packing:
+                    seqlens = batch["seqlens"].to("cuda")
+                    # seqlens has a dynamic shape but fixed dimension, this allow to still torch compile
+                    # https://pytorch.org/docs/stable/torch.compiler_dynamic_shapes.html
+                    torch._dynamo.mark_dynamic(seqlens, 0)
+                else:
+                    seqlens = None
 
-            flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-            flatten_labels = rearrange(labels, "b seq -> (b seq)")
+                with torch.inference_mode():
+                    logits = model(tokens=input_ids, seqlens=seqlens).contiguous()
 
-            if config.optim.z_loss:
-                ce_loss, z_loss = cross_entropy_max_z_loss(flatten_logits, flatten_labels, config.optim.z_loss_weight)
-                ce_loss /= gradient_accumulation_steps
-                z_loss /= gradient_accumulation_steps
+                flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
+                flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
-                del logits
-                loss = ce_loss + z_loss
+                if config.optim.z_loss:
+                    ce_loss, z_loss = cross_entropy_max_z_loss(
+                        flatten_logits, flatten_labels, config.optim.z_loss_weight
+                    )
+                    ce_loss /= gradient_accumulation_steps
+                    z_loss /= gradient_accumulation_steps
 
-            else:
-                loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
-                del logits
+                    del logits
+                    loss = ce_loss + z_loss
 
-            if config.optim.z_loss:
-                loss_batch += ce_loss.clone().detach()
-                z_loss_batch += z_loss.clone().detach()
-            else:
-                loss_batch += loss.clone().detach()
+                else:
+                    loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
+                    del logits
 
-        dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
+                if config.optim.z_loss:
+                    loss_batch += ce_loss.clone().detach()
+                    z_loss_batch += z_loss.clone().detach()
+                else:
+                    loss_batch += loss.clone().detach()
 
-        logger.info(f"loss: {loss_batch.item()}")
+            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
+
+            logger.debug(f"loss: {loss_batch.item()}")
+
+            loss_datasets.append(loss_batch.item())
+
+        logger.info(f"loss over {name}: {sum(loss_datasets)/len(loss_datasets)}")
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from torch.utils.data import IterableDataset, Dataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.distributed.checkpoint.stateful import Stateful
 
-from datasets import load_dataset, interleave_datasets, load_dataset_builder, BuilderConfig
+from datasets import load_dataset, load_dataset_builder, BuilderConfig
 from datasets.distributed import split_dataset_by_node
 import functools
 
@@ -139,11 +139,12 @@ def get_dataloader(
     rank: int,
     batch_size: int,
     data_config: DataConfig,
-) -> DataLoader:
-    if data_config.fake:
-        train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
-    else:
-        ds = load_all_datasets(data_config=data_config, split="train")
+) -> dict[DataLoader]:
+    dataloaders = {}
+
+    datasets = load_all_datasets(data_config=data_config, split="train")
+
+    for name, ds in datasets.items():
 
         def tokenize_function(data):
             outputs = tokenizer(data["text"], truncation=True, max_length=data_config.seq_length)
@@ -152,14 +153,18 @@ def get_dataloader(
         tokenized_datasets = ds.map(tokenize_function, batched=True, remove_columns=["text", "attention_mask"])
         train_dataset = split_dataset_by_node(tokenized_datasets, world_size=world_size, rank=rank)
 
-    dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
+        dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
 
-    return StatefulDataLoader(
-        dataset,
-        batch_size=batch_size,
-        collate_fn=collate_fn,
-        num_workers=data_config.num_workers,
-    )
+        dataloader = StatefulDataLoader(
+            dataset,
+            batch_size=batch_size,
+            collate_fn=collate_fn,
+            num_workers=data_config.num_workers,
+        )
+
+        dataloaders[name] = dataloader
+
+    return dataloaders
 
 
 @functools.lru_cache(maxsize=None)
@@ -196,9 +201,9 @@ def _load_datasets(
     streaming: bool = True,
     probabilities: Optional[List[float]] = None,
     reverse_data_files: bool = False,
-) -> Dataset:
+) -> dict[Dataset]:
     logger.debug(dataset_names)
-    ds_args = []
+    ds_args = {}
     for _ds in dataset_names.split(","):
         _ds_name, _, _ds_config = _ds.partition(":")
         _ds_args = {"path": _ds_name}
@@ -210,22 +215,20 @@ def _load_datasets(
             _ds_args["data_files"] = _data_files
         if data_rank is not None and data_world_size is not None:
             _ds_args["data_files"] = _data_files[data_rank::data_world_size]
-        ds_args.append(_ds_args)
+        ds_args[_ds_name] = _ds_args
 
     # logger.debug(f"Datasets ({split}):\n" + "\n".join(map(_nice_print, ds_args)))
     # logger.debug(f"Probabilities: {probabilities}")
     logger.debug(f"Loading datasets{' in streaming mode' if streaming else ''}")
-    datasets = []
-    for ds_arg in ds_args:
+    datasets = {}
+    for name, ds_arg in ds_args.items():
         # logger.debug(f"Loading dataset: {ds_arg}")
         _ds = load_dataset(**ds_arg, split=split, streaming=streaming)
         _ds = _ds.remove_columns([i for i in _ds.column_names if i not in ["text"]])
-        datasets.append(_ds)
+        datasets[name] = _ds
         # logger.debug(f"Loaded dataset: {ds_arg}")
 
-    ds = interleave_datasets(datasets=datasets, probabilities=probabilities, stopping_strategy="all_exhausted")
-    logger.info(f"Loaded datasets ({split})")
-    return ds
+    return datasets
 
 
 def _get_probabilities(data_config: DataConfig) -> Optional[List[float]]:
@@ -238,11 +241,11 @@ def _get_probabilities(data_config: DataConfig) -> Optional[List[float]]:
     return [i / denom for i in nums]
 
 
-def load_all_datasets(data_config: DataConfig, split: str, max_samples: Optional[int] = None) -> IterableDataset:
+def load_all_datasets(data_config: DataConfig, split: str, max_samples: Optional[int] = None) -> dict[IterableDataset]:
     """Load all datasets and interleave them"""
     if max_samples is not None and not data_config.streaming:
         split = f"{split}[:{max_samples}]"
-    ds = _load_datasets(
+    datasets = _load_datasets(
         dataset_names=data_config.dataset_name_or_paths,
         split=split,
         data_rank=data_config.data_rank,
@@ -251,9 +254,11 @@ def load_all_datasets(data_config: DataConfig, split: str, max_samples: Optional
         probabilities=_get_probabilities(data_config),
         reverse_data_files=data_config.reverse_data_files,
     )
-    if max_samples is not None and data_config.streaming:
-        if data_config.max_train_samples is not None:
-            ds = ds.take(data_config.max_train_samples)
-    logger.info(f"Train dataset:\n{ds}")
 
-    return ds
+    for _, ds in datasets.items():
+        if max_samples is not None and data_config.streaming:
+            if data_config.max_train_samples is not None:
+                ds = ds.take(data_config.max_train_samples)
+    logger.info(f"number of datasets : {len(datasets)}")
+
+    return datasets

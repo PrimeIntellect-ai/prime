@@ -66,7 +66,7 @@ def skip_data(config: Config):
             for _ in range(gradient_accumulation_steps):
                 batch = next(train_dataloader_iterator)
 
-                with open(f"output_{world_info.local_rank}.txt", "w") as f:
+                with open(f"output_{world_info.local_rank}.txt", "a") as f:
                     for i in range(len(batch["input_ids"])):
                         f.write(f"input{i}: {tokenizer.decode(batch['input_ids'][i])}\n")
                         # f.write(f"labels: {tokenizer.decode(batch['labels'][0])}\n")

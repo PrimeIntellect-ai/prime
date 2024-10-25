@@ -59,6 +59,8 @@ def skip_data(config: Config):
 
     total_steps = 0
 
+    data_to_write = []
+
     while True:
         num_inner_steps = config.diloco.inner_steps if config.diloco is not None else 1
 
@@ -66,12 +68,11 @@ def skip_data(config: Config):
             for _ in range(gradient_accumulation_steps):
                 batch = next(train_dataloader_iterator)
 
-                with open("output.txt", "a") as f:
-                    for i in range(len(batch["input_ids"])):
-                        f.write(f"input{i}: {tokenizer.decode(batch['input_ids'][i])}\n")
-                        # f.write(f"labels: {tokenizer.decode(batch['labels'][0])}\n")
-
-                    f.write("------------------------------------------------\n")
+                data_to_write.append(tokenizer.decode(batch["input_ids"]))
+                # with open("output.txt", "a") as f:
+                #     for i in range(len(batch["input_ids"])):
+                #         f.write(f"input{i}: {tokenizer.decode(batch['input_ids'][i])}\n")
+                #         # f.write(f"labels: {tokenizer.decode(batch['labels'][0])}\n")
 
                 # logger.info("input: %s", tokenizer.decode(batch["input_ids"][0]))
                 # logger.info("labels: %s", tokenizer.decode(batch["labels"][0]))
@@ -82,6 +83,10 @@ def skip_data(config: Config):
         logger.info("total steps: %d", total_steps)
         if total_steps >= config.optim.total_steps:
             break
+
+    with open("output.txt", "w") as f:
+        for data in data_to_write:
+            f.write(data)
 
     CkptManager.save_data_v2(os.path.join(config.ckpt.data_path, "data"), train_dataloader, world_info.local_rank)
 

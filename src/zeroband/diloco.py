@@ -74,6 +74,7 @@ class Diloco:
 
         self._init_offloaded_optimizer(model=model)
 
+    @torch.no_grad()
     def _init_offloaded_optimizer(self, model):
         self.param_list_cpu = self.get_offloaded_param(model)
         self.outer_optimizer = torch.optim.SGD(
@@ -81,6 +82,7 @@ class Diloco:
         )
         self._logger.debug("offload model to cpu")
 
+    @torch.no_grad()
     def sync_pseudo_gradient(
         self, model: nn.Module, fake: bool = False, flag: str = "outer", num_effective_peers: int | None = None
     ):
@@ -144,6 +146,7 @@ class Diloco:
 
         self._logger.info(f"Sync psuedo-gradient in {time.perf_counter() - _start_time:.6f} seconds")
 
+    @torch.no_grad()
     def sync_inner_model(self, model: nn.Module):
         """
         Sync the inner model from the CPU outer model to GPU
@@ -153,6 +156,7 @@ class Diloco:
         for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
             param.data.to_local().copy_(param_offloaded.data.to_local())
 
+    @torch.no_grad()
     def get_offloaded_param(self, model: nn.Module) -> list[nn.Parameter]:
         """
         Offload the model parameters to cpu
@@ -209,6 +213,7 @@ class Diloco:
         # )
         return offloaded_params
 
+    @torch.no_grad()
     def step(self, model: nn.Module, fake: bool = False, num_effective_peers: int | None = None, flag: str = "outer"):
         """
         Step the optimizer

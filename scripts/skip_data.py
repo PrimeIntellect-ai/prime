@@ -71,7 +71,7 @@ def skip_data(config: Config):
                         f.write(f"input{i}: {tokenizer.decode(batch['input_ids'][i])}\n")
                         # f.write(f"labels: {tokenizer.decode(batch['labels'][0])}\n")
 
-                f.write("-------------------inner steps %d, grad acc %d-----------------------------\n")
+                    f.write("-------------------inner steps %d, grad acc %d-----------------------------\n")
 
         total_steps += num_inner_steps
         logger.info("total steps: %d", total_steps)

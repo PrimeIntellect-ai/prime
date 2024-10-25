@@ -66,11 +66,17 @@ def skip_data(config: Config):
             for _ in range(gradient_accumulation_steps):
                 batch = next(train_dataloader_iterator)
 
-                logger.info("input: %s", tokenizer.decode(batch["input_ids"][0]))
-                logger.info("labels: %s", tokenizer.decode(batch["labels"][0]))
+                with open("output.txt", "a") as f:
+                    for i in range(len(batch["input_ids"])):
+                        f.write(f"input{i}: {tokenizer.decode(batch['input_ids'][i])}\n")
+                        # f.write(f"labels: {tokenizer.decode(batch['labels'][0])}\n")
 
-                logger.info("------------------------------------------------")
+                    f.write("------------------------------------------------\n")
 
+                # logger.info("input: %s", tokenizer.decode(batch["input_ids"][0]))
+                # logger.info("labels: %s", tokenizer.decode(batch["labels"][0]))
+
+                # logger.info("------------------------------------------------")
                 exit()
         total_steps += num_inner_steps
         logger.info("total steps: %d", total_steps)

@@ -72,7 +72,7 @@ def train(config: Config):
     #     num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
     #     apply_ac_ckpt(model, num)
 
-    elastic_device_mesh = ElasticDeviceMesh(enable=True)
+    elastic_device_mesh = ElasticDeviceMesh(enable=False)
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None

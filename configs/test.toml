@@ -3,7 +3,7 @@ project = "debug_150m_zero_band"
 type_model = "llama2"
 
 [train]
-micro_bs = 4  # change this base on the gpu
+micro_bs = 1  # change this base on the gpu
 
 [data]
 seq_length = 8192

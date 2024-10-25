@@ -15,7 +15,8 @@ dependencies = [
     "torchdata>=0.8.0",
     "fsspec[gcs]>=2024.3.1",
     "ninja",
-    "zstandard"
+    "zstandard",
+    "pyarrow",
 ]
 
 [project.optional-dependencies]
@@ -37,4 +38,4 @@ allow-direct-references = true # allow direct references to git repos in depende
 line-length = 120
 
 [tool.uv]
-dev-dependencies = ["ruff>=0.5.0", "pre-commit>=3.0.0","pytest>=7.0.0"]
+dev-dependencies = ["ruff>=0.5.0", "pre-commit>=3.0.0","pytest>=7.0.0", "faker"]

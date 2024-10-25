@@ -391,6 +391,19 @@ wheels = [
 ]
 
 [[package]]
+name = "faker"
+version = "30.8.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/86/45/528a560000078f33166300acc8b60e17129ce540962b573e8a28aa8bf4d9/faker-30.8.0.tar.gz", hash = "sha256:3608c7fcac2acde0eaa6da28dae97628f18f14d54eaa2a92b96ae006f1621bd7", size = 1808343 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4f/ca/f7a812229555391b0630982c0522b643cc530e7a7feabef8f8caec10ba9a/Faker-30.8.0-py3-none-any.whl", hash = "sha256:4cd0c5ea4bc1e4c902967f6e662f5f5da69f1674d9a94f54e516d27f3c2a6a16", size = 1846806 },
+]
+
+[[package]]
 name = "filelock"
 version = "3.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2132,6 +2145,7 @@ dependencies = [
     { name = "fsspec", extra = ["gcs"] },
     { name = "ninja" },
     { name = "numpy" },
+    { name = "pyarrow" },
     { name = "pydantic-config" },
     { name = "setuptools" },
     { name = "torch" },
@@ -2150,6 +2164,7 @@ all = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "faker" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "ruff" },
@@ -2164,6 +2179,7 @@ requires-dist = [
     { name = "fsspec", extras = ["gcs"], specifier = ">=2024.3.1" },
     { name = "ninja" },
     { name = "numpy" },
+    { name = "pyarrow" },
     { name = "pydantic-config", git = "https://github.com/samsja/pydantic_config.git?rev=e529c9c" },
     { name = "requests", marker = "extra == 'all'", specifier = ">=2.32.3" },
     { name = "setuptools" },
@@ -2176,6 +2192,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "faker" },
     { name = "pre-commit", specifier = ">=3.0.0" },
     { name = "pytest", specifier = ">=7.0.0" },
     { name = "ruff", specifier = ">=0.5.0" },

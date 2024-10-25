@@ -136,7 +136,6 @@ class HttpMonitor:
                 async with session.post(api, json=payload, headers=headers) as response:
                     if response is not None:
                         response.raise_for_status()
-                    self._logger.info(f"Sent {len(batch)} logs to server")
         except Exception as e:
             self._logger.error(f"Error sending batch to server: {str(e)}")
             return False
@@ -165,6 +164,10 @@ class HttpMonitor:
     def finish(self):
         self.set_stage("finishing")
 
-        # Clean up any remaining tasks
-        pending = asyncio.all_tasks(self.loop)
-        self.loop.run_until_complete(asyncio.gather(*pending))
+        if self.loop.is_running():
+            # If we're already in an event loop, create a task
+            task = self.loop.create_task(self._finish())
+            self._pending_tasks.append(task)
+        else:
+            # If we're not in an event loop, run it directly
+            self.loop.run_until_complete(self._finish())

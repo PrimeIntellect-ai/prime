@@ -106,7 +106,7 @@ def train(config: Config):
         # all is inplace
         states = {"model": ModelWrapper(model)}
 
-        torch.distributed.checkpoint.load(states, checkpoint_id="/data/10b/step_27700/diloco_0")
+        torch.distributed.checkpoint.load(states, checkpoint_id=config.ckpt.resume + "/diloco_0")
 
     loss_datasets = defaultdict(list)
 

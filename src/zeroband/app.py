@@ -25,11 +25,7 @@ from zeroband.checkpoint import ModelWrapper
 from zeroband.train import Config
 
 
-class InfConfig(Config):
-    fsdp: bool = True
-
-
-def train(config: InfConfig):
+def train(config: Config):
     # batch_size is the total batch size for all GPUs
     assert config.optim.batch_size % world_info.local_world_size == 0
     batch_size = config.optim.batch_size // world_info.local_world_size
@@ -83,24 +79,23 @@ def train(config: InfConfig):
         param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
     )
 
-    if config.fsdp:
-        for layer_id, transformer_block in model.layers.items():
-            if config.train.reshard_after_forward:
-                reshard_after_forward = int(layer_id) < len(model.layers) - 1
-            else:
-                reshard_after_forward = False
-            fully_shard(
-                transformer_block,
-                mp_policy=mp_policy,
-                mesh=elastic_device_mesh.cuda_local_mesh,
-                reshard_after_forward=reshard_after_forward,
-            )
+    for layer_id, transformer_block in model.layers.items():
+        if config.train.reshard_after_forward:
+            reshard_after_forward = int(layer_id) < len(model.layers) - 1
+        else:
+            reshard_after_forward = False
         fully_shard(
-            model,
+            transformer_block,
             mp_policy=mp_policy,
             mesh=elastic_device_mesh.cuda_local_mesh,
-            reshard_after_forward=config.train.reshard_after_forward,
+            reshard_after_forward=reshard_after_forward,
         )
+    fully_shard(
+        model,
+        mp_policy=mp_policy,
+        mesh=elastic_device_mesh.cuda_local_mesh,
+        reshard_after_forward=config.train.reshard_after_forward,
+    )
 
     if config.train.torch_compile:
         # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
@@ -113,8 +108,6 @@ def train(config: InfConfig):
 
         torch.distributed.checkpoint.load(states, checkpoint_id=config.ckpt.resume + "/diloco_0")
 
-    logger.info("model loaded from %s", config.ckpt.resume)
-
     loss_datasets = defaultdict(list)
 
     for name, train_dataloader in train_dataloaders.items():
@@ -125,9 +118,9 @@ def train(config: InfConfig):
             z_loss_batch = 0
 
             for grad_acc_step in range(gradient_accumulation_steps):
-                # is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
+                is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                 # no sync if we are accumulating gradients
-                # model.set_requires_gradient_sync(not is_accumulating)
+                model.set_requires_gradient_sync(not is_accumulating)
 
                 batch = next(train_dataloader_iterator)
                 input_ids = batch["input_ids"].to("cuda")
@@ -175,6 +168,23 @@ def train(config: InfConfig):
     for name, loss_dataset in loss_datasets.items():
         logger.info(f"loss over {name}: {sum(loss_dataset)/len(loss_dataset)}")
 
+    while True:
+        inputs = input("Enter input: ")
+        print(inputs)
+
+        a = tokenizer(inputs, return_tensors="pt").input_ids[0].tolist()
+        print(a)
+        with torch.inference_mode():
+            for i in range(40):
+                logger.info(i)
+                input_ids = torch.tensor([a], device="cuda")
+
+                output = model(input_ids)
+                # print(F.softmax(output[0, -1])[128001].item())
+                t = output.argmax(dim=2)[0][-1].item()
+                logger.info(tokenizer.decode(t), end="")
+                a.append(t)
+
 
 if __name__ == "__main__":
     # Allow eager fallback during production so that that the training runs dont die
@@ -188,7 +198,7 @@ if __name__ == "__main__":
 
     torch.cuda.set_device(world_info.local_rank)
 
-    config = InfConfig(**parse_argv())
+    config = Config(**parse_argv())
     logger.debug(f"config: {config.model_dump()}")
 
     train(config)

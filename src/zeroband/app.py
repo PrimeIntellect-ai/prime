@@ -8,7 +8,6 @@ from torch.nn import functional as F
 
 from transformers import AutoTokenizer
 
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 
 import torch.distributed as dist
 from zeroband import utils
@@ -75,32 +74,32 @@ def train(config: Config):
 
     elastic_device_mesh = ElasticDeviceMesh(enable=False)
 
-    mp_policy = MixedPrecisionPolicy(
-        param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
-    )
+    # mp_policy = MixedPrecisionPolicy(
+    #     param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
+    # )
 
-    for layer_id, transformer_block in model.layers.items():
-        if config.train.reshard_after_forward:
-            reshard_after_forward = int(layer_id) < len(model.layers) - 1
-        else:
-            reshard_after_forward = False
-        fully_shard(
-            transformer_block,
-            mp_policy=mp_policy,
-            mesh=elastic_device_mesh.cuda_local_mesh,
-            reshard_after_forward=reshard_after_forward,
-        )
-    fully_shard(
-        model,
-        mp_policy=mp_policy,
-        mesh=elastic_device_mesh.cuda_local_mesh,
-        reshard_after_forward=config.train.reshard_after_forward,
-    )
+    # for layer_id, transformer_block in model.layers.items():
+    #     if config.train.reshard_after_forward:
+    #         reshard_after_forward = int(layer_id) < len(model.layers) - 1
+    #     else:
+    #         reshard_after_forward = False
+    #     fully_shard(
+    #         transformer_block,
+    #         mp_policy=mp_policy,
+    #         mesh=elastic_device_mesh.cuda_local_mesh,
+    #         reshard_after_forward=reshard_after_forward,
+    #     )
+    # fully_shard(
+    #     model,
+    #     mp_policy=mp_policy,
+    #     mesh=elastic_device_mesh.cuda_local_mesh,
+    #     reshard_after_forward=config.train.reshard_after_forward,
+    # )
 
-    if config.train.torch_compile:
-        # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
-        model = torch.compile(model)
-        logger.debug("model compiled")
+    # if config.train.torch_compile:
+    #     # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
+    #     model = torch.compile(model)
+    #     logger.debug("model compiled")
 
     if config.ckpt.resume is not None:
         # all is inplace
@@ -118,20 +117,21 @@ def train(config: Config):
             z_loss_batch = 0
 
             for grad_acc_step in range(gradient_accumulation_steps):
-                is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
+                # is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                 # no sync if we are accumulating gradients
-                model.set_requires_gradient_sync(not is_accumulating)
+                # model.set_requires_gradient_sync(not is_accumulating)
 
                 batch = next(train_dataloader_iterator)
                 input_ids = batch["input_ids"].to("cuda")
                 labels = batch["labels"].to("cuda")
-                if config.train.sequence_packing:
-                    seqlens = batch["seqlens"].to("cuda")
-                    # seqlens has a dynamic shape but fixed dimension, this allow to still torch compile
-                    # https://pytorch.org/docs/stable/torch.compiler_dynamic_shapes.html
-                    torch._dynamo.mark_dynamic(seqlens, 0)
-                else:
-                    seqlens = None
+                # if config.train.sequence_packing:
+                #     seqlens = batch["seqlens"].to("cuda")
+                #     # seqlens has a dynamic shape but fixed dimension, this allow to still torch compile
+                #     # https://pytorch.org/docs/stable/torch.compiler_dynamic_shapes.html
+                #     torch._dynamo.mark_dynamic(seqlens, 0)
+                # else:
+
+                seqlens = None
 
                 with torch.inference_mode():
                     logits = model(tokens=input_ids, seqlens=seqlens).contiguous()
@@ -176,13 +176,12 @@ def train(config: Config):
         print(a)
         with torch.inference_mode():
             for i in range(40):
-                logger.info(i)
                 input_ids = torch.tensor([a], device="cuda")
 
                 output = model(input_ids)
                 # print(F.softmax(output[0, -1])[128001].item())
                 t = output.argmax(dim=2)[0][-1].item()
-                logger.info(tokenizer.decode(t), end="")
+                print(tokenizer.decode(t), end="")
                 a.append(t)
 
 

@@ -168,7 +168,7 @@ def train(config: InfConfig):
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
 
-            logger.debug(f"loss: {loss_batch.item()}")
+            logger.info(f"loss: {loss_batch.item()}")
 
             loss_datasets[name].append(loss_batch.item())
 

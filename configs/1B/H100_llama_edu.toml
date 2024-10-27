@@ -1,0 +1,23 @@
+name_model = "1B"
+project = "debug_1B_zero_band"
+type_model = "llama3"
+
+[train]
+micro_bs = 2
+reshard_after_forward = true
+attn_fn = "sdpa"
+sequence_packing = false
+
+[data]
+seq_length = 8192
+num_workers = 4
+
+[optim]
+batch_size = 256
+warmup_steps = 1000
+total_steps = 1_000_000_000_000
+sched_type = "wsd-sqrt"
+lr = 1e-4
+
+[ckpt]
+interval = 1000

@@ -10,6 +10,8 @@ z_loss = true
 [data]
 seq_length = 8192
 num_workers = 4
+dataset_name_or_paths = "/data/datasets/fineweb-edu"
+reverse_data_files = true
 
 [optim]
 batch_size = 256

@@ -5,8 +5,7 @@ type_model = "llama3"
 [train]
 micro_bs = 2
 reshard_after_forward = true
-attn_fn = "sdpa"
-sequence_packing = false
+z_loss = true
 
 [data]
 seq_length = 8192
@@ -17,7 +16,7 @@ batch_size = 256
 warmup_steps = 1000
 total_steps = 1_000_000_000_000
 sched_type = "wsd-sqrt"
-lr = 1e-4
+lr = 4e-4
 
 [ckpt]
 interval = 1000

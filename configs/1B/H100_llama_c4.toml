@@ -3,8 +3,8 @@ project = "debug_1B_zero_band"
 type_model = "llama3"
 
 [train]
-micro_bs = 2
-reshard_after_forward = true
+micro_bs = 1
+reshard_after_forward = false
 attn_fn = "sdpa"
 sequence_packing = false
 

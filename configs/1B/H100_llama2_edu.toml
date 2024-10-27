@@ -4,7 +4,6 @@ type_model = "llama2"
 
 [train]
 micro_bs = 4  
-z_loss = true
 reshard_after_forward = true
 
 [data]
@@ -19,6 +18,7 @@ warmup_steps = 1000
 total_steps = 1_000_000_000_000
 sched_type = "wsd-sqrt"
 lr = 4e-4
+z_loss = true
 
 [ckpt]
 interval = 1000

@@ -115,8 +115,8 @@ def main(config: ExportConfig):
     if config.torch_dtype == "bfloat16":
         state_dict = {k: v.to(torch.bfloat16) for k, v in state_dict.items()}
 
-    if "freqs_cis" in state_dict:  # This should not be persisted
-        del state_dict["freqs_cis"]
+    if "model.freqs_cis" in state_dict:  # This should not be persisted
+        del state_dict["model.freqs_cis"]
     state_keys = list(state_dict.keys())
     shard_size = int(math.ceil(len(state_keys) / num_shards))
     logger.info("Saving model to %d shards", num_shards)
@@ -149,7 +149,7 @@ def main(config: ExportConfig):
         with (save_path / _file).open("wb") as f:
             f.write(
                 requests.get(
-                    f"https://huggingface.co/PrimeIntellect/Meta-Llama-3.1-8B-Instruct-FP8/resolve/main/{_file}?download=true"
+                    f"https://huggingface.co/PrimeIntellect/Meta-Llama-3-8B/resolve/main/{_file}?download=true"
                 ).content
             )
 

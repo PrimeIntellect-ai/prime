@@ -1,4 +1,3 @@
-import requests
 import torch
 from typing import Literal
 import torch.distributed.checkpoint as dcp
@@ -15,6 +14,7 @@ from safetensors.torch import save_file
 import json
 from zeroband.models.llama import ModelArgs
 from transformers import LlamaConfig
+from transformers.generation import GenerationConfig
 
 
 class ExportConfig(Config):
@@ -65,6 +65,11 @@ def convert_config_zb_to_hf(zb_config: ModelArgs) -> LlamaConfig:
         "high_freq_factor": 4.0,
         "original_max_position_embeddings": 8192,
         "rope_type": "llama3",
+    }
+
+    config.auto_map = {
+        "AutoConfig": "PrimeIntellect/prime-llama--configuration_llama.LlamaConfig",
+        "AutoModelForCausalLM": "PrimeIntellect/prime-llama--modeling_llama.LlamaForCausalLM"
     }
 
     return config
@@ -145,13 +150,11 @@ def main(config: ExportConfig):
     )
 
     # Tokenizer
-    for _file in ["tokenizer.json", "special_tokens_map.json", "tokenizer_config.json"]:
-        with (save_path / _file).open("wb") as f:
-            f.write(
-                requests.get(
-                    f"https://huggingface.co/PrimeIntellect/Meta-Llama-3-8B/resolve/main/{_file}?download=true"
-                ).content
-            )
+    tokenizer.save_pretrained(save_path)
+
+    # Generation Config
+    gconfig = GenerationConfig(max_length=100, use_cache=False, temperature=0.7, top_k=None, do_sample=True)
+    gconfig.save_pretrained(save_path)
 
 
 if __name__ == "__main__":

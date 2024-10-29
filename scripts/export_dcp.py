@@ -117,11 +117,11 @@ def main(config: ExportConfig):
     index_json = {}
     total_size = 0
     state_dict = {remap_keys_llama(k): v for k, v in state_dict.items()}
+    if "model.freqs_cis" in state_dict:  # This should not be persisted
+        del state_dict["model.freqs_cis"]
     if config.torch_dtype == "bfloat16":
         state_dict = {k: v.to(torch.bfloat16) for k, v in state_dict.items()}
 
-    if "model.freqs_cis" in state_dict:  # This should not be persisted
-        del state_dict["model.freqs_cis"]
     state_keys = list(state_dict.keys())
     shard_size = int(math.ceil(len(state_keys) / num_shards))
     logger.info("Saving model to %d shards", num_shards)

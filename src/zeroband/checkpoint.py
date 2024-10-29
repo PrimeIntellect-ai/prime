@@ -151,6 +151,7 @@ class RemoteConfig(BaseConfig):
 class CkptConfig(BaseConfig):
     path: str | None = None
     interval: int | None = None
+    interval_inner_step: int | None = None
     topk: int | None = None
 
     remote: RemoteConfig | None = None

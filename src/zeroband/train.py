@@ -446,7 +446,8 @@ def train(config: Config):
                 config.ckpt is not None
                 and training_progress.step > 0
                 and training_progress.step % num_inner_steps != 0
-                and training_progress.step % config.ckpt.interval == 0
+                and config.ckpt.interval_inner_step is not None
+                and training_progress.step % config.ckpt.interval_inner_step == 0
             ):
                 logger.info(
                     f"Saving inner step ckpt at {training_progress.step}. This will only save the inner model and optimizer"

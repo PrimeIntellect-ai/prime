@@ -108,6 +108,14 @@ class Config(BaseConfig):
     ckpt: CkptConfig = CkptConfig()
 
     @model_validator(mode="after")
+    def ckpt_diloco_step(self):
+        if self.ckpt is not None and self.ckpt.interval is not None and self.diloco is not None:
+            assert (
+                self.ckpt.interval % self.diloco.inner_steps == 0
+            ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
+        return self
+
+    @model_validator(mode="after")
     def validate_live_recovery_rank_src(self):
         if self.ckpt is not None and self.ckpt.live_recovery_rank_src is not None and self.diloco is None:
             raise ValueError("live_recovery_rank_src is only supported with diloco")

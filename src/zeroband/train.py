@@ -450,12 +450,14 @@ def train(config: Config):
             if config.train.memory_profiler is not None:
                 memory_profiler.step()
 
+            logger.debug(f"inner step: {inner_step}, ckpt interval inner step: {config.ckpt.interval_inner_step}")
             if (
                 config.ckpt is not None
-                and training_progress.step > 0
                 and training_progress.step % num_inner_steps != 0
                 and config.ckpt.interval_inner_step is not None
-                and training_progress.step % config.ckpt.interval_inner_step == 0
+                and inner_step
+                == config.ckpt.interval_inner_step
+                - 1  # if I want to save at inner steps 4 it means inner_step = 3 because we start indexing at 0
             ):
                 logger.info(
                     f"Saving inner step ckpt at {training_progress.step}. This will only save the inner model and optimizer"

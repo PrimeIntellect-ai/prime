@@ -301,6 +301,7 @@ class CkptManager:
         #     # main reason is that we actually don't a cpu model but just a list of cpu parameters.
         #     self.states["diloco_optimizer"] = self.diloco_offloaded_optimizer
 
+    @torch.no_grad()
     def save(self, remote: bool = False) -> None:
         """
         Each rank will save the right shard of the model and optimizer.
@@ -327,6 +328,7 @@ class CkptManager:
             if remote and self.config.remote is not None:
                 self._async_save_remote(step_ckpt_path, remote_ckpt_path)
 
+    @torch.no_grad()
     def _save(self, ckpt_path: str):
         self.wait_for_blocking_job()
 
@@ -425,6 +427,7 @@ class CkptManager:
         for process in self.non_blocking_process:
             process.join()
 
+    @torch.no_grad()
     def _load_data(self, resume_ckpt_path: str):
         ## we have two formats to to save the dataloader:
         ## 1. v1: save the dataloader in the same file as the outer optimizer
@@ -454,6 +457,7 @@ class CkptManager:
             )
             raise e
 
+    @torch.no_grad()
     def load(
         self,
         resume_ckpt_path: str,
@@ -515,6 +519,7 @@ class CkptManager:
 
         self._logger.info(f"Loaded checkpoint from {resume_ckpt_path} in {time.perf_counter() - time_start} seconds")
 
+    @torch.no_grad()
     def recv_ckpt_from_peer(self, global_pg: dist.ProcessGroup):
         assert self.diloco_offloaded_param_list is not None, "recv_ckpt_from_peers is only supported with diloco"
 
@@ -581,6 +586,7 @@ class CkptManager:
             f"Received ckpt from rank {self.config.live_recovery_rank_src} in {time.perf_counter() - time_start} seconds"
         )
 
+    @torch.no_grad()
     def send_ckpt_to_peer(self, global_pg: dist.ProcessGroup, dest_rank: int):
         def async_send():
             assert self.diloco_offloaded_param_list is not None, "send_ckpt_to_peers is only supported with diloco"
@@ -617,6 +623,7 @@ class CkptManager:
 
         self._live_reco_thread = thread
 
+    @torch.no_grad()
     def cache_inner_optimizer(self):
         """
         Cache the inner optimizer to cpu and cast DTensor to local tensor to be ready to send.

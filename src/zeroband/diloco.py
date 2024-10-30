@@ -90,8 +90,6 @@ class Diloco:
         """
         Sync the pseudo gradient from the local process group to the global process group
         """
-        _start_time = time.perf_counter()
-
         world_size_pre_init = self.elastic_device_mesh.global_pg.size()
         self.elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=False)
         world_size_post_init = self.elastic_device_mesh.global_pg.size()
@@ -105,12 +103,13 @@ class Diloco:
 
         global_pg = self.elastic_device_mesh.global_pg
         for i in range(self.config.retry_all_reduce):
-            for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
-                if fake:
-                    param_offloaded.grad.to_local().zero_()
-                else:
-                    param_offloaded.grad.to_local().copy_(param_offloaded.data.to_local())
-                    param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device))
+            with utils.timer("compute pseudo gradient"):
+                for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
+                    if fake:
+                        param_offloaded.grad.to_local().zero_()
+                    else:
+                        param_offloaded.grad.to_local().copy_(param_offloaded.data.to_local())
+                        param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device))
             try:
                 self.offloaded_grad_flat_tensor.div_(world_size)
                 _collective_start_time = time.perf_counter()
@@ -138,14 +137,14 @@ class Diloco:
                 "Failed to sync pseudo gradient after %d retries. Resorting to calculating pseudo-gradient without reduce",
                 self.config.retry_all_reduce,
             )
-            for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
-                if fake:
-                    param_offloaded.grad.to_local().zero_()
-                else:
-                    param_offloaded.grad.to_local().copy_(param_offloaded.data.to_local())
-                    param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device))
 
-        self._logger.info(f"Sync psuedo-gradient in {time.perf_counter() - _start_time:.6f} seconds")
+            with utils.timer("update gradient"):
+                for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
+                    if fake:
+                        param_offloaded.grad.to_local().zero_()
+                    else:
+                        param_offloaded.grad.to_local().copy_(param_offloaded.data.to_local())
+                        param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device))
 
     @torch.no_grad()
     def sync_inner_model(self, model: nn.Module):

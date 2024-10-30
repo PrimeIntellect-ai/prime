@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import hashlib
 import socket
 import time
@@ -229,3 +230,16 @@ def get_random_available_port_list(num_port):
 
 def get_random_available_port():
     return get_random_available_port_list(1)[0]
+
+
+@contextmanager
+def timer(operation_name: str):
+    """Times code execution and logs duration using an existing logger."""
+    logger = get_logger()
+    start = time.perf_counter()
+    duration = None
+    try:
+        yield lambda: duration
+    finally:
+        duration = time.perf_counter() - start
+        logger.debug(f"{operation_name} completed in {duration:.4f} seconds")

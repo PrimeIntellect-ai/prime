@@ -455,25 +455,26 @@ def train(config: Config):
             if config.train.memory_profiler is not None:
                 memory_profiler.step()
 
-        if config.diloco is not None:
-            if config.train.log_model_hash:
-                logger.debug("Pre diloco model: %s", get_module_signature(model))
+        with utils.timer("full diloco overhead") as diloco_overhead:
+            if config.diloco is not None:
+                if config.train.log_model_hash:
+                    logger.debug("Pre diloco model: %s", get_module_signature(model))
 
-            if world_info.rank == 0 and config.monitor is not None:
-                monitor.set_stage("outer_loop")
+                if world_info.rank == 0 and config.monitor is not None:
+                    monitor.set_stage("outer_loop")
 
-            # todo we could skip this is we don't have live recovery enabled
-            ckpt_manager.cache_inner_optimizer()
+                with utils.timer("cache inner optimizer"):
+                    # todo we could skip this is we don't have live recovery enabled
+                    ckpt_manager.cache_inner_optimizer()
 
-            time_start_inner = time.perf_counter()
-            diloco.step(model=model, flag=training_progress.outer_step, num_effective_peers=num_effective_peers)
-            diloco_time = time.perf_counter() - time_start_inner
+                with utils.timer("diloco step"):
+                    diloco.step(model=model, flag=training_progress.outer_step, num_effective_peers=num_effective_peers)
 
-            if config.train.log_model_hash:
-                logger.debug("inner diloco model: %s", get_module_signature(model))
-                logger.debug(f"outer diloco optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}")
-                logger.debug(f"outer diloco optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}")
-                logger.debug(f"outer diloco model hash: {get_tensor_list_signature(diloco.param_list_cpu)}")
+                if config.train.log_model_hash:
+                    logger.debug("inner diloco model: %s", get_module_signature(model))
+                    logger.debug(f"outer diloco optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}")
+                    logger.debug(f"outer diloco optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}")
+                    logger.debug(f"outer diloco model hash: {get_tensor_list_signature(diloco.param_list_cpu)}")
 
         training_progress.outer_step += 1
 
@@ -485,7 +486,8 @@ def train(config: Config):
             # we only allow to checkpoint after a outer step. For non diloco training outer step = 1 anyway
 
             do_remote = config.ckpt.remote is not None and training_progress.step % config.ckpt.remote.interval == 0
-            ckpt_manager.save(remote=do_remote)
+            with utils.timer("ckpt save"):
+                ckpt_manager.save(remote=do_remote)
             if config.train.log_model_hash:
                 logger.debug("Post saved model: %s", get_module_signature(model))
                 logger.debug("Post saved optimizer: %s", get_optimizer_signature(inner_optimizer))
@@ -511,7 +513,7 @@ def train(config: Config):
                         "step": training_progress.step,
                         "outer_step": training_progress.outer_step,
                         "outer_tokens_per_second": tokens_per_second,
-                        "all_reduce_step": diloco_time,
+                        "all_reduce_step": diloco_overhead(),
                     }
                 )
 

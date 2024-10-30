@@ -3,6 +3,7 @@ import time
 from pydantic_config import BaseConfig
 import torch
 from torch import nn
+from zeroband import utils
 from zeroband.collectives import Compression, all_reduce
 from zeroband.comms import ElasticDeviceMesh
 from zeroband.utils.world_info import get_world_info
@@ -218,11 +219,12 @@ class Diloco:
         """
         Step the optimizer
         """
-        time_start = time.perf_counter()
-        self.sync_pseudo_gradient(model, fake=fake, flag=flag, num_effective_peers=num_effective_peers)
-        self._logger.info(f"all reduce pseudo gradient in: {time.perf_counter() - time_start} seconds")
+        with utils.timer("sync pseudo gradient"):
+            self.sync_pseudo_gradient(model, fake=fake, flag=flag, num_effective_peers=num_effective_peers)
 
-        if self.outer_optimizer is not None:
-            self.outer_optimizer.step()
+        with utils.timer("outer optimizer step"):
+            if self.outer_optimizer is not None:
+                self.outer_optimizer.step()
 
-        self.sync_inner_model(model)
+        with utils.timer("sync inner model"):
+            self.sync_inner_model(model)

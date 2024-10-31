@@ -181,7 +181,7 @@ class Diloco:
             )
 
             offloaded_param.grad = DTensor.from_local(
-                torch.zeros_like(param.grad.to_local()),
+                torch.zeros_like(param.data.to_local()),
                 device_mesh=self.elastic_device_mesh.cpu_local_mesh,
                 placements=param.data.placements,
             )

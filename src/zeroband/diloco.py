@@ -135,9 +135,7 @@ class Diloco:
                         f"{j}/{len(self.param_list_cpu)} all reduce bucket done in {time.perf_counter() - t0:.6f} seconds, numel: {grad.numel()}"
                     )
 
-                self._logger.debug(
-                    f"All reduce takes {time.perf_counter() - _collective_start_time:.6f} seconds numels: {self.offloaded_grad_flat_tensor.numel()}"
-                )
+                self._logger.debug(f"All reduce takes {time.perf_counter() - _collective_start_time:.6f} seconds")
                 break
             except Exception as e:
                 self._logger.error(f"Error syncing pseudo gradient: {e}, retry {i+1}/{self.config.retry_all_reduce}")

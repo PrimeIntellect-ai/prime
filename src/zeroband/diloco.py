@@ -118,15 +118,19 @@ class Diloco:
 
                 self._logger.debug("Beginning all reduce")
                 # all_reduce(self.config.compression, self.offloaded_grad_flat_tensor, dist.ReduceOp.SUM, global_pg)
-                for j, tensor_group in enumerate(self._offloaded_grad_grouped_tensor):
+                for j, param in enumerate(self.param_list_cpu):
+                    grad = param.grad
+
                     t0 = time.perf_counter()
 
                     if self.config.compression == Compression.FP16:
-                        tensor_group = tensor_group.half()
+                        grad = grad.half()
 
-                    all_reduce(self.config.compression, tensor_group, dist.ReduceOp.SUM, global_pg)
+                    all_reduce(self.config.compression, grad, dist.ReduceOp.SUM, global_pg)
+                    param.grad.copy_(grad)
+
                     self._logger.debug(
-                        f"{j}/{len(self._offloaded_grad_grouped_tensor)} all reduce bucket done in {time.perf_counter() - t0:.6f} seconds, numel: {tensor_group.numel()}"
+                        f"{j}/{len(self.param_list_cpu)} all reduce bucket done in {time.perf_counter() - t0:.6f} seconds, numel: {grad.numel()}"
                     )
 
                 self._logger.debug(

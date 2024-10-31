@@ -127,7 +127,6 @@ class Diloco:
                         grad = grad.to_local()
 
                     grad.div_(world_size)
-                    self._logger.debug(f"{grad.shape}, type(grad): {type(grad)}")
                     all_reduce(self.config.compression, grad, dist.ReduceOp.SUM, global_pg)
 
                     self._logger.debug(

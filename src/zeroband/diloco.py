@@ -165,56 +165,27 @@ class Diloco:
         """
         Offload the model parameters to cpu
         """
-        param_items = [(name, param) for name, param in model.named_parameters() if param.requires_grad]
-        numels = sum(param.to_local().numel() for _, param in param_items)
 
-        self.offloaded_data_flat_tensor = torch.empty((numels,), device="cpu", dtype=torch.float32)
-        self.offloaded_grad_flat_tensor = torch.zeros((numels,), device="cpu", dtype=torch.float32)
-        current_offset = 0
         offloaded_params = []
-        param_group_cutoff = []
-
-        prev_id = None
-        for name, param in param_items:
-            if _find_first_number(name) != prev_id:
-                param_group_cutoff.append(current_offset)
-                prev_id = _find_first_number(name)
-
-            # so here we copy the DTensor from gpu to cpu. The trick is that we need to recreate the DTensor with the correct
-            # cpu devise mesh, otherwise we have a cpu DTensor with a cuda device mesh which will fail to do any communication
-            target = param.data.to_local().detach()
-            data_tensor = self.offloaded_data_flat_tensor.as_strided(target.size(), target.stride(), current_offset)
-            grad_tensor = self.offloaded_grad_flat_tensor.as_strided(target.size(), target.stride(), current_offset)
-            current_offset += data_tensor.numel()
-            data_tensor.copy_(target)
-
+        for param in model.parameters():
             offloaded_param = nn.Parameter(
                 DTensor.from_local(
-                    data_tensor,
+                    param.data.to_local(),
                     device_mesh=self.elastic_device_mesh.cpu_local_mesh,
                     placements=param.data.placements,
                 )
             )
 
             offloaded_param.grad = DTensor.from_local(
-                grad_tensor,
+                torch.zeros_like(param.grad.to_local()),
                 device_mesh=self.elastic_device_mesh.cpu_local_mesh,
                 placements=param.data.placements,
             )
+
             # here we pre-allocate the grad DTensor on cpu.
             offloaded_param.requires_grad = True
             offloaded_params.append(offloaded_param)
 
-        param_group_cutoff.append(current_offset)
-        # self._logger.debug(f"Cutoffs: {param_group_cutoff}")
-
-        self._offloaded_grad_grouped_tensor = [
-            self.offloaded_grad_flat_tensor.as_strided((j - i,), (1,), i)
-            for i, j in zip(param_group_cutoff, param_group_cutoff[1:])
-        ]
-        # self._logger.debug(
-        #     f"Grouped Tensors({len(self._offloaded_grad_grouped_tensor)}){[i.numel() for i in self._offloaded_grad_grouped_tensor]}"
-        # )
         return offloaded_params
 
     @torch.no_grad()

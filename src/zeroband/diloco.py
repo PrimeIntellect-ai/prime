@@ -123,13 +123,12 @@ class Diloco:
 
                     t0 = time.perf_counter()
 
-                    if self.config.compression == Compression.FP16:
-                        grad = grad.half()
+                    if isinstance(param.grad, DTensor):
+                        grad = grad.to_local()
 
                     grad.div_(world_size)
-
+                    self._logger.debug(f"{grad.shape}, type(grad): {type(grad)}")
                     all_reduce(self.config.compression, grad, dist.ReduceOp.SUM, global_pg)
-                    param.grad.copy_(grad)
 
                     self._logger.debug(
                         f"{j}/{len(self.param_list_cpu)} all reduce bucket done in {time.perf_counter() - t0:.6f} seconds, numel: {grad.numel()}"

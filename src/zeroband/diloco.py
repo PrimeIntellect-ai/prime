@@ -111,7 +111,7 @@ class Diloco:
                         param_offloaded.grad.to_local().copy_(param_offloaded.data.to_local())
                         param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device))
             try:
-                self.offloaded_grad_flat_tensor.div_(world_size)
+                # self.offloaded_grad_flat_tensor.div_(world_size)
                 _collective_start_time = time.perf_counter()
                 self._logger.debug("Waiting on barrier")
                 self.elastic_device_mesh.monitored_barrier(flag)
@@ -125,6 +125,8 @@ class Diloco:
 
                     if self.config.compression == Compression.FP16:
                         grad = grad.half()
+
+                    grad.div_(world_size)
 
                     all_reduce(self.config.compression, grad, dist.ReduceOp.SUM, global_pg)
                     param.grad.copy_(grad)

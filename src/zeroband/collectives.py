@@ -30,6 +30,7 @@ def gloo_all_reduce(
 class Compression(Enum):
     NO = "no"
     UINT8 = "uint8"
+    FP16 = "fp16"
 
 
 def all_reduce(

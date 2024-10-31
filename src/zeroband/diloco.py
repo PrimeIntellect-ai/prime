@@ -120,6 +120,10 @@ class Diloco:
                 # all_reduce(self.config.compression, self.offloaded_grad_flat_tensor, dist.ReduceOp.SUM, global_pg)
                 for j, tensor_group in enumerate(self._offloaded_grad_grouped_tensor):
                     t0 = time.perf_counter()
+
+                    if self.config.compression == Compression.FP16:
+                        tensor_group = tensor_group.half()
+
                     all_reduce(self.config.compression, tensor_group, dist.ReduceOp.SUM, global_pg)
                     self._logger.debug(
                         f"{j}/{len(self._offloaded_grad_grouped_tensor)} all reduce bucket done in {time.perf_counter() - t0:.6f} seconds, numel: {tensor_group.numel()}"

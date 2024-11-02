@@ -375,7 +375,6 @@ def load_all_datasets(
         probabilities=_get_probabilities(data_config),
         reverse_data_files=data_config.reverse_data_files,
         tokenizer=tokenizer,
-        memory_map=data_config.memory_map,
     )
 
     logger.info(f"Train dataset:\n{ds}")

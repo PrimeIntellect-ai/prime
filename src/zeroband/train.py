@@ -554,6 +554,7 @@ if __name__ == "__main__":
 
     try:
         train(config)
-    except:
+    except:  # noqa
+        # Subprocesses can prevent the main process from exiting, so we need to terminate them
         for p in _children:
             p.terminate()

@@ -2,6 +2,7 @@ import os
 from typing import Literal
 import time
 from pydantic import model_validator
+from multiprocessing.process import _children
 
 import torch
 from pydantic_config import parse_argv, BaseConfig
@@ -551,4 +552,8 @@ if __name__ == "__main__":
     config = Config(**parse_argv())
     logger.debug(f"config: {config.model_dump()}")
 
-    train(config)
+    try:
+        train(config)
+    except:
+        for p in _children:
+            p.terminate()

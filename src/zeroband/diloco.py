@@ -118,6 +118,11 @@ class Diloco:
 
                 self._logger.debug("Beginning all reduce")
                 # all_reduce(self.config.compression, self.offloaded_grad_flat_tensor, dist.ReduceOp.SUM, global_pg)
+                import os
+
+                if os.environ["RANK"] == "1":
+                    time.sleep(3600)
+
                 for j, tensor_group in enumerate(self._offloaded_grad_grouped_tensor):
                     t0 = time.perf_counter()
                     all_reduce(self.config.compression, tensor_group, dist.ReduceOp.SUM, global_pg)
@@ -226,3 +231,4 @@ class Diloco:
             self.outer_optimizer.step()
 
         self.sync_inner_model(model)
+        self.elastic_device_mesh.beat()

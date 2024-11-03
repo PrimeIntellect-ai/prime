@@ -10,6 +10,7 @@ from typing import List, Tuple, Optional
 from torch.testing._internal.distributed.fake_pg import FakeProcessGroup
 import multiprocessing as mp
 from uuid import uuid4
+from zeroband.utils.shared_int_deque import SharedIntDeque
 
 TCPSTORE_TIMEOUT = timedelta(seconds=int(os.getenv("ZERO_BAND_GLOBAL_STORE_TIMEOUT_SECONDS", "300")))
 TCPSTORE_POLLING_INTERVAL = float(os.getenv("ZERO_BAND_GLOBAL_STORE_POLLING_INTERVAL_SECONDS", "0.1"))
@@ -21,6 +22,7 @@ HEARTBEAT_INTERVAL = int(
 HEARTBEAT_TIMEOUT = int(
     os.getenv("ZERO_BAND_EDM_HEARTBEAT_TIMEOUT_SECONDS", "10")
 )  # Time in seconds after which a node is considered dead if no heartbeat is received
+HEARTBEAT_SELF_DESTRUCT_TIMEOUT = int(os.getenv("ZERO_BAND_EDM_HEARTBEAT_SELF_DESTRUCT_TIMEOUT_SECONDS", "5400"))
 
 
 class ElasticDeviceMesh:
@@ -45,6 +47,7 @@ class ElasticDeviceMesh:
     def __init__(self, backend: str = "cpu:gloo,cuda:nccl", enable: bool = True):
         self._logger = get_logger()
         self.world_info = get_world_info()
+        self._beats = SharedIntDeque(5)
 
         # Initialize global process group
         self.global_pg = FakeProcessGroup(self.world_info.rank, 1)
@@ -70,6 +73,9 @@ class ElasticDeviceMesh:
 
         # Logging
         self._logger.info(f"global_pg size : {self.global_pg.size()}, local_pg size: {self.local_pg.size()}")
+
+    def beat(self):
+        self._beats.append(int(time.time()))
 
     def __del__(self):
         self._stop_heartbeat()
@@ -218,6 +224,12 @@ class ElasticDeviceMesh:
         """Continuously send heartbeats until stopped."""
         try:
             while not stop_event.is_set():
+                if time.time() - self._beats[-1] > HEARTBEAT_SELF_DESTRUCT_TIMEOUT:
+                    beats = self._beats.to_list()
+                    beats_diff = [beats[i] - beats[i - 1] for i in range(1, len(beats))]
+                    raise Exception(
+                        f"Beat took {time.time() - beats[-1]}s which is longer than {HEARTBEAT_SELF_DESTRUCT_TIMEOUT}s. Beat diffs: {beats_diff}"
+                    )
                 self._send_heartbeat()
                 time.sleep(HEARTBEAT_INTERVAL)
         finally:

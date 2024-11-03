@@ -127,9 +127,16 @@ class SharedIntDeque(MutableSequence):
         with self.lock:
             return [self[i] for i in indexes]
 
-    def __len__(self) -> int:
+    def to_list(self) -> List[int]:
+        """
+        Returns a list of all items in the deque.
+        """
         with self.lock:
-            return self.size.value
+            items: List[int] = [self[i] for i in range(len(self))]
+        return items
+
+    def __len__(self) -> int:
+        return self.size.value
 
     def __getitem__(self, index: int) -> int:
         if index < 0:

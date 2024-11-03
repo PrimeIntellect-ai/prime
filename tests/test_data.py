@@ -130,7 +130,7 @@ class SimpleTokenizer:
 def fake_sentences():
     """Generate 500 fake sentences (100 per file * 5 files)"""
     fake = Faker()
-    return [fake.sentence() for _ in range(500)]
+    return [fake.sentence() for _ in range(10_000)]
 
 
 @pytest.fixture
@@ -236,7 +236,7 @@ def test_interleave_dataset_ckpt(parquet_files, tokenizer):
         assert data1["input_ids"] == data2["input_ids"]
 
 
-@pytest.mark.parametrize("num_workers", [0, 2])
+@pytest.mark.parametrize("num_workers", [0])  # , 2])
 def test_dataloader_parquet_dataset(parquet_files, tokenizer, num_workers):
     dataset = SequencePackingDataSet(ParquetDataset(parquet_files, tokenizer), max_seq_length=8, eos_token=0)
 

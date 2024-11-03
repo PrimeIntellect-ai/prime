@@ -149,6 +149,8 @@ class PQDatasetState:
     files: List[str]
     file_index: int
     row_index: int
+    increment: int
+    init_row_index: int
 
 
 class ParquetDataset(IterableDataset, Stateful):
@@ -171,13 +173,23 @@ class ParquetDataset(IterableDataset, Stateful):
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
             if worker_info.num_workers > len(self.arg_files):
-                raise ValueError("Number of workers is greater than the number of files")
+                logger.warning(
+                    f"Number of workers {worker_info.num_workers} is greater than the number of files {len(self.arg_files)}"
+                )
+                self.state = PQDatasetState(
+                    files=self.arg_files,
+                    file_index=0,
+                    row_index=worker_info.id,
+                    increment=worker_info.num_workers,
+                    init_row_index=worker_info.id,
+                )
+                return
 
             files = self.arg_files[worker_info.id :: worker_info.num_workers]
         else:
             files = self.arg_files
 
-        self.state = PQDatasetState(files=files, file_index=0, row_index=0)
+        self.state = PQDatasetState(files=files, file_index=0, row_index=0, increment=1, init_row_index=0)
 
     def __iter__(self):
         # we lazy init the parquet dataset to get the worker info from dataloader multi process
@@ -193,9 +205,9 @@ class ParquetDataset(IterableDataset, Stateful):
             while True:
                 row = table[self.state.row_index]
 
-                self.state.row_index += 1
+                self.state.row_index += self.state.increment
                 if self.state.row_index >= len(table):
-                    self.state.row_index = 0
+                    self.state.row_index = self.state.init_row_index
                     self.state.file_index += 1
                     if self.state.file_index >= len(self.state.files):  # infinite datasets
                         self.state.file_index = 0

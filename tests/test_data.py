@@ -15,6 +15,7 @@ import string
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 
+@pytest.mark.skip(reason="not using hf for now")
 @pytest.mark.parametrize(
     "ratio, lower, upper",
     [
@@ -44,6 +45,7 @@ def test_load_all_datasets_vanilla(ratio: str, lower: float, upper: float):
     assert letter_count["A"] / letter_count["C"] > lower
 
 
+@pytest.mark.skip(reason="not using hf for now")
 @pytest.mark.parametrize(
     "ratio, lower, upper, data_rank, data_world_size",
     [

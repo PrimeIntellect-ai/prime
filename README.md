@@ -110,9 +110,11 @@ uv run pytest
 | `ZERO_BAND_GLOBAL_STORE_POLLING_INTERVAL_SECONDS` | Number of seconds between polls to the store when waiting for values | `0.1` |
 | `ZERO_BAND_EDM_HEARTBEAT_INTERVAL_SECONDS` | Interval in seconds between heartbeats | `2` |
 | `ZERO_BAND_EDM_HEARTBEAT_TIMEOUT_SECONDS` | Time in seconds after which a node is considered dead if no heartbeat is received | `10` |
+| `ZERO_BAND_EDM_HEARTBEAT_SELF_DESTRUCT_TIMEOUT_SECONDS` | Time in seconds between beats after which a node will stop its hearbeat and be considered dead | `5400` |
 | `ZERO_BAND_LIVE_RECO_PORT` | Port number for the live recovery server | random |  
 | `ZERO_BAND_LIVE_RECO_ADDR` | IP Address for the live recovery server | `localhost` |  
 
+HEARTBEAT_SELF_DESTRUCT_TIMEOUT = int(os.getenv("ZERO_BAND_EDM_HEARTBEAT_SELF_DESTRUCT_TIMEOUT_SECONDS", "5400"))
 ## Troubleshooting
 
 If you encounter any dataset loading errors at the beginning of training, try setting:

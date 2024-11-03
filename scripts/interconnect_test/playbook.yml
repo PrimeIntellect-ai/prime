@@ -1,0 +1,58 @@
+---
+- name: Install iperf and run interconnect tests
+  hosts: all
+  become: yes
+  tasks:
+    - name: Check if iperf is installed
+      stat:
+        path: /usr/bin/iperf
+      register: iperf_install
+
+    - name: Install iperf
+      apt:
+        name: iperf
+        state: present
+        update_cache: yes
+      when: not iperf_install.stat.exists
+
+    - name: Start iperf servers on all nodes
+      shell: iperf -s -D
+      changed_when: false
+
+    - name: Wait for servers to start
+      pause:
+        seconds: 2
+
+    - name: Run tests between nodes and collect results
+      block:
+        - name: Create result dict
+          set_fact:
+            test_results: []
+
+        - name: Run iperf tests and save results
+          shell: |
+            {% for target in groups['all'] %}
+            {% if inventory_hostname != target %}
+            bandwidth=$(iperf -c {{ hostvars[target]['ip'] }} -P 16 | grep -m 1 "Gbits/sec" | awk '{print $(NF-1)}')
+            echo "{{ inventory_hostname }},{{ target }},${bandwidth:-25}"
+            {% endif %}
+            {% endfor %}
+          args:
+            executable: /bin/bash
+          register: iperf_output
+          changed_when: false
+
+        - name: Parse results into dict
+          set_fact:
+            test_results: "{{ test_results + [{'source': item.split(',')[0], 'destination': item.split(',')[1], 'bandwidth_gbps': item.split(',')[2] | float}] }}"
+          loop: "{{ iperf_output.stdout_lines }}"
+          when: item != ""
+
+    - name: Display results
+      debug:
+        var: test_results
+
+    - name: Stop all iperf servers
+      shell: pkill iperf
+      changed_when: false
+      ignore_errors: yes

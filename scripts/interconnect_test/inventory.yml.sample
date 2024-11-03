@@ -1,0 +1,23 @@
+all:
+  hosts:
+    gpu_node_1:
+      ansible_host: 163.172.155.212
+      ip: 163.172.155.212
+    gpu_node_2:
+      ansible_host: 51.158.238.121 
+      ip: 51.158.238.121
+    gpu_node_3:
+      ansible_host: 151.115.109.213
+      ip: 151.115.109.213
+    gpu_node_4:
+      ansible_host: 217.18.53.81
+      ip: 217.18.53.81
+    gpu_node_5:
+      ansible_host: 195.242.13.116
+      ip: 195.242.13.116
+    gpu_node_6:
+      ansible_host: 101.47.142.129
+      ip: 101.47.142.129
+  vars:
+    ansible_user: ubuntu
+    ansible_ssh_private_key_file: ~/.ssh/private_key_develop.pem

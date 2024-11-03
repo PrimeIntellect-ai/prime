@@ -48,6 +48,7 @@ class ElasticDeviceMesh:
         self._logger = get_logger()
         self.world_info = get_world_info()
         self._beats = SharedIntDeque(5)
+        self.beat()
 
         # Initialize global process group
         self.global_pg = FakeProcessGroup(self.world_info.rank, 1)

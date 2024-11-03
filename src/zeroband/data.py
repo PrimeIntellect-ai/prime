@@ -211,7 +211,6 @@ class ParquetDataset(IterableDataset, Stateful):
 
 @dataclass
 class InterleaveDatasetState:
-    probabilities: List[float]
     current_index: int
     seed: int
 
@@ -229,8 +228,9 @@ class InterleaveDataset(IterableDataset, Stateful):
         assert len(datasets) == len(probabilities), "The number of datasets and probabilities must be the same"
 
         self.datasets = datasets
+        self.probabilities = probabilities
 
-        self.state = InterleaveDatasetState(current_index=0, seed=seed, probabilities=probabilities)
+        self.state = InterleaveDatasetState(current_index=0, seed=seed)
         self._init_random_state()
 
     def _init_random_state(self):
@@ -242,7 +242,7 @@ class InterleaveDataset(IterableDataset, Stateful):
             self._get_dataset_to_yield_from()
 
     def _get_dataset_to_yield_from(self):
-        return self.random_generator.choices(range(len(self.datasets)), weights=self.state.probabilities, k=1)[0]
+        return self.random_generator.choices(range(len(self.datasets)), weights=self.probabilities, k=1)[0]
 
     def __iter__(self):
         data_iters = [iter(dataset) for dataset in self.datasets]

@@ -159,6 +159,9 @@ class ParquetDataset(IterableDataset, Stateful):
     """
 
     def __init__(self, files: List[str], tokenizer: PreTrainedTokenizer, text_key: str = "text"):
+        if len(files) == 0:
+            raise ValueError("At least one file is required")
+
         self.arg_files = files
         self.tokenizer = tokenizer
 
@@ -167,6 +170,9 @@ class ParquetDataset(IterableDataset, Stateful):
     def _lazy_init(self):
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
+            if worker_info.num_workers > len(self.arg_files):
+                raise ValueError("Number of workers is greater than the number of files")
+
             files = self.arg_files[worker_info.id :: worker_info.num_workers]
         else:
             files = self.arg_files

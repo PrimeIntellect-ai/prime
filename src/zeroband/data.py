@@ -182,10 +182,9 @@ class ParquetDataset(IterableDataset, Stateful):
             file = self.state.files[self.state.file_index]
 
             parquet_file = pq.ParquetFile(file)
+            table = parquet_file.read()["text"]
 
             while True:
-                table = parquet_file.read()["text"]
-
                 row = table[self.state.row_index]
 
                 self.state.row_index += 1

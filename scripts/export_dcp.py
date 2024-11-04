@@ -23,6 +23,7 @@ class ExportConfig(Config):
 
 
 def remap_keys_llama(k: str) -> str:
+    """Maps ZeroBand keys to HuggingFace keys"""
     return ("model." if "output.weight" not in k else "") + k.replace("tok_embeddings", "embed_tokens").replace(
         "attention.wq", "self_attn.q_proj"
     ).replace("attention.wk", "self_attn.k_proj").replace("attention.wv", "self_attn.v_proj").replace(
@@ -60,11 +61,8 @@ def convert_config_zb_to_hf(zb_config: ModelArgs) -> LlamaConfig:
 
     # Rope scaling
     config.rope_scaling = {
-        "factor": 8.0,
-        "low_freq_factor": 1.0,
-        "high_freq_factor": 4.0,
         "original_max_position_embeddings": 8192,
-        "rope_type": "llama3",
+        "rope_type": "default",
     }
 
     config.auto_map = {

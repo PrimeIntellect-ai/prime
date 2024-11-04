@@ -160,7 +160,7 @@ class ParquetDataset(IterableDataset, Stateful):
     * [ ] handle mutli proc dataloader pytorch
     """
 
-    def __init__(self, files: List[str], tokenizer: PreTrainedTokenizer, text_key: str = "text"):
+    def __init__(self, files: List[str], tokenizer: PreTrainedTokenizer):
         self.arg_files = files
         self.tokenizer = tokenizer
 

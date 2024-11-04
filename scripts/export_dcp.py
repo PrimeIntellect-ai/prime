@@ -36,6 +36,7 @@ def remap_keys_llama(k: str) -> str:
 
 
 def _get_ffn_dim(hidden_dim: int, ffn_dim_multiplier: float, multiple_of: int) -> int:
+    """Get the FFN dimension from ZeroBand args"""
     hidden_dim = int(8 * hidden_dim / 3)
     # custom dim factor multiplier
     if ffn_dim_multiplier is not None:
@@ -45,6 +46,7 @@ def _get_ffn_dim(hidden_dim: int, ffn_dim_multiplier: float, multiple_of: int) -
 
 
 def convert_config_zb_to_hf(zb_config: ModelArgs) -> LlamaConfig:
+    """Convert ZeroBand config to HuggingFace config"""
     config = LlamaConfig()
     config.hidden_size = zb_config.dim
     config.num_hidden_layers = zb_config.n_layers
@@ -74,6 +76,14 @@ def convert_config_zb_to_hf(zb_config: ModelArgs) -> LlamaConfig:
 
 @torch.no_grad
 def convert_qk_from_complex_to_rotate_half(linear_weight: torch.FloatTensor, head_dim: int) -> torch.FloatTensor:
+    """Converts the Q/K weight from complex to rotate half form.
+    This is required because the rotary implementation in ZeroBand uses complex numbers which encodes even elements as real and odd number as complex.
+    [0, 1, 2, 3] -> [0 + 1j, 2 + 3j]
+    However, the HuggingFace implementation uses rotate_half which encodes top half as real and bottom half as complex.
+    [0, 1, 2, 3] -> [0, 1] + [2, 3]j
+
+    We thus need to permute the QK outputs to match the HuggingFace implementation.
+    """
     new_weight = torch.zeros_like(linear_weight)
 
     num_heads = linear_weight.size(0) // head_dim
@@ -89,9 +99,11 @@ def convert_qk_from_complex_to_rotate_half(linear_weight: torch.FloatTensor, hea
 
 
 def main(config: ExportConfig):
+    # Create save path
     save_path = Path(config.ckpt.path)
     save_path.mkdir(parents=True, exist_ok=True)
 
+    # Load model
     logger.info("Getting tokenizer (for vocab size)")
     if config.type_model == "llama2":
         tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
@@ -108,11 +120,13 @@ def main(config: ExportConfig):
         seq_length=config.data.seq_length,
         attn_fn=config.train.attn_fn,
     )
+    
+    # Convert ZeroBand config to HuggingFace config
     hf_config = convert_config_zb_to_hf(model_config)
     hf_config.to_json_file(save_path / "config.json")
 
+    # Load checkpoint
     logger.info("Before load: %s", get_module_signature(model))
-
     states = {
         "model": ModelWrapper(model),
     }
@@ -124,6 +138,7 @@ def main(config: ExportConfig):
 
     logger.info("After load: %s", get_module_signature(model))
 
+    # Convert model to HuggingFace format
     num_shards = int(sum(p.numel() for p in model.parameters()) / 1e9)
     state_dict = model.state_dict()
 
@@ -143,6 +158,7 @@ def main(config: ExportConfig):
     if config.torch_dtype == "bfloat16":
         state_dict = {k: v.to(torch.bfloat16) for k, v in state_dict.items()}
 
+    # Save model
     state_keys = list(state_dict.keys())
     shard_size = int(math.ceil(len(state_keys) / num_shards))
     logger.info("Saving model to %d shards", num_shards)
@@ -170,10 +186,10 @@ def main(config: ExportConfig):
         indent=2,
     )
 
-    # Tokenizer
+    # Save Tokenizer
     tokenizer.save_pretrained(save_path)
 
-    # Generation Config
+    # Save Generation Config
     gconfig = GenerationConfig(max_length=100, use_cache=False, temperature=0.7, top_k=None, do_sample=True)
     gconfig.save_pretrained(save_path)
 

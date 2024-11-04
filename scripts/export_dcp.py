@@ -68,11 +68,26 @@ def convert_config_zb_to_hf(zb_config: ModelArgs) -> LlamaConfig:
     }
 
     config.auto_map = {
-        "AutoConfig": "PrimeIntellect/prime-llama--configuration_llama.LlamaConfig",
-        "AutoModelForCausalLM": "PrimeIntellect/prime-llama--modeling_llama.LlamaForCausalLM"
+        "AutoConfig": "PrimeIntellect/prime-llama-debug--configuration_llama.LlamaConfig",
+        "AutoModelForCausalLM": "PrimeIntellect/prime-llama-debug--modeling_llama.LlamaForCausalLM"
     }
 
     return config
+
+@torch.no_grad
+def convert_qk_from_complex_to_rotate_half(linear_weight: torch.FloatTensor, head_dim: int) -> torch.FloatTensor:
+    new_weight = torch.zeros_like(linear_weight)
+
+    num_heads = linear_weight.size(0) // head_dim
+    hhd = head_dim // 2
+
+    # This applies the riffle shuffle permutation to the outputs of the linear for each attn head
+    # Even numbers go to the top half, odd numbers go to the bottom half
+    for i in range(num_heads):
+        new_weight[i * head_dim:(i * head_dim + hhd), :].copy_(linear_weight[i * head_dim + 0:(i + 1) * head_dim:2, :])
+        new_weight[i * head_dim + hhd:(i + 1) * head_dim, :].copy_(linear_weight[i * head_dim + 1:(i + 1) * head_dim:2, :])
+
+    return new_weight
 
 
 def main(config: ExportConfig):
@@ -117,6 +132,14 @@ def main(config: ExportConfig):
     index_json = {}
     total_size = 0
     state_dict = {remap_keys_llama(k): v for k, v in state_dict.items()}
+    with torch.no_grad():
+        for i in range(len(hf_config.num_hidden_layers)):
+            old_q = state_dict[f"model.layers.{i}.self_attn.q_proj.weight"]
+            old_k = state_dict[f"model.layers.{i}.self_attn.k_proj.weight"]
+            new_q = convert_qk_from_complex_to_rotate_half(old_q, 128)
+            new_k = convert_qk_from_complex_to_rotate_half(old_k, 128)
+            state_dict[f"model.layers.{i}.self_attn.q_proj.weight"].copy_(new_q)
+            state_dict[f"model.layers.{i}.self_attn.k_proj.weight"].copy_(new_k)
     if "model.freqs_cis" in state_dict:  # This should not be persisted
         del state_dict["model.freqs_cis"]
     if config.torch_dtype == "bfloat16":

@@ -161,9 +161,6 @@ class ParquetDataset(IterableDataset, Stateful):
     """
 
     def __init__(self, files: List[str], tokenizer: PreTrainedTokenizer, text_key: str = "text"):
-        if len(files) == 0:
-            raise ValueError("At least one file is required")
-
         self.arg_files = files
         self.tokenizer = tokenizer
 
@@ -174,7 +171,7 @@ class ParquetDataset(IterableDataset, Stateful):
         if worker_info is not None:
             if worker_info.num_workers > len(self.arg_files):
                 logger.warning(
-                    f"Number of workers {worker_info.num_workers} is greater than the number of files {len(self.arg_files)}"
+                    f"dataloader rank {worker_info.id} Number of workers {worker_info.num_workers} is greater than the number of files {len(self.arg_files)}"
                 )
                 self.state = PQDatasetState(
                     files=self.arg_files,
@@ -214,6 +211,10 @@ class ParquetDataset(IterableDataset, Stateful):
 
                 yield {"input_ids": self.tokenizer.encode(str(row))}
 
+    @property
+    def is_empty(self):
+        return len(self.arg_files) == 0
+
     def state_dict(self) -> dict[str, Any]:
         return asdict(self.state) if self.state is not None else {}
 
@@ -239,8 +240,15 @@ class InterleaveDataset(IterableDataset, Stateful):
         assert len(datasets) > 0, "At least one dataset is required"
         assert len(datasets) == len(probabilities), "The number of datasets and probabilities must be the same"
 
-        self.datasets = datasets
-        self.probabilities = probabilities
+        self.probabilities = []
+        self.datasets = []
+
+        for dataset, prob in zip(datasets, probabilities):
+            if not dataset.is_empty:
+                self.datasets.append(dataset)
+                self.probabilities.append(prob)
+            else:
+                logger.warning(f"Dataset {dataset} is empty. Skipping.")
 
         self.state = InterleaveDatasetState(current_index=0, seed=seed)
         self._init_random_state()
@@ -354,12 +362,7 @@ def _load_datasets(
         if data_rank is not None and data_world_size is not None:
             _ds_args["data_files"] = _data_files[data_rank::data_world_size]
 
-        if len(_ds_args["data_files"]) > 0:
-            ds_args.append(_ds_args)
-        else:
-            logger.warning(
-                f"Not enough data files found for {_ds_name}:{_ds_config} rank {data_rank} world size {data_world_size}"
-            )
+        ds_args.append(_ds_args)
 
     # logger.debug(f"Datasets ({split}):\n" + "\n".join(map(_nice_print, ds_args)))
     # logger.debug(f"Probabilities: {probabilities}")

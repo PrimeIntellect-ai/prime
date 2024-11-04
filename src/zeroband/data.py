@@ -253,7 +253,7 @@ class InterleaveDataset(IterableDataset, Stateful):
         for _ in range(self.state.current_index):
             self._get_dataset_to_yield_from()
 
-    def _get_dataset_to_yield_from(self):
+    def _get_dataset_to_yield_from(self) -> int:
         return self.random_generator.choices(range(len(self.datasets)), weights=self.probabilities, k=1)[0]
 
     def __iter__(self):
@@ -353,7 +353,13 @@ def _load_datasets(
             _ds_args["data_files"] = _data_files
         if data_rank is not None and data_world_size is not None:
             _ds_args["data_files"] = _data_files[data_rank::data_world_size]
-        ds_args.append(_ds_args)
+
+        if len(_ds_args["data_files"]) > 0:
+            ds_args.append(_ds_args)
+        else:
+            logger.warning(
+                f"Not enough data files found for {_ds_name}:{_ds_config} rank {data_rank} world size {data_world_size}"
+            )
 
     # logger.debug(f"Datasets ({split}):\n" + "\n".join(map(_nice_print, ds_args)))
     # logger.debug(f"Probabilities: {probabilities}")

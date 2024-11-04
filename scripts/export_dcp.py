@@ -1,3 +1,8 @@
+#!/usr/bin/env python
+# coding: utf-8
+# Example Usage:
+# python scripts/export_dcp.py @configs/10B/H100.toml --ckpt.path /data/intellect-1-step17000 --ckpt.resume /data/10b/step_17000/diloco_0
+
 import torch
 from typing import Literal
 import torch.distributed.checkpoint as dcp

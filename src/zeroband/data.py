@@ -272,6 +272,8 @@ class InterleaveDataset(IterableDataset, Stateful):
             sample = next(data_iters[dataset_to_yield_from])
             self.state.current_index += 1
 
+            logger.debug(f"Yielding from dataset {dataset_to_yield_from}")
+
             yield sample
 
     def state_dict(self):

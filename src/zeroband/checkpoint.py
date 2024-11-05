@@ -481,7 +481,13 @@ class CkptManager:
         world_info = get_world_info()
         if self.diloco_offloaded_param_list is not None:
             rank = diloco_rank if diloco_rank is not None else world_info.diloco_rank
-            resume_ckpt_path = os.path.join(resume_ckpt_path, f"diloco_{rank}")
+
+            files = os.listdir(resume_ckpt_path)
+            if len(files) == 1:
+                resume_ckpt_path = os.path.join(resume_ckpt_path, files[0])
+            else:
+                resume_ckpt_path = os.path.join(resume_ckpt_path, f"diloco_{rank}")
+
             if data_path is not None:
                 data_path = os.path.join(data_path, f"diloco_{rank}")
 

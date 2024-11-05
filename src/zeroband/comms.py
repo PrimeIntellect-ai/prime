@@ -440,22 +440,24 @@ class LiveRecovery:
         self.logger = get_logger()
         self.world_info = get_world_info()
 
-        self.store = dist.PrefixStore("live_recovery", store)
+        # self.store = dist.PrefixStore("live_recovery", store)
         self.reset()
 
     def reset(self):
-        self.store.set(f"rank_{self.world_info.global_rank}", "null")
+        pass
+        # self.store.set(f"rank_{self.world_info.global_rank}", "null")
 
     def should_send_ckpt_to(self) -> int | None:
         """use this function to check if someone is awaiting for a live ckpt"""
-        data = self.store.get(f"rank_{self.world_info.global_rank}").decode("utf-8")
-        if data == "null":
-            return None
-        try:
-            return int(data)
-        except ValueError as e:
-            self.logger.error(f"Error parsing live recovery data: {e}")
-            return None
+        # data = self.store.get(f"rank_{self.world_info.global_rank}").decode("utf-8")
+        # if data == "null":
+        #     return None
+        # try:
+        #     return int(data)
+        # except ValueError as e:
+        #     self.logger.error(f"Error parsing live recovery data: {e}")
+        #     return None
+        return None
 
     def ask_for_live_ckpt(self, rank: int) -> int | None:
         """use this function to send a signal to a node to ask for a live ckpt"""

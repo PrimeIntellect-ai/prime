@@ -464,7 +464,8 @@ def train(config: Config):
                 monitor.set_stage("outer_loop")
 
             # todo we could skip this is we don't have live recovery enabled
-            ckpt_manager.cache_inner_optimizer()
+            # disable because of potential memory leak
+            # ckpt_manager.cache_inner_optimizer()
 
             time_start_inner = time.perf_counter()
             diloco.step(model=model, flag=training_progress.outer_step, num_effective_peers=num_effective_peers)

@@ -42,6 +42,12 @@ def transfer_states(old_state_dict: dict, new_state_dict: dict):
             )
         ]
         num_ds = len(ex_iterables)
+        new_ds_state = traverse_dict(
+            new_state_dict, f"_snapshot._worker_snapshots.worker_{worker_id}.dataset_state.dataset"
+        )
+        # HACK: dataset_4 is openwebmath which is not always present
+        if "dataset_4" not in new_ds_state.keys():
+            num_ds -= 1
         new_ds_state = [
             traverse_dict(
                 new_state_dict, f"_snapshot._worker_snapshots.worker_{worker_id}.dataset_state.dataset.dataset_{i}"
@@ -50,8 +56,9 @@ def transfer_states(old_state_dict: dict, new_state_dict: dict):
         ]
 
         for new_state, old_state in zip(new_ds_state, ex_iterables):
-            new_state["file_index"] = old_state["shard_idx"] % len(new_state["files"])
-            new_state["row_index"] = old_state["shard_example_idx"]
+            # HACK: We might index error because of skipping into a different sized shard for dclm
+            new_state["file_index"] = (old_state["shard_idx"] + 1) % len(new_state["files"])
+            new_state["row_index"] = 0  # old_state["shard_example_idx"]
 
 
 class ExportConfig(Config):
@@ -93,7 +100,34 @@ def main(config: ExportConfig):
             pass
 
     print(f"Saving to {config.output_path}")
-    torch.save(new_state_dict, config.output_path)
+    torch.save({"data_loader": new_state_dict}, config.output_path)
+
+    del dl
+
+
+def test_dl(config: ExportConfig):
+    if config.type_model == "llama2":
+        tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
+    elif config.type_model == "llama3":
+        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
+    else:
+        raise ValueError(f"Model type {config.type_model} not supported")
+
+    dl = get_dataloader(
+        tokenizer=tokenizer,
+        world_size=config.world_size,
+        rank=config.rank,
+        batch_size=config.train.micro_bs,
+        data_config=config.data,
+    )
+    dl.load_state_dict(torch.load(config.output_path, weights_only=True)["data_loader"])
+
+    iter_dl = iter(dl)
+
+    # Needed to init the states because they are lazy
+    for i in range(10):
+        batch = next(iter_dl)
+        print(batch.keys(), batch["input_ids"].shape)
 
 
 if __name__ == "__main__":
@@ -102,3 +136,4 @@ if __name__ == "__main__":
     logger.debug(f"config: {config.model_dump()}")
 
     main(config)
+    test_dl(config)

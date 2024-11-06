@@ -1,0 +1,19 @@
+name_model = "debugmodel"
+project = "memory_debug"
+type_model = "llama2"
+
+[train]
+micro_bs = 256
+
+[optim]
+batch_size = 512
+warmup_steps = 10
+total_steps = 100000000000000000000
+
+[data]
+seq_length = 8192
+dataset_name_or_paths = "/data/datasets/fineweb-edu,//data/datasets/fineweb-edu"
+dataset_ratio = "55:45"
+num_workers = 4
+reverse_data_files = true
+

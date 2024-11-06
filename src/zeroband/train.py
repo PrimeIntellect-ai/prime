@@ -6,18 +6,14 @@ from multiprocessing.process import _children
 
 import torch
 from pydantic_config import parse_argv, BaseConfig
-from einops import rearrange
-from torch.nn import functional as F
 
 from transformers import AutoTokenizer
 
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 
-import torch.distributed as dist
 from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
 from zeroband.comms import ElasticDeviceMesh
-from zeroband.loss import cross_entropy_max_z_loss
 
 from zeroband.utils import (
     GPUMemoryMonitor,
@@ -365,177 +361,182 @@ def train(config: Config):
                 else:
                     seqlens = None
 
-                logits = model(tokens=input_ids, seqlens=seqlens).contiguous()
-                flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-                flatten_labels = rearrange(labels, "b seq -> (b seq)")
-
-                if config.optim.z_loss:
-                    ce_loss, z_loss = cross_entropy_max_z_loss(
-                        flatten_logits, flatten_labels, config.optim.z_loss_weight
-                    )
-                    ce_loss /= gradient_accumulation_steps
-                    z_loss /= gradient_accumulation_steps
-
-                    del logits
-                    loss = ce_loss + z_loss
-                    loss.backward()
-
-                else:
-                    loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
-                    del logits
-                    loss.backward()
-
-                if config.optim.z_loss:
-                    loss_batch += ce_loss.clone().detach()
-                    z_loss_batch += z_loss.clone().detach()
-                else:
-                    loss_batch += loss.clone().detach()
-
-            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
-            if config.optim.z_loss:
-                dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            inner_optimizer.step()
-            scheduler.step()
-            inner_optimizer.zero_grad()
-
-            # logging
             training_progress.step += 1
-            inner_lr = [group["lr"] for group in inner_optimizer.param_groups][0]
-
-            # syncing loss across all data parallel rank within a nodes
-
-            new_tokens = config.data.seq_length * config.optim.batch_size
-            perf_counter.count_tokens(new_tokens)
-
-            if config.diloco is None:
-                training_progress.total_tokens += new_tokens
-            else:
-                # we count the total tokens with respect to all diloco workers
-                # might need to tweak this as some worker might fail to join the all reduce later
-                training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
-
-            metrics = {
-                "Loss": loss_batch.item(),
-                "step": training_progress.step,
-                "inner_lr": inner_lr,
-                "Perplexity": torch.exp(loss_batch).item(),
-                "total_tokens": training_progress.total_tokens,
-                "time": time.time(),
-            }
-            if config.optim.z_loss:
-                metrics["z_loss"] = z_loss_batch.item()
-
-            if config.train.memory_monitor:
-                peak_gpu_stats = gpu_mem_monitor.get_peak_stats()
-                metrics.update(peak_gpu_stats)
-
-            log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
-
-            tokens_per_second = perf_counter.get_tokens_per_second()
-
-            if tokens_per_second is not None:
-                metrics["tokens_per_second"] = tokens_per_second
-                metrics["mfu"] = (
-                    100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
-                )
-                log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
-
-            if config.diloco is not None:
-                metrics["num_peers"] = elastic_device_mesh.global_pg.size()
-                log += f", diloco_peers: {metrics['num_peers']}"
-
             if world_info.rank == 0:
-                metric_logger.log(metrics)
-                if config.monitor is not None:
-                    monitor.log(metrics)
+                metric_logger.log({"step": training_progress.step})
+            logger.info("step %s", training_progress.step)
 
-            logger.info(log)
+    #             logits = model(tokens=input_ids, seqlens=seqlens).contiguous()
+    #             flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
+    #             flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
-            if config.train.memory_profiler is not None:
-                memory_profiler.step()
+    #             if config.optim.z_loss:
+    #                 ce_loss, z_loss = cross_entropy_max_z_loss(
+    #                     flatten_logits, flatten_labels, config.optim.z_loss_weight
+    #                 )
+    #                 ce_loss /= gradient_accumulation_steps
+    #                 z_loss /= gradient_accumulation_steps
 
-        if config.diloco is not None:
-            if config.train.log_model_hash:
-                logger.debug("Pre diloco model: %s", get_module_signature(model))
+    #                 del logits
+    #                 loss = ce_loss + z_loss
+    #                 loss.backward()
 
-            if world_info.rank == 0 and config.monitor is not None:
-                monitor.set_stage("outer_loop")
+    #             else:
+    #                 loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
+    #                 del logits
+    #                 loss.backward()
 
-            # todo we could skip this is we don't have live recovery enabled
-            # disable because of potential memory leak
-            # ckpt_manager.cache_inner_optimizer()
+    #             if config.optim.z_loss:
+    #                 loss_batch += ce_loss.clone().detach()
+    #                 z_loss_batch += z_loss.clone().detach()
+    #             else:
+    #                 loss_batch += loss.clone().detach()
 
-            time_start_inner = time.perf_counter()
-            diloco.step(model=model, flag=training_progress.outer_step, num_effective_peers=num_effective_peers)
-            diloco_time = time.perf_counter() - time_start_inner
+    #         dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
+    #         if config.optim.z_loss:
+    #             dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
 
-            if config.train.log_model_hash:
-                logger.debug("inner diloco model: %s", get_module_signature(model))
-                logger.debug(f"outer diloco optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}")
-                logger.debug(f"outer diloco optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}")
-                logger.debug(f"outer diloco model hash: {get_tensor_list_signature(diloco.param_list_cpu)}")
+    #         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    #         inner_optimizer.step()
+    #         scheduler.step()
+    #         inner_optimizer.zero_grad()
 
-        training_progress.outer_step += 1
+    #         # logging
+    #         training_progress.step += 1
+    #         inner_lr = [group["lr"] for group in inner_optimizer.param_groups][0]
 
-        if (
-            config.ckpt.interval is not None
-            and training_progress.step > 0
-            and training_progress.step % config.ckpt.interval == 0
-        ):
-            # we only allow to checkpoint after a outer step. For non diloco training outer step = 1 anyway
+    #         # syncing loss across all data parallel rank within a nodes
 
-            do_remote = config.ckpt.remote is not None and training_progress.step % config.ckpt.remote.interval == 0
-            ckpt_manager.save(remote=do_remote)
-            if config.train.log_model_hash:
-                logger.debug("Post saved model: %s", get_module_signature(model))
-                logger.debug("Post saved optimizer: %s", get_optimizer_signature(inner_optimizer))
+    #         new_tokens = config.data.seq_length * config.optim.batch_size
+    #         perf_counter.count_tokens(new_tokens)
 
-                if config.diloco is not None:
-                    logger.debug("Post saved outer model: %s", get_tensor_list_signature(diloco.param_list_cpu))
-                    logger.debug("optimizer hash: %s", get_optimizer_signature(diloco.outer_optimizer))
+    #         if config.diloco is None:
+    #             training_progress.total_tokens += new_tokens
+    #         else:
+    #             # we count the total tokens with respect to all diloco workers
+    #             # might need to tweak this as some worker might fail to join the all reduce later
+    #             training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
 
-        if config.diloco:
-            tokens_per_second = (
-                config.optim.batch_size
-                * config.diloco.inner_steps
-                * config.data.seq_length
-                / (time.perf_counter() - time_start_outer)
-            )
-            mfu = 100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
-            logger.info(f"effective mfu: {mfu}")
+    #         metrics = {
+    #             "Loss": loss_batch.item(),
+    #             "step": training_progress.step,
+    #             "inner_lr": inner_lr,
+    #             "Perplexity": torch.exp(loss_batch).item(),
+    #             "total_tokens": training_progress.total_tokens,
+    #             "time": time.time(),
+    #         }
+    #         if config.optim.z_loss:
+    #             metrics["z_loss"] = z_loss_batch.item()
 
-            if world_info.rank == 0:
-                metric_logger.log(
-                    {
-                        "outer_mfu": mfu,
-                        "step": training_progress.step,
-                        "outer_step": training_progress.outer_step,
-                        "outer_tokens_per_second": tokens_per_second,
-                        "all_reduce_step": diloco_time,
-                    }
-                )
+    #         if config.train.memory_monitor:
+    #             peak_gpu_stats = gpu_mem_monitor.get_peak_stats()
+    #             metrics.update(peak_gpu_stats)
 
-        if config.train.memory_monitor:
-            logger.info(f"outer step peak gpu stats: {gpu_mem_monitor.format_peak_states()}")
+    #         log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
 
-        if training_progress.step >= config.optim.total_steps:
-            # we only allow to break outisde of the inner loop.
-            # This avoid ending the training in the middle of a the inner loop
-            # Since ckpt strategy and all reduce is done at the outer loop level.
-            break
+    #         tokens_per_second = perf_counter.get_tokens_per_second()
 
-    if world_info.rank == 0:
-        metric_logger.finish()
-        if config.monitor is not None:
-            monitor.finish()
+    #         if tokens_per_second is not None:
+    #             metrics["tokens_per_second"] = tokens_per_second
+    #             metrics["mfu"] = (
+    #                 100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
+    #             )
+    #             log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
 
-    ckpt_manager.wait_for_blocking_job()
+    #         if config.diloco is not None:
+    #             metrics["num_peers"] = elastic_device_mesh.global_pg.size()
+    #             log += f", diloco_peers: {metrics['num_peers']}"
 
-    del elastic_device_mesh  # allow to clean up for smoother tests transition
+    #         if world_info.rank == 0:
+    #             metric_logger.log(metrics)
+    #             if config.monitor is not None:
+    #                 monitor.log(metrics)
 
-    logger.info("Training finished, exiting ...")
+    #         logger.info(log)
+
+    #         if config.train.memory_profiler is not None:
+    #             memory_profiler.step()
+
+    #     if config.diloco is not None:
+    #         if config.train.log_model_hash:
+    #             logger.debug("Pre diloco model: %s", get_module_signature(model))
+
+    #         if world_info.rank == 0 and config.monitor is not None:
+    #             monitor.set_stage("outer_loop")
+
+    #         # todo we could skip this is we don't have live recovery enabled
+    #         # disable because of potential memory leak
+    #         # ckpt_manager.cache_inner_optimizer()
+
+    #         time_start_inner = time.perf_counter()
+    #         diloco.step(model=model, flag=training_progress.outer_step, num_effective_peers=num_effective_peers)
+    #         diloco_time = time.perf_counter() - time_start_inner
+
+    #         if config.train.log_model_hash:
+    #             logger.debug("inner diloco model: %s", get_module_signature(model))
+    #             logger.debug(f"outer diloco optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}")
+    #             logger.debug(f"outer diloco optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}")
+    #             logger.debug(f"outer diloco model hash: {get_tensor_list_signature(diloco.param_list_cpu)}")
+
+    #     training_progress.outer_step += 1
+
+    #     if (
+    #         config.ckpt.interval is not None
+    #         and training_progress.step > 0
+    #         and training_progress.step % config.ckpt.interval == 0
+    #     ):
+    #         # we only allow to checkpoint after a outer step. For non diloco training outer step = 1 anyway
+
+    #         do_remote = config.ckpt.remote is not None and training_progress.step % config.ckpt.remote.interval == 0
+    #         ckpt_manager.save(remote=do_remote)
+    #         if config.train.log_model_hash:
+    #             logger.debug("Post saved model: %s", get_module_signature(model))
+    #             logger.debug("Post saved optimizer: %s", get_optimizer_signature(inner_optimizer))
+
+    #             if config.diloco is not None:
+    #                 logger.debug("Post saved outer model: %s", get_tensor_list_signature(diloco.param_list_cpu))
+    #                 logger.debug("optimizer hash: %s", get_optimizer_signature(diloco.outer_optimizer))
+
+    #     if config.diloco:
+    #         tokens_per_second = (
+    #             config.optim.batch_size
+    #             * config.diloco.inner_steps
+    #             * config.data.seq_length
+    #             / (time.perf_counter() - time_start_outer)
+    #         )
+    #         mfu = 100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
+    #         logger.info(f"effective mfu: {mfu}")
+
+    #         if world_info.rank == 0:
+    #             metric_logger.log(
+    #                 {
+    #                     "outer_mfu": mfu,
+    #                     "step": training_progress.step,
+    #                     "outer_step": training_progress.outer_step,
+    #                     "outer_tokens_per_second": tokens_per_second,
+    #                     "all_reduce_step": diloco_time,
+    #                 }
+    #             )
+
+    #     if config.train.memory_monitor:
+    #         logger.info(f"outer step peak gpu stats: {gpu_mem_monitor.format_peak_states()}")
+
+    #     if training_progress.step >= config.optim.total_steps:
+    #         # we only allow to break outisde of the inner loop.
+    #         # This avoid ending the training in the middle of a the inner loop
+    #         # Since ckpt strategy and all reduce is done at the outer loop level.
+    #         break
+
+    # if world_info.rank == 0:
+    #     metric_logger.finish()
+    #     if config.monitor is not None:
+    #         monitor.finish()
+
+    # ckpt_manager.wait_for_blocking_job()
+
+    # del elastic_device_mesh  # allow to clean up for smoother tests transition
+
+    # logger.info("Training finished, exiting ...")
 
 
 if __name__ == "__main__":

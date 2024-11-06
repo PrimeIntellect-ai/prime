@@ -437,6 +437,14 @@ class CkptManager:
 
         world_info = get_world_info()
 
+        files = os.listdir(resume_ckpt_path)
+
+        if len(files) == 1 and files[0].startswith("diloco_"):
+            self._logger.warning(
+                f"Loading diloco ckpt from {files[0]}. This is deprecated and will be removed in the future"
+            )
+            resume_ckpt_path = os.path.join(resume_ckpt_path, files[0])
+
         dcp.load(self.states, checkpoint_id=resume_ckpt_path)
 
         if self.config.token_count is not None:

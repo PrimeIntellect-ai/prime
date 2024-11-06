@@ -71,7 +71,7 @@ def skip_data(config: Config):
         if total_steps >= config.optim.total_steps:
             break
 
-    CkptManager.save_data_v2(os.path.join(config.ckpt.data_path, "data"), train_dataloader, world_info.local_rank)
+    CkptManager.save_data(os.path.join(config.ckpt.data_path, "data"), train_dataloader, world_info.local_rank)
 
     logger.info("skipped data up to step: %d", config.optim.total_steps)
 

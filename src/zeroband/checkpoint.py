@@ -332,13 +332,6 @@ class CkptManager:
     def _save(self, ckpt_path: str):
         self.wait_for_blocking_job()
 
-        if self.diloco_offloaded_optimizer:
-            # here we save model and offloaded optimizer on each diloco rank even tho they are the same
-            # this is done for two reasons:
-            #   * if the nodes don't share a filesystem nor a remote path, they still save all of the data
-            #   * its easier to implement and avoid race condition on the shared data.
-            ckpt_path = os.path.join(ckpt_path, f"diloco_{self.world_info.diloco_rank}")
-
         catch_warning = self._logger.getEffectiveLevel() <= logging.INFO
 
         with warnings.catch_warnings():
@@ -461,7 +454,6 @@ class CkptManager:
     def load(
         self,
         resume_ckpt_path: str,
-        diloco_rank: int | None = None,
         skip_dataloader: bool = False,
         data_path: str | None = None,
     ) -> None:
@@ -474,22 +466,10 @@ class CkptManager:
 
         Loading is done inplace.
 
-        direct_diloco_folder = False. mean that `diloco_rank` is added to the resume_ckpt_path.
         """
         time_start = time.perf_counter()
 
         world_info = get_world_info()
-        if self.diloco_offloaded_param_list is not None:
-            rank = diloco_rank if diloco_rank is not None else world_info.diloco_rank
-
-            files = os.listdir(resume_ckpt_path)
-            if len(files) == 1:
-                resume_ckpt_path = os.path.join(resume_ckpt_path, files[0])
-            else:
-                resume_ckpt_path = os.path.join(resume_ckpt_path, f"diloco_{rank}")
-
-            if data_path is not None:
-                data_path = os.path.join(data_path, f"diloco_{rank}")
 
         dcp.load(self.states, checkpoint_id=resume_ckpt_path)
 

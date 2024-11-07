@@ -6,7 +6,7 @@ from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 import torch.distributed as dist
 from datetime import timedelta
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from torch.testing._internal.distributed.fake_pg import FakeProcessGroup
 import multiprocessing as mp
 from uuid import uuid4
@@ -21,7 +21,16 @@ HEARTBEAT_INTERVAL = int(
 HEARTBEAT_TIMEOUT = int(
     os.getenv("ZERO_BAND_EDM_HEARTBEAT_TIMEOUT_SECONDS", "10")
 )  # Time in seconds after which a node is considered dead if no heartbeat is received
+TOPO_FILE: str = "./topo.csv"
 
+def _read_topo_file() -> Dict[str, int]:
+    """Read the topology file and return the contents."""
+    with open(TOPO_FILE, "r") as f:
+        mappings = [line.strip().split(",") for line in f.readlines()[1:]]
+    for m in mappings:
+        assert len(m) == 2
+        m[1] = int(m[1])
+    return {m[0]: m[1] for m in mappings}
 
 class ElasticDeviceMesh:
     """A class to manage the process groups for elastic training without restarts.
@@ -78,6 +87,17 @@ class ElasticDeviceMesh:
     def _init_global_store_and_status(self):
         """Initialize the global store with mesh_count, joiner_0, and status. Also sets the global status."""
         if self._global_leader:
+            # Topology
+            mappings = _read_topo_file()
+            new_world_size = 1
+            for joiner_id, global_rank in mappings:
+                if global_rank == 0:
+                    continue
+                self.global_store.set(f"rank_{joiner_id}", str(global_rank))
+                new_world_size += 1
+            self.global_store.set("world_size", str(new_world_size))
+
+            # Structs
             self.global_store.set("mesh_count", "0")
             self.global_store.set("joiner_0", "null")
             self.global_store.set("status", "init")
@@ -132,12 +152,11 @@ class ElasticDeviceMesh:
         # Each rank gets its own global store with global rank 0 as the master
         time_start = time.perf_counter()
 
-        self._logger.info(
-            f"[{self.world_info.global_unique_id}] Elastic Device mesh init: Looking for peers via {self.world_info.global_addr}:{self.world_info.global_port}"
-        )
 
         self._global_leader = self.world_info.global_rank == 0
-        self._logger.info(f"[{self.world_info.global_unique_id}] Global leader: {self._global_leader}")
+        self._logger.info(
+            f"[{self.world_info.global_unique_id}](Leader: {self._global_leader}) Elastic Device mesh init: Looking for peers via {self.world_info.global_addr}:{self.world_info.global_port + self.world_info.rank}"
+        )
         self.global_store = dist.TCPStore(
             host_name=self.world_info.global_addr,
             port=self.world_info.global_port + self.world_info.rank,

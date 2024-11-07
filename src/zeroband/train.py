@@ -1,6 +1,7 @@
 import os
 from typing import Literal
 import time
+import psutil
 from pydantic import model_validator
 from multiprocessing.process import _children
 
@@ -362,9 +363,13 @@ def train(config: Config):
                     seqlens = None
 
             training_progress.step += 1
+            remaining_cpu_ram = psutil.virtual_memory().available / (1024 * 1024 * 1024)
+
             if world_info.rank == 0:
-                metric_logger.log({"step": training_progress.step})
-            logger.info("step %s", training_progress.step)
+                metric_logger.log({"step": training_progress.step, "remaining_cpu_ram": remaining_cpu_ram})
+            
+            logger.info("step %s, remaining_cpu_ram: %s GB", training_progress.step, remaining_cpu_ram)
+            
 
     #             logits = model(tokens=input_ids, seqlens=seqlens).contiguous()
     #             flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")

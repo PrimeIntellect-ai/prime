@@ -353,40 +353,40 @@ def train(config: Config):
             for grad_acc_step in range(gradient_accumulation_steps):
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                 # no sync if we are accumulating gradients
-                model.set_requires_gradient_sync(not is_accumulating)
+                # model.set_requires_gradient_sync(not is_accumulating)
 
                 batch = next(train_dataloader_iterator)
-                input_ids = batch["input_ids"].to("cuda")
-                labels = batch["labels"].to("cuda")
-                if config.train.sequence_packing:
-                    seqlens = batch["seqlens"].to("cuda")
-                    # seqlens has a dynamic shape but fixed dimension, this allow to still torch compile
-                    # https://pytorch.org/docs/stable/torch.compiler_dynamic_shapes.html
-                    torch._dynamo.mark_dynamic(seqlens, 0)
-                else:
-                    seqlens = None
+                # input_ids = batch["input_ids"].to("cuda")
+                # labels = batch["labels"].to("cuda")
+                # if config.train.sequence_packing:
+                #     seqlens = batch["seqlens"].to("cuda")
+                #     # seqlens has a dynamic shape but fixed dimension, this allow to still torch compile
+                #     # https://pytorch.org/docs/stable/torch.compiler_dynamic_shapes.html
+                #     torch._dynamo.mark_dynamic(seqlens, 0)
+                # else:
+                #     seqlens = None
 
 
 
-                logits = model(tokens=input_ids, seqlens=seqlens).contiguous()
-                flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-                flatten_labels = rearrange(labels, "b seq -> (b seq)")
+                # logits = model(tokens=input_ids, seqlens=seqlens).contiguous()
+                # flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
+                # flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
-                if config.optim.z_loss:
-                    ce_loss, z_loss = cross_entropy_max_z_loss(
-                        flatten_logits, flatten_labels, config.optim.z_loss_weight
-                    )
-                    ce_loss /= gradient_accumulation_steps
-                    z_loss /= gradient_accumulation_steps
+                # if config.optim.z_loss:
+                #     ce_loss, z_loss = cross_entropy_max_z_loss(
+                #         flatten_logits, flatten_labels, config.optim.z_loss_weight
+                #     )
+                #     ce_loss /= gradient_accumulation_steps
+                #     z_loss /= gradient_accumulation_steps
 
-                    del logits
-                    loss = ce_loss + z_loss
-                    # loss.backward()
+                #     del logits
+                #     loss = ce_loss + z_loss
+                #     # loss.backward()
 
-                else:
-                    loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
-                    del logits
-                    # loss.backward()
+                # else:
+                #     loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
+                #     del logits
+                #     # loss.backward()
                     
         training_progress.step += 1
         remaining_cpu_ram = psutil.virtual_memory().available / (1024 * 1024 * 1024)

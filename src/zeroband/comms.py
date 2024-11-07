@@ -1,3 +1,4 @@
+import torch
 import sys
 import os
 import time
@@ -30,7 +31,14 @@ def _read_topo_file() -> Dict[str, int]:
     for m in mappings:
         assert len(m) == 2
         m[1] = int(m[1])
-    return {m[0]: m[1] for m in mappings}
+    return {m[1]: m[0] for m in mappings}
+
+def _write_topo_file(topo: Dict[str, int]) -> None:
+    """Write the topology file with the given mappings."""
+    with open(TOPO_FILE, "w") as f:
+        f.write("gid,grank\n")
+        for gid, grank in topo.items():
+            f.write(f"{gid},{grank}\n")
 
 class ElasticDeviceMesh:
     """A class to manage the process groups for elastic training without restarts.
@@ -44,7 +52,6 @@ class ElasticDeviceMesh:
     - world_size: The current world size
     - mesh_count: The version of the mesh
     - rank_{uuid}: The rank of the node with the given uuid
-    - rank_map_{rank}: The new rank of the node with the given rank. Used to remap ranks when nodes leave.
     - joiner_{i}: The uuid of the ith joiner. Its a KV implmentation of a queue.
     """
 
@@ -90,7 +97,7 @@ class ElasticDeviceMesh:
             # Topology
             mappings = _read_topo_file()
             new_world_size = 0
-            for joiner_id, global_rank in mappings.items():
+            for global_rank, joiner_id in mappings.items():
                 self.global_store.set(f"rank_{joiner_id}", str(global_rank))
                 new_world_size += 1
             self.global_store.set("world_size", str(new_world_size))
@@ -310,15 +317,21 @@ class ElasticDeviceMesh:
             return False
 
         # Remap live ranks to smaller world_size caused by dead nodes
+        self._grank_to_gid = _read_topo_file()
         leaving_ranks = set(dead_nodes)
+        for rank in dead_nodes:
+            del self._grank_to_gid[rank]
         live_ranks = [i for i in range(self.world_info.global_world_size) if i not in leaving_ranks]
         for i, rank in enumerate(live_ranks):
-            self.global_store.set(f"rank_map_{rank}", str(i))
+            self.global_store.set(f"rank_{self._grank_to_gid[rank]}", str(i))
+        for i, rank in enumerate(live_ranks):
+            self._grank_to_gid[i] = self._grank_to_gid[rank]
         new_world_size = len(live_ranks)
 
         # Give joiners new ranks
         for joiner_id in joiners:
             self.global_store.set(f"rank_{joiner_id}", str(new_world_size))
+            self._grank_to_gid[new_world_size] = joiner_id
             new_world_size += 1
 
         for i in range(1, new_world_size):
@@ -328,7 +341,36 @@ class ElasticDeviceMesh:
         self.global_store.set("mesh_count", str(self.mesh_count + 1))
         # Set status to "reinit"
         self.global_store.set("status", "reinit")
+
+        _write_topo_file(self._grank_to_gid)
         return True
+    
+    def ping_peer(self, peer_rank: int) -> float:
+        tensor = torch.ones(1_000_000, dtype=torch.float32)
+        start_time = time.perf_counter()
+        self.global_pg.send([tensor], peer_rank).wait()
+        end_time = time.perf_counter()
+        return end_time - start_time
+
+    def _measure_communication_cost(self):
+        tensor = torch.ones(1_000_000, dtype=torch.float32)
+        rank = self.world_info.global_rank
+        world_size = self.world_info.global_world_size
+
+        # Measure the time to send the tensor to all other ranks
+        start_time = time.perf_counter()
+        for i in range(world_size):
+            if i != rank:
+                work = self.global_pg.send([tensor], i)
+        end_time = time.perf_counter()
+
+        # Calculate the cost
+        cost = end_time - start_time
+
+        # Store the cost in the KV Store
+        self.global_store.set(f"comm_cost_{rank}", str(cost))
+
+        self._logger.info("Communication cost for rank %d: %f seconds", rank, cost)
 
     def maybe_reinit_global_pg(self, admit_joiners: bool = False) -> bool:
         """Reinitialize the global_pg if there are is a state change.
@@ -373,7 +415,7 @@ class ElasticDeviceMesh:
         # Check if we got remapped
         old_global_rank = self.world_info.global_rank
         self.world_info.global_rank = int(
-            self.global_store.get(f"rank_map_{self.world_info.global_rank}").decode("utf-8")
+            self.global_store.get(f"rank_{self.world_info.global_unique_id}").decode("utf-8")
         )
 
         self.world_info.global_world_size = int(self.global_store.get("world_size").decode("utf-8"))
@@ -400,7 +442,6 @@ class ElasticDeviceMesh:
 
         # Update rank if needed (otherwise, the next remap will do the lookup incorrectly)
         if old_global_rank != self.world_info.global_rank:
-            self.global_store.set(f"rank_{self.world_info.global_unique_id}", str(self.world_info.global_rank))
             self.live_recovery.reset()
 
         self._logger.debug("Reinitialized global_pg done in %s seconds", time.perf_counter() - time_start)

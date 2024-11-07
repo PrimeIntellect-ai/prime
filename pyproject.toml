@@ -17,6 +17,7 @@ dependencies = [
     "ninja",
     "zstandard",
     "pyarrow",
+    "toposolve",
 ]
 
 [project.optional-dependencies]

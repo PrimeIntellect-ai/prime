@@ -132,12 +132,10 @@ class ElasticDeviceMesh:
         # Each rank gets its own global store with global rank 0 as the master
         time_start = time.perf_counter()
 
-        self._logger.info(
-            f"[{self.world_info.global_unique_id}] Elastic Device mesh init: Looking for peers via {self.world_info.global_addr}:{self.world_info.global_port}"
-        )
-
         self._global_leader = self.world_info.global_rank == 0
-        self._logger.info(f"[{self.world_info.global_unique_id}] Global leader: {self._global_leader}")
+        self._logger.info(
+            f"[{self.world_info.global_unique_id}](Leader: {self._global_leader}) TCPStore init: Connecting via {self.world_info.global_addr}:{self.world_info.global_port + self.world_info.rank}"
+        )
         self.global_store = dist.TCPStore(
             host_name=self.world_info.global_addr,
             port=self.world_info.global_port + self.world_info.rank,

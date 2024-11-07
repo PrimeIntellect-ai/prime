@@ -3,7 +3,8 @@ project = "memory_debug"
 type_model = "llama2"
 
 [train]
-micro_bs = 256
+micro_bs = 1
+torch_compile = false
 
 [optim]
 batch_size = 512

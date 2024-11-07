@@ -7,14 +7,18 @@ from multiprocessing.process import _children
 
 import torch
 from pydantic_config import parse_argv, BaseConfig
+from einops import rearrange
+from torch.nn import functional as F
 
 from transformers import AutoTokenizer
 
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 
+import torch.distributed as dist
 from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
 from zeroband.comms import ElasticDeviceMesh
+from zeroband.loss import cross_entropy_max_z_loss
 
 from zeroband.utils import (
     GPUMemoryMonitor,
@@ -362,34 +366,36 @@ def train(config: Config):
                 else:
                     seqlens = None
 
-            training_progress.step += 1
-            remaining_cpu_ram = psutil.virtual_memory().available / (1024 * 1024 * 1024)
 
-            if world_info.rank == 0:
-                metric_logger.log({"step": training_progress.step, "remaining_cpu_ram": remaining_cpu_ram})
-            
-            logger.info("step %s, remaining_cpu_ram: %s GB", training_progress.step, remaining_cpu_ram)
-            
 
-    #             logits = model(tokens=input_ids, seqlens=seqlens).contiguous()
-    #             flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-    #             flatten_labels = rearrange(labels, "b seq -> (b seq)")
+                logits = model(tokens=input_ids, seqlens=seqlens).contiguous()
+                flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
+                flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
-    #             if config.optim.z_loss:
-    #                 ce_loss, z_loss = cross_entropy_max_z_loss(
-    #                     flatten_logits, flatten_labels, config.optim.z_loss_weight
-    #                 )
-    #                 ce_loss /= gradient_accumulation_steps
-    #                 z_loss /= gradient_accumulation_steps
+                if config.optim.z_loss:
+                    ce_loss, z_loss = cross_entropy_max_z_loss(
+                        flatten_logits, flatten_labels, config.optim.z_loss_weight
+                    )
+                    ce_loss /= gradient_accumulation_steps
+                    z_loss /= gradient_accumulation_steps
 
-    #                 del logits
-    #                 loss = ce_loss + z_loss
-    #                 loss.backward()
+                    del logits
+                    loss = ce_loss + z_loss
+                    # loss.backward()
 
-    #             else:
-    #                 loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
-    #                 del logits
-    #                 loss.backward()
+                else:
+                    loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
+                    del logits
+                    # loss.backward()
+                    
+        training_progress.step += 1
+        remaining_cpu_ram = psutil.virtual_memory().available / (1024 * 1024 * 1024)
+
+        if world_info.rank == 0:
+            metric_logger.log({"step": training_progress.step, "remaining_cpu_ram": remaining_cpu_ram})
+        
+        logger.info("step %s, remaining_cpu_ram: %s GB", training_progress.step, remaining_cpu_ram)
+        
 
     #             if config.optim.z_loss:
     #                 loss_batch += ce_loss.clone().detach()

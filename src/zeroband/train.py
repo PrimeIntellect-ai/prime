@@ -1,6 +1,7 @@
 import os
 from typing import Literal
 import time
+import psutil
 from pydantic import model_validator
 from multiprocessing.process import _children
 
@@ -415,6 +416,7 @@ def train(config: Config):
                 # we count the total tokens with respect to all diloco workers
                 # might need to tweak this as some worker might fail to join the all reduce later
                 training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
+            remaining_cpu_ram = psutil.virtual_memory().available / (1024 * 1024 * 1024)
 
             metrics = {
                 "Loss": loss_batch.item(),
@@ -423,7 +425,9 @@ def train(config: Config):
                 "Perplexity": torch.exp(loss_batch).item(),
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
+                "remaining_cpu_ram": remaining_cpu_ram,
             }
+
             if config.optim.z_loss:
                 metrics["z_loss"] = z_loss_batch.item()
 

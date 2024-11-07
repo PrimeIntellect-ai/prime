@@ -89,10 +89,8 @@ class ElasticDeviceMesh:
         if self._global_leader:
             # Topology
             mappings = _read_topo_file()
-            new_world_size = 1
-            for joiner_id, global_rank in mappings:
-                if global_rank == 0:
-                    continue
+            new_world_size = 0
+            for joiner_id, global_rank in mappings.items():
                 self.global_store.set(f"rank_{joiner_id}", str(global_rank))
                 new_world_size += 1
             self.global_store.set("world_size", str(new_world_size))
@@ -155,7 +153,7 @@ class ElasticDeviceMesh:
 
         self._global_leader = self.world_info.global_rank == 0
         self._logger.info(
-            f"[{self.world_info.global_unique_id}](Leader: {self._global_leader}) Elastic Device mesh init: Looking for peers via {self.world_info.global_addr}:{self.world_info.global_port + self.world_info.rank}"
+            f"[{self.world_info.global_unique_id}](Leader: {self._global_leader}) TCPStore init: Connecting via {self.world_info.global_addr}:{self.world_info.global_port + self.world_info.rank}"
         )
         self.global_store = dist.TCPStore(
             host_name=self.world_info.global_addr,
@@ -173,6 +171,8 @@ class ElasticDeviceMesh:
         # Initialize prefix store
         if self.global_status == "init":  # First time init path
             self.mesh_count = 0  # TODO: privatize?
+            self.world_info.global_rank = int(self.global_store.get(f"rank_{self.world_info.global_unique_id}").decode("utf-8"))
+            self.world_info.global_world_size = int(self.global_store.get("world_size").decode("utf-8"))
             prefix_store = dist.PrefixStore("mesh_0", self.global_store)
         elif self.global_status == "running":  # Join path
             # Ask to join and then wait for the status to be "reinit"

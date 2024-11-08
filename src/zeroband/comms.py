@@ -1,6 +1,7 @@
 import sys
 import os
 import time
+import torch
 from torch.distributed.device_mesh import init_device_mesh
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
@@ -10,6 +11,7 @@ from typing import List, Tuple, Optional
 from torch.testing._internal.distributed.fake_pg import FakeProcessGroup
 import multiprocessing as mp
 from uuid import uuid4
+import toposolve
 
 TCPSTORE_TIMEOUT = timedelta(seconds=int(os.getenv("ZERO_BAND_GLOBAL_STORE_TIMEOUT_SECONDS", "300")))
 TCPSTORE_POLLING_INTERVAL = float(os.getenv("ZERO_BAND_GLOBAL_STORE_POLLING_INTERVAL_SECONDS", "0.1"))
@@ -21,6 +23,7 @@ HEARTBEAT_INTERVAL = int(
 HEARTBEAT_TIMEOUT = int(
     os.getenv("ZERO_BAND_EDM_HEARTBEAT_TIMEOUT_SECONDS", "10")
 )  # Time in seconds after which a node is considered dead if no heartbeat is received
+BENCH_TENSOR_SIZE = 1_000_000
 
 
 class ElasticDeviceMesh:
@@ -180,6 +183,9 @@ class ElasticDeviceMesh:
         )
         self._logger.debug("Global pg created with %d peers. Timeout of %s", self.global_pg.size(), GLOBAL_PG_TIMEOUT)
 
+        self._logger.debug("Optimizing ring ranks")
+        self._optimize_ring_ranks()
+
         # Update global store values
         if self._global_leader:
             self.global_store.set("status", "running")
@@ -258,6 +264,16 @@ class ElasticDeviceMesh:
             except dist.DistStoreError:
                 self._logger.warning(f"Node {i} has no heartbeat")
         return dead_nodes
+
+    def _optimize_ring_ranks(self):
+        self._measure_connectivity()
+        self.global_pg.barrier()
+        self._logger.debug("Calculating TSP")
+        if self._global_leader:
+            pings = self.get_pings()
+            min_dist, path = toposolve.TSPSolver().solve_tsp(pings)
+            print(f"Min distance: {min_dist}")
+            print(f"Path: {path}")
 
     def _resolve_world(self, admit_joiners: bool = False) -> bool:
         """Set the new world size and ranks for all nodes if there are joiners or dead nodes. Else, do nothing.
@@ -373,6 +389,8 @@ class ElasticDeviceMesh:
             self._logger.error(f"Error recreating process group: {e}. Retrying...")
             return self.maybe_reinit_global_pg(admit_joiners=admit_joiners)
 
+        self._optimize_ring_ranks()
+
         if self._global_leader:
             self._clear_joiners()
             self.global_store.set("status", "running")
@@ -431,6 +449,44 @@ class ElasticDeviceMesh:
                 time.sleep(TCPSTORE_POLLING_INTERVAL)
 
         self._logger.debug("Monitored barrier resolved in %s seconds", time.perf_counter() - time_start)
+
+    def get_pings(self) -> List[List[int]]:
+        pings = [[1000_000_000] * self.world_size for _ in range(self.world_size)]
+        for i in range(self.world_size):
+            for j in range(self.world_size):
+                if i == j:
+                    continue
+                pings[i][j] = int(self.global_store.get(f"ping_{i}_{j}"))
+        return pings
+
+    def _measure_connectivity(self):
+        # Recv from all other peers
+        recv_work = []
+        tensor = torch.ones(BENCH_TENSOR_SIZE, dtype=torch.float32)
+        for i in range(self.world_size):
+            if i == self.rank:
+                continue
+            recv_work.append(self.global_pg.recv([tensor], i, self.rank + self.world_size * i))
+
+        # Ping all other peers
+        for i in range(self.world_size):
+            if i == self.rank:
+                continue
+            time_taken = self._ping_peer(i)
+            self.global_store.set(f"ping_{self.rank}_{i}", str(time_taken))
+        
+        # Wait for all recv operations to complete
+        for work in recv_work:
+            work.wait()
+
+    def _ping_peer(self, peer_rank: int) -> int:
+        """Ping a peer and return the time taken in microseconds"""
+        tensor = torch.ones(BENCH_TENSOR_SIZE, dtype=torch.float32)
+        start_time = time.perf_counter()
+        self.global_pg.send([tensor], peer_rank, self.rank * self.world_size + peer_rank).wait()
+        end_time = time.perf_counter()
+        return int((end_time - start_time) * 1e6)
+
 
 
 class LiveRecovery:

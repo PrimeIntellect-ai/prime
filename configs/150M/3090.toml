@@ -3,11 +3,21 @@ project = "debug_150m_zero_band"
 type_model = "llama2"
 
 [train]
-micro_bs = 16 # change this base on the gpu
+micro_bs = 8 # change this base on the gpu
 reshard_after_forward = true
 
 [optim]
-batch_size = 512
+batch_size = 32
 warmup_steps = 1000
 total_steps = 88_000
 lr = 4e-4
+
+[diloco]
+inner_steps = 20
+
+[ckpt]
+interval = 20
+path = "/workspace/150m"
+
+[data]
+fake = true

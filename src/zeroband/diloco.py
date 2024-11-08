@@ -89,6 +89,7 @@ class Diloco:
         """
         Sync the pseudo gradient from the local process group to the global process group
         """
+        self.elastic_device_mesh.beat()
         _start_time = time.perf_counter()
 
         world_size_pre_init = self.elastic_device_mesh.global_pg.size()
@@ -130,6 +131,7 @@ class Diloco:
                 )
                 break
             except Exception as e:
+                self.elastic_device_mesh.beat()  # beat before retry so we dont die
                 self._logger.error(f"Error syncing pseudo gradient: {e}, retry {i+1}/{self.config.retry_all_reduce}")
                 global_pg = self.elastic_device_mesh.get_global_pg(maybe_reinit=True)
         else:

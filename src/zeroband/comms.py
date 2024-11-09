@@ -266,14 +266,18 @@ class ElasticDeviceMesh:
         return dead_nodes
 
     def _optimize_ring_ranks(self):
+        start_time = time.perf_counter()
         self._measure_connectivity()
         self.global_pg.barrier()
+        self._logger.debug(f"Time taken to measure connectivity: {time.perf_counter() - start_time}")
+        start_time = time.perf_counter()
         self._logger.debug("Calculating TSP")
         if self._global_leader:
             pings = self.get_pings()
             min_dist, path = toposolve.TSPSolver().solve_tsp(pings)
             print(f"Min distance: {min_dist}")
             print(f"Path: {path}")
+        self._logger.debug(f"Time taken to calculate TSP: {time.perf_counter() - start_time}")
 
     def _resolve_world(self, admit_joiners: bool = False) -> bool:
         """Set the new world size and ranks for all nodes if there are joiners or dead nodes. Else, do nothing.
@@ -334,6 +338,8 @@ class ElasticDeviceMesh:
             bool: True if the global_pg was reinitialized, False otherwise.
         """
 
+        self._optimize_ring_ranks()
+
         if not self.enable:
             # no op if disabled
             return
@@ -388,8 +394,6 @@ class ElasticDeviceMesh:
         except Exception as e:
             self._logger.error(f"Error recreating process group: {e}. Retrying...")
             return self.maybe_reinit_global_pg(admit_joiners=admit_joiners)
-
-        self._optimize_ring_ranks()
 
         if self._global_leader:
             self._clear_joiners()
@@ -451,29 +455,30 @@ class ElasticDeviceMesh:
         self._logger.debug("Monitored barrier resolved in %s seconds", time.perf_counter() - time_start)
 
     def get_pings(self) -> List[List[int]]:
-        pings = [[1000_000_000] * self.world_size for _ in range(self.world_size)]
-        for i in range(self.world_size):
-            for j in range(self.world_size):
+        pings = [[1000_000_000] * self.world_info.global_world_size for _ in range(self.world_info.global_world_size)]
+        for i in range(self.world_info.global_world_size):
+            for j in range(self.world_info.global_world_size):
                 if i == j:
                     continue
                 pings[i][j] = int(self.global_store.get(f"ping_{i}_{j}"))
+        self._logger.debug("Pings: %s", "\n".join(map(str, pings)))
         return pings
 
     def _measure_connectivity(self):
         # Recv from all other peers
         recv_work = []
-        tensor = torch.ones(BENCH_TENSOR_SIZE, dtype=torch.float32)
-        for i in range(self.world_size):
-            if i == self.rank:
+        for i in range(self.world_info.global_world_size):
+            tensor = torch.ones(BENCH_TENSOR_SIZE, dtype=torch.float32)
+            if i == self.world_info.global_rank:
                 continue
-            recv_work.append(self.global_pg.recv([tensor], i, self.rank + self.world_size * i))
+            recv_work.append(self.global_pg.recv([tensor], i, self.world_info.global_rank + self.world_info.global_world_size * i))
 
         # Ping all other peers
-        for i in range(self.world_size):
-            if i == self.rank:
+        for i in range(self.world_info.global_world_size):
+            if i == self.world_info.global_rank:
                 continue
             time_taken = self._ping_peer(i)
-            self.global_store.set(f"ping_{self.rank}_{i}", str(time_taken))
+            self.global_store.set(f"ping_{self.world_info.global_rank}_{i}", str(time_taken))
         
         # Wait for all recv operations to complete
         for work in recv_work:
@@ -483,7 +488,7 @@ class ElasticDeviceMesh:
         """Ping a peer and return the time taken in microseconds"""
         tensor = torch.ones(BENCH_TENSOR_SIZE, dtype=torch.float32)
         start_time = time.perf_counter()
-        self.global_pg.send([tensor], peer_rank, self.rank * self.world_size + peer_rank).wait()
+        self.global_pg.send([tensor], peer_rank, self.world_info.global_rank * self.world_info.global_world_size + peer_rank).wait()
         end_time = time.perf_counter()
         return int((end_time - start_time) * 1e6)
 

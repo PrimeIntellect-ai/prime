@@ -206,7 +206,8 @@ class ElasticDeviceMesh:
         self._create_global_pg()
 
         self._logger.debug("Optimizing ring ranks")
-        self._optimize_ring_ranks()
+        # TODO: You cant put it here because it would kill joining nodes
+        #self._optimize_ring_ranks()
 
         # Update global store values
         if self._global_leader:
@@ -249,7 +250,7 @@ class ElasticDeviceMesh:
         """Send a heartbeat to the global store."""
         current_time = time.time()
         try:
-            self.global_store.set(f"heartbeat_{self.world_info.global_rank}", str(current_time))
+            self.global_store.set(f"heartbeat_{self.world_info.global_unique_id}", str(current_time))
         except Exception:
             self._logger.error("Error sending heartbeat", exc_info=True)
             pass
@@ -257,7 +258,7 @@ class ElasticDeviceMesh:
     def _send_deathrattle(self):
         """Send a deathrattle to the global store."""
         if hasattr(self, "global_store"):
-            self.global_store.set(f"heartbeat_{self.world_info.global_rank}", "-100")
+            self.global_store.set(f"heartbeat_{self.world_info.global_unique_id}", "-100")
         else:
             import warnings
 
@@ -267,20 +268,15 @@ class ElasticDeviceMesh:
         """Check heartbeats and return a list of nodes that have missed their heartbeats."""
         dead_nodes = []
         current_time = time.time()
-        for i in range(self.world_info.global_world_size):
+        for gid in self._global_ids:
             try:
-                last_heartbeat = float(self.global_store.get(f"heartbeat_{i}").decode("utf-8"))
-                self._logger.debug(f"Node {i} last heartbeat: {last_heartbeat}")
+                last_heartbeat = float(self.global_store.get(f"heartbeat_{gid}").decode("utf-8"))
+                self._logger.debug(f"Node {gid} last heartbeat: {last_heartbeat}")
                 if current_time - last_heartbeat > HEARTBEAT_TIMEOUT:
-                    dead_nodes.append(i)
-                    # TODO: This is to avoid cascading death when two maybe_reinit_global_pg
-                    # happen very close to each other. The deathrattle of the leaving node
-                    # becomes invalid after the node is removed but the node that replaces it
-                    # might not have set its heartbeat yet. The dirty value is read
-                    # and the replacing node is killed incorrectly.
-                    self.global_store.set(f"heartbeat_{i}", str(current_time))
+                    dead_nodes.append(gid)
+                    self.global_store.delete_key(f"heartbeat_{gid}")
             except dist.DistStoreError:
-                self._logger.warning(f"Node {i} has no heartbeat")
+                self._logger.warning(f"Node {gid} has no heartbeat")
         return dead_nodes
 
     def _optimize_ring_ranks(self):
@@ -334,17 +330,21 @@ class ElasticDeviceMesh:
             return False
 
         # Remap live ranks to smaller world_size caused by dead nodes
-        leaving_ranks = set(dead_nodes)
-        live_ranks = [i for i in range(self.world_info.global_world_size) if i not in leaving_ranks]
+        leaving_nodes = set(dead_nodes)
+        live_ranks = [i for i in self._global_ids if i not in leaving_nodes]
         for i, rank in enumerate(live_ranks):
-            self.global_store.set(f"rank_map_{rank}", str(i))
+            self.global_store.set(f"rank_{rank}", str(i))
+            self.global_store.set(f"gid_{i}", rank)
         new_world_size = len(live_ranks)
 
         # Give joiners new ranks
         for joiner_id in joiners:
             self.global_store.set(f"rank_{joiner_id}", str(new_world_size))
+            self.global_store.set(f"gid_{new_world_size}", joiner_id)
+            live_ranks.append(joiner_id)
             new_world_size += 1
 
+        self._global_ids = live_ranks
         for i in range(1, new_world_size):
             self.global_store.set(f"barrier_{i}", "null")
         # Update world_size
@@ -362,9 +362,6 @@ class ElasticDeviceMesh:
         Returns:
             bool: True if the global_pg was reinitialized, False otherwise.
         """
-
-        self._optimize_ring_ranks()
-
         if not self.enable:
             # no op if disabled
             return

@@ -38,7 +38,6 @@ class ElasticDeviceMesh:
     - world_size: The current world size
     - mesh_count: The version of the mesh
     - rank_{uuid}: The rank of the node with the given uuid
-    - rank_map_{rank}: The new rank of the node with the given rank. Used to remap ranks when nodes leave.
     - joiner_{i}: The uuid of the ith joiner. Its a KV implmentation of a queue.
     """
 
@@ -291,8 +290,6 @@ class ElasticDeviceMesh:
             min_dist, path = toposolve.TSPSolver().solve_tsp(pings)
             self._logger.debug(f"Min distance: {min_dist}")
             self._logger.debug(f"Path: {path}")
-            for i, rank in enumerate(path[1:-1]):
-                self.global_store.set(f"rank_map_{rank}", str(i))
             self._logger.debug(f"Time taken to calculate TSP: {time.perf_counter() - start_time}")
 
             # Update world_size

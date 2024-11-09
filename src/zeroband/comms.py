@@ -1,7 +1,8 @@
 import sys
 import os
 import time
-import torch
+import subprocess
+import json
 from torch.distributed.device_mesh import init_device_mesh
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
@@ -23,6 +24,8 @@ HEARTBEAT_INTERVAL = int(
 HEARTBEAT_TIMEOUT = int(
     os.getenv("ZERO_BAND_EDM_HEARTBEAT_TIMEOUT_SECONDS", "10")
 )  # Time in seconds after which a node is considered dead if no heartbeat is received
+IPERF_PORT = int(os.getenv("ZERO_BAND_IPERF_PORT", "10101"))
+IPERF_IFNAME = os.getenv("GLOO_SOCKET_IFNAME", "eth0")
 BENCH_TENSOR_SIZE = 1_000_000
 
 
@@ -451,33 +454,60 @@ class ElasticDeviceMesh:
         self._logger.debug("Pings: %s", "\n".join(map(str, pings)))
         return pings
 
-    def _measure_connectivity(self):
-        # Recv from all other peers
-        recv_work = []
-        for i in range(self.world_info.global_world_size):
-            tensor = torch.ones(BENCH_TENSOR_SIZE, dtype=torch.float32)
-            if i == self.world_info.global_rank:
-                continue
-            recv_work.append(self.global_pg.recv([tensor], i, self.world_info.global_rank + self.world_info.global_world_size * i))
-
-        # Ping all other peers
-        for i in range(self.world_info.global_world_size):
-            if i == self.world_info.global_rank:
-                continue
-            time_taken = self._ping_peer(i)
-            self.global_store.set(f"ping_{self.world_info.global_rank}_{i}", str(time_taken))
+    def start_server(self) -> None:
+        """Start the iperf3 server process."""
+        try:
+            from zeroband.utils.ip import get_ip_address
+            iperf_addr = get_ip_address(IPERF_IFNAME)
+            iperf_port = IPERF_PORT + self.world_info.global_rank
+            cmd: List[str] = ["iperf3", "-s", "-p", str(iperf_port)]
+            self.server_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.global_store.set(f"iperf_{self.world_info.global_unique_id}", f"{iperf_addr}:{iperf_port}")
+            self._logger.info(f"Started iperf3 server on {iperf_addr} with port {iperf_port}")
+        except Exception as e:
+            self._logger.error(f"Failed to start iperf3 server: {str(e)}")
+            raise
+    
+    def measure_bandwidth(self, target_host: str, target_port: int) -> int:
+        """
+        Measure bandwidth to a specific target.
         
-        # Wait for all recv operations to complete
-        for work in recv_work:
-            work.wait()
-
-    def _ping_peer(self, peer_rank: int) -> int:
-        """Ping a peer and return the time taken in microseconds"""
-        tensor = torch.ones(BENCH_TENSOR_SIZE, dtype=torch.float32)
-        start_time = time.perf_counter()
-        self.global_pg.send([tensor], peer_rank, self.world_info.global_rank * self.world_info.global_world_size + peer_rank).wait()
-        end_time = time.perf_counter()
-        return int((end_time - start_time) * 1e6)
+        Args:
+            target_host: The host to measure bandwidth to
+            target_port: The port to measure bandwidth to
+            
+        Returns:
+            int: The time taken to transfer 1Tb of data in seconds
+        """
+        try:
+            cmd: List[str] = [
+                "iperf3", 
+                "-c", target_host,
+                "-p", str(target_port),
+                "-J",  # JSON output
+                "-t", "1"  # 1 second test
+            ]
+            result: subprocess.CompletedProcess = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if result.returncode != 0:
+                raise Exception(f"iperf3 error: {result.stderr}")
+            
+            data = json.loads(result.stdout)
+            time_taken: float = 1e12 / data['end']['sum_received']['bits_per_second']
+            
+            return time_taken
+        except Exception as e:
+            self._logger.error(f"Error measuring bandwidth to {target_host}: {str(e)}")
+            return int(1e9)
 
 
 

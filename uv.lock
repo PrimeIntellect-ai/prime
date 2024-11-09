@@ -1254,6 +1254,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pybind11"
+version = "2.13.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d2/c1/72b9622fcb32ff98b054f724e213c7f70d6898baa714f4516288456ceaba/pybind11-2.13.6.tar.gz", hash = "sha256:ba6af10348c12b24e92fa086b39cfba0eff619b61ac77c406167d813b096d39a", size = 218403 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/13/2f/0f24b288e2ce56f51c920137620b4434a38fd80583dbbe24fc2a1656c388/pybind11-2.13.6-py3-none-any.whl", hash = "sha256:237c41e29157b962835d356b370ededd57594a26d5894a795960f0047cb5caf5", size = 243282 },
+]
+
+[[package]]
 name = "pycparser"
 version = "2.22"
 source = { registry = "https://pypi.org/simple" }
@@ -1815,6 +1824,18 @@ wheels = [
 ]
 
 [[package]]
+name = "toposolve"
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pybind11" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b4/d8/c57f67241f71ff14b20b2e5a7316e6a6eb16fb02010a5c6674f5dc5cb402/toposolve-0.1.1.tar.gz", hash = "sha256:b23287b7bdbe5704b30f4fd447a05e41a418e3f500837634c212baa8b226e9ed", size = 5242 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/15/a8861bfc8b5d1d65b49d0078b365e45f857ee44a63b05097839dcc5384aa/toposolve-0.1.1-cp311-cp311-macosx_13_0_arm64.whl", hash = "sha256:6b4cefea1ead3bea316422790af49f63fbc91568b8a1a26305e1e9620600ff86", size = 61503 },
+]
+
+[[package]]
 name = "torch"
 version = "2.4.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2148,6 +2169,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic-config" },
     { name = "setuptools" },
+    { name = "toposolve" },
     { name = "torch" },
     { name = "torchdata" },
     { name = "transformers" },
@@ -2183,6 +2205,7 @@ requires-dist = [
     { name = "pydantic-config", git = "https://github.com/samsja/pydantic_config.git?rev=e529c9c" },
     { name = "requests", marker = "extra == 'all'", specifier = ">=2.32.3" },
     { name = "setuptools" },
+    { name = "toposolve" },
     { name = "torch", specifier = "==2.4.1" },
     { name = "torchdata", specifier = ">=0.8.0" },
     { name = "transformers", specifier = ">=4.44.2" },

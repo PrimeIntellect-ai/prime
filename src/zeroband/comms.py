@@ -270,14 +270,21 @@ class ElasticDeviceMesh:
         self._measure_connectivity()
         self.global_pg.barrier()
         self._logger.debug(f"Time taken to measure connectivity: {time.perf_counter() - start_time}")
-        start_time = time.perf_counter()
-        self._logger.debug("Calculating TSP")
         if self._global_leader:
+            start_time = time.perf_counter()
+            self._logger.debug("Calculating TSP")
             pings = self.get_pings()
             min_dist, path = toposolve.TSPSolver().solve_tsp(pings)
-            print(f"Min distance: {min_dist}")
-            print(f"Path: {path}")
-        self._logger.debug(f"Time taken to calculate TSP: {time.perf_counter() - start_time}")
+            self._logger.debug(f"Min distance: {min_dist}")
+            self._logger.debug(f"Path: {path}")
+            for i, rank in enumerate(path[1:-1]):
+                self.global_store.set(f"rank_map_{rank}", str(i))
+            self._logger.debug(f"Time taken to calculate TSP: {time.perf_counter() - start_time}")
+
+            # Update world_size
+            self.global_store.set("mesh_count", str(self.mesh_count + 1))
+            # Set status to "reinit"
+            self.global_store.set("status", "reinit")
 
     def _resolve_world(self, admit_joiners: bool = False) -> bool:
         """Set the new world size and ranks for all nodes if there are joiners or dead nodes. Else, do nothing.

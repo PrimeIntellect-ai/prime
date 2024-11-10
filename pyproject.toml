@@ -18,6 +18,7 @@ dependencies = [
     "zstandard",
     "pyarrow",
     "toposolve",
+    "psutil",
 ]
 
 [project.optional-dependencies]

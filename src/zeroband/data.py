@@ -373,7 +373,10 @@ def _load_datasets(
         _ds = ParquetDataset(files=ds_arg["data_files"], tokenizer=tokenizer)
         datasets.append(_ds)
 
-    ds = InterleaveDataset(datasets=datasets, probabilities=probabilities)
+    if len(datasets) > 1:
+        ds = InterleaveDataset(datasets=datasets, probabilities=probabilities)
+    else:
+        ds = datasets[0]
 
     logger.info(f"Loaded datasets ({split})")
     return ds

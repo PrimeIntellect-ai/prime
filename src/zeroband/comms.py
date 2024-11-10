@@ -47,9 +47,12 @@ class ElasticDeviceMesh:
     local_pg: dist.ProcessGroup
     global_pg: dist.ProcessGroup
 
-    def __init__(self, backend: str = "cpu:gloo,cuda:nccl", enable: bool = True):
+    def __init__(
+        self, backend: str = "cpu:gloo,cuda:nccl", enable: bool = True, live_recovery_rank_src: int | None = None
+    ):
         self._logger = get_logger()
         self.world_info = get_world_info()
+        self.live_recovery_rank_src = live_recovery_rank_src
 
         # Initialize global process group
         self.global_pg = FakeProcessGroup(self.world_info.rank, 1)
@@ -57,7 +60,6 @@ class ElasticDeviceMesh:
         self.enable = enable
         if enable:
             self._init_global_pg()
-            self.live_recovery = LiveRecovery(store=self.global_store)
 
         # Initialize local process group
         dist.init_process_group(backend=backend)
@@ -240,6 +242,8 @@ class ElasticDeviceMesh:
         # Initialize store values
         self._init_global_store_values()
 
+        self.live_recovery = LiveRecovery(store=self.global_store)
+
         if self.global_status == "running":  # Join path
             # Ask to join and then wait for the status to be "reinit"
             self._logger.info("Waiting to join")
@@ -255,6 +259,9 @@ class ElasticDeviceMesh:
             self.global_store.set("resolved_time", uuid4().hex)
         self.global_status = "running"
         self._last_resolved_time = self.global_store.get("resolved_time").decode("utf-8")
+
+        if self.live_recovery_rank_src is not None:
+            self.live_recovery.ask_for_live_ckpt(self.live_recovery_rank_src)
 
         self._start_heartbeat()
 

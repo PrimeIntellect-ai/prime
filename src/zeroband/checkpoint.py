@@ -500,7 +500,7 @@ class CkptManager:
         for job in jobs:
             job.wait()
 
-        for buffer, param in zip(buffers, self.diloco_offloaded_param_list):
+        for buffer, param in zip(buffers, self.model.parameters()):
             data = param.data
             if isinstance(data, DTensor):
                 data = data.to_local()

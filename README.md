@@ -47,6 +47,7 @@ source $HOME/.cargo/env
 
 2. Set up the environment:
 ```bash
+sudo apt install iperf -y
 uv venv
 source .venv/bin/activate
 uv sync --extra all

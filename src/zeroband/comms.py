@@ -13,6 +13,7 @@ from torch.testing._internal.distributed.fake_pg import FakeProcessGroup
 import multiprocessing as mp
 from uuid import uuid4
 import toposolve
+from zeroband.utils.ip import parse_iperf_output
 
 TCPSTORE_TIMEOUT = timedelta(seconds=int(os.getenv("ZERO_BAND_GLOBAL_STORE_TIMEOUT_SECONDS", "300")))
 TCPSTORE_POLLING_INTERVAL = float(os.getenv("ZERO_BAND_GLOBAL_STORE_POLLING_INTERVAL_SECONDS", "0.1"))
@@ -74,6 +75,7 @@ class ElasticDeviceMesh:
         self.cpu_local_mesh = init_device_mesh("cpu", mesh_shape=(self.local_pg.size(),))
 
         # Logging
+        self._optimize_ring_ranks()
         self._logger.info(f"global_pg size : {self.global_pg.size()}, local_pg size: {self.local_pg.size()}")
 
     def __del__(self):
@@ -89,6 +91,12 @@ class ElasticDeviceMesh:
             port=self.world_info.global_port + self.world_info.rank,
             timeout=TCPSTORE_TIMEOUT,
             is_master=self._global_leader,
+        )
+        self.god_store = dist.TCPStore(
+            host_name=self.world_info.global_addr,
+            port=self.world_info.global_port,
+            timeout=TCPSTORE_TIMEOUT,
+            is_master=False,
         )
 
     def _init_global_store_values(self):
@@ -144,6 +152,35 @@ class ElasticDeviceMesh:
             prefix_store, self.world_info.global_rank, self.world_info.global_world_size, GLOBAL_PG_TIMEOUT
         )
         self._logger.debug("Global pg created with %d peers. Timeout of %s", self.global_pg.size(), GLOBAL_PG_TIMEOUT)
+    
+    def _optimize_ring_ranks(self):
+        if self.world_info.local_rank == 0:
+            self._logger.debug("Measuring bandwidths")
+            self._measure_connectivity()
+            self._logger.debug("Measuring bandwidths done")
+
+        self.local_pg.barrier().wait()
+        self.global_pg.barrier().wait()
+
+        if self._global_leader:
+            self._logger.debug("Calculating TSP")
+            pings = self.get_pings()
+            min_dist, path = toposolve.TSPSolver().solve_tsp(pings)
+            self._logger.debug(f"Min distance: {min_dist}")
+            self._logger.debug(f"Path: {path}")
+            new_gids = [self._global_ids[i] for i in path[:-1]]
+            assert set(new_gids) == set(self._global_ids)
+
+            for i, gid in enumerate(new_gids):
+                self.global_store.set(f"rank_{gid}", str(i))
+                self.global_store.set(f"gid_{i}", gid)
+            self.global_store.set("mesh_count", str(self.mesh_count + 1))
+
+        self.local_pg.barrier().wait()
+        self.global_pg.barrier().wait()
+
+        self._global_ids = [self.global_store.get(f"gid_{i}").decode("utf-8") for i in range(self.world_info.global_world_size)]
+        self._create_global_pg()
 
     def _queue_join(self):
         """Queue a node to join the mesh."""
@@ -207,10 +244,6 @@ class ElasticDeviceMesh:
         # Create global process group
         self._create_global_pg()
 
-        self._logger.debug("Optimizing ring ranks")
-        # TODO: You cant put it here because it would kill joining nodes
-        #self._optimize_ring_ranks()
-
         # Update global store values
         if self._global_leader:
             self.global_store.set("status", "running")
@@ -224,6 +257,8 @@ class ElasticDeviceMesh:
             f"Elastic Device mesh init done with {self.global_pg.size()} peers in {time.perf_counter() - time_start} seconds"
         )
 
+        if self.world_info.local_rank == 0:
+            self._start_iperf_server()
         self._evicted_nodes = []
 
     def _start_heartbeat(self):
@@ -280,25 +315,6 @@ class ElasticDeviceMesh:
             except dist.DistStoreError:
                 self._logger.warning(f"Node {gid} has no heartbeat")
         return dead_nodes
-
-    def _optimize_ring_ranks(self):
-        start_time = time.perf_counter()
-        self._measure_connectivity()
-        self.global_pg.barrier()
-        self._logger.debug(f"Time taken to measure connectivity: {time.perf_counter() - start_time}")
-        if self._global_leader:
-            start_time = time.perf_counter()
-            self._logger.debug("Calculating TSP")
-            pings = self.get_pings()
-            min_dist, path = toposolve.TSPSolver().solve_tsp(pings)
-            self._logger.debug(f"Min distance: {min_dist}")
-            self._logger.debug(f"Path: {path}")
-            self._logger.debug(f"Time taken to calculate TSP: {time.perf_counter() - start_time}")
-
-            # Update world_size
-            self.global_store.set("mesh_count", str(self.mesh_count + 1))
-            # Set status to "reinit"
-            self.global_store.set("status", "reinit")
 
     def _resolve_world(self, admit_joiners: bool = False) -> bool:
         """Set the new world size and ranks for all nodes if there are joiners or dead nodes. Else, do nothing.
@@ -386,6 +402,7 @@ class ElasticDeviceMesh:
         # Reinit Path
         try:
             self._create_global_pg()
+            self._optimize_ring_ranks()
         except Exception as e:
             self._logger.error(f"Error recreating process group: {e}. Retrying...")
             return self.maybe_reinit_global_pg(admit_joiners=admit_joiners)
@@ -446,31 +463,40 @@ class ElasticDeviceMesh:
 
     def get_pings(self) -> List[List[int]]:
         pings = [[1000_000_000] * self.world_info.global_world_size for _ in range(self.world_info.global_world_size)]
-        for i in range(self.world_info.global_world_size):
-            for j in range(self.world_info.global_world_size):
+        for i, e1 in enumerate(self._global_ids):
+            for j, e2 in enumerate(self._global_ids):
                 if i == j:
                     continue
-                pings[i][j] = int(self.global_store.get(f"ping_{i}_{j}"))
+                pings[i][j] = int(self.god_store.get(f"ping_{e1}_{e2}"))
         self._logger.debug("Pings: %s", "\n".join(map(str, pings)))
         return pings
 
-    def start_server(self) -> None:
-        """Start the iperf3 server process."""
+    def _start_iperf_server(self) -> None:
+        """Start the iperf server process."""
         try:
             from zeroband.utils.ip import get_ip_address
             iperf_addr = get_ip_address(IPERF_IFNAME)
             iperf_port = IPERF_PORT + self.world_info.global_rank
-            cmd: List[str] = ["iperf3", "-s", "-p", str(iperf_port)]
+            cmd: List[str] = ["iperf", "-s", "-p", str(iperf_port)]
             self.server_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            self.global_store.set(f"iperf_{self.world_info.global_unique_id}", f"{iperf_addr}:{iperf_port}")
-            self._logger.info(f"Started iperf3 server on {iperf_addr} with port {iperf_port}")
+            self.god_store.set(f"iperf_{self.world_info.global_unique_id}", f"{iperf_addr}:{iperf_port}")
+            self._logger.info(f"Started iperf server on {iperf_addr} with port {iperf_port}")
         except Exception as e:
-            self._logger.error(f"Failed to start iperf3 server: {str(e)}")
+            self._logger.error(f"Failed to start iperf server: {str(e)}")
             raise
+    
+    def _measure_connectivity(self):
+        for i in self._global_ids:
+            if i == self.world_info.global_unique_id:
+                continue
+            target_host, target_port = self.god_store.get(f"iperf_{i}").decode("utf-8").split(":")
+            target_port = int(target_port)
+            time_taken = self.measure_bandwidth(target_host, target_port)
+            self.god_store.set(f"ping_{self.world_info.global_unique_id}_{i}", str(time_taken))
     
     def measure_bandwidth(self, target_host: str, target_port: int) -> int:
         """
@@ -481,14 +507,13 @@ class ElasticDeviceMesh:
             target_port: The port to measure bandwidth to
             
         Returns:
-            int: The time taken to transfer 1Tb of data in seconds
+            int: The time taken to transfer 10Tb of data in seconds
         """
         try:
             cmd: List[str] = [
-                "iperf3", 
+                "iperf", 
                 "-c", target_host,
                 "-p", str(target_port),
-                "-J",  # JSON output
                 "-t", "1"  # 1 second test
             ]
             result: subprocess.CompletedProcess = subprocess.run(
@@ -499,14 +524,14 @@ class ElasticDeviceMesh:
             )
             
             if result.returncode != 0:
-                raise Exception(f"iperf3 error: {result.stderr}")
+                raise Exception(f"iperf error: {result.stderr}")
             
-            data = json.loads(result.stdout)
-            time_taken: float = 1e12 / data['end']['sum_received']['bits_per_second']
+            time_taken: int = int(1e13 / parse_iperf_output(result.stdout))
+            time_taken = min(time_taken, 1_000_000_000)
             
             return time_taken
         except Exception as e:
-            self._logger.error(f"Error measuring bandwidth to {target_host}: {str(e)}")
+            self._logger.error(f"Error measuring bandwidth to {target_host}:{target_port} {str(e)}")
             return int(1e9)
 
 

@@ -2,7 +2,6 @@ import sys
 import os
 import time
 import subprocess
-import json
 from torch.distributed.device_mesh import init_device_mesh
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
@@ -110,7 +109,9 @@ class ElasticDeviceMesh:
             self.global_store.set("joiner_0", "null")
             for i in range(self.world_info.global_world_size):
                 self.global_store.set(f"barrier_{i}", "null")
-            self._global_ids = [self.global_store.get(f"gid_{i}").decode("utf-8") for i in range(self.world_info.global_world_size)]
+            self._global_ids = [
+                self.global_store.get(f"gid_{i}").decode("utf-8") for i in range(self.world_info.global_world_size)
+            ]
             for i in self._global_ids:
                 for j in self._global_ids:
                     self.global_store.set(f"ping_{i}_{j}", "1000_000_000")
@@ -118,8 +119,10 @@ class ElasticDeviceMesh:
             self.global_status = "init"
         else:
             self.global_status = self._wait_for_status()
-            self._global_ids = [self.global_store.get(f"gid_{i}").decode("utf-8") for i in range(self.world_info.global_world_size)]
-    
+            self._global_ids = [
+                self.global_store.get(f"gid_{i}").decode("utf-8") for i in range(self.world_info.global_world_size)
+            ]
+
     def _create_global_pg(self):
         # Delete the old global_pg
         if hasattr(self, "global_pg"):
@@ -139,7 +142,7 @@ class ElasticDeviceMesh:
         self._logger.debug(
             f"New global rank: {self.world_info.global_rank}, New global world size: {self.world_info.global_world_size} New mesh count: {self.mesh_count}"
         )
-        
+
         # Create prefix store
         prefix_store = dist.PrefixStore(f"mesh_{self.mesh_count}", self.global_store)
         self._logger.debug(f"Created prefix store with mesh_{self.mesh_count}")
@@ -152,7 +155,7 @@ class ElasticDeviceMesh:
             prefix_store, self.world_info.global_rank, self.world_info.global_world_size, GLOBAL_PG_TIMEOUT
         )
         self._logger.debug("Global pg created with %d peers. Timeout of %s", self.global_pg.size(), GLOBAL_PG_TIMEOUT)
-    
+
     def _optimize_ring_ranks(self):
         if self.world_info.local_rank == 0:
             self._logger.debug("Measuring bandwidths")
@@ -179,7 +182,9 @@ class ElasticDeviceMesh:
         self.local_pg.barrier().wait()
         self.global_pg.barrier().wait()
 
-        self._global_ids = [self.global_store.get(f"gid_{i}").decode("utf-8") for i in range(self.world_info.global_world_size)]
+        self._global_ids = [
+            self.global_store.get(f"gid_{i}").decode("utf-8") for i in range(self.world_info.global_world_size)
+        ]
         self._create_global_pg()
 
     def _queue_join(self):
@@ -224,7 +229,7 @@ class ElasticDeviceMesh:
                 if status is not None:
                     raise e
                 time.sleep(0.1)
-    
+
     def _init_global_pg(self) -> None:
         # Each rank gets its own global store with global rank 0 as the master
         time_start = time.perf_counter()
@@ -240,7 +245,7 @@ class ElasticDeviceMesh:
             self._logger.info("Waiting to join")
             self._queue_join()
             self._wait_for_status("reinit")
-        
+
         # Create global process group
         self._create_global_pg()
 
@@ -475,20 +480,17 @@ class ElasticDeviceMesh:
         """Start the iperf server process."""
         try:
             from zeroband.utils.ip import get_ip_address
+
             iperf_addr = get_ip_address(IPERF_IFNAME)
             iperf_port = IPERF_PORT + self.world_info.global_rank
             cmd: List[str] = ["iperf", "-s", "-p", str(iperf_port)]
-            self.server_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
+            self.server_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.god_store.set(f"iperf_{self.world_info.global_unique_id}", f"{iperf_addr}:{iperf_port}")
             self._logger.info(f"Started iperf server on {iperf_addr} with port {iperf_port}")
         except Exception as e:
             self._logger.error(f"Failed to start iperf server: {str(e)}")
             raise
-    
+
     def _measure_connectivity(self):
         for i in self._global_ids:
             if i == self.world_info.global_unique_id:
@@ -497,43 +499,40 @@ class ElasticDeviceMesh:
             target_port = int(target_port)
             time_taken = self.measure_bandwidth(target_host, target_port)
             self.god_store.set(f"ping_{self.world_info.global_unique_id}_{i}", str(time_taken))
-    
+
     def measure_bandwidth(self, target_host: str, target_port: int) -> int:
         """
         Measure bandwidth to a specific target.
-        
+
         Args:
             target_host: The host to measure bandwidth to
             target_port: The port to measure bandwidth to
-            
+
         Returns:
             int: The time taken to transfer 10Tb of data in seconds
         """
         try:
             cmd: List[str] = [
-                "iperf", 
-                "-c", target_host,
-                "-p", str(target_port),
-                "-t", "1"  # 1 second test
+                "iperf",
+                "-c",
+                target_host,
+                "-p",
+                str(target_port),
+                "-t",
+                "1",  # 1 second test
             ]
-            result: subprocess.CompletedProcess = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            
+            result: subprocess.CompletedProcess = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+
             if result.returncode != 0:
                 raise Exception(f"iperf error: {result.stderr}")
-            
+
             time_taken: int = int(1e13 / parse_iperf_output(result.stdout))
             time_taken = min(time_taken, 1_000_000_000)
-            
+
             return time_taken
         except Exception as e:
             self._logger.error(f"Error measuring bandwidth to {target_host}:{target_port} {str(e)}")
             return int(1e9)
-
 
 
 class LiveRecovery:

@@ -42,7 +42,7 @@ A research paper about the framework and our INTELLECT-1 10B experiment is comin
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.cargo/env
+source $HOME/.local/bin/env
 ```
 
 2. Set up the environment:

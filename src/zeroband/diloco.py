@@ -83,22 +83,16 @@ class Diloco:
         self._logger.debug("offload model to cpu")
 
     @torch.no_grad()
-    def sync_pseudo_gradient(
-        self, model: nn.Module, fake: bool = False, flag: str = "outer", num_effective_peers: int | None = None
-    ):
+    def sync_pseudo_gradient(self, model: nn.Module, fake: bool = False, flag: str = "outer"):
         """
         Sync the pseudo gradient from the local process group to the global process group
         """
         _start_time = time.perf_counter()
 
-        world_size_pre_init = self.elastic_device_mesh.global_pg.size()
         self.elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=False)
         world_size_post_init = self.elastic_device_mesh.global_pg.size()
 
-        if world_size_pre_init == world_size_post_init and num_effective_peers is not None:
-            world_size = num_effective_peers
-        else:
-            world_size = world_size_post_init
+        world_size = world_size_post_init
 
         self._logger.debug("sync pseudo gradient %s with world size %d", " fake" if fake else "", world_size)
 
@@ -214,12 +208,12 @@ class Diloco:
         return offloaded_params
 
     @torch.no_grad()
-    def step(self, model: nn.Module, fake: bool = False, num_effective_peers: int | None = None, flag: str = "outer"):
+    def step(self, model: nn.Module, fake: bool = False, flag: str = "outer"):
         """
         Step the optimizer
         """
         time_start = time.perf_counter()
-        self.sync_pseudo_gradient(model, fake=fake, flag=flag, num_effective_peers=num_effective_peers)
+        self.sync_pseudo_gradient(model, fake=fake, flag=flag)
         self._logger.info(f"all reduce pseudo gradient in: {time.perf_counter() - time_start} seconds")
 
         if self.outer_optimizer is not None:

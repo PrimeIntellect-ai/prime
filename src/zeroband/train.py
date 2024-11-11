@@ -294,7 +294,6 @@ def train(config: Config):
 
         if config.diloco is not None:
             # this is a patch for now to allow live recovery worker to not affect the all reduce at all
-            num_effective_peers = elastic_device_mesh.global_pg.size()
 
             if not need_live_recovery:
                 elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=True)
@@ -466,7 +465,7 @@ def train(config: Config):
             ckpt_manager.cache_inner_optimizer()
 
             time_start_inner = time.perf_counter()
-            diloco.step(model=model, flag=training_progress.outer_step, num_effective_peers=num_effective_peers)
+            diloco.step(model=model, flag=training_progress.outer_step)
             diloco_time = time.perf_counter() - time_start_inner
 
             if config.train.log_model_hash:

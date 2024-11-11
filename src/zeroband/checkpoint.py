@@ -1,4 +1,3 @@
-import copy
 from dataclasses import dataclass
 import gc
 import multiprocessing
@@ -257,9 +256,6 @@ class CkptManager:
 
             if self.config.remote_data_path is not None:
                 self.check_path_access(self.config.remote_data_path)
-
-        self._inner_optimizer_non_tensor_state_dict = None
-        self._inner_optimizer_tensors = None
 
     def check_path_access(
         self,
@@ -567,8 +563,11 @@ class CkptManager:
                 send_state_dict(global_pg, self.diloco_offloaded_optimizer.state_dict(), dest_rank)
                 send_state_dict(global_pg, self.training_progress.state_dict(), dest_rank)
 
+                inner_optimizer_non_tensor_state_dict, inner_optimizer_tensors = _get_sendable_state_dict(
+                    self.optimizer.state_dict()
+                )
                 send_tensor_and_state_dict(
-                    global_pg, dest_rank, self._inner_optimizer_non_tensor_state_dict, self._inner_optimizer_tensors
+                    global_pg, dest_rank, inner_optimizer_non_tensor_state_dict, inner_optimizer_tensors
                 )
 
                 send_state_dict(global_pg, self.scheduler.state_dict(), dest_rank)
@@ -582,24 +581,6 @@ class CkptManager:
         self._logger.debug("Live recovery thread started")
 
         self._live_reco_thread = thread
-
-    @torch.no_grad()
-    def cache_inner_optimizer(self):
-        """
-        Cache the inner optimizer to cpu and cast DTensor to local tensor to be ready to send.
-        """
-
-        if self._live_reco_thread is not None:
-            self._logger.debug("Waiting for live recovery thread to finish")
-            self._live_reco_thread.join()
-            self._live_reco_thread = None
-            self._logger.debug("Live recovery thread finished")
-
-        _inner_optimizer_non_tensor_state_dict, _inner_optimizer_tensors = _get_sendable_state_dict(
-            self.optimizer.state_dict()
-        )
-        self._inner_optimizer_tensors = [tensor.cpu() for tensor in _inner_optimizer_tensors]
-        self._inner_optimizer_non_tensor_state_dict = copy.deepcopy(_inner_optimizer_non_tensor_state_dict)
 
 
 def delete_topk(ckpt_path: str, topk: int):

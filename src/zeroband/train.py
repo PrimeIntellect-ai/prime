@@ -461,9 +461,6 @@ def train(config: Config):
             if world_info.rank == 0 and config.monitor is not None:
                 monitor.set_stage("outer_loop")
 
-            # todo we could skip this is we don't have live recovery enabled
-            ckpt_manager.cache_inner_optimizer()
-
             time_start_inner = time.perf_counter()
             diloco.step(model=model, flag=training_progress.outer_step)
             diloco_time = time.perf_counter() - time_start_inner

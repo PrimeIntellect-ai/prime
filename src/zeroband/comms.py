@@ -77,7 +77,6 @@ class ElasticDeviceMesh:
 
         # Logging
         self._optimize_ring_ranks()
-
         if self.live_recovery_rank_src is not None:
             self.live_recovery.ask_for_live_ckpt(self.live_recovery_rank_src)
         self.global_pg.barrier().wait()
@@ -423,6 +422,7 @@ class ElasticDeviceMesh:
         try:
             self._create_global_pg()
             self._optimize_ring_ranks()
+            self.global_pg.barrier().wait()
         except Exception as e:
             self._logger.error(f"Error recreating process group: {e}. Retrying...")
             return self.maybe_reinit_global_pg(admit_joiners=admit_joiners)

@@ -349,8 +349,8 @@ class CkptManager:
                 )
                 latest_remote_data_path = os.path.join(self.config.remote_data_path, f"data_{self.data_rank}", "latest")
 
-                self._async_save_remote(data_path, remote_data_path, blocking=False)
-                self._async_save_remote(data_path, latest_remote_data_path, blocking=False)
+                self._async_save_remote(data_path, remote_data_path, blocking=True)
+                self._async_save_remote(data_path, latest_remote_data_path, blocking=True)
 
         gc.collect()
 

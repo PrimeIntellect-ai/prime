@@ -33,5 +33,5 @@ compression = "uint8"
 [ckpt]
 interval = 100
 topk = 40
-path = "outputs_10B_zero_band"
-remote_data_path = "gs://checkpoints_pi/10b/data/"
+path = "/data/10B"
+remote_data_path = "/data/10B_data_ckpt"

@@ -77,6 +77,11 @@ class ElasticDeviceMesh:
 
         # Logging
         self._optimize_ring_ranks()
+
+        if self.live_recovery_rank_src is not None:
+            self.live_recovery.ask_for_live_ckpt(self.live_recovery_rank_src)
+        self.global_pg.barrier().wait()
+
         self._logger.info(f"global_pg size : {self.global_pg.size()}, local_pg size: {self.local_pg.size()}")
 
     def __del__(self):
@@ -262,9 +267,6 @@ class ElasticDeviceMesh:
             self.global_store.set("resolved_time", uuid4().hex)
         self.global_status = "running"
         self._last_resolved_time = self.global_store.get("resolved_time").decode("utf-8")
-
-        if self.live_recovery_rank_src is not None:
-            self.live_recovery.ask_for_live_ckpt(self.live_recovery_rank_src)
 
         self._start_heartbeat()
 

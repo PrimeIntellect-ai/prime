@@ -376,6 +376,9 @@ class ElasticDeviceMesh:
             new_world_size += 1
 
         self._global_ids = live_ranks
+        for i in self._global_ids:
+            for j in self._global_ids:
+                self.global_store.set(f"ping_{i}_{j}", "1000_000_000")
         for i in range(1, new_world_size):
             self.global_store.set(f"barrier_{i}", "null")
         # Update world_size

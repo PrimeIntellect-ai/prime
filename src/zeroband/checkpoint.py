@@ -546,7 +546,7 @@ class CkptManager:
         )
 
     @torch.no_grad()
-    def send_ckpt_to_peer(self, global_pg: dist.ProcessGroup, dest_rank: int):
+    def send_ckpt_to_peer(self, global_pg: dist.ProcessGroup, dest_rank: int, blocking: bool = False):
         def async_send():
             assert self.diloco_offloaded_param_list is not None, "send_ckpt_to_peers is only supported with diloco"
             time_start = time.perf_counter()
@@ -582,8 +582,10 @@ class CkptManager:
         thread = threading.Thread(target=async_send)
         thread.start()
         self._logger.debug("Live recovery thread started")
-
-        self._live_reco_thread = thread
+        if blocking:
+            thread.join()
+        else:
+            self._live_reco_thread = thread
 
 
 def delete_topk(ckpt_path: str, topk: int):

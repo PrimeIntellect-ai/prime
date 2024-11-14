@@ -310,7 +310,7 @@ def train(config: Config):
                         )
                         logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
 
-                    ckpt_manager.send_ckpt_to_peer(elastic_device_mesh.global_pg, maybe_dest_rank)
+                    ckpt_manager.send_ckpt_to_peer(elastic_device_mesh.global_pg, maybe_dest_rank, blocking=True)
 
                     elastic_device_mesh.live_recovery.reset()
             else:

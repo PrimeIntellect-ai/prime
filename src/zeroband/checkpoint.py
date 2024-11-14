@@ -461,19 +461,22 @@ class CkptManager:
 
         if not skip_dataloader:
             if self.config.remote_data_load:
-                remote_data_path = os.path.join(self.config.remote_data_path, f"data_{self.data_rank}", "latest")
-                id_ = uuid.uuid4()
-                dest = f"/tmp/zeroband/data_{id_}"
-                rsync_fsspec(remote_data_path, os.path.join(dest, "data"))
-                data_path = dest
+                self.remote_data_load()
             else:
                 data_path = resume_ckpt_path if data_path is None else data_path
-
-            self._load_data(data_path)
+                self._load_data(data_path)
 
         self._init_state()
 
         self._logger.info(f"Loaded checkpoint from {resume_ckpt_path} in {time.perf_counter() - time_start} seconds")
+
+    def remote_data_load(self):
+        remote_data_path = os.path.join(self.config.remote_data_path, f"data_{self.data_rank}", "latest")
+        id_ = uuid.uuid4()
+        dest = f"/tmp/zeroband/data_{id_}"
+        rsync_fsspec(remote_data_path, os.path.join(dest, "data"))
+        data_path = dest
+        self._load_data(data_path)
 
     @torch.no_grad()
     def recv_ckpt_from_peer(self, global_pg: dist.ProcessGroup):

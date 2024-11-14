@@ -332,6 +332,10 @@ def train(config: Config):
                     logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
 
                 need_live_recovery = False
+
+                if config.ckpt.remote_data_load:
+                    ckpt_manager.remote_data_load()
+
                 logger.info("live recovery done in %f", time.perf_counter() - time_start_live_recovery)
 
         # at the beginning of the inner steps we allow joiner to arrive.

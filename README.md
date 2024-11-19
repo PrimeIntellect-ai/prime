@@ -156,3 +156,19 @@ For info about the arguments to the script, do:
 ```bash
 python3 scripts/subset_data.py --help
 ```
+
+# Exporting checkpoints to huggingface compatible model
+You can convert the checkpoints saved by the training script to a model that can be run with any huggingface-compatible inference engine (e.g. transformers, vLLM) using our export script.
+The export script takes the training config as a positional argument and 2 keyword arguments, `ckpt.resume` which is the path to the checkpoint, `ckpt.path` which is the path you wish to save the converted model.
+You may also pass the `torch_dtype` argument to either `float32` or `bfloat16` to specify the precision of the exported model weights. The default `torch_dtype` is `float32`.
+
+Example export command:
+```bash
+python scripts/export_dcp.py @configs/10B/H100.toml --ckpt.path /path/to/save/converted_model --ckpt.resume /path/to/ckpt/step_84000 --torch_dtype bfloat16
+```
+
+You can then upload the model to huggingface using huggingface-cli:
+```bash
+# Usage:  huggingface-cli upload [repo_id] [local_path] [path_in_repo]
+huggingface-cli upload mymodel /path/to/save/converted_model . --private
+```

@@ -24,7 +24,7 @@ from transformers.generation import GenerationConfig
 
 class ExportConfig(Config):
     save_format: Literal["pt", "safetensors"] = "safetensors"
-    torch_dtype: Literal["float32", "bfloat16"] = "bfloat16"
+    torch_dtype: Literal["float32", "bfloat16"] = "float32"
     with_debug_automap: bool = False
 
 

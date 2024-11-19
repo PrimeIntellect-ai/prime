@@ -170,5 +170,6 @@ python scripts/export_dcp.py @configs/10B/H100.toml --ckpt.path /path/to/save/co
 You can then upload the model to huggingface using huggingface-cli:
 ```bash
 # Usage:  huggingface-cli upload [repo_id] [local_path] [path_in_repo]
-huggingface-cli upload mymodel /path/to/save/converted_model . --private
+huggingface-cli upload username/mymodel /path/to/save/converted_model . --private
 ```
+The repo will be created if `repo_id` does not exist. The `--private` will create the repo as a private repo and cab ne ommited to create a publicly accessible repo.

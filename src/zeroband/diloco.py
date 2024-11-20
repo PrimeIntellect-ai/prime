@@ -9,6 +9,7 @@ from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 from torch.distributed._tensor.api import DTensor
 from functools import lru_cache
+from torch.distributed.device_mesh import init_device_mesh
 
 
 class DilocoConfig(BaseConfig):
@@ -67,6 +68,7 @@ class Diloco:
             # just force compilation
 
         self.pccl_communicator = pccl_communicator
+        self.cpu_local_mesh = init_device_mesh("cpu", mesh_shape=(self.local_pg.size(),))
 
         self._logger = get_logger()
         self.world_info = get_world_info()

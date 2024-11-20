@@ -3,11 +3,10 @@ import time
 from pydantic_config import BaseConfig
 import torch
 from torch import nn
-from zeroband.collectives import Compression, all_reduce
+from zeroband.collectives import Compression
 from zeroband.comms import ElasticDeviceMesh
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
-import torch.distributed as dist
 from torch.distributed._tensor.api import DTensor
 from functools import lru_cache
 
@@ -89,14 +88,10 @@ class Diloco:
         """
         _start_time = time.perf_counter()
 
-        self.elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=False)
-        world_size_post_init = self.elastic_device_mesh.global_pg.size()
+        world_size = 1  # todo
 
-        world_size = world_size_post_init
+        self._logger.debug("sync pseudo gradient %s", " fake" if fake else "")
 
-        self._logger.debug("sync pseudo gradient %s with world size %d", " fake" if fake else "", world_size)
-
-        global_pg = self.elastic_device_mesh.global_pg
         for i in range(self.config.retry_all_reduce):
             for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
                 if fake:
@@ -104,17 +99,16 @@ class Diloco:
                 else:
                     param_offloaded.grad.to_local().copy_(param_offloaded.data.to_local())
                     param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device))
-            try:
+
                 self.offloaded_grad_flat_tensor.div_(world_size)
                 _collective_start_time = time.perf_counter()
-                self._logger.debug("Waiting on barrier")
-                self.elastic_device_mesh.monitored_barrier(flag)
 
                 self._logger.debug("Beginning all reduce")
-                # all_reduce(self.config.compression, self.offloaded_grad_flat_tensor, dist.ReduceOp.SUM, global_pg)
                 for j, tensor_group in enumerate(self._offloaded_grad_grouped_tensor):
                     t0 = time.perf_counter()
-                    all_reduce(self.config.compression, tensor_group, dist.ReduceOp.SUM, global_pg)
+
+                    self.elastic_device_mesh.pccl.global_pccl_communicator(tensor_group.data_ptr())  # this
+
                     self._logger.debug(
                         f"{j}/{len(self._offloaded_grad_grouped_tensor)} all reduce bucket done in {time.perf_counter() - t0:.6f} seconds, numel: {tensor_group.numel()}"
                     )
@@ -122,10 +116,7 @@ class Diloco:
                 self._logger.debug(
                     f"All reduce takes {time.perf_counter() - _collective_start_time:.6f} seconds numels: {self.offloaded_grad_flat_tensor.numel()}"
                 )
-                break
-            except Exception as e:
-                self._logger.error(f"Error syncing pseudo gradient: {e}, retry {i+1}/{self.config.retry_all_reduce}")
-                global_pg = self.elastic_device_mesh.get_global_pg(maybe_reinit=True)
+
         else:
             self._logger.error(
                 "Failed to sync pseudo gradient after %d retries. Resorting to calculating pseudo-gradient without reduce",

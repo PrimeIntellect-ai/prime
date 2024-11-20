@@ -413,7 +413,10 @@ def train(config: Config):
             else:
                 # we count the total tokens with respect to all diloco workers
                 # might need to tweak this as some worker might fail to join the all reduce later
-                training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
+
+                # training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size() # todo need to know the size
+                training_progress.total_tokens += new_tokens
+
             remaining_cpu_ram = psutil.virtual_memory().available / (1024 * 1024 * 1024)
 
             metrics = {
@@ -445,7 +448,7 @@ def train(config: Config):
                 log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
 
             if config.diloco is not None:
-                metrics["num_peers"] = elastic_device_mesh.global_pg.size()
+                metrics["num_peers"] = 1  # elastic_device_mesh.global_pg.size()
                 log += f", diloco_peers: {metrics['num_peers']}"
 
             if world_info.rank == 0:

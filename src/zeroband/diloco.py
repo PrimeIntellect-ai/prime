@@ -4,7 +4,7 @@ from pydantic_config import BaseConfig
 import torch
 from torch import nn
 from zeroband.collectives import Compression
-from zeroband.comms import ElasticDeviceMesh
+from zeroband.comms import PcclCommunicator
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 from torch.distributed._tensor.api import DTensor
@@ -58,7 +58,7 @@ class Diloco:
         self,
         config: DilocoConfig,
         model: nn.Module,
-        elastic_device_mesh: ElasticDeviceMesh,
+        pccl_communicator: PcclCommunicator,
     ):
         self.config = config
 
@@ -66,7 +66,7 @@ class Diloco:
             from zeroband.C.collectives import ring_allreduce as _  # noqa: F401
             # just force compilation
 
-        self.elastic_device_mesh = elastic_device_mesh
+        self.pccl_communicator = pccl_communicator
 
         self._logger = get_logger()
         self.world_info = get_world_info()
@@ -107,7 +107,7 @@ class Diloco:
                 for j, tensor_group in enumerate(self._offloaded_grad_grouped_tensor):
                     t0 = time.perf_counter()
 
-                    self.elastic_device_mesh.pccl.global_pccl_communicator(tensor_group.data_ptr())  # this
+                    self.pccl_communicator.all_reduce(tensor_group.data_ptr())
 
                     self._logger.debug(
                         f"{j}/{len(self._offloaded_grad_grouped_tensor)} all reduce bucket done in {time.perf_counter() - t0:.6f} seconds, numel: {tensor_group.numel()}"
@@ -172,14 +172,14 @@ class Diloco:
             offloaded_param = nn.Parameter(
                 DTensor.from_local(
                     data_tensor,
-                    device_mesh=self.elastic_device_mesh.cpu_local_mesh,
+                    device_mesh=self.cpu_local_mesh,
                     placements=param.data.placements,
                 )
             )
 
             offloaded_param.grad = DTensor.from_local(
                 grad_tensor,
-                device_mesh=self.elastic_device_mesh.cpu_local_mesh,
+                device_mesh=self.cpu_local_mesh,
                 placements=param.data.placements,
             )
             # here we pre-allocate the grad DTensor on cpu.

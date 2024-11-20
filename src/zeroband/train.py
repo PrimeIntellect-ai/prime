@@ -17,7 +17,7 @@ from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 import torch.distributed as dist
 from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
-from zeroband.comms import ElasticDeviceMesh
+from zeroband.comms import PcclCommunicator
 from zeroband.loss import cross_entropy_max_z_loss
 
 from zeroband.utils import (
@@ -180,9 +180,9 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    elastic_device_mesh = ElasticDeviceMesh(
-        enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
-    )
+    pccl_communicator = PcclCommunicator()
+
+    dist.init_process_group()
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
@@ -196,13 +196,11 @@ def train(config: Config):
         fully_shard(
             transformer_block,
             mp_policy=mp_policy,
-            mesh=elastic_device_mesh.cuda_local_mesh,
             reshard_after_forward=reshard_after_forward,
         )
     fully_shard(
         model,
         mp_policy=mp_policy,
-        mesh=elastic_device_mesh.cuda_local_mesh,
         reshard_after_forward=config.train.reshard_after_forward,
     )
     logger.debug("model fsdped")
@@ -216,7 +214,7 @@ def train(config: Config):
     )
 
     if config.diloco is not None:
-        diloco = Diloco(config.diloco, model, elastic_device_mesh)
+        diloco = Diloco(config.diloco, model, pccl_communicator)
 
     scheduler = get_scheduler(
         sched_type=config.optim.sched_type,
@@ -390,9 +388,9 @@ def train(config: Config):
                 else:
                     loss_batch += loss.clone().detach()
 
-            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
+            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
             if config.optim.z_loss:
-                dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
+                dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG)
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             inner_optimizer.step()
@@ -534,7 +532,7 @@ def train(config: Config):
 
     ckpt_manager.wait_for_blocking_job()
 
-    del elastic_device_mesh  # allow to clean up for smoother tests transition
+    del pccl_communicator  # allow to clean up for smoother tests transition
 
     logger.info("Training finished, exiting ...")
 

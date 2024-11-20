@@ -284,7 +284,7 @@ def train(config: Config):
 
     logger.info("starting training")
 
-    need_live_recovery = config.ckpt.live_recovery_rank_src is not None
+    # need_live_recovery = config.ckpt.live_recovery_rank_src is not None
     while True:
         if num_inner_steps > 1:
             # if we don't use diloco we don't print the outer step logs
@@ -292,51 +292,51 @@ def train(config: Config):
 
         time_start_outer = time.perf_counter()
 
-        if config.diloco is not None:
-            # this is a patch for now to allow live recovery worker to not affect the all reduce at all
+        # if config.diloco is not None:
+        #     # this is a patch for now to allow live recovery worker to not affect the all reduce at all
 
-            if not need_live_recovery:
-                elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=True)
+        #     if not need_live_recovery:
+        #         elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=True)
 
-                maybe_dest_rank = elastic_device_mesh.live_recovery.should_send_ckpt_to()
-                if maybe_dest_rank is not None:
-                    logger.info(f"Start live recovery to rank {maybe_dest_rank}")
-                    if config.train.log_model_hash:
-                        logger.info(
-                            f"live recovery outer optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}"
-                        )
-                        logger.info(
-                            f"live recovery outer model hash: {get_tensor_list_signature(diloco.param_list_cpu)}"
-                        )
-                        logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
+        #         maybe_dest_rank = elastic_device_mesh.live_recovery.should_send_ckpt_to()
+        #         if maybe_dest_rank is not None:
+        #             logger.info(f"Start live recovery to rank {maybe_dest_rank}")
+        #             if config.train.log_model_hash:
+        #                 logger.info(
+        #                     f"live recovery outer optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}"
+        #                 )
+        #                 logger.info(
+        #                     f"live recovery outer model hash: {get_tensor_list_signature(diloco.param_list_cpu)}"
+        #                 )
+        #                 logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
 
-                    ckpt_manager.send_ckpt_to_peer(elastic_device_mesh.global_pg, maybe_dest_rank, blocking=True)
+        #             ckpt_manager.send_ckpt_to_peer(elastic_device_mesh.global_pg, maybe_dest_rank, blocking=True)
 
-                    elastic_device_mesh.live_recovery.reset()
-            else:
-                ## receiving
-                time_start_live_recovery = time.perf_counter()
-                logger.info(f"Start live recovery from rank {config.ckpt.live_recovery_rank_src}")
+        #             elastic_device_mesh.live_recovery.reset()
+        #     else:
+        #         ## receiving
+        #         time_start_live_recovery = time.perf_counter()
+        #         logger.info(f"Start live recovery from rank {config.ckpt.live_recovery_rank_src}")
 
-                ## we create grad buffer and opts stats mamnually, the value will be overwritten by the ckpt but we need the DTensor to be correctly init before loading it
+        #         ## we create grad buffer and opts stats mamnually, the value will be overwritten by the ckpt but we need the DTensor to be correctly init before loading it
 
-                diloco.outer_optimizer.step()  # need to step to init the DTensor stats
+        #         diloco.outer_optimizer.step()  # need to step to init the DTensor stats
 
-                ckpt_manager.recv_ckpt_from_peer(elastic_device_mesh.global_pg)
+        #         ckpt_manager.recv_ckpt_from_peer(elastic_device_mesh.global_pg)
 
-                if config.train.log_model_hash:
-                    logger.info(
-                        f"live recovery outer optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}"
-                    )
-                    logger.info(f"live recovery outer model hash: {get_tensor_list_signature(diloco.param_list_cpu)}")
-                    logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
+        #         if config.train.log_model_hash:
+        #             logger.info(
+        #                 f"live recovery outer optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}"
+        #             )
+        #             logger.info(f"live recovery outer model hash: {get_tensor_list_signature(diloco.param_list_cpu)}")
+        #             logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
 
-                need_live_recovery = False
+        #         need_live_recovery = False
 
-                if config.ckpt.remote_data_load:
-                    ckpt_manager.remote_data_load()
+        #         if config.ckpt.remote_data_load:
+        #             ckpt_manager.remote_data_load()
 
-                logger.info("live recovery done in %f", time.perf_counter() - time_start_live_recovery)
+        #         logger.info("live recovery done in %f", time.perf_counter() - time_start_live_recovery)
 
         # at the beginning of the inner steps we allow joiner to arrive.
         # We maybe reinit before the all reduce but only to allow leaving, not to join anymore

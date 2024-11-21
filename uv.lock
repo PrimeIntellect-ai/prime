@@ -1128,7 +1128,7 @@ wheels = [
 [[package]]
 name = "pccl"
 version = "0.1.0"
-source = { git = "ssh://git@github.com/PrimeIntellect-ai/pccl.git?subdirectory=bindings%2Fpython&rev=a81d74c#a81d74ccf9b342b0d8b382ac9c6ede1955b2473e" }
+source = { git = "ssh://git@github.com/PrimeIntellect-ai/pccl.git?subdirectory=bindings%2Fpython&rev=01427aaa#01427aaa7c1414877c54fed2f4079cd6b5096b48" }
 
 [[package]]
 name = "platformdirs"
@@ -2208,7 +2208,7 @@ requires-dist = [
     { name = "fsspec", extras = ["gcs"], specifier = ">=2024.3.1" },
     { name = "ninja" },
     { name = "numpy" },
-    { name = "pccl", git = "ssh://git@github.com/PrimeIntellect-ai/pccl.git?subdirectory=bindings%2Fpython&rev=a81d74c" },
+    { name = "pccl", git = "ssh://git@github.com/PrimeIntellect-ai/pccl.git?subdirectory=bindings%2Fpython&rev=01427aaa" },
     { name = "psutil" },
     { name = "pyarrow" },
     { name = "pydantic-config", git = "https://github.com/samsja/pydantic_config.git?rev=e529c9c" },

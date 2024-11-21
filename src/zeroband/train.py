@@ -536,6 +536,7 @@ def train(config: Config):
 
     ckpt_manager.wait_for_blocking_job()
 
+    pccl_communicator.destroy()
     del pccl_communicator  # allow to clean up for smoother tests transition
 
     logger.info("Training finished, exiting ...")

@@ -56,23 +56,18 @@ class Diloco:
     """
 
     def __init__(
-        self,
-        config: DilocoConfig,
-        model: nn.Module,
-        pccl_communicator: PcclCommunicator,
+            self,
+            config: DilocoConfig,
+            model: nn.Module,
+            pccl_communicator: PcclCommunicator,
     ):
         self.config = config
-
-        if config.compression == Compression.UINT8:
-            from zeroband.C.collectives import ring_allreduce as _  # noqa: F401
-            # just force compilation
-
         self.pccl_communicator = pccl_communicator
-        self.world_info = get_world_info()
-        self._logger = get_logger()
 
+        self._logger = get_logger()
+        self.world_info = get_world_info()
+        self.cpu_local_mesh = init_device_mesh("cpu", mesh_shape=(self.world_info.local_world_size,))
         self._init_offloaded_optimizer(model=model)
-        self.cpu_local_mesh = init_device_mesh("cpu", mesh_shape=(self.world_info.world_size,))
 
     @torch.no_grad()
     def _init_offloaded_optimizer(self, model):
@@ -101,23 +96,26 @@ class Diloco:
                     param_offloaded.grad.to_local().copy_(param_offloaded.data.to_local())
                     param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device))
 
+            try:
                 self.offloaded_grad_flat_tensor.div_(world_size)
                 _collective_start_time = time.perf_counter()
 
-                self._logger.debug("Beginning all reduce")
+                self._logger.debug(f"Beginning all reduce attempt {i + 1}/{self.config.retry_all_reduce}")
                 for j, tensor_group in enumerate(self._offloaded_grad_grouped_tensor):
                     t0 = time.perf_counter()
 
-                    self.pccl_communicator.all_reduce(tensor_group.data_ptr())
+                    self.pccl_communicator.all_reduce(tensor_group.data_ptr(), tensor_group.numel())
 
                     self._logger.debug(
-                        f"{j}/{len(self._offloaded_grad_grouped_tensor)} all reduce bucket done in {time.perf_counter() - t0:.6f} seconds, numel: {tensor_group.numel()}"
+                        f"{j + 1}/{len(self._offloaded_grad_grouped_tensor)} all reduce bucket done in {time.perf_counter() - t0:.6f} seconds, numel: {tensor_group.numel()}"
                     )
 
                 self._logger.debug(
                     f"All reduce takes {time.perf_counter() - _collective_start_time:.6f} seconds numels: {self.offloaded_grad_flat_tensor.numel()}"
                 )
-
+                break
+            except Exception as e:
+                self._logger.error(f"Error syncing pseudo gradient: {e}, retry {i + 1}/{self.config.retry_all_reduce}")
         else:
             self._logger.error(
                 "Failed to sync pseudo gradient after %d retries. Resorting to calculating pseudo-gradient without reduce",

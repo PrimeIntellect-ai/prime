@@ -38,6 +38,8 @@ from zeroband.utils.logging import get_logger
 from zeroband.checkpoint import CkptConfig, CkptManager, TrainingProgress
 from zeroband.lr_scheduler import get_scheduler
 
+from pccl import PROTOCOL_PORT_MASTER
+
 
 class OptimConfig(BaseConfig):
     lr: float = 4e-4
@@ -108,12 +110,14 @@ class Config(BaseConfig):
     monitor: MonitorConfig | None = None
 
     ckpt: CkptConfig = CkptConfig()
+    ccoip_master_ip: str = "127.0.0.1"
+    ccoip_master_port: int = PROTOCOL_PORT_MASTER
 
     @model_validator(mode="after")
     def ckpt_diloco_step(self):
         if self.ckpt is not None and self.ckpt.interval is not None and self.diloco is not None:
             assert (
-                self.ckpt.interval % self.diloco.inner_steps == 0
+                    self.ckpt.interval % self.diloco.inner_steps == 0
             ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
         return self
 
@@ -134,7 +138,7 @@ def train(config: Config):
 
     if config.ckpt is not None and config.ckpt.interval is not None and config.diloco is not None:
         assert (
-            config.ckpt.interval % config.diloco.inner_steps == 0
+                config.ckpt.interval % config.diloco.inner_steps == 0
         ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
 
     if config.type_model == "llama2":
@@ -180,7 +184,7 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    pccl_communicator = PcclCommunicator()
+    pccl_communicator = PcclCommunicator(config.ccoip_master_ip, config.ccoip_master_port)
 
     dist.init_process_group()
 
@@ -441,7 +445,7 @@ def train(config: Config):
             if tokens_per_second is not None:
                 metrics["tokens_per_second"] = tokens_per_second
                 metrics["mfu"] = (
-                    100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
+                        100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
                 )
                 log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
 
@@ -479,9 +483,9 @@ def train(config: Config):
         training_progress.outer_step += 1
 
         if (
-            config.ckpt.interval is not None
-            and training_progress.step > 0
-            and training_progress.step % config.ckpt.interval == 0
+                config.ckpt.interval is not None
+                and training_progress.step > 0
+                and training_progress.step % config.ckpt.interval == 0
         ):
             # we only allow to checkpoint after a outer step. For non diloco training outer step = 1 anyway
 
@@ -497,10 +501,10 @@ def train(config: Config):
 
         if config.diloco:
             tokens_per_second = (
-                config.optim.batch_size
-                * config.diloco.inner_steps
-                * config.data.seq_length
-                / (time.perf_counter() - time_start_outer)
+                    config.optim.batch_size
+                    * config.diloco.inner_steps
+                    * config.data.seq_length
+                    / (time.perf_counter() - time_start_outer)
             )
             mfu = 100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
             logger.info(f"effective mfu: {mfu}")

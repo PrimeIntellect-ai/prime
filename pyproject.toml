@@ -19,7 +19,7 @@ dependencies = [
     "pyarrow",
     "toposolve",
     "psutil",
-    "pccl @ git+ssh://git@github.com/PrimeIntellect-ai/pccl.git@01427aaa#egg=pccl&subdirectory=bindings/python", #todo move to https once open source
+    "pccl @ git+ssh://git@github.com/PrimeIntellect-ai/pccl.git@16110e15#egg=pccl&subdirectory=bindings/python", #todo move to https once open source
 ]
 
 [project.optional-dependencies]

@@ -19,15 +19,21 @@ get_cuda_devices() {
     local end_gpu=$((start_gpu + num_gpu - 1))
 
     if [ "$TOTAL_GPU" -eq 1 ]; then
-        # If only one GPU is available, use GPU 0 for all ranks
         echo "0"
     elif [ "$num_gpu" -eq 1 ]; then
-        # Assign a single GPU based on the rank index
         echo "$start_gpu"
     else
-        # Assign a range of GPUs based on the rank index
         echo "$(seq -s ',' $start_gpu $end_gpu)"
     fi
+}
+
+# Function to find an available port
+find_available_port() {
+    local port=$1
+    while ss -tuln | grep -q ":$port "; do
+        port=$((port + 1))
+    done
+    echo $port
 }
 
 # Array to store PIDs of child processes
@@ -50,7 +56,6 @@ cleanup() {
 # Register the cleanup function to be called on SIGINT (Ctrl+C) and SIGTERM
 trap cleanup SIGINT SIGTERM
 
-# Check if at least three arguments were passed
 if [ "$#" -lt 3 ]; then
     echo "Usage: $0 <N> <num_gpu_per_node> <python_script> [additional_python_args...]"
     echo "Example: $0 2 1 src/zeroband/train.py @configs/debug/normal.toml"
@@ -61,10 +66,8 @@ N=$1               # Number of ranks/nodes
 NUM_GPU=$2         # Number of GPUs per node
 shift 2            # Shift the first two arguments so that $@ contains only additional Python arguments
 
-# Determine the total number of GPUs available on the system
 TOTAL_GPU=$(get_total_gpus)
 
-# Ensure that NUM_GPU does not exceed TOTAL_GPU
 if [ "$NUM_GPU" -gt "$TOTAL_GPU" ]; then
     echo "Requested NUM_GPU ($NUM_GPU) exceeds the total available GPUs ($TOTAL_GPU)."
     echo "Setting NUM_GPU to $TOTAL_GPU."
@@ -76,16 +79,19 @@ mkdir -p logs
 export GLOBAL_ADDR=localhost
 export GLOBAL_PORT=${GLOBAL_PORT:-5565}
 export GLOBAL_WORLD_SIZE=$N
-export BASE_PORT=${BASE_PORT:-10001}
 
-for i in $(seq 0 $((N - 1)))
-do
+BASE_PORT=${BASE_PORT:-10001}
+
+for i in $(seq 0 $((N - 1))); do
     LOG_FILE="logs/log$i.log"
     > "$LOG_FILE"
 
     CUDA_DEVICES=$(get_cuda_devices "$NUM_GPU" "$i")
 
-    echo "Starting rank $i with CUDA_VISIBLE_DEVICES=$CUDA_DEVICES"
+    # Find an available port
+    PORT=$(find_available_port $((BASE_PORT + i)))
+
+    echo "Starting rank $i with CUDA_VISIBLE_DEVICES=$CUDA_DEVICES on port $PORT"
 
     WANDB_MODE=$([ "$i" -eq 0 ] && echo "online" || echo "online") \
     GLOBAL_UNIQUE_ID=$i \
@@ -93,7 +99,7 @@ do
     CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" \
     torchrun --nproc_per_node="$NUM_GPU" \
              --node_rank=0 \
-             --rdzv_endpoint=localhost:$((BASE_PORT + i)) \
+             --rdzv_endpoint=localhost:$PORT \
              --rdzv_id=simulate_multi_node \
              --rdzv_backend=c10d \
              --nnodes=1 \
@@ -105,11 +111,9 @@ do
     child_pids+=($!)
 done
 
-# Optionally, tail the first log file to monitor progress
 if [ "$TOTAL_GPU" -ge 1 ]; then
     tail -f "logs/log0.log" &
     child_pids+=($!)
 fi
 
-# Wait for all child processes to finish
 wait

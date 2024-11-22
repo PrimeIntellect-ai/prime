@@ -21,6 +21,7 @@ from zeroband.comms import ElasticDeviceMesh
 from zeroband.loss import cross_entropy_max_z_loss
 
 from zeroband.utils import (
+    FakeTokenizer,
     GPUMemoryMonitor,
     PerfCounter,
     get_module_signature,
@@ -137,7 +138,9 @@ def train(config: Config):
             config.ckpt.interval % config.diloco.inner_steps == 0
         ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
 
-    if config.type_model == "llama2":
+    if config.data.fake and config.name_model == "debugmodel":
+        tokenizer = FakeTokenizer()
+    elif config.type_model == "llama2":
         tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
     elif config.type_model == "llama3":
         tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)

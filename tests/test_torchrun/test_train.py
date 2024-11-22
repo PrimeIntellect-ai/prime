@@ -6,6 +6,10 @@ import socket
 
 from zeroband.diloco import Compression
 
+import torch
+
+num_gpu = torch.cuda.device_count()
+
 
 def get_random_available_port_list(num_port):
     # https://stackoverflow.com/questions/1365265/on-localhost-how-do-i-pick-a-free-port-number
@@ -77,7 +81,7 @@ def test_multi_gpu(num_gpus):
     _test_multi_gpu(num_gpus, "debug/normal.toml")
 
 
-@pytest.mark.parametrize("num_gpus", [[2, 1], [2, 2]])
+@pytest.mark.parametrize("num_gpus", [[2, 1], [2, 2]] if num_gpu >= 4 else [[2, 1]])
 def test_multi_gpu_diloco(num_gpus):
     _test_multi_gpu(num_gpus, "debug/diloco.toml", diloco=True)
 

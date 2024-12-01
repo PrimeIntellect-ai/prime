@@ -1,6 +1,7 @@
 import os
 from typing import Literal
 import time
+import warnings
 import psutil
 from pydantic import model_validator
 from multiprocessing.process import _children
@@ -75,12 +76,12 @@ class TrainConfig(BaseConfig):
     memory_profiler: MemoryProfilerConfig | None = None
 
     sequence_packing: bool = True
-    attn_fn: Literal["flash", "sdpa"] = "flash"
+    attn_fn: Literal["flash", "sdpa"] | None = None
 
     @model_validator(mode="after")
     def validate_attn_fn(self):
-        if self.attn_fn == "sdpa" and self.sequence_packing:
-            raise ValueError("SDPA does not support sequence packing")
+        if self.attn_fn is not None:
+            warnings.warn("attn_fn argument is deprecated")
 
         return self
 
@@ -162,7 +163,6 @@ def train(config: Config):
         config.type_model,
         vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
         seq_length=config.data.seq_length,
-        attn_fn=config.train.attn_fn,
     )
 
     model = model.to(world_info.local_rank)
@@ -360,10 +360,12 @@ def train(config: Config):
                 input_ids = batch["input_ids"].to("cuda")
                 labels = batch["labels"].to("cuda")
                 if config.train.sequence_packing:
-                    seqlens = batch["seqlens"].to("cuda")
+                    seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
+
                     # seqlens has a dynamic shape but fixed dimension, this allow to still torch compile
                     # https://pytorch.org/docs/stable/torch.compiler_dynamic_shapes.html
-                    torch._dynamo.mark_dynamic(seqlens, 0)
+                    # torch._dynamo.mark_dynamic(seqlens, 0)
+                    logger.debug(f"seqlens: {seqlens}")
                 else:
                     seqlens = None
 

@@ -124,7 +124,7 @@ class SequencePackingDataSet(IterableDataset, Stateful):
         self.state = SequencePackingDataSetState(**state_dict["state"])
 
 
-def collate_fn(samples: list[dict[str, torch.LongTensor]]) -> dict[str, torch.LongTensor]:
+def collate_fn(samples: list[dict[str, torch.LongTensor]]) -> dict[str, torch.LongTensor | list[torch.LongTensor]]:
     assert samples[0].keys() == {"input_ids", "labels", "seqlens"}
 
     inputs_ids = []
@@ -135,12 +135,12 @@ def collate_fn(samples: list[dict[str, torch.LongTensor]]) -> dict[str, torch.Lo
         inputs_ids.append(sample["input_ids"])
         labels.append(sample["labels"])
 
-        seqlens.extend(sample["seqlens"])
+        seqlens.extend(torch.Tensor(sample["seqlens"]).long())
 
     return {
         "input_ids": torch.stack(inputs_ids, dim=0),
         "labels": torch.stack(labels, dim=0),
-        "seqlens": torch.Tensor(seqlens).long(),
+        "seqlens": seqlens,
     }
 
 

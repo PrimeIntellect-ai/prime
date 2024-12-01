@@ -50,21 +50,36 @@ def test_attn(llama_config: ModelArgs):
 
     freqs_cis = get_freqs_cis(llama_config)
     input_ = torch.rand(bs, seq_len, llama_config.dim).to("cuda")
+    seqlens = [torch.Tensor([seq_len]).int().to("cuda") for _ in range(bs)]
 
     attn = Attention(llama_config).to("cuda")
-    attn.attn_fn = "sdpa"
 
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         output_sdpa = attn(input_, freqs_cis)
 
-    attn.attn_fn = "flash"
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        output_fa = attn(input_, freqs_cis)
+        output_flex = attn(input_, freqs_cis, seqlens=seqlens)
 
     rtol = ERROR_RTOL[torch.bfloat16]
     atol = ERROR_ATOL[torch.bfloat16]
-    assert output_sdpa.shape == output_fa.shape
-    torch.testing.assert_close(output_sdpa, output_fa, rtol=rtol, atol=atol)
+    assert output_sdpa.shape == output_flex.shape
+    torch.testing.assert_close(output_sdpa, output_flex, rtol=rtol, atol=atol)
+
+
+def test_packing_simple(llama_config: ModelArgs):
+    seq_len = 512
+    bs = 8
+
+    freqs_cis = get_freqs_cis(llama_config)
+    input_ = torch.rand(bs, seq_len, llama_config.dim).to("cuda")
+    seqlens = [torch.Tensor([seq_len // 4] * 4).int().to("cuda") for _ in range(bs)]
+
+    attn = Attention(llama_config).to("cuda")
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        output = attn(input_, freqs_cis, seqlens=seqlens)
+
+    assert output.shape == (bs, seq_len, llama_config.dim)
 
 
 def test_sequence_packing_two_time_same_sequence(llama_config: ModelArgs):
@@ -73,15 +88,13 @@ def test_sequence_packing_two_time_same_sequence(llama_config: ModelArgs):
     We then pass the packed sequence to the attention layer and check that the output for each sequence is the same.
     """
 
-    llama_config.attn_fn = "flash"
     model = Attention(llama_config).to("cuda")
 
     emb = torch.nn.Embedding(10, llama_config.dim).to("cuda")
 
     seq = [2, 1, 4, 8]
     input_stuff_raw = torch.Tensor([seq + seq]).long().to("cuda")
-    seqlens = [len(seq), len(seq)]
-    seqlens = torch.Tensor(seqlens).int().to("cuda")
+    seqlens = [torch.Tensor([len(seq), len(seq)]).int().to("cuda")]
 
     input_stuff = emb(input_stuff_raw)
 

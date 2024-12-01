@@ -12,18 +12,16 @@
 
 
 from dataclasses import dataclass
-from importlib.util import find_spec
-from typing import Literal, Optional, Tuple
-from einops import rearrange
+from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from zeroband.models.norms import build_norm
 
-flash_attn_available = find_spec("flash_attn") is not None
-if flash_attn_available:
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+
+flex_attention_compiled = torch.compile(flex_attention, dynamic=False)
 
 
 @dataclass
@@ -44,8 +42,6 @@ class ModelArgs:
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
     norm_type: str = "fused_rmsnorm"
-
-    attn_fn: Literal["sdpa", "flash"] = "sdpa"
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
@@ -138,6 +134,15 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
+def seqlens_to_docs_tensor(seqlens: list[torch.Tensor]) -> torch.Tensor:
+    """Converts list of sequence lengths to document indices tensor.
+    Example:
+        seqlens = [tensor([2,2,1]), tensor([2,2,1])]  # List of 2 tensors
+        docs = [[0,0,1,1,2], [0,0,1,1,2]] # Each doc_id repeated per its length
+    """
+    return torch.stack([torch.repeat_interleave(torch.arange(len(seq), device=seq.device), seq) for seq in seqlens])
+
+
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -164,8 +169,6 @@ class Attention(nn.Module):
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
 
-        self.attn_fn = model_args.attn_fn
-
         self.wq = nn.Linear(model_args.dim, model_args.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
@@ -180,7 +183,7 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-        seqlens: torch.Tensor | None = None,
+        seqlens: list[torch.Tensor] | None = None,
     ):
         """
         Forward pass of the attention module.
@@ -224,55 +227,30 @@ class Attention(nn.Module):
         output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         return output
 
-    def _flash_attention(self, xq, xk, xv) -> torch.Tensor:
-        q = rearrange(xq, "b n t h -> b t n h")
-        k = rearrange(xk, "b n t h -> b t n h")
-        v = rearrange(xv, "b n t h -> b t n h")
-        # q/k/b is [b, nh, t, hs] but fa2 expected [b , t, nh, hs]
-        return flash_attn_func(q, k, v, causal=True)
+    def _flex_attention_with_seqlens(self, xq, xk, xv, seqlens: list[torch.Tensor]) -> torch.Tensor:
+        docs = seqlens_to_docs_tensor(seqlens).to(xq.device)
+        batch_size, max_seq_len = docs.shape
 
-    def _fa_attention_with_seqlens(self, xq, xk, xv, seqlens) -> torch.Tensor:
-        b = xq.shape[0]
-        cu_seqlens = (
-            torch.concat([torch.tensor([0]).to(xq.device), seqlens.cumsum(0)], dim=0).to(torch.int32).to(xq.device)
-        )
-        max_seqlen = seqlens.max()
+        def document_causal_mask(b, h, q_idx, kv_idx):
+            causal_mask = q_idx >= kv_idx
+            document_mask = docs[b, q_idx] == docs[b, kv_idx]
+            return causal_mask & document_mask
 
-        q = rearrange(xq, "b n t h -> (b t) n h")
-        k = rearrange(xk, "b n t h -> (b t) n h")
-        v = rearrange(xv, "b n t h -> (b t) n h")
-        # q/k/v is [b, nh, t, hs] but fa expected [b * t, nh, hs]
-
-        y = flash_attn_varlen_func(
-            q,
-            k,
-            v,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=max_seqlen,
-            max_seqlen_k=max_seqlen,
-            causal=True,
+        block_mask = create_block_mask(
+            document_causal_mask, batch_size, None, max_seq_len, max_seq_len, device="cuda", _compile=True
         )
 
-        y = rearrange(y, "(b t) n h -> b t n h", b=b)
-        return y
+        output = flex_attention_compiled(xq, xk, xv, block_mask=block_mask)
+        output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+        return output
 
     def self_attention(
-        self, xq: torch.Tensor, xk: torch.Tensor, xv: torch.Tensor, seqlens: torch.Tensor | None = None
+        self, xq: torch.Tensor, xk: torch.Tensor, xv: torch.Tensor, seqlens: list[torch.Tensor] | None = None
     ) -> torch.Tensor:
-        if self.attn_fn == "sdpa":
-            if seqlens is not None:
-                raise NotImplementedError("SDPA with seqlens is not implemented.")
-            return self._sdpa_attention(xq, xk, xv)
-        elif self.attn_fn == "flash":
-            if not flash_attn_available:
-                raise RuntimeError("Flash attention is not available. Please install flash_attn.")
-            if seqlens is not None:
-                return self._fa_attention_with_seqlens(xq, xk, xv, seqlens)
-            else:
-                return self._flash_attention(xq, xk, xv)
+        if seqlens is not None:
+            return self._flex_attention_with_seqlens(xq, xk, xv, seqlens)
         else:
-            raise ValueError(f"Unknown attention function: {self.attn_fn}")
+            return self._sdpa_attention(xq, xk, xv)
 
 
 class FeedForward(nn.Module):

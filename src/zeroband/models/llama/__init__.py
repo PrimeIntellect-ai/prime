@@ -81,7 +81,10 @@ llama3_configs = {
 
 
 def get_model(
-    name_model: str, type_model: str, vocab_size: int, seq_length: int, attn_fn: str
+    name_model: str,
+    type_model: str,
+    vocab_size: int,
+    seq_length: int,
 ) -> tuple[Transformer, ModelArgs]:
     """get the transformer model"""
 
@@ -94,6 +97,5 @@ def get_model(
 
     config.vocab_size = vocab_size
     config.max_seq_len = seq_length
-    config.attn_fn = attn_fn
 
     return Transformer(config), config

@@ -25,7 +25,7 @@ logger = get_logger(__name__)
 
 
 class DataConfig(BaseConfig):
-    dataset_name_or_paths: str = "/data/datasets/fineweb-edu"
+    dataset_name_or_paths: str = "datasets/fineweb-edu"
     val_dataset_name_or_paths: Optional[str] = None
     seq_length: int = 1024
     fake: bool = False

@@ -38,6 +38,15 @@ A research paper about the framework and our INTELLECT-1 10B experiment is comin
 
 ## Getting Started
 
+For an easy install that download the data
+
+```
+curl -sSL https://raw.githubusercontent.com/PrimeIntellect-ai/prime/scripts/install/install.sh | bash
+```
+
+step by step :
+
+
 1. Clone: 
 
 ```bash
@@ -67,19 +76,11 @@ git submodule update --init --recursive
 huggingface-cli login
 ```
 
-all steps:
-
+5. Download the data 
 ```
-git clone git@github.com:PrimeIntellect-ai/prime.git
-cd prime
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
-sudo apt install iperf -y
-uv venv
-source .venv/bin/activate
-uv sync --extra all
-uv pip install flash-attn --no-build-isolation
-git submodule update --init --recursive
+mkdir -p datasets
+uv run python scripts/subset_data.py --dataset_name PrimeIntellect/fineweb-edu --data_world_size 1 --data_rank 0 --max_shards 32
+mv fineweb-edu/ datasets/fineweb-edu/
 ```
 
 
@@ -88,14 +89,14 @@ git submodule update --init --recursive
 Verify your setup:
 
 ```bash
-ZERO_BAND_LOG_LEVEL=DEBUG torchrun --nproc_per_node=2 src/zeroband/train.py @configs/debug/normal.toml
+GLOO_SOCKET_IFNAME=lo GLOBAL_ADDR=localhost GLOBAL_RANK=0 GLOBAL_UNIQUE_ID=0 GLOBAL_WORLD_SIZE=1 GLOBAL_PORT=8989  uv run torchrun --nproc_per_node=2 src/zeroband/train.py  @configs/debug/diloco.toml
 ```
 
 ## Usage
 
 ### Running DiLoCo
 
-To test DiLoCo locally you can use the helper script `scripts/simulatsimulate_multi_nodee_mutl.sh` 
+To test DiLoCo locally you can use the helper script `scripts/simulatsimulate_multi_nodee_mutl.sh`
 
 ```bash
 # Using 4 GPUs

@@ -25,6 +25,8 @@ dataset_name_or_paths = "/data/datasets/fineweb-edu,/data/datasets/fineweb,/data
 dataset_ratio = "55:10:20:10:5"
 num_workers = 4
 reverse_data_files = true
+split_by_data_rank = false # the 10b training assume that data was already split by datarank. Keeping this for backward compatibility
+
 
 [diloco]
 inner_steps = 100

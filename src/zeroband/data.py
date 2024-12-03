@@ -36,6 +36,7 @@ class DataConfig(BaseConfig):
     data_rank: Optional[int] = None
     data_world_size: Optional[int] = None
     reverse_data_files: bool = False
+    split_by_data_rank: bool = True
 
 
 class FakeTokenizedDataset(IterableDataset):
@@ -393,14 +394,28 @@ def _get_probabilities(data_config: DataConfig) -> Optional[List[float]]:
 
 
 def load_all_datasets(
-    data_config: DataConfig, split: str, tokenizer: PreTrainedTokenizer, rank: int, world_size: int
+    data_config: DataConfig,
+    split: str,
+    tokenizer: PreTrainedTokenizer,
+    rank: int,
+    world_size: int,
 ) -> InterleaveDataset:
     """Load all datasets and interleave them"""
+
+    if data_config.split_by_data_rank and (
+        data_config.data_rank is not None and data_config.data_world_size is not None
+    ):
+        split_rank = data_config.data_rank * world_size + rank
+        split_world_size = data_config.data_world_size * world_size
+    else:
+        split_rank = rank
+        split_world_size = world_size
+
     ds = _load_datasets(
         dataset_names=data_config.dataset_name_or_paths,
         split=split,
-        data_rank=rank,
-        data_world_size=world_size,
+        data_rank=split_rank,
+        data_world_size=split_world_size,
         probabilities=_get_probabilities(data_config),
         reverse_data_files=data_config.reverse_data_files,
         tokenizer=tokenizer,

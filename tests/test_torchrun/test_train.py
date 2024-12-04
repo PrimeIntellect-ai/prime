@@ -112,3 +112,10 @@ def test_packing(packing: bool):
     num_gpus = [2, 1]
     packing_arg = "--train.sequence_packing" if packing else "--no-train.sequence_packing"
     _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=[packing_arg])
+
+
+@pytest.mark.parametrize("diloco", [False])
+def test_muon(diloco: bool):
+    num_gpus = [1, 2]
+    config_file = "debug/diloco.toml" if diloco else "debug/normal.toml"
+    _test_multi_gpu(num_gpus, config_file, extra_args=["--optim.optim.pseudo_order_steps", "6"])

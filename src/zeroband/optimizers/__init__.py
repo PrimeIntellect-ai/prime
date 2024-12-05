@@ -1,8 +1,24 @@
+from typing import TypeAlias
+from pydantic_config import BaseConfig
 import torch
 from zeroband.optimizers.muon import Muon, AdamConfig, MuonConfig
+from distributed_shampoo import EighEigenvalueCorrectionConfig, DistributedShampoo, FullyShardShampooConfig
 
 
-def get_optimizer(params: list[torch.nn.Parameter], config: AdamConfig | MuonConfig) -> torch.optim.Optimizer:
+class SoapConfig(BaseConfig):
+    lr: float = 4e-4
+    weight_decay: float = 0.1
+    betas1: float = 0.9
+    betas2: float = 0.95
+
+    max_preconditioner_dim: int = 8192
+    precondition_frequency: int = 100
+
+
+OptimizersConfig: TypeAlias = AdamConfig | MuonConfig | SoapConfig
+
+
+def get_optimizer(params: list[torch.nn.Parameter], config: OptimizersConfig) -> torch.optim.Optimizer:
     if isinstance(config, AdamConfig):
         return torch.optim.AdamW(
             params,
@@ -21,8 +37,23 @@ def get_optimizer(params: list[torch.nn.Parameter], config: AdamConfig | MuonCon
             adamw_betas=(config.adam.betas1, config.adam.betas2),
             adamw_wd=config.adam.weight_decay,
         )
+    elif isinstance(config, SoapConfig):
+        return DistributedShampoo(
+            params,
+            lr=config.lr,
+            betas=(config.betas1, config.betas2),
+            epsilon=1e-12,
+            weight_decay=1e-05,
+            max_preconditioner_dim=8192,
+            precondition_frequency=100,
+            use_decoupled_weight_decay=True,
+            # This can also be set to `QREigenvalueCorrectionConfig` which is less expensive
+            # and might therefore allow for a smaller `precondition_frequency`.
+            preconditioner_computation_config=EighEigenvalueCorrectionConfig(),
+            distributed_config=FullyShardShampooConfig(),
+        )
     else:
         raise ValueError(f"Unknown optimizer {config.optimizer}")
 
 
-__all__ = ["AdamConfig", "MuonConfig", "get_optimizer"]
+__all__ = ["OptimizersConfig", "get_optimizer"]

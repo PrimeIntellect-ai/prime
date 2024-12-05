@@ -4,6 +4,7 @@ type_model = "llama2"
 
 [train]
 micro_bs = 64 # change this base on the gpu
+reshard_after_forward = true
 
 [optim]
 batch_size = 512

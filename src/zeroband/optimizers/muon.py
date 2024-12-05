@@ -1,5 +1,6 @@
 # credits to https://github.com/ethansmith2000/fsdp_optimizers/blob/main/muon.py
 
+from pydantic_config import BaseConfig
 import torch
 from typing import Generator
 from torch.distributed._tensor.api import (
@@ -205,3 +206,19 @@ class Muon(torch.optim.Optimizer):
                     scale = bias_correction1 / bias_correction2**0.5
                     p.data.mul_(1 - lr * group["adamw_wd"])
                     p.data.add_(g, alpha=-lr / scale)
+
+
+class AdamConfig(BaseConfig):
+    lr: float = 4e-4
+    weight_decay: float = 0.1
+    betas1: float = 0.9
+    betas2: float = 0.95
+
+
+class MuonConfig(BaseConfig):
+    pseudo_order_steps: int
+    lr: float = 0.02
+    momentum: float = 0.9
+    nesterov: bool = True
+
+    adam: AdamConfig = AdamConfig(lr=3e-4, betas1=0.95, betas2=0.95, weight_decay=0)

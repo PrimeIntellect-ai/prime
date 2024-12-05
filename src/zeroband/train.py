@@ -19,8 +19,7 @@ from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
 from zeroband.comms import ElasticDeviceMesh
 from zeroband.loss import cross_entropy_max_z_loss
-from zeroband.optimizers import AdamConfig, get_optimizer
-from zeroband.optimizers.muon import MuonConfig
+from zeroband.optimizers import AdamConfig, MuonConfig, get_optimizer
 
 from zeroband.utils import (
     FakeTokenizer,

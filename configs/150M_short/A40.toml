@@ -5,8 +5,9 @@ type_model = "llama2"
 [train]
 micro_bs = 32 # change this base on the gpu
 reshard_after_forward = true
+
 [optim]
 batch_size = 512
-warmup_steps = 1000
-total_steps = 15_000
+warmup_steps = 500
+total_steps = 8192
 lr = 4e-4

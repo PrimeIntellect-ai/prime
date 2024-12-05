@@ -11,9 +11,3 @@ batch_size = 512
 warmup_steps = 1000
 total_steps = 88_000
 lr = 4e-4
-
-
-[data]
-dataset_name_or_paths = "/data/datasets/fineweb-edu,/data/datasets/StackV1-popular"
-dataset_ratio = "80:20"
-num_workers = 2

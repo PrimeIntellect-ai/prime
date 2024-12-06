@@ -123,3 +123,14 @@ def test_muon(diloco: bool):
         extra_args=["--optim.optim.pseudo_order_steps", "6"],
         diloco=diloco,
     )
+
+
+@pytest.mark.parametrize("diloco", [False, True])
+def test_soap(diloco: bool):
+    num_gpus = [1, 2] if diloco else [2, 1]
+    _test_multi_gpu(
+        num_gpus,
+        "debug/diloco.toml" if diloco else "debug/normal.toml",
+        extra_args=["--optim.optim.precondition_frequency", "1"],
+        diloco=diloco,
+    )

@@ -1,8 +1,12 @@
+from typing import TypeAlias
 import torch
 from zeroband.optimizers.muon import Muon, AdamConfig, MuonConfig
 
 
-def get_optimizer(params: list[torch.nn.Parameter], config: AdamConfig | MuonConfig) -> torch.optim.Optimizer:
+OptimizersConfig: TypeAlias = AdamConfig | MuonConfig
+
+
+def get_optimizer(params: list[torch.nn.Parameter], config: OptimizersConfig) -> torch.optim.Optimizer:
     if isinstance(config, AdamConfig):
         return torch.optim.AdamW(
             params,
@@ -25,4 +29,4 @@ def get_optimizer(params: list[torch.nn.Parameter], config: AdamConfig | MuonCon
         raise ValueError(f"Unknown optimizer {config.optimizer}")
 
 
-__all__ = ["AdamConfig", "MuonConfig", "get_optimizer"]
+__all__ = ["OptimizersConfig", "get_optimizer"]

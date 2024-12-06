@@ -19,7 +19,7 @@ from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
 from zeroband.comms import ElasticDeviceMesh
 from zeroband.loss import cross_entropy_max_z_loss
-from zeroband.optimizers import AdamConfig, MuonConfig, get_optimizer
+from zeroband.optimizers import AdamConfig, OptimizersConfig, get_optimizer
 
 from zeroband.utils import (
     FakeTokenizer,
@@ -42,7 +42,7 @@ from zeroband.lr_scheduler import get_scheduler
 
 
 class OptimConfig(BaseConfig):
-    optim: AdamConfig | MuonConfig = AdamConfig()
+    optim: OptimizersConfig = AdamConfig()
 
     sched_type: Literal["cosine", "linear", "wsd-sqrt"] = "cosine"
     warmup_steps: int = 1000

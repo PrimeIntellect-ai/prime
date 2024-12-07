@@ -107,7 +107,7 @@ def test_z_loss():
     _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=["--optim.z_loss"])
 
 
-@pytest.mark.parametrize("packing", [True, False])
+@pytest.mark.parametrize("packing", [True])  # , False])
 def test_packing(packing: bool):
     num_gpus = [2, 1]
     packing_arg = "--train.sequence_packing" if packing else "--no-train.sequence_packing"

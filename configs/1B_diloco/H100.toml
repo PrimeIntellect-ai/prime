@@ -9,9 +9,11 @@ micro_bs = 16
 batch_size = 2048
 warmup_steps = 1000
 total_steps = 88_000
-lr = 4e-4
 
 z_loss = true
+
+[optim.optim]
+lr = 4e-4
 
 
 [diloco]

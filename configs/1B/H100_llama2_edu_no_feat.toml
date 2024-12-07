@@ -19,5 +19,7 @@ batch_size = 256
 warmup_steps = 1000
 total_steps = 1_000_000_000_000
 sched_type = "wsd-sqrt"
-lr = 2e-4
 z_loss = false
+
+[optim.optim]
+lr = 2e-4

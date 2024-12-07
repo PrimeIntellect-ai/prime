@@ -7,7 +7,7 @@ from distributed_shampoo import EighEigenvalueCorrectionConfig, DistributedShamp
 
 class SoapConfig(BaseConfig):
     lr: float = 4e-4
-    weight_decay: float = 0.1
+    weight_decay: float = 1e-05
     betas1: float = 0.9
     betas2: float = 0.95
 

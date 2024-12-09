@@ -17,7 +17,7 @@ from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 import torch.distributed as dist
 from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
-from zeroband.comms import ElasticDeviceMesh
+from zeroband.comms import PcclCommunicator
 from zeroband.loss import cross_entropy_max_z_loss
 
 from zeroband.utils import (
@@ -38,6 +38,8 @@ from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 from zeroband.checkpoint import CkptConfig, CkptManager, TrainingProgress
 from zeroband.lr_scheduler import get_scheduler
+
+from pccl import PROTOCOL_PORT_MASTER
 
 
 class OptimConfig(BaseConfig):
@@ -109,12 +111,14 @@ class Config(BaseConfig):
     monitor: MonitorConfig | None = None
 
     ckpt: CkptConfig = CkptConfig()
+    ccoip_master_ip: str = "127.0.0.1"
+    ccoip_master_port: int = PROTOCOL_PORT_MASTER
 
     @model_validator(mode="after")
     def ckpt_diloco_step(self):
         if self.ckpt is not None and self.ckpt.interval is not None and self.diloco is not None:
             assert (
-                self.ckpt.interval % self.diloco.inner_steps == 0
+                    self.ckpt.interval % self.diloco.inner_steps == 0
             ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
         return self
 
@@ -135,7 +139,7 @@ def train(config: Config):
 
     if config.ckpt is not None and config.ckpt.interval is not None and config.diloco is not None:
         assert (
-            config.ckpt.interval % config.diloco.inner_steps == 0
+                config.ckpt.interval % config.diloco.inner_steps == 0
         ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
 
     if config.data.fake and config.name_model == "debugmodel":
@@ -183,9 +187,9 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    elastic_device_mesh = ElasticDeviceMesh(
-        enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
-    )
+    pccl_communicator = PcclCommunicator(config.ccoip_master_ip, config.ccoip_master_port)
+
+    dist.init_process_group()
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
@@ -199,13 +203,11 @@ def train(config: Config):
         fully_shard(
             transformer_block,
             mp_policy=mp_policy,
-            mesh=elastic_device_mesh.cuda_local_mesh,
             reshard_after_forward=reshard_after_forward,
         )
     fully_shard(
         model,
         mp_policy=mp_policy,
-        mesh=elastic_device_mesh.cuda_local_mesh,
         reshard_after_forward=config.train.reshard_after_forward,
     )
     logger.debug("model fsdped")
@@ -219,7 +221,7 @@ def train(config: Config):
     )
 
     if config.diloco is not None:
-        diloco = Diloco(config.diloco, model, elastic_device_mesh)
+        diloco = Diloco(config.diloco, model, pccl_communicator)
 
     scheduler = get_scheduler(
         sched_type=config.optim.sched_type,
@@ -287,7 +289,7 @@ def train(config: Config):
 
     logger.info("starting training")
 
-    need_live_recovery = config.ckpt.live_recovery_rank_src is not None
+    # need_live_recovery = config.ckpt.live_recovery_rank_src is not None
     while True:
         if num_inner_steps > 1:
             # if we don't use diloco we don't print the outer step logs
@@ -295,51 +297,51 @@ def train(config: Config):
 
         time_start_outer = time.perf_counter()
 
-        if config.diloco is not None:
-            # this is a patch for now to allow live recovery worker to not affect the all reduce at all
+        # if config.diloco is not None:
+        #     # this is a patch for now to allow live recovery worker to not affect the all reduce at all
 
-            if not need_live_recovery:
-                elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=True)
+        #     if not need_live_recovery:
+        #         elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=True)
 
-                maybe_dest_rank = elastic_device_mesh.live_recovery.should_send_ckpt_to()
-                if maybe_dest_rank is not None:
-                    logger.info(f"Start live recovery to rank {maybe_dest_rank}")
-                    if config.train.log_model_hash:
-                        logger.info(
-                            f"live recovery outer optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}"
-                        )
-                        logger.info(
-                            f"live recovery outer model hash: {get_tensor_list_signature(diloco.param_list_cpu)}"
-                        )
-                        logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
+        #         maybe_dest_rank = elastic_device_mesh.live_recovery.should_send_ckpt_to()
+        #         if maybe_dest_rank is not None:
+        #             logger.info(f"Start live recovery to rank {maybe_dest_rank}")
+        #             if config.train.log_model_hash:
+        #                 logger.info(
+        #                     f"live recovery outer optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}"
+        #                 )
+        #                 logger.info(
+        #                     f"live recovery outer model hash: {get_tensor_list_signature(diloco.param_list_cpu)}"
+        #                 )
+        #                 logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
 
-                    ckpt_manager.send_ckpt_to_peer(elastic_device_mesh.global_pg, maybe_dest_rank, blocking=True)
+        #             ckpt_manager.send_ckpt_to_peer(elastic_device_mesh.global_pg, maybe_dest_rank, blocking=True)
 
-                    elastic_device_mesh.live_recovery.reset()
-            else:
-                ## receiving
-                time_start_live_recovery = time.perf_counter()
-                logger.info(f"Start live recovery from rank {config.ckpt.live_recovery_rank_src}")
+        #             elastic_device_mesh.live_recovery.reset()
+        #     else:
+        #         ## receiving
+        #         time_start_live_recovery = time.perf_counter()
+        #         logger.info(f"Start live recovery from rank {config.ckpt.live_recovery_rank_src}")
 
-                ## we create grad buffer and opts stats mamnually, the value will be overwritten by the ckpt but we need the DTensor to be correctly init before loading it
+        #         ## we create grad buffer and opts stats mamnually, the value will be overwritten by the ckpt but we need the DTensor to be correctly init before loading it
 
-                diloco.outer_optimizer.step()  # need to step to init the DTensor stats
+        #         diloco.outer_optimizer.step()  # need to step to init the DTensor stats
 
-                ckpt_manager.recv_ckpt_from_peer(elastic_device_mesh.global_pg)
+        #         ckpt_manager.recv_ckpt_from_peer(elastic_device_mesh.global_pg)
 
-                if config.train.log_model_hash:
-                    logger.info(
-                        f"live recovery outer optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}"
-                    )
-                    logger.info(f"live recovery outer model hash: {get_tensor_list_signature(diloco.param_list_cpu)}")
-                    logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
+        #         if config.train.log_model_hash:
+        #             logger.info(
+        #                 f"live recovery outer optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}"
+        #             )
+        #             logger.info(f"live recovery outer model hash: {get_tensor_list_signature(diloco.param_list_cpu)}")
+        #             logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
 
-                need_live_recovery = False
+        #         need_live_recovery = False
 
-                if config.ckpt.remote_data_load:
-                    ckpt_manager.remote_data_load()
+        #         if config.ckpt.remote_data_load:
+        #             ckpt_manager.remote_data_load()
 
-                logger.info("live recovery done in %f", time.perf_counter() - time_start_live_recovery)
+        #         logger.info("live recovery done in %f", time.perf_counter() - time_start_live_recovery)
 
         # at the beginning of the inner steps we allow joiner to arrive.
         # We maybe reinit before the all reduce but only to allow leaving, not to join anymore
@@ -393,9 +395,9 @@ def train(config: Config):
                 else:
                     loss_batch += loss.clone().detach()
 
-            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
+            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
             if config.optim.z_loss:
-                dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
+                dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG)
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             inner_optimizer.step()
@@ -416,7 +418,10 @@ def train(config: Config):
             else:
                 # we count the total tokens with respect to all diloco workers
                 # might need to tweak this as some worker might fail to join the all reduce later
-                training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
+
+                # training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size() # todo need to know the size
+                training_progress.total_tokens += new_tokens
+
             remaining_cpu_ram = psutil.virtual_memory().available / (1024 * 1024 * 1024)
 
             metrics = {
@@ -443,12 +448,12 @@ def train(config: Config):
             if tokens_per_second is not None:
                 metrics["tokens_per_second"] = tokens_per_second
                 metrics["mfu"] = (
-                    100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
+                        100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
                 )
                 log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
 
             if config.diloco is not None:
-                metrics["num_peers"] = elastic_device_mesh.global_pg.size()
+                metrics["num_peers"] = 1  # elastic_device_mesh.global_pg.size()
                 log += f", diloco_peers: {metrics['num_peers']}"
 
             if world_info.rank == 0:
@@ -481,9 +486,9 @@ def train(config: Config):
         training_progress.outer_step += 1
 
         if (
-            config.ckpt.interval is not None
-            and training_progress.step > 0
-            and training_progress.step % config.ckpt.interval == 0
+                config.ckpt.interval is not None
+                and training_progress.step > 0
+                and training_progress.step % config.ckpt.interval == 0
         ):
             # we only allow to checkpoint after a outer step. For non diloco training outer step = 1 anyway
 
@@ -499,10 +504,10 @@ def train(config: Config):
 
         if config.diloco:
             tokens_per_second = (
-                config.optim.batch_size
-                * config.diloco.inner_steps
-                * config.data.seq_length
-                / (time.perf_counter() - time_start_outer)
+                    config.optim.batch_size
+                    * config.diloco.inner_steps
+                    * config.data.seq_length
+                    / (time.perf_counter() - time_start_outer)
             )
             mfu = 100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
             logger.info(f"effective mfu: {mfu}")
@@ -534,7 +539,8 @@ def train(config: Config):
 
     ckpt_manager.wait_for_blocking_job()
 
-    del elastic_device_mesh  # allow to clean up for smoother tests transition
+    pccl_communicator.destroy()
+    del pccl_communicator  # allow to clean up for smoother tests transition
 
     logger.info("Training finished, exiting ...")
 

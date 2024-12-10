@@ -63,8 +63,14 @@ def convert_config_zb_to_hf(zb_config: ModelArgs, with_debug_automap: bool = Fal
     config.rms_norm_eps = zb_config.norm_eps
     config.rope_theta = float(zb_config.rope_theta)
     config.max_position_embeddings = zb_config.max_seq_len
-    config.bos_token_id = 128000
-    config.eos_token_id = [128001, 128008, 128009]
+
+    if zb_config.type_model == "llama3":
+        config.bos_token_id = [1]
+        config.eos_token_id = [2]
+    else:
+        config.bos_token_id = [128000]
+        config.eos_token_id = [128001, 128008, 128009]
+
     config.architectures = ["LlamaForCausalLM"]
 
     # Rope scaling
@@ -76,10 +82,11 @@ def convert_config_zb_to_hf(zb_config: ModelArgs, with_debug_automap: bool = Fal
     if with_debug_automap:
         config.auto_map = {
             "AutoConfig": "PrimeIntellect/prime-llama-debug--configuration_llama.LlamaConfig",
-            "AutoModelForCausalLM": "PrimeIntellect/prime-llama-debug--modeling_llama.LlamaForCausalLM"
+            "AutoModelForCausalLM": "PrimeIntellect/prime-llama-debug--modeling_llama.LlamaForCausalLM",
         }
 
     return config
+
 
 @torch.no_grad
 def convert_qk_from_complex_to_rotate_half(linear_weight: torch.FloatTensor, head_dim: int) -> torch.FloatTensor:
@@ -99,8 +106,12 @@ def convert_qk_from_complex_to_rotate_half(linear_weight: torch.FloatTensor, hea
     # This applies the riffle shuffle permutation to the outputs of the linear for each attn head
     # Even numbers go to the top half, odd numbers go to the bottom half
     for i in range(num_heads):
-        new_weight[i * head_dim:(i * head_dim + hhd), :].copy_(linear_weight[i * head_dim + 0:(i + 1) * head_dim:2, :])
-        new_weight[i * head_dim + hhd:(i + 1) * head_dim, :].copy_(linear_weight[i * head_dim + 1:(i + 1) * head_dim:2, :])
+        new_weight[i * head_dim : (i * head_dim + hhd), :].copy_(
+            linear_weight[i * head_dim + 0 : (i + 1) * head_dim : 2, :]
+        )
+        new_weight[i * head_dim + hhd : (i + 1) * head_dim, :].copy_(
+            linear_weight[i * head_dim + 1 : (i + 1) * head_dim : 2, :]
+        )
 
     return new_weight
 
@@ -127,7 +138,7 @@ def main(config: ExportConfig):
         seq_length=config.data.seq_length,
         attn_fn=config.train.attn_fn,
     )
-    
+
     # Convert ZeroBand config to HuggingFace config
     hf_config = convert_config_zb_to_hf(model_config, with_debug_automap=config.with_debug_automap)
     hf_config.to_json_file(save_path / "config.json")
@@ -152,7 +163,7 @@ def main(config: ExportConfig):
     index_json = {}
     total_size = 0
     state_dict = {remap_keys_llama(k): v for k, v in state_dict.items()}
-    if not config.with_debug_automap: # The debug uses complex rotary impl
+    if not config.with_debug_automap:  # The debug uses complex rotary impl
         with torch.no_grad():
             for i in range(hf_config.num_hidden_layers):
                 old_q = state_dict[f"model.layers.{i}.self_attn.q_proj.weight"]

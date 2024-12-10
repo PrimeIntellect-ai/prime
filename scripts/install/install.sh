@@ -46,10 +46,7 @@ main() {
     
     log_info "Installing dependencies..."
     uv sync --extra all
-    
-    log_info "Installing flash-attn..."
-    uv pip install flash-attn==2.6.3 --no-build-isolation
-    
+        
     log_info "Updating git submodules..."
     git submodule update --init --recursive
     

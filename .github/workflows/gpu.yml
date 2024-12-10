@@ -24,16 +24,10 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
       
-
-
       - name: Set up Python 
         run: uv python install 3.10.13
 
       - name: Install the project
         run: uv sync --all-extras --dev
-
-      - name: Install flash attention
-        run: uv pip install flash-attn --no-build-isolation
-
       - name: Run tests
         run: uv run pytest tests

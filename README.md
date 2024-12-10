@@ -66,7 +66,6 @@ sudo apt install iperf -y
 uv venv
 source .venv/bin/activate
 uv sync --extra all
-uv pip install flash-attn==2.6.3 --no-build-isolation
 git submodule update --init --recursive
 ```
 

@@ -125,7 +125,7 @@ uv run python scripts/export_dcp.py @configs/10B/H100.toml --ckpt.path CONVERTED
 
 
 ```
-uv run accelerate launch -m lm_eval --model hf --model_args pretrained=CONVERTED_MODEL_PATH,add_bos_token=True,trust_remote_code=True  --tasks hellaswag --num_fewshot 10
+uv run accelerate launch -m lm_eval --model hf --model_args pretrained=CONVERTED_MODEL_PATH,add_bos_token=True  --tasks hellaswag --num_fewshot 10
 ```
 
 

@@ -117,7 +117,7 @@ uv run pytest
 
 ### Eval
 
-To eval you need first to concert the checkpoint to a huggingface compatible model.
+To eval you need first to convert the checkpoint to a huggingface compatible model.
 
 ```bash
 uv run python scripts/export_dcp.py @configs/10B/H100.toml --ckpt.path CONVERTED_MODEL_PATH --ckpt.resume CHECKPOINT_PATH --torch_dtype bfloat16  --ckpt.interval 1

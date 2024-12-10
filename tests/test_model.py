@@ -2,7 +2,7 @@ import random
 import pytest
 import torch
 from zeroband.models.llama import Transformer, llama2_configs
-from zeroband.models.llama.model import Attention, ModelArgs
+from zeroband.models.llama.model import Attention, ModelArgs, create_block_mask_from_seqlens
 
 
 VOCAB_SIZE = 1024
@@ -26,11 +26,9 @@ def llama_config() -> ModelArgs:
     return config
 
 
-@pytest.mark.parametrize("attn_fn", ["flash", "sdpa"])
-def test_llama(llama_config: ModelArgs, attn_fn):
+def test_llama(llama_config: ModelArgs):
     seq_len = 512
     bs = 8
-    llama_config.attn_fn = attn_fn
     model = Transformer(llama_config).to("cuda")
     input_ = torch.randint(0, llama_config.vocab_size, (bs, seq_len)).to("cuda")
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -51,6 +49,7 @@ def test_attn(llama_config: ModelArgs):
     freqs_cis = get_freqs_cis(llama_config)
     input_ = torch.rand(bs, seq_len, llama_config.dim).to("cuda")
     seqlens = [torch.Tensor([seq_len]).int().to("cuda") for _ in range(bs)]
+    block_mask = create_block_mask_from_seqlens(seqlens)
 
     attn = Attention(llama_config).to("cuda")
 
@@ -58,7 +57,7 @@ def test_attn(llama_config: ModelArgs):
         output_sdpa = attn(input_, freqs_cis)
 
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        output_flex = attn(input_, freqs_cis, seqlens=seqlens)
+        output_flex = attn(input_, freqs_cis, block_mask=block_mask)
 
     rtol = ERROR_RTOL[torch.bfloat16]
     atol = ERROR_ATOL[torch.bfloat16]
@@ -73,11 +72,12 @@ def test_packing_simple(llama_config: ModelArgs):
     freqs_cis = get_freqs_cis(llama_config)
     input_ = torch.rand(bs, seq_len, llama_config.dim).to("cuda")
     seqlens = [torch.Tensor([seq_len // 4] * 4).int().to("cuda") for _ in range(bs)]
+    block_mask = create_block_mask_from_seqlens(seqlens)
 
     attn = Attention(llama_config).to("cuda")
 
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        output = attn(input_, freqs_cis, seqlens=seqlens)
+        output = attn(input_, freqs_cis, block_mask=block_mask)
 
     assert output.shape == (bs, seq_len, llama_config.dim)
 
@@ -95,13 +95,14 @@ def test_sequence_packing_two_time_same_sequence(llama_config: ModelArgs):
     seq = [2, 1, 4, 8]
     input_stuff_raw = torch.Tensor([seq + seq]).long().to("cuda")
     seqlens = [torch.Tensor([len(seq), len(seq)]).int().to("cuda")]
+    block_mask = create_block_mask_from_seqlens(seqlens)
 
     input_stuff = emb(input_stuff_raw)
 
     freqs_cis = get_freqs_cis(llama_config)
 
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        output = model(input_stuff, freqs_cis, seqlens=seqlens)
+        output = model(input_stuff, freqs_cis, block_mask=block_mask)
 
     output_left = output[:, :4, :]
     output_right = output[:, 4:, :]
@@ -129,11 +130,12 @@ def test_sequence_packing_vs_normal(llama_config: ModelArgs):
 
     input_packed_raw = torch.Tensor([seq_1 + seq_2]).long().to("cuda")
     seqlens = [torch.Tensor([len(seq_1), len(seq_2)]).int().to("cuda")]
+    block_mask = create_block_mask_from_seqlens(seqlens)
 
     input_packed = emb(input_packed_raw)
 
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        output = model(input_packed, freqs_cis, seqlens=seqlens)
+        output = model(input_packed, freqs_cis, block_mask=block_mask)
 
     output_packed_1 = output[:, :4, :]
     output_packed_2 = output[:, 4:, :]
@@ -179,12 +181,13 @@ def test_sequence_packing_vs_normal_random(llama_config: ModelArgs):
         input_2 = torch.rand(1, seq2, llama_config.dim).to("cuda")
 
         seqlens = [torch.Tensor([seq1, seq2]).int().to("cuda")]
+        block_mask = create_block_mask_from_seqlens(seqlens)
 
         packed_input = torch.cat([input_1, input_2], dim=1)
 
         # packed output
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            output = model(packed_input, freqs_cis, seqlens=seqlens)
+            output = model(packed_input, freqs_cis, block_mask=block_mask)
 
         output_packed_1 = output[:, :seq_len_cutoff, :]
         output_packed_2 = output[:, seq_len_cutoff:, :]

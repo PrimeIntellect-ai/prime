@@ -119,7 +119,6 @@ def test_sequence_packing_vs_normal(llama_config: ModelArgs):
     take two sequences and compare the outout of attention on individual sequences vs the output of attention on the packed sequence
     """
 
-    llama_config.attn_fn = "flash"
     model = Attention(llama_config).to("cuda")
     emb = torch.nn.Embedding(10, llama_config.dim).to("cuda")
 
@@ -129,8 +128,7 @@ def test_sequence_packing_vs_normal(llama_config: ModelArgs):
     seq_2 = [3, 7, 5, 6]
 
     input_packed_raw = torch.Tensor([seq_1 + seq_2]).long().to("cuda")
-    seqlens = [len(seq_1), len(seq_2)]
-    seqlens = torch.Tensor(seqlens).int().to("cuda")
+    seqlens = [torch.Tensor([len(seq_1), len(seq_2)]).int().to("cuda")]
 
     input_packed = emb(input_packed_raw)
 
@@ -166,7 +164,6 @@ def test_sequence_packing_vs_normal_random(llama_config: ModelArgs):
     take two sequences and compare the outout of attention on individual sequences vs the output of attention on the packed sequence
     """
 
-    llama_config.attn_fn = "flash"
     model = Attention(llama_config).to("cuda")
 
     freqs_cis = get_freqs_cis(llama_config)
@@ -176,11 +173,12 @@ def test_sequence_packing_vs_normal_random(llama_config: ModelArgs):
     for _ in range(10):
         seq_len_cutoff = random.randint(1, MAX_SEQ_LEN)
 
-        input_1 = torch.rand(1, seq_len_cutoff, llama_config.dim).to("cuda")
-        input_2 = torch.rand(1, MAX_SEQ_LEN - seq_len_cutoff, llama_config.dim).to("cuda")
+        seq1 = seq_len_cutoff
+        seq2 = MAX_SEQ_LEN - seq_len_cutoff
+        input_1 = torch.rand(1, seq1, llama_config.dim).to("cuda")
+        input_2 = torch.rand(1, seq2, llama_config.dim).to("cuda")
 
-        seqlens = [seq_len_cutoff, MAX_SEQ_LEN - seq_len_cutoff]
-        seqlens = torch.Tensor(seqlens).int().to("cuda")
+        seqlens = [torch.Tensor([seq1, seq2]).int().to("cuda")]
 
         packed_input = torch.cat([input_1, input_2], dim=1)
 
@@ -208,7 +206,6 @@ def test_sequence_packing_vs_normal_random(llama_config: ModelArgs):
 
 
 def test_end_to_end_packing(llama_config: ModelArgs):
-    llama_config.attn_fn = "flash"
     model = Transformer(llama_config).to("cuda")
 
     BS = 8
@@ -216,8 +213,7 @@ def test_end_to_end_packing(llama_config: ModelArgs):
 
     input_ = torch.randint(1, llama_config.vocab_size, (BS, SEQ_LEN)).to("cuda")
 
-    seqlens = [SEQ_LEN // 4, SEQ_LEN // 4, SEQ_LEN // 2]
-    seqlens = torch.Tensor(seqlens).int().to("cuda")
+    seqlens = [torch.Tensor([SEQ_LEN // 4, SEQ_LEN // 4, SEQ_LEN // 2]).int().to("cuda") for _ in range(BS)]
 
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         output = model(input_, seqlens=seqlens)

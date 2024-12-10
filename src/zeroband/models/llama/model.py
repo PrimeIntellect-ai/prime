@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch import nn
 from zeroband.models.norms import build_norm
 
-from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention, _DEFAULT_SPARSE_BLOCK_SIZE
 
 flex_attention_compiled = torch.compile(flex_attention, dynamic=False)
 
@@ -237,7 +237,14 @@ class Attention(nn.Module):
             return causal_mask & document_mask
 
         block_mask = create_block_mask(
-            document_causal_mask, batch_size, None, max_seq_len, max_seq_len, device="cuda", _compile=True
+            document_causal_mask,
+            batch_size,
+            None,
+            max_seq_len,
+            max_seq_len,
+            device="cuda",
+            _compile=True,
+            BLOCK_SIZE=max_seq_len if max_seq_len < _DEFAULT_SPARSE_BLOCK_SIZE else _DEFAULT_SPARSE_BLOCK_SIZE,
         )
 
         output = flex_attention_compiled(xq, xk, xv, block_mask=block_mask)

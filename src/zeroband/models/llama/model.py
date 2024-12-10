@@ -159,6 +159,18 @@ def seqlens_to_docs_tensor(seqlens: list[torch.Tensor]) -> torch.Tensor:
 
 
 def create_block_mask_from_seqlens(seqlens: list[torch.Tensor]) -> BlockMask:
+    """Creates a block mask from a list of sequence lengths.
+
+    Example:
+        seqlens = [tensor([2,2,1]))]  # List of 2 tensors
+        docs = [[0,0,1,1,2]] # Each doc_id repeated per its length
+
+        mask = [[1 1 0 0 0]  # First token of doc 0 can see itself and second token of doc 0
+                [1 1 0 0 0]  # Second token of doc 0 can see both tokens of doc 0
+                [0 0 1 1 0]  # First token of doc 1 can see itself and second token of doc 1
+                [0 0 1 1 0]  # Second token of doc 1 can see both tokens of doc 1
+                [0 0 0 0 1]] # Token of doc 2 can only see itself
+    """
     docs = seqlens_to_docs_tensor(seqlens).to("cuda")
     batch_size, max_seq_len = docs.shape
 

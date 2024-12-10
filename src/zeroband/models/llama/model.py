@@ -21,7 +21,22 @@ from zeroband.models.norms import build_norm
 
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention, BlockMask, _DEFAULT_SPARSE_BLOCK_SIZE
 
-flex_attention_compiled = torch.compile(flex_attention, dynamic=False)
+_flex_attention_compiled = torch.compile(flex_attention, dynamic=False)
+
+
+# copied from https://github.com/pytorch/torchtune/blob/f2bd4bc25b24587aef40f486087412b9da8f1d94/torchtune/modules/attention_utils.py#L27
+# We cannot do nested compile, but flex attention only has perf benefits
+# when compiled. To insulate it from the compiler, we wrap it with
+# compiler.disable so that it can be used regardless of whether the model
+# is compiled or not, and flex attention always remains compiled.
+@torch.compiler.disable(recursive=False)
+def flex_attention_compiled(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_mask: BlockMask,
+) -> torch.Tensor:
+    return _flex_attention_compiled(q, k, v, block_mask=block_mask)
 
 
 @dataclass
@@ -252,6 +267,9 @@ class Attention(nn.Module):
         output = flex_attention_compiled(xq, xk, xv, block_mask=block_mask)
         output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         return output
+        # output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+        # output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+        # return output
 
     def self_attention(
         self, xq: torch.Tensor, xk: torch.Tensor, xv: torch.Tensor, block_mask: BlockMask | None = None
@@ -462,22 +480,19 @@ class Transformer(nn.Module):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor, seqlens: torch.Tensor | None = None):
+    def forward(self, tokens: torch.Tensor, block_mask: BlockMask | None = None):
         """
         Perform a forward pass through the Transformer model.
 
         Args:
             tokens (torch.Tensor): Input token indices.
-            seqlens (torch.Tensor | None): Sequence lengths tensor for packing.
-
+            block_mask (BlockMask | None): Block mask for attention.
         Returns:
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
-
-        block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
 
         for layer in self.layers.values():
             h = layer(h, self.freqs_cis, block_mask=block_mask)

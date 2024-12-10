@@ -217,9 +217,9 @@ def test_end_to_end_packing(llama_config: ModelArgs):
     input_ = torch.randint(1, llama_config.vocab_size, (BS, SEQ_LEN)).to("cuda")
 
     seqlens = [torch.Tensor([SEQ_LEN // 4, SEQ_LEN // 4, SEQ_LEN // 2]).int().to("cuda") for _ in range(BS)]
-
+    block_mask = create_block_mask_from_seqlens(seqlens)
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        output = model(input_, seqlens=seqlens)
+        output = model(input_, block_mask=block_mask)
 
     assert output.shape == (BS, SEQ_LEN, llama_config.vocab_size)
 

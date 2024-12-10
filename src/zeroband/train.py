@@ -20,6 +20,7 @@ from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
 from zeroband.comms import ElasticDeviceMesh
 from zeroband.loss import cross_entropy_max_z_loss
+from zeroband.models.llama.model import create_block_mask_from_seqlens
 
 from zeroband.utils import (
     FakeTokenizer,
@@ -361,15 +362,11 @@ def train(config: Config):
                 labels = batch["labels"].to("cuda")
                 if config.train.sequence_packing:
                     seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
-
-                    # seqlens has a dynamic shape but fixed dimension, this allow to still torch compile
-                    # https://pytorch.org/docs/stable/torch.compiler_dynamic_shapes.html
-                    # torch._dynamo.mark_dynamic(seqlens, 0)
-                    logger.debug(f"seqlens: {seqlens}")
+                    block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
                 else:
-                    seqlens = None
+                    block_mask = None
 
-                logits = model(tokens=input_ids, seqlens=seqlens).contiguous()
+                logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
                 flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
                 flatten_labels = rearrange(labels, "b seq -> (b seq)")
 

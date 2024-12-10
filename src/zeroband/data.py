@@ -136,7 +136,7 @@ def collate_fn(samples: list[dict[str, torch.LongTensor]]) -> dict[str, torch.Lo
         inputs_ids.append(sample["input_ids"])
         labels.append(sample["labels"])
 
-        seqlens.extend(torch.Tensor(sample["seqlens"]).long())
+        seqlens.append(torch.Tensor(sample["seqlens"]).long())
 
     return {
         "input_ids": torch.stack(inputs_ids, dim=0),

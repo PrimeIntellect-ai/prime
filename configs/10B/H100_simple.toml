@@ -4,6 +4,7 @@ project = "debug_10B_zero_band"
 [train]
 micro_bs = 1
 ac_ckpt = true
+torch_compile_mode = "max-autotune-no-cudagraphs"
 
 [optim]
 sched_type = "wsd-sqrt"

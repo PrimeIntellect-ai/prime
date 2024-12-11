@@ -10,4 +10,7 @@ reshard_after_forward = true
 batch_size = 512
 warmup_steps = 500
 total_steps = 8192
+
+
+[optim.optim]
 lr = 4e-4

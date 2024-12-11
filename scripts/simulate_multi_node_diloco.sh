@@ -61,7 +61,7 @@ export GLOO_SOCKET_IFNAME=lo
 for i in $(seq 0 $(($N - 1 )))
 do
     > logs/log$i.log
-    WANDB_MODE=$([ $i -eq 0 ] && echo "online" || echo "online") GLOBAL_UNIQUE_ID=$i GLOBAL_RANK=$i CUDA_VISIBLE_DEVICES=$(get_cuda_devices $NUM_GPU $i) uv run torchrun --nproc_per_node=$NUM_GPU --node-rank 0 --rdzv-endpoint localhost:$((BASE_PORT + $i)) --nnodes=1  $@ --data.data_rank $i --data.data_world_size $N > logs/log$i.log 2>&1 &
+    WANDB_MODE=$([ $i -eq 0 ] && echo "online" || echo "offline") GLOBAL_UNIQUE_ID=$i GLOBAL_RANK=$i CUDA_VISIBLE_DEVICES=$(get_cuda_devices $NUM_GPU $i) uv run torchrun --nproc_per_node=$NUM_GPU --node-rank 0 --rdzv-endpoint localhost:$((BASE_PORT + $i)) --nnodes=1  $@ --data.data_rank $i --data.data_world_size $N > logs/log$i.log 2>&1 &
     child_pids+=($!)
 done
 

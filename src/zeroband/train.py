@@ -21,6 +21,7 @@ from zeroband.diloco import Diloco, DilocoConfig
 from zeroband.comms import ElasticDeviceMesh
 from zeroband.loss import cross_entropy_max_z_loss
 from zeroband.models.llama.model import create_block_mask_from_seqlens
+from zeroband.optimizers import AdamConfig, OptimizersConfig, get_optimizer
 
 from zeroband.utils import (
     FakeTokenizer,
@@ -43,10 +44,7 @@ from zeroband.lr_scheduler import get_scheduler
 
 
 class OptimConfig(BaseConfig):
-    lr: float = 4e-4
-    weight_decay: float = 0.1
-    adam_betas1: float = 0.9
-    adam_betas2: float = 0.95
+    optim: OptimizersConfig = AdamConfig()
 
     sched_type: Literal["cosine", "linear", "wsd-sqrt"] = "cosine"
     warmup_steps: int = 1000
@@ -212,12 +210,7 @@ def train(config: Config):
     logger.debug("model fsdped")
 
     # Setup optimizers
-    inner_optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.optim.lr,
-        weight_decay=config.optim.weight_decay,
-        betas=(config.optim.adam_betas1, config.optim.adam_betas2),
-    )
+    inner_optimizer = get_optimizer(model.parameters(), config.optim.optim)
 
     if config.diloco is not None:
         diloco = Diloco(config.diloco, model, elastic_device_mesh)

@@ -66,6 +66,7 @@ class MemoryProfilerConfig(BaseConfig):
 class TrainConfig(BaseConfig):
     micro_bs: int
     torch_compile: bool = True
+    torch_compile_mode: Literal["max-autotune-no-cudagraphs"] | None = None
     ac_ckpt: bool | int = False
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
 
@@ -246,7 +247,7 @@ def train(config: Config):
 
     if config.train.torch_compile:
         # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
-        model = torch.compile(model)
+        model = torch.compile(model, mode=config.train.torch_compile_mode)
         logger.debug("model compiled")
 
     if config.ckpt.resume is not None:

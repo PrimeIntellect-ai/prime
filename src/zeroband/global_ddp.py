@@ -1,6 +1,7 @@
 import time
 from pydantic import model_validator
 from pydantic_config import BaseConfig
+import torch
 import torch.nn as nn
 from zeroband.comms import ElasticDeviceMesh
 import torch.distributed as dist
@@ -56,6 +57,7 @@ class GlobalDDP:
 
     def __init__(
         self,
+        model: nn.Module,
         config: GlobalDDPConfig,
         elastic_device_mesh: ElasticDeviceMesh,
     ):
@@ -65,7 +67,12 @@ class GlobalDDP:
         self._logger = get_logger()
         self.world_info = get_world_info()
 
-    def all_reduce(self, model: nn.Module):
+        self.model = model
+
+    def all_reduce(self):
+        self._all_reduce(list(self.model.parameters()))
+
+    def _all_reduce(self, tensor: list[torch.Tensor]):
         _start_time = time.perf_counter()
 
         self.elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=False)
@@ -83,8 +90,8 @@ class GlobalDDP:
 
                 self._logger.debug("Beginning all reduce")
 
-                total_param = len(list(model.parameters()))
-                for j, param in enumerate(model.parameters()):
+                total_param = len(tensor)
+                for j, param in enumerate(tensor):
                     t0 = time.perf_counter()
                     if isinstance(param.grad, DTensor):
                         grad = param.grad.to_local()

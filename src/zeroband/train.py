@@ -227,7 +227,7 @@ def train(config: Config):
         diloco = Diloco(config.diloco, model, elastic_device_mesh)
 
     if config.global_ddp:
-        global_ddp = GlobalDDP(config.global_ddp, elastic_device_mesh)
+        global_ddp = GlobalDDP(model=model, config=config.global_ddp, elastic_device_mesh=elastic_device_mesh)
 
     scheduler = get_scheduler(
         sched_type=config.optim.sched_type,
@@ -406,7 +406,7 @@ def train(config: Config):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
             if config.global_ddp:
-                global_ddp.all_reduce(model)
+                global_ddp.all_reduce()
 
             inner_optimizer.step()
             scheduler.step()

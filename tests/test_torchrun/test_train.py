@@ -114,6 +114,8 @@ def test_packing(packing: bool):
     _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=[packing_arg])
 
 
-def test_global_ddp():
+@pytest.mark.parametrize("dpu", [True, False])
+def test_global_ddp(dpu: bool):
     num_gpus = [2, 1]
-    _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=["--global_ddp.enable"], multi_nodes=True)
+    dpu_arg = "--global_ddp.dpu" if dpu else "--no-global_ddp.dpu"
+    _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=[dpu_arg], multi_nodes=True)

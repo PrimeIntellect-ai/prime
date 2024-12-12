@@ -296,6 +296,7 @@ def train(config: Config):
     logger.info("starting training")
 
     need_live_recovery = config.ckpt.live_recovery_rank_src is not None
+    first_step = True
     while True:
         if num_inner_steps > 1:
             # if we don't use diloco we don't print the outer step logs
@@ -408,9 +409,14 @@ def train(config: Config):
             if config.global_ddp:
                 global_ddp.all_reduce()
 
-            inner_optimizer.step()
-            scheduler.step()
-            inner_optimizer.zero_grad()
+            if config.global_ddp is not None and config.global_ddp.dpu and first_step:
+                inner_optimizer.zero_grad()
+                first_step = False
+                ## if we are at the beginning of the dpu bubble we need to skip the first step
+            else:
+                inner_optimizer.step()
+                scheduler.step()
+                inner_optimizer.zero_grad()
 
             # logging
             training_progress.step += 1

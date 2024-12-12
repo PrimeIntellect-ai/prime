@@ -12,7 +12,8 @@ def gloo_all_reduce(
     tensor: torch.Tensor,
     op: dist.ReduceOp = dist.ReduceOp.SUM,
     group: Optional[dist.ProcessGroup] = None,
-) -> None:
+    async_op: bool = False,
+) -> None | dist.Work:
     """Wrap gloo all reduce"""
     if group is None:
         group = dist.distributed_c10d._get_default_group()
@@ -24,7 +25,7 @@ def gloo_all_reduce(
         # todo check numerical stability of doing post or pre div
         tensor.div_(group.size())
 
-    dist.all_reduce(tensor, op, group=group)
+    return dist.all_reduce(tensor, op, group=group, async_op=async_op)
 
 
 class Compression(Enum):

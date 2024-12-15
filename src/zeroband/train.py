@@ -19,6 +19,7 @@ import torch.distributed as dist
 from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
 from zeroband.comms import ElasticDeviceMesh
+from zeroband.global_ddp import GlobalDDP, GlobalDDPConfig
 from zeroband.loss import cross_entropy_max_z_loss
 from zeroband.models.llama.model import create_block_mask_from_seqlens
 
@@ -105,6 +106,9 @@ class Config(BaseConfig):
 
     # sub config
     diloco: DilocoConfig | None = None
+
+    global_ddp: GlobalDDPConfig | None = None
+
     data: DataConfig = DataConfig()
     optim: OptimConfig = OptimConfig()
     train: TrainConfig
@@ -185,7 +189,7 @@ def train(config: Config):
         apply_ac_ckpt(model, num)
 
     elastic_device_mesh = ElasticDeviceMesh(
-        enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
+        enable=config.diloco is not None or config.global_ddp, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
     )
 
     mp_policy = MixedPrecisionPolicy(
@@ -221,6 +225,9 @@ def train(config: Config):
 
     if config.diloco is not None:
         diloco = Diloco(config.diloco, model, elastic_device_mesh)
+
+    if config.global_ddp:
+        global_ddp = GlobalDDP(model=model, config=config.global_ddp, elastic_device_mesh=elastic_device_mesh)
 
     scheduler = get_scheduler(
         sched_type=config.optim.sched_type,
@@ -289,6 +296,7 @@ def train(config: Config):
     logger.info("starting training")
 
     need_live_recovery = config.ckpt.live_recovery_rank_src is not None
+    first_step = True
     while True:
         if num_inner_steps > 1:
             # if we don't use diloco we don't print the outer step logs
@@ -397,9 +405,18 @@ def train(config: Config):
                 dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            inner_optimizer.step()
-            scheduler.step()
-            inner_optimizer.zero_grad()
+
+            if config.global_ddp:
+                global_ddp.all_reduce()
+
+            if config.global_ddp is not None and config.global_ddp.dpu and first_step:
+                inner_optimizer.zero_grad()
+                first_step = False
+                ## if we are at the beginning of the dpu bubble we need to skip the first step
+            else:
+                inner_optimizer.step()
+                scheduler.step()
+                inner_optimizer.zero_grad()
 
             # logging
             training_progress.step += 1

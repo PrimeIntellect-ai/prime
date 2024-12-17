@@ -15,4 +15,6 @@ num_workers = 1
 batch_size = 128
 warmup_steps = 1000
 total_steps = 88_000
+
+[optim.optim]
 lr = 4e-4

@@ -13,6 +13,8 @@ from zeroband.utils.world_info import get_world_info
 
 from torch.distributed import Work
 
+logger = get_logger(__name__)
+
 
 class GlobalDDPConfig(BaseConfig):
     # retry_all_reduce: int = 3
@@ -54,6 +56,33 @@ def maybe_unwrap_dtensor(tensor: torch.Tensor | DTensor):
 class AllReduceGradWork(NamedTuple):
     grad: torch.Tensor
     work: Work
+
+
+def async_all_reduce(model: nn.Module, elastic_device_mesh: ElasticDeviceMesh, flag: str) -> list[AllReduceGradWork]:
+    """
+    Triggered all reduce operation on a list of tensors in a async manner.
+    Return a list of async jobs that can be waited on.
+    """
+
+    elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=False)
+    world_size = elastic_device_mesh.global_pg.size()
+
+    global_pg = elastic_device_mesh.global_pg
+    elastic_device_mesh.monitored_barrier(flag)
+    logger.debug("Beginning all reduce")
+
+    async_job = []
+
+    for param in offload_grad_generator(model):  # TODO: do we need to offload when doing blocking all reduce ?
+        grad = maybe_unwrap_dtensor(param)
+
+        grad.div_(world_size)
+
+        # all_reduce(self.config.compression, grad, dist.ReduceOp.SUM, global_pg) # doing gloo all reduce direclty because of async op
+
+        async_job.append(AllReduceGradWork(grad, gloo_all_reduce(grad, dist.ReduceOp.SUM, global_pg, True)))
+
+    return async_job
 
 
 class GlobalDDP:
@@ -105,7 +134,7 @@ class GlobalDDP:
         if not self.config.dpu:
             self._blocking_all_reduce(self.model)
         else:
-            new_staling_grad_work = self._async_all_reduce(self.model)
+            new_staling_grad_work = async_all_reduce(self.model, self.elastic_device_mesh, self.flag)
 
             if self._stalling_grad_work is None:
                 # if it is the first step we just store the work for the next call to this function and return
@@ -122,34 +151,11 @@ class GlobalDDP:
                 # and store the new staling grad work for the next call to this function
                 self._stalling_grad_work = new_staling_grad_work
 
-    def _async_all_reduce(self, model: nn.Module) -> list[AllReduceGradWork]:
-        """
-        Triggered all reduce operation on a list of tensors in a async manner.
-        Return a list of async jobs that can be waited on.
-        """
-
-        self.elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=False)
-        world_size = self.elastic_device_mesh.global_pg.size()
-
-        global_pg = self.elastic_device_mesh.global_pg
-        self.elastic_device_mesh.monitored_barrier(self.flag)
-        self._logger.debug("Beginning all reduce")
-
-        async_job = []
-
-        for param in offload_grad_generator(model):  # TODO: do we need to offload when doing blocking all reduce ?
-            grad = maybe_unwrap_dtensor(param)
-
-            grad.div_(world_size)
-
-            # all_reduce(self.config.compression, grad, dist.ReduceOp.SUM, global_pg) # doing gloo all reduce direclty because of async op
-
-            async_job.append(AllReduceGradWork(grad, gloo_all_reduce(grad, dist.ReduceOp.SUM, global_pg, True)))
-
-        return async_job
-
     def _blocking_all_reduce(self, tensor: list[torch.Tensor]):
         """
         Triggered all reduce operation on a list of tensors in a blocking manner.
         """
-        [all_reduce_grad_work.work.wait() for all_reduce_grad_work in self._async_all_reduce(tensor)]
+        [
+            all_reduce_grad_work.work.wait()
+            for all_reduce_grad_work in async_all_reduce(tensor, self.elastic_device_mesh, self.flag)
+        ]

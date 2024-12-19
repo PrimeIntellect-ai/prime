@@ -79,6 +79,8 @@ class TrainConfig(BaseConfig):
     sequence_packing: bool = True
     attn_fn: Literal["flash", "sdpa"] | None = None
 
+    math_attn: bool = False  # slow
+
     @model_validator(mode="after")
     def validate_attn_fn(self):
         if self.attn_fn is not None:
@@ -133,6 +135,7 @@ def log_hash_training_state(
     inner_optimizer: torch.optim.Optimizer,
     diloco: Diloco | None,
     metric_logger: MetricLogger,
+    step: int,
     id: str = "",
 ):
     """Log the hash of the model and optimizer. This function is slow"""
@@ -143,10 +146,11 @@ def log_hash_training_state(
         logger.debug(f"inner diloco model {id} : {inner_model_hash}")
         logger.debug(f"inner optimizer hash {id} : {inner_optimizer_hash}")
 
-        if world_info.rank == 0:
-            metric_logger.log(
-                {"inner_model_hash_{id}": inner_model_hash, "inner_optimizer_hash_{id}": inner_optimizer_hash}
-            )
+        metrics = {
+            "step": step,
+            f"inner_model_hash_{id}": inner_model_hash,
+            f"inner_optimizer_hash_{id}": inner_optimizer_hash,
+        }
 
         if config.diloco is not None and diloco is not None:
             outer_optimizer_hash = get_optimizer_signature(diloco.outer_optimizer)
@@ -155,10 +159,11 @@ def log_hash_training_state(
             logger.debug(f"outer diloco optimizer hash {id} : {outer_optimizer_hash}")
             logger.debug(f"outer diloco model hash {id} : {outer_model_hash}")
 
-            if world_info.rank == 0:
-                metric_logger.log(
-                    {f"outer_optimizer_hash_{id}": outer_optimizer_hash, f"outer_model_hash_{id}": outer_model_hash}
-                )
+            metrics.update(
+                {f"outer_optimizer_hash_{id}": outer_optimizer_hash, f"outer_model_hash_{id}": outer_model_hash}
+            )
+        if world_info.rank == 0:
+            metric_logger.log(metrics)
 
 
 def train(config: Config):
@@ -198,6 +203,7 @@ def train(config: Config):
         config.type_model,
         vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
         seq_length=config.data.seq_length,
+        math_attn=config.train.math_attn,
     )
 
     model = model.to(world_info.local_rank)
@@ -300,7 +306,9 @@ def train(config: Config):
             skip_dataloader=config.ckpt.skip_dataloader,
             data_path=config.ckpt.data_path,
         )
-        log_hash_training_state(config, model, inner_optimizer, diloco, metric_logger, id="resume")
+        log_hash_training_state(
+            config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="resume"
+        )
 
     if config.train.memory_monitor:
         gpu_mem_monitor = GPUMemoryMonitor()
@@ -349,7 +357,15 @@ def train(config: Config):
 
                 ckpt_manager.recv_ckpt_from_peer(elastic_device_mesh.global_pg)
 
-                log_hash_training_state(config, model, inner_optimizer, diloco, metric_logger, id="live_reco_recv")
+                log_hash_training_state(
+                    config,
+                    model,
+                    inner_optimizer,
+                    diloco,
+                    metric_logger,
+                    step=training_progress.step,
+                    id="live_reco_recv",
+                )
                 need_live_recovery = False
 
                 if config.ckpt.remote_data_load:
@@ -483,7 +499,9 @@ def train(config: Config):
             diloco.step(model=model, flag=training_progress.outer_step)
             diloco_time = time.perf_counter() - time_start_inner
 
-            log_hash_training_state(config, model, inner_optimizer, diloco, metric_logger, id="outer_step")
+            log_hash_training_state(
+                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="outer_step"
+            )
 
         training_progress.outer_step += 1
 
@@ -496,7 +514,9 @@ def train(config: Config):
 
             do_remote = config.ckpt.remote is not None and training_progress.step % config.ckpt.remote.interval == 0
             ckpt_manager.save(remote=do_remote)
-            log_hash_training_state(config, model, inner_optimizer, diloco, metric_logger, id="ckpt save")
+            log_hash_training_state(
+                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="save"
+            )
 
         if config.diloco:
             tokens_per_second = (

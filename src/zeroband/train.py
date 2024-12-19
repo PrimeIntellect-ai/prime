@@ -2,7 +2,6 @@ import os
 from typing import Literal
 import time
 import warnings
-import psutil
 from pydantic import model_validator
 from multiprocessing.process import _children
 
@@ -24,7 +23,6 @@ from zeroband.models.llama.model import create_block_mask_from_seqlens
 
 from zeroband.utils import (
     FakeTokenizer,
-    GPUMemoryMonitor,
     PerfCounter,
     get_module_signature,
     get_optimizer_signature,
@@ -32,7 +30,7 @@ from zeroband.utils import (
 )
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader, DataConfig
-from zeroband.utils.metric_logger import WandbMetricLogger, DummyMetricLogger
+from zeroband.utils.metric_logger import MetricLogger, WandbMetricLogger, DummyMetricLogger
 from zeroband.utils.monitor import HttpMonitor
 from zeroband.models.llama import get_model
 from zeroband.utils.profiler import MemoryProfiler
@@ -73,11 +71,12 @@ class TrainConfig(BaseConfig):
 
     log_model_hash: bool = False
 
-    memory_monitor: bool = False
     memory_profiler: MemoryProfilerConfig | None = None
 
     sequence_packing: bool = True
     attn_fn: Literal["flash", "sdpa"] | None = None
+
+    math_attn: bool = False  # slow
 
     @model_validator(mode="after")
     def validate_attn_fn(self):
@@ -127,6 +126,43 @@ class Config(BaseConfig):
         return self
 
 
+def log_hash_training_state(
+    config: Config,
+    model: torch.nn.Module,
+    inner_optimizer: torch.optim.Optimizer,
+    diloco: Diloco | None,
+    metric_logger: MetricLogger,
+    step: int,
+    id: str = "",
+):
+    """Log the hash of the model and optimizer. This function is slow"""
+    if config.train.log_model_hash:
+        inner_model_hash = get_module_signature(model)
+        inner_optimizer_hash = get_optimizer_signature(inner_optimizer)
+
+        logger.debug(f"inner diloco model {id} : {inner_model_hash}")
+        logger.debug(f"inner optimizer hash {id} : {inner_optimizer_hash}")
+
+        metrics = {
+            "step": step,
+            f"inner_model_hash_{id}": inner_model_hash,
+            f"inner_optimizer_hash_{id}": inner_optimizer_hash,
+        }
+
+        if config.diloco is not None and diloco is not None:
+            outer_optimizer_hash = get_optimizer_signature(diloco.outer_optimizer)
+            outer_model_hash = get_tensor_list_signature(diloco.param_list_cpu)
+
+            logger.debug(f"outer diloco optimizer hash {id} : {outer_optimizer_hash}")
+            logger.debug(f"outer diloco model hash {id} : {outer_model_hash}")
+
+            metrics.update(
+                {f"outer_optimizer_hash_{id}": outer_optimizer_hash, f"outer_model_hash_{id}": outer_model_hash}
+            )
+        if world_info.rank == 0:
+            metric_logger.log(metrics)
+
+
 def train(config: Config):
     # batch_size is the total batch size for all GPUs
     assert config.optim.batch_size % world_info.local_world_size == 0
@@ -164,6 +200,7 @@ def train(config: Config):
         config.type_model,
         vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
         seq_length=config.data.seq_length,
+        math_attn=config.train.math_attn,
     )
 
     model = model.to(world_info.local_rank)
@@ -244,6 +281,16 @@ def train(config: Config):
         diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None,
     )
 
+    if world_info.rank == 0:
+        logger_cls = WandbMetricLogger if config.metric_logger_type == "wandb" else DummyMetricLogger
+        metric_logger = logger_cls(
+            project=config.project,
+            config={"config": config.model_dump(), "world_info": world_info.json()},
+            resume=config.wandb_resume,
+        )
+    else:
+        metric_logger = None
+
     if config.train.torch_compile:
         # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
         model = torch.compile(model)
@@ -256,24 +303,10 @@ def train(config: Config):
             skip_dataloader=config.ckpt.skip_dataloader,
             data_path=config.ckpt.data_path,
         )
-        if config.train.log_model_hash:
-            logger.info(f"model hash: {get_module_signature(model)}")
-            logger.info(f"optimizer hash: {get_optimizer_signature(inner_optimizer)}")
-
-            if config.diloco is not None:
-                logger.info(f"outer optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}")
-                logger.info(f"outer model hash: {get_tensor_list_signature(diloco.param_list_cpu)}")
-
-    if world_info.rank == 0:
-        logger_cls = WandbMetricLogger if config.metric_logger_type == "wandb" else DummyMetricLogger
-        metric_logger = logger_cls(
-            project=config.project,
-            config={"config": config.model_dump(), "world_info": world_info.json()},
-            resume=config.wandb_resume,
+        log_hash_training_state(
+            config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="resume"
         )
 
-    if config.train.memory_monitor:
-        gpu_mem_monitor = GPUMemoryMonitor()
     if config.train.memory_profiler is not None:
         memory_profiler = MemoryProfiler(config.train.memory_profiler.freq, config.train.memory_profiler.snapshot_dir)
 
@@ -305,15 +338,6 @@ def train(config: Config):
                 maybe_dest_rank = elastic_device_mesh.live_recovery.should_send_ckpt_to()
                 if maybe_dest_rank is not None:
                     logger.info(f"Start live recovery to rank {maybe_dest_rank}")
-                    if config.train.log_model_hash:
-                        logger.info(
-                            f"live recovery outer optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}"
-                        )
-                        logger.info(
-                            f"live recovery outer model hash: {get_tensor_list_signature(diloco.param_list_cpu)}"
-                        )
-                        logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
-
                     ckpt_manager.send_ckpt_to_peer(elastic_device_mesh.global_pg, maybe_dest_rank, blocking=True)
 
                     elastic_device_mesh.live_recovery.reset()
@@ -328,13 +352,15 @@ def train(config: Config):
 
                 ckpt_manager.recv_ckpt_from_peer(elastic_device_mesh.global_pg)
 
-                if config.train.log_model_hash:
-                    logger.info(
-                        f"live recovery outer optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}"
-                    )
-                    logger.info(f"live recovery outer model hash: {get_tensor_list_signature(diloco.param_list_cpu)}")
-                    logger.info(f"inner optimizer hash: {get_optimizer_signature(inner_optimizer)}")
-
+                log_hash_training_state(
+                    config,
+                    model,
+                    inner_optimizer,
+                    diloco,
+                    metric_logger,
+                    step=training_progress.step,
+                    id="live_reco_recv",
+                )
                 need_live_recovery = False
 
                 if config.ckpt.remote_data_load:
@@ -416,7 +442,6 @@ def train(config: Config):
                 # we count the total tokens with respect to all diloco workers
                 # might need to tweak this as some worker might fail to join the all reduce later
                 training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
-            remaining_cpu_ram = psutil.virtual_memory().available / (1024 * 1024 * 1024)
 
             metrics = {
                 "Loss": loss_batch.item(),
@@ -425,15 +450,10 @@ def train(config: Config):
                 "Perplexity": torch.exp(loss_batch).item(),
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
-                "remaining_cpu_ram": remaining_cpu_ram,
             }
 
             if config.optim.z_loss:
                 metrics["z_loss"] = z_loss_batch.item()
-
-            if config.train.memory_monitor:
-                peak_gpu_stats = gpu_mem_monitor.get_peak_stats()
-                metrics.update(peak_gpu_stats)
 
             log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
 
@@ -461,9 +481,6 @@ def train(config: Config):
                 memory_profiler.step()
 
         if config.diloco is not None:
-            if config.train.log_model_hash:
-                logger.debug("Pre diloco model: %s", get_module_signature(model))
-
             if world_info.rank == 0 and config.monitor is not None:
                 monitor.set_stage("outer_loop")
 
@@ -471,11 +488,9 @@ def train(config: Config):
             diloco.step(model=model, flag=training_progress.outer_step)
             diloco_time = time.perf_counter() - time_start_inner
 
-            if config.train.log_model_hash:
-                logger.debug("inner diloco model: %s", get_module_signature(model))
-                logger.debug(f"outer diloco optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}")
-                logger.debug(f"outer diloco optimizer hash: {get_optimizer_signature(diloco.outer_optimizer)}")
-                logger.debug(f"outer diloco model hash: {get_tensor_list_signature(diloco.param_list_cpu)}")
+            log_hash_training_state(
+                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="outer_step"
+            )
 
         training_progress.outer_step += 1
 
@@ -488,13 +503,9 @@ def train(config: Config):
 
             do_remote = config.ckpt.remote is not None and training_progress.step % config.ckpt.remote.interval == 0
             ckpt_manager.save(remote=do_remote)
-            if config.train.log_model_hash:
-                logger.debug("Post saved model: %s", get_module_signature(model))
-                logger.debug("Post saved optimizer: %s", get_optimizer_signature(inner_optimizer))
-
-                if config.diloco is not None:
-                    logger.debug("Post saved outer model: %s", get_tensor_list_signature(diloco.param_list_cpu))
-                    logger.debug("optimizer hash: %s", get_optimizer_signature(diloco.outer_optimizer))
+            log_hash_training_state(
+                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="save"
+            )
 
         if config.diloco:
             tokens_per_second = (
@@ -516,9 +527,6 @@ def train(config: Config):
                         "all_reduce_step": diloco_time,
                     }
                 )
-
-        if config.train.memory_monitor:
-            logger.info(f"outer step peak gpu stats: {gpu_mem_monitor.format_peak_states()}")
 
         if training_progress.step >= config.optim.total_steps:
             # we only allow to break outisde of the inner loop.

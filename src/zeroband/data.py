@@ -46,18 +46,23 @@ class FakeTokenizedDataset(IterableDataset):
         self.seq_len = seq_len
         self.vocab_size = vocab_size
         assert vocab_size > 3, "Vocab size must be greater than 3"
+        self.step = 0
 
     def __iter__(self) -> Generator[dict[str, Any], Any, None]:
         while True:
             len_ = random.randint(1, self.seq_len)
             input_ids = torch.randint(3, self.vocab_size, (len_,)).tolist()
+            self.step += 1
             yield {"input_ids": input_ids}
 
     def state_dict(self):
-        return {}
+        return {"step": self.step}
 
     def load_state_dict(self, state_dict):
-        pass
+        self.step = state_dict["step"]
+        itera = iter(self)
+        for _ in range(self.step):
+            next(itera)
 
 
 class BatchOutput(TypedDict):

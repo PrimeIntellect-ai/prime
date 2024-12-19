@@ -2,7 +2,6 @@ import os
 from typing import Literal
 import time
 import warnings
-import psutil
 from pydantic import model_validator
 from multiprocessing.process import _children
 
@@ -24,7 +23,6 @@ from zeroband.models.llama.model import create_block_mask_from_seqlens
 
 from zeroband.utils import (
     FakeTokenizer,
-    GPUMemoryMonitor,
     PerfCounter,
     get_module_signature,
     get_optimizer_signature,
@@ -73,7 +71,6 @@ class TrainConfig(BaseConfig):
 
     log_model_hash: bool = False
 
-    memory_monitor: bool = False
     memory_profiler: MemoryProfilerConfig | None = None
 
     sequence_packing: bool = True
@@ -310,8 +307,6 @@ def train(config: Config):
             config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="resume"
         )
 
-    if config.train.memory_monitor:
-        gpu_mem_monitor = GPUMemoryMonitor()
     if config.train.memory_profiler is not None:
         memory_profiler = MemoryProfiler(config.train.memory_profiler.freq, config.train.memory_profiler.snapshot_dir)
 
@@ -447,7 +442,6 @@ def train(config: Config):
                 # we count the total tokens with respect to all diloco workers
                 # might need to tweak this as some worker might fail to join the all reduce later
                 training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
-            remaining_cpu_ram = psutil.virtual_memory().available / (1024 * 1024 * 1024)
 
             metrics = {
                 "Loss": loss_batch.item(),
@@ -456,15 +450,10 @@ def train(config: Config):
                 "Perplexity": torch.exp(loss_batch).item(),
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
-                "remaining_cpu_ram": remaining_cpu_ram,
             }
 
             if config.optim.z_loss:
                 metrics["z_loss"] = z_loss_batch.item()
-
-            if config.train.memory_monitor:
-                peak_gpu_stats = gpu_mem_monitor.get_peak_stats()
-                metrics.update(peak_gpu_stats)
 
             log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
 
@@ -538,9 +527,6 @@ def train(config: Config):
                         "all_reduce_step": diloco_time,
                     }
                 )
-
-        if config.train.memory_monitor:
-            logger.info(f"outer step peak gpu stats: {gpu_mem_monitor.format_peak_states()}")
 
         if training_progress.step >= config.optim.total_steps:
             # we only allow to break outisde of the inner loop.

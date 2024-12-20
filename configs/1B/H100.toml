@@ -3,10 +3,11 @@ project = "debug_1B_zero_band"
 type_model = "llama2"
 
 [train]
-micro_bs = 16  
+micro_bs = 32
+reshard_after_forward = true
 
 [optim]
-batch_size = 2048
+batch_size = 1024
 warmup_steps = 1000
-total_steps = 88_000
-lr = 4e-4
+total_steps = 8192
+lr = 7e-4

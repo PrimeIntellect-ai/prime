@@ -1,7 +1,6 @@
 import os
 from typing import Literal
 import time
-import warnings
 import psutil
 from pydantic import model_validator
 from multiprocessing.process import _children
@@ -77,14 +76,6 @@ class TrainConfig(BaseConfig):
     memory_profiler: MemoryProfilerConfig | None = None
 
     sequence_packing: bool = True
-    attn_fn: Literal["flash", "sdpa"] | None = None
-
-    @model_validator(mode="after")
-    def validate_attn_fn(self):
-        if self.attn_fn is not None:
-            warnings.warn("attn_fn argument is deprecated")
-
-        return self
 
 
 class MonitorConfig(BaseConfig):

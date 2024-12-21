@@ -85,6 +85,7 @@ def get_model(
     type_model: str,
     vocab_size: int,
     seq_length: int,
+    math_attn: bool,
 ) -> tuple[Transformer, ModelArgs]:
     """get the transformer model"""
 
@@ -97,5 +98,6 @@ def get_model(
 
     config.vocab_size = vocab_size
     config.max_seq_len = seq_length
+    config.math_attn = math_attn
 
     return Transformer(config), config

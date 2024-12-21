@@ -1,5 +1,7 @@
 import copy
 import os
+from pathlib import Path
+import pickle
 import subprocess
 import pytest
 import socket
@@ -112,3 +114,139 @@ def test_packing(packing: bool):
     num_gpus = [2, 1]
     packing_arg = "--train.sequence_packing" if packing else "--no-train.sequence_packing"
     _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=[packing_arg])
+
+
+def test_ckpt(tmp_path: Path):
+    num_gpus = [1, 2]
+    v1_file = tmp_path / "v1.log"
+    v2_file = tmp_path / "v2.log"
+    # v3_file = tmp_path / "v3.log"
+
+    v1_ckpt = tmp_path / "v1_ckpt"
+    v2_ckpt = tmp_path / "v2_ckpt"
+    # v3_ckpt = tmp_path / "v3_ckpt"
+
+    os.mkdir(v1_ckpt)
+    os.mkdir(v2_ckpt)
+    # os.mkdir(v3_ckpt)
+
+    _test_multi_gpu(
+        num_gpus,
+        "debug/diloco.toml",
+        extra_args=[
+            "--project",
+            str(v1_file),
+            "--ckpt.path",
+            str(v1_ckpt),
+            "--ckpt.interval",
+            "5",
+            "--optim.total_steps",
+            "20",
+            "--train.log_model_hash",
+            "--no-train.sequence_packing",
+            "--train.math_attn",
+        ],
+        diloco=True,
+    )
+    _test_multi_gpu(
+        num_gpus,
+        "debug/diloco.toml",
+        extra_args=[
+            "--project",
+            str(v2_file),
+            "--ckpt.path",
+            str(v2_ckpt),
+            "--ckpt.interval",
+            "5",
+            "--ckpt.resume",
+            str(v1_ckpt / "step_5"),
+            "--optim.total_steps",
+            "20",
+            "--train.log_model_hash",
+            "--no-train.sequence_packing",
+            "--train.math_attn",
+        ],
+        diloco=True,
+    )
+    # _test_multi_gpu(
+    #     num_gpus,
+    #     "debug/diloco.toml",
+    #     extra_args=[
+    #         "--project",
+    #         str(v3_file),
+    #         "--ckpt.path",
+    #         str(v3_ckpt),
+    #         "--ckpt.interval",
+    #         "5",
+    #         "--ckpt.resume",
+    #         str(v2_ckpt / "step_10"),
+    #         "--optim.total_steps",
+    #         "20",
+    #         "--train.log_model_hash",
+    #         "--no-train.sequence_packing",
+    #         "--train.math_attn",
+    #     ],
+    #     diloco=True,
+    # )
+
+    key_to_round = ["Perplexity", "Loss"]
+    digit_to_round = [0, 3]
+
+    def read_logs(path: Path):
+        with path.open("rb") as f:
+            data = pickle.load(f)
+
+        filtered_data = {}
+        for entry in data:
+            step = entry.pop("step")
+
+            # Round perplexity and loss
+            for key, digit in zip(key_to_round, digit_to_round):
+                if key in entry:
+                    entry[key] = round(entry[key], digit)
+
+            if step in filtered_data:
+                filtered_data[step].update(entry)
+            else:
+                filtered_data[step] = entry
+
+        return filtered_data
+
+    v1_data = read_logs(v1_file)
+    v2_data = read_logs(v2_file)
+    # v3_data = read_logs(v3_file)
+
+    ## check that loading from v1 to v2 worked
+
+    # first check that the hash of saving is the same as the hash of loading
+    assert v1_data[5]["inner_model_hash_save"] == v2_data[5]["inner_model_hash_resume"]
+    assert v1_data[5]["inner_optimizer_hash_save"] == v2_data[5]["inner_optimizer_hash_resume"]
+    assert v1_data[5]["outer_optimizer_hash_save"] == v2_data[5]["outer_optimizer_hash_resume"]
+    assert v1_data[5]["outer_model_hash_save"] == v2_data[5]["outer_model_hash_resume"]
+
+    # then we check that the loss and lr value are the same after loading the ckpt
+    for step, data_v2 in v2_data.items():
+        if step == 5:
+            continue  # not testing 5 as ts the one were we restarted from
+
+        data_v1 = v1_data[step]
+        assert data_v1["Loss"] == data_v2["Loss"]
+        assert data_v1["inner_lr"] == data_v2["inner_lr"]
+        assert data_v1["total_tokens"] == data_v2["total_tokens"]
+
+    # ## check that the second loading is working
+    # ## why ? We had bugs where ckpt was working but not when the training was resuming
+
+    # assert v2_data[10]["inner_model_hash_save"] == v3_data[10]["inner_model_hash_resume"]
+    # assert v2_data[10]["inner_optimizer_hash_save"] == v3_data[10]["inner_optimizer_hash_resume"]
+    # assert v2_data[10]["outer_optimizer_hash_save"] == v3_data[10]["outer_optimizer_hash_resume"]
+    # assert v2_data[10]["outer_model_hash_save"] == v3_data[10]["outer_model_hash_resume"]
+
+    # for step, data_v3 in v3_data.items():
+    #     if step == 10:
+    #         continue  # not testing 10 as ts the one were we restarted from
+
+    #     data_v2 = v2_data[step]
+    #     assert data_v2["Loss"] == data_v3["Loss"]
+    #     assert data_v2["inner_lr"] == data_v3["inner_lr"]
+    #     assert data_v2["total_tokens"] == data_v3["total_tokens"]

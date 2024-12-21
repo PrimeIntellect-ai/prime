@@ -11,6 +11,7 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
+import contextlib
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -20,6 +21,7 @@ from torch import nn
 from zeroband.models.norms import build_norm
 
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention, BlockMask, _DEFAULT_SPARSE_BLOCK_SIZE
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 _flex_attention_compiled = torch.compile(flex_attention, dynamic=False)
 
@@ -57,6 +59,8 @@ class ModelArgs:
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
     norm_type: str = "fused_rmsnorm"
+
+    math_attn: bool = False  # slow for testing
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
@@ -222,6 +226,8 @@ class Attention(nn.Module):
         self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(model_args.n_heads * self.head_dim, model_args.dim, bias=False)
 
+        self.math_attn = model_args.math_attn
+
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
@@ -271,7 +277,8 @@ class Attention(nn.Module):
         return self.wo(output)
 
     def _sdpa_attention(self, xq, xk, xv) -> torch.Tensor:
-        output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+        with sdpa_kernel(SDPBackend.MATH) if self.math_attn else contextlib.nullcontext():
+            output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
         output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         return output
 

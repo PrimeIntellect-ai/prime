@@ -138,7 +138,6 @@ def main(config: ExportConfig):
         config.type_model,
         vocab_size=len(tokenizer),
         seq_length=config.data.seq_length,
-        attn_fn=config.train.attn_fn,
     )
 
     # Convert ZeroBand config to HuggingFace config

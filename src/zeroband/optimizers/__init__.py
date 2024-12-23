@@ -2,7 +2,12 @@ from typing import TypeAlias
 from pydantic_config import BaseConfig
 import torch
 from zeroband.optimizers.muon import Muon, AdamConfig, MuonConfig
-from distributed_shampoo import EighEigenvalueCorrectionConfig, DistributedShampoo, FullyShardShampooConfig
+from distributed_shampoo import (
+    EighEigenvalueCorrectionConfig,
+    DistributedShampoo,
+    FullyShardShampooConfig,
+    ShampooPT2CompileConfig,
+)
 
 
 class SoapConfig(BaseConfig):
@@ -13,6 +18,8 @@ class SoapConfig(BaseConfig):
 
     max_preconditioner_dim: int = 8192
     precondition_frequency: int = 100
+
+    torch_compile: bool = False
 
 
 OptimizersConfig: TypeAlias = AdamConfig | MuonConfig | SoapConfig
@@ -51,6 +58,9 @@ def get_optimizer(params: list[torch.nn.Parameter], config: OptimizersConfig) ->
             # and might therefore allow for a smaller `precondition_frequency`.
             preconditioner_computation_config=EighEigenvalueCorrectionConfig(),
             distributed_config=FullyShardShampooConfig(),
+            shampoo_pt2_compile_config=ShampooPT2CompileConfig(enable_shampoo_pt2_dynamic_shape=False)
+            if config.torch_compile
+            else None,
         )
     else:
         raise ValueError(f"Unknown optimizer {config.optimizer}")

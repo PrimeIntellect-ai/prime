@@ -1,12 +1,9 @@
 import hashlib
 import socket
 import time
-from typing import Any
 import torch
 from torch.distributed.fsdp import ShardingStrategy
 from torch.distributed._tensor.api import DTensor
-
-from zeroband.utils.logging import get_logger
 
 
 __all__ = ["get_sharding_strategy", "get_peak_flops", "get_num_flop_per_token", "get_num_params"]
@@ -163,53 +160,6 @@ def get_optimizer_signature(optimizer: torch.optim.Optimizer, compress: bool = T
 def get_tensor_list_signature(tensor_list: list[torch.Tensor]) -> str:
     tensors = [get_tensor_signature(tensor) for tensor in tensor_list]
     return hashlib.md5(str(tensors).encode("utf-8")).hexdigest()
-
-
-class GPUMemoryMonitor:
-    # inspired from https://github.com/pytorch/torchtitan/blob/eef8bb2b1b6f0875ab0581079e1511d51654910e/torchtitan/metrics.py#L32
-    def __init__(self, device: str = "cuda"):
-        self.device = torch.device(device)  # device object
-        self.device_capacity = torch.cuda.get_device_properties(self.device).total_memory
-        self.device_capacity_gib = self._to_gib(self.device_capacity)
-        torch.cuda.reset_peak_memory_stats()
-        torch.cuda.empty_cache()
-
-        self._logger = get_logger()
-
-    def _to_gib(self, memory_in_bytes):
-        # NOTE: GiB (gibibyte) is 1024, vs GB is 1000
-        _gib_in_bytes = 1024 * 1024 * 1024
-        memory_in_gib = memory_in_bytes / _gib_in_bytes
-        return memory_in_gib
-
-    def _to_pct(self, memory):
-        return 100 * memory / self.device_capacity
-
-    def get_peak_stats(self) -> dict[str, Any]:
-        cuda_info = torch.cuda.memory_stats(self.device)
-
-        max_active = cuda_info["active_bytes.all.peak"]
-        max_active_gib = self._to_gib(max_active)
-        max_active_pct = self._to_pct(max_active)
-
-        max_reserved = cuda_info["reserved_bytes.all.peak"]
-        max_reserved_gib = self._to_gib(max_reserved)
-        max_reserved_pct = self._to_pct(max_reserved)
-
-        return {
-            "gpu_max_active_gib": max_active_gib,
-            "gpu_max_active_pct": max_active_pct,
-            "gpu_max_reserved_gib": max_reserved_gib,
-            "gpu_max_reserved_pct": max_reserved_pct,
-        }
-
-    def reset_peak_stats(self):
-        torch.cuda.reset_peak_memory_stats()
-
-    def format_peak_states(self, peak_stats: dict[str, Any] | None = None) -> str:
-        if peak_stats is None:
-            peak_stats = self.get_peak_stats()
-        return f"Active {peak_stats['gpu_max_active_gib']:.2f} GiB ({peak_stats['gpu_max_active_pct']:.2f}%), Reserved {peak_stats['gpu_max_reserved_gib']:.2f} GiB ({peak_stats['gpu_max_reserved_pct']:.2f}%)"
 
 
 def get_random_available_port_list(num_port):

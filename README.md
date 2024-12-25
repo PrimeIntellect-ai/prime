@@ -113,6 +113,22 @@ Ensure you have at least two GPU to run the full test suite:
 ```bash
 uv run pytest
 ```
+
+
+### Eval
+
+To eval you need first to convert the checkpoint to a huggingface compatible model.
+
+```bash
+uv run python scripts/export_dcp.py @configs/10B/H100.toml --ckpt.path CONVERTED_MODEL_PATH --ckpt.resume CHECKPOINT_PATH --torch_dtype bfloat16  --ckpt.interval 1
+```
+
+
+```
+uv run accelerate launch -m lm_eval --model hf --model_args pretrained=CONVERTED_MODEL_PATH,add_bos_token=True  --tasks hellaswag --num_fewshot 10
+```
+
+
 ## Environment variables
 ### Global Store Initialization
 | Environment Variable  | Description                                      | Default Value |

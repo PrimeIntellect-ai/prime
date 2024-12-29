@@ -6,16 +6,17 @@ from ..config import Config
 app = typer.Typer(help="Configure the CLI")
 console = Console()
 
+
 @app.command()
 def view():
     """View current configuration"""
     config = Config()
     settings = config.view()
-    
+
     table = Table(title="Prime CLI Configuration")
     table.add_column("Setting", style="cyan")
     table.add_column("Value", style="green")
-    
+
     # Show API key (partially hidden)
     api_key = settings["api_key"]
     if api_key:
@@ -23,41 +24,40 @@ def view():
     else:
         masked_key = "Not set"
     table.add_row("API Key", masked_key)
-    
+
     # Show Team ID
     team_id = settings["team_id"]
     table.add_row("Team ID", team_id or "Personal Account")
-    
+
     # Show base URL
     table.add_row("Base URL", settings["base_url"])
-    
+
     console.print(table)
+
 
 @app.command()
 def set_api_key(
     api_key: str = typer.Option(
-        ..., 
-        prompt="Enter your API key",
-        help="Your Prime Intellect API key"
-    )
+        ..., prompt="Enter your API key", help="Your Prime Intellect API key"
+    ),
 ):
     """Set your API key"""
     config = Config()
     config.set_api_key(api_key)
     console.print("[green]API key configured successfully![/green]")
 
+
 @app.command()
 def set_team_id(
     team_id: str = typer.Option(
-        ..., 
-        prompt="Enter your team ID",
-        help="Your Prime Intellect team ID"
-    )
+        ..., prompt="Enter your team ID", help="Your Prime Intellect team ID"
+    ),
 ):
     """Set your team ID"""
     config = Config()
     config.set_team_id(team_id)
     console.print("[green]Team ID configured successfully![/green]")
+
 
 @app.command()
 def remove_team_id():
@@ -66,18 +66,20 @@ def remove_team_id():
     config.set_team_id("")
     console.print("[green]Team ID removed. Using personal account.[/green]")
 
+
 @app.command()
 def set_base_url(
     url: str = typer.Option(
         ...,
         prompt="Enter the API base URL",
-        help="Base URL for the Prime Intellect API"
-    )
+        help="Base URL for the Prime Intellect API",
+    ),
 ):
     """Set the API base URL"""
     config = Config()
     config.set_base_url(url)
     console.print("[green]Base URL configured successfully![/green]")
+
 
 @app.command()
 def reset():

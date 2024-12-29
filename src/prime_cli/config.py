@@ -1,11 +1,11 @@
 import os
 from pathlib import Path
 import json
-from typing import Optional
+
 
 class Config:
     DEFAULT_BASE_URL = "https://api.primeintellect.ai"
-    
+
     def __init__(self):
         self.config_dir = Path.home() / ".prime"
         self.config_file = self.config_dir / "config.json"
@@ -16,11 +16,9 @@ class Config:
         """Create config directory if it doesn't exist"""
         self.config_dir.mkdir(exist_ok=True)
         if not self.config_file.exists():
-            self._save_config({
-                "api_key": "",
-                "team_id": "",
-                "base_url": self.DEFAULT_BASE_URL
-            })
+            self._save_config(
+                {"api_key": "", "team_id": "", "base_url": self.DEFAULT_BASE_URL}
+            )
 
     def _load_config(self):
         """Load configuration from file"""
@@ -61,8 +59,8 @@ class Config:
 
     def set_base_url(self, value: str):
         """Set API base URL in config file"""
-        value = value.rstrip('/')
-        if value.endswith('/api/v1'):
+        value = value.rstrip("/")
+        if value.endswith("/api/v1"):
             value = value[:-7]
         self.config["base_url"] = value
         self._save_config(self.config)
@@ -72,5 +70,5 @@ class Config:
         return {
             "api_key": self.api_key,
             "team_id": self.team_id,
-            "base_url": self.base_url
+            "base_url": self.base_url,
         }

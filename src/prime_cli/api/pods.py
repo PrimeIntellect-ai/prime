@@ -1,0 +1,77 @@
+from typing import List, Optional, Union
+from pydantic import BaseModel, Field
+
+
+class PortMapping(BaseModel):
+    internal: str
+    external: str
+    protocol: str
+    used_by: Optional[str] = Field(None, alias="usedBy")
+    description: Optional[str]
+
+    class Config:
+        populate_by_name = True
+
+
+class PodStatus(BaseModel):
+    pod_id: str = Field(..., alias="podId")
+    provider_type: str = Field(..., alias="providerType")
+    status: str
+    ssh_connection: Optional[Union[str, List[str]]] = Field(None, alias="sshConnection")
+    cost_per_hr: Optional[float] = Field(None, alias="priceHr")
+    prime_port_mapping: Optional[List[PortMapping]] = Field(
+        None, alias="primePortMapping"
+    )
+    ip: Optional[Union[str, List[str]]]
+    installation_failure: Optional[str] = Field(None, alias="installationFailure")
+    installation_progress: Optional[int] = Field(None, alias="installationProgress")
+    team_id: Optional[str] = Field(None, alias="teamId")
+
+    class Config:
+        populate_by_name = True
+
+
+class Pod(BaseModel):
+    id: str
+    name: Optional[str]
+    gpu_type: str = Field(..., alias="gpuName")
+    gpu_count: int = Field(..., alias="gpuCount")
+    status: str
+    created_at: str = Field(..., alias="createdAt")
+    provider_type: str = Field(..., alias="providerType")
+    team_id: Optional[str] = Field(None, alias="teamId")
+
+    class Config:
+        populate_by_name = True
+
+
+class PodList(BaseModel):
+    total_count: int = Field(..., alias="total_count")
+    offset: int
+    limit: int
+    data: List[Pod]
+
+    class Config:
+        populate_by_name = True
+
+
+class PodsClient:
+    def __init__(self, client):
+        self.client = client
+
+    def list(self, offset: int = 0, limit: int = 100) -> PodList:
+        """List all pods"""
+        params = {"offset": offset, "limit": limit}
+        response = self.client.get("/pods", params=params)
+        return PodList(**response)
+
+    def get_status(self, pod_ids: List[str]) -> List[PodStatus]:
+        """Get status for specified pods"""
+        params = {"pod_ids": pod_ids}
+        response = self.client.get("/pods/status", params=params)
+        return [PodStatus(**status) for status in response.get("data", [])]
+
+    def get(self, pod_id: str) -> Pod:
+        """Get details of a specific pod"""
+        response = self.client.get(f"/pods/{pod_id}")
+        return Pod(**response)

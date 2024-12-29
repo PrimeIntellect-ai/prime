@@ -1,6 +1,6 @@
 from typing import List, Optional, Union
 from pydantic import BaseModel, Field
-
+from prime_cli.api.client import APIError
 
 class PortMapping(BaseModel):
     internal: str
@@ -25,6 +25,7 @@ class PodStatus(BaseModel):
     ip: Optional[Union[str, List[str]]]
     installation_failure: Optional[str] = Field(None, alias="installationFailure")
     installation_progress: Optional[int] = Field(None, alias="installationProgress")
+    installation_status: Optional[str] = Field(None, alias="installationStatus")
     team_id: Optional[str] = Field(None, alias="teamId")
 
     class Config:
@@ -39,6 +40,7 @@ class Pod(BaseModel):
     status: str
     created_at: str = Field(..., alias="createdAt")
     provider_type: str = Field(..., alias="providerType")
+    installation_status: Optional[str] = Field(None, alias="installationStatus")
     team_id: Optional[str] = Field(None, alias="teamId")
 
     class Config:
@@ -61,17 +63,32 @@ class PodsClient:
 
     def list(self, offset: int = 0, limit: int = 100) -> PodList:
         """List all pods"""
-        params = {"offset": offset, "limit": limit}
-        response = self.client.get("/pods", params=params)
-        return PodList(**response)
+        try:
+            params = {"offset": offset, "limit": limit}
+            response = self.client.get("/pods", params=params)
+            return PodList(**response)
+        except Exception as e:
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                raise APIError(f"Failed to list pods: {e.response.text}")
+            raise APIError(f"Failed to list pods: {str(e)}")
 
     def get_status(self, pod_ids: List[str]) -> List[PodStatus]:
         """Get status for specified pods"""
-        params = {"pod_ids": pod_ids}
-        response = self.client.get("/pods/status", params=params)
-        return [PodStatus(**status) for status in response.get("data", [])]
+        try:
+            params = {"pod_ids": pod_ids}
+            response = self.client.get("/pods/status", params=params)
+            return [PodStatus(**status) for status in response.get("data", [])]
+        except Exception as e:
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                raise APIError(f"Failed to get pod status: {e.response.text}")
+            raise APIError(f"Failed to get pod status: {str(e)}")
 
     def get(self, pod_id: str) -> Pod:
         """Get details of a specific pod"""
-        response = self.client.get(f"/pods/{pod_id}")
-        return Pod(**response)
+        try:
+            response = self.client.get(f"/pods/{pod_id}")
+            return Pod(**response)
+        except Exception as e:
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                raise APIError(f"Failed to get pod details: {e.response.text}")
+            raise APIError(f"Failed to get pod details: {str(e)}")

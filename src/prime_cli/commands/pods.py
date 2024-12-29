@@ -4,6 +4,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 from datetime import datetime
+import subprocess
+import os
 
 from ..api.client import APIClient, APIError
 from ..api.pods import PodsClient
@@ -58,9 +60,16 @@ def list(
             status = status_lookup.get(pod.id)
 
             # Format status with color
-            status_color = {"ACTIVE": "green", "PENDING": "yellow", "ERROR": "red"}.get(
-                pod.status, "white"
-            )
+            display_status = pod.status
+            if pod.status == "ACTIVE" and pod.installation_status != "FINISHED":
+                display_status = "INSTALLING"
+            
+            status_color = {
+                "ACTIVE": "green", 
+                "PENDING": "yellow", 
+                "ERROR": "red",
+                "INSTALLING": "yellow"
+            }.get(display_status, "white")
 
             # Format created time
             created_at = datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
@@ -73,7 +82,7 @@ def list(
                 pod.id,
                 pod.name or "N/A",
                 f"{pod.gpu_type} x{pod.gpu_count}",
-                Text(pod.status, style=status_color),
+                Text(display_status, style=status_color),
                 ip_display,
                 created_str,
                 pod.team_id or "Personal",
@@ -120,10 +129,16 @@ def status(pod_id: str):
         table.add_column("Property", style="cyan")
         table.add_column("Value", style="white")
 
+        # Display status with installation state consideration
+        display_status = status.status
+        if status.status == "ACTIVE" and status.installation_status != "FINISHED":
+            display_status = "INSTALLING"
+
         table.add_row(
             "Status",
             Text(
-                status.status, style="green" if status.status == "ACTIVE" else "yellow"
+                display_status, 
+                style="green" if display_status == "ACTIVE" else "yellow"
             ),
         )
         table.add_row("Team", status.team_id or "Personal")
@@ -136,7 +151,7 @@ def status(pod_id: str):
         table.add_row("SSH", ssh_display)
 
         if status.installation_progress is not None:
-            table.add_row("Progress", f"{status.installation_progress}%")
+            table.add_row("Installation Progress", f"{status.installation_progress}%")
 
         if status.installation_failure:
             table.add_row("Error", Text(status.installation_failure, style="red"))

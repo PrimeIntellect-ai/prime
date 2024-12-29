@@ -43,27 +43,12 @@ ruff format src/prime_cli
 ruff check src/prime_cli
 ```
 
-## Project Structure
-
-```
-prime-cli/
-├── src/
-│   └── prime_cli/         # Main package code
-│       ├── api/           # API client code
-│       ├── commands/      # CLI commands
-│       └── config.py      # Configuration
-├── tests/                 # Test files
-└── pyproject.toml        # Project configuration
-```
-
 ## Contributing
 
 1. Create a new branch for your feature
 2. Make your changes
-3. Run the formatting tools (black, isort)
-4. Run the linter (ruff)
-5. Run the tests (pytest)
-6. Submit a pull request
+3. Run the linter (ruff)
+4. Submit a pull request
 
 ## License
 

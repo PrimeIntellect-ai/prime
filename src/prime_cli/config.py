@@ -1,11 +1,11 @@
 import os
 from pathlib import Path
 import json
-
+from typing import Optional
 
 class Config:
-    DEFAULT_BASE_URL = "https://api.primeintellect.ai"  # Note: removed /api/v1
-
+    DEFAULT_BASE_URL = "https://api.primeintellect.ai"
+    
     def __init__(self):
         self.config_dir = Path.home() / ".prime"
         self.config_file = self.config_dir / "config.json"
@@ -16,7 +16,11 @@ class Config:
         """Create config directory if it doesn't exist"""
         self.config_dir.mkdir(exist_ok=True)
         if not self.config_file.exists():
-            self._save_config({"api_key": "", "base_url": self.DEFAULT_BASE_URL})
+            self._save_config({
+                "api_key": "",
+                "team_id": "",
+                "base_url": self.DEFAULT_BASE_URL
+            })
 
     def _load_config(self):
         """Load configuration from file"""
@@ -41,19 +45,32 @@ class Config:
         self._save_config(self.config)
 
     @property
+    def team_id(self) -> str:
+        """Get team ID from environment or config file"""
+        return os.getenv("PRIME_TEAM_ID") or self.config.get("team_id", "")
+
+    def set_team_id(self, value: str):
+        """Set team ID in config file"""
+        self.config["team_id"] = value
+        self._save_config(self.config)
+
+    @property
     def base_url(self) -> str:
         """Get API base URL from config"""
         return self.config.get("base_url", self.DEFAULT_BASE_URL)
 
     def set_base_url(self, value: str):
         """Set API base URL in config file"""
-        # Remove trailing slashes and /api/v1 if present
-        value = value.rstrip("/")
-        if value.endswith("/api/v1"):
+        value = value.rstrip('/')
+        if value.endswith('/api/v1'):
             value = value[:-7]
         self.config["base_url"] = value
         self._save_config(self.config)
 
     def view(self) -> dict:
         """Get all config values"""
-        return {"api_key": self.api_key, "base_url": self.base_url}
+        return {
+            "api_key": self.api_key,
+            "team_id": self.team_id,
+            "base_url": self.base_url
+        }

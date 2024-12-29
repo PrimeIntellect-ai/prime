@@ -21,11 +21,9 @@ pip install -e ".[dev]"  # This installs the package with development dependenci
 
 3. Set up your API key:
 ```bash
-# You can either set it in your environment:
-export PRIME_API_KEY=your_api_key
-
-# Or configure it via the CLI:
 prime config set-api-key
+# Check details
+prime config view
 ```
 
 ## Basic Usage

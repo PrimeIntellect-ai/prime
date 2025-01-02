@@ -37,28 +37,16 @@ def list(
         # Get pods list
         pods_list = pods_client.list(offset=offset, limit=limit)
 
-        # If we have pods, get their detailed status
-        if pods_list.data:
-            pod_statuses = pods_client.get_status([pod.id for pod in pods_list.data])
-            # Create a lookup dict for quick access
-            status_lookup = {status.pod_id: status for status in pod_statuses}
-        else:
-            status_lookup = {}
-
         # Create display table
-        table = Table(title=f"Compute Pods (Total: {pods_list.total_count})")
-        table.add_column("ID", style="cyan")
+        table = Table(title=f"Compute Pods (Total: {pods_list.total_count})", show_lines=True)
+        table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("Name", style="blue")
         table.add_column("GPU", style="green")
         table.add_column("Status", style="yellow")
-        table.add_column("IP", style="white")
         table.add_column("Created", style="blue")
-        table.add_column("Team", style="blue")
 
         # Add rows for each pod
         for pod in pods_list.data:
-            status = status_lookup.get(pod.id)
-
             # Format status with color
             display_status = pod.status
             if pod.status == "ACTIVE" and pod.installation_status != "FINISHED":
@@ -75,20 +63,16 @@ def list(
             created_at = datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
             created_str = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
 
-            # Get IP display using helper function
-            ip_display = format_ip_display(status.ip if status else None)
-
             table.add_row(
                 pod.id,
                 pod.name or "N/A",
                 f"{pod.gpu_type} x{pod.gpu_count}",
                 Text(display_status, style=status_color),
-                ip_display,
                 created_str,
-                pod.team_id or "Personal",
             )
 
         console.print(table)
+        console.print("\n[blue]Use 'prime pods status <pod-id>' to see detailed information about a specific pod[/blue]")
 
         # If there are more pods, show a message
         if pods_list.total_count > offset + limit:
@@ -107,8 +91,6 @@ def list(
 
         traceback.print_exc()
         raise typer.Exit(1)
-
-
 @app.command()
 def status(pod_id: str):
     """Get detailed status of a specific pod"""
@@ -124,6 +106,9 @@ def status(pod_id: str):
 
         status = statuses[0]
 
+        # Get pod details for additional info
+        pod_details = pods_client.get(pod_id)
+
         # Create display table
         table = Table(title=f"Pod Status: {pod_id}")
         table.add_column("Property", style="cyan")
@@ -137,33 +122,49 @@ def status(pod_id: str):
         table.add_row(
             "Status",
             Text(
-                display_status, 
+                display_status,
                 style="green" if display_status == "ACTIVE" else "yellow"
             ),
         )
+
+        # Basic pod info
+        table.add_row("Name", pod_details.name or "N/A")
         table.add_row("Team", status.team_id or "Personal")
+        table.add_row("Provider", status.provider_type)
+        table.add_row("GPU", f"{pod_details.gpu_type} x{pod_details.gpu_count}")
+        
+        # Cost info if available
+        if status.cost_per_hr:
+            table.add_row("Cost per Hour", f"${status.cost_per_hr:.3f}")
 
-        # Use helper function for IP display
+        # Created time
+        created_at = datetime.fromisoformat(pod_details.created_at.replace("Z", "+00:00"))
+        table.add_row("Created", created_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
+
+        # Connection details
         table.add_row("IP", format_ip_display(status.ip))
-
-        # Handle SSH connection display for both single and list cases
         ssh_display = format_ip_display(status.ssh_connection)
         table.add_row("SSH", ssh_display)
 
+        # Installation status
+        if status.installation_status:
+            table.add_row("Installation Status", status.installation_status)
         if status.installation_progress is not None:
             table.add_row("Installation Progress", f"{status.installation_progress}%")
-
         if status.installation_failure:
-            table.add_row("Error", Text(status.installation_failure, style="red"))
+            table.add_row("Installation Error", Text(status.installation_failure, style="red"))
 
+        # Port mappings
         if status.prime_port_mapping:
             ports = "\n".join(
                 [
-                    f"{port.protocol}:{port.external}->{port.internal} ({port.used_by or 'unknown'})"
+                    f"{port.protocol}:{port.external}->{port.internal} "
+                    f"({port.description + ' - ' if port.description else ''}"
+                    f"{port.used_by or 'unknown'})"
                     for port in status.prime_port_mapping
                 ]
             )
-            table.add_row("Ports", ports)
+            table.add_row("Port Mappings", ports)
 
         console.print(table)
 

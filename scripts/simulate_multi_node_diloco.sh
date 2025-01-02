@@ -58,14 +58,23 @@ export GLOBAL_WORLD_SIZE=$N
 export BASE_PORT=${BASE_PORT:-10001}
 export GLOO_SOCKET_IFNAME=lo
 
+# Replace '=' with ' ' in all arguments
+modified_args=()
+for arg in "$@"; do
+    modified_arg=$(echo "$arg" | sed 's/=/ /g')
+    modified_args+=("$modified_arg")
+done
+
+args="${modified_args[@]}"
+
 for i in $(seq 0 $(($N - 1 )))
 do
     > logs/log$i.log
-    WANDB_MODE=$([ $i -eq 0 ] && echo "online" || echo "offline") GLOBAL_UNIQUE_ID=$i GLOBAL_RANK=$i CUDA_VISIBLE_DEVICES=$(get_cuda_devices $NUM_GPU $i) uv run torchrun --nproc_per_node=$NUM_GPU --node-rank 0 --rdzv-endpoint localhost:$((BASE_PORT + $i)) --nnodes=1  $@ --data.data_rank $i --data.data_world_size $N > logs/log$i.log 2>&1 &
+    WANDB_MODE=$([ $i -eq 0 ] && echo "online" || echo "disabled") GLOBAL_UNIQUE_ID=$i GLOBAL_RANK=$i CUDA_VISIBLE_DEVICES=$(get_cuda_devices $NUM_GPU $i) uv run torchrun --nproc_per_node=$NUM_GPU --node-rank 0 --rdzv-endpoint localhost:$((BASE_PORT + $i)) --nnodes=1 $args --data.data_rank $i --data.data_world_size $N > logs/log$i.log 2>&1 &
     child_pids+=($!)
 done
 
-tail -f logs/log0.log &
+#tail -f logs/log0.log & # the outputs appear fine
 child_pids+=($!)
 
 wait

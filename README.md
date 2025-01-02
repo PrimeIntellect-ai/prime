@@ -95,7 +95,7 @@ GLOO_SOCKET_IFNAME=lo GLOBAL_ADDR=localhost GLOBAL_RANK=0 GLOBAL_UNIQUE_ID=0 GLO
 
 ### Running DiLoCo
 
-To test DiLoCo locally you can use the helper script `scripts/simulatsimulate_multi_nodee_mutl.sh`
+To test DiLoCo locally you can use the helper script `scripts/simulate_multi_node_diloco.sh`
 
 ```bash
 # Using 4 GPUs
@@ -189,3 +189,18 @@ You can then upload the model to huggingface using huggingface-cli:
 huggingface-cli upload username/mymodel /path/to/save/converted_model . --private
 ```
 The repo will be created if `repo_id` does not exist. The `--private` will create the repo as a private repo and cab ne ommited to create a publicly accessible repo.
+
+## Sweeps
+
+To run a sweep, you can use the `sweeps/diloco.yaml` example file. This file contains the command to run the sweep, the method to use (random, grid, etc), and the metric to minimize.
+
+1. Initialize a sweep
+
+    ```bash
+    wandb sweep --project <propject-name> <path-to-config file>
+    ```
+
+2. Start the sweep agent
+    ```bash
+    wandb agent <sweep-ID>
+    ```

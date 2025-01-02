@@ -1,0 +1,47 @@
+command:
+  - ./scripts/simulate_multi_node_diloco.sh
+  - 4
+  - 2
+  - src/zeroband/train.py
+  - "@configs/150M/H100.toml"
+  - ${args}
+method: random
+metric:
+  goal: minimize
+  name: Perplexity
+name: diloco-sweep-150m-4workers-4Btokens
+parameters:
+  diloco.inner_steps:
+    values:
+      - 128
+  diloco.outer_lr:
+    distribution: uniform
+    max: 1
+    min: 0.8
+  optim.optim.betas1:
+    distribution: log_uniform_values
+    max: 0.999
+    min: 0.7
+  optim.optim.betas2:
+    distribution: log_uniform_values
+    max: 0.9999
+    min: 0.6
+  optim.optim.lr:
+    distribution: log_uniform_values
+    max: 3e-2
+    min: 1e-3
+  optim.optim.weight_decay:
+    distribution: uniform
+    max: 3e-2
+    min: 0
+  optim.warmup_steps:
+    distribution: q_uniform
+    max: 4000
+    min: 2000
+  optim.batch_size:
+    values:
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 2048

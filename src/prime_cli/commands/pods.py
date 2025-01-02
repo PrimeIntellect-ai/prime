@@ -38,7 +38,9 @@ def list(
         pods_list = pods_client.list(offset=offset, limit=limit)
 
         # Create display table
-        table = Table(title=f"Compute Pods (Total: {pods_list.total_count})", show_lines=True)
+        table = Table(
+            title=f"Compute Pods (Total: {pods_list.total_count})", show_lines=True
+        )
         table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("Name", style="blue")
         table.add_column("GPU", style="green")
@@ -51,12 +53,12 @@ def list(
             display_status = pod.status
             if pod.status == "ACTIVE" and pod.installation_status != "FINISHED":
                 display_status = "INSTALLING"
-            
+
             status_color = {
-                "ACTIVE": "green", 
-                "PENDING": "yellow", 
+                "ACTIVE": "green",
+                "PENDING": "yellow",
                 "ERROR": "red",
-                "INSTALLING": "yellow"
+                "INSTALLING": "yellow",
             }.get(display_status, "white")
 
             # Format created time
@@ -72,7 +74,9 @@ def list(
             )
 
         console.print(table)
-        console.print("\n[blue]Use 'prime pods status <pod-id>' to see detailed information about a specific pod[/blue]")
+        console.print(
+            "\n[blue]Use 'prime pods status <pod-id>' to see detailed information about a specific pod[/blue]"
+        )
 
         # If there are more pods, show a message
         if pods_list.total_count > offset + limit:
@@ -91,6 +95,8 @@ def list(
 
         traceback.print_exc()
         raise typer.Exit(1)
+
+
 @app.command()
 def status(pod_id: str):
     """Get detailed status of a specific pod"""
@@ -123,7 +129,7 @@ def status(pod_id: str):
             "Status",
             Text(
                 display_status,
-                style="green" if display_status == "ACTIVE" else "yellow"
+                style="green" if display_status == "ACTIVE" else "yellow",
             ),
         )
 
@@ -132,13 +138,15 @@ def status(pod_id: str):
         table.add_row("Team", status.team_id or "Personal")
         table.add_row("Provider", status.provider_type)
         table.add_row("GPU", f"{pod_details.gpu_type} x{pod_details.gpu_count}")
-        
+
         # Cost info if available
         if status.cost_per_hr:
             table.add_row("Cost per Hour", f"${status.cost_per_hr:.3f}")
 
         # Created time
-        created_at = datetime.fromisoformat(pod_details.created_at.replace("Z", "+00:00"))
+        created_at = datetime.fromisoformat(
+            pod_details.created_at.replace("Z", "+00:00")
+        )
         table.add_row("Created", created_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
 
         # Connection details
@@ -152,7 +160,9 @@ def status(pod_id: str):
         if status.installation_progress is not None:
             table.add_row("Installation Progress", f"{status.installation_progress}%")
         if status.installation_failure:
-            table.add_row("Installation Error", Text(status.installation_failure, style="red"))
+            table.add_row(
+                "Installation Error", Text(status.installation_failure, style="red")
+            )
 
         # Port mappings
         if status.prime_port_mapping:

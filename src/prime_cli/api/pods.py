@@ -2,6 +2,7 @@ from typing import List, Optional, Union
 from pydantic import BaseModel, Field
 from prime_cli.api.client import APIError
 
+
 class PortMapping(BaseModel):
     internal: str
     external: str
@@ -68,7 +69,7 @@ class PodsClient:
             response = self.client.get("/pods", params=params)
             return PodList(**response)
         except Exception as e:
-            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+            if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to list pods: {e.response.text}")
             raise APIError(f"Failed to list pods: {str(e)}")
 
@@ -79,7 +80,7 @@ class PodsClient:
             response = self.client.get("/pods/status", params=params)
             return [PodStatus(**status) for status in response.get("data", [])]
         except Exception as e:
-            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+            if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to get pod status: {e.response.text}")
             raise APIError(f"Failed to get pod status: {str(e)}")
 
@@ -89,6 +90,6 @@ class PodsClient:
             response = self.client.get(f"/pods/{pod_id}")
             return Pod(**response)
         except Exception as e:
-            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+            if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to get pod details: {e.response.text}")
             raise APIError(f"Failed to get pod details: {str(e)}")

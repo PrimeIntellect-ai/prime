@@ -41,6 +41,14 @@ prime pods create                         # Create a pod interactively
 prime pods create --id <ID>               # Create a pod with a specific GPU config
 prime pods create --name my-pod           # Create a pod with a custom name
 prime pods terminate <pod-id>             # Terminate a pod
+
+# SSH into pods
+prime pods ssh <pod-id>                   # SSH into a running pod
+
+# Before using SSH:
+# 1. Download your SSH private key from Prime Intellect dashboard
+# 2. Set the SSH key path in your config:
+prime config set-ssh-key-path             
 """
 
 ## Development Commands

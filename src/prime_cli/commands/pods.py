@@ -4,6 +4,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 from datetime import datetime
+import subprocess
+import os
 from ..config import Config
 from ..api.client import APIClient, APIError
 from ..api.pods import PodsClient
@@ -522,6 +524,63 @@ def terminate(pod_id: str):
         # Delete the pod
         pods_client.delete(pod_id)
         console.print(f"[green]Successfully terminated pod {pod_id}[/green]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1)
+
+
+@app.command()
+def ssh(pod_id: str):
+    """SSH into a pod using configured SSH key"""
+    try:
+        base_client = APIClient()
+        pods_client = PodsClient(base_client)
+
+        # Get pod status to check SSH connection details
+        statuses = pods_client.get_status([pod_id])
+        if not statuses:
+            console.print(f"[red]No status found for pod {pod_id}[/red]")
+            raise typer.Exit(1)
+
+        status = statuses[0]
+        if not status.ssh_connection:
+            console.print(f"[red]SSH connection not available for pod {pod_id}[/red]")
+            raise typer.Exit(1)
+
+        # Get SSH key path from config
+        ssh_key_path = config.ssh_key_path
+        if not os.path.exists(ssh_key_path):
+            console.print(f"[red]SSH key not found at {ssh_key_path}[/red]")
+            raise typer.Exit(1)
+
+        connection_parts = status.ssh_connection.split(" -p ")
+        host = connection_parts[0]
+        port = connection_parts[1] if len(connection_parts) > 1 else "22"
+
+        ssh_command = [
+            "ssh",
+            "-i",
+            ssh_key_path,
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-p",
+            port,
+            host,
+        ]
+
+        # Execute SSH command
+        try:
+            subprocess.run(ssh_command)
+        except subprocess.CalledProcessError as e:
+            console.print(f"[red]SSH connection failed: {str(e)}[/red]")
+            raise typer.Exit(1)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

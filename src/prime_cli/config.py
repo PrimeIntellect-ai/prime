@@ -5,6 +5,7 @@ import json
 
 class Config:
     DEFAULT_BASE_URL = "https://api.primeintellect.ai"
+    DEFAULT_SSH_KEY_PATH = str(Path.home() / ".ssh" / "id_rsa")
 
     def __init__(self):
         self.config_dir = Path.home() / ".prime"
@@ -17,7 +18,12 @@ class Config:
         self.config_dir.mkdir(exist_ok=True)
         if not self.config_file.exists():
             self._save_config(
-                {"api_key": "", "team_id": "", "base_url": self.DEFAULT_BASE_URL}
+                {
+                    "api_key": "",
+                    "team_id": "",
+                    "base_url": self.DEFAULT_BASE_URL,
+                    "ssh_key_path": self.DEFAULT_SSH_KEY_PATH,
+                }
             )
 
     def _load_config(self):
@@ -65,10 +71,23 @@ class Config:
         self.config["base_url"] = value
         self._save_config(self.config)
 
+    @property
+    def ssh_key_path(self) -> str:
+        """Get SSH private key path from environment or config file"""
+        return os.getenv("PRIME_SSH_KEY_PATH") or self.config.get(
+            "ssh_key_path", self.DEFAULT_SSH_KEY_PATH
+        )
+
+    def set_ssh_key_path(self, value: str):
+        """Set SSH private key path in config file"""
+        self.config["ssh_key_path"] = str(Path(value).expanduser().resolve())
+        self._save_config(self.config)
+
     def view(self) -> dict:
         """Get all config values"""
         return {
             "api_key": self.api_key,
             "team_id": self.team_id,
             "base_url": self.base_url,
+            "ssh_key_path": self.ssh_key_path,
         }

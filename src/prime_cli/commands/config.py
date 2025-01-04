@@ -32,6 +32,9 @@ def view():
     # Show base URL
     table.add_row("Base URL", settings["base_url"])
 
+    # Show SSH key path
+    table.add_row("SSH Key Path", settings["ssh_key_path"])
+
     console.print(table)
 
 
@@ -82,6 +85,20 @@ def set_base_url(
 
 
 @app.command()
+def set_ssh_key_path(
+    path: str = typer.Option(
+        ...,
+        prompt="Enter the SSH private key path",
+        help="Path to your SSH private key file",
+    ),
+):
+    """Set the SSH private key path"""
+    config = Config()
+    config.set_ssh_key_path(path)
+    console.print("[green]SSH key path configured successfully![/green]")
+
+
+@app.command()
 def reset():
     """Reset configuration to defaults"""
     if typer.confirm("Are you sure you want to reset all settings?"):
@@ -89,4 +106,5 @@ def reset():
         config.set_api_key("")
         config.set_team_id("")
         config.set_base_url(Config.DEFAULT_BASE_URL)
+        config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
         console.print("[green]Configuration reset to defaults![/green]")

@@ -4,14 +4,15 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 from datetime import datetime
-import subprocess
-import os
-
+from ..config import Config
 from ..api.client import APIClient, APIError
 from ..api.pods import PodsClient
+from ..api.availability import AvailabilityClient
+from ..helper.short_id import generate_short_id
 
 app = typer.Typer(help="Manage compute pods")
 console = Console()
+config = Config()
 
 
 def format_ip_display(ip: Optional[Union[str, List[str]]]) -> str:
@@ -177,6 +178,273 @@ def status(pod_id: str):
             table.add_row("Port Mappings", ports)
 
         console.print(table)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1)
+
+
+@app.command()
+def create(
+    id: Optional[str] = typer.Option(None, help="Short ID from availability list"),
+    cloud_id: Optional[str] = typer.Option(None, help="Cloud ID from cloud provider"),
+    name: Optional[str] = typer.Option(None, help="Name for the pod"),
+    disk_size: Optional[int] = typer.Option(None, help="Disk size in GB"),
+    vcpus: Optional[int] = typer.Option(None, help="Number of vCPUs"),
+    memory: Optional[int] = typer.Option(None, help="Memory in GB"),
+    image: Optional[str] = typer.Option(None, help="Custom image"),
+    team_id: Optional[str] = typer.Option(None, help="Team ID to use for the pod"),
+):
+    """Create a new pod with an interactive setup process"""
+    try:
+        if not id and not cloud_id:
+            console.print("[red]Error: No GPU configuration ID provided[/red]")
+            console.print("\nTo get available GPU configurations:")
+            console.print(
+                "1. Run [green]prime availability list[/green] to see available options"
+            )
+            console.print("2. Copy the ID from the list")
+            console.print("3. Run this command again with [green]--id <ID>[/green]")
+            raise typer.Exit(1)
+
+        base_client = APIClient()
+        availability_client = AvailabilityClient(base_client)
+        pods_client = PodsClient(base_client)
+
+        # Get availability info
+        availabilities = availability_client.get()
+        selected_gpu = None
+
+        # Find the matching GPU configuration
+        for gpu_type, gpus in availabilities.items():
+            for gpu in gpus:
+                if id and generate_short_id(gpu) == id:
+                    selected_gpu = gpu
+                    cloud_id = gpu.cloud_id
+                    break
+                elif gpu.cloud_id == cloud_id:
+                    selected_gpu = gpu
+                    break
+            if selected_gpu:
+                break
+
+        if not selected_gpu:
+            console.print(
+                f"[red]No GPU configuration found for {'ID: ' + id if id else 'cloud ID: ' + cloud_id}[/red]"
+            )
+            raise typer.Exit(1)
+
+        # Interactive configuration
+        if not name:
+            while True:
+                name = typer.prompt(
+                    "Pod name (alphanumeric and dashes only, must contain at least 1 letter)",
+                    default="",
+                )
+                if (
+                    name
+                    and any(c.isalpha() for c in name)
+                    and all(c.isalnum() or c == "-" for c in name)
+                ):
+                    break
+                console.print(
+                    "[red]Invalid name format. Use only letters, numbers and dashes. Must contain at least 1 letter.[/red]"
+                )
+
+        gpu_count = selected_gpu.gpu_count
+
+        if not disk_size:
+            min_disk = selected_gpu.disk.min_count
+            max_disk = selected_gpu.disk.max_count
+            default_disk = selected_gpu.disk.default_count
+
+            if min_disk is None or max_disk is None:
+                disk_size = default_disk
+            else:
+                disk_size = typer.prompt(
+                    f"Disk size in GB (min: {min_disk}, max: {max_disk})",
+                    default=default_disk or min_disk,
+                    type=int,
+                )
+                if disk_size < min_disk or disk_size > max_disk:
+                    console.print(
+                        f"[red]Disk size must be between {min_disk}GB and {max_disk}GB[/red]"
+                    )
+                    raise typer.Exit(1)
+
+        if not vcpus:
+            min_vcpus = selected_gpu.vcpu.min_count
+            max_vcpus = selected_gpu.vcpu.max_count
+            default_vcpus = selected_gpu.vcpu.default_count
+
+            if min_vcpus is None or max_vcpus is None:
+                vcpus = default_vcpus
+            else:
+                vcpus = typer.prompt(
+                    f"Number of vCPUs (min: {min_vcpus}, max: {max_vcpus})",
+                    default=default_vcpus,
+                    type=int,
+                )
+                if vcpus < min_vcpus or vcpus > max_vcpus:
+                    console.print(
+                        f"[red]vCPU count must be between {min_vcpus} and {max_vcpus}[/red]"
+                    )
+                    raise typer.Exit(1)
+
+        if not memory:
+            min_memory = selected_gpu.memory.min_count
+            max_memory = selected_gpu.memory.max_count
+            default_memory = selected_gpu.memory.default_count
+
+            if min_memory is None or max_memory is None:
+                memory = default_memory
+            else:
+                memory = typer.prompt(
+                    f"Memory in GB (min: {min_memory}, max: {max_memory})",
+                    default=default_memory,
+                    type=int,
+                )
+                if memory < min_memory or memory > max_memory:
+                    console.print(
+                        f"[red]Memory must be between {min_memory}GB and {max_memory}GB[/red]"
+                    )
+                    raise typer.Exit(1)
+
+        if not image and selected_gpu.images:
+            # Show available images
+            console.print("\n[bold]Available Images:[/bold]")
+            for idx, img in enumerate(selected_gpu.images):
+                console.print(f"{idx + 1}. {img}")
+
+            # Prompt for image selection
+            image_idx = typer.prompt(
+                "Select image number", type=int, default=1, show_default=False
+            )
+
+            if image_idx < 1 or image_idx > len(selected_gpu.images):
+                console.print("[red]Invalid image selection[/red]")
+                raise typer.Exit(1)
+
+            image = selected_gpu.images[image_idx - 1]
+
+        # Get team ID from config if not provided
+        if not team_id:
+            default_team_id = config.team_id
+            options = ["Personal Account", "Custom Team ID"]
+            if default_team_id:
+                options.insert(1, f"Pre-selected Team ({default_team_id})")
+
+            console.print("\n[bold]Select Team:[/bold]")
+            for idx, opt in enumerate(options, 1):
+                console.print(f"{idx}. {opt}")
+
+            choice = typer.prompt("Enter choice", type=int, default=1)
+
+            if choice < 1 or choice > len(options):
+                console.print("[red]Invalid selection[/red]")
+                raise typer.Exit(1)
+
+            if options[choice - 1] == "Personal Account":
+                team_id = None
+            elif "Pre-selected Team" in options[choice - 1]:
+                team_id = default_team_id
+            else:
+                team_id = typer.prompt("Enter team ID")
+
+        # Create pod configuration
+        pod_config = {
+            "pod": {
+                "name": name or None,
+                "cloudId": cloud_id,
+                "gpuType": selected_gpu.gpu_type,
+                "socket": selected_gpu.socket,
+                "gpuCount": gpu_count,
+                "diskSize": disk_size,
+                "vcpus": vcpus,
+                "memory": memory,
+                "image": image,
+                "dataCenterId": selected_gpu.data_center,
+                "maxPrice": None,
+                "customTemplateId": None,
+                "dataCenterId": selected_gpu.data_center,
+                "country": None,
+                "security": None,
+                "jupyterPassword": None,
+                "autoRestart": False,
+                
+            },
+            "provider": {"type": selected_gpu.provider}
+            if selected_gpu.provider
+            else {},
+            "team": {
+                "teamId": team_id,
+            }
+            if team_id
+            else None,
+        }
+
+        # Show configuration summary
+        console.print("\n[bold]Pod Configuration Summary:[/bold]")
+        for key, value in pod_config["pod"].items():
+            if value is not None:
+                if key == "provider":
+                    continue
+                console.print(f"{key}: {value}")
+        if pod_config["provider"]:
+            console.print(f"provider: {pod_config['provider']['type']}")
+        console.print(f"team: {team_id}")
+
+        if typer.confirm("\nDo you want to create this pod?", default=True):
+            try:
+                # Create the pod with loading animation
+                with console.status("[bold blue]Creating pod...", spinner="dots"):
+                    pod = pods_client.create(pod_config)
+
+                console.print(f"\n[green]Successfully created pod {pod.id}[/green]")
+                console.print(
+                    f"\n[blue]Use 'prime pods status {pod.id}' to check the pod status[/blue]"
+                )
+            except AttributeError:
+                console.print(
+                    "[red]Error: Failed to create pod - invalid API client configuration[/red]"
+                )
+                raise typer.Exit(1)
+        else:
+            console.print("\nPod creation cancelled")
+            raise typer.Exit(0)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1)
+
+
+@app.command()
+def terminate(pod_id: str):
+    """Terminate a pod"""
+    try:
+        base_client = APIClient()
+        pods_client = PodsClient(base_client)
+
+        # Confirm termination
+        if not typer.confirm(f"Are you sure you want to terminate pod {pod_id}?"):
+            console.print("Termination cancelled")
+            raise typer.Exit(0)
+
+        # Delete the pod
+        pods_client.delete(pod_id)
+        console.print(f"[green]Successfully terminated pod {pod_id}[/green]")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

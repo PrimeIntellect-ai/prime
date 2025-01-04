@@ -58,6 +58,27 @@ class PodList(BaseModel):
         populate_by_name = True
 
 
+class PodConfig(BaseModel):
+    name: Optional[str]
+    cloud_id: str = Field(..., alias="cloudId")
+    gpu_type: str = Field(..., alias="gpuType")
+    socket: str
+    gpu_count: int = Field(..., alias="gpuCount")
+    disk_size: Optional[int] = Field(None, alias="diskSize")
+    vcpus: Optional[int]
+    memory: Optional[int]
+    image: Optional[str]
+    custom_template_id: Optional[str] = Field(None, alias="customTemplateId")
+    data_center_id: Optional[str] = Field(None, alias="dataCenterId")
+    country: Optional[str]
+    security: Optional[str]
+    provider: dict
+    team: Optional[dict]
+
+    class Config:
+        populate_by_name = True
+
+
 class PodsClient:
     def __init__(self, client):
         self.client = client
@@ -93,3 +114,22 @@ class PodsClient:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to get pod details: {e.response.text}")
             raise APIError(f"Failed to get pod details: {str(e)}")
+
+    def create(self, pod_config: dict) -> Pod:
+        """Create a new pod"""
+        try:
+            response = self.client.request("POST", "/pods", json=pod_config)
+            return Pod(**response)
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to create pod: {e.response.text}")
+            raise APIError(f"Failed to create pod: {str(e)}")
+
+    def delete(self, pod_id: str) -> None:
+        """Delete a pod"""
+        try:
+            self.client.delete(f"/pods/{pod_id}")
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to delete pod: {e.response.text}")
+            raise APIError(f"Failed to delete pod: {str(e)}")

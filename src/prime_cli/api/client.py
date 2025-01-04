@@ -31,10 +31,14 @@ class APIClient:
             }
         )
 
-    def get(
-        self, endpoint: str, params: Optional[Dict[str, Any]] = None
+    def request(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        json: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Make a GET request to the API"""
+        """Make a request to the API"""
         # Ensure endpoint starts with /api/v1/
         if not endpoint.startswith("/"):
             endpoint = f"/api/v1/{endpoint}"
@@ -44,13 +48,29 @@ class APIClient:
         url = f"{self.base_url}{endpoint}"
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.request(method, url, params=params, json=json)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.HTTPError as e:
             raise APIError(f"API request failed: {e}")
         except requests.exceptions.RequestException as e:
             raise APIError(f"Request failed: {e}")
+
+    def get(
+        self, endpoint: str, params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Make a GET request to the API"""
+        return self.request("GET", endpoint, params=params)
+
+    def post(
+        self, endpoint: str, json: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Make a POST request to the API"""
+        return self.request("POST", endpoint, json=json)
+
+    def delete(self, endpoint: str) -> Dict[str, Any]:
+        """Make a DELETE request to the API"""
+        return self.request("DELETE", endpoint)
 
     def __str__(self):
         """For debugging"""

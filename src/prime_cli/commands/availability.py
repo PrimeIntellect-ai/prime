@@ -3,6 +3,7 @@ from typing import Optional, List
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
+from ..helper.short_id import generate_short_id
 
 from ..api.client import APIClient, APIError
 from ..api.availability import AvailabilityClient
@@ -35,7 +36,7 @@ def list(
 
         # Create display table
         table = Table(title="Available GPU Resources")
-        table.add_column("Cloud ID", style="cyan")
+        table.add_column("ID", style="cyan", no_wrap=True)  # Short ID column
         table.add_column("GPU Type", style="cyan")
         table.add_column("Socket", style="blue")
         table.add_column("Provider", style="blue")
@@ -71,29 +72,35 @@ def list(
                     else "N/A"
                 )
 
-                all_gpus.append(
-                    {
-                        "cloud_id": gpu.cloud_id,
-                        "gpu_type": gpu_type,
-                        "socket": gpu.socket or "N/A",
-                        "provider": gpu.provider or "N/A",
-                        "location": location,
-                        "stock_status": Text(gpu.stock_status, style=stock_color),
-                        "price": price_str,
-                        "price_value": price or float("inf"),  # For sorting
-                        "gpu_memory": gpu.gpu_memory,
-                        "security": gpu.security or "N/A",
-                        "vcpu": gpu.vcpu.default_count,
-                        "memory": gpu.memory.default_count,
-                    }
-                )
+                short_id = generate_short_id(gpu)
+                gpu_data = {
+                    "short_id": short_id,
+                    "cloud_id": gpu.cloud_id,
+                    "gpu_type": gpu_type,
+                    "socket": gpu.socket or "N/A",
+                    "provider": gpu.provider or "N/A",
+                    "location": location,
+                    "stock_status": Text(gpu.stock_status, style=stock_color),
+                    "price": price_str,
+                    "price_value": price or float("inf"),  # For sorting
+                    "gpu_memory": gpu.gpu_memory,
+                    "security": gpu.security or "N/A",
+                    "vcpu": gpu.vcpu.default_count,
+                    "memory": gpu.memory.default_count,
+                }
+                all_gpus.append(gpu_data)
 
-        all_gpus.sort(key=lambda x: x["price_value"])
+        # Sort by price and remove duplicates based on short_id
+        seen_ids = set()
+        filtered_gpus = []
+        for gpu in sorted(all_gpus, key=lambda x: x["price_value"]):
+            if gpu["short_id"] not in seen_ids:
+                seen_ids.add(gpu["short_id"])
+                filtered_gpus.append(gpu)
 
-        # Add sorted rows to table
-        for gpu in all_gpus:
+        for gpu in filtered_gpus:
             table.add_row(
-                gpu["cloud_id"],
+                gpu["short_id"],
                 gpu["gpu_type"],
                 gpu["socket"],
                 gpu["provider"],
@@ -107,6 +114,17 @@ def list(
             )
 
         console.print(table)
+
+        # Add deployment instructions
+        console.print(
+            "\n[bold blue]To deploy a pod with one of these configurations:[/bold blue]"
+        )
+        console.print("1. Copy either the ID or Cloud ID of your desired configuration")
+        console.print("2. Run one of the following commands:")
+        console.print("   [green]prime pods create --id <ID>[/green]")
+        console.print(
+            "\nThe command will guide you through an interactive setup process to configure the pod."
+        )
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

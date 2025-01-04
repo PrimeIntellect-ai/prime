@@ -17,6 +17,7 @@ def callback(ctx: typer.Context):
     if ctx.invoked_subcommand is None:
         ctx.get_help()
 
+
 def run():
     """Entry point for the CLI"""
     app()

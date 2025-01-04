@@ -244,7 +244,6 @@ def create(
                 for idx, gpu_type_option in enumerate(gpu_types, 1):
                     console.print(f"{idx}. {gpu_type_option}")
 
-                # Show loading status after displaying options
                 gpu_type_idx = typer.prompt(
                     "Select GPU type number", type=int, default=1
                 )
@@ -254,7 +253,6 @@ def create(
                 gpu_type = gpu_types[gpu_type_idx - 1]
 
             if not gpu_count:
-                # Show available configurations for selected GPU type
                 console.print(f"\n[bold]Available {gpu_type} Configurations:[/bold]")
                 gpu_configs = availabilities.get(gpu_type, [])
 
@@ -323,7 +321,6 @@ def create(
             console.print("[red]No valid GPU configuration found[/red]")
             raise typer.Exit(1)
 
-        # Interactive configuration
         if not name:
             while True:
                 name = typer.prompt(

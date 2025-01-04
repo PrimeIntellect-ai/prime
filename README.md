@@ -59,5 +59,4 @@ ruff check src/prime_cli
 4. Submit a pull request
 
 ## License
-
 MIT License - see LICENSE file for details

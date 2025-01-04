@@ -13,6 +13,40 @@ console = Console()
 
 
 @app.command()
+def gpu_types():
+    """List available GPU types"""
+    try:
+        # Create API clients
+        base_client = APIClient()
+        availability_client = AvailabilityClient(base_client)
+
+        # Get availability data
+        availability_data = availability_client.get()
+
+        # Create display table
+        table = Table(title="Available GPU Types")
+        table.add_column("GPU Type", style="cyan")
+
+        # Get unique GPU types
+        gpu_types = sorted(availability_data.keys())
+
+        for gpu_type in gpu_types:
+            table.add_row(gpu_type)
+
+        console.print(table)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1)
+
+
+@app.command()
 def list(
     gpu_type: Optional[str] = typer.Option(None, help="GPU type (e.g., H100_80GB)"),
     gpu_count: Optional[int] = typer.Option(None, help="Number of GPUs required"),
@@ -36,8 +70,9 @@ def list(
 
         # Create display table
         table = Table(title="Available GPU Resources")
-        table.add_column("ID", style="cyan", no_wrap=True)  # Short ID column
+        table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("GPU Type", style="cyan")
+        table.add_column("GPUs", style="cyan")
         table.add_column("Socket", style="blue")
         table.add_column("Provider", style="blue")
         table.add_column("Location", style="green")
@@ -77,12 +112,13 @@ def list(
                     "short_id": short_id,
                     "cloud_id": gpu.cloud_id,
                     "gpu_type": gpu_type,
+                    "gpu_count": gpu.gpu_count,
                     "socket": gpu.socket or "N/A",
                     "provider": gpu.provider or "N/A",
                     "location": location,
                     "stock_status": Text(gpu.stock_status, style=stock_color),
                     "price": price_str,
-                    "price_value": price or float("inf"),  # For sorting
+                    "price_value": price or float("inf"),
                     "gpu_memory": gpu.gpu_memory,
                     "security": gpu.security or "N/A",
                     "vcpu": gpu.vcpu.default_count,
@@ -102,6 +138,7 @@ def list(
             table.add_row(
                 gpu["short_id"],
                 gpu["gpu_type"],
+                str(gpu["gpu_count"]),
                 gpu["socket"],
                 gpu["provider"],
                 gpu["location"],

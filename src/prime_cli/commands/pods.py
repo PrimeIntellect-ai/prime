@@ -123,7 +123,11 @@ def status(pod_id: str):
 
         # Display status with installation state consideration
         display_status = status.status
-        if status.status == "ACTIVE" and status.installation_status != "FINISHED":
+        if (
+            status.status == "ACTIVE"
+            and status.installation_status
+            and status.installation_status != "FINISHED"
+        ):
             display_status = "INSTALLING"
 
         table.add_row(
@@ -194,6 +198,8 @@ def status(pod_id: str):
 def create(
     id: Optional[str] = typer.Option(None, help="Short ID from availability list"),
     cloud_id: Optional[str] = typer.Option(None, help="Cloud ID from cloud provider"),
+    gpu_type: Optional[str] = typer.Option(None, help="GPU type (e.g. A100, V100)"),
+    gpu_count: Optional[int] = typer.Option(None, help="Number of GPUs"),
     name: Optional[str] = typer.Option(None, help="Name for the pod"),
     disk_size: Optional[int] = typer.Option(None, help="Disk size in GB"),
     vcpus: Optional[int] = typer.Option(None, help="Number of vCPUs"),
@@ -203,41 +209,118 @@ def create(
 ):
     """Create a new pod with an interactive setup process"""
     try:
-        if not id and not cloud_id:
-            console.print("[red]Error: No GPU configuration ID provided[/red]")
-            console.print("\nTo get available GPU configurations:")
-            console.print(
-                "1. Run [green]prime availability list[/green] to see available options"
-            )
-            console.print("2. Copy the ID from the list")
-            console.print("3. Run this command again with [green]--id <ID>[/green]")
-            raise typer.Exit(1)
-
         base_client = APIClient()
         availability_client = AvailabilityClient(base_client)
         pods_client = PodsClient(base_client)
 
-        # Get availability info
-        availabilities = availability_client.get()
         selected_gpu = None
 
-        # Find the matching GPU configuration
-        for gpu_type, gpus in availabilities.items():
-            for gpu in gpus:
-                if id and generate_short_id(gpu) == id:
-                    selected_gpu = gpu
-                    cloud_id = gpu.cloud_id
+        # Get availability info
+        with console.status(
+            "[bold blue]Loading available GPU configurations...", spinner="dots"
+        ):
+            availabilities = availability_client.get()
+
+        if id or cloud_id:
+            # Find the matching GPU configuration by ID or cloud_id
+            for gpu_type_key, gpus in availabilities.items():
+                for gpu in gpus:
+                    if id and generate_short_id(gpu) == id:
+                        selected_gpu = gpu
+                        cloud_id = gpu.cloud_id
+                        break
+                    elif gpu.cloud_id == cloud_id:
+                        selected_gpu = gpu
+                        break
+                if selected_gpu:
                     break
-                elif gpu.cloud_id == cloud_id:
-                    selected_gpu = gpu
-                    break
-            if selected_gpu:
-                break
+
+        else:
+            # Interactive GPU selection if no ID provided
+            if not gpu_type:
+                # Show available GPU types
+                console.print("\n[bold]Available GPU Types:[/bold]")
+                gpu_types = sorted(availabilities.keys())
+                for idx, gpu_type_option in enumerate(gpu_types, 1):
+                    console.print(f"{idx}. {gpu_type_option}")
+
+                # Show loading status after displaying options
+                gpu_type_idx = typer.prompt(
+                    "Select GPU type number", type=int, default=1
+                )
+                if gpu_type_idx < 1 or gpu_type_idx > len(gpu_types):
+                    console.print("[red]Invalid GPU type selection[/red]")
+                    raise typer.Exit(1)
+                gpu_type = gpu_types[gpu_type_idx - 1]
+
+            if not gpu_count:
+                # Show available configurations for selected GPU type
+                console.print(f"\n[bold]Available {gpu_type} Configurations:[/bold]")
+                gpu_configs = availabilities.get(gpu_type, [])
+
+                # Get unique GPU counts
+                unique_configs = {}
+                for gpu in gpu_configs:
+                    if gpu.gpu_count not in unique_configs:
+                        unique_configs[gpu.gpu_count] = gpu
+
+                # Display unique configurations
+                config_list = sorted(unique_configs.values(), key=lambda x: x.gpu_count)
+                for idx, gpu in enumerate(config_list, 1):
+                    price = (
+                        gpu.prices.on_demand
+                        if gpu.prices and gpu.prices.on_demand
+                        else "N/A"
+                    )
+                    console.print(
+                        f"{idx}. {gpu.gpu_count}x {gpu_type} (${round(float(price), 2) if price != 'N/A' else price}/hr)"
+                    )
+
+                config_idx = typer.prompt(
+                    "Select configuration number", type=int, default=1
+                )
+                if config_idx < 1 or config_idx > len(config_list):
+                    console.print("[red]Invalid configuration selection[/red]")
+                    raise typer.Exit(1)
+
+                # Find the best provider for selected configuration
+                selected_count = config_list[config_idx - 1].gpu_count
+                matching_configs = [
+                    gpu for gpu in gpu_configs if gpu.gpu_count == selected_count
+                ]
+
+                # Sort by price and select cheapest
+                selected_gpu = sorted(
+                    matching_configs,
+                    key=lambda x: x.prices.on_demand
+                    if x.prices and x.prices.on_demand
+                    else float("inf"),
+                )[0]
+                cloud_id = selected_gpu.cloud_id
+            else:
+                # Find configuration matching GPU type and count
+                matching_configs = [
+                    gpu
+                    for gpu in availabilities.get(gpu_type, [])
+                    if gpu.gpu_count == gpu_count
+                ]
+                if not matching_configs:
+                    console.print(
+                        f"[red]No configuration found for {gpu_count}x {gpu_type}[/red]"
+                    )
+                    raise typer.Exit(1)
+
+                # Sort by price and select cheapest
+                selected_gpu = sorted(
+                    matching_configs,
+                    key=lambda x: x.prices.on_demand
+                    if x.prices and x.prices.on_demand
+                    else float("inf"),
+                )[0]
+                cloud_id = selected_gpu.cloud_id
 
         if not selected_gpu:
-            console.print(
-                f"[red]No GPU configuration found for {'ID: ' + id if id else 'cloud ID: ' + cloud_id}[/red]"
-            )
+            console.print("[red]No valid GPU configuration found[/red]")
             raise typer.Exit(1)
 
         # Interactive configuration
@@ -245,7 +328,6 @@ def create(
             while True:
                 name = typer.prompt(
                     "Pod name (alphanumeric and dashes only, must contain at least 1 letter)",
-                    default="",
                 )
                 if (
                     name
@@ -372,12 +454,10 @@ def create(
                 "dataCenterId": selected_gpu.data_center,
                 "maxPrice": None,
                 "customTemplateId": None,
-                "dataCenterId": selected_gpu.data_center,
                 "country": None,
                 "security": None,
                 "jupyterPassword": None,
                 "autoRestart": False,
-                
             },
             "provider": {"type": selected_gpu.provider}
             if selected_gpu.provider

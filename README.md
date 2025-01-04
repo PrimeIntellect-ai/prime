@@ -1,8 +1,8 @@
 # Prime Intellect CLI
 
-Command line interface for managing Prime Intellect AI resources.
+Command line interface for managing Prime Intellect resources.
 
-## Development Setup
+## Setup
 
 1. Create and activate a virtual environment:```bash
 # Create a new virtual environment
@@ -16,7 +16,7 @@ source venv/bin/activate
 ```bash
 git clone https://github.com/PrimeIntellect-ai/prime-cli
 cd prime-cli
-pip install -e ".[dev]"  # This installs the package with development dependencies
+pip install -e ".[dev]" 
 ```
 
 3. Set up your API key:
@@ -28,10 +28,20 @@ prime config view
 
 ## Basic Usage
 
-```bash
+"""bash
 # Check GPU availability
-prime gpu availability
-```
+prime availability list                    # List all available GPU resources
+prime availability list --gpu-type H100    # Filter by GPU type
+prime availability gpu-types              # List available GPU types
+
+# Manage compute pods
+prime pods list                           # List your running pods
+prime pods status <pod-id>                # Get detailed status of a pod
+prime pods create                         # Create a pod interactively
+prime pods create --id <ID>               # Create a pod with a specific GPU config
+prime pods create --name my-pod           # Create a pod with a custom name
+prime pods terminate <pod-id>             # Terminate a pod
+"""
 
 ## Development Commands
 

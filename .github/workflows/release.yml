@@ -3,8 +3,9 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
-
+      - 'v*.*.*' 
+  workflow_dispatch: 
+  
 jobs:
   release:
     runs-on: ubuntu-latest

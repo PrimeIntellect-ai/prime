@@ -21,23 +21,29 @@ prime = "prime_cli.main:run"
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
-    "black>=22.3.0",    # Code formatting
-    "isort>=5.10.1",    # Import sorting
-    "ruff>=0.1.8",      # Fast linter
+    "ruff>=0.1.8",      # Fast linter + formatter
+    "mypy>=1.8.0", 
+    "pre-commit>=3.5.0"      # Type checking
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.black]
-line-length = 88
-target-version = ["py38"]
-
-[tool.isort]
-profile = "black"
-multi_line_output = 3
-
 [tool.ruff]
 line-length = 88
 target-version = "py38"
+extend-select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort (import sorting)
+]
+
+[tool.mypy]
+python_version = "3.8"
+disallow_untyped_defs = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+warn_unreachable = true

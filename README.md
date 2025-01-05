@@ -19,8 +19,11 @@ git clone https://github.com/PrimeIntellect-ai/prime-cli
 cd prime-cli
 pip install -e ".[dev]" 
 ```
-
-3. Set up your API key:
+3. Setup pre-commit hooks:
+```bash
+pre-commit install
+```
+4. Set up your API key:
 ```bash
 prime config set-api-key
 # Check details

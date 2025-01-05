@@ -4,15 +4,33 @@ on:
   push:
     tags:
       - 'v*.*.*' 
-  workflow_dispatch: 
-  
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to create release from (e.g. v1.2.3)'
+        required: true
+        type: string
+
 jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug trigger
+        run: |
+          echo "Event name: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Tag: ${{ github.ref_name }}"
+          echo "Manual tag: ${{ inputs.tag }}"
+
   release:
     runs-on: ubuntu-latest
+    needs: debug
     permissions:
       contents: write 
     steps:
       - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Need full history for changelog
       
       - name: Set up Python
         uses: actions/setup-python@v3
@@ -22,9 +40,21 @@ jobs:
       - name: Get version changelog
         id: changelog
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
+          # Use manual tag input if workflow_dispatch, otherwise use git tag
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+            VERSION=${VERSION#v}  # Remove v prefix if present
+          else
+            VERSION=${GITHUB_REF#refs/tags/v}
+          fi
           # Extract the section for this version from CHANGELOG.md
-          sed -n "/## \[$VERSION\]/,/## \[/p" CHANGELOG.md | sed '$d' > release_notes.md
+          sed -n "/## \\\[$VERSION\\\]/,/## \\\[/p" @CHANGELOG.md | sed '$d' > release_notes.md
+          # Debug output
+          echo "Tag version: $VERSION"
+          echo "CHANGELOG.md contents:"
+          cat CHANGELOG.md
+          echo "Generated release notes:"
+          cat release_notes.md
           
       - name: Install dependencies
         run: |
@@ -37,9 +67,10 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ github.event.inputs.tag }}
           body_path: release_notes.md
           files: dist/*
-        
+          
       - name: Publish to PyPI
         env:
           TWINE_USERNAME: __token__

@@ -22,8 +22,9 @@ prime = "prime_cli.main:run"
 dev = [
     "pytest>=7.0.0",
     "ruff>=0.1.8",      # Fast linter + formatter
-    "mypy>=1.8.0", 
-    "pre-commit>=3.5.0"      # Type checking
+    "mypy>=1.8.0",
+    "types-requests>=2.31.0", 
+    "pre-commit>=3.5.0"    
 ]
 
 [build-system]

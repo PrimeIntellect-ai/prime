@@ -1,0 +1,37 @@
+name: Tag Version
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'pyproject.toml'
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          
+      - name: Get Version
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+      - name: Check if tag exists
+        id: tag_check
+        run: |
+          if git tag -l "v${{ steps.version.outputs.version }}" | grep -q "v${{ steps.version.outputs.version }}"; then
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Tag
+        if: steps.tag_check.outputs.tag_exists == 'false'
+        run: |
+          git tag v${{ steps.version.outputs.version }}
+          git push origin v${{ steps.version.outputs.version }}

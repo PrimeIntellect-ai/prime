@@ -41,7 +41,10 @@ def view():
 @app.command()
 def set_api_key(
     api_key: str = typer.Option(
-        ..., prompt="Enter your API key", help="Your Prime Intellect API key"
+        ...,
+        prompt="Enter your API key",
+        help="Your Prime Intellect API key",
+        hide_input=True,
     ),
 ):
     """Set your API key"""

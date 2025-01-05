@@ -32,6 +32,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.ruff]
+src = ["."]
 line-length = 88
 target-version = "py38"
 

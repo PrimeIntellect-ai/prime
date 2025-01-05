@@ -31,7 +31,7 @@ jobs:
 
     - name: Check types with MyPy
       run: |
-        mypy prime_cli/
+        mypy src/prime_cli/
 
     - name: Check formatting with Ruff
       run: |

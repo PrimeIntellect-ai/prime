@@ -47,7 +47,7 @@ def set_api_key(
         help="Your Prime Intellect API key",
         hide_input=True,
     ),
-):
+) -> None:
     """Set your API key"""
     console.print("[yellow]Note: Your input will be hidden for security[/yellow]")
     api_key = typer.prompt("Enter your API key", hide_input=True)

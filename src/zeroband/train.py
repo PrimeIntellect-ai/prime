@@ -1,7 +1,6 @@
 import os
 from typing import Literal
 import time
-import warnings
 from pydantic import model_validator
 from multiprocessing.process import _children
 
@@ -19,7 +18,7 @@ from zeroband import utils
 from zeroband.diloco import Diloco, DilocoConfig
 from zeroband.comms import ElasticDeviceMesh
 from zeroband.loss import cross_entropy_max_z_loss
-from zeroband.models.llama.model import create_block_mask_from_seqlens
+from zeroband.models.llama.model import AttnFnType, create_block_mask_from_seqlens
 
 from zeroband.utils import (
     FakeTokenizer,
@@ -74,16 +73,8 @@ class TrainConfig(BaseConfig):
     memory_profiler: MemoryProfilerConfig | None = None
 
     sequence_packing: bool = True
-    attn_fn: Literal["flash", "sdpa"] | None = None
 
-    math_attn: bool = False  # slow
-
-    @model_validator(mode="after")
-    def validate_attn_fn(self):
-        if self.attn_fn is not None:
-            warnings.warn("attn_fn argument is deprecated")
-
-        return self
+    attn_fn: AttnFnType = "flex"
 
 
 class MonitorConfig(BaseConfig):
@@ -200,7 +191,7 @@ def train(config: Config):
         config.type_model,
         vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
         seq_length=config.data.seq_length,
-        math_attn=config.train.math_attn,
+        attn_fn=config.train.attn_fn,
     )
 
     model = model.to(world_info.local_rank)

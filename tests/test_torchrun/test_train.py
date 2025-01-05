@@ -144,7 +144,8 @@ def test_ckpt(tmp_path: Path):
             "20",
             "--train.log_model_hash",
             "--no-train.sequence_packing",
-            "--train.math_attn",
+            "--train.attn_fn",
+            "math",
         ],
         diloco=True,
     )
@@ -164,7 +165,8 @@ def test_ckpt(tmp_path: Path):
             "20",
             "--train.log_model_hash",
             "--no-train.sequence_packing",
-            "--train.math_attn",
+            "--train.attn_fn",
+            "math",
         ],
         diloco=True,
     )
@@ -184,7 +186,8 @@ def test_ckpt(tmp_path: Path):
     #         "20",
     #         "--train.log_model_hash",
     #         "--no-train.sequence_packing",
-    #         "--train.math_attn",
+    #         "--train.attn_fn",
+    #         "math",
     #     ],
     #     diloco=True,
     # )

@@ -1,77 +1,143 @@
 # Prime Intellect CLI
 
-Command line interface for managing Prime Intellect resources.
+<div align="center">
 
-## Setup
+![PyPI version](https://img.shields.io/pypi/v/prime-cli)
+![Python versions](https://img.shields.io/pypi/pyversions/prime-cli)
+![License](https://img.shields.io/pypi/l/prime-cli)
 
-1. Create and activate a virtual environment:
+Command line interface for managing Prime Intellect GPU resources, enabling seamless deployment and management of compute pods.
+</div>
+
+## 🚀 Quick Start
+
 ```bash
-# Create a new virtual environment
-python -m venv venv
+# Install from PyPI
+pip install prime-cli
 
-# Activate it:
-source venv/bin/activate
+# Set up your API key
+prime config set-api-key
+
+# List available GPU resources
+prime availability list
 ```
 
-2. Clone and install the package in development mode:
+## 🔧 Features
+
+- **GPU Resource Management**: Query and filter available GPU resources
+- **Pod Management**: Create, monitor, and terminate compute pods
+- **SSH Access**: Direct SSH access to running pods
+- **Team Support**: Manage resources across team environments
+
+## 📦 Installation
+
+### From PyPI
 ```bash
+pip install prime-cli
+```
+
+### For Development
+```bash
+# Clone the repository
 git clone https://github.com/PrimeIntellect-ai/prime-cli
 cd prime-cli
-pip install -e ".[dev]" 
-```
-3. Setup pre-commit hooks:
-```bash
+
+# Create and activate virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: .\venv\Scripts\activate
+
+# Install in development mode
+pip install -e ".[dev]"
+
+# Set up pre-commit hooks
 pre-commit install
 ```
-4. Set up your API key:
+
+## 🛠️ Usage
+
+### Configuration
 ```bash
+# Set up API key
 prime config set-api-key
-# Check details
+
+# Configure SSH key for pod access
+prime config set-ssh-key-path
+
+# View current configuration
 prime config view
 ```
 
-## Basic Usage
-
+### GPU Resources
 ```bash
-# Check GPU availability 
-prime availability list                          # List all available GPU resources
-prime availability list --gpu-type H100_80GB     # Filter by GPU type
-prime availability gpu-types                     # List available GPU types
+# List all available GPUs
+prime availability list
 
-# Manage compute pods
-prime pods list                                  # List your running pods
-prime pods status <pod-id>                       # Get detailed status of a pod
-prime pods create                                # Create a pod interactively
-prime pods create --id <ID>                      # Create a pod with a specific GPU config
-prime pods create --name my-pod                  # Create a pod with a custom name
-prime pods terminate <pod-id>                    # Terminate a pod
+# Filter by GPU type
+prime availability list --gpu-type H100_80GB
 
-# SSH into pods
-prime pods ssh <pod-id>                          # SSH into a running pod
-
-# Before using SSH:
-# 1. Download your SSH private key from Prime Intellect dashboard
-# 2. Set the SSH key path in your config:
-prime config set-ssh-key-path
-
-## Team Usage
-prime config set-team-id 
+# Show available GPU types
+prime availability gpu-types
 ```
 
-## Development Commands
-
+### Pod Management
 ```bash
-# Run linter and formatter (includes import sorting)
+# List your pods
+prime pods list
+
+# Create a pod
+prime pods create
+prime pods create --id <ID>     # With specific GPU config
+prime pods create --name my-pod # With custom name
+
+# Monitor and manage pods
+prime pods status <pod-id>
+prime pods terminate <pod-id>
+prime pods ssh <pod-id>
+```
+
+### Team Management
+```bash
+# Set team context
+prime config set-team-id
+```
+
+## 💻 Development
+
+### Code Quality
+```bash
+# Format code
 ruff format src/prime_cli
+
+# Run linter
 ruff check src/prime_cli
+
+# Run tests
+pytest
 ```
 
-## Contributing
+### Release Process
+We use semantic versioning. Releases are automatically created when changes are merged to main.
 
-1. Create a new branch for your feature
-2. Make your changes
-3. Run the linter (ruff)
-4. Submit a pull request
+## 🤝 Contributing
 
-## License
-MIT License - see LICENSE file for details
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Run code quality checks
+   ```bash
+   ruff format .
+   ruff check .
+   pytest
+   ```
+4. Commit your changes (`git commit -m 'Add amazing feature'`)
+5. Push to the branch (`git push origin feature/amazing-feature`)
+6. Open a Pull Request
+
+## 📝 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🔗 Links
+
+- [Documentation](https://docs.primeintellect.ai)
+- [PyPI Package](https://pypi.org/project/prime-cli/)
+- [Issue Tracker](https://github.com/PrimeIntellect-ai/prime-cli/issues)

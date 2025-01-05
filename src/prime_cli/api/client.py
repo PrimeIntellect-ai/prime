@@ -1,5 +1,7 @@
+from typing import Any, Dict, Optional
+
 import requests
-from typing import Optional, Dict, Any
+
 from ..config import Config
 
 
@@ -30,7 +32,8 @@ class APIClient:
         self.api_key = api_key or self.config.api_key
         if not self.api_key:
             raise APIError(
-                "No API key configured. Run 'prime config set-api-key' or set PRIME_API_KEY"
+                "No API key configured. ",
+                "Run 'prime config set-api-key' or set PRIME_API_KEY",
             )
 
         # Setup client
@@ -62,12 +65,17 @@ class APIClient:
         try:
             response = self.session.request(method, url, params=params, json=json)
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            if not isinstance(result, dict):
+                raise APIError("API response was not a dictionary")
+            return result
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
                 raise UnauthorizedError(
-                    "API key unauthorized. Please check that your API key has the correct permissions "
-                    "or generate a new one at https://app.primeintellect.ai/dashboard/tokens"
+                    "API key unauthorized. ",
+                    "Please check that your API key has the correct permissions "
+                    "or generate a new one at ",
+                    "https://app.primeintellect.ai/dashboard/tokens",
                 )
             if e.response.status_code == 402:
                 raise PaymentRequiredError(
@@ -94,6 +102,6 @@ class APIClient:
         """Make a DELETE request to the API"""
         return self.request("DELETE", endpoint)
 
-    def __str__(self):
+    def __str__(self) -> str:
         """For debugging"""
         return f"APIClient(base_url={self.base_url})"

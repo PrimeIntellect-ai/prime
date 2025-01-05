@@ -1,6 +1,7 @@
 import typer
 from rich.console import Console
 from rich.table import Table
+
 from ..config import Config
 
 app = typer.Typer(help="Configure the CLI")
@@ -8,7 +9,7 @@ console = Console()
 
 
 @app.command()
-def view():
+def view() -> None:
     """View current configuration"""
     config = Config()
     settings = config.view()
@@ -62,7 +63,7 @@ def set_team_id(
     team_id: str = typer.Option(
         ..., prompt="Enter your team ID", help="Your Prime Intellect team ID"
     ),
-):
+) -> None:
     """Set your team ID"""
     config = Config()
     config.set_team_id(team_id)
@@ -70,7 +71,7 @@ def set_team_id(
 
 
 @app.command()
-def remove_team_id():
+def remove_team_id() -> None:
     """Remove team ID to use personal account"""
     config = Config()
     config.set_team_id("")
@@ -84,7 +85,7 @@ def set_base_url(
         prompt="Enter the API base URL",
         help="Base URL for the Prime Intellect API",
     ),
-):
+) -> None:
     """Set the API base URL"""
     config = Config()
     config.set_base_url(url)
@@ -98,7 +99,7 @@ def set_ssh_key_path(
         prompt="Enter the SSH private key path",
         help="Path to your SSH private key file",
     ),
-):
+) -> None:
     """Set the SSH private key path"""
     config = Config()
     config.set_ssh_key_path(path)
@@ -106,7 +107,7 @@ def set_ssh_key_path(
 
 
 @app.command()
-def reset():
+def reset() -> None:
     """Reset configuration to defaults"""
     if typer.confirm("Are you sure you want to reset all settings?"):
         config = Config()

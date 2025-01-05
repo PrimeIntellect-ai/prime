@@ -33,6 +33,8 @@ build-backend = "hatchling.build"
 [tool.ruff]
 line-length = 88
 target-version = "py38"
+
+[tool.ruff.lint]
 extend-select = [
     "E",   # pycodestyle errors
     "F",   # pyflakes

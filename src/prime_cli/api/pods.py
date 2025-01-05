@@ -1,6 +1,8 @@
 from typing import List, Optional, Union
+
 from pydantic import BaseModel, Field
-from prime_cli.api.client import APIError
+
+from prime_cli.api.client import APIClient, APIError
 
 
 class PortMapping(BaseModel):
@@ -31,6 +33,23 @@ class PodStatus(BaseModel):
         populate_by_name = True
 
 
+class AttachedResource(BaseModel):
+    id: Union[str, int, None] = Field(None, alias="id")
+    type: Optional[str] = Field(None, alias="type")
+    status: Optional[str] = None
+    created_at: Optional[str] = Field(None, alias="createdAt")
+    size: Optional[int]
+    mount_path: Optional[str] = Field(None, alias="mountPath")
+    resource_path: Optional[str] = Field(None, alias="resourcePath")
+    is_detachable: Optional[bool] = Field(None, alias="isDetachable")
+    resource_type: Optional[str] = Field(None, alias="resourceType")
+
+    class Config:
+        populate_by_name = True
+        str_strip_whitespace = True
+        validate_assignment = True
+
+
 class Pod(BaseModel):
     id: str
     name: Optional[str]
@@ -40,7 +59,33 @@ class Pod(BaseModel):
     created_at: str = Field(..., alias="createdAt")
     provider_type: str = Field(..., alias="providerType")
     installation_status: Optional[str] = Field(None, alias="installationStatus")
+    installation_failure: Optional[str] = Field(None, alias="installationFailure")
+    installation_progress: Optional[int] = Field(None, alias="installationProgress")
     team_id: Optional[str] = Field(None, alias="teamId")
+    resources: Optional[dict]
+    attached_resources: Optional[List[AttachedResource]] = Field(
+        None, alias="attachedResources"
+    )
+    prime_port_mapping: Optional[List[PortMapping]] = Field(
+        None, alias="primePortMapping"
+    )
+    ssh_connection: Optional[str] = Field(None, alias="sshConnection")
+    ip: Optional[str]
+    price_hr: Optional[float] = Field(None, alias="priceHr")
+    environment_type: Optional[str] = Field(None, alias="environmentType")
+    socket: Optional[str]
+    type: Optional[str]
+    user_id: Optional[str] = Field(None, alias="userId")
+    wallet_id: Optional[str] = Field(None, alias="walletId")
+    updated_at: Optional[str] = Field(None, alias="updatedAt")
+    jupyter_password: Optional[str] = Field(None, alias="jupyterPassword")
+    stopped_price_hr: Optional[float] = Field(None, alias="stoppedPriceHr")
+    provisioning_price_hr: Optional[float] = Field(None, alias="provisioningPriceHr")
+    base_price_hr: Optional[float] = Field(None, alias="basePriceHr")
+    base_currency: Optional[str] = Field(None, alias="baseCurrency")
+    custom_template_id: Optional[str] = Field(None, alias="customTemplateId")
+    is_spot: Optional[bool] = Field(None, alias="isSpot")
+    auto_restart: Optional[bool] = Field(None, alias="autoRestart")
 
     class Config:
         populate_by_name = True
@@ -78,7 +123,7 @@ class PodConfig(BaseModel):
 
 
 class PodsClient:
-    def __init__(self, client):
+    def __init__(self, client: APIClient) -> None:
         self.client = client
 
     def list(self, offset: int = 0, limit: int = 100) -> PodList:

@@ -1,19 +1,20 @@
+from typing import Any, Dict, List, Optional
+
 import typer
-from typing import Optional, List
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
-from ..helper.short_id import generate_short_id
 
+from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.client import APIClient, APIError
-from ..api.availability import AvailabilityClient
+from ..helper.short_id import generate_short_id
 
 app = typer.Typer(help="Check GPU availability and pricing")
 console = Console()
 
 
 @app.command()
-def gpu_types():
+def gpu_types() -> None:
     """List available GPU types"""
     try:
         # Create API clients
@@ -56,7 +57,7 @@ def list(
     socket: Optional[str] = typer.Option(
         None, help="Filter by socket type (e.g., PCIe, SXM5, SXM4)"
     ),
-):
+) -> None:
     """List available GPU resources"""
     try:
         # Create API clients
@@ -64,7 +65,7 @@ def list(
         availability_client = AvailabilityClient(base_client)
 
         # Get availability data
-        availability_data = availability_client.get(
+        availability_data: Dict[str, List[GPUAvailability]] = availability_client.get(
             gpu_type=gpu_type, gpu_count=gpu_count, regions=regions
         )
 
@@ -83,19 +84,14 @@ def list(
         table.add_column("vCPUs", style="blue")
         table.add_column("RAM (GB)", style="blue")
 
-        all_gpus = []
+        all_gpus: List[Dict[str, Any]] = []
         for gpu_type, gpus in availability_data.items():
             for gpu in gpus:
                 if socket and gpu.socket != socket:
                     continue
 
-                # Get price based on provider
-                if gpu.security == "community_cloud":
-                    price = gpu.prices.community_price
-                    price_str = f"${price:.2f}" if price else "N/A"
-                else:
-                    price = gpu.prices.on_demand
-                    price_str = f"${price:.2f}" if price else "N/A"
+                price = gpu.prices.price
+                price_str = f"${price:.2f}" if price != float("inf") else "N/A"
 
                 stock_color = {"High": "green", "Medium": "yellow", "Low": "red"}.get(
                     gpu.stock_status, "white"
@@ -118,7 +114,7 @@ def list(
                     "location": location,
                     "stock_status": Text(gpu.stock_status, style=stock_color),
                     "price": price_str,
-                    "price_value": price or float("inf"),
+                    "price_value": price,
                     "gpu_memory": gpu.gpu_memory,
                     "security": gpu.security or "N/A",
                     "vcpu": gpu.vcpu.default_count,
@@ -128,26 +124,28 @@ def list(
 
         # Sort by price and remove duplicates based on short_id
         seen_ids = set()
-        filtered_gpus = []
-        for gpu in sorted(all_gpus, key=lambda x: x["price_value"]):
-            if gpu["short_id"] not in seen_ids:
-                seen_ids.add(gpu["short_id"])
-                filtered_gpus.append(gpu)
+        filtered_gpus: List[Dict[str, Any]] = []
+        for gpu_config in sorted(
+            all_gpus, key=lambda x: (x["price_value"], x["short_id"])
+        ):
+            if gpu_config["short_id"] not in seen_ids:
+                seen_ids.add(gpu_config["short_id"])
+                filtered_gpus.append(gpu_config)
 
-        for gpu in filtered_gpus:
+        for gpu_entry in filtered_gpus:
             table.add_row(
-                gpu["short_id"],
-                gpu["gpu_type"],
-                str(gpu["gpu_count"]),
-                gpu["socket"],
-                gpu["provider"],
-                gpu["location"],
-                gpu["stock_status"],
-                gpu["price"],
-                str(gpu["gpu_memory"]),
-                gpu["security"],
-                str(gpu["vcpu"]),
-                str(gpu["memory"]),
+                gpu_entry["short_id"],
+                gpu_entry["gpu_type"],
+                str(gpu_entry["gpu_count"]),
+                gpu_entry["socket"],
+                gpu_entry["provider"],
+                gpu_entry["location"],
+                gpu_entry["stock_status"],
+                gpu_entry["price"],
+                str(gpu_entry["gpu_memory"]),
+                gpu_entry["security"],
+                str(gpu_entry["vcpu"]),
+                str(gpu_entry["memory"]),
             )
 
         console.print(table)
@@ -160,7 +158,8 @@ def list(
         console.print("2. Run one of the following commands:")
         console.print("   [green]prime pods create --id <ID>[/green]")
         console.print(
-            "\nThe command will guide you through an interactive setup process to configure the pod."
+            "\nThe command will guide you through an interactive ",
+            "setup process to configure the pod.",
         )
 
     except APIError as e:

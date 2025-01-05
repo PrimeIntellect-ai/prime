@@ -1,4 +1,5 @@
-from typing import List, Optional, Dict
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -41,6 +42,15 @@ class Prices(BaseModel):
     class Config:
         populate_by_name = True
 
+    @property
+    def price(self) -> float:
+        """Returns the price - either on-demand or community price"""
+        if self.community_price is not None:
+            return self.community_price
+        if self.on_demand is not None:
+            return self.on_demand
+        return float("inf")
+
 
 class GPUAvailability(BaseModel):
     cloud_id: str = Field(..., alias="cloudId")
@@ -65,12 +75,15 @@ class GPUAvailability(BaseModel):
     is_spot: Optional[bool] = Field(None, alias="isSpot")
     prepaid_time: Optional[int] = Field(None, alias="prepaidTime")
 
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
     class Config:
         populate_by_name = True
 
 
 class AvailabilityClient:
-    def __init__(self, client):
+    def __init__(self, client: Any) -> None:
         self.client = client
 
     def get(
@@ -84,9 +97,9 @@ class AvailabilityClient:
         """
         params = {}
         if regions:
-            params["regions"] = regions
+            params["regions"] = ",".join(regions)
         if gpu_count:
-            params["gpu_count"] = gpu_count
+            params["gpu_count"] = str(gpu_count)
         if gpu_type:
             params["gpu_type"] = gpu_type
 

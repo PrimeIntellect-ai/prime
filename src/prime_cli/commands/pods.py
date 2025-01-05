@@ -1,15 +1,17 @@
+import os
+import subprocess
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple, Union
+
 import typer
-from typing import Optional, List, Union
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
-from datetime import datetime
-import subprocess
-import os
-from ..config import Config
+
+from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.client import APIClient, APIError
 from ..api.pods import PodsClient
-from ..api.availability import AvailabilityClient
+from ..config import Config
 from ..helper.short_id import generate_short_id
 
 app = typer.Typer(help="Manage compute pods")
@@ -22,15 +24,16 @@ def format_ip_display(ip: Optional[Union[str, List[str]]]) -> str:
     if not ip:
         return "N/A"
     # Handle both list and single IP cases by always converting to list
-    ip_list = ip if hasattr(ip, "__iter__") and not isinstance(ip, str) else [ip]
-    return ", ".join(ip_list)
+    if isinstance(ip, str):
+        return ip
+    return ", ".join(str(x) for x in ip)
 
 
 @app.command()
 def list(
     limit: int = typer.Option(100, help="Maximum number of pods to list"),
     offset: int = typer.Option(0, help="Number of pods to skip"),
-):
+) -> None:
     """List your running pods"""
     try:
         # Create API clients
@@ -78,7 +81,8 @@ def list(
 
         console.print(table)
         console.print(
-            "\n[blue]Use 'prime pods status <pod-id>' to see detailed information about a specific pod[/blue]"
+            "\n[blue]Use 'prime pods status <pod-id>' to see detailed information "
+            "about a specific pod[/blue]"
         )
 
         # If there are more pods, show a message
@@ -86,7 +90,8 @@ def list(
             remaining = pods_list.total_count - (offset + limit)
             console.print(
                 f"\n[yellow]Showing {limit} of {pods_list.total_count} pods. "
-                f"Use --offset {offset + limit} to see the next {min(limit, remaining)} pods.[/yellow]"
+                f"Use --offset {offset + limit} to see the next "
+                f"{min(limit, remaining)} pods.[/yellow]"
             )
 
     except APIError as e:
@@ -101,7 +106,7 @@ def list(
 
 
 @app.command()
-def status(pod_id: str):
+def status(pod_id: str) -> None:
     """Get detailed status of a specific pod"""
     try:
         base_client = APIClient()
@@ -144,6 +149,7 @@ def status(pod_id: str):
         table.add_row("Team", pod_details.team_id or "Personal")
         table.add_row("Provider", status.provider_type)
         table.add_row("GPU", f"{pod_details.gpu_type} x{pod_details.gpu_count}")
+        table.add_row("Image", pod_details.environment_type)
 
         # Cost info if available
         if status.cost_per_hr:
@@ -184,6 +190,28 @@ def status(pod_id: str):
 
         console.print(table)
 
+        # Display attached resources in a separate table if they exist
+        if pod_details.attached_resources:
+            resource_table = Table(title="Attached Resources")
+            resource_table.add_column("ID", style="cyan")
+            resource_table.add_column("Type", style="white")
+            resource_table.add_column("Status", style="white")
+            resource_table.add_column("Size", style="white")
+            resource_table.add_column("Mount Path", style="white")
+
+            for resource in pod_details.attached_resources:
+                status_style = "green" if resource.status == "ACTIVE" else "yellow"
+                resource_table.add_row(
+                    str(resource.id),
+                    resource.type or "N/A",
+                    Text(resource.status or "N/A", style=status_style),
+                    str(resource.size) + "GB" if resource.size else "N/A",
+                    resource.mount_path or "N/A",
+                )
+
+            console.print("\n")  # Add spacing between tables
+            console.print(resource_table)
+
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -207,7 +235,7 @@ def create(
     memory: Optional[int] = typer.Option(None, help="Memory in GB"),
     image: Optional[str] = typer.Option(None, help="Custom image"),
     team_id: Optional[str] = typer.Option(None, help="Team ID to use for the pod"),
-):
+) -> None:
     """Create a new pod with an interactive setup process"""
     try:
         base_client = APIClient()
@@ -261,23 +289,13 @@ def create(
 
             if not gpu_count:
                 console.print(f"\n[bold]Available {gpu_type} Configurations:[/bold]")
-                gpu_configs = availabilities.get(gpu_type, [])
+                gpu_configs = availabilities.get(str(gpu_type), [])
 
                 # Get unique GPU counts and find cheapest price for each count
-                unique_configs = {}
+                unique_configs: Dict[int, Tuple[GPUAvailability, float]] = {}
                 for gpu in gpu_configs:
                     gpu_count = gpu.gpu_count
-                    on_demand_price = (
-                        gpu.prices.on_demand
-                        if gpu.prices and gpu.prices.on_demand
-                        else float("inf")
-                    )
-                    community_price = (
-                        gpu.prices.community_price
-                        if gpu.prices and gpu.prices.community_price
-                        else float("inf")
-                    )
-                    price = min(on_demand_price, community_price)
+                    price = gpu.prices.price if gpu.prices else float("inf")
 
                     if (
                         gpu_count not in unique_configs
@@ -303,7 +321,10 @@ def create(
                     console.print(f"{idx}. {count}x {gpu_type} ({price_display})")
 
                 config_idx = typer.prompt(
-                    "Select configuration number", type=int, default=1
+                    "Select configuration number",
+                    type=int,
+                    default=1,
+                    show_default=False,
                 )
                 if config_idx < 1 or config_idx > len(config_list):
                     console.print("[red]Invalid configuration selection[/red]")
@@ -315,24 +336,17 @@ def create(
                     gpu for gpu in gpu_configs if gpu.gpu_count == selected_count
                 ]
 
-                # Sort by price considering both on-demand and community prices
+                # Sort by price
                 selected_gpu = sorted(
                     matching_configs,
-                    key=lambda x: min(
-                        x.prices.on_demand
-                        if x.prices and x.prices.on_demand
-                        else float("inf"),
-                        x.prices.community_price
-                        if x.prices and x.prices.community_price
-                        else float("inf"),
-                    ),
+                    key=lambda x: x.prices.price if x.prices else float("inf"),
                 )[0]
                 cloud_id = selected_gpu.cloud_id
             else:
                 # Find configuration matching GPU type and count
                 matching_configs = [
                     gpu
-                    for gpu in availabilities.get(gpu_type, [])
+                    for gpu in availabilities.get(str(gpu_type), [])
                     if gpu.gpu_count == gpu_count
                 ]
                 if not matching_configs:
@@ -341,17 +355,10 @@ def create(
                     )
                     raise typer.Exit(1)
 
-                # Sort by price considering both on-demand and community prices
+                # Sort by price
                 selected_gpu = sorted(
                     matching_configs,
-                    key=lambda x: min(
-                        x.prices.on_demand
-                        if x.prices and x.prices.on_demand
-                        else float("inf"),
-                        x.prices.community_price
-                        if x.prices and x.prices.community_price
-                        else float("inf"),
-                    ),
+                    key=lambda x: x.prices.price if x.prices else float("inf"),
                 )[0]
                 cloud_id = selected_gpu.cloud_id
 
@@ -362,7 +369,8 @@ def create(
         if not name:
             while True:
                 name = typer.prompt(
-                    "Pod name (alphanumeric and dashes only, must contain at least 1 letter)",
+                    "Pod name (alphanumeric and dashes only, must contain at least "
+                    "1 letter)",
                 )
                 if (
                     name
@@ -371,7 +379,8 @@ def create(
                 ):
                     break
                 console.print(
-                    "[red]Invalid name format. Use only letters, numbers and dashes. Must contain at least 1 letter.[/red]"
+                    "[red]Invalid name format. Use only letters, numbers and dashes. "
+                    "Must contain at least 1 letter.[/red]"
                 )
 
         gpu_count = selected_gpu.gpu_count
@@ -389,18 +398,26 @@ def create(
                     default=default_disk or min_disk,
                     type=int,
                 )
-                if disk_size < min_disk or disk_size > max_disk:
-                    console.print(
-                        f"[red]Disk size must be between {min_disk}GB and {max_disk}GB[/red]"
-                    )
+                if (
+                    min_disk is not None
+                    and disk_size is not None
+                    and disk_size < min_disk
+                ):
+                    console.print(f"[red]Disk size must be at least {min_disk}GB[/red]")
+                    raise typer.Exit(1)
+                if (
+                    max_disk is not None
+                    and disk_size is not None
+                    and disk_size > max_disk
+                ):
+                    console.print(f"[red]Disk size must be at most {max_disk}GB[/red]")
                     raise typer.Exit(1)
 
         if not vcpus:
             min_vcpus = selected_gpu.vcpu.min_count
             max_vcpus = selected_gpu.vcpu.max_count
             default_vcpus = selected_gpu.vcpu.default_count
-
-            if min_vcpus is None or max_vcpus is None:
+            if min_vcpus is None or max_vcpus is None or default_vcpus is None:
                 vcpus = default_vcpus
             else:
                 vcpus = typer.prompt(
@@ -408,9 +425,10 @@ def create(
                     default=default_vcpus,
                     type=int,
                 )
-                if vcpus < min_vcpus or vcpus > max_vcpus:
+                if vcpus is None or vcpus < min_vcpus or vcpus > max_vcpus:
                     console.print(
-                        f"[red]vCPU count must be between {min_vcpus} and {max_vcpus}[/red]"
+                        f"[red]vCPU count must be between {min_vcpus} and "
+                        f"{max_vcpus}[/red]"
                     )
                     raise typer.Exit(1)
 
@@ -427,9 +445,10 @@ def create(
                     default=default_memory,
                     type=int,
                 )
-                if memory < min_memory or memory > max_memory:
+                if memory is None or memory < min_memory or memory > max_memory:
                     console.print(
-                        f"[red]Memory must be between {min_memory}GB and {max_memory}GB[/red]"
+                        f"[red]Memory must be between {min_memory}GB and "
+                        f"{max_memory}GB[/red]"
                     )
                     raise typer.Exit(1)
 
@@ -506,12 +525,16 @@ def create(
 
         # Show configuration summary
         console.print("\n[bold]Pod Configuration Summary:[/bold]")
-        for key, value in pod_config["pod"].items():
-            if value is not None:
-                if key == "provider":
-                    continue
-                console.print(f"{key}: {value}")
-        if pod_config["provider"]:
+        pod_dict = pod_config.get("pod", {})
+        if isinstance(pod_dict, dict):
+            for key, value in pod_dict.items():
+                if value is not None:
+                    if key == "provider":
+                        continue
+                    console.print(f"{key}: {value}")
+        if isinstance(pod_config["provider"], dict) and isinstance(
+            pod_config["provider"].get("type"), str
+        ):
             console.print(f"provider: {pod_config['provider']['type']}")
         console.print(f"team: {team_id}")
 
@@ -523,11 +546,13 @@ def create(
 
                 console.print(f"\n[green]Successfully created pod {pod.id}[/green]")
                 console.print(
-                    f"\n[blue]Use 'prime pods status {pod.id}' to check the pod status[/blue]"
+                    f"\n[blue]Use 'prime pods status {pod.id}' to check the pod "
+                    "status[/blue]"
                 )
             except AttributeError:
                 console.print(
-                    "[red]Error: Failed to create pod - invalid API client configuration[/red]"
+                    "[red]Error: Failed to create pod - invalid API client "
+                    "configuration[/red]"
                 )
                 raise typer.Exit(1)
         else:
@@ -546,7 +571,7 @@ def create(
 
 
 @app.command()
-def terminate(pod_id: str):
+def terminate(pod_id: str) -> None:
     """Terminate a pod"""
     try:
         base_client = APIClient()
@@ -573,7 +598,7 @@ def terminate(pod_id: str):
 
 
 @app.command()
-def ssh(pod_id: str):
+def ssh(pod_id: str) -> None:
     """SSH into a pod using configured SSH key"""
     try:
         base_client = APIClient()
@@ -595,8 +620,15 @@ def ssh(pod_id: str):
         if not os.path.exists(ssh_key_path):
             console.print(f"[red]SSH key not found at {ssh_key_path}[/red]")
             raise typer.Exit(1)
+        ssh_conn = status.ssh_connection
+        # Handle ssh_conn being either a string or list of strings
+        connection_str: str
+        if isinstance(ssh_conn, List):
+            connection_str = ssh_conn[0] if ssh_conn else ""
+        else:
+            connection_str = str(ssh_conn) if ssh_conn else ""
 
-        connection_parts = status.ssh_connection.split(" -p ")
+        connection_parts = connection_str.split(" -p ")
         host = connection_parts[0]
         port = connection_parts[1] if len(connection_parts) > 1 else "22"
 

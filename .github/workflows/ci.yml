@@ -1,18 +1,15 @@
 name: CI
-
 on:
   push:
     branches: [ "main", "develop" ]
   pull_request:
     branches: [ "main", "develop" ]
-
 jobs:
   lint:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.8", "3.9", "3.10"]
-
     steps:
     - uses: actions/checkout@v4
     
@@ -31,7 +28,7 @@ jobs:
 
     - name: Check types with MyPy
       run: |
-        mypy prime_cli/
+        mypy src/prime_cli/
 
     - name: Check formatting with Ruff
       run: |

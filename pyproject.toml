@@ -1,0 +1,56 @@
+[project]
+name = "prime-cli"
+version = "0.1.0"
+description = "Prime Intellect CLI"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+authors = [
+    { name = "Prime Intellect", email = "contact@primeintellect.ai" }
+]
+dependencies = [
+    "typer[all]>=0.9.0",
+    "requests>=2.31.0",
+    "rich>=13.3.1",  
+    "pydantic>=2.0.0" 
+]
+
+[project.scripts]
+prime = "prime_cli.main:run"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "ruff>=0.1.8",      
+    "mypy>=1.8.0",
+    "types-requests>=2.31.0", 
+    "pre-commit>=3.5.0"    
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+src = ["."]
+line-length = 88
+target-version = "py38"
+
+[tool.ruff.lint]
+extend-select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort (import sorting)
+]
+
+[tool.mypy]
+python_version = "3.8"
+disallow_untyped_defs = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+warn_unreachable = true
+[[tool.mypy.overrides]]
+module = "pytest"
+ignore_missing_imports = true

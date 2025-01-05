@@ -107,16 +107,15 @@ def status(pod_id: str):
         base_client = APIClient()
         pods_client = PodsClient(base_client)
 
-        # Get pod status
+        # Get both pod status and details
         statuses = pods_client.get_status([pod_id])
+        pod_details = pods_client.get(pod_id)
+
         if not statuses:
             console.print(f"[red]No status found for pod {pod_id}[/red]")
             raise typer.Exit(1)
 
         status = statuses[0]
-
-        # Get pod details for additional info
-        pod_details = pods_client.get(pod_id)
 
         # Create display table
         table = Table(title=f"Pod Status: {pod_id}")
@@ -127,8 +126,8 @@ def status(pod_id: str):
         display_status = status.status
         if (
             status.status == "ACTIVE"
-            and status.installation_status
-            and status.installation_status != "FINISHED"
+            and status.installation_progress is not None
+            and status.installation_progress < 100
         ):
             display_status = "INSTALLING"
 
@@ -142,7 +141,7 @@ def status(pod_id: str):
 
         # Basic pod info
         table.add_row("Name", pod_details.name or "N/A")
-        table.add_row("Team", status.team_id or "Personal")
+        table.add_row("Team", pod_details.team_id or "Personal")
         table.add_row("Provider", status.provider_type)
         table.add_row("GPU", f"{pod_details.gpu_type} x{pod_details.gpu_count}")
 
@@ -162,8 +161,8 @@ def status(pod_id: str):
         table.add_row("SSH", ssh_display)
 
         # Installation status
-        if status.installation_status:
-            table.add_row("Installation Status", status.installation_status)
+        if pod_details.installation_status:
+            table.add_row("Installation Status", pod_details.installation_status)
         if status.installation_progress is not None:
             table.add_row("Installation Progress", f"{status.installation_progress}%")
         if status.installation_failure:
@@ -242,7 +241,13 @@ def create(
             if not gpu_type:
                 # Show available GPU types
                 console.print("\n[bold]Available GPU Types:[/bold]")
-                gpu_types = sorted(availabilities.keys())
+                gpu_types = sorted(
+                    [
+                        gpu_type
+                        for gpu_type, gpus in availabilities.items()
+                        if len(gpus) > 0
+                    ]
+                )
                 for idx, gpu_type_option in enumerate(gpu_types, 1):
                     console.print(f"{idx}. {gpu_type_option}")
 
@@ -258,23 +263,44 @@ def create(
                 console.print(f"\n[bold]Available {gpu_type} Configurations:[/bold]")
                 gpu_configs = availabilities.get(gpu_type, [])
 
-                # Get unique GPU counts
+                # Get unique GPU counts and find cheapest price for each count
                 unique_configs = {}
                 for gpu in gpu_configs:
-                    if gpu.gpu_count not in unique_configs:
-                        unique_configs[gpu.gpu_count] = gpu
-
-                # Display unique configurations
-                config_list = sorted(unique_configs.values(), key=lambda x: x.gpu_count)
-                for idx, gpu in enumerate(config_list, 1):
-                    price = (
+                    gpu_count = gpu.gpu_count
+                    on_demand_price = (
                         gpu.prices.on_demand
                         if gpu.prices and gpu.prices.on_demand
+                        else float("inf")
+                    )
+                    community_price = (
+                        gpu.prices.community_price
+                        if gpu.prices and gpu.prices.community_price
+                        else float("inf")
+                    )
+                    price = min(on_demand_price, community_price)
+
+                    if (
+                        gpu_count not in unique_configs
+                        or price < unique_configs[gpu_count][1]
+                    ):
+                        unique_configs[gpu_count] = (gpu, price)
+
+                # Display unique configurations with their cheapest prices
+                config_list = sorted(
+                    [
+                        (count, gpu, price)
+                        for count, (gpu, price) in unique_configs.items()
+                    ],
+                    key=lambda x: x[0],
+                )
+
+                for idx, (count, gpu, price) in enumerate(config_list, 1):
+                    price_display = (
+                        f"${round(float(price), 2)}/hr"
+                        if price != float("inf")
                         else "N/A"
                     )
-                    console.print(
-                        f"{idx}. {gpu.gpu_count}x {gpu_type} (${round(float(price), 2) if price != 'N/A' else price}/hr)"
-                    )
+                    console.print(f"{idx}. {count}x {gpu_type} ({price_display})")
 
                 config_idx = typer.prompt(
                     "Select configuration number", type=int, default=1
@@ -284,17 +310,22 @@ def create(
                     raise typer.Exit(1)
 
                 # Find the best provider for selected configuration
-                selected_count = config_list[config_idx - 1].gpu_count
+                selected_count = config_list[config_idx - 1][0]
                 matching_configs = [
                     gpu for gpu in gpu_configs if gpu.gpu_count == selected_count
                 ]
 
-                # Sort by price and select cheapest
+                # Sort by price considering both on-demand and community prices
                 selected_gpu = sorted(
                     matching_configs,
-                    key=lambda x: x.prices.on_demand
-                    if x.prices and x.prices.on_demand
-                    else float("inf"),
+                    key=lambda x: min(
+                        x.prices.on_demand
+                        if x.prices and x.prices.on_demand
+                        else float("inf"),
+                        x.prices.community_price
+                        if x.prices and x.prices.community_price
+                        else float("inf"),
+                    ),
                 )[0]
                 cloud_id = selected_gpu.cloud_id
             else:
@@ -310,12 +341,17 @@ def create(
                     )
                     raise typer.Exit(1)
 
-                # Sort by price and select cheapest
+                # Sort by price considering both on-demand and community prices
                 selected_gpu = sorted(
                     matching_configs,
-                    key=lambda x: x.prices.on_demand
-                    if x.prices and x.prices.on_demand
-                    else float("inf"),
+                    key=lambda x: min(
+                        x.prices.on_demand
+                        if x.prices and x.prices.on_demand
+                        else float("inf"),
+                        x.prices.community_price
+                        if x.prices and x.prices.community_price
+                        else float("inf"),
+                    ),
                 )[0]
                 cloud_id = selected_gpu.cloud_id
 

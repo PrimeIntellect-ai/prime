@@ -26,8 +26,6 @@ class PodStatus(BaseModel):
     ip: Optional[Union[str, List[str]]]
     installation_failure: Optional[str] = Field(None, alias="installationFailure")
     installation_progress: Optional[int] = Field(None, alias="installationProgress")
-    installation_status: Optional[str] = Field(None, alias="installationStatus")
-    team_id: Optional[str] = Field(None, alias="teamId")
 
     class Config:
         populate_by_name = True

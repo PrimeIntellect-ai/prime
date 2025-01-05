@@ -9,6 +9,18 @@ class APIError(Exception):
     pass
 
 
+class UnauthorizedError(APIError):
+    """Raised when API returns 401 unauthorized"""
+
+    pass
+
+
+class PaymentRequiredError(APIError):
+    """Raised when API returns 402 payment required"""
+
+    pass
+
+
 class APIClient:
     def __init__(self, api_key: Optional[str] = None):
         # Load config
@@ -52,6 +64,16 @@ class APIClient:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                raise UnauthorizedError(
+                    "API key unauthorized. Please check that your API key has the correct permissions "
+                    "or generate a new one at https://app.primeintellect.ai/dashboard/tokens"
+                )
+            if e.response.status_code == 402:
+                raise PaymentRequiredError(
+                    "Payment required. Please check your billing status at "
+                    "https://app.primeintellect.ai/dashboard/billing"
+                )
             raise APIError(f"API request failed: {e}")
         except requests.exceptions.RequestException as e:
             raise APIError(f"Request failed: {e}")

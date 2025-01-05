@@ -1,6 +1,6 @@
 from typing import List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from prime_cli.api.client import APIClient, APIError
 
@@ -12,8 +12,7 @@ class PortMapping(BaseModel):
     used_by: Optional[str] = Field(None, alias="usedBy")
     description: Optional[str]
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class PodStatus(BaseModel):
@@ -29,8 +28,7 @@ class PodStatus(BaseModel):
     installation_failure: Optional[str] = Field(None, alias="installationFailure")
     installation_progress: Optional[int] = Field(None, alias="installationProgress")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class AttachedResource(BaseModel):
@@ -44,10 +42,9 @@ class AttachedResource(BaseModel):
     is_detachable: Optional[bool] = Field(None, alias="isDetachable")
     resource_type: Optional[str] = Field(None, alias="resourceType")
 
-    class Config:
-        populate_by_name = True
-        str_strip_whitespace = True
-        validate_assignment = True
+    model_config = ConfigDict(
+        populate_by_name=True, str_strip_whitespace=True, validate_assignment=True
+    )
 
 
 class Pod(BaseModel):
@@ -87,8 +84,7 @@ class Pod(BaseModel):
     is_spot: Optional[bool] = Field(None, alias="isSpot")
     auto_restart: Optional[bool] = Field(None, alias="autoRestart")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class PodList(BaseModel):
@@ -97,8 +93,7 @@ class PodList(BaseModel):
     limit: int
     data: List[Pod]
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class PodConfig(BaseModel):
@@ -118,8 +113,7 @@ class PodConfig(BaseModel):
     provider: dict
     team: Optional[dict]
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class PodsClient:

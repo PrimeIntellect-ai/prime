@@ -2,6 +2,17 @@ import json
 import os
 from pathlib import Path
 
+from pydantic import BaseModel, ConfigDict
+
+
+class ConfigModel(BaseModel):
+    api_key: str = ""
+    team_id: str = ""
+    base_url: str = "https://api.primeintellect.ai"
+    ssh_key_path: str = str(Path.home() / ".ssh" / "id_rsa")
+
+    model_config = ConfigDict(populate_by_name=True)
+
 
 class Config:
     DEFAULT_BASE_URL: str = "https://api.primeintellect.ai"
@@ -18,18 +29,20 @@ class Config:
         self.config_dir.mkdir(exist_ok=True)
         if not self.config_file.exists():
             self._save_config(
-                {
-                    "api_key": "",
-                    "team_id": "",
-                    "base_url": self.DEFAULT_BASE_URL,
-                    "ssh_key_path": self.DEFAULT_SSH_KEY_PATH,
-                }
+                ConfigModel(
+                    api_key="",
+                    team_id="",
+                    base_url=self.DEFAULT_BASE_URL,
+                    ssh_key_path=self.DEFAULT_SSH_KEY_PATH,
+                ).model_dump()
             )
 
     def _load_config(self) -> None:
         """Load configuration from file"""
         if self.config_file.exists():
-            self.config = json.loads(self.config_file.read_text())
+            self.config = ConfigModel(
+                **json.loads(self.config_file.read_text())
+            ).model_dump()
         else:
             self.config = {}
 

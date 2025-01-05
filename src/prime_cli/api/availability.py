@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DiskConfig(BaseModel):
@@ -14,8 +14,7 @@ class DiskConfig(BaseModel):
     )
     additional_info: Optional[str] = Field(None, alias="additionalInfo")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ResourceConfig(BaseModel):
@@ -29,8 +28,7 @@ class ResourceConfig(BaseModel):
     )
     additional_info: Optional[str] = Field(None, alias="additionalInfo")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class Prices(BaseModel):
@@ -39,8 +37,7 @@ class Prices(BaseModel):
     is_variable: Optional[bool] = Field(None, alias="isVariable")
     currency: Optional[str]
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
     @property
     def price(self) -> float:
@@ -78,8 +75,7 @@ class GPUAvailability(BaseModel):
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class AvailabilityClient:

@@ -10,10 +10,13 @@ on:
 jobs:
   tag:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Add this permissions block
     steps:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}  # Add explicit token
           
       - name: Get Version
         id: version
@@ -33,5 +36,7 @@ jobs:
       - name: Create Tag
         if: steps.tag_check.outputs.tag_exists == 'false'
         run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git tag v${{ steps.version.outputs.version }}
           git push origin v${{ steps.version.outputs.version }}

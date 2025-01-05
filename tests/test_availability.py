@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Any, Dict
 
 import pytest
@@ -9,8 +10,12 @@ from typer.testing import CliRunner
 
 @pytest.fixture
 def mock_api_client(monkeypatch: pytest.MonkeyPatch) -> APIClient:
+    # Get the absolute path to the test data file
+    test_dir = os.path.dirname(os.path.abspath(__file__))
+    data_file = os.path.join(test_dir, "data", "availability_response.json")
+
     # Load the API response JSON from a file
-    with open("tests/data/availability_response.json", "r") as f:
+    with open(data_file, "r") as f:
         api_response_json: Dict[str, Any] = json.load(f)
 
     # Create a mock client that returns the test data

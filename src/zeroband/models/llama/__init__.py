@@ -7,7 +7,7 @@
 # Llama 2 is licensed under the LLAMA 2 Community License,
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from zeroband.models.llama.model import ModelArgs, Transformer
+from zeroband.models.llama.model import AttnFnType, ModelArgs, Transformer
 
 __all__ = ["Transformer"]
 
@@ -85,7 +85,7 @@ def get_model(
     type_model: str,
     vocab_size: int,
     seq_length: int,
-    math_attn: bool,
+    attn_fn: AttnFnType,
 ) -> tuple[Transformer, ModelArgs]:
     """get the transformer model"""
 
@@ -98,6 +98,6 @@ def get_model(
 
     config.vocab_size = vocab_size
     config.max_seq_len = seq_length
-    config.math_attn = math_attn
+    config.attn_fn = attn_fn
 
     return Transformer(config), config

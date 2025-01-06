@@ -116,7 +116,6 @@ def test_packing(packing: bool):
     _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=[packing_arg])
 
 
-
 @pytest.mark.parametrize("diloco", [False, True])
 def test_muon(diloco: bool):
     num_gpus = [1, 2] if diloco else [2, 1]
@@ -137,6 +136,7 @@ def test_soap(diloco: bool):
         extra_args=["--optim.optim.precondition_frequency", "1"],
         diloco=diloco,
     )
+
 
 def test_ckpt(tmp_path: Path):
     num_gpus = [1, 2]
@@ -166,7 +166,8 @@ def test_ckpt(tmp_path: Path):
             "20",
             "--train.log_model_hash",
             "--no-train.sequence_packing",
-            "--train.math_attn",
+            "--train.attn_fn",
+            "math",
         ],
         diloco=True,
     )
@@ -186,7 +187,8 @@ def test_ckpt(tmp_path: Path):
             "20",
             "--train.log_model_hash",
             "--no-train.sequence_packing",
-            "--train.math_attn",
+            "--train.attn_fn",
+            "math",
         ],
         diloco=True,
     )
@@ -206,7 +208,8 @@ def test_ckpt(tmp_path: Path):
     #         "20",
     #         "--train.log_model_hash",
     #         "--no-train.sequence_packing",
-    #         "--train.math_attn",
+    #         "--train.attn_fn",
+    #         "math",
     #     ],
     #     diloco=True,
     # )

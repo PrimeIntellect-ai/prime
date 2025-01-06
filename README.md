@@ -4,7 +4,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/prime-cli)](https://pypi.org/project/prime-cli/)
 [![Python versions](https://img.shields.io/pypi/pyversions/prime-cli)](https://pypi.org/project/prime-cli/)
-[![License](https://img.shields.io/pypi/l/prime-cli)](https://pypi.org/project/prime-cli/)
+[![Downloads](https://img.shields.io/pypi/dm/prime-cli)](https://pypi.org/project/prime-cli/)
 
 Command line interface for managing Prime Intellect GPU resources, enabling seamless deployment and management of compute pods.
 </div>

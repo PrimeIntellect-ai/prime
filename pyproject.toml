@@ -19,7 +19,7 @@ dependencies = [
     "pyarrow",
     "toposolve",
     "psutil",
-    "torch-shampoo @ git+https://github.com/facebookresearch/optimizers.git@main",
+    "torch-shampoo",
 ]
 
 [project.optional-dependencies]
@@ -46,3 +46,6 @@ line-length = 120
 
 [tool.uv]
 dev-dependencies = ["ruff>=0.5.0", "pre-commit>=3.0.0","pytest>=7.0.0", "faker"]
+
+[tool.uv.sources]
+torch-shampoo = { path = "third_party/optimizers", editable = true }

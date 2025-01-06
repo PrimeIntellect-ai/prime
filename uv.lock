@@ -2416,9 +2416,21 @@ wheels = [
 [[package]]
 name = "torch-shampoo"
 version = "1.0.0"
-source = { git = "https://github.com/facebookresearch/optimizers.git?rev=main#c51e4e6c0a9a6e93163441a9b32bb65cc1c736a8" }
+source = { editable = "third_party/optimizers" }
 dependencies = [
     { name = "torch" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "expecttest", marker = "extra == 'dev'" },
+    { name = "mypy", marker = "extra == 'dev'" },
+    { name = "pre-commit", marker = "extra == 'dev'" },
+    { name = "ruff", marker = "extra == 'dev'" },
+    { name = "torch", specifier = ">=2.5.0" },
+    { name = "torch-shampoo", extras = ["examples"], marker = "extra == 'dev'" },
+    { name = "torchvision", marker = "extra == 'examples'", specifier = ">=0.15.0" },
+    { name = "usort", marker = "extra == 'dev'" },
 ]
 
 [[package]]
@@ -2797,7 +2809,7 @@ requires-dist = [
     { name = "setuptools" },
     { name = "toposolve" },
     { name = "torch", specifier = "==2.5.1" },
-    { name = "torch-shampoo", git = "https://github.com/facebookresearch/optimizers.git?rev=main" },
+    { name = "torch-shampoo", editable = "third_party/optimizers" },
     { name = "torchdata", specifier = ">=0.8.0" },
     { name = "transformers", specifier = ">=4.44.2" },
     { name = "wandb", marker = "extra == 'all'" },

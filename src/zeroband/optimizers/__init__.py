@@ -3,7 +3,7 @@ from pydantic_config import BaseConfig
 import torch
 from zeroband.optimizers.muon import Muon, AdamConfig, MuonConfig
 from distributed_shampoo import (
-    EighEigenvalueCorrectionConfig,
+    DefaultEigenvalueCorrectedShampooConfig,
     DistributedShampoo,
     FullyShardShampooConfig,
     ShampooPT2CompileConfig,
@@ -52,9 +52,9 @@ def get_optimizer(params: list[torch.nn.Parameter], config: OptimizersConfig) ->
             max_preconditioner_dim=config.max_preconditioner_dim,
             precondition_frequency=config.precondition_frequency,
             use_decoupled_weight_decay=True,
-            # This can also be set to `QREigenvalueCorrectionConfig` which is less expensive
-            # and might therefore allow for a smaller `precondition_frequency`.
-            preconditioner_computation_config=EighEigenvalueCorrectionConfig(),
+            # This can also be set to `DefaultSOAPConfig` which uses QR decompositions, hence is
+            # less expensive and might thereby allow for a smaller `precondition_frequency`.
+            preconditioner_config=DefaultEigenvalueCorrectedShampooConfig,
             distributed_config=FullyShardShampooConfig(),
             shampoo_pt2_compile_config=ShampooPT2CompileConfig(enable_shampoo_pt2_dynamic_shape=False),
         )

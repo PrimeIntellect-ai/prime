@@ -2416,7 +2416,7 @@ wheels = [
 [[package]]
 name = "torch-shampoo"
 version = "1.0.0"
-source = { git = "https://github.com/facebookresearch/optimizers.git?rev=main#f9d2a8cb526709bd4b5ef71f8cca3705906a0f94" }
+source = { git = "https://github.com/facebookresearch/optimizers.git?rev=main#c51e4e6c0a9a6e93163441a9b32bb65cc1c736a8" }
 dependencies = [
     { name = "torch" },
 ]

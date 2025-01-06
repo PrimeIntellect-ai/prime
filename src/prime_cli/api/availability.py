@@ -62,9 +62,9 @@ class GPUAvailability(BaseModel):
     vcpu: ResourceConfig
     memory: ResourceConfig
     internet_speed: Optional[float] = Field(None, alias="internetSpeed")
-    interconnect: Optional[str]
+    interconnect: Optional[int]
     interconnect_type: Optional[str] = Field(None, alias="interconnectType")
-    provisioning_time: Optional[str] = Field(None, alias="provisioningTime")
+    provisioning_time: Optional[int] = Field(None, alias="provisioningTime")
     stock_status: str = Field(..., alias="stockStatus")
     security: Optional[str]
     prices: Prices

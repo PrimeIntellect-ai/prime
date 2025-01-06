@@ -128,12 +128,15 @@ def test_muon(diloco: bool):
 
 
 @pytest.mark.parametrize("diloco", [False, True])
-def test_soap(diloco: bool):
+@pytest.mark.parametrize("topk_compression", [None, 5])
+def test_soap(diloco: bool, topk_compression: int | None):
     num_gpus = [1, 2] if diloco else [2, 1]
+
     _test_multi_gpu(
         num_gpus,
         "debug/diloco.toml" if diloco else "debug/normal.toml",
-        extra_args=["--optim.optim.precondition_frequency", "1"],
+        extra_args=["--optim.optim.precondition_frequency", "1"]
+        + (["--optim.optim.topk_compression", str(topk_compression)] if topk_compression is not None else []),
         diloco=diloco,
     )
 

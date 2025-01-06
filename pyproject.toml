@@ -6,19 +6,19 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "torch==2.5.1",
-    "numpy",
-    "setuptools",
+    "numpy>=0",
+    "setuptools>=0",
     "transformers>=4.44.2",
     "datasets>=3.0.0",
     "pydantic_config @ git+https://github.com/samsja/pydantic_config.git@74c94ee",
-    "einops",
+    "einops>=0",
     "torchdata>=0.8.0",
     "fsspec[gcs]>=2024.3.1",
-    "ninja",
-    "zstandard",
-    "pyarrow",
-    "toposolve",
-    "psutil",
+    "ninja>=0",
+    "zstandard>=0",
+    "pyarrow>=0",
+    "toposolve>=0",
+    "psutil>=0",
     "torch-shampoo",
 ]
 
@@ -26,11 +26,11 @@ dependencies = [
 
 
 all = [
-    "wandb",
+    "wandb>=0",
     "asyncio>=3.4.3",
     "aiohttp>=3.10.5",
     "requests>=2.32.3",
-    "lm-eval"
+    "lm-eval>=0",
 ]
 
 
@@ -45,7 +45,7 @@ allow-direct-references = true # allow direct references to git repos in depende
 line-length = 120
 
 [tool.uv]
-dev-dependencies = ["ruff>=0.5.0", "pre-commit>=3.0.0","pytest>=7.0.0", "faker"]
+dev-dependencies = ["ruff>=0.5.0", "pre-commit>=3.0.0","pytest>=7.0.0", "faker>=0"]
 
 [tool.uv.sources]
 torch-shampoo = { path = "third_party/optimizers", editable = true }

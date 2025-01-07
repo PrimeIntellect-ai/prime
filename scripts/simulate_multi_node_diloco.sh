@@ -21,15 +21,24 @@ function get_cuda_devices() {
 # Array to store PIDs of child processes
 child_pids=()
 
-# Function to kill all child processes
+# Modified cleanup function to handle tail separately
 cleanup() {
     echo "Cleaning up child processes..."
     local killed=0
+    
+    # First kill the main processes
     for pid in "${child_pids[@]}"; do
         if kill -TERM "$pid" 2>/dev/null; then
             ((killed++))
         fi
     done
+    
+    # Kill the tail process if it exists
+    if [ -n "$tail_pid" ]; then
+        kill -TERM "$tail_pid" 2>/dev/null
+        ((killed++))
+    fi
+    
     wait
     echo "All child processes terminated. Killed $killed processes."
     exit
@@ -65,7 +74,16 @@ do
     child_pids+=($!)
 done
 
+# Start tail in background and store its PID separately
 tail -f logs/log0.log &
-child_pids+=($!)
+tail_pid=$!
 
-wait
+# Wait for the main processes only
+for pid in "${child_pids[@]}"; do
+    wait $pid
+done
+
+# Once main processes are done, kill the tail process
+if [ -n "$tail_pid" ]; then
+    kill -TERM "$tail_pid"
+fi

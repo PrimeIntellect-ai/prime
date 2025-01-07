@@ -333,9 +333,15 @@ class FeedForward(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+        #self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        #self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        #self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+
+        from torchao.float8.float8_linear import Float8Linear, Float8LinearConfig
+        config = Float8LinearConfig()
+        self.w1 = Float8Linear(dim, hidden_dim, bias=False, config=config)
+        self.w2 = Float8Linear(hidden_dim, dim, bias=False, config=config)
+        self.w3 = Float8Linear(dim, hidden_dim, bias=False, config=config)
 
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))

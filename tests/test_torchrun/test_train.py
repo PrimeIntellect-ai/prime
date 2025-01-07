@@ -128,7 +128,7 @@ def test_muon(diloco: bool):
 
 
 @pytest.mark.parametrize("diloco", [False, True])
-@pytest.mark.parametrize("topk_compression", [None, 5])
+@pytest.mark.parametrize("topk_compression", [None, 5, 0.1])
 def test_soap(diloco: bool, topk_compression: int | None):
     num_gpus = [1, 2] if diloco else [2, 1]
 

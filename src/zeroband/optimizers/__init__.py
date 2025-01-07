@@ -1,4 +1,5 @@
 from typing import TypeAlias
+from pydantic import model_validator
 from pydantic_config import BaseConfig
 import torch
 from distributed_shampoo.shampoo_types import EigenvalueCorrectedShampooPreconditionerConfig
@@ -20,7 +21,14 @@ class SoapConfig(BaseConfig):
     max_preconditioner_dim: int = 8192
     precondition_frequency: int = 100
 
-    topk_compression: int | None = None
+    topk_compression: int | float | None = None
+
+    @model_validator(mode="after")
+    def validate_topk_compression(self):
+        if isinstance(self.topk_compression, float):
+            if not 0 < self.topk_compression <= 1:
+                raise ValueError("If topk_compression is float, it must be between 0 and 1")
+        return self
 
 
 OptimizersConfig: TypeAlias = AdamConfig | MuonConfig | SoapConfig

@@ -582,8 +582,9 @@ def terminate(pod_id: str) -> None:
             console.print("Termination cancelled")
             raise typer.Exit(0)
 
-        # Delete the pod
-        pods_client.delete(pod_id)
+        with console.status("[bold blue]Terminating pod...", spinner="dots"):
+            pods_client.delete(pod_id)
+
         console.print(f"[green]Successfully terminated pod {pod_id}[/green]")
 
     except APIError as e:

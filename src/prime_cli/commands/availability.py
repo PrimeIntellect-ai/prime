@@ -57,6 +57,9 @@ def list(
     socket: Optional[str] = typer.Option(
         None, help="Filter by socket type (e.g., PCIe, SXM5, SXM4)"
     ),
+    group_similar: bool = typer.Option(
+        True, help="Group similar configurations from same provider"
+    ),
 ) -> None:
     """List available GPU resources"""
     try:
@@ -97,11 +100,7 @@ def list(
                     gpu.stock_status, "white"
                 )
 
-                location = (
-                    f"{gpu.country or 'N/A'} - {gpu.data_center or 'N/A'}"
-                    if gpu.country or gpu.data_center
-                    else "N/A"
-                )
+                location = f"{gpu.country or 'N/A'}"
 
                 short_id = generate_short_id(gpu)
                 gpu_data = {
@@ -125,12 +124,43 @@ def list(
         # Sort by price and remove duplicates based on short_id
         seen_ids = set()
         filtered_gpus: List[Dict[str, Any]] = []
-        for gpu_config in sorted(
-            all_gpus, key=lambda x: (x["price_value"], x["short_id"])
-        ):
-            if gpu_config["short_id"] not in seen_ids:
-                seen_ids.add(gpu_config["short_id"])
-                filtered_gpus.append(gpu_config)
+
+        if group_similar:
+            grouped_gpus: Dict[str, List[Dict[str, Any]]] = {}
+            for gpu_config in sorted(
+                all_gpus, key=lambda x: (x["price_value"], x["short_id"])
+            ):
+                key = (
+                    f"{gpu_config['provider']}_{gpu_config['gpu_type']}_{gpu_config['gpu_count']}_"
+                    f"{gpu_config['socket']}_{gpu_config['location']}_{gpu_config['security']}_{gpu_config['price']}"
+                )
+                if key not in grouped_gpus:
+                    grouped_gpus[key] = []
+                grouped_gpus[key].append(gpu_config)
+
+            # For each group, select representative configuration
+            for group in grouped_gpus.values():
+                if len(group) > 1:
+                    # Use first ID but show ranges for variable specs
+                    base = group[0].copy()
+                    min_vcpu = min(g["vcpu"] for g in group)
+                    max_vcpu = max(g["vcpu"] for g in group)
+                    min_mem = min(g["memory"] for g in group)
+                    max_mem = max(g["memory"] for g in group)
+                    vcpu_range = f"{min_vcpu}-{max_vcpu}"
+                    memory_range = f"{min_mem}-{max_mem}"
+                    base["vcpu"] = vcpu_range
+                    base["memory"] = memory_range
+                    filtered_gpus.append(base)
+                else:
+                    filtered_gpus.append(group[0])
+        else:
+            for gpu_config in sorted(
+                all_gpus, key=lambda x: (x["price_value"], x["short_id"])
+            ):
+                if gpu_config["short_id"] not in seen_ids:
+                    seen_ids.add(gpu_config["short_id"])
+                    filtered_gpus.append(gpu_config)
 
         for gpu_entry in filtered_gpus:
             table.add_row(

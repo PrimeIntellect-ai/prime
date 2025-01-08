@@ -20,6 +20,7 @@ class SoapConfig(BaseConfig):
 
     max_preconditioner_dim: int = 8192
     precondition_frequency: int = 100
+    min_compression_ratio: float = 0.0
 
     topk_compression: int | float | None = None
 
@@ -28,6 +29,8 @@ class SoapConfig(BaseConfig):
         if isinstance(self.topk_compression, float):
             if not 0 < self.topk_compression <= 1:
                 raise ValueError("If topk_compression is float, it must be between 0 and 1")
+        if self.min_compression_ratio > 1 and self.min_compression_ratio < 0:
+            raise ValueError("min_compression_ratio must be between 0 and 1")
         return self
 
 

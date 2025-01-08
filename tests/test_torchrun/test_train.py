@@ -136,7 +136,7 @@ def test_soap(diloco: bool, topk_compression: int | None):
         num_gpus,
         "debug/diloco.toml" if diloco else "debug/normal.toml",
         extra_args=["--optim.optim.precondition_frequency", "1"]
-        + (["--optim.optim.topk_compression", str(topk_compression)] if topk_compression is not None else []),
+        + (["--optim.optim.topk.topk_compression", str(topk_compression)] if topk_compression is not None else []),
         diloco=diloco,
     )
 

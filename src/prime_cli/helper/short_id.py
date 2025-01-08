@@ -13,6 +13,7 @@ def generate_short_id(gpu_config: GPUAvailability) -> str:
         f"{location}-"
         f"{gpu_config.provider or 'N/A'}-"
         f"{gpu_config.memory.default_count}-"
-        f"{gpu_config.vcpu.default_count}"
+        f"{gpu_config.vcpu.default_count}-"
+        f"{gpu_config.gpu_count}"
     )
     return hashlib.md5(config_str.encode()).hexdigest()[:6]

@@ -20,8 +20,8 @@ class SoapConfig(BaseConfig):
 
     max_preconditioner_dim: int = 8192
     precondition_frequency: int = 100
-    min_compression_ratio: float = 0.0
 
+    min_compression_ratio: float = 0.0
     topk_compression: int | float | None = None
 
     @model_validator(mode="after")
@@ -60,7 +60,10 @@ def get_optimizer(params: list[torch.nn.Parameter], config: OptimizersConfig) ->
         amortized_computation_config = (
             DefaultEighEigenvectorConfig
             if config.topk_compression is None
-            else TopKCompressionEigenvectorConfig(topk_compression=config.topk_compression)
+            else TopKCompressionEigenvectorConfig(
+                topk_compression=config.topk_compression,
+                min_compression_ratio=config.min_compression_ratio,
+            )
         )
         return DistributedShampoo(
             params,

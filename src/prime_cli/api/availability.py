@@ -112,14 +112,13 @@ class AvailabilityClient:
         single_response = self.client.get("/availability", params=params)
         cluster_response = self.client.get("/availability/clusters", params=params)
 
-        # Combine the responses
         combined: Dict[str, List[GPUAvailability]] = {}
         for gpu_type, gpus in single_response.items():
-            if gpu_type is not None:  # Ensure gpu_type is not None
+            if gpu_type is not None:
                 combined[gpu_type] = [GPUAvailability(**gpu) for gpu in gpus]
 
         for gpu_type, gpus in cluster_response.items():
-            if gpu_type is not None:  # Ensure gpu_type is not None
+            if gpu_type is not None:
                 if gpu_type in combined:
                     combined[gpu_type].extend([GPUAvailability(**gpu) for gpu in gpus])
                 else:

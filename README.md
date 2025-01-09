@@ -36,22 +36,6 @@ prime availability list
 pip install prime-cli
 ```
 
-### For Development
-```bash
-# Clone the repository
-git clone https://github.com/PrimeIntellect-ai/prime-cli
-cd prime-cli
-
-# Create and activate virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: .\venv\Scripts\activate
-
-# Install in development mode
-pip install -e ".[dev]"
-
-# Set up pre-commit hooks
-pre-commit install
-```
 
 ## 🛠️ Usage
 
@@ -101,8 +85,38 @@ prime pods ssh <pod-id>
 prime config set-team-id
 ```
 
+### Usage in python 
+```python
+from prime_cli import get_availability, get_pods, set_api_key
+
+# Set your API key
+set_api_key("YOUR_API_KEY")
+
+pods = get_pods()
+print(pods)
+
+availability = get_availability()
+print(availability)
+```
+
 ## 💻 Development
 
+### Installation 
+```bash
+# Clone the repository
+git clone https://github.com/PrimeIntellect-ai/prime-cli
+cd prime-cli
+
+# Create and activate virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: .\venv\Scripts\activate
+
+# Install in development mode
+pip install -e ".[dev]"
+
+# Set up pre-commit hooks
+pre-commit install
+```
 ### Code Quality
 ```bash
 # Format code

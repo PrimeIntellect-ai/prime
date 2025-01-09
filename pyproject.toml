@@ -19,6 +19,7 @@ dependencies = [
     "pyarrow",
     "toposolve",
     "psutil",
+    "torch-shampoo @ git+https://github.com/facebookresearch/optimizers.git@main",
 ]
 
 [project.optional-dependencies]

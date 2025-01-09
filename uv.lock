@@ -2414,6 +2414,14 @@ wheels = [
 ]
 
 [[package]]
+name = "torch-shampoo"
+version = "1.0.0"
+source = { git = "https://github.com/facebookresearch/optimizers.git?rev=main#c51e4e6c0a9a6e93163441a9b32bb65cc1c736a8" }
+dependencies = [
+    { name = "torch" },
+]
+
+[[package]]
 name = "torchdata"
 version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2749,6 +2757,7 @@ dependencies = [
     { name = "setuptools" },
     { name = "toposolve" },
     { name = "torch" },
+    { name = "torch-shampoo" },
     { name = "torchdata" },
     { name = "transformers" },
     { name = "zstandard" },
@@ -2788,6 +2797,7 @@ requires-dist = [
     { name = "setuptools" },
     { name = "toposolve" },
     { name = "torch", specifier = "==2.5.1" },
+    { name = "torch-shampoo", git = "https://github.com/facebookresearch/optimizers.git?rev=main" },
     { name = "torchdata", specifier = ">=0.8.0" },
     { name = "transformers", specifier = ">=4.44.2" },
     { name = "wandb", marker = "extra == 'all'" },

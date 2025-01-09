@@ -7,16 +7,17 @@ ac_ckpt = true
 
 [optim]
 sched_type = "wsd-sqrt"
-batch_size = 128 #1M tokens bs
+batch_size = 128                #1M tokens bs
 warmup_steps = 1000
 total_steps = 1_000_000_000_000
-lr = 7.5e-5
-
-adam_betas1 = 0.9
-adam_betas2 = 0.95
-weight_decay = 0.1
 
 z_loss = true
+
+[optim.optim]
+lr = 7.5e-5
+betas1 = 0.9
+betas2 = 0.95
+weight_decay = 0.1
 
 [data]
 seq_length = 8192

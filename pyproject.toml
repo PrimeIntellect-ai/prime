@@ -19,6 +19,7 @@ dependencies = [
     "pyarrow",
     "toposolve",
     "psutil",
+    "torchft-nightly",
 ]
 
 [project.optional-dependencies]

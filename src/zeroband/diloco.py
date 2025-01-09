@@ -4,12 +4,13 @@ from pydantic_config import BaseConfig
 import torch
 from torch import nn
 from zeroband.collectives import Compression, all_reduce
-from zeroband.comms import ElasticDeviceMesh
+#from zeroband.comms import ElasticDeviceMesh
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 import torch.distributed as dist
 from torch.distributed._tensor.api import DTensor
 from functools import lru_cache
+from torchft import Manager
 
 
 class DilocoConfig(BaseConfig):
@@ -59,7 +60,8 @@ class Diloco:
         self,
         config: DilocoConfig,
         model: nn.Module,
-        elastic_device_mesh: ElasticDeviceMesh,
+        manager: Manager,
+        cpu_local_mesh,
     ):
         self.config = config
 
@@ -67,16 +69,16 @@ class Diloco:
             from zeroband.C.collectives import ring_allreduce as _  # noqa: F401
             # just force compilation
 
-        self.elastic_device_mesh = elastic_device_mesh
+        self.manager = manager
 
         self._logger = get_logger()
         self.world_info = get_world_info()
 
-        self._init_offloaded_optimizer(model=model)
+        self._init_offloaded_optimizer(model=model, cpu_local_mesh=cpu_local_mesh)
 
     @torch.no_grad()
-    def _init_offloaded_optimizer(self, model):
-        self.param_list_cpu = self.get_offloaded_param(model)
+    def _init_offloaded_optimizer(self, model, cpu_local_mesh):
+        self.param_list_cpu = self.get_offloaded_param(model, cpu_local_mesh)
         self.outer_optimizer = torch.optim.SGD(
             self.param_list_cpu, lr=self.config.outer_lr, momentum=0.9, nesterov=True
         )
@@ -89,14 +91,12 @@ class Diloco:
         """
         _start_time = time.perf_counter()
 
-        self.elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=False)
-        world_size_post_init = self.elastic_device_mesh.global_pg.size()
-
-        world_size = world_size_post_init
+        # TODO: Outer step with manager
+        self.manager.start_quorum("ending", allow_heal=False)
+        world_size = self.manager.num_participants()
 
         self._logger.debug("sync pseudo gradient %s with world size %d", " fake" if fake else "", world_size)
 
-        global_pg = self.elastic_device_mesh.global_pg
         for i in range(self.config.retry_all_reduce):
             for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
                 if fake:
@@ -104,28 +104,32 @@ class Diloco:
                 else:
                     param_offloaded.grad.to_local().copy_(param_offloaded.data.to_local())
                     param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device))
-            try:
-                self.offloaded_grad_flat_tensor.div_(world_size)
-                _collective_start_time = time.perf_counter()
-                self._logger.debug("Waiting on barrier")
-                self.elastic_device_mesh.monitored_barrier(flag)
 
-                self._logger.debug("Beginning all reduce")
-                # all_reduce(self.config.compression, self.offloaded_grad_flat_tensor, dist.ReduceOp.SUM, global_pg)
-                for j, tensor_group in enumerate(self._offloaded_grad_grouped_tensor):
-                    t0 = time.perf_counter()
-                    all_reduce(self.config.compression, tensor_group, dist.ReduceOp.SUM, global_pg)
-                    self._logger.debug(
-                        f"{j}/{len(self._offloaded_grad_grouped_tensor)} all reduce bucket done in {time.perf_counter() - t0:.6f} seconds, numel: {tensor_group.numel()}"
-                    )
+            self.offloaded_grad_flat_tensor.div_(world_size)
+            _collective_start_time = time.perf_counter()
+            self._logger.debug("Waiting on barrier")
+            # TODO: Barrier
+            #self.elastic_device_mesh.monitored_barrier(flag)
 
+            self._logger.debug("Beginning all reduce")
+            # all_reduce(self.config.compression, self.offloaded_grad_flat_tensor, dist.ReduceOp.SUM, global_pg)
+            for j, tensor_group in enumerate(self._offloaded_grad_grouped_tensor):
+                t0 = time.perf_counter()
+                # TODO: Custom all reduce. Make sure to report errors to manager correctly
+                self.manager.allreduce(tensor_group)
+                #all_reduce(self.config.compression, tensor_group, dist.ReduceOp.SUM, global_pg)
                 self._logger.debug(
-                    f"All reduce takes {time.perf_counter() - _collective_start_time:.6f} seconds numels: {self.offloaded_grad_flat_tensor.numel()}"
+                    f"{j}/{len(self._offloaded_grad_grouped_tensor)} all reduce bucket done in {time.perf_counter() - t0:.6f} seconds, numel: {tensor_group.numel()}"
                 )
-                break
-            except Exception as e:
-                self._logger.error(f"Error syncing pseudo gradient: {e}, retry {i+1}/{self.config.retry_all_reduce}")
-                global_pg = self.elastic_device_mesh.get_global_pg(maybe_reinit=True)
+            
+            if not self.manager.should_commit():
+                self._logger.error(f"Error syncing pseudo gradient: retry {i+1}/{self.config.retry_all_reduce}")
+                self.manager.start_quorum("retry", allow_heal=False)
+                continue
+
+            self._logger.debug(
+                f"All reduce takes {time.perf_counter() - _collective_start_time:.6f} seconds numels: {self.offloaded_grad_flat_tensor.numel()}"
+            )
         else:
             self._logger.error(
                 "Failed to sync pseudo gradient after %d retries. Resorting to calculating pseudo-gradient without reduce",
@@ -151,7 +155,7 @@ class Diloco:
             param.data.to_local().copy_(param_offloaded.data.to_local())
 
     @torch.no_grad()
-    def get_offloaded_param(self, model: nn.Module) -> list[nn.Parameter]:
+    def get_offloaded_param(self, model: nn.Module, cpu_local_mesh) -> list[nn.Parameter]:
         """
         Offload the model parameters to cpu
         """
@@ -181,14 +185,14 @@ class Diloco:
             offloaded_param = nn.Parameter(
                 DTensor.from_local(
                     data_tensor,
-                    device_mesh=self.elastic_device_mesh.cpu_local_mesh,
+                    device_mesh=cpu_local_mesh,
                     placements=param.data.placements,
                 )
             )
 
             offloaded_param.grad = DTensor.from_local(
                 grad_tensor,
-                device_mesh=self.elastic_device_mesh.cpu_local_mesh,
+                device_mesh=cpu_local_mesh,
                 placements=param.data.placements,
             )
             # here we pre-allocate the grad DTensor on cpu.

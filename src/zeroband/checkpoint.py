@@ -38,6 +38,7 @@ from zeroband.utils.state_dict_send_recv import (
     send_state_dict,
     send_tensor_and_state_dict,
 )
+from distributed_shampoo import DistributedShampoo
 
 from zeroband.utils.world_info import get_world_info
 
@@ -80,17 +81,23 @@ class OptimizerWrapper(Stateful):
         self.optim = optim
 
     def state_dict(self) -> dict[str, Any]:
-        return get_optimizer_state_dict(
-            model=self.model, optimizers=self.optim, options=StateDictOptions(flatten_optimizer_state_dict=True)
-        )
+        if isinstance(self.optim, DistributedShampoo):
+            return self.optim.distributed_state_dict(key_to_param=self.model.named_parameters())
+        else:
+            return get_optimizer_state_dict(
+                model=self.model, optimizers=self.optim, options=StateDictOptions(flatten_optimizer_state_dict=True)
+            )
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        set_optimizer_state_dict(
-            model=self.model,
-            optimizers=self.optim,
-            optim_state_dict=state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
+        if isinstance(self.optim, DistributedShampoo):
+            self.optim.load_distributed_state_dict(state_dict, key_to_param=self.model.named_parameters())
+        else:
+            set_optimizer_state_dict(
+                model=self.model,
+                optimizers=self.optim,
+                optim_state_dict=state_dict,
+                options=StateDictOptions(flatten_optimizer_state_dict=True),
+            )
 
 
 def cast_dtensor_to_tensor(state_dict: dict[str, Any]) -> dict[str, Any]:

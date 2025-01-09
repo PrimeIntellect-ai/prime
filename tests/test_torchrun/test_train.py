@@ -127,7 +127,8 @@ def test_soap(diloco: bool):
     )
 
 
-def test_ckpt(tmp_path: Path):
+@pytest.mark.parametrize("soap", [False, True])
+def test_ckpt(tmp_path: Path, soap: bool):
     num_gpus = [1, 2]
     v1_file = tmp_path / "v1.log"
     v2_file = tmp_path / "v2.log"
@@ -157,7 +158,8 @@ def test_ckpt(tmp_path: Path):
             "--no-train.sequence_packing",
             "--train.attn_fn",
             "math",
-        ],
+        ]
+        + (["--optim.optim.precondition_frequency", "1"] if soap else []),
         diloco=True,
     )
     _test_multi_gpu(
@@ -178,7 +180,8 @@ def test_ckpt(tmp_path: Path):
             "--no-train.sequence_packing",
             "--train.attn_fn",
             "math",
-        ],
+        ]
+        + (["--optim.optim.precondition_frequency", "1"] if soap else []),
         diloco=True,
     )
     # _test_multi_gpu(

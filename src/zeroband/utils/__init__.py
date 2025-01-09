@@ -4,6 +4,7 @@ import time
 import torch
 from torch.distributed.fsdp import ShardingStrategy
 from torch.distributed._tensor.api import DTensor
+from distributed_shampoo import DistributedShampoo
 
 
 __all__ = ["get_sharding_strategy", "get_peak_flops", "get_num_flop_per_token", "get_num_params"]
@@ -137,6 +138,9 @@ def get_optimizer_signature(optimizer: torch.optim.Optimizer, compress: bool = T
     """
     Get the optimizer signature
     """
+
+    if isinstance(optimizer, DistributedShampoo):
+        return "mocked signature because shampoo does not support state_dict()"
 
     def unwrap_tensor(state_dict: dict) -> dict:
         new_dict = {}

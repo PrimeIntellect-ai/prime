@@ -216,6 +216,7 @@ def train(config: Config):
 
     dist.init_process_group(backend="cpu:gloo,cuda:nccl")
     comm = Communicator(os.environ["PCCL_MASTER_ADDR"], peer_group=dist.get_rank())
+    comm.connect()
     cuda_local_mesh = init_device_mesh("cuda", mesh_shape=(int(os.environ["LOCAL_WORLD_SIZE"]),))
 
     mp_policy = MixedPrecisionPolicy(
@@ -325,6 +326,7 @@ def train(config: Config):
         if not first_step:
             comm.update_topology()
         first_step = False
+        print("Hello")
 
         if world_info.rank == 0 and config.monitor is not None:
             monitor.set_stage("inner_loop")

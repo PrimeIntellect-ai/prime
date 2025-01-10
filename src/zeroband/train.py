@@ -472,7 +472,7 @@ if __name__ == "__main__":
     torch.cuda.set_device(world_info.local_rank)
 
     config = Config(**parse_argv())
-    config.train.memory_profiler = MemoryProfilerConfig(snapshot_dir="logs/", freq=1)
+    # config.train.memory_profiler = MemoryProfilerConfig(snapshot_dir="logs/", freq=1)
     logger.debug(f"config: {config.model_dump()}")
 
     try:

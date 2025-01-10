@@ -19,6 +19,7 @@ dependencies = [
     "pyarrow",
     "toposolve",
     "psutil",
+    "pccl @ git+ssh://git@github.com/PrimeIntellect-ai/pccl.git@main#egg=pccl&subdirectory=python/framework",
 ]
 
 [project.optional-dependencies]

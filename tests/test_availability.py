@@ -35,9 +35,7 @@ def test_availability_list(
     result = runner.invoke(app, ["availability", "list"])
 
     # Check the exit code is 0 (success)
-    assert (
-        result.exit_code == 0
-    ), f"Expected exit code 0, got {result.exit_code}. Output: {result.output}"
+    assert result.exit_code == 0, f"Failed: {result.exit_code}\n{result.output}"
 
     # Verify table headers are present
     assert "Available GPU Resources" in result.output

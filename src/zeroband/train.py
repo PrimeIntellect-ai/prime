@@ -12,6 +12,7 @@ from transformers import AutoTokenizer
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 
 import torch.distributed as dist
+from distributed_shampoo import DistributedShampoo
 from zeroband import utils
 from zeroband.diloco import Diloco
 from zeroband.comms import ElasticDeviceMesh
@@ -258,6 +259,7 @@ def train(config: Config):
                 ## we create grad buffer and opts stats mamnually, the value will be overwritten by the ckpt but we need the DTensor to be correctly init before loading it
 
                 diloco.outer_optimizer.step()  # need to step to init the DTensor stats
+            
 
                 ckpt_manager.recv_ckpt_from_peer(elastic_device_mesh.global_pg)
 
@@ -335,7 +337,16 @@ def train(config: Config):
             inner_optimizer.step()
             scheduler.step()
             inner_optimizer.zero_grad()
-
+            
+            if isinstance(inner_optimizer, DistributedShampoo) and training_progress.step % config.optim.optim.precondition_frequency == 0 and training_progress.step>0:
+                logger.info(f"step {training_progress.step} preconditioning")
+                eigen_stats = inner_optimizer.eigenvector_stats(key_to_param=model.named_parameters())
+                for group_name, group_stats in eigen_stats.items():
+                    for param_name, param_stats in group_stats.items():
+                        if world_info.rank == 0:
+                            if param_stats.effective_rank is not None:
+                                for key, val in param_stats.log_stats().items():
+                                    metric_logger.log({f"eigenvalue_stats/{group_name}/{param_name}/{key}": val})
             # logging
             training_progress.step += 1
             inner_lr = [group["lr"] for group in inner_optimizer.param_groups][0]

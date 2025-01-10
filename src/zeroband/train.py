@@ -169,8 +169,7 @@ def train(config: Config):
         betas=(config.optim.adam_betas1, config.optim.adam_betas2),
     )
 
-    if config.diloco is not None:
-        diloco = Diloco(config.diloco, model, elastic_device_mesh)
+    diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
 
     scheduler = get_scheduler(
         sched_type=config.optim.sched_type,

@@ -7,8 +7,7 @@ from zeroband.checkpoint import CkptConfig
 from zeroband.data import DataConfig
 from zeroband.diloco import DilocoConfig
 from zeroband.models.llama.model import AttnFnType
-from zeroband.optimizers import OptimizersConfig
-from zeroband.optimizers.muon import AdamConfig
+from zeroband.optimizers import OptimizersConfig, AdamConfig
 
 
 class OptimConfig(BaseConfig):

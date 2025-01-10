@@ -14,7 +14,6 @@ def mock_api_client(monkeypatch: pytest.MonkeyPatch) -> APIClient:
     test_dir = os.path.dirname(os.path.abspath(__file__))
     data_file = os.path.join(test_dir, "data", "availability_response.json")
 
-    # Load the API response JSON from a file
     with open(data_file, "r") as f:
         api_response_json: Dict[str, Any] = json.load(f)
 

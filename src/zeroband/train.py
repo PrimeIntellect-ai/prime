@@ -20,7 +20,6 @@ from zeroband.loss import cross_entropy_max_z_loss
 from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.config import Config  #, MemoryProfilerConfig
 from zeroband.optimizers import get_optimizer
-from zeroband.models.llama.model import AttnFnType, create_block_mask_from_seqlens
 
 from zeroband.utils import (
     FakeTokenizer,

@@ -346,7 +346,7 @@ def train(config: Config):
                         if world_info.rank == 0:
                             if param_stats.effective_rank is not None:
                                 for key, val in param_stats.log_stats().items():
-                                    metric_logger.log({f"eigenvalue_stats/{group_name}/{param_name}/{key}": val})
+                                    metric_logger.log({f"eigenvalue_stats/{group_name}/{param_name}/{key}": val, "step": training_progress.step})
             # logging
             training_progress.step += 1
             inner_lr = [group["lr"] for group in inner_optimizer.param_groups][0]

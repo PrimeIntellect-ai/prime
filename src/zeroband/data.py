@@ -417,7 +417,7 @@ def load_all_datasets(
         split_world_size = world_size
 
 
-    logger.info(f"Loading Train dataset(s)")
+    logger.info("Loading Train dataset(s)")
 
     ds = _load_datasets(
         dataset_names=data_config.dataset_name_or_paths,

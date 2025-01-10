@@ -38,7 +38,7 @@ from zeroband.utils.logging import get_logger
 from zeroband.checkpoint import CkptConfig, CkptManager, TrainingProgress
 from zeroband.lr_scheduler import get_scheduler
 
-from pccl import Communicator, Attribute
+from pccl import Attribute
 
 
 class OptimConfig(BaseConfig):
@@ -195,6 +195,7 @@ def train(config: Config):
         seq_length=config.data.seq_length,
         attn_fn=config.train.attn_fn,
     )
+    print(model)
 
     model = model.to(world_info.local_rank)
     logger.debug("model loaded")
@@ -215,9 +216,12 @@ def train(config: Config):
         apply_ac_ckpt(model, num)
 
     dist.init_process_group(backend="cpu:gloo,cuda:nccl")
-    comm = Communicator(os.environ["PCCL_MASTER_ADDR"], peer_group=dist.get_rank())
-    comm.connect()
+    if config.diloco is not None:
+        pass
+        # comm = Communicator(os.environ["PCCL_MASTER_ADDR"], peer_group=dist.get_rank())
+        # comm.connect()
     cuda_local_mesh = init_device_mesh("cuda", mesh_shape=(int(os.environ["LOCAL_WORLD_SIZE"]),))
+    print(cuda_local_mesh)
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
@@ -251,7 +255,7 @@ def train(config: Config):
     )
 
     if config.diloco is not None:
-        diloco = Diloco(config.diloco, model, comm)
+        diloco = Diloco(config.diloco, model, None)
 
     scheduler = get_scheduler(
         sched_type=config.optim.sched_type,
@@ -323,15 +327,15 @@ def train(config: Config):
 
         time_start_outer = time.perf_counter()
 
-        if not first_step:
+        if not first_step and config.diloco is not None:
             comm.update_topology()
         first_step = False
-        print("Hello")
 
         if world_info.rank == 0 and config.monitor is not None:
             monitor.set_stage("inner_loop")
 
         for inner_step in range(num_inner_steps):
+            print("Starting inner step")
             loss_batch = 0
             z_loss_batch = 0
 
@@ -348,11 +352,14 @@ def train(config: Config):
                     block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
                 else:
                     block_mask = None
+                print("Starting inner step")
 
+                print("Model forward!")
                 logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
                 flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
                 flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
+                print("Mid inner step")
                 if config.optim.z_loss:
                     ce_loss, z_loss = cross_entropy_max_z_loss(
                         flatten_logits, flatten_labels, config.optim.z_loss_weight
@@ -368,16 +375,19 @@ def train(config: Config):
                     loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
                     del logits
                     loss.backward()
+                print("End? inner step")
 
                 if config.optim.z_loss:
                     loss_batch += ce_loss.clone().detach()
                     z_loss_batch += z_loss.clone().detach()
                 else:
                     loss_batch += loss.clone().detach()
+                print("Z loss")
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
             if config.optim.z_loss:
                 dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG)
+            print("Hi")
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             inner_optimizer.step()
@@ -398,7 +408,9 @@ def train(config: Config):
             else:
                 # we count the total tokens with respect to all diloco workers
                 # might need to tweak this as some worker might fail to join the all reduce later
+                print("Get attr")
                 training_progress.total_tokens += new_tokens * comm.get_attribute(Attribute.CURRENT_WORLD_SIZE)
+                print("Post Get attr")
 
             metrics = {
                 "Loss": loss_batch.item(),

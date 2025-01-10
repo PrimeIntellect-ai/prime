@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+from sys import platform
 
 from pydantic import BaseModel, ConfigDict
 
@@ -19,7 +20,15 @@ class Config:
     DEFAULT_SSH_KEY_PATH: str = str(Path.home() / ".ssh" / "id_rsa")
 
     def __init__(self) -> None:
-        self.config_dir = Path.home() / ".prime"
+        if platform.startswith("linux"):
+            if "XDG_CONFIG_HOME" in os.environ:
+                self.config_dir = Path(os.environ["XDG_CONFIG_HOME"]) / "prime"
+            else:
+                self.config_dir = Path.home() / ".config/prime"
+        else:
+            self.config_dir = Path.home() / ".prime"
+
+
         self.config_file = self.config_dir / "config.json"
         self._ensure_config_dir()
         self._load_config()

@@ -100,15 +100,16 @@ class AvailabilityClient:
             Dictionary mapping GPU types to lists of availability information,
             combining both single GPU and cluster availability
         """
-        params = {}
+        params: Dict[str, Any] = {}
         if regions:
-            params["regions"] = ",".join(regions)
+            params["regions"] = []
+            for region in regions:
+                params["regions"].extend(r.strip() for r in region.split(","))
         if gpu_count:
             params["gpu_count"] = str(gpu_count)
         if gpu_type:
             params["gpu_type"] = gpu_type
 
-        # Get both single GPU and cluster availability
         single_response = self.client.get("/availability", params=params)
         cluster_response = self.client.get("/availability/clusters", params=params)
 

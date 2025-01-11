@@ -1,3 +1,4 @@
+import torch.distributed as dist
 from typing import List
 import torch
 from torch.utils.data import DataLoader
@@ -32,6 +33,7 @@ def compute_loss(model: torch.nn.Module, inputs: List[str], tokenizer) -> torch.
 
 # Main function
 def main():
+    batch_size = 8
     # Load dataset
     dataset = load_dataset("/root/prime/datasets/fineweb-edu", split="train", streaming=True)
     data_loader = DataLoader(dataset, batch_size=8, shuffle=False)
@@ -42,15 +44,16 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
     config = AutoConfig.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_config(config)
-    model = model.to("cuda" if torch.cuda.is_available() else "cpu")
+    theta_t = [p.detach().clone() for p in model.parameters() if p.requires_grad]
+    optimizer_copy = [p.detach().clone() for p in model.parameters() if p.requires_grad]
+    reduce_work = []
+    model.to("cuda")
 
     # Define optimizer
-    optimizer = AdamW(model.parameters(), lr=1e-4)
+    optimizer = AdamW(optimizer_copy, lr=1e-4)
 
     # Run ACCO algorithm
     num_steps = 100
-
-    model_params = [p for p in model.parameters() if p.requires_grad]
 
     first_step = True
     for step, batch in enumerate(data_loader):
@@ -62,37 +65,50 @@ def main():
         mid_point = len(batch_text) // 2
         first_half, second_half = batch_text[:mid_point], batch_text[mid_point:]
 
-        # Stage 1: Compute gradients g_t and tilde_theta_t+1
-        loss_t = compute_loss(model, first_half, tokenizer)
-        loss_t.backward()  # Compute gradients for g_t
-        g_t = [p.grad.cpu() for p in model_params]
-        theta_t = [p.cpu() for p in model_params]
-        # TODO: Gather gradients from other workers
+        # Stage 1: Compute gradients g_tilde and theta
+        for p in model.parameters():
+            p.grad = None
+        loss = compute_loss(model, first_half, tokenizer)
+        loss.backward()  # Compute gradients for g_t
+        for work in reduce_work:
+            work.wait()
 
         if not first_step:
+            for opt_param, cpu_param, _g_t, _g_tilde in zip(optimizer_copy, theta_t, g_t, g_tilde):
+                opt_param.data = cpu_param.data
+                opt_param.grad = (_g_t + _g_tilde) / (batch_size * dist.get_world_size())
             optimizer.step()
-        optimizer.zero_grad()
+            for param, cpu_param, opt_param in zip(model.parameters(), theta_t, optimizer_copy):
+                param.data.copy_(opt_param.data, non_blocking=True)
+                cpu_param.data.copy_(opt_param.data, non_blocking=True)
         first_step = False 
 
-        # Stage 2: Compute g_tilde_t+1 and theta_t+1
-        loss_tilde = compute_loss(model, second_half, tokenizer)
-        loss_tilde.backward()
+        g_tilde = [p.grad.cpu() for p in model.parameters() if p.requires_grad]
+        reduce_work = [dist.all_reduce(_g_tilde, op=dist.ReduceOp.SUM, async_op=True) for _g_tilde in g_tilde]
 
-        # Restore original parameters
-        for param, original_param in zip(model_params, theta_t):
-            param.data.copy_(original_param)
-        
-        # Incorporate other workers grads
-        for param, grad in zip(model_params, g_t):
-            param.grad += grad.cuda() # TODO: Offload optimizer
-        
+        # Stage 2: Compute g_t and theta_tilde
+        for p in model.parameters():
+            p.grad = None
+        loss = compute_loss(model, second_half, tokenizer)
+        loss.backward()
+        g_t = [p.grad.cpu() for p in model.parameters() if p.requires_grad]
+        for work in reduce_work:
+            work.wait()
+        reduce_work = [dist.all_reduce(_g_t, op=dist.ReduceOp.SUM, async_op=True) for _g_t in g_t]
+
+        # theta_tilde
+        for param, _g_tilde in zip(optimizer_copy, g_tilde):
+            ## TODO: Weight by seen by batches
+            param.grad = _g_tilde / (batch_size // 2 * dist.get_world_size())
         optimizer.step()
-        optimizer.zero_grad()
+        for param, param_tilde in zip(model.parameters(), optimizer_copy):
+            param.data.copy_(param_tilde, non_blocking=True)
 
-        print(f"Step {step + 1}/{num_steps}: Loss = {loss_t.item()}")
-
-
+        print(f"Step {step + 1}/{num_steps}: Loss = {loss.item()}")
 
 # Entry point
 if __name__ == "__main__":
+    dist.init_process_group(backend="cpu:gloo,cuda:nccl")
+    torch.cuda.set_device(dist.get_rank())
     main()
+    dist.destroy_process_group()

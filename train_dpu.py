@@ -31,15 +31,6 @@ def compute_loss(model: torch.nn.Module, inputs: List[str], tokenizer) -> torch.
     return outputs.loss
 
 
-# Optimizer update step
-def optimizer_step(optimizer, model_params, gradients):
-    for param, grad in zip(model_params, gradients):
-        if param.grad is not None:
-            param.grad = grad  # Set gradients
-    optimizer.step()  # Perform optimizer step
-    optimizer.zero_grad()  # Reset gradients
-
-
 def acco_algorithm(
     model: torch.nn.Module, tokenizer, data_loader: DataLoader, optimizer: Optimizer, num_steps: int
 ) -> None:
@@ -48,6 +39,7 @@ def acco_algorithm(
     """
     model_params = [p for p in model.parameters() if p.requires_grad]
 
+    first_step = True
     for step, batch in enumerate(data_loader):
         if step >= num_steps:
             break
@@ -57,31 +49,32 @@ def acco_algorithm(
         mid_point = len(batch_text) // 2
         first_half, second_half = batch_text[:mid_point], batch_text[mid_point:]
 
-        # Stage 1: Compute gradients g_t using the second half of the batch
-        loss_t = compute_loss(model, second_half, tokenizer)
+        # Stage 1: Compute gradients g_t and tilde_theta_t+1
+        loss_t = compute_loss(model, first_half, tokenizer)
         loss_t.backward()  # Compute gradients for g_t
-        g_t = [p.grad.clone() for p in model_params]  # Copy gradients
-        optimizer.zero_grad()  # Clear gradients to avoid accumulation
+        g_t = [p.grad.cpu() for p in model_params]
+        theta_t = [p.cpu() for p in model_params]
+        # TODO: Gather gradients from other workers
 
-        # Stage 2: Estimate next parameters (tilde_theta_t+1)
-        with torch.no_grad():
-            tilde_theta_t1 = [param - optimizer.defaults["lr"] * grad for param, grad in zip(model_params, g_t)]
+        if not first_step:
+            optimizer.step()
+        optimizer.zero_grad()
+        first_step = False 
 
-        # Temporarily update model parameters to tilde_theta_t+1
-        for param, tilde_param in zip(model_params, tilde_theta_t1):
-            param.data.copy_(tilde_param)
-
-        # Compute estimated gradients tilde_g_t+1 using the first half of the batch
-        loss_tilde = compute_loss(model, first_half, tokenizer)
-        tilde_g_t1 = torch.autograd.grad(loss_tilde, model_params)  # No need for retain_graph
+        # Stage 2: Compute g_tilde_t+1 and theta_t+1
+        loss_tilde = compute_loss(model, second_half, tokenizer)
+        loss_tilde.backward()
 
         # Restore original parameters
-        for param, original_param in zip(model_params, tilde_theta_t1):
+        for param, original_param in zip(model_params, theta_t):
             param.data.copy_(original_param)
-
-        # Update parameters theta_t+1 using combined gradients
-        combined_gradients = [g_t_i + tilde_g_t1_i for g_t_i, tilde_g_t1_i in zip(g_t, tilde_g_t1)]
-        optimizer_step(optimizer, model_params, combined_gradients)
+        
+        # Incorporate other workers grads
+        for param, grad in zip(model_params, g_t):
+            param.grad += grad.cuda() # TODO: Offload optimizer
+        
+        optimizer.step()
+        optimizer.zero_grad()
 
         print(f"Step {step + 1}/{num_steps}: Loss = {loss_t.item()}")
 
@@ -89,9 +82,7 @@ def acco_algorithm(
 # Main function
 def main():
     # Load dataset
-    dataset = load_dataset(
-        "/root/prime/prime/datasets/fineweb-edu", split="train", streaming=True
-    )  # Small subset for example
+    dataset = load_dataset("/root/prime/datasets/fineweb-edu", split="train", streaming=True)
     data_loader = DataLoader(dataset, batch_size=8, shuffle=False)
 
     # Load model and tokenizer

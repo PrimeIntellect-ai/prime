@@ -25,20 +25,20 @@ child_pids=()
 cleanup() {
     echo "Cleaning up child processes..."
     local killed=0
-    
+
     # First kill the main processes
     for pid in "${child_pids[@]}"; do
         if kill -TERM "$pid" 2>/dev/null; then
             ((killed++))
         fi
     done
-    
+
     # Kill the tail process if it exists
     if [ -n "$tail_pid" ]; then
         kill -TERM "$tail_pid" 2>/dev/null
         ((killed++))
     fi
-    
+
     wait
     echo "All child processes terminated. Killed $killed processes."
     exit
@@ -51,9 +51,10 @@ if [ "$#" -lt 3 ]; then
 fi
 
 
-N=$1         # Set N from the first argument
-NUM_GPU=$2
-shift 2     # Remove the first three arguments so $@ contains only additional Python arguments
+N=$1         # The number of processes
+NUM_GPU=$2   # The number of GPUs used by each process
+# Remove the first three arguments so $@ contains only additional Python arguments
+shift 2
 
 # Register the cleanup function to be called on SIGINT (Ctrl+C)
 trap cleanup SIGINT

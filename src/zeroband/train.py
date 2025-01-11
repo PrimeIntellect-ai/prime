@@ -10,6 +10,7 @@ from torch.nn import functional as F
 from transformers import AutoTokenizer
 
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.autograd.profiler import record_function
 
 import torch.distributed as dist
 from zeroband import utils
@@ -18,7 +19,7 @@ from zeroband.comms import ElasticDeviceMesh
 from zeroband.loss import cross_entropy_max_z_loss
 
 from zeroband.models.llama.model import create_block_mask_from_seqlens
-from zeroband.config import Config  #, MemoryProfilerConfig
+from zeroband.config import Config, TorchProfilerConfig, MemoryProfilerConfig
 from zeroband.optimizers import get_optimizer
 
 from zeroband.utils import (
@@ -100,26 +101,31 @@ def train(config: Config):
 
     logger.debug("tokenizer loaded")
 
-    train_dataloader = get_dataloader(
-        tokenizer=tokenizer,
-        world_size=world_info.world_size,
-        rank=world_info.rank,
-        batch_size=config.train.micro_bs,
-        data_config=config.data,
-    )
+    with record_function("Get dataloader"):
+        logger.debug("Getting dataloader")
+        train_dataloader = get_dataloader(
+            tokenizer=tokenizer,
+            world_size=world_info.world_size,
+            rank=world_info.rank,
+            batch_size=config.train.micro_bs,
+            data_config=config.data,
+        )
+        train_dataloader_iterator = iter(train_dataloader)
 
-    logger.debug("Getting model")
-    model, model_config = get_model(
-        config.name_model,
-        config.type_model,
-        vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
-        seq_length=config.data.seq_length,
-        attn_fn=config.train.attn_fn,
-    )
+    with record_function("Get model"):
+        logger.debug("Getting model")
+        model, model_config = get_model(
+            config.name_model,
+            config.type_model,
+            vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
+            seq_length=config.data.seq_length,
+            attn_fn=config.train.attn_fn,
+        )
 
-    logger.debug(f"Distributing model to {world_info.local_rank}")
-    model = model.to(world_info.local_rank)
-    logger.debug("model loaded")
+    with record_function("Distribute model"):
+        logger.debug(f"Distributing model to {world_info.local_rank}")
+        model = model.to(world_info.local_rank)
+        logger.debug("Model loaded")
 
     gpu_peak_flops = utils.get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
@@ -132,63 +138,65 @@ def train(config: Config):
         config.data.seq_length,
     )
 
-    if config.train.ac_ckpt:
-        num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
-        apply_ac_ckpt(model, num)
+    with record_function("Shard model"):
+        if config.train.ac_ckpt:
+            num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
+            apply_ac_ckpt(model, num)
 
-    elastic_device_mesh = ElasticDeviceMesh(
-        enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
-    )
+        elastic_device_mesh = ElasticDeviceMesh(
+            enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
+        )
 
-    mp_policy = MixedPrecisionPolicy(
-        param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
-    )
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
+        )
 
-    for layer_id, transformer_block in model.layers.items():
-        if config.train.reshard_after_forward:
-            reshard_after_forward = int(layer_id) < len(model.layers) - 1
-        else:
-            reshard_after_forward = False
+        for layer_id, transformer_block in model.layers.items():
+            if config.train.reshard_after_forward:
+                reshard_after_forward = int(layer_id) < len(model.layers) - 1
+            else:
+                reshard_after_forward = False
+            fully_shard(
+                transformer_block,
+                mp_policy=mp_policy,
+                mesh=elastic_device_mesh.cuda_local_mesh,
+                reshard_after_forward=reshard_after_forward,
+            )
         fully_shard(
-            transformer_block,
+            model,
             mp_policy=mp_policy,
             mesh=elastic_device_mesh.cuda_local_mesh,
-            reshard_after_forward=reshard_after_forward,
+            reshard_after_forward=config.train.reshard_after_forward,
         )
-    fully_shard(
-        model,
-        mp_policy=mp_policy,
-        mesh=elastic_device_mesh.cuda_local_mesh,
-        reshard_after_forward=config.train.reshard_after_forward,
-    )
-    logger.debug("model fsdped")
+        logger.debug("model fsdped")
 
     # Setup optimizers
-    inner_optimizer = get_optimizer(model.parameters(), config.optim.optim)
+    with record_function("Set up Optimizers"):
+        inner_optimizer = get_optimizer(model.parameters(), config.optim.optim)
 
-    diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
+        diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
 
-    scheduler = get_scheduler(
-        sched_type=config.optim.sched_type,
-        optimizer=inner_optimizer,
-        num_warmup_steps=config.optim.warmup_steps,
-        num_stable_steps=config.optim.stable_steps,
-        num_training_steps=config.optim.total_steps,
-    )
+        scheduler = get_scheduler(
+            sched_type=config.optim.sched_type,
+            optimizer=inner_optimizer,
+            num_warmup_steps=config.optim.warmup_steps,
+            num_stable_steps=config.optim.stable_steps,
+            num_training_steps=config.optim.total_steps,
+        )
 
-    training_progress = TrainingProgress(total_tokens=0, outer_step=0, step=0)
+        training_progress = TrainingProgress(total_tokens=0, outer_step=0, step=0)
 
-    ckpt_manager = CkptManager(
-        config=config.ckpt,
-        model=model,
-        optimizer=inner_optimizer,
-        scheduler=scheduler,
-        dataloader=train_dataloader,
-        training_progress=training_progress,
-        data_rank=config.data.data_rank,
-        diloco_offloaded_optimizer=diloco.outer_optimizer if config.diloco is not None else None,
-        diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None,
-    )
+        ckpt_manager = CkptManager(
+            config=config.ckpt,
+            model=model,
+            optimizer=inner_optimizer,
+            scheduler=scheduler,
+            dataloader=train_dataloader,
+            training_progress=training_progress,
+            data_rank=config.data.data_rank,
+            diloco_offloaded_optimizer=diloco.outer_optimizer if config.diloco is not None else None,
+            diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None,
+        )
 
     if world_info.rank == 0:
         logger_cls = WandbMetricLogger if config.metric_logger_type == "wandb" else DummyMetricLogger
@@ -200,21 +208,23 @@ def train(config: Config):
     else:
         metric_logger = None
 
-    if config.train.torch_compile:
-        # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
-        model = torch.compile(model)
-        logger.debug("model compiled")
+    with record_function("Compile model"):
+        if config.train.torch_compile:
+            # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
+            model = torch.compile(model)
+            logger.debug("model compiled")
 
-    if config.ckpt.resume is not None:
-        # all is inplace
-        ckpt_manager.load(
-            resume_ckpt_path=config.ckpt.resume,
-            skip_dataloader=config.ckpt.skip_dataloader,
-            data_path=config.ckpt.data_path,
-        )
-        log_hash_training_state(
-            config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="resume"
-        )
+    with record_function("Resume checkpoint"):
+        if config.ckpt.resume is not None:
+            # all is inplace
+            ckpt_manager.load(
+                resume_ckpt_path=config.ckpt.resume,
+                skip_dataloader=config.ckpt.skip_dataloader,
+                data_path=config.ckpt.data_path,
+            )
+            log_hash_training_state(
+                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="resume"
+            )
 
     if config.train.memory_profiler is not None:
         memory_profiler = MemoryProfiler(config.train.memory_profiler.freq, config.train.memory_profiler.snapshot_dir)
@@ -222,8 +232,6 @@ def train(config: Config):
     if config.monitor is not None:
         monitor = HttpMonitor(config=config.model_dump(), resume=False)
         monitor.set_stage("init")
-
-    train_dataloader_iterator = iter(train_dataloader)
 
     num_inner_steps = config.diloco.inner_steps if config.diloco is not None else 1
     perf_counter = PerfCounter(window_size=10)
@@ -468,13 +476,39 @@ if __name__ == "__main__":
     torch.cuda.set_device(world_info.local_rank)
 
     config = Config(**parse_argv())
-    # config.train.memory_profiler = MemoryProfilerConfig(snapshot_dir="logs/", freq=1)
+    #config.train.memory_profiler = MemoryProfilerConfig(snapshot_dir="logs/", freq=1)
+    config.train.torch_profiler = TorchProfilerConfig()
     logger.debug(f"config: {config.model_dump()}")
 
     try:
-        train(config)
+        if config.train.torch_profiler is not None and world_info.rank == 0:
+            logger.debug("Running train() with profiler.")
+            prof = torch.profiler.profile(
+                    activities=[
+                        torch.profiler.ProfilerActivity.CPU,
+                        torch.profiler.ProfilerActivity.CUDA,
+                    ],
+                    record_shapes=True,
+                    profile_memory=True,
+                    with_stack=True,
+                )
+            try:
+                prof.__enter__()
+                train(config)
+            finally:
+                logger.debug("Exiting profiler context.")
+                prof.__exit__(None, None, None)
+
+            logger.info("Exporting chrome trace.")
+            prof.export_chrome_trace(f"logs/profile.json.gz")
+            logger.info("Exporting memory timeline.")
+            prof.export_memory_timeline(f"logs/mem_timeline.html", device="cuda:0")
+        else:
+            train(config)
     except Exception as e:
         # Subprocesses can prevent the main process from exiting, so we need to terminate them
+        logger.info("Caught an exception, terminating children")
+        logger.info(e)
         for p in _children:
             p.terminate()
 

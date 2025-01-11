@@ -28,6 +28,9 @@ class OptimConfig(BaseConfig):
     z_loss_weight: float = 2e-4
 
 
+class TorchProfilerConfig(BaseConfig):
+    pass
+
 class MemoryProfilerConfig(BaseConfig):
     freq: int = 10
     snapshot_dir: str
@@ -44,6 +47,8 @@ class TrainConfig(BaseConfig):
     log_model_hash: bool = False
 
     memory_profiler: MemoryProfilerConfig | None = None
+
+    torch_profiler: TorchProfilerConfig | None = None
 
     sequence_packing: bool = True
 

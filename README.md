@@ -98,10 +98,10 @@ GLOO_SOCKET_IFNAME=lo GLOBAL_ADDR=localhost GLOBAL_RANK=0 GLOBAL_UNIQUE_ID=0 GLO
 To test DiLoCo locally you can use the helper script `scripts/simulatsimulate_multi_nodee_mutl.sh`
 
 ```bash
-# Using 4 GPUs
+# Using 4 GPUs (2 diloco workers, each across 2 GPUs)
 ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 2 src/zeroband/train.py @configs/debug/diloco.toml
 
-# Using 2 GPUs
+# Using 2 GPUs (2 diloco workers, each on a single GPU)
 ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 1 src/zeroband/train.py @configs/debug/diloco.toml
 ```
 
@@ -142,14 +142,14 @@ uv run accelerate launch -m lm_eval --model hf --model_args pretrained=CONVERTED
 ### Elastic Device Mesh Configuration
 | Environment Variable  | Description                                      | Default Value |
 |-----------------------|--------------------------------------------------|---------------|
-| `ZERO_BAND_LOG_LEVEL` | Enable debug mode for loge | `False` |
+| `ZERO_BAND_LOG_LEVEL` | Enable debug log lines | `False` |
 | `ZERO_BAND_GLOBAL_STORE_TIMEOUT_SECONDS` | Number of seconds before the global store operations timeout | `300` |
 | `ZERO_BAND_GLOBAL_PG_TIMEOUT_SECONDS` | Number of seconds before the global process group operations timeout | `600` |
 | `ZERO_BAND_GLOBAL_STORE_POLLING_INTERVAL_SECONDS` | Number of seconds between polls to the store when waiting for values | `0.1` |
 | `ZERO_BAND_EDM_HEARTBEAT_INTERVAL_SECONDS` | Interval in seconds between heartbeats | `2` |
 | `ZERO_BAND_EDM_HEARTBEAT_TIMEOUT_SECONDS` | Time in seconds after which a node is considered dead if no heartbeat is received | `10` |
-| `ZERO_BAND_LIVE_RECO_PORT` | Port number for the live recovery server | random |  
-| `ZERO_BAND_LIVE_RECO_ADDR` | IP Address for the live recovery server | `localhost` |  
+| `ZERO_BAND_LIVE_RECO_PORT` | Port number for the live recovery server | random |
+| `ZERO_BAND_LIVE_RECO_ADDR` | IP Address for the live recovery server | `localhost` |
 
 ## Troubleshooting
 

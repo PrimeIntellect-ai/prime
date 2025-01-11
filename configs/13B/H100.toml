@@ -9,6 +9,8 @@ ac_ckpt = true
 batch_size = 1024 #2M tokens bs
 warmup_steps = 1000
 total_steps = 88_000
+
+[optim.optim]
 lr = 3e-4
 
 [data]

@@ -36,8 +36,10 @@ main() {
     curl -LsSf https://astral.sh/uv/install.sh | sh
     
     log_info "Sourcing uv environment..."
-    source $HOME/.local/bin/env
-        
+    if ! command -v uv &> /dev/null; then
+        source $HOME/.local/bin/env
+    fi
+    
     log_info "Creating virtual environment..."
     uv venv
     

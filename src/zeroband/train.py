@@ -15,11 +15,11 @@ import torch.distributed as dist
 from zeroband import utils
 from zeroband.diloco import Diloco
 from zeroband.comms import ElasticDeviceMesh
-from zeroband.global_ddp import GlobalDDP, GlobalDDPConfig
+from zeroband.global_ddp import GlobalDDP
 from zeroband.loss import cross_entropy_max_z_loss
 
 from zeroband.models.llama.model import create_block_mask_from_seqlens
-from zeroband.config import Config  #, MemoryProfilerConfig
+from zeroband.config import Config  # , MemoryProfilerConfig
 from zeroband.optimizers import get_optimizer
 
 from zeroband.utils import (
@@ -39,6 +39,7 @@ from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 from zeroband.checkpoint import CkptManager, TrainingProgress
 from zeroband.lr_scheduler import get_scheduler
+
 
 def log_hash_training_state(
     config: Config,

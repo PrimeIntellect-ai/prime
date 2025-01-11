@@ -6,6 +6,7 @@ from pydantic_config import BaseConfig
 from zeroband.checkpoint import CkptConfig
 from zeroband.data import DataConfig
 from zeroband.diloco import DilocoConfig
+from zeroband.global_ddp import GlobalDDPConfig
 from zeroband.models.llama.model import AttnFnType
 from zeroband.optimizers import OptimizersConfig, AdamConfig
 
@@ -68,6 +69,7 @@ class Config(BaseConfig):
 
     # sub config
     diloco: DilocoConfig | None = None
+    global_ddp: GlobalDDPConfig | None = None
     data: DataConfig = DataConfig()
     optim: OptimConfig = OptimConfig()
     train: TrainConfig
@@ -88,4 +90,3 @@ class Config(BaseConfig):
         if self.ckpt is not None and self.ckpt.live_recovery_rank_src is not None and self.diloco is None:
             raise ValueError("live_recovery_rank_src is only supported with diloco")
         return self
-

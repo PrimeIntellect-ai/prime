@@ -30,13 +30,26 @@ def compute_loss(model: torch.nn.Module, inputs: List[str], tokenizer) -> torch.
     outputs = model(input_ids, labels=labels)
     return outputs.loss
 
+# Main function
+def main():
+    # Load dataset
+    dataset = load_dataset("/root/prime/datasets/fineweb-edu", split="train", streaming=True)
+    data_loader = DataLoader(dataset, batch_size=8, shuffle=False)
 
-def acco_algorithm(
-    model: torch.nn.Module, tokenizer, data_loader: DataLoader, optimizer: Optimizer, num_steps: int
-) -> None:
-    """
-    ACCO algorithm implementation without memory leaks.
-    """
+    # Load model and tokenizer
+    model_name = "llama-debug"  # Replace with actual Llama model if available
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
+    tokenizer.pad_token = tokenizer.eos_token
+    config = AutoConfig.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_config(config)
+    model = model.to("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Define optimizer
+    optimizer = AdamW(model.parameters(), lr=1e-4)
+
+    # Run ACCO algorithm
+    num_steps = 100
+
     model_params = [p for p in model.parameters() if p.requires_grad]
 
     first_step = True
@@ -78,27 +91,6 @@ def acco_algorithm(
 
         print(f"Step {step + 1}/{num_steps}: Loss = {loss_t.item()}")
 
-
-# Main function
-def main():
-    # Load dataset
-    dataset = load_dataset("/root/prime/datasets/fineweb-edu", split="train", streaming=True)
-    data_loader = DataLoader(dataset, batch_size=8, shuffle=False)
-
-    # Load model and tokenizer
-    model_name = "llama-debug"  # Replace with actual Llama model if available
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
-    tokenizer.pad_token = tokenizer.eos_token
-    config = AutoConfig.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_config(config)
-    model = model.to("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Define optimizer
-    optimizer = AdamW(model.parameters(), lr=1e-4)
-
-    # Run ACCO algorithm
-    num_steps = 100
-    acco_algorithm(model, tokenizer, data_loader, optimizer, num_steps)
 
 
 # Entry point

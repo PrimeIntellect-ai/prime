@@ -13,7 +13,3 @@ total_steps = 4
 
 [data]
 fake = true
-
-[diloco]
-inner_steps = 5
-

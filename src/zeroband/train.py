@@ -38,7 +38,7 @@ from zeroband.utils.logging import get_logger
 from zeroband.checkpoint import CkptConfig, CkptManager, TrainingProgress
 from zeroband.lr_scheduler import get_scheduler
 
-from pccl import Attribute
+from pccl import Attribute, Communicator
 
 
 class OptimConfig(BaseConfig):
@@ -217,9 +217,8 @@ def train(config: Config):
 
     dist.init_process_group(backend="cpu:gloo,cuda:nccl")
     if config.diloco is not None:
-        pass
-        # comm = Communicator(os.environ["PCCL_MASTER_ADDR"], peer_group=dist.get_rank())
-        # comm.connect()
+        comm = Communicator(os.environ["PCCL_MASTER_ADDR"], peer_group=dist.get_rank())
+        comm.connect()
     cuda_local_mesh = init_device_mesh("cuda", mesh_shape=(int(os.environ["LOCAL_WORLD_SIZE"]),))
     print(cuda_local_mesh)
 

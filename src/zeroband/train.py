@@ -300,49 +300,60 @@ def train(config: Config):
                 # no sync if we are accumulating gradients
                 model.set_requires_gradient_sync(not is_accumulating)
 
-                batch = next(train_dataloader_iterator)
-                input_ids = batch["input_ids"].to("cuda")
-                labels = batch["labels"].to("cuda")
-                if config.train.sequence_packing:
-                    seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
-                    block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
-                else:
-                    block_mask = None
+                with record_function("Load batch"):
+                    # TODO/NOTE: We could overlap sending the batch with communication
+                    #            although to be honest the perf impact is minimal
+                    batch = next(train_dataloader_iterator)
+                    input_ids = batch["input_ids"].to("cuda")
+                    labels = batch["labels"].to("cuda")
+                    if config.train.sequence_packing:
+                        seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
+                        block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
+                    else:
+                        block_mask = None
 
-                logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
-                flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-                flatten_labels = rearrange(labels, "b seq -> (b seq)")
+                with record_function("Run model"):
+                    logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
+                    flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
+                    flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
-                if config.optim.z_loss:
-                    ce_loss, z_loss = cross_entropy_max_z_loss(
-                        flatten_logits, flatten_labels, config.optim.z_loss_weight
-                    )
-                    ce_loss /= gradient_accumulation_steps
-                    z_loss /= gradient_accumulation_steps
+                with record_function("Loss calculation"):
+                    if config.optim.z_loss:
+                        ce_loss, z_loss = cross_entropy_max_z_loss(
+                            flatten_logits, flatten_labels, config.optim.z_loss_weight
+                        )
+                        ce_loss /= gradient_accumulation_steps
+                        z_loss /= gradient_accumulation_steps
 
-                    del logits
-                    loss = ce_loss + z_loss
+                        del logits
+                        loss = ce_loss + z_loss
+
+                    else:
+                        loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
+                        del logits
+                
+                with record_function("Backward"):
                     loss.backward()
 
-                else:
-                    loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
-                    del logits
-                    loss.backward()
+                with record_function("Clone loss"):
+                    if config.optim.z_loss:
+                        loss_batch += ce_loss.clone().detach()
+                        z_loss_batch += z_loss.clone().detach()
+                    else:
+                        loss_batch += loss.clone().detach()
 
+            with record_function("Local allreduce"):
+                dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
                 if config.optim.z_loss:
-                    loss_batch += ce_loss.clone().detach()
-                    z_loss_batch += z_loss.clone().detach()
-                else:
-                    loss_batch += loss.clone().detach()
+                    dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
 
-            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
-            if config.optim.z_loss:
-                dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            inner_optimizer.step()
-            scheduler.step()
-            inner_optimizer.zero_grad()
+            with record_function("Clip grad"):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
+            with record_function("Optimizer step"):
+                inner_optimizer.step()
+                scheduler.step()
+                inner_optimizer.zero_grad()
 
             # logging
             training_progress.step += 1
@@ -489,8 +500,8 @@ if __name__ == "__main__":
                         torch.profiler.ProfilerActivity.CUDA,
                     ],
                     record_shapes=True,
-                    profile_memory=True,
-                    with_stack=True,
+                    #profile_memory=True,
+                    #with_stack=True,
                 )
             try:
                 prof.__enter__()
@@ -501,8 +512,22 @@ if __name__ == "__main__":
 
             logger.info("Exporting chrome trace.")
             prof.export_chrome_trace(f"logs/profile.json.gz")
-            logger.info("Exporting memory timeline.")
-            prof.export_memory_timeline(f"logs/mem_timeline.html", device="cuda:0")
+
+            width = 30
+            logger.info("\n" + "*" * width + " CPU TIME " + "*" * width)
+            logger.info(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
+
+            logger.info("\n" + "*" * width + " GPU TIME " + "*" * width)
+            logger.info(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+
+            logger.info("\n" + "*" * width + " CPU MEM " + "*" * width)
+            logger.info(prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=10))
+
+            logger.info("\n" + "*" * width + " GPU MEM " + "*" * width)
+            logger.info(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
+
+            #logger.info("Exporting memory timeline.")
+            #prof.export_memory_timeline(f"logs/mem_timeline.html", device="cuda:0")
         else:
             train(config)
     except Exception as e:

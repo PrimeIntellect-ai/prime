@@ -34,7 +34,7 @@ https://github.com/user-attachments/assets/c034d2a2-400c-4bf8-acd0-c84b6c897d69
     - Our Diloco optimizer does not add any GPU overhead. All the tensors required by the Diloco optimizer are offloaded to CPU memory.
     - Since we only perform a global sync every hundreds of steps, the reduced speed of copying and calculating the pseudo-gradient on cpu is negligible relative to the time to execute the inner steps and all-reduce.
 
-A research paper about the framework and our INTELLECT-1 10B experiment is coming soon.
+A research paper about the framework and our INTELLECT-1 10B experiment can be found [here](https://arxiv.org/abs/2412.01152).
 
 ## Getting Started
 
@@ -95,17 +95,15 @@ GLOO_SOCKET_IFNAME=lo GLOBAL_ADDR=localhost GLOBAL_RANK=0 GLOBAL_UNIQUE_ID=0 GLO
 
 ### Running DiLoCo
 
-To test DiLoCo locally you can use the helper script `scripts/simulatsimulate_multi_nodee_mutl.sh`
+To test DiLoCo locally you can use the helper script `scripts/simulate_multi_node_diloco.sh`
 
 ```bash
-# Using 4 GPUs
-ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 2 src/zeroband/train.py @configs/debug/diloco.toml
+# Using 2 GPUs with 2 simulated DiLoCo workers
+ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 1 2 src/zeroband/train.py @configs/debug/diloco.toml
 
-# Using 2 GPUs
+# Using 2 GPUs with 1 simulated DiLoCo worker
 ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 1 src/zeroband/train.py @configs/debug/diloco.toml
 ```
-
-> **Note:** Single GPU setups are currently not supported due to an FSDP implementation bug.
 
 ### Running Tests
 

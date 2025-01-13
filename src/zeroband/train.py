@@ -504,7 +504,12 @@ if __name__ == "__main__":
     pretty_dict(config.model_dump())
 
     try:
-        if config.train.torch_profiler is not None and world_info.rank == 0:
+        if config.train.torch_profiler and world_info.rank == 0:
+
+            # Note: I cannot seem to get the memory profiler to work.
+            # Running into this issue: https://github.com/pytorch/pytorch/issues/64345
+            # In the meantime, we can use the memory snapshotter.
+
             logger.debug("Running train() with profiler.")
             prof = torch.profiler.profile(
                     activities=[

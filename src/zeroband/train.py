@@ -341,8 +341,7 @@ def train(config: Config):
                 dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
 
             if config.acco is not None:
-                # TODO: This is wrong, we overwrite g_tilde before we use it in the update
-                g_tilde = [p.grad.detach().cpu() for p in model.parameters() if p.requires_grad]
+                new_g_tilde = [p.grad.detach().cpu() for p in model.parameters() if p.requires_grad]
                 for work in reduce_work:
                     work.wait()
                 #reduce_work = [elastic_device_mesh.global_pg.allreduce([_g_tilde], op=dist.ReduceOp.SUM) for _g_tilde in g_tilde]
@@ -366,9 +365,9 @@ def train(config: Config):
                         cpu_param.data.copy_(param.data, non_blocking=True)
                 first_step = False
 
+                g_tilde = new_g_tilde
                 for _g_tilde in g_tilde:
                     work = dist.all_reduce(_g_tilde.to_local(), dist.ReduceOp.SUM, group=elastic_device_mesh.global_pg, async_op=True)
-                    work.wait()
 
                 # Stage 2: Compute g_t and theta_tilde
                 for grad_acc_step in range(gradient_accumulation_steps):

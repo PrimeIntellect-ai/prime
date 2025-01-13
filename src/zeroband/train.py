@@ -1,44 +1,45 @@
 import os
 import time
-from multiprocessing.process import _children
+from typing import TYPE_CHECKING
+from multiprocessing.process import _children # type: ignore
 
 import torch
-from pydantic_config import parse_argv
-from einops import rearrange
 from torch.nn import functional as F
-
-from transformers import AutoTokenizer
-
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+import torch.distributed as dist
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
 from torch.autograd.profiler import record_function
 
-import torch.distributed as dist
-from zeroband import utils
-from zeroband.diloco import Diloco
+from zeroband.checkpoint import CkptManager, TrainingProgress
 from zeroband.comms import ElasticDeviceMesh
-from zeroband.loss import compute_cross_entropy_loss
-
-from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.config import Config, MemoryProfilerConfig
+from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
+from zeroband.diloco import Diloco
+from zeroband.loss import compute_cross_entropy_loss
+from zeroband.lr_scheduler import get_scheduler
+from zeroband.models.llama import get_model
+from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.optimizers import get_optimizer
-
 from zeroband.utils import (
     FakeTokenizer,
     PerfCounter,
     get_module_signature,
     get_optimizer_signature,
     get_tensor_list_signature,
+    get_peak_flops,
+    get_num_params,
+    get_num_flop_per_token
 )
-from zeroband.utils.activation_ckpt import apply_ac_ckpt
-from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
 from zeroband.utils.metric_logger import MetricLogger, WandbMetricLogger, DummyMetricLogger
 from zeroband.utils.monitor import HttpMonitor
-from zeroband.models.llama import get_model
+from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.utils.profiler import MemoryProfiler
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
-from zeroband.checkpoint import CkptManager, TrainingProgress
-from zeroband.lr_scheduler import get_scheduler
+
+from einops import rearrange
+from transformers import AutoTokenizer
+from pydantic_config import parse_argv
+
 
 def log_hash_training_state(
     config: Config,
@@ -128,12 +129,12 @@ def train(config: Config):
         model = model.to(world_info.local_rank)
         logger.debug("Model loaded")
 
-    gpu_peak_flops = utils.get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
+    gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
 
-    num_params = utils.get_num_params(model, exclude_embedding=True)
+    num_params = get_num_params(model, exclude_embedding=True)
     logger.info(f"Number of parameters: {num_params}")
-    num_flop_per_token = utils.get_num_flop_per_token(
+    num_flop_per_token = get_num_flop_per_token(
         num_params,
         model_config,
         config.data.seq_length,
@@ -195,8 +196,8 @@ def train(config: Config):
             dataloader=train_dataloader,
             training_progress=training_progress,
             data_rank=config.data.data_rank,
-            diloco_offloaded_optimizer=diloco.outer_optimizer if config.diloco is not None else None,
-            diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None,
+            diloco_offloaded_optimizer=diloco.outer_optimizer if config.diloco is not None else None, # type: ignore
+            diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None, # type: ignore
         )
 
     if world_info.rank == 0:
@@ -212,7 +213,7 @@ def train(config: Config):
     with record_function("Compile model"):
         if config.train.torch_compile:
             # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
-            model = torch.compile(model)
+            model = torch.compile(model) if not TYPE_CHECKING else model
             logger.debug("model compiled")
 
     with record_function("Resume checkpoint"):
@@ -335,7 +336,7 @@ def train(config: Config):
                         loss = ce_loss + z_loss
                     else:
                         loss = ce_loss / gradient_accumulation_steps
-                
+
                 with record_function("Backward"):
                     loss.backward()
 
@@ -354,7 +355,7 @@ def train(config: Config):
 
             with record_function("Clip grad"):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            
+
             with record_function("Optimizer step"):
                 inner_optimizer.step()
                 scheduler.step()
@@ -376,6 +377,7 @@ def train(config: Config):
                 # might need to tweak this as some worker might fail to join the all reduce later
                 training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
 
+            assert isinstance(loss_batch, torch.Tensor)
             metrics = {
                 "Loss": loss_batch.item(),
                 "step": training_progress.step,
@@ -386,6 +388,7 @@ def train(config: Config):
             }
 
             if config.optim.z_loss:
+                assert isinstance(z_loss_batch, torch.Tensor)
                 metrics["z_loss"] = z_loss_batch.item()
 
             log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
@@ -415,11 +418,12 @@ def train(config: Config):
                 memory_profiler.step()
 
         if config.diloco is not None:
+            assert diloco is not None
             if world_info.rank == 0 and config.monitor is not None:
                 monitor.set_stage("outer_loop")
 
             time_start_inner = time.perf_counter()
-            diloco.step(model=model, flag=training_progress.outer_step)
+            diloco.step(model=model, flag=str(training_progress.outer_step))
             diloco_time = time.perf_counter() - time_start_inner
 
             log_hash_training_state(
@@ -504,7 +508,7 @@ if __name__ == "__main__":
                 pretty_dict(value, indent + 2)
             else:
                 logger.debug(" " * indent + f"{key}: {value}")
-        
+
     logger.debug(f"config:")
     pretty_dict(config.model_dump())
 

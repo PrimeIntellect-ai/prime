@@ -16,10 +16,10 @@ import torch.distributed as dist
 from zeroband import utils
 from zeroband.diloco import Diloco
 from zeroband.comms import ElasticDeviceMesh
-from zeroband.loss import cross_entropy_max_z_loss
+from zeroband.loss import compute_cross_entropy_loss
 
 from zeroband.models.llama.model import create_block_mask_from_seqlens
-from zeroband.config import Config, TorchProfilerConfig, MemoryProfilerConfig
+from zeroband.config import Config, MemoryProfilerConfig
 from zeroband.optimizers import get_optimizer
 
 from zeroband.utils import (
@@ -318,18 +318,20 @@ def train(config: Config):
                     flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
                 with record_function("Loss calculation"):
+                    ce_loss, z_loss = compute_cross_entropy_loss(
+                        flatten_logits,
+                        flatten_labels,
+                        z_weight=config.optim.z_loss_weight if config.optim.z_loss else None,
+                        num_chunks=config.optim.num_chunks
+                    )
                     if config.optim.z_loss:
-                        ce_loss, z_loss = cross_entropy_max_z_loss(
-                            flatten_logits, flatten_labels, config.optim.z_loss_weight
-                        )
+                        assert z_loss is not None
                         ce_loss /= gradient_accumulation_steps
                         z_loss /= gradient_accumulation_steps
-
                         del logits
                         loss = ce_loss + z_loss
-
                     else:
-                        loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
+                        loss = ce_loss / gradient_accumulation_steps
                         del logits
                 
                 with record_function("Backward"):
@@ -337,6 +339,7 @@ def train(config: Config):
 
                 with record_function("Clone loss"):
                     if config.optim.z_loss:
+                        assert z_loss is not None
                         loss_batch += ce_loss.clone().detach()
                         z_loss_batch += z_loss.clone().detach()
                     else:
@@ -487,9 +490,18 @@ if __name__ == "__main__":
     torch.cuda.set_device(world_info.local_rank)
 
     config = Config(**parse_argv())
-    #config.train.memory_profiler = MemoryProfilerConfig(snapshot_dir="logs/", freq=1)
-    config.train.torch_profiler = TorchProfilerConfig()
-    logger.debug(f"config: {config.model_dump()}")
+    config.train.memory_profiler = MemoryProfilerConfig(snapshot_dir="logs/", freq=1)
+
+    def pretty_dict(d, indent=2):
+        for key, value in d.items():
+            if isinstance(value, dict):
+                logger.debug(" " * indent + f"{key}:")
+                pretty_dict(value, indent + 2)
+            else:
+                logger.debug(" " * indent + f"{key}: {value}")
+        
+    logger.debug(f"config:")
+    pretty_dict(config.model_dump())
 
     try:
         if config.train.torch_profiler is not None and world_info.rank == 0:

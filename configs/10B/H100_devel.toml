@@ -5,6 +5,7 @@ metric_logger_type = "dummy"
 [train]
 micro_bs = 1
 ac_ckpt = true
+torch_profiler = false
 
 [optim]
 sched_type = "wsd-sqrt"
@@ -12,6 +13,7 @@ batch_size = 128 #1M tokens bs
 warmup_steps = 0
 total_steps = 1
 lr = 7.5e-5
+num_chunks = 8
 
 adam_betas1 = 0.9
 adam_betas2 = 0.95

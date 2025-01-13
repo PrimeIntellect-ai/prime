@@ -26,10 +26,8 @@ class OptimConfig(BaseConfig):
 
     z_loss: bool = False
     z_loss_weight: float = 2e-4
+    num_chunks: int | None = None
 
-
-class TorchProfilerConfig(BaseConfig):
-    pass
 
 class MemoryProfilerConfig(BaseConfig):
     freq: int = 10
@@ -48,7 +46,7 @@ class TrainConfig(BaseConfig):
 
     memory_profiler: MemoryProfilerConfig | None = None
 
-    torch_profiler: TorchProfilerConfig | None = None
+    torch_profiler: bool = False
 
     sequence_packing: bool = True
 

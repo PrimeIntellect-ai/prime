@@ -1,4 +1,4 @@
-from typing import Literal, TypeAlias
+from typing import Iterable, Literal, TypeAlias
 from pydantic_config import BaseConfig
 import torch
 from distributed_shampoo import (
@@ -29,7 +29,7 @@ class SoapConfig(BaseConfig):
 OptimizersConfig: TypeAlias = AdamConfig | SoapConfig
 
 
-def get_optimizer(params: list[torch.nn.Parameter], config: OptimizersConfig) -> torch.optim.Optimizer:
+def get_optimizer(params: Iterable[torch.nn.Parameter], config: OptimizersConfig) -> torch.optim.Optimizer:
     if isinstance(config, AdamConfig):
         return torch.optim.AdamW(
             params,

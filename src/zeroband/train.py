@@ -83,6 +83,7 @@ def compute_loss(
     gradient_accumulation_steps: int,
     train_dataloader_iterator: iter,
     local_pg: dist.ProcessGroup,
+    loss_scaling: float = 1.0,
     enable_z_loss: bool = False,
 ):
     loss_batch = 0
@@ -108,15 +109,15 @@ def compute_loss(
 
         if enable_z_loss:
             ce_loss, z_loss = cross_entropy_max_z_loss(flatten_logits, flatten_labels, config.optim.z_loss_weight)
-            ce_loss /= gradient_accumulation_steps
-            z_loss /= gradient_accumulation_steps
+            ce_loss /= gradient_accumulation_steps * loss_scaling
+            z_loss /= gradient_accumulation_steps * loss_scaling
 
             del logits
             loss = ce_loss + z_loss
             loss.backward()
 
         else:
-            loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
+            loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps * loss_scaling
             del logits
             loss.backward()
 
@@ -356,18 +357,15 @@ def train(config: Config):
                 gradient_accumulation_steps,
                 train_dataloader_iterator,
                 elastic_device_mesh.local_pg,
+                0.5 if config.acco is not None else 1.0,
                 config.optim.z_loss,
             )
+            print(loss_batch, z_loss_batch)
 
             if config.acco is not None:
                 new_g_tilde = [p.grad.detach().cpu() for p in model.parameters() if p.requires_grad]
                 for work in reduce_work:
                     work.wait()
-                # reduce_work = [elastic_device_mesh.global_pg.allreduce([_g_tilde], op=dist.ReduceOp.SUM) for _g_tilde in g_tilde]
-                # reduce_work = [dist.all_reduce(_g_tilde, dist.ReduceOp.SUM, group=elastic_device_mesh.global_pg, async_op=True) for _g_tilde in g_tilde]
-                # a = torch.randn(10, device="cpu")
-                # work = dist.all_reduce(a, op=dist.ReduceOp.SUM, group=elastic_device_mesh.global_pg, async_op=True)
-                # work.wait()
 
                 if not first_step:
                     # Copy in theta_t and consume g_t
@@ -385,21 +383,25 @@ def train(config: Config):
                 first_step = False
 
                 g_tilde = new_g_tilde
-                for _g_tilde in g_tilde:
-                    work = dist.all_reduce(
+                reduce_work = [
+                    dist.all_reduce(
                         _g_tilde.to_local(), dist.ReduceOp.SUM, group=elastic_device_mesh.global_pg, async_op=True
                     )
+                    for _g_tilde in g_tilde
+                ]
 
                 loss_batch_1, z_loss_batch_1 = compute_loss(
                     model,
                     gradient_accumulation_steps,
                     train_dataloader_iterator,
                     elastic_device_mesh.local_pg,
+                    0.5 if config.acco is not None else 1.0,
                     config.optim.z_loss,
                 )
                 loss_batch += loss_batch_1
                 z_loss_batch += z_loss_batch_1
 
+                print(loss_batch, z_loss_batch)
                 g_t = [p.grad.detach().cpu() for p in model.parameters() if p.requires_grad]
                 for work in reduce_work:
                     work.wait()
@@ -415,6 +417,11 @@ def train(config: Config):
                     opt_param.grad.copy_(_g_tilde, non_blocking=True)
                     opt_param.grad /= batch_size // 2 * elastic_device_mesh.global_pg.size()
                 inner_optimizer.step()
+                inner_optimizer.zero_grad()
+
+            else:
+                inner_optimizer.step()
+                scheduler.step()
                 inner_optimizer.zero_grad()
 
             # logging

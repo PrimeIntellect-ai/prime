@@ -118,6 +118,7 @@ def list(
                     "security": gpu.security or "N/A",
                     "vcpu": gpu.vcpu.default_count,
                     "memory": gpu.memory.default_count,
+                    "is_spot": gpu.is_spot,
                 }
                 all_gpus.append(gpu_data)
 
@@ -163,9 +164,14 @@ def list(
                     filtered_gpus.append(gpu_config)
 
         for gpu_entry in filtered_gpus:
+            gpu_type_display = (
+                f"{gpu_entry['gpu_type']} (Spot)"
+                if gpu_entry["is_spot"]
+                else gpu_entry["gpu_type"]
+            )
             table.add_row(
                 gpu_entry["short_id"],
-                gpu_entry["gpu_type"],
+                gpu_type_display,
                 str(gpu_entry["gpu_count"]),
                 gpu_entry["socket"],
                 gpu_entry["provider"],

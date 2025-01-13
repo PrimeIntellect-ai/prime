@@ -5,6 +5,9 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from datasets import load_dataset
 from torch.optim import AdamW, Optimizer
+import wandb
+import psutil
+from tqdm import tqdm
 
 
 # Loss function
@@ -31,11 +34,37 @@ def compute_loss(model: torch.nn.Module, inputs: List[str], tokenizer) -> torch.
     outputs = model(input_ids, labels=labels)
     return outputs.loss
 
+def print_memory_usage():
+    # Get CPU memory usage
+    memory_info = psutil.virtual_memory()
+    cpu_memory_used = memory_info.used / (1024 ** 2)
+    cpu_memory_total = memory_info.total / (1024 ** 2)
+
+    print(f"CPU Memory Usage:")
+    print(f"Used: {cpu_memory_used:.2f} MB")
+    print(f"Total: {cpu_memory_total:.2f} MB")
+    print(f"Percentage: {memory_info.percent}%\n")
+
+    # Check if CUDA is available
+    if torch.cuda.is_available():
+        # Get current device
+        device = torch.device('cuda')
+        gpu_memory_used = torch.cuda.memory_allocated(device=device)
+        gpu_memory_reserved = torch.cuda.memory_reserved(device=device)
+        gpu_memory_total = torch.cuda.get_device_properties(device).total_memory
+
+        print(f"GPU Memory Usage (Device: {torch.cuda.get_device_name(device)}):")
+        print(f"Allocated: {gpu_memory_used / (1024 ** 2):.2f} MB")
+        print(f"Reserved: {gpu_memory_reserved / (1024 ** 2):.2f} MB")
+        print(f"Total: {gpu_memory_total / (1024 ** 2):.2f} MB\n")
+    else:
+        print("CUDA is not available.")
+
 # Main function
 def main():
     batch_size = 8
     # Load dataset
-    dataset = load_dataset("/root/prime/datasets/fineweb-edu", split="train", streaming=True)
+    dataset = load_dataset("/root/prime/prime/datasets/fineweb-edu", split="train", streaming=True)
     data_loader = DataLoader(dataset, batch_size=8, shuffle=False)
 
     # Load model and tokenizer
@@ -44,6 +73,8 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
     config = AutoConfig.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_config(config)
+    print(f"Model params: {sum(p.numel() for p in model.parameters()):,}, Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    print_memory_usage()
     theta_t = [p.detach().clone() for p in model.parameters() if p.requires_grad]
     optimizer_copy = [p.detach().clone() for p in model.parameters() if p.requires_grad]
     reduce_work = []
@@ -56,7 +87,9 @@ def main():
     num_steps = 100
 
     first_step = True
-    for step, batch in enumerate(data_loader):
+    print("Post Init")
+    print_memory_usage()
+    for step, batch in tqdm(enumerate(data_loader), total=num_steps):
         if step >= num_steps:
             break
 
@@ -105,10 +138,15 @@ def main():
             param.data.copy_(param_tilde, non_blocking=True)
 
         print(f"Step {step + 1}/{num_steps}: Loss = {loss.item()}")
+        wandb.log({"loss": loss.item()})
+        print(f"End of step {step}")
+        print_memory_usage()
 
 # Entry point
 if __name__ == "__main__":
     dist.init_process_group(backend="cpu:gloo,cuda:nccl")
     torch.cuda.set_device(dist.get_rank())
+    wandb.init()
     main()
+    wandb.finish()
     dist.destroy_process_group()

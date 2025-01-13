@@ -35,7 +35,7 @@ class WandbMetricLogger(MetricLogger):
 
 class DummyMetricLogger(MetricLogger):
     def __init__(self, project, config, *args, **kwargs):
-        self.project = f"/tmp/{project}_logs.pkl"
+        self.project = project
         self.config = config
         open(self.project, "a").close()  # Create an empty file to append to
 

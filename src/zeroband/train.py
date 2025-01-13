@@ -3,6 +3,7 @@ import time
 from typing import TYPE_CHECKING
 from multiprocessing.process import _children # type: ignore
 
+import rich.pretty
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
@@ -482,6 +483,9 @@ def train(config: Config):
 
     del elastic_device_mesh  # allow to clean up for smoother tests transition
 
+    if config.train.memory_profiler is not None:
+        logger.debug(f"Max memory used: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")
+
     logger.info("Training finished, exiting ...")
 
 
@@ -498,7 +502,7 @@ if __name__ == "__main__":
     torch.cuda.set_device(world_info.local_rank)
 
     config = Config(**parse_argv())  # type: ignore
-    config.train.memory_profiler = MemoryProfilerConfig(snapshot_dir="logs/", freq=1)
+    # config.train.memory_profiler = MemoryProfilerConfig(snapshot_dir="logs/", freq=1)
 
     def pretty_dict(d, indent=2):
         for key, value in d.items():
@@ -514,7 +518,7 @@ if __name__ == "__main__":
     try:
         if config.train.torch_profiler and world_info.rank == 0:
 
-            # Note: I cannot seem to get the memory profiler to work.
+            # NOTE(apaz-cli): I cannot seem to get the memory profiler to work.
             # Running into this issue: https://github.com/pytorch/pytorch/issues/64345
             # In the meantime, we can use the memory snapshotter.
 
@@ -530,7 +534,7 @@ if __name__ == "__main__":
                 )
             try:
                 prof.__enter__()
-                train(config)
+                train(config)   
             finally:
                 logger.debug("Exiting profiler context.")
                 prof.__exit__(None, None, None)

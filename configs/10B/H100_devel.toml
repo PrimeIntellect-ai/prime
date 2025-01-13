@@ -7,6 +7,10 @@ micro_bs = 1
 ac_ckpt = true
 torch_profiler = false
 
+[train.memory_profiler]
+freq = 1
+snapshot_dir = "logs/"
+
 [optim]
 sched_type = "wsd-sqrt"
 batch_size = 128 #1M tokens bs

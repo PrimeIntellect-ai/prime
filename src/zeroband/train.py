@@ -3,7 +3,6 @@ import time
 from typing import TYPE_CHECKING
 from multiprocessing.process import _children # type: ignore
 
-import rich.pretty
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
@@ -11,7 +10,7 @@ from torch.autograd.profiler import record_function
 
 from zeroband.checkpoint import CkptManager, TrainingProgress
 from zeroband.comms import ElasticDeviceMesh
-from zeroband.config import Config, MemoryProfilerConfig
+from zeroband.config import Config
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
 from zeroband.diloco import Diloco
 from zeroband.loss import compute_cross_entropy_loss
@@ -501,9 +500,6 @@ if __name__ == "__main__":
 
     torch.cuda.set_device(world_info.local_rank)
 
-    config = Config(**parse_argv())  # type: ignore
-    # config.train.memory_profiler = MemoryProfilerConfig(snapshot_dir="logs/", freq=1)
-
     def pretty_dict(d, indent=2):
         for key, value in d.items():
             if isinstance(value, dict):
@@ -512,6 +508,7 @@ if __name__ == "__main__":
             else:
                 logger.debug(" " * indent + f"{key}: {value}")
 
+    config = Config(**parse_argv())  # type: ignore
     logger.debug("config:")
     pretty_dict(config.model_dump())
 
@@ -534,7 +531,7 @@ if __name__ == "__main__":
                 )
             try:
                 prof.__enter__()
-                train(config)   
+                train(config)
             finally:
                 logger.debug("Exiting profiler context.")
                 prof.__exit__(None, None, None)

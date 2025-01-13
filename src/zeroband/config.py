@@ -6,9 +6,9 @@ from pydantic_config import BaseConfig
 from zeroband.checkpoint import CkptConfig
 from zeroband.data import DataConfig
 from zeroband.diloco import DilocoConfig
-from zeroband.global_ddp import GlobalDDPConfig
 from zeroband.models.llama.model import AttnFnType
 from zeroband.optimizers import OptimizersConfig, AdamConfig
+from zeroband.dpu import ACCOConfig
 
 
 class OptimConfig(BaseConfig):
@@ -69,7 +69,7 @@ class Config(BaseConfig):
 
     # sub config
     diloco: DilocoConfig | None = None
-    global_ddp: GlobalDDPConfig | None = None
+    acco: ACCOConfig | None = None
     data: DataConfig = DataConfig()
     optim: OptimConfig = OptimConfig()
     train: TrainConfig

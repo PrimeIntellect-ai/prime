@@ -224,7 +224,7 @@ class CkptManager:
         scheduler: LambdaLR,
         dataloader: StatefulDataLoader,
         training_progress: TrainingProgress,
-        data_rank: int,
+        data_rank: int | None,
         diloco_offloaded_param_list: list[nn.Parameter] | None,
         diloco_offloaded_optimizer: Optimizer | None,
     ):

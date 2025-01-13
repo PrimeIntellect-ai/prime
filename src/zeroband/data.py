@@ -300,7 +300,7 @@ def get_dataloader(
     rank: int,
     batch_size: int,
     data_config: DataConfig,
-) -> DataLoader:
+) -> StatefulDataLoader:
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
     else:

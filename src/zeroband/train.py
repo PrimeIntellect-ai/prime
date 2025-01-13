@@ -45,7 +45,7 @@ def log_hash_training_state(
     model: torch.nn.Module,
     inner_optimizer: torch.optim.Optimizer,
     diloco: Diloco | None,
-    metric_logger: MetricLogger,
+    metric_logger: MetricLogger | None,
     step: int,
     id: str = "",
 ):
@@ -65,7 +65,7 @@ def log_hash_training_state(
 
         if config.diloco is not None and diloco is not None:
             outer_optimizer_hash = get_optimizer_signature(diloco.outer_optimizer)
-            outer_model_hash = get_tensor_list_signature(diloco.param_list_cpu)
+            outer_model_hash = get_tensor_list_signature(diloco.param_list_cpu) # type: ignore
 
             logger.debug(f"outer diloco optimizer hash {id} : {outer_optimizer_hash}")
             logger.debug(f"outer diloco model hash {id} : {outer_model_hash}")
@@ -74,6 +74,7 @@ def log_hash_training_state(
                 {f"outer_optimizer_hash_{id}": outer_optimizer_hash, f"outer_model_hash_{id}": outer_model_hash}
             )
         if world_info.rank == 0:
+            assert metric_logger is not None
             metric_logger.log(metrics)
 
 
@@ -247,6 +248,7 @@ def train(config: Config):
         time_start_outer = time.perf_counter()
 
         if config.diloco is not None:
+            assert diloco is not None
             # this is a patch for now to allow live recovery worker to not affect the all reduce at all
 
             if not need_live_recovery:
@@ -324,15 +326,15 @@ def train(config: Config):
                         z_weight=config.optim.z_loss_weight if config.optim.z_loss else None,
                         num_chunks=config.optim.num_chunks
                     )
+                    del logits
+
                     if config.optim.z_loss:
                         assert z_loss is not None
                         ce_loss /= gradient_accumulation_steps
                         z_loss /= gradient_accumulation_steps
-                        del logits
                         loss = ce_loss + z_loss
                     else:
                         loss = ce_loss / gradient_accumulation_steps
-                        del logits
                 
                 with record_function("Backward"):
                     loss.backward()
@@ -345,7 +347,7 @@ def train(config: Config):
                     else:
                         loss_batch += loss.clone().detach()
 
-            with record_function("Local allreduce"):
+            with record_function("Inner allreduce"):
                 dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
                 if config.optim.z_loss:
                     dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
@@ -402,6 +404,7 @@ def train(config: Config):
                 log += f", diloco_peers: {metrics['num_peers']}"
 
             if world_info.rank == 0:
+                assert metric_logger is not None
                 metric_logger.log(metrics)
                 if config.monitor is not None:
                     monitor.log(metrics)
@@ -449,6 +452,7 @@ def train(config: Config):
             logger.info(f"effective mfu: {mfu}")
 
             if world_info.rank == 0:
+                assert metric_logger is not None
                 metric_logger.log(
                     {
                         "outer_mfu": mfu,
@@ -466,6 +470,7 @@ def train(config: Config):
             break
 
     if world_info.rank == 0:
+        assert metric_logger is not None
         metric_logger.finish()
         if config.monitor is not None:
             monitor.finish()
@@ -480,7 +485,7 @@ def train(config: Config):
 if __name__ == "__main__":
     # Allow eager fallback during production so that that the training runs dont die
     # However, in development, we want to know that we broke torch compile
-    torch._dynamo.config.suppress_errors = "ZERO_BAND_DEV" not in os.environ
+    torch._dynamo.config.suppress_errors = "ZERO_BAND_DEV" not in os.environ # type: ignore
     torch.set_float32_matmul_precision("high")
     torch.manual_seed(42)
 
@@ -489,7 +494,7 @@ if __name__ == "__main__":
 
     torch.cuda.set_device(world_info.local_rank)
 
-    config = Config(**parse_argv())
+    config = Config(**parse_argv())  # type: ignore
     config.train.memory_profiler = MemoryProfilerConfig(snapshot_dir="logs/", freq=1)
 
     def pretty_dict(d, indent=2):
@@ -531,14 +536,8 @@ if __name__ == "__main__":
             prof.export_chrome_trace(f"logs/profile.json.gz")
 
             width = 30
-            logger.info("\n" + "*" * width + " CPU TIME " + "*" * width)
-            logger.info(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
-
             logger.info("\n" + "*" * width + " GPU TIME " + "*" * width)
             logger.info(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-
-            logger.info("\n" + "*" * width + " CPU MEM " + "*" * width)
-            logger.info(prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=10))
 
             logger.info("\n" + "*" * width + " GPU MEM " + "*" * width)
             logger.info(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))

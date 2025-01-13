@@ -1,6 +1,6 @@
 import pickle
 from typing import Any, Protocol
-import importlib
+import importlib.util
 
 
 class MetricLogger(Protocol):
@@ -11,7 +11,7 @@ class MetricLogger(Protocol):
     def finish(self): ...
 
 
-class WandbMetricLogger:
+class WandbMetricLogger(MetricLogger):
     def __init__(self, project, config, resume: bool):
         if importlib.util.find_spec("wandb") is None:
             raise ImportError("wandb is not installed. Please install it to use WandbMonitor.")
@@ -33,7 +33,7 @@ class WandbMetricLogger:
         wandb.finish()
 
 
-class DummyMetricLogger:
+class DummyMetricLogger(MetricLogger):
     def __init__(self, project, config, *args, **kwargs):
         self.project = f"/tmp/{project}_logs.pkl"
         self.config = config

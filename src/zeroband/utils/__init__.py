@@ -191,3 +191,6 @@ class FakeTokenizer(object):
         self.bos_token_id = 0
         self.eos_token_id = 1
         self.pad_token_id = 2
+
+    def __len__(self):
+        return self.vocab_size

@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING
 from multiprocessing.process import _children # type: ignore
 
 import torch
-from torch.nn import functional as F
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
 from torch.autograd.profiler import record_function
@@ -509,7 +508,7 @@ if __name__ == "__main__":
             else:
                 logger.debug(" " * indent + f"{key}: {value}")
 
-    logger.debug(f"config:")
+    logger.debug("config:")
     pretty_dict(config.model_dump())
 
     try:
@@ -537,7 +536,7 @@ if __name__ == "__main__":
                 prof.__exit__(None, None, None)
 
             logger.info("Exporting chrome trace.")
-            prof.export_chrome_trace(f"logs/profile.json.gz")
+            prof.export_chrome_trace("logs/profile.json.gz")
 
             width = 30
             logger.info("\n" + "*" * width + " GPU TIME " + "*" * width)

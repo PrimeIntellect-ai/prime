@@ -7,7 +7,6 @@ from pydantic_config import BaseConfig
 from zeroband.utils.logging import get_logger
 
 import torch
-from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset, Dataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.distributed.checkpoint.stateful import Stateful

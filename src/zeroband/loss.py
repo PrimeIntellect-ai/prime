@@ -39,7 +39,7 @@ def compute_cross_entropy_loss(
             ce, z = _upcast_cross_entropy_max_z(logits_chunk, labels_chunk, z_weight, ignore_index=ignore_index)
             loss += ce
             ce_loss += z
-    
+
     return (loss / num_elements), (None if ce_loss is None else ce_loss / num_elements)
 
 

@@ -28,15 +28,44 @@ class SoapConfig(BaseConfig):
     precondition_frequency: int = 100
 
     topk: TopKCompressionEigenvectorConfig | None = None
+    
+    eigen_stats: bool = False
 
 
 OptimizersConfig: TypeAlias = AdamConfig | SoapConfig
 
+# Constants for large matrix patterns in LLaMA
+LLAMA_LARGE_MATRIX_PATTERNS = [
+   'attention.wq',    # Attention matrices
+   'attention.wk', 
+   'attention.wv',
+   'attention.wo',
+   'feed_forward.w1', # FFN matrices
+   'feed_forward.w2',
+   'feed_forward.w3',
+]
 
-def get_optimizer(params: list[torch.nn.Parameter], config: OptimizersConfig) -> torch.optim.Optimizer:
+def split_model_parameters(model: torch.nn.Module):
+   """
+   Split model parameters into large matrices and other parameters.
+   Returns a tuple of (other_params, large_matrix_params)
+   """
+   large_params = []
+   other_params = []
+
+   for name, param in model.named_parameters():
+       if any(pattern in name for pattern in LLAMA_LARGE_MATRIX_PATTERNS):
+           large_params.append(param)
+       else:
+           # Everything else (including tok_embeddings and output) goes here
+           other_params.append(param)
+
+   return other_params, large_params
+
+def get_optimizer(model: torch.nn.Module, config: OptimizersConfig) -> torch.optim.Optimizer:
     if isinstance(config, AdamConfig):
         return torch.optim.AdamW(
-            params,
+            model.parameters(),
             lr=config.lr,
             weight_decay=config.weight_decay,
             betas=(config.betas1, config.betas2),
@@ -44,8 +73,16 @@ def get_optimizer(params: list[torch.nn.Parameter], config: OptimizersConfig) ->
     elif isinstance(config, SoapConfig):
         amortized_computation_config = DefaultEighEigenvectorConfig if config.topk is None else config.topk
 
+        other_params, large_params = split_model_parameters(model)
+
+        param_groups = [
+            {"params": large_params, "preconditioner_config": EigenvalueCorrectedShampooPreconditionerConfig(amortized_computation_config=amortized_computation_config), "eigen_stats": config.eigen_stats},
+            {"params": other_params, "preconditioner_config": EigenvalueCorrectedShampooPreconditionerConfig(amortized_computation_config=DefaultEighEigenvectorConfig), "eigen_stats": False}
+        ]
+        # we only apply topk compression to large params
+
         return DistributedShampoo(
-            params,
+            param_groups,
             lr=config.lr,
             betas=(config.betas1, config.betas2),
             epsilon=1e-12,
@@ -56,7 +93,7 @@ def get_optimizer(params: list[torch.nn.Parameter], config: OptimizersConfig) ->
             # This can also be set to `DefaultSOAPConfig` which uses QR decompositions, hence is
             # less expensive and might thereby allow for a smaller `precondition_frequency`.
             preconditioner_config=EigenvalueCorrectedShampooPreconditionerConfig(
-                amortized_computation_config=amortized_computation_config
+                amortized_computation_config=DefaultEighEigenvectorConfig
             ),
             distributed_config=FullyShardShampooConfig(),
             shampoo_pt2_compile_config=ShampooPT2CompileConfig(enable_shampoo_pt2_dynamic_shape=False),

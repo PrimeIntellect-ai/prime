@@ -165,7 +165,7 @@ def train(config: Config):
     logger.debug("model fsdped")
 
     # Setup optimizers
-    inner_optimizer = get_optimizer(model.parameters(), config.optim.optim)
+    inner_optimizer = get_optimizer(model, config.optim.optim)
 
     diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
 
@@ -338,15 +338,8 @@ def train(config: Config):
             scheduler.step()
             inner_optimizer.zero_grad()
             
-            if isinstance(inner_optimizer, DistributedShampoo) and training_progress.step % config.optim.optim.precondition_frequency == 0 and training_progress.step>0:
-                logger.info(f"step {training_progress.step} preconditioning")
-                eigen_stats = inner_optimizer.eigenvector_stats(key_to_param=model.named_parameters())
-                for group_name, group_stats in eigen_stats.items():
-                    for param_name, param_stats in group_stats.items():
-                        if world_info.rank == 0:
-                            if param_stats.effective_rank is not None:
-                                for key, val in param_stats.log_stats().items():
-                                    metric_logger.log({f"eigenvalue_stats/{group_name}/{param_name}/{key}": val, "step": training_progress.step})
+
+
             # logging
             training_progress.step += 1
             inner_lr = [group["lr"] for group in inner_optimizer.param_groups][0]
@@ -371,6 +364,15 @@ def train(config: Config):
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
             }
+            
+            if isinstance(inner_optimizer, DistributedShampoo) and training_progress.step % config.optim.optim.precondition_frequency == 0 and training_progress.step>0 and world_info.rank == 0:
+                logger.info(f"step {training_progress.step} preconditioning")
+                eigen_stats = inner_optimizer.eigenvector_stats(key_to_param=model.named_parameters())
+                
+                for param_name, param_stats in eigen_stats.items():
+                    log_stats = param_stats.log_stats()
+                    for key, val in log_stats.items(): 
+                        metrics[f"eigenvalue_stats/{param_name}/{key}"] = val
 
             if config.optim.z_loss:
                 metrics["z_loss"] = z_loss_batch.item()

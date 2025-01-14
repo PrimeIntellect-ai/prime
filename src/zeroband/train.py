@@ -368,12 +368,20 @@ def train(config: Config):
             if isinstance(inner_optimizer, DistributedShampoo) and training_progress.step % config.optim.optim.precondition_frequency == 0 and training_progress.step>0 and world_info.rank == 0:
                 logger.info(f"step {training_progress.step} preconditioning")
                 eigen_stats = inner_optimizer.eigenvector_stats(key_to_param=model.named_parameters())
+            
+                og_total_rank = 0
+                effective_total_rank = 0 
                 
                 for param_name, param_stats in eigen_stats.items():
                     log_stats = param_stats.log_stats()
                     for key, val in log_stats.items(): 
                         metrics[f"eigenvalue_stats/{param_name}/{key}"] = val
-
+                    
+                    og_total_rank += param_stats.og_rank
+                    effective_total_rank += param_stats.effective_rank
+                
+                metrics["total_compression"] = 1 - effective_total_rank / og_total_rank
+                    
             if config.optim.z_loss:
                 metrics["z_loss"] = z_loss_batch.item()
 

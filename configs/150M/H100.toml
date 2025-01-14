@@ -1,16 +1,21 @@
 name_model = "150M"
-project = "debug_150m_zero_band"
+project = "adam_sweep"
 type_model = "llama2"
 
 [train]
-micro_bs = 64 # change this base on the gpu
+micro_bs = 4 # change this base on the gpu
 reshard_after_forward = true
 
 [optim]
-batch_size = 512
+batch_size = 128
 warmup_steps = 1000
-total_steps = 88_000
+total_steps = 8192
+optim.lr = 4e-4
 
-[optim.optim]
-lr = 4e-4
+[data]
+seq_length = 8192
+num_workers = 2
+dataset_name_or_paths = "/home/ubuntu/prime/datasets/fineweb-edu"
+split_by_data_rank = true
 
+[acco]

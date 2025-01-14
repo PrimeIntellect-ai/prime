@@ -36,7 +36,7 @@ def gpus_to_use(num_nodes, num_gpu, rank):
     return ",".join(map(str, range(rank * num_gpu, (rank + 1) * num_gpu)))
 
 
-def _test_multi_gpu(num_gpus, config, extra_args=[], diloco=False):
+def _test_multi_gpu(num_gpus, config, extra_args=[], multi_nodes=False):
     num_nodes, num_gpu = num_gpus[0], num_gpus[1]
 
     processes = []
@@ -55,7 +55,7 @@ def _test_multi_gpu(num_gpus, config, extra_args=[], diloco=False):
 
         env = copy.deepcopy(os.environ)
 
-        if diloco:
+        if multi_nodes:
             new_env = {
                 "GLOBAL_RANK": str(i),
                 "GLOBAL_UNIQUE_ID": str(i),
@@ -85,7 +85,7 @@ def test_multi_gpu(num_gpus):
 
 @pytest.mark.parametrize("num_gpus", [[2, 1], [2, 2]] if num_gpu >= 4 else [[2, 1]])
 def test_multi_gpu_diloco(num_gpus):
-    _test_multi_gpu(num_gpus, "debug/diloco.toml", diloco=True)
+    _test_multi_gpu(num_gpus, "debug/diloco.toml", multi_nodes=True)
 
 
 def test_act_ckpt():
@@ -101,7 +101,7 @@ def test_act_ckpt_num():
 @pytest.mark.parametrize("backend", [Compression.NO, Compression.UINT8])
 def test_all_reduce_diloco(backend: Compression):
     num_gpus = [2, 1]
-    _test_multi_gpu(num_gpus, "debug/diloco.toml", extra_args=["--diloco.compression", backend.value], diloco=True)
+    _test_multi_gpu(num_gpus, "debug/diloco.toml", extra_args=["--diloco.compression", backend.value], multi_nodes=True)
 
 
 def test_z_loss():
@@ -114,6 +114,13 @@ def test_packing(packing: bool):
     num_gpus = [2, 1]
     packing_arg = "--train.sequence_packing" if packing else "--no-train.sequence_packing"
     _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=[packing_arg])
+
+
+@pytest.mark.parametrize("dpu", [True, False])
+def test_global_ddp(dpu: bool):
+    num_gpus = [2, 1]
+    dpu_arg = "--global_ddp.dpu" if dpu else "--no-global_ddp.dpu"
+    _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=[dpu_arg], multi_nodes=True)
 
 
 @pytest.mark.parametrize("diloco", [False, True])

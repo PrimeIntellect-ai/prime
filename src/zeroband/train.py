@@ -6,6 +6,7 @@ import torch
 from pydantic_config import parse_argv
 from einops import rearrange
 from torch.nn import functional as F
+from torch import nn
 
 from transformers import AutoTokenizer
 
@@ -18,7 +19,7 @@ from zeroband.comms import ElasticDeviceMesh
 from zeroband.loss import cross_entropy_max_z_loss
 
 from zeroband.models.llama.model import create_block_mask_from_seqlens
-from zeroband.config import Config  #, MemoryProfilerConfig
+from zeroband.config import Config  # , MemoryProfilerConfig
 from zeroband.optimizers import get_optimizer
 
 from zeroband.utils import (
@@ -38,6 +39,7 @@ from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 from zeroband.checkpoint import CkptManager, TrainingProgress
 from zeroband.lr_scheduler import get_scheduler
+
 
 def log_hash_training_state(
     config: Config,
@@ -76,6 +78,62 @@ def log_hash_training_state(
             metric_logger.log(metrics)
 
 
+def compute_loss(
+    model: nn.Module,
+    gradient_accumulation_steps: int,
+    train_dataloader_iterator: iter,
+    local_pg: dist.ProcessGroup,
+    loss_scaling: float = 1.0,
+    enable_z_loss: bool = False,
+):
+    loss_batch = 0
+    z_loss_batch = 0
+
+    for grad_acc_step in range(gradient_accumulation_steps):
+        is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
+        # no sync if we are accumulating gradients
+        model.set_requires_gradient_sync(not is_accumulating)
+
+        batch = next(train_dataloader_iterator)
+        input_ids = batch["input_ids"].to("cuda")
+        labels = batch["labels"].to("cuda")
+        if config.train.sequence_packing:
+            seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
+            block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
+        else:
+            block_mask = None
+
+        logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
+        flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
+        flatten_labels = rearrange(labels, "b seq -> (b seq)")
+
+        if enable_z_loss:
+            ce_loss, z_loss = cross_entropy_max_z_loss(flatten_logits, flatten_labels, config.optim.z_loss_weight)
+            ce_loss /= gradient_accumulation_steps * loss_scaling
+            z_loss /= gradient_accumulation_steps * loss_scaling
+
+            del logits
+            loss = ce_loss + z_loss
+            loss.backward()
+
+        else:
+            loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps * loss_scaling
+            del logits
+            loss.backward()
+
+        if config.optim.z_loss:
+            loss_batch += ce_loss.clone().detach()
+            z_loss_batch += z_loss.clone().detach()
+        else:
+            loss_batch += loss.clone().detach()
+
+    dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=local_pg)
+    if config.optim.z_loss:
+        dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=local_pg)
+
+    return loss_batch, z_loss_batch
+
+
 def train(config: Config):
     # batch_size is the total batch size for all GPUs
     assert config.optim.batch_size % world_info.local_world_size == 0
@@ -83,6 +141,9 @@ def train(config: Config):
 
     assert batch_size % config.train.micro_bs == 0
     gradient_accumulation_steps = batch_size // config.train.micro_bs
+    if config.acco:
+        assert gradient_accumulation_steps % 2 == 0, "ACCO requires gradient accumulation steps to be even"
+        gradient_accumulation_steps //= 2
 
     if config.ckpt is not None and config.ckpt.interval is not None and config.diloco is not None:
         assert (
@@ -137,7 +198,8 @@ def train(config: Config):
         apply_ac_ckpt(model, num)
 
     elastic_device_mesh = ElasticDeviceMesh(
-        enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
+        enable=config.diloco is not None or config.acco is not None,
+        live_recovery_rank_src=config.ckpt.live_recovery_rank_src,
     )
 
     mp_policy = MixedPrecisionPolicy(
@@ -165,6 +227,12 @@ def train(config: Config):
 
     # Setup optimizers
     inner_optimizer = get_optimizer(model.parameters(), config.optim.optim)
+    if config.acco is not None:
+        first_step = True
+        reduce_work = []
+        theta_t = [p.detach().clone() for p in model.parameters() if p.requires_grad]
+        if config.acco.theta_t_device is not None:
+            theta_t = [p.to(config.acco.theta_t_device) for p in theta_t]
 
     diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
 
@@ -284,57 +352,77 @@ def train(config: Config):
             monitor.set_stage("inner_loop")
 
         for inner_step in range(num_inner_steps):
-            loss_batch = 0
-            z_loss_batch = 0
+            loss_batch, z_loss_batch = compute_loss(
+                model,
+                gradient_accumulation_steps,
+                train_dataloader_iterator,
+                elastic_device_mesh.local_pg,
+                0.5 if config.acco is not None else 1.0,
+                config.optim.z_loss,
+            )
+            print(loss_batch, z_loss_batch)
 
-            for grad_acc_step in range(gradient_accumulation_steps):
-                is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-                # no sync if we are accumulating gradients
-                model.set_requires_gradient_sync(not is_accumulating)
+            if config.acco is not None:
+                new_g_tilde = [p.grad.detach().cpu() for p in model.parameters() if p.requires_grad]
+                for work in reduce_work:
+                    work.wait()
 
-                batch = next(train_dataloader_iterator)
-                input_ids = batch["input_ids"].to("cuda")
-                labels = batch["labels"].to("cuda")
-                if config.train.sequence_packing:
-                    seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
-                    block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
-                else:
-                    block_mask = None
+                if not first_step:
+                    # Copy in theta_t and consume g_t
+                    for opt_param, cpu_param, _g_t, _g_tilde in zip(model.parameters(), theta_t, g_t, g_tilde):  # noqa
+                        opt_param.data.copy_(cpu_param.data, non_blocking=True)
+                        opt_param.grad.copy_(_g_t + _g_tilde, non_blocking=True)
+                        opt_param.grad /= batch_size * elastic_device_mesh.global_pg.size()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    inner_optimizer.step()
+                    scheduler.step()
+                    inner_optimizer.zero_grad()
+                    # Update theta_t
+                    for param, cpu_param in zip(model.parameters(), theta_t):
+                        cpu_param.data.copy_(param.data, non_blocking=True)
+                first_step = False
 
-                logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
-                flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-                flatten_labels = rearrange(labels, "b seq -> (b seq)")
-
-                if config.optim.z_loss:
-                    ce_loss, z_loss = cross_entropy_max_z_loss(
-                        flatten_logits, flatten_labels, config.optim.z_loss_weight
+                g_tilde = new_g_tilde
+                reduce_work = [
+                    dist.all_reduce(
+                        _g_tilde.to_local(), dist.ReduceOp.SUM, group=elastic_device_mesh.global_pg, async_op=True
                     )
-                    ce_loss /= gradient_accumulation_steps
-                    z_loss /= gradient_accumulation_steps
+                    for _g_tilde in g_tilde
+                ]
 
-                    del logits
-                    loss = ce_loss + z_loss
-                    loss.backward()
+                loss_batch_1, z_loss_batch_1 = compute_loss(
+                    model,
+                    gradient_accumulation_steps,
+                    train_dataloader_iterator,
+                    elastic_device_mesh.local_pg,
+                    0.5 if config.acco is not None else 1.0,
+                    config.optim.z_loss,
+                )
+                loss_batch += loss_batch_1
+                z_loss_batch += z_loss_batch_1
 
-                else:
-                    loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
-                    del logits
-                    loss.backward()
+                print(loss_batch, z_loss_batch)
+                g_t = [p.grad.detach().cpu() for p in model.parameters() if p.requires_grad]
+                for work in reduce_work:
+                    work.wait()
+                # reduce_work = [elastic_device_mesh.global_pg.allreduce([_g_t], op=dist.ReduceOp.SUM) for _g_t in g_t]
+                reduce_work = [
+                    dist.all_reduce(
+                        _g_t.to_local(), dist.ReduceOp.SUM, group=elastic_device_mesh.global_pg, async_op=True
+                    )
+                    for _g_t in g_t
+                ]
 
-                if config.optim.z_loss:
-                    loss_batch += ce_loss.clone().detach()
-                    z_loss_batch += z_loss.clone().detach()
-                else:
-                    loss_batch += loss.clone().detach()
+                for opt_param, _g_tilde in zip(model.parameters(), g_tilde):
+                    opt_param.grad.copy_(_g_tilde, non_blocking=True)
+                    opt_param.grad /= batch_size // 2 * elastic_device_mesh.global_pg.size()
+                inner_optimizer.step()
+                inner_optimizer.zero_grad()
 
-            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
-            if config.optim.z_loss:
-                dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            inner_optimizer.step()
-            scheduler.step()
-            inner_optimizer.zero_grad()
+            else:
+                inner_optimizer.step()
+                scheduler.step()
+                inner_optimizer.zero_grad()
 
             # logging
             training_progress.step += 1

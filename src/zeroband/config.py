@@ -8,6 +8,7 @@ from zeroband.data import DataConfig
 from zeroband.diloco import DilocoConfig
 from zeroband.models.llama.model import AttnFnType
 from zeroband.optimizers import OptimizersConfig, AdamConfig
+from zeroband.dpu import ACCOConfig
 
 
 class OptimConfig(BaseConfig):
@@ -68,6 +69,7 @@ class Config(BaseConfig):
 
     # sub config
     diloco: DilocoConfig | None = None
+    acco: ACCOConfig | None = None
     data: DataConfig = DataConfig()
     optim: OptimConfig = OptimConfig()
     train: TrainConfig
@@ -88,4 +90,3 @@ class Config(BaseConfig):
         if self.ckpt is not None and self.ckpt.live_recovery_rank_src is not None and self.diloco is None:
             raise ValueError("live_recovery_rank_src is only supported with diloco")
         return self
-

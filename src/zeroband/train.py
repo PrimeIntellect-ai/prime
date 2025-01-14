@@ -373,12 +373,13 @@ def train(config: Config):
                 effective_total_rank = 0 
                 
                 for param_name, param_stats in eigen_stats.items():
-                    log_stats = param_stats.log_stats()
-                    for key, val in log_stats.items(): 
-                        metrics[f"eigenvalue_stats/{param_name}/{key}"] = val
-                    
-                    og_total_rank += param_stats.og_rank
-                    effective_total_rank += param_stats.effective_rank
+                    if param_stats is not None:
+                        log_stats = param_stats.log_stats()
+                        for key, val in log_stats.items(): 
+                            metrics[f"eigenvalue_stats/{param_name}/{key}"] = val
+                        
+                        og_total_rank += param_stats.og_rank
+                        effective_total_rank += param_stats.effective_rank
                 
                 metrics["total_compression"] = 1 - effective_total_rank / og_total_rank
                     

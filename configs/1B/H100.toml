@@ -1,15 +1,22 @@
 name_model = "1B"
-project = "debug_1B_zero_band"
+project = "adam_sweep"
 type_model = "llama2"
 
 [train]
-micro_bs = 32
+micro_bs = 2
 reshard_after_forward = true
 
 [optim]
-batch_size = 1024
+batch_size = 128
 warmup_steps = 1000
 total_steps = 8192
 
-[optim.optim]
-lr = 7e-4
+optim.lr = 4e-4
+
+[data]
+seq_length = 8192
+num_workers = 2
+dataset_name_or_paths = "/home/ubuntu/prime/datasets/fineweb-edu"
+split_by_data_rank = true
+
+[acco]

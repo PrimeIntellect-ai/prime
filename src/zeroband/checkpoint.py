@@ -9,8 +9,6 @@ from typing import Any
 import uuid
 import fsspec
 from fsspec.generic import rsync as rsync_fsspec
-from pydantic import model_validator
-from pydantic_config import BaseConfig
 import torch
 from torch import nn
 from torch.optim import Optimizer
@@ -28,7 +26,6 @@ import torch.distributed as dist
 
 
 from torch.distributed.checkpoint.stateful import Stateful
-from zeroband.utils.logging import get_logger
 import warnings
 import logging
 from torch.distributed._tensor.api import DTensor
@@ -39,7 +36,8 @@ from zeroband.utils.state_dict_send_recv import (
     send_tensor_and_state_dict,
 )
 from distributed_shampoo import DistributedShampoo
-
+from zeroband.utils.logging import get_logger
+from zeroband.config import CkptConfig
 from zeroband.utils.world_info import get_world_info
 
 ## code inspired by torchtitan https://github.com/pytorch/torchtitan/blob/main/torchtitan/checkpoint.py
@@ -149,56 +147,12 @@ class OuterOptimizerWrapper(Stateful):
         self.optimizer.load_state_dict(state_dict)
 
 
-class RemoteConfig(BaseConfig):
-    path: str  # could be a s3 path
-    interval: int
-
-
-class CkptConfig(BaseConfig):
-    path: str | None = None
-    interval: int | None = None
-    topk: int | None = None
-
-    remote: RemoteConfig | None = None
-
-    remote_data_path: str | None = None
-    remote_data_load: bool = False
-
-    resume: str | None = None
-
-    skip_dataloader: bool = False
-
-    live_recovery_rank_src: int | None = None
-
-    data_path: str | None = None
-
-    token_count: int | None = None
-
-    @model_validator(mode="after")
-    def validate_path_and_interval(self):
-        if (self.path is None) != (self.interval is None):
-            raise ValueError("path and interval must be both set or both None")
-        if self.path is None and self.remote is not None:
-            raise ValueError("remote_path is set but path is not set")
-
-        return self
-
-    @model_validator(mode="after")
-    def validate_remote_data_path(self):
-        if self.remote_data_load and self.data_path is not None:
-            raise ValueError("remote_data_load and data_path are mutually exclusive")
-
-        if self.remote_data_load and self.remote_data_path is None:
-            raise ValueError("remote_data_load is set but remote_data_path is not set")
-        return self
-
-
 def non_error_barrier():
-    logger = get_logger()
     try:
         dist.barrier()
     except Exception as e:
-        logger.info(f"Error in data checkpointing barrier: {e}, continuing training")
+        from zeroband.utils.logging import get_logger
+        get_logger().info(f"Error in data checkpointing barrier: {e}, continuing training")
 
 
 class CkptManager:
@@ -247,7 +201,7 @@ class CkptManager:
 
         self._init_state()
 
-        self._logger = get_logger()
+        self._logger = get_logger(config)
         self.world_info = get_world_info()
 
         self.non_blocking_process: list[multiprocessing.Process] = []
@@ -400,7 +354,7 @@ class CkptManager:
 
         if self.world_info.local_rank == 0:
             if self.config.topk is not None:
-                delete_topk(self.config.path, self.config.topk)
+                delete_topk(self.logger, self.config.path, self.config.topk)
 
     def _del__(self):
         self.wait_for_blocking_job()
@@ -595,12 +549,12 @@ class CkptManager:
             self._live_reco_thread = thread
 
 
-def delete_topk(ckpt_path: str, topk: int):
+def delete_topk(logger: logging.Logger, ckpt_path: str, topk: int):
     checkpoints_to_delete = get_checkpoints_to_delete(ckpt_path, topk)
     for ckpt_path in checkpoints_to_delete:
         shutil.rmtree(ckpt_path, ignore_errors=True)
     if len(checkpoints_to_delete) > 0:
-        get_logger().info(f"Deleted {checkpoints_to_delete} checkpoints")
+        logger.info(f"Deleted {checkpoints_to_delete} checkpoints")
 
 
 def get_checkpoints_to_delete(ckpt_path: str, topk: int) -> list[str]:

@@ -495,8 +495,9 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision("high")
     torch.manual_seed(42)
 
+    config = Config(**parse_argv())  # type: ignore
     world_info = get_world_info()
-    logger = get_logger()
+    logger = get_logger(config)
 
     torch.cuda.set_device(world_info.local_rank)
 
@@ -508,7 +509,6 @@ if __name__ == "__main__":
             else:
                 logger.debug(" " * indent + f"{key}: {value}")
 
-    config = Config(**parse_argv())  # type: ignore
     logger.debug("config:")
     pretty_dict(config.model_dump())
 

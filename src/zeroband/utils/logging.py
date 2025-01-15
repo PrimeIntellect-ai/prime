@@ -1,7 +1,6 @@
-from typing import Optional
 import logging
-import os
 
+from zeroband.config import Config, get_env_config, get_env_config_bool
 from zeroband.utils.world_info import get_world_info
 
 logger = None
@@ -25,7 +24,7 @@ class CustomFormatter(logging.Formatter):
         return formatter.format(record)
 
 
-def get_logger(name: Optional[str] = None) -> logging.Logger:
+def get_logger(config: Config | None = None, name: str | None = None) -> logging.Logger:
     global logger  # Add this line to modify the global logger variable
     if logger is not None:
         return logger
@@ -39,12 +38,13 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
         world_info.local_rank = 0
     logger = logging.getLogger(name or __name__)
 
-    log_level = os.getenv("ZERO_BAND_LOG_LEVEL", "INFO")
+    log_level = get_env_config(config, "log_level", "INFO")
+    assert isinstance(log_level, str)
 
     if world_info.local_rank == 0:
         logger.setLevel(level=getattr(logging, log_level, logging.INFO))
     else:
-        if os.getenv("ZERO_BAND_LOG_ALL_RANK", "false").lower() == "true":
+        if get_env_config_bool(config, "log_all_rank", False):
             logger.setLevel(level=getattr(logging, log_level, logging.INFO))
         else:
             logger.setLevel(level=logging.CRITICAL)  # Disable logging for non-zero ranks

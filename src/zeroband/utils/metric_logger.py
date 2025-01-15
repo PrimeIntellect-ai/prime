@@ -2,6 +2,8 @@ import pickle
 from typing import Any, Protocol
 import importlib.util
 
+from zeroband.config import get_env_config
+
 
 class MetricLogger(Protocol):
     def __init__(self, project, config): ...
@@ -18,8 +20,10 @@ class WandbMetricLogger(MetricLogger):
 
         import wandb
 
+        run_name = get_env_config(config, "run_name")
+
         wandb.init(
-            project=project, config=config, resume="auto" if resume else None
+            project=project, config=config, name=run_name, resume="auto" if resume else None
         )  # make wandb reuse the same run id if possible
 
     def log(self, metrics: dict[str, Any]):

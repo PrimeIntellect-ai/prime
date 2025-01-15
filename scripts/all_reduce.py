@@ -63,6 +63,6 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision("high")
     init_process_group(backend="gloo")
 
-    logger = get_logger()
+    logger = get_logger(config)
     main(config)
     destroy_process_group()

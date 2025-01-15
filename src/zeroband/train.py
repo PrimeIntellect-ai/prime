@@ -5,7 +5,9 @@ from multiprocessing.process import _children # type: ignore
 
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
+# from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 from torch.autograd.profiler import record_function
 
 from zeroband.checkpoint import CkptManager, TrainingProgress
@@ -148,28 +150,30 @@ def train(config: Config):
             enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
         )
 
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
-        )
+        # mp_policy = MixedPrecisionPolicy(
+        #     param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
+        # )
 
-        for layer_id, transformer_block in model.layers.items():
-            if config.train.reshard_after_forward:
-                reshard_after_forward = int(layer_id) < len(model.layers) - 1
-            else:
-                reshard_after_forward = False
-            fully_shard(
-                transformer_block,
-                mp_policy=mp_policy,
-                mesh=elastic_device_mesh.cuda_local_mesh,
-                reshard_after_forward=reshard_after_forward,
-            )
-        fully_shard(
-            model,
-            mp_policy=mp_policy,
-            mesh=elastic_device_mesh.cuda_local_mesh,
-            reshard_after_forward=config.train.reshard_after_forward,
-        )
-        logger.debug("model fsdped")
+        # for layer_id, transformer_block in model.layers.items():
+        #     if config.train.reshard_after_forward:
+        #         reshard_after_forward = int(layer_id) < len(model.layers) - 1
+        #     else:
+        #         reshard_after_forward = False
+        #     fully_shard(
+        #         transformer_block,
+        #         mp_policy=mp_policy,
+        #         mesh=elastic_device_mesh.cuda_local_mesh,
+        #         reshard_after_forward=reshard_after_forward,
+        #     )
+        # fully_shard(
+        #     model,
+        #     mp_policy=mp_policy,
+        #     mesh=elastic_device_mesh.cuda_local_mesh,
+        #     reshard_after_forward=config.train.reshard_after_forward,
+        # )
+        model = DDP(model, device_ids=[world_info.local_rank], broadcast_buffers=False, gradient_as_bucket_view=True)
+
+        logger.debug("model ddped")
 
     # Setup optimizers
     with record_function("Set up Optimizers"):
@@ -300,8 +304,10 @@ def train(config: Config):
             for grad_acc_step in range(gradient_accumulation_steps):
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                 # no sync if we are accumulating gradients
-                model.set_requires_gradient_sync(not is_accumulating)
+                # model.set_requires_gradient_sync(not is_accumulating)
+                model.require_backward_grad_sync = not is_accumulating
 
+                
                 with record_function("Load batch"):
                     # TODO/NOTE: We could overlap sending the batch with communication
                     #            although to be honest the perf impact is minimal
@@ -315,7 +321,9 @@ def train(config: Config):
                         block_mask = None
 
                 with record_function("Run model"):
-                    logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
+                        
                     flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
                     flatten_labels = rearrange(labels, "b seq -> (b seq)")
 

@@ -1,5 +1,4 @@
-from typing import Iterable, Literal, TypeAlias
-from pydantic_config import BaseConfig
+from typing import Iterable
 import torch
 from distributed_shampoo import (
     DefaultEigenvalueCorrectedShampooConfig,
@@ -7,27 +6,7 @@ from distributed_shampoo import (
     FullyShardShampooConfig,
     ShampooPT2CompileConfig,
 )
-
-class AdamConfig(BaseConfig):
-    type: Literal["adam"] = "adam" # the literal is used to distinguish between the different optimizers configuration in the union type
-    lr: float = 4e-4
-    weight_decay: float = 0.1
-    betas1: float = 0.9
-    betas2: float = 0.95
-
-class SoapConfig(BaseConfig):
-    type: Literal["soap"] = "soap"
-    lr: float = 4e-4
-    weight_decay: float = 1e-05
-    betas1: float = 0.9
-    betas2: float = 0.95
-
-    max_preconditioner_dim: int = 8192
-    precondition_frequency: int = 100
-
-
-OptimizersConfig: TypeAlias = AdamConfig | SoapConfig
-
+from zeroband.config import AdamConfig, SoapConfig, OptimizersConfig
 
 def get_optimizer(params: Iterable[torch.nn.Parameter], config: OptimizersConfig) -> torch.optim.Optimizer:
     if isinstance(config, AdamConfig):

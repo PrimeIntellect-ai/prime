@@ -3,8 +3,8 @@ import random
 from typing import Any, Generator, Optional, List, Dict, TypedDict, Union
 import functools
 
-from pydantic_config import BaseConfig
 from zeroband.utils.logging import get_logger
+from zeroband.config import DataConfig
 
 import torch
 from torch.utils.data import IterableDataset, Dataset
@@ -20,22 +20,7 @@ TEST_VOCAB_SIZE = 1024
 
 # TODO sami: make sure the init of the model is the same on all rank
 
-logger = get_logger(__name__)
-
-
-class DataConfig(BaseConfig):
-    dataset_name_or_paths: str = "datasets/fineweb-edu"
-    val_dataset_name_or_paths: Optional[str] = None
-    seq_length: int = 1024
-    fake: bool = False
-    num_workers: int = 4
-    max_train_samples: Optional[int] = None
-    max_eval_samples: Optional[int] = None
-    dataset_ratio: Optional[str] = None
-    data_rank: Optional[int] = None
-    data_world_size: Optional[int] = None
-    reverse_data_files: bool = False
-    split_by_data_rank: bool = True
+logger = get_logger(name=__name__)
 
 
 class FakeTokenizedDataset(IterableDataset):

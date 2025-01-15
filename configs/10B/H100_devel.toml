@@ -1,6 +1,8 @@
 name_model = "10B"
 project = "debug_I2_zero_band"
 metric_logger_type = "dummy"
+log_level = "DEBUG"
+run_name = "RUN NAME"
 
 [train]
 micro_bs = 1

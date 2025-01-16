@@ -4,7 +4,6 @@ from torch.distributed import destroy_process_group, init_process_group, ReduceO
 import torch.utils.benchmark as benchmark
 
 from zeroband.collectives import Compression, all_reduce
-from zeroband.config import resolve_env_vars
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 

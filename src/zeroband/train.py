@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 # from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.algorithms.ddp_comm_hooks import powerSGD_hook
 
 from torch.autograd.profiler import record_function
 
@@ -171,8 +172,17 @@ def train(config: Config):
         #     mesh=elastic_device_mesh.cuda_local_mesh,
         #     reshard_after_forward=config.train.reshard_after_forward,
         # )
-        model = DDP(model, device_ids=[world_info.local_rank], broadcast_buffers=False, gradient_as_bucket_view=True)
-
+        model: DDP = DDP(model, device_ids=[world_info.local_rank], broadcast_buffers=False, gradient_as_bucket_view=True)
+        
+        if config.optim.power_sgd is not None:
+            state = powerSGD_hook.PowerSGDState(
+                process_group=None,  # Default process group
+                matrix_approximation_rank=1,  # Adjust rank based on compression needs
+                start_powerSGD_iter=1000,     # When to start compression
+            )
+            
+            model.register_comm_hook(state, powerSGD_hook.powerSGD_hook)
+        
         logger.debug("model ddped")
 
     # Setup optimizers

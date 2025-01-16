@@ -505,12 +505,12 @@ if __name__ == "__main__":
     def pretty_dict(d, indent=2):
         for key, value in d.items():
             if isinstance(value, dict):
-                logger.info(" " * indent + f"{key}:")
+                logger.debug(" " * indent + f"{key}:")
                 pretty_dict(value, indent + 2)
             else:
-                logger.info(" " * indent + f"{key}: {value}")
+                logger.debug(" " * indent + f"{key}: {value}")
 
-    logger.info("config:")
+    logger.debug("config:")
     pretty_dict(config.model_dump())
 
     try:

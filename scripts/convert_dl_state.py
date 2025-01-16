@@ -4,6 +4,7 @@
 # python scripts/convert_dl_state.py @configs/10B/H100.toml --input_path /workspace/step_49200/diloco_0/data/_3.pt --output_path ./meow.pt --rank 3 --world_size 8
 
 import torch
+from zeroband.config import resolve_env_vars
 from zeroband.data import get_dataloader
 from transformers import AutoTokenizer
 from zeroband.train import Config
@@ -133,6 +134,7 @@ def test_dl(config: ExportConfig):
 if __name__ == "__main__":
     logger = get_logger()
     config = ExportConfig(**parse_argv())
+    resolve_env_vars(config)
     logger.debug(f"config: {config.model_dump()}")
 
     main(config)

@@ -204,7 +204,7 @@ def resolve_env_vars(config: Config) -> None:
 
             try:
                 # Create a temporary model with just this field, then validate and rip it out.
-                py_model = create_model('TempModel', __base__ = BaseConfig, **{field_name: (field_info.annotation, ...)})
+                py_model = create_model('TempModel', __base__ = BaseConfig, **{field_name: (field_info.annotation, ...)}) # type: ignore
                 validated = py_model.model_validate({field_name: value})
                 return getattr(validated, field_name)
             except Exception as e:

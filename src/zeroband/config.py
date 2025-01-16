@@ -22,8 +22,11 @@ class DataConfig(BaseConfig):
     reverse_data_files: bool = False
     split_by_data_rank: bool = True
 
+
 class AdamConfig(BaseConfig):
-    type: Literal["adam"] = "adam" # the literal is used to distinguish between the different optimizers configuration in the union type
+    type: Literal["adam"] = (
+        "adam"  # the literal is used to distinguish between the different optimizers configuration in the union type
+    )
     lr: float = 4e-4
     weight_decay: float = 0.1
     betas1: float = 0.9
@@ -47,11 +50,6 @@ OptimizersConfig: TypeAlias = AdamConfig | SoapConfig
 class OptimConfig(BaseConfig):
     optim: OptimizersConfig = AdamConfig()
 
-    lr: float = 4e-4
-    weight_decay: float = 0.1
-    adam_betas1: float = 0.9
-    adam_betas2: float = 0.95
-
     sched_type: Literal["cosine", "linear", "wsd-sqrt"] = "cosine"
     warmup_steps: int = 1000
     stable_steps: int = 80_000
@@ -69,6 +67,7 @@ class DilocoConfig(BaseConfig):
     compression: Compression = Compression.NO
 
     retry_all_reduce: int = 3
+
 
 class MemoryProfilerConfig(BaseConfig):
     freq: int = 10
@@ -231,7 +230,8 @@ def get_env_config(config: Config | None, item: str | None, default: Any | None 
 
     return cfg
 
-def get_env_config_bool(config: Config | None, item: str | None, default: bool  | None = None) -> bool:
+
+def get_env_config_bool(config: Config | None, item: str | None, default: bool | None = None) -> bool:
     """
     Call get_env_config and convert strings to bools where makes sense.
 
@@ -248,4 +248,3 @@ def get_env_config_bool(config: Config | None, item: str | None, default: bool  
     if isinstance(val, str):
         return val.lower() == "true" or val.lower() == "1"
     return bool(val)
-

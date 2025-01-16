@@ -333,7 +333,7 @@ def train(config: Config):
                         block_mask = None
 
                 with record_function("Run model"):
-                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                         logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
 
                     flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")

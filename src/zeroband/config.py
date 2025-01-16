@@ -44,8 +44,13 @@ class SoapConfig(BaseConfig):
 OptimizersConfig: TypeAlias = AdamConfig | SoapConfig
 
 
+class PowerSGDConfig(BaseConfig):
+    rank: int = 1
+    warmup_steps: int = 1000
+
 class OptimConfig(BaseConfig):
     optim: OptimizersConfig = AdamConfig()
+    power_sgd: PowerSGDConfig | None = None
 
     lr: float = 4e-4
     weight_decay: float = 0.1
@@ -142,6 +147,7 @@ class CkptConfig(BaseConfig):
         if self.remote_data_load and self.remote_data_path is None:
             raise ValueError("remote_data_load is set but remote_data_path is not set")
         return self
+
 
 
 class Config(BaseConfig):

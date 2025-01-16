@@ -3,7 +3,7 @@ import torch
 from distributed_shampoo import (
     DefaultEigenvalueCorrectedShampooConfig,
     DistributedShampoo,
-    FullyShardShampooConfig,
+    DDPShampooConfig,
     ShampooPT2CompileConfig,
 )
 from zeroband.config import AdamConfig, SoapConfig, OptimizersConfig
@@ -29,7 +29,7 @@ def get_optimizer(params: Iterable[torch.nn.Parameter], config: OptimizersConfig
             # This can also be set to `DefaultSOAPConfig` which uses QR decompositions, hence is
             # less expensive and might thereby allow for a smaller `precondition_frequency`.
             preconditioner_config=DefaultEigenvalueCorrectedShampooConfig,
-            distributed_config=FullyShardShampooConfig(),
+            distributed_config=DDPShampooConfig(),
             shampoo_pt2_compile_config=ShampooPT2CompileConfig(enable_shampoo_pt2_dynamic_shape=False),
         )
     else:

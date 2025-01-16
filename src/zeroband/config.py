@@ -143,6 +143,8 @@ class CkptConfig(BaseConfig):
         return self
 
 
+ENV_VAR_PREFIX = "ZERO_BAND_"
+
 class Config(BaseConfig):
     # main config
     name_model: Literal["debugmodel", "150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
@@ -216,7 +218,7 @@ def resolve_env_vars(config: Config) -> None:
 
         for field_name, _ in config_obj.__class__.model_fields.items():
             # Build the full env var name
-            full_env_var = f"ZERO_BAND_{prefix}_{field_name}".upper() if prefix else f"ZERO_BAND_{field_name}".upper()
+            full_env_var = f"{ENV_VAR_PREFIX}{prefix}_{field_name}".upper() if prefix else f"{ENV_VAR_PREFIX}{field_name}".upper()
 
             # Try to resolve the field directly using the local field name
             value = _resolve_value(full_env_var, field_name, config_obj)
@@ -236,7 +238,7 @@ def resolve_env_vars(config: Config) -> None:
             return valid_vars
 
         for field_name, _ in config_obj.__class__.model_fields.items():
-            full_env_var = f"ZERO_BAND_{prefix}_{field_name}".upper() if prefix else f"ZERO_BAND_{field_name}".upper()
+            full_env_var = f"{ENV_VAR_PREFIX}{prefix}_{field_name}".upper() if prefix else f"{ENV_VAR_PREFIX}{field_name}".upper()
             valid_vars.add(full_env_var)
 
             field_value = getattr(config_obj, field_name)
@@ -250,12 +252,12 @@ def resolve_env_vars(config: Config) -> None:
     valid_env_vars = _get_valid_env_vars("", config)
     invalid_vars = []
     for env_var in os.environ:
-        if env_var.startswith("ZERO_BAND_") and env_var not in valid_env_vars:
+        if env_var.startswith(ENV_VAR_PREFIX) and env_var not in valid_env_vars:
             invalid_vars.append(env_var)
 
     if invalid_vars:
         raise ValueError(
-            f"Found invalid environment variables with ZERO_BAND_ prefix: {', '.join(invalid_vars)}\n"
+            f"Found invalid environment variables with {ENV_VAR_PREFIX} prefix: {', '.join(invalid_vars)}\n"
              "See the full list of valid config veriables in src/zeroband/config.py."
         )
 

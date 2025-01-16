@@ -1,6 +1,6 @@
 import logging
 
-from zeroband.config import Config, get_env_config, get_env_config_bool
+from zeroband.config import Config
 from zeroband.utils.world_info import get_world_info
 
 logger = None
@@ -38,14 +38,13 @@ def get_logger(config: Config | None = None, name: str | None = None) -> logging
         world_info.local_rank = 0
     logger = logging.getLogger(name or __name__)
 
-    log_level = get_env_config(config, "log_level", "INFO")
-    assert isinstance(log_level, str)
+    assert isinstance(config.log_level, str)
 
     if world_info.local_rank == 0:
-        logger.setLevel(level=getattr(logging, log_level, logging.INFO))
+        logger.setLevel(level=getattr(logging, config.log_level, logging.INFO))
     else:
-        if get_env_config_bool(config, "log_all_rank", False):
-            logger.setLevel(level=getattr(logging, log_level, logging.INFO))
+        if config.log_all_rank:
+            logger.setLevel(level=getattr(logging, config.log_level, logging.INFO))
         else:
             logger.setLevel(level=logging.CRITICAL)  # Disable logging for non-zero ranks
 

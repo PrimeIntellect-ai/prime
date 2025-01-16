@@ -1,7 +1,7 @@
-from typing import Any, Literal, TypeAlias
+from typing import Any, Type, Literal, TypeAlias
 import os
 
-from pydantic import model_validator
+from pydantic import create_model, model_validator
 from pydantic_config import BaseConfig
 
 from zeroband.collectives import Compression
@@ -184,66 +184,81 @@ class Config(BaseConfig):
         return self
 
 
-def get_env_config(config: Config | None, item: str | None, default: Any | None = None) -> Any:
+def resolve_env_vars(config: Config) -> None:
     """
-    Get a config value from the environment or the config.
-        item: item is of the form "train.memory_profiler.freq"
-        default: default value if not found
-
-    If either config or item are None, returns default. This is so you can call get_logger() as before.
-
-    Examples:
-    ```
-    # Returns ZERO_BAND_RUN_NAME if set in env.
-    # Otherwise returns config.run_name.
-    get_env_config(config, "run_name")
-    ```
-    ```
-    # Returns ZERO_BAND_TRAIN_MEMORY_PROFILER_FREQ if set in env.
-    # Then returns 10 if train or config.train.memory_profiler are None.
-    # Otherwise, returns the value of config.train.memory_profiler.freq.
-    get_env_config(config, "train.memory_profiler.freq", 10)
-    ```
-
+    Resolve environment variables for config fields.
+    Modifies the config in place.
+    Environment variables should be prefixed with ZERO_BAND_.
     """
 
-    if config is None or item is None:
-        return default
+    def _resolve_value(env_var: str, field_name: str, config_obj: Any) -> Any:
+        """
+        Resolve a single value from an environment variable
+        env_var: full environment variable name (e.g. ZERO_BAND_TRAIN_MICRO_BS)
+        field_name: actual field name in the config object (e.g. micro_bs)
+        """
+        value = os.environ.get(env_var)
+        if value is not None:
+            if (field_info := config_obj.__class__.model_fields.get(field_name)) is None:
+                raise AttributeError(f"Config {config_obj} has no attribute {field_name}")
 
-    # Check env
-    env_name = "ZERO_BAND_" + item.upper().replace(".", "_")
-    if env_name in os.environ:
-        return os.environ[env_name]
+            try:
+                # Create a temporary model with just this field, then validate and rip it out.
+                py_model = create_model('TempModel', __base__ = BaseConfig, **{field_name: (field_info.annotation, ...)})
+                validated = py_model.model_validate({field_name: value})
+                return getattr(validated, field_name)
+            except Exception as e:
+                raise ValueError(f"Error setting {env_var}={value}: {e}")
+        return None
 
-    # Check config
-    spt = item.split(".")
-    cfg: Any = config
-    for s in spt:
-        if cfg is None:
-            return default
-        try:
-            cfg = getattr(cfg, s)
-        except AttributeError:
-            # TODO: Fancier error message for debugging
-            raise ValueError(f"Config item {item} not found.")
+    def _resolve_nested(prefix: str, config_obj: Any) -> None:
+        if not hasattr(config_obj, 'model_fields'):
+            return
 
-    return cfg
+        for field_name, _ in config_obj.__class__.model_fields.items():
+            # Build the full env var name
+            full_env_var = f"ZERO_BAND_{prefix}_{field_name}".upper() if prefix else f"ZERO_BAND_{field_name}".upper()
 
-def get_env_config_bool(config: Config | None, item: str | None, default: bool  | None = None) -> bool:
-    """
-    Call get_env_config and convert strings to bools where makes sense.
+            # Try to resolve the field directly using the local field name
+            value = _resolve_value(full_env_var, field_name, config_obj)
+            if value is not None:
+                setattr(config_obj, field_name, value)
 
-    Throws an exception if the value is not a string and not convertable.
-    """
+            # Handle nested configs
+            field_value = getattr(config_obj, field_name)
+            if field_value is not None and hasattr(field_value, 'model_fields'):
+                # Pass the prefix for building env var names, but use local field names for lookup
+                _resolve_nested(f"{prefix}_{field_name}" if prefix else field_name, field_value)
 
-    val = get_env_config(config, item, default)
-    if val is None and default is not None:
-        return default
-    if val is None:
-        return False
-    if isinstance(val, bool):
-        return val
-    if isinstance(val, str):
-        return val.lower() == "true" or val.lower() == "1"
-    return bool(val)
+    def _get_valid_env_vars(prefix: str, config_obj: Any) -> set[str]:
+        """Recursively collect all valid environment variable names"""
+        valid_vars = set()
+        if not hasattr(config_obj, 'model_fields'):
+            return valid_vars
 
+        for field_name, _ in config_obj.__class__.model_fields.items():
+            full_env_var = f"ZERO_BAND_{prefix}_{field_name}".upper() if prefix else f"ZERO_BAND_{field_name}".upper()
+            valid_vars.add(full_env_var)
+
+            field_value = getattr(config_obj, field_name)
+            if field_value is not None and hasattr(field_value, 'model_fields'):
+                nested_prefix = f"{prefix}_{field_name}" if prefix else field_name
+                valid_vars.update(_get_valid_env_vars(nested_prefix, field_value))
+
+        return valid_vars
+
+    # Check for any invalid ZERO_BAND_ environment variables
+    valid_env_vars = _get_valid_env_vars("", config)
+    invalid_vars = []
+    for env_var in os.environ:
+        if env_var.startswith("ZERO_BAND_") and env_var not in valid_env_vars:
+            invalid_vars.append(env_var)
+
+    if invalid_vars:
+        raise ValueError(
+            f"Found invalid environment variables with ZERO_BAND_ prefix: {', '.join(invalid_vars)}\n"
+             "See the full list of valid config veriables in src/zeroband/config.py."
+        )
+
+    # Now resolve the valid ones.
+    _resolve_nested("", config)

@@ -18,10 +18,6 @@ from transformers import PreTrainedTokenizer
 
 TEST_VOCAB_SIZE = 1024
 
-# TODO sami: make sure the init of the model is the same on all rank
-
-logger = get_logger(name=__name__)
-
 
 class FakeTokenizedDataset(IterableDataset):
     """This is a dummy dataset that generates random sequences of length seq_len and vocab_size"""
@@ -160,7 +156,7 @@ class ParquetDataset(IterableDataset, Stateful):
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
             if worker_info.num_workers > len(self.arg_files):
-                logger.warning(
+                get_logger().warning(
                     f"dataloader rank {worker_info.id} Number of workers {worker_info.num_workers} is greater than the number of files {len(self.arg_files)}"
                 )
                 self.state = PQDatasetState(
@@ -238,7 +234,7 @@ class InterleaveDataset(IterableDataset, Stateful):
                 self.datasets.append(dataset)
                 self.probabilities.append(prob)
             else:
-                logger.warning(f"Dataset {dataset} is empty. Skipping.")
+                get_logger().warning(f"Dataset {dataset} is empty. Skipping.")
 
         self.state = InterleaveDatasetState(current_index=0, seed=seed)
         self._init_random_state()
@@ -312,7 +308,7 @@ def _get_datafiles(path: str, name: Optional[str] = None, split: str = "train") 
     builder_config = _get_ds_config_dict(path=path, name=name)
     if name is None or len(name) == 0:
         if "default" not in builder_config:
-            logger.warning(f"Default config not found for {path}. Using first config.")
+            get_logger().warning(f"Default config not found for {path}. Using first config.")
             name = next(iter(builder_config.keys()))
         else:
             name = "default"
@@ -338,7 +334,7 @@ def _load_datasets(
     probabilities: Optional[List[float]] = None,
     reverse_data_files: bool = False,
 ) -> InterleaveDataset:
-    logger.debug(dataset_names)
+    get_logger().debug(dataset_names)
     ds_args = []
     for _ds in dataset_names.split(","):
         _ds_name, _, _ds_config = _ds.partition(":")
@@ -356,7 +352,7 @@ def _load_datasets(
 
     # logger.debug(f"Datasets ({split}):\n" + "\n".join(map(_nice_print, ds_args)))
     # logger.debug(f"Probabilities: {probabilities}")
-    logger.debug(f"Loading datasets{' in streaming mode' if streaming else ''}")
+    get_logger().debug(f"Loading datasets{' in streaming mode' if streaming else ''}")
     datasets = []
     for ds_arg in ds_args:
         # logger.debug(f"Loading dataset: {ds_arg['data_files']}")
@@ -368,7 +364,7 @@ def _load_datasets(
     else:
         ds = datasets[0]
 
-    logger.info(f"Loaded datasets ({split})")
+    get_logger().info(f"Loaded datasets ({split})")
     return ds
 
 
@@ -401,7 +397,7 @@ def load_all_datasets(
         split_world_size = world_size
 
 
-    logger.info("Loading Train dataset(s)")
+    get_logger().info("Loading Train dataset(s)")
 
     ds = _load_datasets(
         dataset_names=data_config.dataset_name_or_paths,
@@ -413,6 +409,6 @@ def load_all_datasets(
         tokenizer=tokenizer,
     )
 
-    logger.info(f"Train dataset:\n{ds}")
+    get_logger().info(f"Train dataset:\n{ds}")
 
     return ds

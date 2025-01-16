@@ -10,7 +10,7 @@ from torch.autograd.profiler import record_function
 
 from zeroband.checkpoint import CkptManager, TrainingProgress
 from zeroband.comms import ElasticDeviceMesh
-from zeroband.config import Config
+from zeroband.config import Config, resolve_env_vars
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
 from zeroband.diloco import Diloco
 from zeroband.loss import compute_cross_entropy_loss
@@ -83,7 +83,7 @@ def train(config: Config):
     assert config.optim.batch_size % world_info.local_world_size == 0
     batch_size = config.optim.batch_size // world_info.local_world_size
 
-    assert batch_size % config.train.micro_bs == 0
+    assert batch_size % config.train.micro_bs == 0, f'The micro batch size ({config.train.micro_bs}) must divide the number of samples on each GPU ({batch_size}).'
     gradient_accumulation_steps = batch_size // config.train.micro_bs
 
     if config.ckpt is not None and config.ckpt.interval is not None and config.diloco is not None:
@@ -496,6 +496,7 @@ if __name__ == "__main__":
     torch.manual_seed(42)
 
     config = Config(**parse_argv())  # type: ignore
+    resolve_env_vars(config)
     world_info = get_world_info()
     logger = get_logger(config)
 
@@ -504,12 +505,12 @@ if __name__ == "__main__":
     def pretty_dict(d, indent=2):
         for key, value in d.items():
             if isinstance(value, dict):
-                logger.debug(" " * indent + f"{key}:")
+                logger.info(" " * indent + f"{key}:")
                 pretty_dict(value, indent + 2)
             else:
-                logger.debug(" " * indent + f"{key}: {value}")
+                logger.info(" " * indent + f"{key}: {value}")
 
-    logger.debug("config:")
+    logger.info("config:")
     pretty_dict(config.model_dump())
 
     try:

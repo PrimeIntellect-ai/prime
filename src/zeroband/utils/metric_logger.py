@@ -18,7 +18,6 @@ class WandbMetricLogger(MetricLogger):
 
         import wandb
 
-        print(logger_config["config"])
         wandb.init(
             project=project, config=logger_config, name=logger_config["config"]["run_name"], resume="auto" if resume else None
         )  # make wandb reuse the same run id if possible

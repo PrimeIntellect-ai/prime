@@ -219,8 +219,6 @@ def get_env_config(config: Config | None, item: str | None, default: Any | None 
     spt = item.split(".")
     cfg: Any = config
     for s in spt:
-        print(cfg)
-        print(s)
         if cfg is None:
             return default
         try:

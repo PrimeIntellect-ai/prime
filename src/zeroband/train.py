@@ -1,10 +1,11 @@
 import os
 import time
 from typing import TYPE_CHECKING
-from multiprocessing.process import _children # type: ignore
+from multiprocessing.process import _children  # type: ignore
 
 import torch
 import torch.distributed as dist
+
 # from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed.algorithms.ddp_comm_hooks import powerSGD_hook
@@ -29,7 +30,7 @@ from zeroband.utils import (
     get_tensor_list_signature,
     get_peak_flops,
     get_num_params,
-    get_num_flop_per_token
+    get_num_flop_per_token,
 )
 from zeroband.utils.metric_logger import MetricLogger, WandbMetricLogger, DummyMetricLogger
 from zeroband.utils.monitor import HttpMonitor
@@ -68,7 +69,7 @@ def log_hash_training_state(
 
         if config.diloco is not None and diloco is not None:
             outer_optimizer_hash = get_optimizer_signature(diloco.outer_optimizer)
-            outer_model_hash = get_tensor_list_signature(diloco.param_list_cpu) # type: ignore
+            outer_model_hash = get_tensor_list_signature(diloco.param_list_cpu)  # type: ignore
 
             logger.debug(f"outer diloco optimizer hash {id} : {outer_optimizer_hash}")
             logger.debug(f"outer diloco model hash {id} : {outer_model_hash}")
@@ -172,17 +173,19 @@ def train(config: Config):
         #     mesh=elastic_device_mesh.cuda_local_mesh,
         #     reshard_after_forward=config.train.reshard_after_forward,
         # )
-        model: DDP = DDP(model, device_ids=[world_info.local_rank], broadcast_buffers=False, gradient_as_bucket_view=True)
-        
+        model: DDP = DDP(
+            model, device_ids=[world_info.local_rank], broadcast_buffers=False, gradient_as_bucket_view=True
+        )
+
         if config.optim.power_sgd is not None:
             state = powerSGD_hook.PowerSGDState(
                 process_group=None,  # Default process group
-                matrix_approximation_rank=1,  # Adjust rank based on compression needs
-                start_powerSGD_iter=1000,     # When to start compression
+                matrix_approximation_rank=config.optim.power_sgd.rank,  # Adjust rank based on compression needs
+                start_powerSGD_iter=config.optim.power_sgd.warmup_steps,  # When to start compression
             )
-            
+
             model.register_comm_hook(state, powerSGD_hook.powerSGD_hook)
-        
+
         logger.debug("model ddped")
 
     # Setup optimizers
@@ -209,8 +212,8 @@ def train(config: Config):
             dataloader=train_dataloader,
             training_progress=training_progress,
             data_rank=config.data.data_rank,
-            diloco_offloaded_optimizer=diloco.outer_optimizer if config.diloco is not None else None, # type: ignore
-            diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None, # type: ignore
+            diloco_offloaded_optimizer=diloco.outer_optimizer if config.diloco is not None else None,  # type: ignore
+            diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None,  # type: ignore
         )
 
     if world_info.rank == 0:
@@ -317,7 +320,6 @@ def train(config: Config):
                 # model.set_requires_gradient_sync(not is_accumulating)
                 model.require_backward_grad_sync = not is_accumulating
 
-                
                 with record_function("Load batch"):
                     # TODO/NOTE: We could overlap sending the batch with communication
                     #            although to be honest the perf impact is minimal
@@ -333,7 +335,7 @@ def train(config: Config):
                 with record_function("Run model"):
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
                         logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
-                        
+
                     flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
                     flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
@@ -342,7 +344,7 @@ def train(config: Config):
                         flatten_logits,
                         flatten_labels,
                         z_weight=config.optim.z_loss_weight if config.optim.z_loss else None,
-                        num_chunks=config.optim.num_chunks
+                        num_chunks=config.optim.num_chunks,
                     )
                     del logits
 
@@ -509,7 +511,7 @@ def train(config: Config):
 if __name__ == "__main__":
     # Allow eager fallback during production so that that the training runs dont die
     # However, in development, we want to know that we broke torch compile
-    torch._dynamo.config.suppress_errors = "ZERO_BAND_DEV" not in os.environ # type: ignore
+    torch._dynamo.config.suppress_errors = "ZERO_BAND_DEV" not in os.environ  # type: ignore
     torch.set_float32_matmul_precision("high")
     torch.manual_seed(42)
 
@@ -532,21 +534,20 @@ if __name__ == "__main__":
 
     try:
         if config.train.torch_profiler and world_info.rank == 0:
-
             # NOTE(apaz-cli): I cannot seem to get the memory profiler to work.
             # Running into this issue: https://github.com/pytorch/pytorch/issues/64345
             # In the meantime, we can use the memory snapshotter.
 
             logger.debug("Running train() with profiler.")
             prof = torch.profiler.profile(
-                    activities=[
-                        torch.profiler.ProfilerActivity.CPU,
-                        torch.profiler.ProfilerActivity.CUDA,
-                    ],
-                    record_shapes=True,
-                    #profile_memory=True,
-                    #with_stack=True,
-                )
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                record_shapes=True,
+                # profile_memory=True,
+                # with_stack=True,
+            )
             try:
                 prof.__enter__()
                 train(config)
@@ -564,8 +565,8 @@ if __name__ == "__main__":
             logger.info("\n" + "*" * width + " GPU MEM " + "*" * width)
             logger.info(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
 
-            #logger.info("Exporting memory timeline.")
-            #prof.export_memory_timeline(f"logs/mem_timeline.html", device="cuda:0")
+            # logger.info("Exporting memory timeline.")
+            # prof.export_memory_timeline(f"logs/mem_timeline.html", device="cuda:0")
         else:
             train(config)
     except Exception as e:

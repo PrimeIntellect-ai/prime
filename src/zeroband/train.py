@@ -203,7 +203,7 @@ def train(config: Config):
         logger_cls = WandbMetricLogger if config.metric_logger_type == "wandb" else DummyMetricLogger
         metric_logger = logger_cls(
             project=config.project,
-            config={"config": config.model_dump(), "world_info": world_info.json()},
+            logger_config={"config": config.model_dump(), "world_info": world_info.json()},
             resume=config.wandb_resume,
         )
     else:

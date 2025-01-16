@@ -173,9 +173,7 @@ def train(config: Config):
         #     mesh=elastic_device_mesh.cuda_local_mesh,
         #     reshard_after_forward=config.train.reshard_after_forward,
         # )
-        model: DDP = DDP(
-            model, device_ids=[world_info.local_rank], broadcast_buffers=False, gradient_as_bucket_view=True
-        )
+        model: DDP = DDP(model, device_ids=[world_info.local_rank])
 
         if config.optim.power_sgd is not None:
             state = powerSGD_hook.PowerSGDState(

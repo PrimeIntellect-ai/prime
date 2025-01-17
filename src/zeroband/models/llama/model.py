@@ -13,12 +13,13 @@
 
 import contextlib
 from dataclasses import dataclass
-from typing import Literal, Optional, Tuple, TypeAlias
+from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from zeroband.models.norms import build_norm
+from zeroband.config import AttnFnType
 
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention, BlockMask, _DEFAULT_SPARSE_BLOCK_SIZE
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -41,9 +42,6 @@ def flex_attention_compiled(
     return _flex_attention_compiled(q, k, v, block_mask=block_mask)
 
 
-AttnFnType: TypeAlias = Literal["flex", "math"]
-
-
 @dataclass
 class ModelArgs:
     dim: int = 4096
@@ -62,6 +60,8 @@ class ModelArgs:
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
     norm_type: str = "fused_rmsnorm"
+
+    fused_linear_ce: bool = False
 
     attn_fn: AttnFnType = "flex"  # slow for testing
 
@@ -520,7 +520,7 @@ class Transformer(nn.Module):
             h = layer(h, self.freqs_cis, block_mask=block_mask)
 
         h = self.norm(h) if self.norm else h
-        output = self.output(h).float() if self.output else h
+        output = self.output(h).float() if (self.output and not self.model_args.fused_linear_ce) else h
         return output
 
     @classmethod

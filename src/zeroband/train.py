@@ -116,11 +116,8 @@ def train(config: Config):
     with record_function("Get model"):
         logger.debug("Getting model")
         model, model_config = get_model(
-            config.name_model,
-            config.type_model,
-            vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
-            seq_length=config.data.seq_length,
-            attn_fn=config.train.attn_fn,
+            config,
+            vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE
         )
 
     with record_function("Distribute model"):
@@ -316,8 +313,10 @@ def train(config: Config):
 
                 with record_function("Run model"):
                     logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
-                    flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-                    flatten_labels = rearrange(labels, "b seq -> (b seq)")
+                    print(logits.shape)
+                    if not config.optimizations.fused_linear_ce:
+                        flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
+                        flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
                 with record_function("Loss calculation"):
                     ce_loss, z_loss = compute_cross_entropy_loss(

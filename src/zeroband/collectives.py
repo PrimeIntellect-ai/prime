@@ -1,7 +1,8 @@
-from enum import Enum
 from typing import Callable, Optional, TypeAlias
 import torch
 import torch.distributed as dist
+
+from zeroband.config import Compression
 
 AllReduceFunc: TypeAlias = Callable[
     [torch.Tensor, dist.ReduceOp, Optional[dist.ProcessGroup], Optional[torch.dtype]], None
@@ -25,11 +26,6 @@ def gloo_all_reduce(
         tensor.div_(group.size())
 
     dist.all_reduce(tensor, op, group=group)
-
-
-class Compression(Enum):
-    NO = "no"
-    UINT8 = "uint8"
 
 
 def all_reduce(

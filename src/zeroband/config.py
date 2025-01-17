@@ -4,8 +4,8 @@ import os
 from pydantic import create_model, model_validator
 from pydantic_config import BaseConfig
 
-from zeroband.collectives import Compression
-from zeroband.models.llama.model import AttnFnType
+
+AttnFnType: TypeAlias = Literal["flex", "math"]
 
 
 class DataConfig(BaseConfig):
@@ -75,8 +75,8 @@ class MemoryProfilerConfig(BaseConfig):
 
 
 class TrainConfig(BaseConfig):
-    micro_bs: int
-    torch_compile: bool = True
+    micro_bs: int = 1
+    
     ac_ckpt: bool | int = False
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
 
@@ -91,6 +91,12 @@ class TrainConfig(BaseConfig):
     sequence_packing: bool = True
 
     attn_fn: AttnFnType = "flex"
+
+
+class OptimizationsConfig(BaseConfig):
+    torch_compile: bool = True
+    fused_linear_ce: bool = False
+    
 
 
 class MonitorConfig(BaseConfig):
@@ -166,6 +172,7 @@ class Config(BaseConfig):
     data: DataConfig = DataConfig()
     optim: OptimConfig = OptimConfig()
     train: TrainConfig
+    optimizations: OptimizationsConfig = OptimizationsConfig()
     monitor: MonitorConfig | None = None
 
     ckpt: CkptConfig = CkptConfig()

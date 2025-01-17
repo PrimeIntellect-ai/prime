@@ -20,6 +20,7 @@ dependencies = [
     "toposolve",
     "psutil",
     "torch-shampoo @ git+https://github.com/facebookresearch/optimizers.git@main",
+    "liger-kernel",
 ]
 
 [project.optional-dependencies]

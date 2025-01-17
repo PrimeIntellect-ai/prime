@@ -1,11 +1,11 @@
-name_model = "10B"
+name_model = "150M"
 project = "debug_I2_zero_band"
-metric_logger_type = "dummy"
+metric_logger_type = "wandb"
 log_level = "DEBUG"
-run_name = "RUN NAME"
+run_name = "Liger 150M"
 
 [train]
-micro_bs = 1
+micro_bs = 8
 ac_ckpt = true
 torch_profiler = false
 
@@ -17,10 +17,13 @@ snapshot_dir = "logs/"
 sched_type = "wsd-sqrt"
 batch_size = 128 #1M tokens bs
 warmup_steps = 0
-total_steps = 1
+total_steps = 1 # 2_000
 num_chunks = 8
 
-z_loss = true
+z_loss = false
+
+[optimizations]
+fused_linear_ce = true
 
 [data]
 seq_length = 8192

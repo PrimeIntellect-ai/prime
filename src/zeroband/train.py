@@ -3,6 +3,8 @@ import time
 from typing import TYPE_CHECKING
 from multiprocessing.process import _children # type: ignore
 
+import liger_kernel.transformers
+import liger_kernel.transformers
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
@@ -207,7 +209,7 @@ def train(config: Config):
         metric_logger = None
 
     with record_function("Compile model"):
-        if config.train.torch_compile:
+        if config.optimizations.torch_compile:
             # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
             model = torch.compile(model) if not TYPE_CHECKING else model
             logger.debug("model compiled")
@@ -296,7 +298,7 @@ def train(config: Config):
 
             for grad_acc_step in range(gradient_accumulation_steps):
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-                # no sync if we are accumulating gradients
+                # no sync if we are accumulatirecord_functionng gradients
                 model.set_requires_gradient_sync(not is_accumulating)
 
                 with record_function("Load batch"):
@@ -313,18 +315,35 @@ def train(config: Config):
 
                 with record_function("Run model"):
                     logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
-                    print(logits.shape)
-                    if not config.optimizations.fused_linear_ce:
-                        flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-                        flatten_labels = rearrange(labels, "b seq -> (b seq)")
+                    # print(f"dim: {model.model_args.dim}")
+                    # print(f"hidden_dim: {model.layers[str(model.model_args.n_layers - 1)].feed_forward.w2.out_features}")
+                    # print(f"logits: {logits.shape}")
+                    
+                    flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
+                    flatten_labels = rearrange(labels, "b seq -> (b seq)")
+
+                    # print("Flat logits: ", flatten_logits.shape)
+                    
 
                 with record_function("Loss calculation"):
-                    ce_loss, z_loss = compute_cross_entropy_loss(
-                        flatten_logits,
-                        flatten_labels,
-                        z_weight=config.optim.z_loss_weight if config.optim.z_loss else None,
-                        num_chunks=config.optim.num_chunks
-                    )
+                    if config.optimizations.fused_linear_ce:
+                        if config.optim.z_loss:
+                            raise ValueError("z loss is not supported with fused linear cross entropy")
+
+                        from liger_kernel.ops.fused_linear_cross_entropy import LigerFusedLinearCrossEntropyFunction
+                        ce_loss = LigerFusedLinearCrossEntropyFunction.apply(
+                            flatten_logits,
+                            model.output.weight,
+                            flatten_labels,
+                        )
+                        assert isinstance(ce_loss, torch.Tensor)
+                    else:
+                        ce_loss, z_loss = compute_cross_entropy_loss(
+                            flatten_logits,
+                            flatten_labels,
+                            z_weight=config.optim.z_loss_weight if config.optim.z_loss else None,
+                            num_chunks=config.optim.num_chunks
+                        )
                     del logits
 
                     if config.optim.z_loss:
@@ -499,6 +518,7 @@ if __name__ == "__main__":
     world_info = get_world_info()
     logger = get_logger(config)
 
+    torch.set_default_device("cuda")
     torch.cuda.set_device(world_info.local_rank)
 
     def pretty_dict(d, indent=2):

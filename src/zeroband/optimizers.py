@@ -2,7 +2,7 @@ from typing import Literal, TypeAlias
 from pydantic_config import BaseConfig
 import torch
 from distributed_shampoo.shampoo_types import EigenvalueCorrectedShampooPreconditionerConfig
-from matrix_functions_types import DefaultEighEigenvectorConfig, TopKCompressionEigenvectorConfig
+from matrix_functions_types import DefaultEighEigenvectorConfig
 
 from distributed_shampoo import (
     DistributedShampoo,
@@ -10,12 +10,16 @@ from distributed_shampoo import (
     ShampooPT2CompileConfig,
 )
 
+
 class AdamConfig(BaseConfig):
-    type: Literal["adam"] = "adam" # the literal is used to distinguish between the different optimizers configuration in the union type
+    type: Literal["adam"] = (
+        "adam"  # the literal is used to distinguish between the different optimizers configuration in the union type
+    )
     lr: float = 4e-4
     weight_decay: float = 0.1
     betas1: float = 0.9
     betas2: float = 0.95
+
 
 class SoapConfig(BaseConfig):
     type: Literal["soap"] = "soap"
@@ -26,8 +30,6 @@ class SoapConfig(BaseConfig):
 
     max_preconditioner_dim: int = 8192
     precondition_frequency: int = 100
-
-    topk: TopKCompressionEigenvectorConfig | None = None
 
 
 OptimizersConfig: TypeAlias = AdamConfig | SoapConfig
@@ -42,8 +44,6 @@ def get_optimizer(params: list[torch.nn.Parameter], config: OptimizersConfig) ->
             betas=(config.betas1, config.betas2),
         )
     elif isinstance(config, SoapConfig):
-        amortized_computation_config = DefaultEighEigenvectorConfig if config.topk is None else config.topk
-
         return DistributedShampoo(
             params,
             lr=config.lr,
@@ -56,7 +56,7 @@ def get_optimizer(params: list[torch.nn.Parameter], config: OptimizersConfig) ->
             # This can also be set to `DefaultSOAPConfig` which uses QR decompositions, hence is
             # less expensive and might thereby allow for a smaller `precondition_frequency`.
             preconditioner_config=EigenvalueCorrectedShampooPreconditionerConfig(
-                amortized_computation_config=amortized_computation_config
+                amortized_computation_config=DefaultEighEigenvectorConfig
             ),
             distributed_config=FullyShardShampooConfig(),
             shampoo_pt2_compile_config=ShampooPT2CompileConfig(enable_shampoo_pt2_dynamic_shape=False),

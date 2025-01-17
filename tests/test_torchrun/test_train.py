@@ -116,19 +116,13 @@ def test_packing(packing: bool):
     _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=[packing_arg])
 
 
-
-
-
 @pytest.mark.parametrize("diloco", [False, True])
-@pytest.mark.parametrize("topk_compression", [None, 5, 0.1])
-def test_soap(diloco: bool, topk_compression: int | None):
+def test_soap(diloco: bool):
     num_gpus = [1, 2] if diloco else [2, 1]
-
     _test_multi_gpu(
         num_gpus,
         "debug/diloco.toml" if diloco else "debug/normal.toml",
-        extra_args=["--optim.optim.precondition_frequency", "1"]
-        + (["--optim.optim.topk.topk_compression", str(topk_compression)] if topk_compression is not None else []),
+        extra_args=["--optim.optim.precondition_frequency", "1"],
         diloco=diloco,
     )
 

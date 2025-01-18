@@ -2349,14 +2349,22 @@ wheels = [
 
 [[package]]
 name = "toposolve"
-version = "0.1.1"
+version = "0.1.17"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pybind11" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b4/d8/c57f67241f71ff14b20b2e5a7316e6a6eb16fb02010a5c6674f5dc5cb402/toposolve-0.1.1.tar.gz", hash = "sha256:b23287b7bdbe5704b30f4fd447a05e41a418e3f500837634c212baa8b226e9ed", size = 5242 }
+sdist = { url = "https://files.pythonhosted.org/packages/51/5d/e24dd0bbbf9f508d9aa11120fdcc7b0e4caf1c1d401359495636470e0431/toposolve-0.1.17.tar.gz", hash = "sha256:539a1301ed36df5e2fbd0d3e1806f2c6cd7840c3527938647a61b0a7b53689f9", size = 5437 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b1/15/a8861bfc8b5d1d65b49d0078b365e45f857ee44a63b05097839dcc5384aa/toposolve-0.1.1-cp311-cp311-macosx_13_0_arm64.whl", hash = "sha256:6b4cefea1ead3bea316422790af49f63fbc91568b8a1a26305e1e9620600ff86", size = 61503 },
+    { url = "https://files.pythonhosted.org/packages/c4/02/91db85f3ab2822377e90357b23783c5a1408cdb7c36f9f94a7d3db6783cc/toposolve-0.1.17-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:cc1a33e2438c29a29ccac4c957c6ffaf035b239b34f0e369f4665ed255b413c9", size = 125471 },
+    { url = "https://files.pythonhosted.org/packages/ed/4c/90f3b00b1f381ead4394cb1a1391b8dcd2a043490b2f77ebf71609e24b91/toposolve-0.1.17-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:dda111813910145f97df62e34d30ad38c39df45539f129b57df0e6c51e52902b", size = 125548 },
+    { url = "https://files.pythonhosted.org/packages/61/46/062d43764ac1cf6fff3edde81295846d6191c43a103550ddf27472da49ca/toposolve-0.1.17-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:141ba41c36e49ecd2280517031f4ef8c2c131b4fb93b85f38c10fead17974b7f", size = 95148 },
+    { url = "https://files.pythonhosted.org/packages/58/c0/854d8b5cc5cb23d99720c28908e5eff587e1ec25c797ceac219bf5f0f3a7/toposolve-0.1.17-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:8b13cdf80823dd86dd75bda7f94418b5b093cbb4989a4a6f0956f2595b8a7be1", size = 128253 },
+    { url = "https://files.pythonhosted.org/packages/b9/ab/9e062fe4e58729594eda886ed464e4839232162e1ddbd0e36b5bcb61d664/toposolve-0.1.17-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:baa9a76f54f295d8beb06559bd90c117c9a0c2f84aa4c9c661fb283a7529fd68", size = 128431 },
+    { url = "https://files.pythonhosted.org/packages/4f/3b/b6e6c863d06f8cb533068224f954b3b49722ba88cb6a0861fd62aefbc151/toposolve-0.1.17-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:ac94551501ca671d428c7ad435a50da5cd33f832c432c87e676f3ab8310bf19d", size = 96749 },
+    { url = "https://files.pythonhosted.org/packages/70/1e/7028dbd313ba931c086ecb24856566fb34cd159d3bd305cf05fa6b66bb3b/toposolve-0.1.17-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:e158c666e1492832dba077eaea9c4bcd88fbb3f45b8bfde8a8f545d5de8212e2", size = 127421 },
+    { url = "https://files.pythonhosted.org/packages/44/3b/a51dd6d756076853f1a6d18cc20761126b613a28a5ff9e37a113a546477b/toposolve-0.1.17-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:17666bdb0078cddcffc89cb9e7c0f0ce35007597b8a309f7b29c6a39a0fb6d8a", size = 127540 },
+    { url = "https://files.pythonhosted.org/packages/1e/8e/0d7b43f5c751490745bd25cf2cf1f1285627749e3ebfd2da131a9bbdac8c/toposolve-0.1.17-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1b238dadaced7fe98638fcb595596619104724a66ba1205914d0faebb2a2081b", size = 95545 },
 ]
 
 [[package]]
@@ -2785,7 +2793,7 @@ requires-dist = [
     { name = "pydantic-config", git = "https://github.com/samsja/pydantic_config.git?rev=74c94ee" },
     { name = "requests", marker = "extra == 'all'", specifier = ">=2.32.3" },
     { name = "setuptools" },
-    { name = "toposolve" },
+    { name = "toposolve", specifier = ">=0.1.17" },
     { name = "torch", specifier = "==2.5.1" },
     { name = "torch-shampoo", git = "https://github.com/facebookresearch/optimizers.git?rev=main" },
     { name = "torchdata", specifier = ">=0.8.0" },

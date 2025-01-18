@@ -19,7 +19,7 @@ from zeroband.comms import ElasticDeviceMesh
 from zeroband.loss import cross_entropy_max_z_loss
 
 from zeroband.models.llama.model import create_block_mask_from_seqlens
-from zeroband.config import Config  #, MemoryProfilerConfig
+from zeroband.config import Config  # , MemoryProfilerConfig
 from zeroband.optimizers import get_optimizer
 
 from zeroband.utils import (
@@ -39,6 +39,7 @@ from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 from zeroband.checkpoint import CkptManager, TrainingProgress
 from zeroband.lr_scheduler import get_scheduler
+
 
 def log_hash_training_state(
     config: Config,
@@ -259,7 +260,6 @@ def train(config: Config):
                 ## we create grad buffer and opts stats mamnually, the value will be overwritten by the ckpt but we need the DTensor to be correctly init before loading it
 
                 diloco.outer_optimizer.step()  # need to step to init the DTensor stats
-            
 
                 ckpt_manager.recv_ckpt_from_peer(elastic_device_mesh.global_pg)
 
@@ -337,8 +337,6 @@ def train(config: Config):
             inner_optimizer.step()
             scheduler.step()
             inner_optimizer.zero_grad()
-            
-
 
             # logging
             training_progress.step += 1
@@ -364,25 +362,30 @@ def train(config: Config):
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
             }
-            
-            if isinstance(inner_optimizer, DistributedShampoo) and training_progress.step % config.optim.optim.precondition_frequency == 0 and training_progress.step>0 and world_info.rank == 0:
+
+            if (
+                isinstance(inner_optimizer, DistributedShampoo)
+                and training_progress.step % config.optim.optim.precondition_frequency == 0
+                and training_progress.step > 0
+                and world_info.rank == 0
+            ):
                 logger.info(f"step {training_progress.step} preconditioning")
-                eigen_stats = inner_optimizer.eigenvector_stats(key_to_param=model.named_parameters())
-            
+                # eigen_stats = inner_optimizer.eigenvector_stats(key_to_param=model.named_parameters())
+
                 # og_total_rank = 0
-                # effective_total_rank = 0 
-                
-                for param_name, param_stats in eigen_stats.items():
-                    if param_stats is not None:
-                        log_stats = param_stats.log_stats()
-                        for key, val in log_stats.items(): 
-                            metrics[f"eigenvalue_stats/{param_name}/{key}"] = val
-                        
-                        # og_total_rank += param_stats.og_rank
-                        # effective_total_rank += param_stats.effective_rank
-                
+                # effective_total_rank = 0
+
+                # for param_name, param_stats in eigen_stats.items():
+                #     if param_stats is not None:
+                #         log_stats = param_stats.log_stats()
+                #         for key, val in log_stats.items():
+                #             metrics[f"eigenvalue_stats/{param_name}/{key}"] = val
+
+                # og_total_rank += param_stats.og_rank
+                # effective_total_rank += param_stats.effective_rank
+
                 # metrics["total_compression"] = 1 - effective_total_rank / og_total_rank if og_total_rank > 0 else 0
-                    
+
             if config.optim.z_loss:
                 metrics["z_loss"] = z_loss_batch.item()
 

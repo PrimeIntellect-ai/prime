@@ -1,11 +1,15 @@
-name_model = "150M"
+name_model = "10B" # "150M"
+# type_model = "llama3"
+
 project = "debug_I2_zero_band"
-metric_logger_type = "wandb"
-log_level = "DEBUG"
 run_name = "Liger 150M"
 
+metric_logger_type = "dummy" # "wandb"
+log_level = "DEBUG"
+
+
 [train]
-micro_bs = 8
+micro_bs = 1
 ac_ckpt = true
 torch_profiler = false
 
@@ -19,11 +23,11 @@ batch_size = 128 #1M tokens bs
 warmup_steps = 0
 total_steps = 1 # 2_000
 num_chunks = 8
-
 z_loss = false
 
 [optimizations]
-fused_linear_ce = true
+torch_compile = true
+fused_linear_ce = false
 
 [data]
 seq_length = 8192

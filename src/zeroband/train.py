@@ -315,35 +315,20 @@ def train(config: Config):
 
                 with record_function("Run model"):
                     logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
-                    # print(f"dim: {model.model_args.dim}")
-                    # print(f"hidden_dim: {model.layers[str(model.model_args.n_layers - 1)].feed_forward.w2.out_features}")
-                    # print(f"logits: {logits.shape}")
-                    
                     flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-                    flatten_labels = rearrange(labels, "b seq -> (b seq)")
-
-                    # print("Flat logits: ", flatten_logits.shape)
-                    
+                    flatten_labels = rearrange(labels, "b seq -> (b seq)")                    
 
                 with record_function("Loss calculation"):
-                    if config.optimizations.fused_linear_ce:
-                        if config.optim.z_loss:
-                            raise ValueError("z loss is not supported with fused linear cross entropy")
-
-                        from liger_kernel.ops.fused_linear_cross_entropy import LigerFusedLinearCrossEntropyFunction
-                        ce_loss = LigerFusedLinearCrossEntropyFunction.apply(
-                            flatten_logits,
-                            model.output.weight,
-                            flatten_labels,
-                        )
-                        assert isinstance(ce_loss, torch.Tensor)
-                    else:
-                        ce_loss, z_loss = compute_cross_entropy_loss(
-                            flatten_logits,
-                            flatten_labels,
-                            z_weight=config.optim.z_loss_weight if config.optim.z_loss else None,
-                            num_chunks=config.optim.num_chunks
-                        )
+                    if (config.optimizations.fused_linear_ce and config.optim.z_loss):
+                        raise ValueError("Liger kernel does not yet support fused linear CE and z loss.")
+                        
+                    ce_loss, z_loss = compute_cross_entropy_loss(
+                        flatten_logits,
+                        flatten_labels,
+                        z_weight=config.optim.z_loss_weight if config.optim.z_loss else None,
+                        num_chunks=config.optim.num_chunks,
+                        fused_linear_weight=model.output.weight if config.optimizations.fused_linear_ce else None,
+                    )
                     del logits
 
                     if config.optim.z_loss:

@@ -8,6 +8,7 @@ def compute_cross_entropy_loss(
         z_weight: float | None = None,
         num_chunks: int | None = None,
         ignore_index: int = -100,
+        fused_linear_weight: Tensor | None = None,
     ) -> tuple[Tensor, Tensor | None]:
     """
     Compute cross entropy loss in fp32, optionally chunked, and optionally with max z loss.
@@ -21,26 +22,43 @@ def compute_cross_entropy_loss(
     where z is the max logit
     """
 
-    num_elements = (labels != ignore_index).sum().float()
+    if fused_linear_weight is None:
+        num_elements = (labels != ignore_index).sum().float()
 
-    if num_chunks is not None and not num_chunks <= 1:
-        l_labels: list[Tensor] = [target_chunk.reshape(-1) for target_chunk in labels.chunk(num_chunks, dim=0)]
-        l_logits: list[Tensor] = [logit_chunk.reshape(-1, logit_chunk.size(-1)) for logit_chunk in logits.reshape(-1, logits.size(-1)).chunk(num_chunks, dim=0)]
-    else:
-        l_labels: list[Tensor] = [labels.reshape(-1)]
-        l_logits: list[Tensor] = [logits.reshape(-1, logits.size(-1))]
-
-    loss = 0.0
-    ce_loss = None if z_weight is None else 0.0
-    for logits_chunk, labels_chunk in zip(l_logits, l_labels):
-        if z_weight is None:
-            loss += _upcast_cross_entropy(logits_chunk, labels_chunk, ignore_index=ignore_index)
+        if num_chunks is not None and not num_chunks <= 1:
+            l_labels: list[Tensor] = [target_chunk.reshape(-1) for target_chunk in labels.chunk(num_chunks, dim=0)]
+            l_logits: list[Tensor] = [logit_chunk.reshape(-1, logit_chunk.size(-1)) for logit_chunk in logits.reshape(-1, logits.size(-1)).chunk(num_chunks, dim=0)]
         else:
-            ce, z = _upcast_cross_entropy_max_z(logits_chunk, labels_chunk, z_weight, ignore_index=ignore_index)
-            loss += ce
-            ce_loss += z
+            l_labels: list[Tensor] = [labels.reshape(-1)]
+            l_logits: list[Tensor] = [logits.reshape(-1, logits.size(-1))]
 
-    return (loss / num_elements), (None if ce_loss is None else ce_loss / num_elements)
+        loss = 0.0
+        ce_loss = None if z_weight is None else 0.0
+        for logits_chunk, labels_chunk in zip(l_logits, l_labels):
+            if z_weight is None:
+                loss += _upcast_cross_entropy(logits_chunk, labels_chunk, ignore_index=ignore_index)
+            else:
+                ce, z = _upcast_cross_entropy_max_z(logits_chunk, labels_chunk, z_weight, ignore_index=ignore_index)
+                loss += ce
+                ce_loss += z
+
+        return (loss / num_elements), (None if ce_loss is None else ce_loss / num_elements)
+    
+    else:
+        # Ignore number of chunks, since it is not confugrable in liger.
+        from liger_kernel.ops.fused_linear_cross_entropy import LigerFusedLinearCrossEntropyFunction
+        ce_loss = LigerFusedLinearCrossEntropyFunction.apply(
+            logits,
+            fused_linear_weight,
+            labels,
+            None, # bias
+            ignore_index,
+            z_weight if z_weight is not None else 0.0, # lse_square_scale
+            0.0, # label_smoothing
+            "mean", # reduction
+            None, # softcap
+        )
+        return ce_loss, None
 
 
 # Compile the upcast into the CE calculation

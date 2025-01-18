@@ -94,12 +94,11 @@ class TrainConfig(BaseConfig):
 
     sequence_packing: bool = True
 
-    attn_fn: AttnFnType = "flex"
-
-
-class OptimizationsConfig(BaseConfig):
     torch_compile: bool = True
+
     fused_linear_ce: bool = False
+
+    attn_fn: AttnFnType = "flex"
 
 
 class MonitorConfig(BaseConfig):
@@ -175,7 +174,6 @@ class Config(BaseConfig):
     data: DataConfig = DataConfig()
     optim: OptimConfig = OptimConfig()
     train: TrainConfig
-    optimizations: OptimizationsConfig = OptimizationsConfig()
     monitor: MonitorConfig | None = None
 
     ckpt: CkptConfig = CkptConfig()

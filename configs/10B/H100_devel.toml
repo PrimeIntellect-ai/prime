@@ -12,6 +12,8 @@ log_level = "DEBUG"
 micro_bs = 1
 ac_ckpt = true
 torch_profiler = false
+torch_compile = true
+fused_linear_ce = false
 
 [train.memory_profiler]
 freq = 1
@@ -24,10 +26,6 @@ warmup_steps = 0
 total_steps = 1 # 2_000
 num_chunks = 8
 z_loss = false
-
-[optimizations]
-torch_compile = true
-fused_linear_ce = false
 
 [data]
 seq_length = 8192

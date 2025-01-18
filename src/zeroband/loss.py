@@ -43,7 +43,7 @@ def compute_cross_entropy_loss(
                 ce_loss += z
 
         return (loss / num_elements), (None if ce_loss is None else ce_loss / num_elements)
-    
+
     else:
         # Ignore number of chunks, since it is not confugrable in liger.
         from liger_kernel.ops.fused_linear_cross_entropy import LigerFusedLinearCrossEntropyFunction

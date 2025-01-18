@@ -17,7 +17,7 @@ dependencies = [
     "ninja",
     "zstandard",
     "pyarrow",
-    "toposolve",
+    "toposolve==0.1.17",
     "psutil",
     "torch-shampoo @ git+https://github.com/facebookresearch/optimizers.git@main",
 ]

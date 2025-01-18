@@ -501,7 +501,7 @@ if __name__ == "__main__":
     world_info = get_world_info()
     logger = get_logger(config)
 
-    torch.set_default_device("cuda")
+    # torch.set_default_device("cuda")
     torch.cuda.set_device(world_info.local_rank)
 
     def pretty_dict(d, indent=2):

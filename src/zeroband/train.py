@@ -318,7 +318,7 @@ def train(config: Config):
 
                 with record_function("Loss calculation"):
                     if (config.optimizations.fused_linear_ce and config.optim.z_loss):
-                        raise ValueError("Liger kernel does not yet support fused linear CE and z loss. See https://github.com/linkedin/Liger-Kernel/issues/527")
+                        raise NotImplementedError("Liger kernel does not yet support fused linear CE and z loss. See https://github.com/linkedin/Liger-Kernel/issues/527")
 
                     ce_loss, z_loss = compute_cross_entropy_loss(
                         flatten_logits,

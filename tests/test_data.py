@@ -2,7 +2,8 @@ import copy
 import torch
 from zeroband.data import InterleaveDataset, ParquetDataset, SequencePackingDataSet, collate_fn
 from torch.utils.data import DataLoader
-from zeroband.data import load_all_datasets, DataConfig, logger as data_logger
+from zeroband.data import load_all_datasets, DataConfig
+from zeroband.utils.logging import get_logger
 from collections import Counter
 from itertools import chain
 import pytest
@@ -54,7 +55,7 @@ def test_load_all_datasets_vanilla(ratio: str, lower: float, upper: float):
     ],
 )
 def test_load_all_datasets_data_rank(ratio: str, lower: float, upper: float, data_rank: int, data_world_size: int):
-    data_logger.setLevel(logging.DEBUG)
+    get_logger().setLevel(logging.DEBUG)
     config = DataConfig(
         dataset_name_or_paths="Jackmin108/abc-testing:A,Jackmin108/abc-testing:C",
         dataset_ratio=ratio,

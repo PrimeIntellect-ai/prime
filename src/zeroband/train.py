@@ -3,8 +3,6 @@ import time
 from typing import TYPE_CHECKING
 from multiprocessing.process import _children # type: ignore
 
-import liger_kernel.transformers
-import liger_kernel.transformers
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore

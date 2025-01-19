@@ -207,7 +207,7 @@ def train(config: Config):
         metric_logger = None
 
     with record_function("Compile model"):
-        if config.optimizations.torch_compile:
+        if config.train.torch_compile:
             # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
             model = torch.compile(model) if not TYPE_CHECKING else model
             logger.debug("model compiled")
@@ -317,7 +317,7 @@ def train(config: Config):
                     flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
                 with record_function("Loss calculation"):
-                    if (config.optimizations.fused_linear_ce and config.optim.z_loss):
+                    if (config.train.fused_linear_ce and config.optim.z_loss):
                         raise NotImplementedError("Liger kernel does not yet support fused linear CE and z loss. See https://github.com/linkedin/Liger-Kernel/issues/527")
 
                     ce_loss, z_loss = compute_cross_entropy_loss(
@@ -325,7 +325,7 @@ def train(config: Config):
                         flatten_labels,
                         z_weight=config.optim.z_loss_weight if config.optim.z_loss else None,
                         num_chunks=config.optim.num_chunks,
-                        fused_linear_weight=model.output.weight if config.optimizations.fused_linear_ce else None,
+                        fused_linear_weight=model.output.weight if config.train.fused_linear_ce else None,
                     )
                     del logits
 

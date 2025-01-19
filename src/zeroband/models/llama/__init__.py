@@ -97,6 +97,6 @@ def get_model(
     model_config.vocab_size = vocab_size
     model_config.max_seq_len = config.data.seq_length
     model_config.attn_fn = config.train.attn_fn
-    model_config.fused_linear_ce = config.optimizations.fused_linear_ce
+    model_config.fused_linear_ce = config.train.fused_linear_ce
 
     return Transformer(model_config), model_config

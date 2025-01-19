@@ -83,6 +83,7 @@ class TrainConfig(BaseConfig):
 
     ac_ckpt: bool | int = False
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
+    offload_inner_optimizer: bool = False
 
     reduce_fp32: bool = False  # should be True if SXM. Keep to false as default for backward compatibility
 

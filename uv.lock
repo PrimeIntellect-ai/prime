@@ -794,16 +794,16 @@ wheels = [
 ]
 
 [[package]]
-name = "liger-kernel"
-version = "0.5.2"
+name = "liger-kernel-nightly"
+version = "0.5.2.dev20250118115043"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "torch" },
     { name = "triton" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a6/cb/5b6debc3fc29bb6a034446a0f1e90cfdfa246772edb6484c3c7db6e295d9/liger_kernel-0.5.2.tar.gz", hash = "sha256:784b5e74848d6802f52e38766bdc0241bf723040f8bf82b153485dd2c9ba0054", size = 70272 }
+sdist = { url = "https://files.pythonhosted.org/packages/bb/a4/6b0e0c83fd8913e04676c85a83153f9967f48357e9a5ee7bd0de389c5e13/liger_kernel_nightly-0.5.2.dev20250118115043.tar.gz", hash = "sha256:ac89c0c3e3750950c452c30bfd2ee2df082d9cb00b10568c99e1a2df02ac1cb3", size = 3444413 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fc/9e/b05809867d937dbcba4d8717197f69d05a1d41087e7a5c2fdbd5cae79c33/liger_kernel-0.5.2-py3-none-any.whl", hash = "sha256:31a7409ac9db20fc77e7caf8ab146f56d37d4a1d22e3cefd08661560a99d0c46", size = 104184 },
+    { url = "https://files.pythonhosted.org/packages/9c/f2/d49ea5b381857f6a4fdd2cda2e6b8765e00d1de7650169fef2b0506aea8f/liger_kernel_nightly-0.5.2.dev20250118115043-py3-none-any.whl", hash = "sha256:90165e0a7abab1c1cfed2c34c165de607190708fa597c02a960c0b5911caabbd", size = 107349 },
 ]
 
 [[package]]
@@ -2745,7 +2745,7 @@ dependencies = [
     { name = "datasets" },
     { name = "einops" },
     { name = "fsspec", extra = ["gcs"] },
-    { name = "liger-kernel" },
+    { name = "liger-kernel-nightly" },
     { name = "ninja" },
     { name = "numpy" },
     { name = "psutil" },
@@ -2784,7 +2784,7 @@ requires-dist = [
     { name = "datasets", specifier = ">=3.0.0" },
     { name = "einops" },
     { name = "fsspec", extras = ["gcs"], specifier = ">=2024.3.1" },
-    { name = "liger-kernel" },
+    { name = "liger-kernel-nightly" },
     { name = "lm-eval", marker = "extra == 'all'" },
     { name = "ninja" },
     { name = "numpy" },

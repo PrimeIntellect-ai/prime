@@ -1,5 +1,5 @@
-name_model = "10B" # "150M"
-# type_model = "llama3"
+name_model = "13B" # "150M"
+type_model = "llama2"
 
 project = "debug_I2_zero_band"
 run_name = "Liger 150M"
@@ -13,7 +13,8 @@ micro_bs = 1
 ac_ckpt = true
 torch_profiler = false
 torch_compile = true
-fused_linear_ce = false
+fused_linear_ce = true
+reshard_after_forward = true
 
 [train.memory_profiler]
 freq = 1
@@ -24,8 +25,12 @@ sched_type = "wsd-sqrt"
 batch_size = 128 #1M tokens bs
 warmup_steps = 0
 total_steps = 1 # 2_000
-num_chunks = 8
+num_chunks = 16
 z_loss = false
+
+#[optim.optim]
+#type = "soap"
+
 
 [data]
 seq_length = 8192

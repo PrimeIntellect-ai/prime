@@ -317,8 +317,8 @@ def train(config: Config):
                     flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
                 with record_function("Loss calculation"):
-                    if (config.train.fused_linear_ce and config.optim.z_loss):
-                        raise NotImplementedError("Liger kernel does not yet support fused linear CE and z loss. See https://github.com/linkedin/Liger-Kernel/issues/527")
+                    #if (config.train.fused_linear_ce and config.optim.z_loss):
+                    #    raise NotImplementedError("Liger kernel does not yet support fused linear CE and z loss. See https://github.com/linkedin/Liger-Kernel/issues/527")
 
                     ce_loss, z_loss = compute_cross_entropy_loss(
                         flatten_logits,
@@ -501,7 +501,7 @@ if __name__ == "__main__":
     world_info = get_world_info()
     logger = get_logger(config)
 
-    # torch.set_default_device("cuda")
+    torch.set_default_device("cuda")
     torch.cuda.set_device(world_info.local_rank)
 
     def pretty_dict(d, indent=2):

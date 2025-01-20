@@ -370,16 +370,17 @@ def train(config: Config):
                 and world_info.rank == 0
             ):
                 logger.info(f"step {training_progress.step} preconditioning")
-                # eigen_stats = inner_optimizer.eigenvector_stats(key_to_param=model.named_parameters())
-
+                eigen_stats = inner_optimizer.eigenvector_stats(key_to_param=model.named_parameters())
+                # 1/0
                 # og_total_rank = 0
                 # effective_total_rank = 0
 
-                # for param_name, param_stats in eigen_stats.items():
-                #     if param_stats is not None:
-                #         log_stats = param_stats.log_stats()
-                #         for key, val in log_stats.items():
-                #             metrics[f"eigenvalue_stats/{param_name}/{key}"] = val
+                for param_name, param_stats in eigen_stats.items():
+                    if param_stats is not None:
+                        for key, val in param_stats.items():
+                            log_stats = val.log_stats()
+                            for sub_key, sub_val in log_stats.items():
+                                metrics[f"eigenvalue_stats/{param_name}/{key}/{sub_key}"] = sub_val
 
                 # og_total_rank += param_stats.og_rank
                 # effective_total_rank += param_stats.effective_rank

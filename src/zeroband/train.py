@@ -17,7 +17,7 @@ from zeroband.loss import compute_cross_entropy_loss
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
 from zeroband.models.llama.model import create_block_mask_from_seqlens
-from zeroband.optimizers import get_optimizer
+from zeroband.optimizers import get_optimizer, optimizer_to
 from zeroband.utils import (
     FakeTokenizer,
     PerfCounter,
@@ -171,6 +171,8 @@ def train(config: Config):
     # Setup optimizers
     with record_function("Set up Optimizers"):
         inner_optimizer = get_optimizer(model.parameters(), config.optim.optim)
+        if config.train.offload_inner_optimizer:
+            optimizer_to(inner_optimizer, "cpu")
 
         diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
 

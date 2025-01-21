@@ -372,8 +372,8 @@ def train(config: Config):
                 logger.info(f"step {training_progress.step} preconditioning")
                 eigen_stats = inner_optimizer.eigenvector_stats(key_to_param=model.named_parameters())
                 # 1/0
-                # og_total_rank = 0
-                # effective_total_rank = 0
+                og_total_rank = 0
+                effective_total_rank = 0
 
                 for param_name, param_stats in eigen_stats.items():
                     if param_stats is not None:
@@ -382,10 +382,10 @@ def train(config: Config):
                             for sub_key, sub_val in log_stats.items():
                                 metrics[f"eigenvalue_stats/{param_name}/{key}/{sub_key}"] = sub_val
 
-                # og_total_rank += param_stats.og_rank
-                # effective_total_rank += param_stats.effective_rank
+                            og_total_rank += val.og_rank
+                            effective_total_rank += val.effective_rank
 
-                # metrics["total_compression"] = 1 - effective_total_rank / og_total_rank if og_total_rank > 0 else 0
+                metrics["total_compression"] = 1 - effective_total_rank / og_total_rank if og_total_rank > 0 else 0
 
             if config.optim.z_loss:
                 metrics["z_loss"] = z_loss_batch.item()

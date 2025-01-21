@@ -43,7 +43,7 @@ def view() -> None:
 def set_api_key(
     api_key: str = typer.Option(
         ...,
-        prompt="Enter your API key",
+        prompt="you can create an API key at https://app.primeintellect.ai/dashboard/tokens\nEnter your API key",  # noqa: E501
         help="Your Prime Intellect API key",
         hide_input=True,
     ),

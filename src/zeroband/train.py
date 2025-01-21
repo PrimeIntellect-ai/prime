@@ -35,7 +35,6 @@ from zeroband.utils.profiler import MemoryProfiler
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 
-from einops import rearrange
 from transformers import AutoTokenizer
 from pydantic_config import parse_argv
 
@@ -122,7 +121,8 @@ def train(config: Config):
 
     with record_function("Distribute model"):
         logger.debug(f"Distributing model to {world_info.local_rank}")
-        model = model.to(world_info.local_rank)
+        #model = model.to(world_info.local_rank)
+        model = model.to("cpu")
         logger.debug("Model loaded")
 
     gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
@@ -172,7 +172,9 @@ def train(config: Config):
     with record_function("Set up Optimizers"):
         inner_optimizer = get_optimizer(model.parameters(), config.optim.optim)
         if config.train.offload_inner_optimizer:
+            logger.debug("Offloading inner optimizer to CPU")
             optimizer_to(inner_optimizer, "cpu")
+            model = model.to(world_info.local_rank)
 
         diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
 
@@ -197,6 +199,8 @@ def train(config: Config):
             diloco_offloaded_optimizer=diloco.outer_optimizer if config.diloco is not None else None, # type: ignore
             diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None, # type: ignore
         )
+
+        logger.debug("Optimizers set up.")
 
     if world_info.rank == 0:
         logger_cls = WandbMetricLogger if config.metric_logger_type == "wandb" else DummyMetricLogger
@@ -315,12 +319,10 @@ def train(config: Config):
 
                 with record_function("Run model"):
                     logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
-                    flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-                    flatten_labels = rearrange(labels, "b seq -> (b seq)")
+                    flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b seq) vocab
+                    flatten_labels = labels.reshape(-1)                   # b seq -> (b seq)
 
                 with record_function("Loss calculation"):
-                    #if (config.train.fused_linear_ce and config.optim.z_loss):
-                    #    raise NotImplementedError("Liger kernel does not yet support fused linear CE and z loss. See https://github.com/linkedin/Liger-Kernel/issues/527")
 
                     ce_loss, z_loss = compute_cross_entropy_loss(
                         flatten_logits,
@@ -351,9 +353,16 @@ def train(config: Config):
                         loss_batch += loss.clone().detach()
 
             with record_function("Inner allreduce"):
-                dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
+                # Launch both allreduces at the same time to hide latency
+                loss_allreduce = dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True)
                 if config.optim.z_loss:
-                    dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
+                    z_loss_allreduce = dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True)
+
+                assert isinstance(loss_allreduce, torch.distributed.Work)
+                loss_allreduce.wait()
+                if config.optim.z_loss:
+                    assert isinstance(z_loss_allreduce, torch.distributed.Work)
+                    z_loss_allreduce.wait()
 
             with record_function("Clip grad"):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

@@ -1,3 +1,5 @@
+from typing import cast
+from numpy import isin
 from torch import Tensor
 import torch
 import torch.nn.functional as F
@@ -60,6 +62,9 @@ def compute_cross_entropy_loss(
             None,                                        # softcap
             fused_linear_weight is not None,             # return_z_loss
         )
+        if not isinstance(ret, tuple):
+            assert isinstance(ret, Tensor)
+            ret = (ret, None)
         return ret
 
 

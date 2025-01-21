@@ -418,15 +418,6 @@ wheels = [
 ]
 
 [[package]]
-name = "einops"
-version = "0.8.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/79/ca/9f5dcb8bead39959454c3912266bedc4c315839cee0e0ca9f4328f4588c1/einops-0.8.0.tar.gz", hash = "sha256:63486517fed345712a8385c100cb279108d9d47e6ae59099b07657e983deae85", size = 58861 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/44/5a/f0b9ad6c0a9017e62d4735daaeb11ba3b6c009d69a26141b258cd37b5588/einops-0.8.0-py3-none-any.whl", hash = "sha256:9572fb63046264a862693b0a87088af3bdc8c068fde03de63453cbbde245465f", size = 43223 },
-]
-
-[[package]]
 name = "evaluate"
 version = "0.4.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2743,7 +2734,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "datasets" },
-    { name = "einops" },
     { name = "fsspec", extra = ["gcs"] },
     { name = "liger-kernel-nightly" },
     { name = "ninja" },
@@ -2782,7 +2772,6 @@ requires-dist = [
     { name = "aiohttp", marker = "extra == 'all'", specifier = ">=3.10.5" },
     { name = "asyncio", marker = "extra == 'all'", specifier = ">=3.4.3" },
     { name = "datasets", specifier = ">=3.0.0" },
-    { name = "einops" },
     { name = "fsspec", extras = ["gcs"], specifier = ">=2024.3.1" },
     { name = "liger-kernel-nightly" },
     { name = "lm-eval", marker = "extra == 'all'" },

@@ -1,4 +1,4 @@
-from typing import Any, Iterable, cast
+from typing import Iterable
 import torch
 from distributed_shampoo import (
     DefaultEigenvalueCorrectedShampooConfig,
@@ -8,9 +8,7 @@ from distributed_shampoo import (
 )
 import torch.distributed.fsdp
 import torch.distributed.tensor
-from torch.distributed._tensor.api import DTensor
 from zeroband.config import Config, AdamConfig, SoapConfig, OptimizersConfig
-from zeroband.utils.logging import get_logger
 
 
 def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch.optim.Optimizer:

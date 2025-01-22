@@ -1,13 +1,16 @@
 from typing import Iterable
+
 import torch
+import torch.distributed.fsdp
+import torch.distributed.tensor
+
 from distributed_shampoo import (
     DefaultEigenvalueCorrectedShampooConfig,
     DistributedShampoo,
     FullyShardShampooConfig,
     ShampooPT2CompileConfig,
 )
-import torch.distributed.fsdp
-import torch.distributed.tensor
+
 from zeroband.config import Config, AdamConfig, SoapConfig, OptimizersConfig
 
 

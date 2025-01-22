@@ -114,7 +114,7 @@ def train(config: Config):
         train_dataloader_iterator = iter(train_dataloader)
 
     with record_function("Get model"):
-        logger.debug("Getting model")
+        logger.debug("Constructing model")
         model, model_config = get_model(
             config,
             vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE

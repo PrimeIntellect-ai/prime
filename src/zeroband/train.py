@@ -17,7 +17,7 @@ from zeroband.loss import compute_cross_entropy_loss
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
 from zeroband.models.llama.model import create_block_mask_from_seqlens
-from zeroband.optimizers import get_optimizer, optimizer_to
+from zeroband.optimizers import get_optimizer
 from zeroband.utils import (
     FakeTokenizer,
     PerfCounter,
@@ -121,8 +121,7 @@ def train(config: Config):
 
     with record_function("Distribute model"):
         logger.debug(f"Distributing model to {world_info.local_rank}")
-        #model = model.to(world_info.local_rank)
-        model = model.to("cpu")
+        model = model.to(world_info.local_rank)
         logger.debug("Model loaded")
 
     gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
@@ -170,11 +169,7 @@ def train(config: Config):
 
     # Setup optimizers
     with record_function("Set up Optimizers"):
-        inner_optimizer = get_optimizer(model.parameters(), config.optim.optim)
-        if config.train.offload_inner_optimizer:
-            logger.debug("Offloading inner optimizer to CPU")
-            optimizer_to(inner_optimizer, "cpu")
-            model = model.to(world_info.local_rank)
+        inner_optimizer = get_optimizer(config, model.parameters())
 
         diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
 
@@ -323,6 +318,7 @@ def train(config: Config):
                     flatten_labels = labels.reshape(-1)                   # b seq -> (b seq)
 
                 with record_function("Loss calculation"):
+                    logger.debug("Computing loss")
 
                     ce_loss, z_loss = compute_cross_entropy_loss(
                         flatten_logits,
@@ -342,17 +338,20 @@ def train(config: Config):
                         loss = ce_loss / gradient_accumulation_steps
 
                 with record_function("Backward"):
+                    logger.debug("Running backward()")
                     loss.backward()
 
                 with record_function("Clone loss"):
+                    logger.debug("Cloning loss")
                     if config.optim.z_loss:
                         assert z_loss is not None
-                        loss_batch += ce_loss.clone().detach()
-                        z_loss_batch += z_loss.clone().detach()
+                        loss_batch += ce_loss.detach().clone()
+                        z_loss_batch += z_loss.detach().clone()
                     else:
-                        loss_batch += loss.clone().detach()
+                        loss_batch += loss.detach().clone()
 
             with record_function("Inner allreduce"):
+                logger.debug("loss allreduce()")
                 # Launch both allreduces at the same time to hide latency
                 loss_allreduce = dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True)
                 if config.optim.z_loss:
@@ -365,11 +364,14 @@ def train(config: Config):
                     z_loss_allreduce.wait()
 
             with record_function("Clip grad"):
+                logger.debug("clipping grad")
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
             with record_function("Optimizer step"):
+                logger.debug("inner optimizer step")
                 inner_optimizer.step()
                 scheduler.step()
+                logger.debug("zero inner optimizer grad")
                 inner_optimizer.zero_grad()
 
             # logging

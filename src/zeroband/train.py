@@ -316,7 +316,6 @@ def train(config: Config):
                     # TODO/NOTE: We could overlap sending the batch with communication
                     #            although to be honest the perf impact is minimal
                     batch = next(train_dataloader_iterator)
-                    logger.debug("Done with next()")
                     input_ids = batch["input_ids"].to("cuda")
                     labels = batch["labels"].to("cuda")
                     if config.train.sequence_packing:

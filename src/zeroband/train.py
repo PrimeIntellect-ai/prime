@@ -5,7 +5,7 @@ from multiprocessing.process import _children # type: ignore
 
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy # type: ignore
 from torch.autograd.profiler import record_function
 
 from zeroband.checkpoint import CkptManager, TrainingProgress
@@ -69,9 +69,10 @@ def log_hash_training_state(
             logger.debug(f"outer diloco optimizer hash {id} : {outer_optimizer_hash}")
             logger.debug(f"outer diloco model hash {id} : {outer_model_hash}")
 
-            metrics.update(
-                {f"outer_optimizer_hash_{id}": outer_optimizer_hash, f"outer_model_hash_{id}": outer_model_hash}
-            )
+            metrics.update({
+                f"outer_optimizer_hash_{id}": outer_optimizer_hash,
+                f"outer_model_hash_{id}": outer_model_hash
+            })
         if world_info.rank == 0:
             assert metric_logger is not None
             metric_logger.log(metrics)
@@ -141,12 +142,16 @@ def train(config: Config):
             apply_ac_ckpt(model, num)
 
         elastic_device_mesh = ElasticDeviceMesh(
-            enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
+            enable=config.diloco is not None,
+            live_recovery_rank_src=config.ckpt.live_recovery_rank_src
         )
 
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
         )
+
+        offload_policy = CPUOffloadPolicy(pin_memory=True)
 
         for layer_id, transformer_block in model.layers.items():
             if config.train.reshard_after_forward:
@@ -158,12 +163,14 @@ def train(config: Config):
                 mp_policy=mp_policy,
                 mesh=elastic_device_mesh.cuda_local_mesh,
                 reshard_after_forward=reshard_after_forward,
+                offload_policy=offload_policy,
             )
         fully_shard(
             model,
             mp_policy=mp_policy,
             mesh=elastic_device_mesh.cuda_local_mesh,
             reshard_after_forward=config.train.reshard_after_forward,
+            offload_policy=offload_policy,
         )
         logger.debug("model fsdped")
 
@@ -292,27 +299,35 @@ def train(config: Config):
             monitor.set_stage("inner_loop")
 
         for inner_step in range(num_inner_steps):
+            logger.debug("Starting inner step.")
+
             loss_batch = 0
             z_loss_batch = 0
 
             for grad_acc_step in range(gradient_accumulation_steps):
+                logger.debug("Starting gradient accumulation step.")
+
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                 # no sync if we are accumulatirecord_functionng gradients
                 model.set_requires_gradient_sync(not is_accumulating)
 
                 with record_function("Load batch"):
+                    logger.debug("Loading batch")
                     # TODO/NOTE: We could overlap sending the batch with communication
                     #            although to be honest the perf impact is minimal
                     batch = next(train_dataloader_iterator)
+                    logger.debug("Done with next()")
                     input_ids = batch["input_ids"].to("cuda")
                     labels = batch["labels"].to("cuda")
                     if config.train.sequence_packing:
                         seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
                         block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
                     else:
+                        seqlens = None
                         block_mask = None
 
                 with record_function("Run model"):
+                    logger.debug("Running forward()")
                     logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
                     flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b seq) vocab
                     flatten_labels = labels.reshape(-1)                   # b seq -> (b seq)
@@ -327,7 +342,10 @@ def train(config: Config):
                         num_chunks=config.optim.num_chunks,
                         fused_linear_weight=model.output.weight if config.train.fused_linear_ce else None,
                     )
+
                     del logits
+                    del flatten_logits
+                    del flatten_labels
 
                     if config.optim.z_loss:
                         assert z_loss is not None
@@ -368,10 +386,10 @@ def train(config: Config):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
             with record_function("Optimizer step"):
-                logger.debug("inner optimizer step")
+                logger.debug("inner optimizer step()")
                 inner_optimizer.step()
                 scheduler.step()
-                logger.debug("zero inner optimizer grad")
+                logger.debug("inner optimizer zero_grad()")
                 inner_optimizer.zero_grad()
 
             # logging
@@ -379,7 +397,6 @@ def train(config: Config):
             inner_lr = [group["lr"] for group in inner_optimizer.param_groups][0]
 
             # syncing loss across all data parallel rank within a nodes
-
             new_tokens = config.data.seq_length * config.optim.batch_size
             perf_counter.count_tokens(new_tokens)
 
@@ -407,7 +424,6 @@ def train(config: Config):
             log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
 
             tokens_per_second = perf_counter.get_tokens_per_second()
-
             if tokens_per_second is not None:
                 metrics["tokens_per_second"] = tokens_per_second
                 metrics["mfu"] = (
@@ -514,7 +530,7 @@ if __name__ == "__main__":
     world_info = get_world_info()
     logger = get_logger(config)
 
-    torch.set_default_device("cuda")
+    # torch.set_default_device("cuda")
     torch.cuda.set_device(world_info.local_rank)
 
     def pretty_dict(d, indent=2):

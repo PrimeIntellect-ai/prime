@@ -273,7 +273,6 @@ class InterleaveDataset(IterableDataset, Stateful):
             dataset.load_state_dict(state_dict[f"dataset_{i}"])
         self._init_random_state()
 
-
 def get_dataloader(
     tokenizer,
     world_size: int,
@@ -338,7 +337,7 @@ def _load_datasets(
     ds_args = []
     for _ds in dataset_names.split(","):
         _ds_name, _, _ds_config = _ds.partition(":")
-        _ds_args = {"path": _ds_name}
+        _ds_args: dict[str, Any] = {"path": _ds_name}
         if _ds_config:
             _ds_args["name"] = _ds_config
         _data_files = _get_datafiles(_ds_name, _ds_config, split)
@@ -409,6 +408,6 @@ def load_all_datasets(
         tokenizer=tokenizer,
     )
 
-    get_logger().info(f"Train dataset:\n{ds}")
+    get_logger().info(f"Train dataset: {ds}")
 
     return ds

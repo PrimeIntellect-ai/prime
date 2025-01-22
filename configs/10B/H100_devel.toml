@@ -24,12 +24,8 @@ sched_type = "wsd-sqrt"
 batch_size = 128 #1M tokens bs
 warmup_steps = 0
 total_steps = 1 # 2_000
-#num_chunks = 8
-#z_loss = true
-
-#[optim.optim]
-#type = "soap"
-
+num_chunks = 8
+z_loss = true
 
 [data]
 seq_length = 8192

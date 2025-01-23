@@ -120,11 +120,6 @@ def train(config: Config):
             vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE
         )
 
-    with record_function("Distribute model"):
-        logger.debug(f"Distributing model to {world_info.local_rank}")
-        model = model.to(world_info.local_rank)
-        logger.debug("Model loaded")
-
     gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
 
@@ -308,7 +303,7 @@ def train(config: Config):
                 logger.debug("Starting gradient accumulation step.")
 
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-                # no sync if we are accumulatirecord_functionng gradients
+                # no sync if we are accumulating gradients
                 model.set_requires_gradient_sync(not is_accumulating)
 
                 with record_function("Load batch"):

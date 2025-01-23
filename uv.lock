@@ -418,15 +418,6 @@ wheels = [
 ]
 
 [[package]]
-name = "einops"
-version = "0.8.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/79/ca/9f5dcb8bead39959454c3912266bedc4c315839cee0e0ca9f4328f4588c1/einops-0.8.0.tar.gz", hash = "sha256:63486517fed345712a8385c100cb279108d9d47e6ae59099b07657e983deae85", size = 58861 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/44/5a/f0b9ad6c0a9017e62d4735daaeb11ba3b6c009d69a26141b258cd37b5588/einops-0.8.0-py3-none-any.whl", hash = "sha256:9572fb63046264a862693b0a87088af3bdc8c068fde03de63453cbbde245465f", size = 43223 },
-]
-
-[[package]]
 name = "evaluate"
 version = "0.4.3"
 source = { registry = "https://pypi.org/simple" }
@@ -794,16 +785,16 @@ wheels = [
 ]
 
 [[package]]
-name = "liger-kernel"
-version = "0.5.2"
+name = "liger-kernel-nightly"
+version = "0.5.2.dev20250122195349"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "torch" },
     { name = "triton" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a6/cb/5b6debc3fc29bb6a034446a0f1e90cfdfa246772edb6484c3c7db6e295d9/liger_kernel-0.5.2.tar.gz", hash = "sha256:784b5e74848d6802f52e38766bdc0241bf723040f8bf82b153485dd2c9ba0054", size = 70272 }
+sdist = { url = "https://files.pythonhosted.org/packages/fb/9c/2a5d4deab8973ff8813a4878b8e91d9b6c8e14c26ea3063bdffa13a7241f/liger_kernel_nightly-0.5.2.dev20250122195349.tar.gz", hash = "sha256:073a1f8985cb47016e1fedd0230ae55b7fc9dd7deefe26ea9349624c0b721e6c", size = 3460781 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fc/9e/b05809867d937dbcba4d8717197f69d05a1d41087e7a5c2fdbd5cae79c33/liger_kernel-0.5.2-py3-none-any.whl", hash = "sha256:31a7409ac9db20fc77e7caf8ab146f56d37d4a1d22e3cefd08661560a99d0c46", size = 104184 },
+    { url = "https://files.pythonhosted.org/packages/03/dd/c8eb59e57bb6da7cbbc31e980ff01028b28041794e98af64b92c57dc57eb/liger_kernel_nightly-0.5.2.dev20250122195349-py3-none-any.whl", hash = "sha256:b4d6747ea3a6a2eb4ab81ee4ba965a839740efac4ad9b65e3382179c5cc7f2c5", size = 112179 },
 ]
 
 [[package]]
@@ -2743,9 +2734,8 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "datasets" },
-    { name = "einops" },
     { name = "fsspec", extra = ["gcs"] },
-    { name = "liger-kernel" },
+    { name = "liger-kernel-nightly" },
     { name = "ninja" },
     { name = "numpy" },
     { name = "psutil" },
@@ -2782,9 +2772,8 @@ requires-dist = [
     { name = "aiohttp", marker = "extra == 'all'", specifier = ">=3.10.5" },
     { name = "asyncio", marker = "extra == 'all'", specifier = ">=3.4.3" },
     { name = "datasets", specifier = ">=3.0.0" },
-    { name = "einops" },
     { name = "fsspec", extras = ["gcs"], specifier = ">=2024.3.1" },
-    { name = "liger-kernel" },
+    { name = "liger-kernel-nightly", specifier = ">=0.5.2.dev20250122195349" },
     { name = "lm-eval", marker = "extra == 'all'" },
     { name = "ninja" },
     { name = "numpy" },

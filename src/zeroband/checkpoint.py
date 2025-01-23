@@ -12,7 +12,7 @@ from fsspec.generic import rsync as rsync_fsspec
 import torch
 from torch import nn
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import LRScheduler
 from torchdata.stateful_dataloader import StatefulDataLoader
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint.state_dict import (
@@ -175,7 +175,7 @@ class CkptManager:
         config: CkptConfig,
         model: nn.Module,
         optimizer: Optimizer,
-        scheduler: LambdaLR,
+        scheduler: LRScheduler,
         dataloader: StatefulDataLoader,
         training_progress: TrainingProgress,
         data_rank: int | None,

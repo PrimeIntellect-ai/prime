@@ -1,6 +1,9 @@
-from torch.optim.lr_scheduler import LambdaLR
+from typing import Callable
 from functools import partial
 import math
+
+from torch.optim.lr_scheduler import LRScheduler, LambdaLR
+
 from transformers.optimization import get_cosine_schedule_with_warmup, get_linear_schedule_with_warmup
 
 
@@ -12,7 +15,7 @@ def _get_linear_schedule_with_wsd_sqrt_lr_lambda(current_step: int, *, num_warmu
     else:
         return max(0.0, 1 - math.sqrt(float(current_step - num_stable_steps) / float(num_training_steps - num_stable_steps)))
 
-def get_linear_schedule_with_wsd_sqrt(optimizer, num_warmup_steps: int, num_stable_steps: int, num_training_steps: int, last_epoch: int=-1):
+def get_linear_schedule_with_wsd_sqrt(optimizer, num_warmup_steps: int, num_stable_steps: int, num_training_steps: int, last_epoch: int=-1) -> LRScheduler:
     """
     Create a schedule with a learning rate that decreases linearly from the initial lr set in the optimizer to 0, after
     a warmup period during which it increases linearly from 0 to the initial lr set in the optimizer.
@@ -39,13 +42,13 @@ def get_linear_schedule_with_wsd_sqrt(optimizer, num_warmup_steps: int, num_stab
     )
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
-SCHED_MAP = {
+SCHED_MAP: dict[str, Callable[..., LRScheduler]] = {
     "cosine": get_cosine_schedule_with_warmup,
     "wsd-sqrt": get_linear_schedule_with_wsd_sqrt,
     "linear": get_linear_schedule_with_warmup
 }
 
-def get_scheduler(sched_type: str, optimizer, num_warmup_steps: int, num_stable_steps: int, num_training_steps: int):
+def get_scheduler(sched_type: str, optimizer, num_warmup_steps: int, num_stable_steps: int, num_training_steps: int) -> LRScheduler:
     if 'wsd' in sched_type:
         return SCHED_MAP[sched_type](optimizer, num_warmup_steps=num_warmup_steps, num_stable_steps=num_stable_steps, num_training_steps=num_training_steps)
     else:

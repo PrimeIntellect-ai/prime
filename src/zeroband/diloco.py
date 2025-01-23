@@ -91,6 +91,7 @@ class Diloco:
         global_pg = self.elastic_device_mesh.global_pg
         for i in range(self.config.retry_all_reduce):
             for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
+                assert isinstance(param_offloaded.grad, DTensor)
                 if fake:
                     param_offloaded.grad.to_local().zero_()
                 else:

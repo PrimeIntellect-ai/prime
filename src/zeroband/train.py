@@ -5,7 +5,7 @@ from multiprocessing.process import _children # type: ignore
 
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy # type: ignore
 from torch.autograd.profiler import record_function
 
 from zeroband.checkpoint import CkptManager, TrainingProgress
@@ -35,7 +35,6 @@ from zeroband.utils.profiler import MemoryProfiler
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 
-from einops import rearrange
 from transformers import AutoTokenizer
 from pydantic_config import parse_argv
 
@@ -70,9 +69,10 @@ def log_hash_training_state(
             logger.debug(f"outer diloco optimizer hash {id} : {outer_optimizer_hash}")
             logger.debug(f"outer diloco model hash {id} : {outer_model_hash}")
 
-            metrics.update(
-                {f"outer_optimizer_hash_{id}": outer_optimizer_hash, f"outer_model_hash_{id}": outer_model_hash}
-            )
+            metrics.update({
+                f"outer_optimizer_hash_{id}": outer_optimizer_hash,
+                f"outer_model_hash_{id}": outer_model_hash
+            })
         if world_info.rank == 0:
             assert metric_logger is not None
             metric_logger.log(metrics)
@@ -114,16 +114,11 @@ def train(config: Config):
         train_dataloader_iterator = iter(train_dataloader)
 
     with record_function("Get model"):
-        logger.debug("Getting model")
+        logger.debug("Constructing model")
         model, model_config = get_model(
             config,
             vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE
         )
-
-    with record_function("Distribute model"):
-        logger.debug(f"Distributing model to {world_info.local_rank}")
-        model = model.to(world_info.local_rank)
-        logger.debug("Model loaded")
 
     gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
@@ -142,12 +137,16 @@ def train(config: Config):
             apply_ac_ckpt(model, num)
 
         elastic_device_mesh = ElasticDeviceMesh(
-            enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
+            enable=config.diloco is not None,
+            live_recovery_rank_src=config.ckpt.live_recovery_rank_src
         )
 
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
         )
+
+        offload_policy = CPUOffloadPolicy(pin_memory=True)
 
         for layer_id, transformer_block in model.layers.items():
             if config.train.reshard_after_forward:
@@ -159,18 +158,20 @@ def train(config: Config):
                 mp_policy=mp_policy,
                 mesh=elastic_device_mesh.cuda_local_mesh,
                 reshard_after_forward=reshard_after_forward,
+                offload_policy=offload_policy,
             )
         fully_shard(
             model,
             mp_policy=mp_policy,
             mesh=elastic_device_mesh.cuda_local_mesh,
             reshard_after_forward=config.train.reshard_after_forward,
+            offload_policy=offload_policy,
         )
         logger.debug("model fsdped")
 
     # Setup optimizers
     with record_function("Set up Optimizers"):
-        inner_optimizer = get_optimizer(model.parameters(), config.optim.optim)
+        inner_optimizer = get_optimizer(config, model.parameters())
 
         diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
 
@@ -195,6 +196,8 @@ def train(config: Config):
             diloco_offloaded_optimizer=diloco.outer_optimizer if config.diloco is not None else None, # type: ignore
             diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None, # type: ignore
         )
+
+        logger.debug("Optimizers set up.")
 
     if world_info.rank == 0:
         logger_cls = WandbMetricLogger if config.metric_logger_type == "wandb" else DummyMetricLogger
@@ -291,15 +294,20 @@ def train(config: Config):
             monitor.set_stage("inner_loop")
 
         for inner_step in range(num_inner_steps):
+            logger.debug("Starting inner step.")
+
             loss_batch = 0
             z_loss_batch = 0
 
             for grad_acc_step in range(gradient_accumulation_steps):
+                logger.debug("Starting gradient accumulation step.")
+
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-                # no sync if we are accumulatirecord_functionng gradients
+                # no sync if we are accumulating gradients
                 model.set_requires_gradient_sync(not is_accumulating)
 
                 with record_function("Load batch"):
+                    logger.debug("Loading batch")
                     # TODO/NOTE: We could overlap sending the batch with communication
                     #            although to be honest the perf impact is minimal
                     batch = next(train_dataloader_iterator)
@@ -309,16 +317,17 @@ def train(config: Config):
                         seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
                         block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
                     else:
+                        seqlens = None
                         block_mask = None
 
                 with record_function("Run model"):
+                    logger.debug("Running forward()")
                     logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
-                    flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-                    flatten_labels = rearrange(labels, "b seq -> (b seq)")
+                    flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b seq) vocab
+                    flatten_labels = labels.reshape(-1)                   # b seq -> (b seq)
 
                 with record_function("Loss calculation"):
-                    if (config.train.fused_linear_ce and config.optim.z_loss):
-                        raise NotImplementedError("Liger kernel does not yet support fused linear CE and z loss. See https://github.com/linkedin/Liger-Kernel/issues/527")
+                    logger.debug("Computing loss")
 
                     ce_loss, z_loss = compute_cross_entropy_loss(
                         flatten_logits,
@@ -327,7 +336,10 @@ def train(config: Config):
                         num_chunks=config.optim.num_chunks,
                         fused_linear_weight=model.output.weight if config.train.fused_linear_ce else None,
                     )
+
                     del logits
+                    del flatten_logits
+                    del flatten_labels
 
                     if config.optim.z_loss:
                         assert z_loss is not None
@@ -338,27 +350,40 @@ def train(config: Config):
                         loss = ce_loss / gradient_accumulation_steps
 
                 with record_function("Backward"):
+                    logger.debug("Running backward()")
                     loss.backward()
 
                 with record_function("Clone loss"):
+                    logger.debug("Cloning loss")
                     if config.optim.z_loss:
                         assert z_loss is not None
-                        loss_batch += ce_loss.clone().detach()
-                        z_loss_batch += z_loss.clone().detach()
+                        loss_batch += ce_loss.detach().clone()
+                        z_loss_batch += z_loss.detach().clone()
                     else:
-                        loss_batch += loss.clone().detach()
+                        loss_batch += loss.detach().clone()
 
             with record_function("Inner allreduce"):
-                dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
+                logger.debug("loss allreduce()")
+                # Launch both allreduces at the same time to hide latency
+                loss_allreduce = dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True)
                 if config.optim.z_loss:
-                    dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
+                    z_loss_allreduce = dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True)
+
+                assert isinstance(loss_allreduce, torch.distributed.Work)
+                loss_allreduce.wait()
+                if config.optim.z_loss:
+                    assert isinstance(z_loss_allreduce, torch.distributed.Work)
+                    z_loss_allreduce.wait()
 
             with record_function("Clip grad"):
+                logger.debug("clipping grad")
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
             with record_function("Optimizer step"):
+                logger.debug("inner optimizer step()")
                 inner_optimizer.step()
                 scheduler.step()
+                logger.debug("inner optimizer zero_grad()")
                 inner_optimizer.zero_grad()
 
             # logging
@@ -366,7 +391,6 @@ def train(config: Config):
             inner_lr = [group["lr"] for group in inner_optimizer.param_groups][0]
 
             # syncing loss across all data parallel rank within a nodes
-
             new_tokens = config.data.seq_length * config.optim.batch_size
             perf_counter.count_tokens(new_tokens)
 
@@ -394,7 +418,6 @@ def train(config: Config):
             log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
 
             tokens_per_second = perf_counter.get_tokens_per_second()
-
             if tokens_per_second is not None:
                 metrics["tokens_per_second"] = tokens_per_second
                 metrics["mfu"] = (

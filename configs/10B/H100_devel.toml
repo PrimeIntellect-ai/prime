@@ -1,4 +1,4 @@
-name_model = "13B" # "150M"
+name_model = "26B"
 type_model = "llama2"
 
 project = "debug_I2_zero_band"
@@ -21,7 +21,7 @@ snapshot_dir = "logs/"
 
 [optim]
 sched_type = "wsd-sqrt"
-batch_size = 16 # 128 #1M tokens bs
+batch_size = 128
 warmup_steps = 0
 total_steps = 1 # 2_000
 num_chunks = 8

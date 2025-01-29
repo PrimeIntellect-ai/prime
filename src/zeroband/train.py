@@ -1,7 +1,7 @@
 import os
 import time
 from typing import TYPE_CHECKING
-from multiprocessing.process import _children # type: ignore
+from multiprocessing.process import _children  # type: ignore
 
 import torch
 import torch.distributed as dist
@@ -26,7 +26,7 @@ from zeroband.utils import (
     get_tensor_list_signature,
     get_peak_flops,
     get_num_params,
-    get_num_flop_per_token
+    get_num_flop_per_token,
 )
 from zeroband.utils.metric_logger import MetricLogger, WandbMetricLogger, DummyMetricLogger
 from zeroband.utils.monitor import HttpMonitor
@@ -64,7 +64,7 @@ def log_hash_training_state(
 
         if config.diloco is not None and diloco is not None:
             outer_optimizer_hash = get_optimizer_signature(diloco.outer_optimizer)
-            outer_model_hash = get_tensor_list_signature(diloco.param_list_cpu) # type: ignore
+            outer_model_hash = get_tensor_list_signature(diloco.param_list_cpu)  # type: ignore
 
             logger.debug(f"outer diloco optimizer hash {id} : {outer_optimizer_hash}")
             logger.debug(f"outer diloco model hash {id} : {outer_model_hash}")
@@ -83,7 +83,9 @@ def train(config: Config):
     assert config.optim.batch_size % world_info.local_world_size == 0
     batch_size = config.optim.batch_size // world_info.local_world_size
 
-    assert batch_size % config.train.micro_bs == 0, f'The micro batch size ({config.train.micro_bs}) must divide the number of samples on each GPU ({batch_size}).'
+    assert (
+        batch_size % config.train.micro_bs == 0
+    ), f"The micro batch size ({config.train.micro_bs}) must divide the number of samples on each GPU ({batch_size})."
     gradient_accumulation_steps = batch_size // config.train.micro_bs
 
     if config.ckpt is not None and config.ckpt.interval is not None and config.diloco is not None:
@@ -117,7 +119,7 @@ def train(config: Config):
         logger.debug("Constructing model")
         model, model_config = get_model(
             config,
-            vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE
+            vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
         )
 
     gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
@@ -193,8 +195,8 @@ def train(config: Config):
             dataloader=train_dataloader,
             training_progress=training_progress,
             data_rank=config.data.data_rank,
-            diloco_offloaded_optimizer=diloco.outer_optimizer if config.diloco is not None else None, # type: ignore
-            diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None, # type: ignore
+            diloco_offloaded_optimizer=diloco.outer_optimizer if config.diloco is not None else None,  # type: ignore
+            diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None,  # type: ignore
         )
 
         logger.debug("Optimizers set up.")
@@ -377,7 +379,8 @@ def train(config: Config):
 
             with record_function("Clip grad"):
                 logger.debug("clipping grad")
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()
+                # full tensor needed because grad_norm is a DTensor
 
             with record_function("Optimizer step"):
                 logger.debug("inner optimizer step()")
@@ -409,6 +412,7 @@ def train(config: Config):
                 "Perplexity": torch.exp(loss_batch).item(),
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
+                "grad_norm": grad_norm.item(),
             }
 
             if config.optim.z_loss:
@@ -515,7 +519,7 @@ def train(config: Config):
 if __name__ == "__main__":
     # Allow eager fallback during production so that that the training runs dont die
     # However, in development, we want to know that we broke torch compile
-    torch._dynamo.config.suppress_errors = "ZERO_BAND_DEV" not in os.environ # type: ignore
+    torch._dynamo.config.suppress_errors = "ZERO_BAND_DEV" not in os.environ  # type: ignore
     torch.set_float32_matmul_precision("high")
     torch.manual_seed(42)
 
@@ -540,21 +544,20 @@ if __name__ == "__main__":
 
     try:
         if config.train.torch_profiler and world_info.rank == 0:
-
             # NOTE(apaz-cli): I cannot seem to get the memory profiler to work.
             # Running into this issue: https://github.com/pytorch/pytorch/issues/64345
             # In the meantime, we can use the memory snapshotter.
 
             logger.debug("Running train() with profiler.")
             prof = torch.profiler.profile(
-                    activities=[
-                        torch.profiler.ProfilerActivity.CPU,
-                        torch.profiler.ProfilerActivity.CUDA,
-                    ],
-                    record_shapes=True,
-                    #profile_memory=True,
-                    #with_stack=True,
-                )
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                record_shapes=True,
+                # profile_memory=True,
+                # with_stack=True,
+            )
             try:
                 prof.__enter__()
                 train(config)
@@ -572,8 +575,8 @@ if __name__ == "__main__":
             logger.info("\n" + "*" * width + " GPU MEM " + "*" * width)
             logger.info(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
 
-            #logger.info("Exporting memory timeline.")
-            #prof.export_memory_timeline(f"logs/mem_timeline.html", device="cuda:0")
+            # logger.info("Exporting memory timeline.")
+            # prof.export_memory_timeline(f"logs/mem_timeline.html", device="cuda:0")
         else:
             train(config)
     except Exception as e:

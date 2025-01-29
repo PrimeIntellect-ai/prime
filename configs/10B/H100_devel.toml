@@ -1,4 +1,4 @@
-name_model = "26B"
+name_model = "10B" # "26B"
 type_model = "llama2"
 
 project = "debug_I2_zero_band"

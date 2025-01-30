@@ -47,18 +47,23 @@ def compute_cross_entropy_loss(
     else:
         # Ignore number of chunks, since it is not confugrable in liger.
         from liger_kernel.ops.fused_linear_cross_entropy import LigerFusedLinearCrossEntropyFunction
-        ce_loss = LigerFusedLinearCrossEntropyFunction.apply(
-            logits,
-            fused_linear_weight,
-            labels,
-            None, # bias
-            ignore_index,
-            z_weight if z_weight is not None else 0.0, # lse_square_scale
-            0.0, # label_smoothing
-            "mean", # reduction
-            None, # softcap
+        ret = LigerFusedLinearCrossEntropyFunction.apply(
+            logits,                                      # _input
+            fused_linear_weight,                         # weight
+            labels,                                      # target
+            None,                                        # ce_weight
+            None,                                        # bias
+            ignore_index,                                # ce_weight=None
+            z_weight if z_weight is not None else 0.0,   # lse_square_scale
+            0.0,                                         # label_smoothing
+            "mean",                                      # reduction
+            None,                                        # softcap
+            fused_linear_weight is not None,             # return_z_loss
         )
-        return ce_loss, None
+        if not isinstance(ret, tuple):
+            assert isinstance(ret, Tensor)
+            ret = (ret, None)
+        return ret
 
 
 # Compile the upcast into the CE calculation

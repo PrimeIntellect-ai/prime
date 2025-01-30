@@ -13,7 +13,7 @@ micro_bs = 1
 ac_ckpt = true
 torch_profiler = false
 torch_compile = true
-fused_linear_ce = false
+fused_linear_ce = true
 
 [train.memory_profiler]
 freq = 1
@@ -21,11 +21,10 @@ snapshot_dir = "logs/"
 
 [optim]
 sched_type = "wsd-sqrt"
-batch_size = 128 #1M tokens bs
+batch_size = 128
 warmup_steps = 0
 total_steps = 1 # 2_000
-num_chunks = 8
-z_loss = false
+z_loss = true
 
 [data]
 seq_length = 8192

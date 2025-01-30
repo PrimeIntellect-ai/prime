@@ -319,11 +319,6 @@ def train(config: Config):
                     flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
                 with record_function("Loss calculation"):
-                    if config.train.fused_linear_ce and config.optim.z_loss:
-                        raise NotImplementedError(
-                            "Liger kernel does not yet support fused linear CE and z loss. See https://github.com/linkedin/Liger-Kernel/issues/527"
-                        )
-
                     ce_loss, z_loss = compute_cross_entropy_loss(
                         flatten_logits,
                         flatten_labels,
@@ -339,6 +334,7 @@ def train(config: Config):
                         z_loss /= gradient_accumulation_steps
                         loss = ce_loss + z_loss
                     else:
+                        assert z_loss is None
                         loss = ce_loss / gradient_accumulation_steps
 
                 with record_function("Backward"):

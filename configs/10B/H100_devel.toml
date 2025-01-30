@@ -14,6 +14,7 @@ ac_ckpt = true
 torch_profiler = false
 torch_compile = true
 fused_linear_ce = true
+fsdp_cpu_offload = true
 
 [train.memory_profiler]
 freq = 1

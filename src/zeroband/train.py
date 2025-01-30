@@ -151,7 +151,7 @@ def train(config: Config):
             param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
         )
 
-        offload_policy = CPUOffloadPolicy(pin_memory=True)
+        offload_policy = CPUOffloadPolicy(pin_memory=True) if config.train.fsdp_cpu_offload else None
 
         for layer_id, transformer_block in model.layers.items():
             if config.train.reshard_after_forward:

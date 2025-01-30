@@ -5,7 +5,7 @@ from multiprocessing.process import _children  # type: ignore
 
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
 from torch.autograd.profiler import record_function
 
 from zeroband.checkpoint import CkptManager, TrainingProgress
@@ -151,6 +151,8 @@ def train(config: Config):
             param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
         )
 
+        offload_policy = CPUOffloadPolicy(pin_memory=True)
+
         for layer_id, transformer_block in model.layers.items():
             if config.train.reshard_after_forward:
                 reshard_after_forward = int(layer_id) < len(model.layers) - 1
@@ -161,12 +163,14 @@ def train(config: Config):
                 mp_policy=mp_policy,
                 mesh=elastic_device_mesh.cuda_local_mesh,
                 reshard_after_forward=reshard_after_forward,
+                offload_policy=offload_policy,
             )
         fully_shard(
             model,
             mp_policy=mp_policy,
             mesh=elastic_device_mesh.cuda_local_mesh,
             reshard_after_forward=config.train.reshard_after_forward,
+            offload_policy=offload_policy,
         )
         logger.debug("model fsdped")
 

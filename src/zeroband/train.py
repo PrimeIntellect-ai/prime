@@ -5,7 +5,7 @@ from multiprocessing.process import _children  # type: ignore
 
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy # type: ignore
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
 from torch.autograd.profiler import record_function
 
 from zeroband.checkpoint import CkptManager, TrainingProgress
@@ -148,7 +148,7 @@ def train(config: Config):
             reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
         )
 
-        offload_policy = CPUOffloadPolicy(pin_memory=True)
+        offload_policy = CPUOffloadPolicy(pin_memory=True) if config.train.fsdp_cpu_offload else None
 
         for layer_id, transformer_block in model.layers.items():
             if config.train.reshard_after_forward:
@@ -330,7 +330,6 @@ def train(config: Config):
 
                 with record_function("Loss calculation"):
                     logger.debug("Computing loss")
-
                     ce_loss, z_loss = compute_cross_entropy_loss(
                         flatten_logits,
                         flatten_labels,

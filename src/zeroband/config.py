@@ -98,6 +98,8 @@ class TrainConfig(BaseConfig):
 
     fused_linear_ce: bool = False
 
+    fsdp_cpu_offload: bool = False
+
     attn_fn: AttnFnType = "flex"
 
 

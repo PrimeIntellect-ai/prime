@@ -334,7 +334,6 @@ def train(config: Config):
                         z_loss /= gradient_accumulation_steps
                         loss = ce_loss + z_loss
                     else:
-                        assert z_loss is None
                         loss = ce_loss / gradient_accumulation_steps
 
                 with record_function("Backward"):

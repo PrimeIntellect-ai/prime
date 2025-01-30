@@ -33,7 +33,8 @@ from zeroband.utils.monitor import HttpMonitor
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.utils.profiler import MemoryProfiler
 from zeroband.utils.world_info import get_world_info
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
+from zeroband.utils.stopwatch import Stopwatch
 
 from transformers import AutoTokenizer
 from pydantic_config import parse_argv

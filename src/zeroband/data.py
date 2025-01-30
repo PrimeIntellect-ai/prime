@@ -3,7 +3,7 @@ import random
 from typing import Any, Generator, Optional, List, Dict, TypedDict, Union
 import functools
 
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 from zeroband.config import DataConfig
 
 import torch

@@ -36,7 +36,7 @@ from zeroband.utils.state_dict_send_recv import (
     send_tensor_and_state_dict,
 )
 from distributed_shampoo import DistributedShampoo
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 from zeroband.config import CkptConfig
 from zeroband.utils.world_info import get_world_info
 
@@ -151,7 +151,7 @@ def non_error_barrier():
     try:
         dist.barrier()
     except Exception as e:
-        from zeroband.utils.logging import get_logger
+        from zeroband.utils.logger import get_logger
         get_logger().info(f"Error in data checkpointing barrier: {e}, continuing training")
 
 

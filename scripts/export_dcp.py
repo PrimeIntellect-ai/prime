@@ -11,7 +11,7 @@ from zeroband.config import resolve_env_vars
 from zeroband.checkpoint import ModelWrapper
 from zeroband.utils import get_module_signature
 from zeroband.train import Config
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 from pydantic_config import parse_argv
 from transformers import AutoTokenizer
 import math

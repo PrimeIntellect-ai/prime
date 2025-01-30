@@ -5,7 +5,7 @@ from torch import nn
 from zeroband.comms import ElasticDeviceMesh
 from zeroband.collectives import Compression, all_reduce
 from zeroband.utils.world_info import get_world_info
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 from zeroband.config import DilocoConfig
 import torch.distributed as dist
 from torch.distributed._tensor.api import DTensor

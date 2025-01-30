@@ -4,7 +4,7 @@ import time
 import subprocess
 from torch.distributed.device_mesh import init_device_mesh
 from zeroband.utils.world_info import get_world_info
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 import torch.distributed as dist
 from datetime import timedelta
 from typing import List, Tuple, Optional

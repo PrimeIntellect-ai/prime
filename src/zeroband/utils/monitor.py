@@ -1,5 +1,5 @@
 from typing import Any
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 import aiohttp
 from aiohttp import ClientError
 import asyncio

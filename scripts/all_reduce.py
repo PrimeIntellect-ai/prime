@@ -5,7 +5,7 @@ import torch.utils.benchmark as benchmark
 
 from zeroband.collectives import Compression, all_reduce
 from zeroband.utils.world_info import get_world_info
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 
 from enum import Enum
 

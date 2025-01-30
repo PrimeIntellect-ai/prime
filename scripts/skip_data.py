@@ -25,7 +25,7 @@ from zeroband.train import Config
 from zeroband.data import get_dataloader
 
 from zeroband.utils.world_info import get_world_info
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 
 
 def skip_data(config: Config):

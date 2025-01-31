@@ -22,8 +22,11 @@ class DataConfig(BaseConfig):
     reverse_data_files: bool = False
     split_by_data_rank: bool = True
 
+
 class AdamConfig(BaseConfig):
-    type: Literal["adam"] = "adam" # the literal is used to distinguish between the different optimizers configuration in the union type
+    type: Literal["adam"] = (
+        "adam"  # the literal is used to distinguish between the different optimizers configuration in the union type
+    )
     lr: float = 4e-4
     weight_decay: float = 0.1
     betas1: float = 0.9
@@ -41,12 +44,21 @@ class SoapConfig(BaseConfig):
     precondition_frequency: int = 100
 
 
-OptimizersConfig: TypeAlias = AdamConfig | SoapConfig
+class MuonConfig(BaseConfig):
+    type: Literal["muon"] = "muon"
+    ns_steps: int = 5
+    lr: float = 0.02
+    momentum: float = 0.95
+    nesterov: bool = True
+
+
+OptimizersConfig: TypeAlias = AdamConfig | SoapConfig | MuonConfig
 
 
 class PowerSGDConfig(BaseConfig):
     rank: int = 1
     warmup_steps: int = 1000
+
 
 class OptimConfig(BaseConfig):
     optim: OptimizersConfig = AdamConfig()
@@ -74,6 +86,7 @@ class DilocoConfig(BaseConfig):
     compression: Compression = Compression.NO
 
     retry_all_reduce: int = 3
+
 
 class MemoryProfilerConfig(BaseConfig):
     freq: int = 10
@@ -147,7 +160,6 @@ class CkptConfig(BaseConfig):
         if self.remote_data_load and self.remote_data_path is None:
             raise ValueError("remote_data_load is set but remote_data_path is not set")
         return self
-
 
 
 class Config(BaseConfig):
@@ -237,7 +249,8 @@ def get_env_config(config: Config | None, item: str | None, default: Any | None 
 
     return cfg
 
-def get_env_config_bool(config: Config | None, item: str | None, default: bool  | None = None) -> bool:
+
+def get_env_config_bool(config: Config | None, item: str | None, default: bool | None = None) -> bool:
     """
     Call get_env_config and convert strings to bools where makes sense.
 
@@ -254,4 +267,3 @@ def get_env_config_bool(config: Config | None, item: str | None, default: bool  
     if isinstance(val, str):
         return val.lower() == "true" or val.lower() == "1"
     return bool(val)
-

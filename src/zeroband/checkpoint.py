@@ -152,6 +152,7 @@ def non_error_barrier():
         dist.barrier()
     except Exception as e:
         from zeroband.utils.logging import get_logger
+
         get_logger().info(f"Error in data checkpointing barrier: {e}, continuing training")
 
 
@@ -174,8 +175,8 @@ class CkptManager:
         self,
         config: CkptConfig,
         model: nn.Module,
-        optimizer: Optimizer,
-        scheduler: LambdaLR,
+        optimizer: list[Optimizer],
+        scheduler: list[LambdaLR],
         dataloader: StatefulDataLoader,
         training_progress: TrainingProgress,
         data_rank: int | None,

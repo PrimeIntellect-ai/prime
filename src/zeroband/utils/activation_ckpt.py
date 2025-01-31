@@ -21,4 +21,4 @@ def apply_ac_ckpt(model: Transformer, num: int):
             model.layers.register_module(layer_id, transformer_block)
             layers_ckpt += 1
 
-    logger.info(f"Applied activation checkpointing to {layers_ckpt} layers")
+    logger.debug(f"Applied activation checkpointing to {layers_ckpt} layers")

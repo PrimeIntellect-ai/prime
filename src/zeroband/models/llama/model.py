@@ -165,7 +165,7 @@ def seqlens_to_docs_tensor(seqlens: list[torch.Tensor]) -> torch.Tensor:
     return torch.stack([torch.repeat_interleave(torch.arange(len(seq), device=seq.device), seq) for seq in seqlens])
 
 
-def create_block_mask_from_seqlens(seqlens: list[torch.Tensor]) -> BlockMask:
+def create_block_mask_from_seqlens(seqlens: list[torch.Tensor], device: str = "cuda") -> BlockMask:
     """Creates a block mask from a list of sequence lengths.
 
     Example:
@@ -178,7 +178,7 @@ def create_block_mask_from_seqlens(seqlens: list[torch.Tensor]) -> BlockMask:
                 [0 0 1 1 0]  # Second token of doc 1 can see both tokens of doc 1
                 [0 0 0 0 1]] # Token of doc 2 can only see itself
     """
-    docs = seqlens_to_docs_tensor(seqlens).to("cuda")
+    docs = seqlens_to_docs_tensor(seqlens).to(device)
     batch_size, max_seq_len = docs.shape
 
     def document_causal_mask(b, h, q_idx, kv_idx):
@@ -192,7 +192,7 @@ def create_block_mask_from_seqlens(seqlens: list[torch.Tensor]) -> BlockMask:
         None,
         max_seq_len,
         max_seq_len,
-        device="cuda",
+        device=device,
         _compile=True,
         BLOCK_SIZE=max_seq_len if max_seq_len < _DEFAULT_SPARSE_BLOCK_SIZE else _DEFAULT_SPARSE_BLOCK_SIZE,
     )

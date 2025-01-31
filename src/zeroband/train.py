@@ -116,7 +116,7 @@ def train(config: Config):
             world_size=world_info.world_size,
             rank=world_info.rank,
             batch_size=config.train.micro_bs,
-            data_config=config.data,
+            config=config,
         )
         train_dataloader_iterator = iter(train_dataloader)
         sw.end_block("dataloader loaded")
@@ -330,15 +330,14 @@ def train(config: Config):
                     # TODO/NOTE: We could overlap sending the batch with communication
                     #            although to be honest the perf impact is minimal
                     batch = next(train_dataloader_iterator)
-                    input_ids = batch["input_ids"].to("cuda")
-                    labels = batch["labels"].to("cuda")
-                    if config.train.sequence_packing:
-                        seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
-                        block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
-                    else:
-                        seqlens = None
-                        block_mask = None
-                    sw.end_block("batch loaded")
+                    #input_ids = batch["input_ids"].to("cuda")
+                    input_ids = batch["input_ids"].cuda(non_blocking=True)
+                    #labels = batch["labels"].to("cuda")
+                    labels = batch["labels"].cuda(non_blocking=True)
+                    seqlens = batch["seqlens"]
+                    block_mask = create_block_mask_from_seqlens(seqlens) if config.train.sequence_packing else None
+                    sw.end_block("Batch loaded")
+                    del seqlens
 
                 with record_function("Run model"):
                     sw.start_block()

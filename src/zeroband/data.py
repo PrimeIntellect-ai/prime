@@ -3,8 +3,10 @@ import random
 from typing import Any, Generator, Optional, List, Dict, TypedDict, Union
 import functools
 
+import torch.utils.data.dataloader
+
 from zeroband.utils.logger import get_logger
-from zeroband.config import DataConfig
+from zeroband.config import Config, DataConfig
 
 import torch
 from torch.utils.data import IterableDataset, Dataset
@@ -108,27 +110,6 @@ class SequencePackingDataSet(IterableDataset, Stateful):
     def load_state_dict(self, state_dict):
         self.dataset.load_state_dict(state_dict["dataset"])
         self.state = SequencePackingDataSetState(**state_dict["state"])
-
-
-def collate_fn(samples: list[dict[str, torch.LongTensor]]) -> dict[str, torch.LongTensor | list[torch.LongTensor]]:
-    assert samples[0].keys() == {"input_ids", "labels", "seqlens"}
-
-    inputs_ids = []
-    labels = []
-    seqlens = []
-
-    for sample in samples:
-        inputs_ids.append(sample["input_ids"])
-        labels.append(sample["labels"])
-
-        seqlens.append(torch.Tensor(sample["seqlens"]).long())
-
-    return {
-        "input_ids": torch.stack(inputs_ids, dim=0),
-        "labels": torch.stack(labels, dim=0),
-        "seqlens": seqlens,
-    }
-
 
 @dataclass
 class PQDatasetState:
@@ -278,8 +259,9 @@ def get_dataloader(
     world_size: int,
     rank: int,
     batch_size: int,
-    data_config: DataConfig,
+    config: Config,
 ) -> StatefulDataLoader:
+    data_config: DataConfig = config.data
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
     else:
@@ -288,6 +270,24 @@ def get_dataloader(
         )
 
     dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
+
+    def collate_fn(samples: list[dict[str, torch.LongTensor]]) -> dict[str, Any]:
+        assert samples[0].keys() == {"input_ids", "labels", "seqlens"}
+
+        inputs_ids = []
+        labels = []
+        seqlens = []
+
+        for sample in samples:
+            inputs_ids.append(sample["input_ids"])
+            labels.append(sample["labels"])
+            seqlens.append(torch.Tensor(sample["seqlens"]).long())
+
+        return {
+            "input_ids": torch.stack(inputs_ids, dim=0),
+            "labels": torch.stack(labels, dim=0),
+            "seqlens": [seqlen for seqlen in seqlens] if config.train.sequence_packing else seqlens
+        }
 
     return StatefulDataLoader(
         dataset,

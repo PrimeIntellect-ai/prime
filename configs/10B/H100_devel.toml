@@ -9,7 +9,7 @@ log_level = "DEBUG"
 
 
 [train]
-micro_bs = 1
+micro_bs = 8
 ac_ckpt = true
 torch_profiler = false
 torch_compile = true

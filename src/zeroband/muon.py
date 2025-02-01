@@ -38,6 +38,54 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
     return X
 
 
+@torch.compile
+def low_rank_approximation_zeropower_via_newtonschulz5(G: Tensor, rank: int, steps: int = 5) -> tuple[Tensor, Tensor]:
+    """
+    Compute a low-rank approximation of matrix G using Newton-Schulz iteration.
+    Returns the expanded approximated matrix directly.
+
+    Args:
+        G: Input tensor of shape (..., m, n)
+        rank: Target rank for the approximation
+        steps: Number of Newton-Schulz iterations
+
+    Returns:
+        G_approx: Low rank approximation of G with the same shape as G
+    """
+    assert G.ndim >= 2
+    assert rank > 0 and rank <= min(G.size(-2), G.size(-1))
+
+    # Constants for quintic iteration
+    a, b, c = (3.4445, -4.7750, 2.0315)
+
+    # Convert to bfloat16
+    G = G.bfloat16()
+
+    # Initialize random projection matrix Q in bfloat16
+    n = G.size(-1)
+    Q = torch.randn((*G.shape[:-2], n, rank), device=G.device).bfloat16()
+    Q = Q / (Q.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+
+    # Power iteration to find approximate range
+    Y = G @ Q
+
+    # Normalize Y
+    Y = Y / (Y.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+
+    # Newton-Schulz iterations for orthogonalization
+    for _ in range(steps):
+        A = Y @ Y.mT
+        B = b * A + c * A @ A
+        Y = a * Y + B @ Y
+
+    # Compute factors and immediately expand
+    U = Y
+    V = G.mT @ U
+    G_approx = U @ V.mT
+
+    return G_approx
+
+
 class Muon(torch.optim.Optimizer):
     """
     Muon - MomentUm Orthogonalized by Newton-schulz
@@ -63,13 +111,24 @@ class Muon(torch.optim.Optimizer):
         ns_steps: The number of Newton-Schulz iteration steps to use.
     """
 
-    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5, rank=0, world_size=1):
+    def __init__(
+        self,
+        params,
+        lr=0.02,
+        momentum=0.95,
+        nesterov=True,
+        ns_steps=5,
+        rank=0,
+        world_size=1,
+        compression_ratio: float | None = None,
+    ):
         self.rank = rank
         self.world_size = world_size
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
         params: list[Tensor] = [*params]
         assert all(isinstance(p, Tensor) for p in params)
         sizes = {p.numel() for p in params}
+        self.compression_ratio = compression_ratio
 
         def create_update_buffer(size: int):
             b = torch.empty(self.world_size, size, dtype=torch.bfloat16, device="cuda")
@@ -116,7 +175,12 @@ class Muon(torch.optim.Optimizer):
                     buf: Tensor = state["momentum_buffer"]
                     buf.lerp_(g, 1 - momentum)
                     g = g.lerp_(buf, momentum) if nesterov else buf
-                    g = zeropower_via_newtonschulz5(g, steps=ns_steps).flatten()
+
+                    if self.compression_ratio is not None:
+                        mat_rank = int(g.shape[0] * self.compression_ratio)
+                        g = low_rank_approximation_zeropower_via_newtonschulz5(g, mat_rank, steps=ns_steps).flatten()
+                    else:
+                        g = zeropower_via_newtonschulz5(g, steps=ns_steps).flatten()
                 else:
                     g = update_buffer_views[self.rank]
                 update_prev()  # async all_gather instead of sync all_reduce by @YouJiacheng

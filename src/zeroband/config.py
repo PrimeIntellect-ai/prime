@@ -52,6 +52,7 @@ class MuonConfig(BaseConfig):
     nesterov: bool = True
     compression_ratio: float | None = None
     compression_step_start: int = 0
+    lie_compression: bool = False
 
     @model_validator(mode="after")
     def calidate_compression(self):

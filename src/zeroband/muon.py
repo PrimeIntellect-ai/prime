@@ -86,6 +86,77 @@ def low_rank_approximation_zeropower_via_newtonschulz5(G: Tensor, rank: int, ste
     return G_approx
 
 
+@torch.compile
+def low_rank_approximation_via_newtonschulz_lie(G: Tensor, rank: int, steps: int = 5) -> Tensor:
+    """
+    Compute a low-rank approximation of matrix G using Newton-Schulz iteration with Lie group structure.
+    Returns the approximated matrix in the form Q = (I + UVᵀ)diag(d).
+
+    Args:
+        G: Input tensor of shape (..., m, n)
+        rank: Target rank for the approximation
+        steps: Number of Newton-Schulz iterations
+
+    Returns:
+        G_approx: Low rank approximation of G with the same shape as G
+    """
+    assert G.ndim >= 2
+    assert rank > 0 and rank <= min(G.size(-2), G.size(-1))
+
+    # Constants for quintic iteration
+    a, b, c = (3.4445, -4.7750, 2.0315)
+
+    # Convert to bfloat16
+    G = G.bfloat16()
+    m, n = G.size(-2), G.size(-1)
+
+    # Initialize random projection matrix Q
+    Q = torch.randn((*G.shape[:-2], n, rank), device=G.device).bfloat16()
+    Q = Q / (Q.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+
+    # Power iteration to find approximate range
+    Y = G @ Q
+    Y = Y / (Y.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+
+    # Newton-Schulz iterations for orthogonalization
+    for _ in range(steps):
+        A = Y @ Y.mT
+        B = b * A + c * A @ A
+        Y = a * Y + B @ Y
+
+    # Compute U factor
+    U = Y
+
+    # Compute V factor through projection
+    V = G.mT @ U
+
+    # Normalize U and V to have unit norm
+    U_norms = torch.sum(U * U, dim=-1, keepdim=True).sqrt()
+    V_norms = torch.sum(V * V, dim=-1, keepdim=True).sqrt()
+
+    U = U / (U_norms + 1e-7)
+    V = V / (V_norms + 1e-7)
+
+    # Create identity matrix of appropriate size
+    Id = torch.eye(m, device=G.device, dtype=G.dtype)
+    Id = Id.expand(*G.shape[:-2], m, m)
+
+    # Compute diagonal scaling
+    d = torch.diagonal(G @ G.mT, dim1=-2, dim2=-1).sqrt()
+    d = d / (d.norm(dim=-1, keepdim=True) + 1e-7)
+
+    # Construct final approximation Q = (I + UVᵀ)diag(d)
+    G_approx = U @ V.mT
+
+    # Scale the approximation to match G's magnitude
+    G_norms = torch.sum(G * G, dim=(-2, -1), keepdim=True).sqrt()
+    G_approx_norms = torch.sum(G_approx * G_approx, dim=(-2, -1), keepdim=True).sqrt()
+    scale = G_norms / (G_approx_norms + 1e-7)
+    G_approx = G_approx * scale
+
+    return G_approx
+
+
 class Muon(torch.optim.Optimizer):
     """
     Muon - MomentUm Orthogonalized by Newton-schulz
@@ -122,11 +193,13 @@ class Muon(torch.optim.Optimizer):
         world_size=1,
         compression_ratio: float | None = None,
         compression_step_start: int = 0,
+        lie_compression: bool = False,
     ):
         self.rank = rank
         self.world_size = world_size
         self.compression_ratio = compression_ratio
         self.compression_step_start = compression_step_start
+        self.lie_compression = lie_compression
         self._step_count = 0  # Add step counter
 
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
@@ -184,7 +257,12 @@ class Muon(torch.optim.Optimizer):
                     # Only apply compression if we've reached the start step and compression ratio is set
                     if self.compression_ratio is not None and self._step_count >= self.compression_step_start:
                         mat_rank = int(g.shape[0] * self.compression_ratio)
-                        g = low_rank_approximation_zeropower_via_newtonschulz5(g, mat_rank, steps=ns_steps).flatten()
+                        if self.lie_compression:
+                            g = low_rank_approximation_via_newtonschulz_lie(g, mat_rank, steps=ns_steps).flatten()
+                        else:
+                            g = low_rank_approximation_zeropower_via_newtonschulz5(
+                                g, mat_rank, steps=ns_steps
+                            ).flatten()
                     else:
                         g = zeropower_via_newtonschulz5(g, steps=ns_steps).flatten()
                 else:

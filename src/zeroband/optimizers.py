@@ -62,6 +62,7 @@ def get_optimizer(model: Transformer, config: OptimizersConfig) -> list[torch.op
             rank=world_info.rank,
             world_size=world_info.world_size,
             compression_ratio=config.compression_ratio,
+            compression_step_start=config.compression_step_start,
         )
         return [optimizer2, optimizer1]
     else:

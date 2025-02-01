@@ -121,14 +121,18 @@ class Muon(torch.optim.Optimizer):
         rank=0,
         world_size=1,
         compression_ratio: float | None = None,
+        compression_step_start: int = 0,
     ):
         self.rank = rank
         self.world_size = world_size
+        self.compression_ratio = compression_ratio
+        self.compression_step_start = compression_step_start
+        self._step_count = 0  # Add step counter
+
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
         params: list[Tensor] = [*params]
         assert all(isinstance(p, Tensor) for p in params)
         sizes = {p.numel() for p in params}
-        self.compression_ratio = compression_ratio
 
         def create_update_buffer(size: int):
             b = torch.empty(self.world_size, size, dtype=torch.bfloat16, device="cuda")
@@ -141,6 +145,8 @@ class Muon(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step(self):
+        self._step_count += 1  # Increment step counter
+
         for group in self.param_groups:
             lr = group["lr"]
             momentum = group["momentum"]
@@ -148,12 +154,11 @@ class Muon(torch.optim.Optimizer):
             ns_steps = group["ns_steps"]
             update_buffer = group["update_buffer"]
             update_buffer_views: list[Tensor] = group["update_buffer_views"]
-            # generate weight updates in distributed fashion
             params: list[Tensor] = group["params"]
             handle = None
             params_world = None
 
-            def update_prev():  # optimized Muon implementation contributed by @YouJiacheng
+            def update_prev():
                 if params_world is None:
                     return
                 assert handle is not None
@@ -176,14 +181,15 @@ class Muon(torch.optim.Optimizer):
                     buf.lerp_(g, 1 - momentum)
                     g = g.lerp_(buf, momentum) if nesterov else buf
 
-                    if self.compression_ratio is not None:
+                    # Only apply compression if we've reached the start step and compression ratio is set
+                    if self.compression_ratio is not None and self._step_count >= self.compression_step_start:
                         mat_rank = int(g.shape[0] * self.compression_ratio)
                         g = low_rank_approximation_zeropower_via_newtonschulz5(g, mat_rank, steps=ns_steps).flatten()
                     else:
                         g = zeropower_via_newtonschulz5(g, steps=ns_steps).flatten()
                 else:
                     g = update_buffer_views[self.rank]
-                update_prev()  # async all_gather instead of sync all_reduce by @YouJiacheng
+                update_prev()
                 handle = dist.all_gather_into_tensor(update_buffer, g, async_op=True)
                 params_world = params[base_i : base_i + self.world_size]
             update_prev()

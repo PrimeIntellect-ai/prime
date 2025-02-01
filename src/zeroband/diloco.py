@@ -8,7 +8,7 @@ from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logger import get_logger
 from zeroband.config import DilocoConfig
 import torch.distributed as dist
-from torch.distributed._tensor.api import DTensor
+from torch.distributed.tensor import DTensor
 from functools import lru_cache
 
 

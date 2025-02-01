@@ -5,7 +5,7 @@ from multiprocessing.process import _children  # type: ignore
 
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
 from torch.autograd.profiler import record_function
 
 from zeroband.checkpoint import CkptManager, TrainingProgress
@@ -70,10 +70,9 @@ def log_hash_training_state(
             logger.debug(f"outer diloco optimizer hash {id} : {outer_optimizer_hash}")
             logger.debug(f"outer diloco model hash {id} : {outer_model_hash}")
 
-            metrics.update({
-                f"outer_optimizer_hash_{id}": outer_optimizer_hash,
-                f"outer_model_hash_{id}": outer_model_hash
-            })
+            metrics.update(
+                {f"outer_optimizer_hash_{id}": outer_optimizer_hash, f"outer_model_hash_{id}": outer_model_hash}
+            )
         if world_info.rank == 0:
             assert metric_logger is not None
             metric_logger.log(metrics)
@@ -142,13 +141,11 @@ def train(config: Config):
             apply_ac_ckpt(model, num)
 
         elastic_device_mesh = ElasticDeviceMesh(
-            enable=config.diloco is not None,
-            live_recovery_rank_src=config.ckpt.live_recovery_rank_src
+            enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
         )
 
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=torch.bfloat16,
-            reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
+            param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
         )
 
         offload_policy = CPUOffloadPolicy(pin_memory=True) if config.train.fsdp_cpu_offload else None
@@ -365,9 +362,13 @@ def train(config: Config):
 
             with sw.record_block("Loss allreduce()"):
                 # Launch both allreduces at the same time to hide latency
-                loss_allreduce = dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True)
+                loss_allreduce = dist.all_reduce(
+                    tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True
+                )
                 if config.optim.z_loss:
-                    z_loss_allreduce = dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True)
+                    z_loss_allreduce = dist.all_reduce(
+                        tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True
+                    )
 
                 assert isinstance(loss_allreduce, torch.distributed.Work)
                 loss_allreduce.wait()

@@ -33,6 +33,10 @@ all = [
     "lm-eval"
 ]
 
+vllm = [
+    "vllm>=0.7.1"
+]
+
 
 [build-system]
 requires = ["hatchling"]

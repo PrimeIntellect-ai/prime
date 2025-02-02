@@ -2,7 +2,7 @@ from zeroband.models.llama.model import Transformer
 
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
 
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 
 
 def apply_ac_ckpt(model: Transformer, num: int):
@@ -21,4 +21,4 @@ def apply_ac_ckpt(model: Transformer, num: int):
             model.layers.register_module(layer_id, transformer_block)
             layers_ckpt += 1
 
-    logger.info(f"Applied activation checkpointing to {layers_ckpt} layers")
+    logger.debug(f"Applied activation checkpointing to {layers_ckpt} layers")

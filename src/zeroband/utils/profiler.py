@@ -1,7 +1,7 @@
 import os
 import pickle
 import torch
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 from zeroband.utils.world_info import get_world_info
 
 _MAX_ENTRIES = 10000

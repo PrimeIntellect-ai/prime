@@ -3,7 +3,7 @@ import torch
 from zeroband.data import InterleaveDataset, ParquetDataset, SequencePackingDataSet, collate_fn
 from torch.utils.data import DataLoader
 from zeroband.data import load_all_datasets, DataConfig
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 from collections import Counter
 from itertools import chain
 import pytest

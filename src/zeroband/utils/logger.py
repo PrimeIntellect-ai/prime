@@ -29,8 +29,6 @@ def get_logger(config: Config | None = None, name: str | None = None) -> logging
     if logger is not None:
         return logger
 
-    assert isinstance(config, Config)
-
     try:
         world_info = get_world_info()
     except KeyError:
@@ -40,11 +38,12 @@ def get_logger(config: Config | None = None, name: str | None = None) -> logging
         world_info.local_rank = 0
     logger = logging.getLogger(name or __name__)
 
+    log_level = config.log_level if config else "DEBUG"
     if world_info.local_rank == 0:
-        logger.setLevel(level=getattr(logging, config.log_level, logging.INFO))
+        logger.setLevel(level=getattr(logging, log_level, logging.INFO))
     else:
-        if config.log_all_rank:
-            logger.setLevel(level=getattr(logging, config.log_level, logging.INFO))
+        if (not config) or config.log_all_rank:
+            logger.setLevel(level=getattr(logging, log_level, logging.INFO))
         else:
             logger.setLevel(level=logging.CRITICAL)  # Disable logging for non-zero ranks
 

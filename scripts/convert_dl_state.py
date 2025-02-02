@@ -8,7 +8,7 @@ from zeroband.config import resolve_env_vars
 from zeroband.data import get_dataloader
 from transformers import AutoTokenizer
 from zeroband.train import Config
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 from pydantic_config import parse_argv
 
 COMMON_KEYS = [

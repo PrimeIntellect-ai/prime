@@ -3,7 +3,7 @@ import random
 from typing import Any, Generator, Optional, List, Dict, TypedDict, Union
 import functools
 
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 from zeroband.config import DataConfig
 
 import torch
@@ -222,7 +222,7 @@ class InterleaveDataset(IterableDataset, Stateful):
     The state can be saved and restored. Under the hood we just fast forward the random generator to the current position.
     """
 
-    def __init__(self, datasets: List[ParquetDataset], probabilities: Optional[List[float]] = None, seed: int = 42):
+    def __init__(self, datasets: List[ParquetDataset], probabilities: List[float], seed: int = 42):
         assert len(datasets) > 0, "At least one dataset is required"
         assert len(datasets) == len(probabilities), "The number of datasets and probabilities must be the same"
 

@@ -173,7 +173,7 @@ def train(config: Config):
         )
 
     # Setup optimizers
-    with sw.record_block("Set up Optimizers", "Set up optimizers"):
+    with sw.record_block("Set up Optimizers", "Set up Optimizers"):
         inner_optimizer = get_optimizer(config, model.parameters())
 
         diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
@@ -216,7 +216,7 @@ def train(config: Config):
             model = torch.compile(model) if not TYPE_CHECKING else model
 
     if config.ckpt.resume is not None:
-        with sw.record_block("Resume checkpoint", "Resuming checkpoint", "Resumed checkpoint"):
+        with sw.record_block("Resume checkpoint", "Resumed checkpoint", "Resuming checkpoint"):
             # all is inplace
             ckpt_manager.load(
                 resume_ckpt_path=config.ckpt.resume,
@@ -300,7 +300,7 @@ def train(config: Config):
             loss_batch = 0
             z_loss_batch = 0
 
-            with sw.record_block("Grad acc steps", "Running grad acc steps", "Grad acc steps finished"):
+            with sw.record_block("Grad acc steps", "Grad acc steps finished", "Running grad acc steps"):
                 for grad_acc_step in range(gradient_accumulation_steps):
                     sw.start("grad_acc_step")
 

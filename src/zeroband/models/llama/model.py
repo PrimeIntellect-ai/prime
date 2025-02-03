@@ -459,7 +459,9 @@ class Transformer(nn.Module):
         self.norm = build_norm(model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps)
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
-        self.init_weights()
+
+        with torch.no_grad():
+            self.init_weights()
 
     def init_weights(self):
         """

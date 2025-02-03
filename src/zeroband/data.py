@@ -354,9 +354,9 @@ class PrefetchDataLoader(IterableDataset, Stateful):
                     "block_mask": block_mask
                 }
                 self.next_batch = processed_batch
-                get_logger().critical(f"Prefetched batch")
+                get_logger().critical("Prefetched batch")
 
-            get_logger().critical(f"Spinning worker thread")
+            get_logger().critical("Spinning worker thread")
 
             self.thread = threading.Thread(target=_task)
             self.thread.start()

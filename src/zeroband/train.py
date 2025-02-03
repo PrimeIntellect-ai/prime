@@ -16,7 +16,6 @@ from zeroband.diloco import Diloco
 from zeroband.loss import compute_cross_entropy_loss
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
-from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.optimizers import get_optimizer
 from zeroband.utils import (
     FakeTokenizer,

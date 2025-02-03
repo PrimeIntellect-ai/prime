@@ -2,9 +2,11 @@ from dataclasses import dataclass, asdict
 import random
 from typing import Any, Generator, Optional, List, Dict, TypedDict, Union
 import functools
+import threading
 
+from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.utils.logger import get_logger
-from zeroband.config import DataConfig
+from zeroband.config import Config, DataConfig
 
 import torch
 from torch.utils.data import IterableDataset, Dataset
@@ -14,6 +16,8 @@ from torch.distributed.checkpoint.stateful import Stateful
 from datasets import load_dataset_builder, BuilderConfig
 from pyarrow import parquet as pq
 from transformers import PreTrainedTokenizer
+
+from zeroband.utils.world_info import get_world_info
 
 
 TEST_VOCAB_SIZE = 1024
@@ -241,7 +245,6 @@ class InterleaveDataset(IterableDataset, Stateful):
 
     def _init_random_state(self):
         """Initialize random generator and advance to current position"""
-        ...
         self.random_generator = random.Random(self.state.seed)
         # Advance the RNG to the current position
         for _ in range(self.state.current_index):
@@ -273,13 +276,126 @@ class InterleaveDataset(IterableDataset, Stateful):
             dataset.load_state_dict(state_dict[f"dataset_{i}"])
         self._init_random_state()
 
+
+class PrefetchDataLoader(IterableDataset, Stateful):
+    def __init__(self, original_dataloader, config):
+        self.original_dataloader = original_dataloader
+        self.config = config
+        self.current_iterator = None
+        self.prefetched_batch = None  # Used to hold a prefetched batch when restoring state
+
+    def __iter__(self):
+        # Create a new iterator and pass any saved prefetched_batch
+        iterator = self._PrefetchIterator(
+            self.original_dataloader,
+            self.config,
+            initial_prefetched_batch=self.prefetched_batch
+        )
+        self.current_iterator = iterator
+        self.prefetched_batch = None  # Consumed by the iterator
+        return iterator
+
+    def state_dict(self):
+        # Wait for any current iterator's prefetch to complete
+        if self.current_iterator is not None:
+            self.current_iterator._wait_for_prefetch()
+            prefetched_batch = self.current_iterator.next_batch
+        else:
+            prefetched_batch = self.prefetched_batch
+
+        state = {
+            'dataloader_state': self.original_dataloader.state_dict(),
+            'prefetched_batch': prefetched_batch
+        }
+        return state
+
+    def load_state_dict(self, state_dict):
+        self.original_dataloader.load_state_dict(state_dict['dataloader_state'])
+        self.prefetched_batch = state_dict['prefetched_batch']
+
+    class _PrefetchIterator:
+        def __init__(self, original_dataloader, config, initial_prefetched_batch=None):
+            self.original_iterator = iter(original_dataloader)
+            self.config = config
+            self.next_batch = initial_prefetched_batch
+            self.thread = None
+            if self.next_batch is None:
+                self._prefetch_next()
+
+        def _prefetch_next(self):
+            def _task():
+                get_logger().critical("Started worker thread")
+
+                # NOTE: Each thread gets its own threadlocal CUDA context and has to reset the device.
+                torch.cuda.set_device(get_world_info().local_rank)
+
+                try:
+                    batch = next(self.original_iterator)
+                except StopIteration:
+                    self.next_batch = None
+                    return
+
+                # Transfer to CUDA asynchronously
+                input_ids = batch["input_ids"].to("cuda", non_blocking=True)
+                labels = batch["labels"].to("cuda", non_blocking=True)
+
+                # Create block mask if needed
+                block_mask = None
+                if self.config.train.sequence_packing:
+                    seqlens = batch.get("seqlens")
+                    if seqlens is not None:
+                        seqlens = [s.to("cuda", non_blocking=True) for s in seqlens]
+                        block_mask = create_block_mask_from_seqlens(seqlens)
+
+                # Construct processed batch
+                processed_batch = {
+                    "input_ids": input_ids,
+                    "labels": labels,
+                    "block_mask": block_mask
+                }
+                self.next_batch = processed_batch
+                get_logger().critical(f"Prefetched batch")
+
+            get_logger().critical(f"Spinning worker thread")
+
+            self.thread = threading.Thread(target=_task)
+            self.thread.start()
+
+        def __next__(self):
+            # Wait for any ongoing prefetch
+            if self.thread is not None:
+                self.thread.join()
+                self.thread = None
+
+            # Check if we have a batch to return
+            if self.next_batch is None:
+                raise StopIteration
+
+            # Get the batch and reset next_batch
+            batch = self.next_batch
+            self.next_batch = None
+
+            # Prefetch the next batch in the background
+            self._prefetch_next()
+
+            return batch
+
+        def _wait_for_prefetch(self):
+            if self.thread is not None and self.thread.is_alive():
+                self.thread.join()
+                self.thread = None
+
+        def __del__(self):
+            self._wait_for_prefetch()
+
 def get_dataloader(
     tokenizer,
     world_size: int,
     rank: int,
     batch_size: int,
-    data_config: DataConfig,
+    config: Config,
 ) -> StatefulDataLoader:
+    data_config = config.data
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
     else:
@@ -289,12 +405,12 @@ def get_dataloader(
 
     dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
 
-    return StatefulDataLoader(
+    return PrefetchDataLoader(StatefulDataLoader(
         dataset,
         batch_size=batch_size,
         collate_fn=collate_fn,
         num_workers=data_config.num_workers,
-    )
+    ), config)
 
 
 @functools.lru_cache(maxsize=None)

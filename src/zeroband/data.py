@@ -277,50 +277,64 @@ class InterleaveDataset(IterableDataset, Stateful):
         self._init_random_state()
 
 
-class PrefetchDataLoader(IterableDataset, Stateful):
-    def __init__(self, original_dataloader, config):
-        self.original_dataloader = original_dataloader
+class PrefetchDataLoader(StatefulDataLoader):
+    def __init__(self, original_dataloader: StatefulDataLoader, config: Config):
         self.config = config
-        self.current_iterator = None
-        self.prefetched_batch = None  # Used to hold a prefetched batch when restoring state
+        self.original_dataloader = original_dataloader
+        self._prefetch_iterator = None
 
     def __iter__(self):
-        # Create a new iterator and pass any saved prefetched_batch
-        iterator = self._PrefetchIterator(
+        if self._prefetch_iterator is not None:
+            return self._prefetch_iterator
+
+        self._prefetch_iterator = self._PrefetchIterator(
             self.original_dataloader,
             self.config,
-            initial_prefetched_batch=self.prefetched_batch
         )
-        self.current_iterator = iterator
-        self.prefetched_batch = None  # Consumed by the iterator
-        return iterator
+        return self._prefetch_iterator
 
     def state_dict(self):
-        # Wait for any current iterator's prefetch to complete
-        if self.current_iterator is not None:
-            self.current_iterator._wait_for_prefetch()
-            prefetched_batch = self.current_iterator.next_batch
-        else:
-            prefetched_batch = self.prefetched_batch
+        if self._prefetch_iterator is not None:
+            self._prefetch_iterator._await_prefetch()
 
         state = {
-            'dataloader_state': self.original_dataloader.state_dict(),
-            'prefetched_batch': prefetched_batch
+            'config': self.config.model_dump(),
+            'dataloader_state': None if self._prefetch_iterator else self.original_dataloader.state_dict(), # No need to keep it around
+            '_prefetch_iterator': None if self._prefetch_iterator is None else self._prefetch_iterator.state_dict(),
         }
         return state
 
     def load_state_dict(self, state_dict):
-        self.original_dataloader.load_state_dict(state_dict['dataloader_state'])
-        self.prefetched_batch = state_dict['prefetched_batch']
+        if state_dict['dataloader_state']:
+            self.original_dataloader.load_state_dict(state_dict['dataloader_state'])
+        self.config = Config.model_validate(state_dict['config'])
+        self._prefetch_iterator = self._PrefetchIterator(self.original_dataloader, self.config)
 
-    class _PrefetchIterator:
-        def __init__(self, original_dataloader, config, initial_prefetched_batch=None):
-            self.original_iterator = iter(original_dataloader)
+    class _PrefetchIterator(Stateful):
+        def __init__(self, original_dataloader: StatefulDataLoader, config: Config):
+            self.original_dataloader = original_dataloader
+            self.dataloader_iter = iter(original_dataloader)
             self.config = config
-            self.next_batch = initial_prefetched_batch
+
+            self.ready_batch = None
             self.thread = None
-            if self.next_batch is None:
-                self._prefetch_next()
+
+            if self.ready_batch is None:
+                self._prefetch_next() # Immediately transfer first batch async.
+
+        def state_dict(self) -> Dict[str, Any]:
+            self._await_prefetch()
+            return {
+                'original_dataloader': self.original_dataloader.state_dict(),
+                'config': self.config.model_dump(),
+            }
+
+        def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+            
+            self.original_dataloader.load_state_dict(state_dict['original_dataloader'])
+            self.dataloader_iter = iter(self.original_dataloader)
+            self.config = Config.model_validate(state_dict['config'])
+            
 
         def _prefetch_next(self):
             def _task():
@@ -330,9 +344,9 @@ class PrefetchDataLoader(IterableDataset, Stateful):
                 torch.cuda.set_device(get_world_info().local_rank)
 
                 try:
-                    batch = next(self.original_iterator)
+                    batch = next(self.dataloader_iter)
                 except StopIteration:
-                    self.next_batch = None
+                    self.ready_batch = StopIteration
                     return
 
                 # Transfer to CUDA asynchronously
@@ -348,12 +362,11 @@ class PrefetchDataLoader(IterableDataset, Stateful):
                         block_mask = create_block_mask_from_seqlens(seqlens)
 
                 # Construct processed batch
-                processed_batch = {
+                self.ready_batch = {
                     "input_ids": input_ids,
                     "labels": labels,
                     "block_mask": block_mask
                 }
-                self.next_batch = processed_batch
                 get_logger().critical("Prefetched batch")
 
             get_logger().critical("Spinning worker thread")
@@ -362,31 +375,23 @@ class PrefetchDataLoader(IterableDataset, Stateful):
             self.thread.start()
 
         def __next__(self):
-            # Wait for any ongoing prefetch
-            if self.thread is not None:
-                self.thread.join()
-                self.thread = None
-
-            # Check if we have a batch to return
-            if self.next_batch is None:
+            self._await_prefetch()
+            if self.ready_batch is StopIteration:
                 raise StopIteration
 
-            # Get the batch and reset next_batch
-            batch = self.next_batch
-            self.next_batch = None
+            batch = self.ready_batch
+            self.ready_batch = None
 
-            # Prefetch the next batch in the background
             self._prefetch_next()
-
             return batch
 
-        def _wait_for_prefetch(self):
+        def _await_prefetch(self):
             if self.thread is not None and self.thread.is_alive():
                 self.thread.join()
                 self.thread = None
 
         def __del__(self):
-            self._wait_for_prefetch()
+            self._await_prefetch()
 
 def get_dataloader(
     tokenizer,
@@ -405,12 +410,16 @@ def get_dataloader(
 
     dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
 
-    return PrefetchDataLoader(StatefulDataLoader(
+    mp_batch_dataloader = StatefulDataLoader(
         dataset,
         batch_size=batch_size,
         collate_fn=collate_fn,
         num_workers=data_config.num_workers,
-    ), config)
+    )
+
+    to_cuda_dataloader = PrefetchDataLoader(mp_batch_dataloader, config)
+
+    return to_cuda_dataloader
 
 
 @functools.lru_cache(maxsize=None)

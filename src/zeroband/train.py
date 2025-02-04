@@ -98,7 +98,7 @@ def train(config: Config):
     sw.start("train()")
 
     # Load tokenizer
-    with sw.record_block("Load tokenizer", "Loaded tokenizer"):
+    with sw.record_block("Load Tokenizer"):
         if config.data.fake and config.name_model == "debugmodel":
             tokenizer = FakeTokenizer()
         elif config.type_model == "llama2":
@@ -108,7 +108,7 @@ def train(config: Config):
         else:
             raise ValueError(f"Model type {config.type_model} not supported")
 
-    with sw.record_block("Get dataloader", "Got dataloader"):
+    with sw.record_block("Get Dataloader"):
         train_dataloader = get_dataloader(
             tokenizer=tokenizer,
             world_size=world_info.world_size,
@@ -118,7 +118,7 @@ def train(config: Config):
         )
         train_dataloader_iterator = iter(train_dataloader)
 
-    with sw.record_block("Get model", "Constructed model", "Constructing model"):
+    with sw.record_block("Get Model"):
         model, model_config = get_model(
             config,
             vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
@@ -136,7 +136,7 @@ def train(config: Config):
         config.data.seq_length,
     )
 
-    with sw.record_block("Shard model", "Sharded model", "Sharding model"):
+    with sw.record_block("Shard Model"):
         if config.train.ac_ckpt:
             num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
             apply_ac_ckpt(model, num)
@@ -174,7 +174,7 @@ def train(config: Config):
         )
 
     # Setup optimizers
-    with sw.record_block("Set up Optimizers", "Set up optimizers"):
+    with sw.record_block("Optimizer Setup"):
         inner_optimizer = get_optimizer(config, model.parameters())
 
         diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
@@ -211,13 +211,13 @@ def train(config: Config):
     else:
         metric_logger = None
 
-    with sw.record_block("Compile model", "Compiled model"):
+    with sw.record_block("Compile Model"):
         if config.train.torch_compile:
             # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
             model = torch.compile(model) if not TYPE_CHECKING else model
 
     if config.ckpt.resume is not None:
-        with sw.record_block("Resume checkpoint", "Resuming checkpoint", "Resumed checkpoint"):
+        with sw.record_block("Resume Checkpoint"):
             # all is inplace
             ckpt_manager.load(
                 resume_ckpt_path=config.ckpt.resume,
@@ -301,7 +301,7 @@ def train(config: Config):
             loss_batch = 0
             z_loss_batch = 0
 
-            with sw.record_block("Grad acc steps", "Running grad acc steps", "Grad acc steps finished"):
+            with sw.record_block("Grad Acc Steps"):
                 for grad_acc_step in range(gradient_accumulation_steps):
                     sw.start("grad_acc_step")
 
@@ -309,7 +309,7 @@ def train(config: Config):
                     # no sync if we are accumulating gradients
                     model.set_requires_gradient_sync(not is_accumulating)
 
-                    with sw.record_block("Load batch", "Loaded batch"):
+                    with sw.record_block("Load batch"):
                         # TODO/NOTE: We could overlap sending the batch with communication
                         #            although to be honest the perf impact is minimal
                         batch = next(train_dataloader_iterator)
@@ -322,12 +322,12 @@ def train(config: Config):
                             seqlens = None
                             block_mask = None
 
-                    with sw.record_block("Run model", "Ran forward()"):
+                    with sw.record_block("Run forward()"):
                         logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
                         flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b * seq) vocab
                         flatten_labels = labels.reshape(-1)                   # b seq -> (b * seq)
 
-                    with sw.record_block("Loss calculation", "Loss computed"):
+                    with sw.record_block("Loss Calculation"):
                         ce_loss, z_loss = compute_cross_entropy_loss(
                             flatten_logits,
                             flatten_labels,
@@ -348,10 +348,10 @@ def train(config: Config):
                         else:
                             loss = ce_loss / gradient_accumulation_steps
 
-                    with sw.record_block("Backward", "Ran backward()"):
+                    with sw.record_block("Run backward()"):
                         loss.backward()
 
-                    with record_function("Clone loss"):
+                    with record_function("Clone Loss"):
                         # No need to time, takes 0 seconds
                         if config.optim.z_loss:
                             assert z_loss is not None
@@ -363,7 +363,7 @@ def train(config: Config):
                     elapsed = sw.stop("grad_acc_step")
                     logger.debug(f"Grad acc step {grad_acc_step} completed in {elapsed:.2f} seconds")
 
-            with sw.record_block("Loss allreduce", "Loss allreduced"):
+            with sw.record_block("Loss allreduce()"):
                 # Launch both allreduces at the same time to hide latency
                 loss_allreduce = dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True)
                 if config.optim.z_loss:
@@ -375,14 +375,14 @@ def train(config: Config):
                     assert isinstance(z_loss_allreduce, torch.distributed.Work)
                     z_loss_allreduce.wait()
 
-            with sw.record_block("Clip grad", "Clipped grad"):
+            with sw.record_block("Clip Grad"):
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor() # type: ignore (is a dtensor)
 
-            with sw.record_block("Optimizer step", "Inner optimizer step()"):
+            with sw.record_block("Optimizer Step"):
                 inner_optimizer.step()
                 scheduler.step()
 
-            with sw.record_block("Optimizer zero grad", "Inner optimizer zero_grad()"):
+            with sw.record_block("Optimizer Zero Grad"):
                 inner_optimizer.zero_grad()
 
             # logging

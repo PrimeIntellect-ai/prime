@@ -7,11 +7,9 @@ from zeroband.utils.logger import get_logger
 
 
 class _RecordBlockContext:
-    def __init__(self, sw, prof_name, start_message, end_format_str):
+    def __init__(self, sw, prof_name):
         self.sw = sw
         self.prof_name = prof_name
-        self.start_message = start_message
-        self.end_format_str = end_format_str
 
     def __enter__(self):
         self.torch_context = record_function(self.prof_name)
@@ -19,8 +17,7 @@ class _RecordBlockContext:
 
         if self.sw.disabled:
             return self
-        if self.start_message is not None:
-            self.sw.start_block(message=self.start_message)
+        self.sw.start_block(message=f"Starting \"{self.prof_name}\"")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -29,8 +26,7 @@ class _RecordBlockContext:
 
         if self.sw.disabled:
             return
-        if self.end_format_str is not None:
-            self.sw.end_block(format_str=self.end_format_str)
+        self.sw.end_block(format_str=f"Finished \"{self.prof_name}\"")
 
 
 class Stopwatch:
@@ -124,11 +120,11 @@ class Stopwatch:
         self.timers.clear()
         self.stack.clear()
 
-    def record_block(self, prof_name: str | None = None, end_message: str | None = None, start_message: str | None = None) -> _RecordBlockContext:
+    def record_block(self, prof_name: str) -> _RecordBlockContext:
         """
         Calls the torch profiler record_function() and times with start_block() and end_block().
         end_format_str is passed as end_block's format_str.
         start_message is passed as start_block's message.
         """
-        return _RecordBlockContext(self, prof_name, start_message, end_message)
+        return _RecordBlockContext(self, prof_name)
 

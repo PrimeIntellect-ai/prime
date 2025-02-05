@@ -297,79 +297,74 @@ class PrefetchDataLoader(StatefulDataLoader):
         if self._prefetch_iterator is not None:
             self._prefetch_iterator._await_prefetch()
 
+        # Only keep around one or the other
         state = {
-            'config': self.config.model_dump(),
-            'dataloader_state': None if self._prefetch_iterator else self.original_dataloader.state_dict(), # No need to keep it around
+            'dataloader_state': None if self._prefetch_iterator else self.original_dataloader.state_dict(),
             '_prefetch_iterator': None if self._prefetch_iterator is None else self._prefetch_iterator.state_dict(),
         }
         return state
 
     def load_state_dict(self, state_dict):
-        if state_dict['dataloader_state']:
+        if state_dict['dataloader_state'] is not None:
             self.original_dataloader.load_state_dict(state_dict['dataloader_state'])
-        self.config = Config.model_validate(state_dict['config'])
-        self._prefetch_iterator = self._PrefetchIterator(self.original_dataloader, self.config)
+        if state_dict['_prefetch_iterator'] is not None:
+            self._prefetch_iterator = self._PrefetchIterator(self.original_dataloader, self.config)
 
     class _PrefetchIterator(Stateful):
         def __init__(self, original_dataloader: StatefulDataLoader, config: Config):
-            self.original_dataloader = original_dataloader
             self.dataloader_iter = iter(original_dataloader)
             self.config = config
-
             self.ready_batch = None
             self.thread = None
 
-            if self.ready_batch is None:
-                self._prefetch_next() # Immediately transfer first batch async.
+            # Immediately transfer first batch async.
+            self._prefetch_next()
 
         def state_dict(self) -> Dict[str, Any]:
             self._await_prefetch()
             return {
-                'original_dataloader': self.original_dataloader.state_dict(),
-                'config': self.config.model_dump(),
+                'dataloader_iter': self.dataloader_iter.state_dict(),
+                'ready_batch': {k: v.cpu() for k, v in self.ready_batch.items()}
             }
 
         def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-            
-            self.original_dataloader.load_state_dict(state_dict['original_dataloader'])
-            self.dataloader_iter = iter(self.original_dataloader)
-            self.config = Config.model_validate(state_dict['config'])
-            
+            self.dataloader_iter = state_dict['dataloader_iter']
+            self.ready_batch = {k: v.cuda() for k, v in state_dict['ready_batch']}
 
         def _prefetch_next(self):
-            def _task():
-                get_logger().critical("Started worker thread")
-
+            def _task() -> None:
                 # NOTE: Each thread gets its own threadlocal CUDA context and has to reset the device.
-                torch.cuda.set_device(get_world_info().local_rank)
+                local_rank = get_world_info().local_rank
+                torch.cuda.set_device(local_rank)
 
+                # Grab batch or return sentinel
                 try:
                     batch = next(self.dataloader_iter)
                 except StopIteration:
                     self.ready_batch = StopIteration
-                    return
+                    return None
 
-                # Transfer to CUDA asynchronously
-                input_ids = batch["input_ids"].to("cuda", non_blocking=True)
-                labels = batch["labels"].to("cuda", non_blocking=True)
+                # Transfer to CUDA asynchronously and create block mask in another cuda stream
+                newstream = torch.cuda.Stream(local_rank)
+                with torch.cuda.stream(newstream):
+                    input_ids = batch["input_ids"].to("cuda", non_blocking=True)
+                    labels = batch["labels"].to("cuda", non_blocking=True)
 
-                # Create block mask if needed
-                block_mask = None
-                if self.config.train.sequence_packing:
-                    seqlens = batch.get("seqlens")
-                    if seqlens is not None:
-                        seqlens = [s.to("cuda", non_blocking=True) for s in seqlens]
-                        block_mask = create_block_mask_from_seqlens(seqlens)
+                    # Create block mask if needed
+                    block_mask = None
+                    if self.config.train.sequence_packing:
+                        seqlens = batch.get("seqlens")
+                        if seqlens is not None:
+                            seqlens = [s.to("cuda", non_blocking=True) for s in seqlens]
+                            block_mask = create_block_mask_from_seqlens(seqlens)
 
-                # Construct processed batch
+                # Construct and return processed batch.
                 self.ready_batch = {
                     "input_ids": input_ids,
                     "labels": labels,
                     "block_mask": block_mask
                 }
-                get_logger().critical("Prefetched batch")
-
-            get_logger().critical("Spinning worker thread")
+                return None
 
             self.thread = threading.Thread(target=_task)
             self.thread.start()

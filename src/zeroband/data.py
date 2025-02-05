@@ -297,11 +297,10 @@ class PrefetchDataLoader(StatefulDataLoader):
             self._prefetch_iterator._await_prefetch()
 
         # Only keep around one or the other
-        state = {
+        return {
             'dataloader_state': None if self._prefetch_iterator else self.original_dataloader.state_dict(),
             '_prefetch_iterator': None if self._prefetch_iterator is None else self._prefetch_iterator.state_dict(),
         }
-        return state
 
     def load_state_dict(self, state_dict):
         if state_dict['dataloader_state'] is not None:
@@ -403,17 +402,13 @@ def get_dataloader(
         )
 
     dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
-
     mp_batch_dataloader = StatefulDataLoader(
         dataset,
         batch_size=batch_size,
         collate_fn=collate_fn,
         num_workers=data_config.num_workers,
     )
-
-    to_cuda_dataloader = PrefetchDataLoader(mp_batch_dataloader, config)
-
-    return to_cuda_dataloader
+    return PrefetchDataLoader(mp_batch_dataloader, config)
 
 
 @functools.lru_cache(maxsize=None)

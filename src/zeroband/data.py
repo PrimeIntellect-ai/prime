@@ -6,6 +6,7 @@ import threading
 
 from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.utils.logger import get_logger
+from zeroband.utils.world_info import get_world_info
 from zeroband.config import Config, DataConfig
 
 import torch
@@ -16,8 +17,6 @@ from torch.distributed.checkpoint.stateful import Stateful
 from datasets import load_dataset_builder, BuilderConfig
 from pyarrow import parquet as pq
 from transformers import PreTrainedTokenizer
-
-from zeroband.utils.world_info import get_world_info
 
 
 TEST_VOCAB_SIZE = 1024

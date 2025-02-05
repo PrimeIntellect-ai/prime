@@ -277,6 +277,13 @@ class InterleaveDataset(IterableDataset, Stateful):
 
 
 class PrefetchDataLoader(StatefulDataLoader):
+    """
+    This class is a wrapper around a dataloader that prefetches the next batch asynchronously on another thread.
+    This is useful to hide the latency of transferring the batch to GPU.
+    We can't integrate this into the StatefulDataloader's collate_fn() because it runs in another process.
+    We're also using it to hide the latency of torch compiling FlexAttention block masks.
+    """
+
     def __init__(self, original_dataloader: StatefulDataLoader, config: Config):
         self.config = config
         self.original_dataloader = original_dataloader

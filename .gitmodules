@@ -1,3 +1,6 @@
 [submodule "third_party/gloo"]
 	path = third_party/gloo
 	url = https://github.com/facebookincubator/gloo.git
+[submodule "third_party/optimizers"]
+	path = third_party/optimizers
+	url = git@github.com:PrimeIntellect-ai/optimizers.git

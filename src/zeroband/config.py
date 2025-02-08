@@ -47,8 +47,22 @@ class SoapConfig(BaseConfig):
     max_preconditioner_dim: int = 8192
     precondition_frequency: int = 100
 
+class MuonConfig(BaseConfig):
+    type: Literal["muon"] = "muon"
+    ns_steps: int = 5
+    lr: float = 0.02
+    momentum: float = 0.95
+    nesterov: bool = True
 
-OptimizersConfig: TypeAlias = AdamConfig | SoapConfig
+
+    @model_validator(mode="after")
+    def calidate_compression(self):
+        if not self.nesterov:
+            raise NotImplementedError("Muon optimizer only supports nesterov=True for now")
+        return self
+
+
+OptimizersConfig: TypeAlias = AdamConfig | SoapConfig | MuonConfig
 
 
 class OptimConfig(BaseConfig):

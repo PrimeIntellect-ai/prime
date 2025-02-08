@@ -11,7 +11,7 @@ from distributed_shampoo import (
     ShampooPT2CompileConfig,
 )
 
-from zeroband.config import Config, AdamConfig, SoapConfig, OptimizersConfig
+from zeroband.config import Config, AdamConfig, MuonConfig, SoapConfig, OptimizersConfig
 
 
 def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch.optim.Optimizer:
@@ -46,6 +46,8 @@ def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch
                 enable_shampoo_pt2_dynamic_shape=False
             ),
         )
+    elif isinstance(_config, MuonConfig):
+        raise NotImplementedError("Distributed Muon optimizer is not implemented yet")
     else:
         raise ValueError(f"Unknown optimizer {_config.optimizer}")
 

@@ -64,7 +64,9 @@ def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch
             # is supposed to be and figure out how to pass it in when the parameter is initialized.
             if isinstance(param, DTensor):
                 _param = param.to_local() # Acquire a view into the local shard of the DTensor.
-                print(f"\033[91mDTensor: {param}\033[0m\n"
+                _grad = param.grad.to_local()
+                print(f"\033[91mDTensor: {param}\033[0m\n" # DTensor
+                      f"\033[91mDTensor grad: {param.grad}\033[0m\n" # DTensor
                       f"\033[91mLocal shard: {type(_param.data)}\033[0m\n"
                       f"\033[91mLocal grad: {type(_param.grad)}\033[0m")
                 opt.step_param(_param)

@@ -27,6 +27,14 @@ warmup_steps = 0
 total_steps = 1 # 2_000
 z_loss = true
 
+[optim.optim]
+type = "cpu_adam"
+lr = 7.5e-5
+betas1 = 0.9
+betas2 = 0.95
+weight_decay = 0.1
+pipelined = true
+
 [data]
 seq_length = 8192
 num_workers = 4

@@ -19,6 +19,7 @@ dependencies = [
     "toposolve>=0.1.17",
     "psutil",
     "torch-shampoo @ git+https://github.com/facebookresearch/optimizers.git@main",
+    "CPUOptimizer @ git+https://github.com/PrimeIntellect-ai/CPUOptimizer@main",
     "liger-kernel-nightly>=0.5.2.dev20250122195349",
 ]
 

@@ -1,10 +1,7 @@
 from typing import Iterable
 
 import torch
-import torch.distributed.fsdp
-import torch.distributed.tensor
-
-
+from torch.distributed.tensor import DTensor
 
 from zeroband.config import Config, AdamConfig, SoapConfig, OptimizersConfig, CPUAdamConfig
 
@@ -56,25 +53,20 @@ def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch
 
         # Closes over opt before it's defined. It's cursed but it's how cpython works.
         def pipeline_hook(param):
-            print("\033[91mRunning pipeline hook!\033[0m")
-            print(type(param))
-            print(param.device)
-            print(param.shape)
-
-            from torch.distributed.tensor import DTensor
-
             # TODO: Thread opt.step_param(). Probably best to leave the explicit thread management to the c++ code.
             #       Then have opt.step() will await all the threads for all the parameter optimizers.
 
             # TODO: Support DTensors in the C++ extension code.
             # If it's a dtensor, do the optimizer update on the view of the local tensor.
-            # This works because Adam is indexwise, and would not work for SOAP.
+            # This works because Adam is indexwise, and would not work for SOAP, which would have to do an allgather.
+            # Or... would it? Aren't all the shards are on CPU anyway? So can't I can just .full_tensor() it? Will figure out tomorrow.
+            # The thing that I need to do to immediately get it working is to figure out what the size of the optimizer state
+            # is supposed to be and figure out how to pass it in when the parameter is initialized.
             if isinstance(param, DTensor):
-                _param = param.to_local() # Returns a view
-                print("\033[91mLocal shard:\033[0m")
-                print(type(_param))
-                print(_param.device)
-                print(_param.shape)
+                _param = param.to_local() # Acquire a view into the local shard of the DTensor.
+                print(f"\033[91mDTensor: {param}\033[0m\n"
+                      f"\033[91mLocal shard: {type(_param.data)}\033[0m\n"
+                      f"\033[91mLocal grad: {type(_param.grad)}\033[0m")
                 opt.step_param(_param)
             else:
                 opt.step_param(param)

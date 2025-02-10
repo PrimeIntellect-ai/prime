@@ -2,7 +2,7 @@ command:
  - bash 
  - scripts/simulate_multi_diloco.sh
  - "1"
- - "2"
+ - "8"
  - "@configs/150M_big_bs/H100.toml"
  - ${args}
 name: adam-sweep

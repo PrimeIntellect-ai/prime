@@ -11,6 +11,7 @@ console = Console()
 @app.command()
 def view() -> None:
     """View current configuration"""
+    console.print("[blue]Test[/blue]")
     config = Config()
     settings = config.view()
 

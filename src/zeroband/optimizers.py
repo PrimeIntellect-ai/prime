@@ -63,8 +63,13 @@ def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch
             # The thing that I need to do to immediately get it working is to figure out what the size of the optimizer state
             # is supposed to be and figure out how to pass it in when the parameter is initialized.
             if isinstance(param, DTensor):
-                _param = param.to_local() # Acquire a view into the local shard of the DTensor.
-                _grad = param.grad.to_local()
+                # Time how long it takes to convert the DTensor to a local tensor.
+                import time
+                start = time.perf_counter()
+                _param = param.full_tensor() # Acquire a view into the local shard of the DTensor.
+                end = time.perf_counter()
+                _grad = param.grad()
+                print(f"Time to convert DTensor to full tensor: {end - start}")
                 print(f"\033[91mDTensor: {param}\033[0m\n" # DTensor
                       f"\033[91mDTensor grad: {param.grad}\033[0m\n" # DTensor
                       f"\033[91mLocal shard: {type(_param.data)}\033[0m\n"

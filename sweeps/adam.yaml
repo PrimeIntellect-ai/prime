@@ -28,10 +28,10 @@ parameters:
     distribution: uniform
     min: 0.8
     max: 0.9999
-  # optim.optim.weight_decay:
-  #   distribution: uniform
-  #   min: 0.0
-  #   max: 0.4
+  optim.optim.weight_decay:
+    distribution: uniform
+    min: 0.0
+    max: 0.4
   optim.warmup_steps:
     distribution: q_uniform
     min: 0

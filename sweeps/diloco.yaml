@@ -5,7 +5,7 @@ command:
  - "4"
  - "src/zeroband/train.py"
  - "@configs/150M_big_bs/H100.toml"
- - "--diloco.num_inners_steps"
+ - "--diloco.inner_steps"
  - "25"
  - ${args}
 name: adam-sweep

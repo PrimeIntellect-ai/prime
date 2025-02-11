@@ -1,209 +1,81 @@
-# copied from https://github.com/KellerJordan/modded-nanogpt/blob/master/train_gpt.py
 import torch
-from torch import Tensor
 import torch.distributed as dist
-
-
-@torch.compile
-def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
-    """
-    Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
-    quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
-    of minimizing steps, it turns out to be empirically effective to keep increasing the slope at
-    zero even beyond the point where the iteration no longer converges all the way to one everywhere
-    on the interval. This iteration therefore does not produce UV^T but rather something like US'V^T
-    where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt model
-    performance at all relative to UV^T, where USV^T = G is the SVD.
-    """
-    assert (
-        G.ndim >= 2
-    )  # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
-    a, b, c = (3.4445, -4.7750, 2.0315)
-    X = G.bfloat16()
-    if G.size(-2) > G.size(-1):
-        X = X.mT
-
-    # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
-    # Perform the NS iterations
-    for _ in range(steps):
-        A = X @ X.mT
-        B = (
-            b * A + c * A @ A
-        )  # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
-        X = a * X + B @ X
-
-    if G.size(-2) > G.size(-1):
-        X = X.mT
-    return X
-
+from torch import Tensor
 
 @torch.compile
-def low_rank_approximation_zeropower_via_newtonschulz5(G: Tensor, rank: int, steps: int = 5) -> tuple[Tensor, Tensor]:
+def low_rank_momentum_newton_schulz(G: Tensor, rank: int, steps: int = 5) -> Tensor:
     """
-    Compute a low-rank approximation of matrix G using Newton-Schulz iteration.
-    Returns the expanded approximated matrix directly.
-
+    Compute low-rank momentum approximation using Newton-Schulz iteration.
+    This combines PowerSGD's low-rank idea with Muon's Newton-Schulz orthogonalization.
+    
     Args:
-        G: Input tensor of shape (..., m, n)
-        rank: Target rank for the approximation
+        G: Input tensor of shape (m, n)
+        rank: Target rank for approximation
         steps: Number of Newton-Schulz iterations
-
-    Returns:
-        G_approx: Low rank approximation of G with the same shape as G
     """
-    assert G.ndim >= 2
-    assert rank > 0 and rank <= min(G.size(-2), G.size(-1))
+    assert G.ndim == 2
+    assert rank > 0 and rank <= min(G.size(0), G.size(1))
 
-    # Constants for quintic iteration
+    # Constants for quintic iteration (same as Muon)
     a, b, c = (3.4445, -4.7750, 2.0315)
 
-    # Convert to bfloat16
+    # Convert to bfloat16 for efficiency
     G = G.bfloat16()
-
-    # Initialize random projection matrix Q in bfloat16
-    n = G.size(-1)
-    Q = torch.randn((*G.shape[:-2], n, rank), device=G.device).bfloat16()
-    Q = Q / (Q.norm(dim=(-2, -1), keepdim=True) + 1e-7)
-
-    # Power iteration to find approximate range
-    Y = G @ Q
-
-    # Normalize Y
-    Y = Y / (Y.norm(dim=(-2, -1), keepdim=True) + 1e-7)
-
-    # Newton-Schulz iterations for orthogonalization
-    for _ in range(steps):
-        A = Y @ Y.mT
-        B = b * A + c * A @ A
-        Y = a * Y + B @ Y
-
-    # Compute factors and immediately expand
-    U = Y
-    V = G.mT @ U
-    G_approx = U @ V.mT
-
-    return G_approx
-
-
-@torch.compile
-def low_rank_approximation_via_newtonschulz_lie(G: Tensor, rank: int, steps: int = 5) -> Tensor:
-    """
-    Compute a low-rank approximation of matrix G using Newton-Schulz iteration with Lie group structure.
-    Returns the approximated matrix in the form Q = (I + UVᵀ)diag(d).
-
-    Args:
-        G: Input tensor of shape (..., m, n)
-        rank: Target rank for the approximation
-        steps: Number of Newton-Schulz iterations
-
-    Returns:
-        G_approx: Low rank approximation of G with the same shape as G
-    """
-    assert G.ndim >= 2
-    assert rank > 0 and rank <= min(G.size(-2), G.size(-1))
-
-    # Constants for quintic iteration
-    a, b, c = (3.4445, -4.7750, 2.0315)
-
-    # Convert to bfloat16
-    G = G.bfloat16()
-    m, n = G.size(-2), G.size(-1)
 
     # Initialize random projection matrix Q
-    Q = torch.randn((*G.shape[:-2], n, rank), device=G.device).bfloat16()
-    Q = Q / (Q.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    n = G.size(1)
+    Q = torch.randn(n, rank, device=G.device).bfloat16()
+    Q = Q / (Q.norm() + 1e-7)
 
-    # Power iteration to find approximate range
-    Y = G @ Q
-    Y = Y / (Y.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    # Project momentum buffer onto low-rank space
+    P = G @ Q  # [m x n] @ [n x r] = [m x r]
+    
+    # Handle non-square matrices like in original Muon
+    if P.size(0) > P.size(1):
+        P = P.t()
+        transposed = True
+    else:
+        transposed = False
+
+    # Normalize P
+    P = P / (P.norm() + 1e-7)
 
     # Newton-Schulz iterations for orthogonalization
     for _ in range(steps):
-        A = Y @ Y.mT
+        A = P @ P.t()
         B = b * A + c * A @ A
-        Y = a * Y + B @ Y
+        P = a * P + B @ P
 
-    # Compute U factor
-    U = Y
+    if transposed:
+        P = P.t()
 
-    # Compute V factor through projection
-    V = G.mT @ U
-
-    # Normalize U and V to have unit norm
-    U_norms = torch.sum(U * U, dim=-1, keepdim=True).sqrt()
-    V_norms = torch.sum(V * V, dim=-1, keepdim=True).sqrt()
-
-    U = U / (U_norms + 1e-7)
-    V = V / (V_norms + 1e-7)
-
-    # Create identity matrix of appropriate size
-    Id = torch.eye(m, device=G.device, dtype=G.dtype)
-    Id = Id.expand(*G.shape[:-2], m, m)
-
-    # Compute diagonal scaling
-    d = torch.diagonal(G @ G.mT, dim1=-2, dim2=-1).sqrt()
-    d = d / (d.norm(dim=-1, keepdim=True) + 1e-7)
-
-    # Construct final approximation Q = (I + UVᵀ)diag(d)
-    G_approx = U @ V.mT
-
-    # Scale the approximation to match G's magnitude
-    G_norms = torch.sum(G * G, dim=(-2, -1), keepdim=True).sqrt()
-    G_approx_norms = torch.sum(G_approx * G_approx, dim=(-2, -1), keepdim=True).sqrt()
-    scale = G_norms / (G_approx_norms + 1e-7)
-    G_approx = G_approx * scale
-
-    return G_approx
-
+    # Compute final factors and expand
+    V = G.t() @ P  # [n x m] @ [m x r] = [n x r]
+    return P @ V.t()  # [m x r] @ [r x n] = [m x n]
 
 class Muon(torch.optim.Optimizer):
     """
-    Muon - MomentUm Orthogonalized by Newton-schulz
-
-    Muon internally runs standard SGD-momentum, and then performs an orthogonalization post-
-    processing step, in which each 2D parameter's update is replaced with the nearest orthogonal
-    matrix. To efficiently orthogonalize each update, we use a Newton-Schulz iteration, which has
-    the advantage that it can be stably run in bfloat16 on the GPU.
-
-    Some warnings:
-    - This optimizer assumes that all parameters passed in are 2D.
-    - It should not be used for the embedding layer, the final fully connected layer, or any {0,1}-D
-    parameters; those should all be optimized by a standard method (e.g., AdamW).
-    - To use it with 4D convolutional filters, it works well to just flatten their last 3 dimensions.
-    - We believe it is unlikely to work well for training with small batch size.
-    - We believe it may not work well for finetuning pretrained models, but we haven"t tested this.
-    - We have not yet tried this optimizer for training scenarios larger than NanoGPT (124M).
-
-    Arguments:
-        lr: The learning rate used by the internal SGD.
-        momentum: The momentum used by the internal SGD.
-        nesterov: Whether to use Nesterov-style momentum in the internal SGD. (recommended)
-        ns_steps: The number of Newton-Schulz iteration steps to use.
+    Fuses Muon and PowerSGD approaches:
+    - Uses momentum accumulation from Muon
+    - Applies low-rank projection like PowerSGD
+    - Uses Newton-Schulz for orthogonalization
     """
-
     def __init__(
         self,
         params,
         lr=0.02,
         momentum=0.95,
         nesterov=True,
+        rank=4,  # New parameter for low-rank approximation
         ns_steps=5,
-        rank=0,
         world_size=1,
-        compression_ratio: float | None = None,
-        compression_step_start: int = 0,
-        lie_compression: bool = False,
     ):
         self.rank = rank
         self.world_size = world_size
-        self.compression_ratio = compression_ratio
-        self.compression_step_start = compression_step_start
-        self.lie_compression = lie_compression
-        self._step_count = 0  # Add step counter
+        self._step_count = 0
 
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
-        params: list[Tensor] = [*params]
+        params = [*params]
         assert all(isinstance(p, Tensor) for p in params)
         sizes = {p.numel() for p in params}
 
@@ -212,13 +84,14 @@ class Muon(torch.optim.Optimizer):
             return dict(update_buffer=b, update_buffer_views=[b[i] for i in range(self.world_size)])
 
         param_groups = [
-            dict(params=[p for p in params if p.numel() == size], **create_update_buffer(size)) for size in sizes
+            dict(params=[p for p in params if p.numel() == size], **create_update_buffer(size))
+            for size in sizes
         ]
         super().__init__(param_groups, defaults)
 
     @torch.no_grad()
     def step(self):
-        self._step_count += 1  # Increment step counter
+        self._step_count += 1
 
         for group in self.param_groups:
             lr = group["lr"]
@@ -226,8 +99,8 @@ class Muon(torch.optim.Optimizer):
             nesterov = group["nesterov"]
             ns_steps = group["ns_steps"]
             update_buffer = group["update_buffer"]
-            update_buffer_views: list[Tensor] = group["update_buffer_views"]
-            params: list[Tensor] = group["params"]
+            update_buffer_views = group["update_buffer_views"]
+            params = group["params"]
             handle = None
             params_world = None
 
@@ -247,26 +120,22 @@ class Muon(torch.optim.Optimizer):
                     p = params[base_i + self.rank]
                     g = p.grad
                     assert g is not None
+                    
+                    # Get momentum buffer
                     state = self.state[p]
                     if "momentum_buffer" not in state:
                         state["momentum_buffer"] = torch.zeros_like(g)
-                    buf: Tensor = state["momentum_buffer"]
+                    buf = state["momentum_buffer"]
+                    
+                    # Update momentum (same as original Muon)
                     buf.lerp_(g, 1 - momentum)
                     g = g.lerp_(buf, momentum) if nesterov else buf
 
-                    # Only apply compression if we've reached the start step and compression ratio is set
-                    if self.compression_ratio is not None and self._step_count >= self.compression_step_start:
-                        mat_rank = int(g.shape[0] * self.compression_ratio)
-                        if self.lie_compression:
-                            g = low_rank_approximation_via_newtonschulz_lie(g, mat_rank, steps=ns_steps).flatten()
-                        else:
-                            g = low_rank_approximation_zeropower_via_newtonschulz5(
-                                g, mat_rank, steps=ns_steps
-                            ).flatten()
-                    else:
-                        g = zeropower_via_newtonschulz5(g, steps=ns_steps).flatten()
+                    # Apply low-rank momentum approximation
+                    g = low_rank_momentum_newton_schulz(g, self.rank, steps=ns_steps).flatten()
                 else:
                     g = update_buffer_views[self.rank]
+                    
                 update_prev()
                 handle = dist.all_gather_into_tensor(update_buffer, g, async_op=True)
                 params_world = params[base_i : base_i + self.world_size]

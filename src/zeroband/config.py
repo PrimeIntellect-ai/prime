@@ -50,15 +50,9 @@ class MuonConfig(BaseConfig):
     lr: float = 0.02
     momentum: float = 0.95
     nesterov: bool = True
-    compression_ratio: float | None = None
-    compression_step_start: int = 0
-    lie_compression: bool = False
+    
+    rank: int = 1
 
-    @model_validator(mode="after")
-    def calidate_compression(self):
-        if self.compression_ratio is not None:
-            assert 0 < self.compression_ratio <= 1, "compression_ratio must be between 0 and 1"
-        return self
 
 
 OptimizersConfig: TypeAlias = AdamConfig | SoapConfig | MuonConfig

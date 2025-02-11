@@ -15,13 +15,13 @@ def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch
 
     _config: OptimizersConfig = config.optim.optim
 
-
     if isinstance(_config, AdamConfig):
         opt = torch.optim.AdamW(
             params,
             lr=_config.lr,
             weight_decay=_config.weight_decay,
             betas=(_config.betas1, _config.betas2),
+            fused=True,
         )
     elif isinstance(_config, SoapConfig):
         from distributed_shampoo import (
@@ -55,28 +55,8 @@ def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch
         def pipeline_hook(param):
             # TODO: Thread opt.step_param(). Probably best to leave the explicit thread management to the c++ code.
             #       Then have opt.step() will await all the threads for all the parameter optimizers.
-
-            # TODO: Support DTensors in the C++ extension code.
-            # If it's a dtensor, do the optimizer update on the view of the local tensor.
-            # This works because Adam is indexwise, and would not work for SOAP, which would have to do an allgather.
-            # Or... would it? Aren't all the shards are on CPU anyway? So can't I can just .full_tensor() it? Will figure out tomorrow.
-            # The thing that I need to do to immediately get it working is to figure out what the size of the optimizer state
-            # is supposed to be and figure out how to pass it in when the parameter is initialized.
-            if isinstance(param, DTensor):
-                # Time how long it takes to convert the DTensor to a local tensor.
-                import time
-                start = time.perf_counter()
-                _param = param.full_tensor() # Acquire a view into the local shard of the DTensor.
-                end = time.perf_counter()
-                _grad = param.grad()
-                print(f"Time to convert DTensor to full tensor: {end - start}")
-                print(f"\033[91mDTensor: {param}\033[0m\n" # DTensor
-                      f"\033[91mDTensor grad: {param.grad}\033[0m\n" # DTensor
-                      f"\033[91mLocal shard: {type(_param.data)}\033[0m\n"
-                      f"\033[91mLocal grad: {type(_param.grad)}\033[0m")
-                opt.step_param(_param)
-            else:
-                opt.step_param(param)
+            #       This will probably result in a massive perf improvement.
+            opt.step_param(param)
 
         opt = CPUAdam(
             params,

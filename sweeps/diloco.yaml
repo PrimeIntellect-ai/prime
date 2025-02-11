@@ -5,6 +5,8 @@ command:
  - "4"
  - "src/zeroband/train.py"
  - "@configs/150M_big_bs/H100.toml"
+ - "--optim.batch_size"
+ - "1024"
  - "--diloco.inner_steps"
  - "25"
  - ${args}

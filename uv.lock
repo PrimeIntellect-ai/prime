@@ -349,14 +349,6 @@ wheels = [
 ]
 
 [[package]]
-name = "cpuoptimizer"
-version = "0.0.0"
-source = { git = "https://github.com/PrimeIntellect-ai/CPUOptimizer?rev=main#ca9a50a0603f01acba9c4998b2bc07768c6adee9" }
-dependencies = [
-    { name = "torch" },
-]
-
-[[package]]
 name = "dataproperty"
 version = "1.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2876,7 +2868,6 @@ name = "zeroband"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "cpuoptimizer" },
     { name = "datasets" },
     { name = "fsspec", extra = ["gcs"] },
     { name = "liger-kernel-nightly" },
@@ -2915,7 +2906,6 @@ dev = [
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'all'", specifier = ">=3.10.5" },
     { name = "asyncio", marker = "extra == 'all'", specifier = ">=3.4.3" },
-    { name = "cpuoptimizer", git = "https://github.com/PrimeIntellect-ai/CPUOptimizer?rev=main" },
     { name = "datasets", specifier = ">=3.0.0" },
     { name = "fsspec", extras = ["gcs"], specifier = ">=2024.3.1" },
     { name = "liger-kernel-nightly", specifier = ">=0.5.2.dev20250122195349" },

@@ -376,8 +376,7 @@ def train(config: Config):
                     z_loss_allreduce.wait()
 
             with sw.record_block("Clip Grad"):
-                if config.optim.optim.type != "cpu_adam":
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor() # type: ignore (is a dtensor)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor() # type: ignore (is a dtensor)
 
             with sw.record_block("Optimizer Step"):
                 inner_optimizer.step()
@@ -409,6 +408,7 @@ def train(config: Config):
                 "Perplexity": torch.exp(loss_batch).item(),
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
+                "grad_norm": grad_norm.item(),
             }
 
             if config.optim.z_loss:

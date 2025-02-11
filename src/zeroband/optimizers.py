@@ -1,7 +1,6 @@
 from typing import Iterable
 
 import torch
-from torch.distributed.tensor import DTensor
 
 from zeroband.config import Config, AdamConfig, SoapConfig, OptimizersConfig, CPUAdamConfig
 

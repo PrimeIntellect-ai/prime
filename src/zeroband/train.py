@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 
 # from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
-from torch.nn.parallel import DistributedDataParallel as DDP
+# from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed.algorithms.ddp_comm_hooks import powerSGD_hook
 
 from torch.autograd.profiler import record_function
@@ -22,6 +22,7 @@ from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
 from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.optimizers import get_optimizer
+from zeroband.powersgd import PowerSGD
 from zeroband.utils import (
     FakeTokenizer,
     PerfCounter,
@@ -178,7 +179,8 @@ def train(config: Config):
     # Setup optimizers
     with record_function("Set up Optimizers"):
         inner_optimizers = get_optimizer(model, config.optim.optim)
-
+        power_sgd = PowerSGD(model.parameters(), config.optim.power_sgd.rank, config.optim.power_sgd.warmup_steps) if config.optim.power_sgd is not None else None
+        
         diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
 
         schedulers = [
@@ -362,10 +364,13 @@ def train(config: Config):
                 if config.optim.z_loss:
                     dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
             
-            for param in model.parameters():
-                if param.grad is not None:
-                    dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
-            
+            if config.optim.power_sgd is not None:
+                power_sgd.all_reduce(training_progress.step)
+            else:
+                for param in model.parameters():
+                    if param.grad is not None:
+                        dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+                
             with record_function("Clip grad"):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 

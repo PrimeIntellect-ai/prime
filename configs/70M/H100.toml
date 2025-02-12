@@ -1,0 +1,16 @@
+name_model = "70M"
+project = "debug_70m_zero_band"
+type_model = "llama2"
+
+[train]
+micro_bs = 128 # change this base on the gpu
+reshard_after_forward = false
+
+[optim]
+batch_size = 512
+warmup_steps = 1000
+total_steps = 88_000
+
+[optim.optim]
+lr = 4e-4
+

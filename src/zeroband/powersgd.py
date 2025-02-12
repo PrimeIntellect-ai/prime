@@ -41,42 +41,34 @@ class PowerSGD:
         self.params = list(params)
         self.rank = rank
         self.warmup_steps = warmup_steps
-        
-            
+
         self.no_compress_param = [param for param in self.params if len(param.shape) != 2]
         self.low_rank_param = [param for param in self.params if len(param.shape) == 2]
-        
+
         self.q = [torch.randn(param.shape[1], self.rank).to(param.device) for param in self.low_rank_param]
         self.error = [torch.zeros_like(param).to(param.device) for param in self.low_rank_param]
-        
+
     def all_reduce(self, step: int):
         for param in self.no_compress_param:
             dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
-        
-        
+
         if step < self.warmup_steps:
             for param in self.low_rank_param:
                 param.grad = None
         else:
-            
             for param, q, error in zip(self.low_rank_param, self.q, self.error):
                 delta = param.grad + error
-                
+
                 P = delta @ q  # n×r matrix
                 dist.all_reduce(P, op=dist.ReduceOp.AVG)  # Average P across workers
                 error.copy_(delta - P @ q.T)
-                
-            
-  
+
                 P = P.unsqueeze(0)
                 _orthogonalize_gram_schmidt(P)
-                P = P.squeeze(0)    
-                        
+                P = P.squeeze(0)
+
                 Q = param.grad.T @ P  # m×r matrix
                 dist.all_reduce(Q, op=dist.ReduceOp.AVG)  # Average Q across workers
-                
+
+                q.copy_(Q)
                 param.grad = P @ Q.T
-            
-            
-            
-            

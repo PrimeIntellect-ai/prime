@@ -157,7 +157,7 @@ ENV_VAR_PREFIX = "ZERO_BAND_"
 
 class Config(BaseConfig):
     # main config
-    name_model: Literal["debugmodel", "150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
+    name_model: Literal["debugmodel", "70M","150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
     type_model: Literal["llama2", "llama3"] = "llama3"
 
     # Project/Run

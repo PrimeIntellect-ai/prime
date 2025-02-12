@@ -173,24 +173,11 @@ def train(config: Config):
         #     mesh=elastic_device_mesh.cuda_local_mesh,
         #     reshard_after_forward=config.train.reshard_after_forward,
         # )
-        model: DDP = DDP(
-            model, device_ids=[world_info.local_rank], broadcast_buffers=False, gradient_as_bucket_view=True
-        )
-
-        if config.optim.power_sgd is not None:
-            state = powerSGD_hook.PowerSGDState(
-                process_group=None,  # Default process group
-                matrix_approximation_rank=config.optim.power_sgd.rank,  # Adjust rank based on compression needs
-                start_powerSGD_iter=config.optim.power_sgd.warmup_steps,  # When to start compression
-            )
-
-            model.register_comm_hook(state, powerSGD_hook.powerSGD_hook)
-
         logger.debug("model ddped")
 
     # Setup optimizers
     with record_function("Set up Optimizers"):
-        inner_optimizers = get_optimizer(model.module, config.optim.optim)
+        inner_optimizers = get_optimizer(model, config.optim.optim)
 
         diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
 
@@ -318,10 +305,10 @@ def train(config: Config):
             z_loss_batch = 0
 
             for grad_acc_step in range(gradient_accumulation_steps):
-                is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
+                # is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                 # no sync if we are accumulating gradients
                 # model.set_requires_gradient_sync(not is_accumulating)
-                model.require_backward_grad_sync = not is_accumulating
+                # model.require_backward_grad_sync = not is_accumulating
 
                 with record_function("Load batch"):
                     # TODO/NOTE: We could overlap sending the batch with communication
@@ -374,7 +361,11 @@ def train(config: Config):
                 dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
                 if config.optim.z_loss:
                     dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
-
+            
+            for param in model.parameters():
+                if param.grad is not None:
+                    dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+            
             with record_function("Clip grad"):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 

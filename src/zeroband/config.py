@@ -57,6 +57,7 @@ class CPUAdamConfig(BaseConfig):
     betas2: float = 0.95
     eps: float = 1e-8
     weight_decay: float = 0.0
+    clip_max_norm: float = 0.0
     pipelined: bool = False
 
 

@@ -63,6 +63,7 @@ def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch
             betas=(_config.betas1, _config.betas2),
             eps=_config.eps,
             weight_decay=_config.weight_decay,
+            clip_max_norm=_config.clip_max_norm,
             pipeline_hook=pipeline_hook if _config.pipelined else None,
         )
     else:

@@ -370,8 +370,8 @@ def train(config: Config):
                     z_loss_allreduce.wait()
 
             with sw.record_block("Clip Grad"):
-                if config.optim.optim.type != "cpu_adam":
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor() # type: ignore (is a dtensor)
+                #if config.optim.optim.type != "cpu_adam":
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor() # type: ignore (is a dtensor)
 
             with sw.record_block("Optimizer Step"):
                 inner_optimizer.step()

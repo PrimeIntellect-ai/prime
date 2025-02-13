@@ -1,0 +1,40 @@
+name_model = "10B"
+type_model = "llama2"
+
+project = "debug_I2_zero_band"
+run_name = "Torch Optimizer"
+
+metric_logger_type = "wandb"
+log_level = "DEBUG"
+
+
+[train]
+micro_bs = 1
+ac_ckpt = true
+torch_profiler = false
+torch_compile = true
+fused_linear_ce = true
+fsdp_cpu_offload = true
+
+#[train.memory_profiler]
+#freq = 1
+#snapshot_dir = "logs/"
+
+[optim]
+sched_type = "wsd-sqrt"
+batch_size = 16
+warmup_steps = 0
+total_steps = 2_000
+z_loss = true
+
+[optim.optim]
+type = "adam"
+lr = 0.000075
+betas1 = 0.9
+betas2 = 0.95
+weight_decay = 0.1
+
+[data]
+seq_length = 8192
+num_workers = 4
+

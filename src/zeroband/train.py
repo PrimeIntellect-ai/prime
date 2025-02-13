@@ -16,7 +16,6 @@ from zeroband.diloco import Diloco
 from zeroband.loss import compute_cross_entropy_loss
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
-from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.optimizers import get_optimizer
 from zeroband.utils import (
     FakeTokenizer,
@@ -114,7 +113,7 @@ def train(config: Config):
             world_size=world_info.world_size,
             rank=world_info.rank,
             batch_size=config.train.micro_bs,
-            data_config=config.data,
+            config=config,
         )
         train_dataloader_iterator = iter(train_dataloader)
 
@@ -313,14 +312,9 @@ def train(config: Config):
                         # TODO/NOTE: We could overlap sending the batch with communication
                         #            although to be honest the perf impact is minimal
                         batch = next(train_dataloader_iterator)
-                        input_ids = batch["input_ids"].to("cuda")
-                        labels = batch["labels"].to("cuda")
-                        if config.train.sequence_packing:
-                            seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
-                            block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
-                        else:
-                            seqlens = None
-                            block_mask = None
+                        input_ids = batch["input_ids"]
+                        labels = batch["labels"]
+                        block_mask = batch["block_mask"]
 
                     with sw.record_block("Run forward()"):
                         logits = model(tokens=input_ids, block_mask=block_mask).contiguous()

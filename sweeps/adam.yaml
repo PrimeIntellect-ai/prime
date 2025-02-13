@@ -1,0 +1,39 @@
+command: 
+ - bash 
+ - scripts/simulate_multi_node_diloco.sh
+ - "1"
+ - "8"
+ - "src/zeroband/train.py"
+ - "@configs/150M_big_bs/H100.toml"
+ - ${args}
+name: adam-sweep
+method: bayes
+early_terminate:
+  type: hyperband
+  max_iter: 27
+  eta: 3
+  s: 2
+metric:
+  goal: minimize
+  name: Perplexity
+parameters:
+  optim.optim.lr:
+    distribution: log_uniform_values
+    min: 1e-4
+    max: 1e-2
+  # optim.optim.betas1:
+  #   distribution: uniform
+  #   min: 0.8
+  #   max: 0.999 
+  optim.optim.betas2:
+    distribution: uniform
+    min: 0.8
+    max: 0.9999
+  optim.optim.weight_decay:
+    distribution: uniform
+    min: 0.0
+    max: 0.4
+  optim.warmup_steps:
+    distribution: q_uniform
+    min: 0
+    max: 2000

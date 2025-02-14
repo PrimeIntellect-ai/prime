@@ -24,14 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 
-
-all = [
-    "wandb",
-    "asyncio>=3.4.3",
-    "aiohttp>=3.10.5",
-    "requests>=2.32.3",
-    "lm-eval"
-]
+all = ["wandb","lm-eval"]
 
 
 [build-system]

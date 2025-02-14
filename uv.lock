@@ -156,15 +156,6 @@ wheels = [
 ]
 
 [[package]]
-name = "asyncio"
-version = "3.4.3"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/da/54/054bafaf2c0fb8473d423743e191fcdf49b2c1fd5e9af3524efbe097bafd/asyncio-3.4.3.tar.gz", hash = "sha256:83360ff8bc97980e4ff25c964c7bd3923d333d177aa4f7fb736b019f26c7cb41", size = 204411 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/22/74/07679c5b9f98a7cb0fc147b1ef1cc1853bc07a4eb9cb5731e24732c5f773/asyncio-3.4.3-py3-none-any.whl", hash = "sha256:c4d18b22701821de07bd6aea8b53d21449ec0ec5680645e5317062ea21817d2d", size = 101767 },
-]
-
-[[package]]
 name = "attrs"
 version = "25.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2887,10 +2878,7 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
-    { name = "aiohttp" },
-    { name = "asyncio" },
     { name = "lm-eval" },
-    { name = "requests" },
     { name = "wandb" },
 ]
 
@@ -2904,8 +2892,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", marker = "extra == 'all'", specifier = ">=3.10.5" },
-    { name = "asyncio", marker = "extra == 'all'", specifier = ">=3.4.3" },
     { name = "datasets", specifier = ">=3.0.0" },
     { name = "fsspec", extras = ["gcs"], specifier = ">=2024.3.1" },
     { name = "liger-kernel-nightly", specifier = ">=0.5.2.dev20250122195349" },
@@ -2915,7 +2901,6 @@ requires-dist = [
     { name = "psutil" },
     { name = "pyarrow" },
     { name = "pydantic-config", git = "https://github.com/samsja/pydantic_config.git?rev=b7becc3" },
-    { name = "requests", marker = "extra == 'all'", specifier = ">=2.32.3" },
     { name = "setuptools" },
     { name = "toposolve", specifier = ">=0.1.17" },
     { name = "torch", specifier = "==2.5.1" },

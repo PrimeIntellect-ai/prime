@@ -29,7 +29,6 @@ from zeroband.utils import (
     get_num_flop_per_token,
 )
 from zeroband.utils.metric_logger import MetricLogger, WandbMetricLogger, DummyMetricLogger
-from zeroband.utils.monitor import HttpMonitor
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.utils.profiler import MemoryProfiler
 from zeroband.utils.world_info import get_world_info
@@ -70,10 +69,9 @@ def log_hash_training_state(
             logger.debug(f"outer diloco optimizer hash {id} : {outer_optimizer_hash}")
             logger.debug(f"outer diloco model hash {id} : {outer_model_hash}")
 
-            metrics.update({
-                f"outer_optimizer_hash_{id}": outer_optimizer_hash,
-                f"outer_model_hash_{id}": outer_model_hash
-            })
+            metrics.update(
+                {f"outer_optimizer_hash_{id}": outer_optimizer_hash, f"outer_model_hash_{id}": outer_model_hash}
+            )
         if world_info.rank == 0:
             assert metric_logger is not None
             metric_logger.log(metrics)
@@ -84,15 +82,15 @@ def train(config: Config):
     assert config.optim.batch_size % world_info.local_world_size == 0
     batch_size = config.optim.batch_size // world_info.local_world_size
 
-    assert (
-        batch_size % config.train.micro_bs == 0
-    ), f"The micro batch size ({config.train.micro_bs}) must divide the number of samples on each GPU ({batch_size})."
+    assert batch_size % config.train.micro_bs == 0, (
+        f"The micro batch size ({config.train.micro_bs}) must divide the number of samples on each GPU ({batch_size})."
+    )
     gradient_accumulation_steps = batch_size // config.train.micro_bs
 
     if config.ckpt is not None and config.ckpt.interval is not None and config.diloco is not None:
-        assert (
-            config.ckpt.interval % config.diloco.inner_steps == 0
-        ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
+        assert config.ckpt.interval % config.diloco.inner_steps == 0, (
+            "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
+        )
 
     sw = Stopwatch(config)
     sw.start("train()")
@@ -124,7 +122,6 @@ def train(config: Config):
             vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
         )
 
-
     gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
 
@@ -142,13 +139,11 @@ def train(config: Config):
             apply_ac_ckpt(model, num)
 
         elastic_device_mesh = ElasticDeviceMesh(
-            enable=config.diloco is not None,
-            live_recovery_rank_src=config.ckpt.live_recovery_rank_src
+            enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
         )
 
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=torch.bfloat16,
-            reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
+            param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
         )
 
         offload_policy = CPUOffloadPolicy(pin_memory=True) if config.train.fsdp_cpu_offload else None
@@ -231,10 +226,6 @@ def train(config: Config):
     if config.train.memory_profiler is not None:
         memory_profiler = MemoryProfiler(config.train.memory_profiler.freq, config.train.memory_profiler.snapshot_dir)
 
-    if config.monitor is not None:
-        monitor = HttpMonitor(config=config.model_dump(), resume=False)
-        monitor.set_stage("init")
-
     num_inner_steps = config.diloco.inner_steps if config.diloco is not None else 1
     perf_counter = PerfCounter(window_size=10)
 
@@ -291,9 +282,6 @@ def train(config: Config):
         # at the beginning of the inner steps we allow joiner to arrive.
         # We maybe reinit before the all reduce but only to allow leaving, not to join anymore
 
-        if world_info.rank == 0 and config.monitor is not None:
-            monitor.set_stage("inner_loop")
-
         for inner_step in range(num_inner_steps):
             logger.debug("Starting inner step.")
             sw.start("inner_step")
@@ -325,7 +313,7 @@ def train(config: Config):
                     with sw.record_block("Run forward()"):
                         logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
                         flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b * seq) vocab
-                        flatten_labels = labels.reshape(-1)                   # b seq -> (b * seq)
+                        flatten_labels = labels.reshape(-1)  # b seq -> (b * seq)
 
                     with sw.record_block("Loss Calculation"):
                         ce_loss, z_loss = compute_cross_entropy_loss(
@@ -365,9 +353,13 @@ def train(config: Config):
 
             with sw.record_block("Loss allreduce()"):
                 # Launch both allreduces at the same time to hide latency
-                loss_allreduce = dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True)
+                loss_allreduce = dist.all_reduce(
+                    tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True
+                )
                 if config.optim.z_loss:
-                    z_loss_allreduce = dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True)
+                    z_loss_allreduce = dist.all_reduce(
+                        tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True
+                    )
 
                 assert isinstance(loss_allreduce, torch.distributed.Work)
                 loss_allreduce.wait()
@@ -376,7 +368,7 @@ def train(config: Config):
                     z_loss_allreduce.wait()
 
             with sw.record_block("Clip Grad"):
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor() # type: ignore (is a dtensor)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
             with sw.record_block("Optimizer Step"):
                 inner_optimizer.step()
@@ -432,8 +424,6 @@ def train(config: Config):
             if world_info.rank == 0:
                 assert metric_logger is not None
                 metric_logger.log(metrics)
-                if config.monitor is not None:
-                    monitor.log(metrics)
 
             logger.info(log)
 
@@ -445,9 +435,6 @@ def train(config: Config):
 
         if config.diloco is not None:
             assert diloco is not None
-            if world_info.rank == 0 and config.monitor is not None:
-                monitor.set_stage("outer_loop")
-
             time_start_inner = time.perf_counter()
             diloco.step(model=model, flag=str(training_progress.outer_step))
             diloco_time = time.perf_counter() - time_start_inner
@@ -502,8 +489,6 @@ def train(config: Config):
     if world_info.rank == 0:
         assert metric_logger is not None
         metric_logger.finish()
-        if config.monitor is not None:
-            monitor.finish()
 
     ckpt_manager.wait_for_blocking_job()
 

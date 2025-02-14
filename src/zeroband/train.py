@@ -3,6 +3,7 @@ import time
 from typing import TYPE_CHECKING
 from multiprocessing.process import _children  # type: ignore
 
+import pccl
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
@@ -224,6 +225,12 @@ def train(config: Config):
 
     logger.debug("Finished setup in %f seconds", sw.elapsed())
 
+    if config.diloco is not None:
+        # Initialize PCCL
+        communicator = pccl.Communicator(config.diloco.pccl.address, world_info.rank)
+        communicator.connect(n_attempts=15)
+        logger.info("pccl connected to master.")
+
     while True:
         if num_inner_steps > 1:
             # if we don't use diloco we don't print the outer step logs
@@ -335,9 +342,11 @@ def train(config: Config):
             else:
                 # we count the total tokens with respect to all diloco workers
                 # might need to tweak this as some worker might fail to join the all reduce later
-                raise NotImplementedError("Diloco is not implemented yet")
+                # raise NotImplementedError("Diloco is not implemented yet")
                 # todo(sami): add the number of diloco workers
-                # training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
+                training_progress.total_tokens += new_tokens * communicator.get_attribute(
+                    pccl.Attribute.CURRENT_WORLD_SIZE
+                )
 
             assert isinstance(loss_batch, torch.Tensor)
             metrics = {
@@ -365,10 +374,9 @@ def train(config: Config):
                 log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
 
             if config.diloco is not None:
-                raise NotImplementedError("Diloco is not implemented yet")
                 # todo(sami): add the number of diloco workers
-                # metrics["num_peers"] = elastic_device_mesh.global_pg.size()
-                # log += f", diloco_peers: {metrics['num_peers']}"
+                metrics["num_peers"] = communicator.get_attribute(pccl.Attribute.CURRENT_WORLD_SIZE)
+                log += f", diloco_peers: {metrics['num_peers']}"
 
             if world_info.rank == 0:
                 assert metric_logger is not None

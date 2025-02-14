@@ -66,12 +66,23 @@ class OptimConfig(BaseConfig):
     num_chunks: int | None = None
 
 
+class PCCLConfig(BaseConfig):
+    host: str = "127.0.0.1"
+    port: int = 48148
+
+    @property
+    def address(self) -> str:
+        return f"{self.host}:{self.port}"
+
+
 class DilocoConfig(BaseConfig):
     outer_lr: float = 0.7
     inner_steps: int
     compression: Compression = Compression.NO
 
     retry_all_reduce: int = 3
+
+    pccl: PCCLConfig = PCCLConfig()
 
 
 class MemoryProfilerConfig(BaseConfig):

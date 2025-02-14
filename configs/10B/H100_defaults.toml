@@ -7,7 +7,6 @@ run_name = "Torch Optimizer"
 metric_logger_type = "wandb"
 log_level = "DEBUG"
 
-
 [train]
 micro_bs = 1
 ac_ckpt = true
@@ -15,10 +14,6 @@ torch_profiler = false
 torch_compile = true
 fused_linear_ce = true
 fsdp_cpu_offload = true
-
-#[train.memory_profiler]
-#freq = 1
-#snapshot_dir = "logs/"
 
 [optim]
 sched_type = "wsd-sqrt"

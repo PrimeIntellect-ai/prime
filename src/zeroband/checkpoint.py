@@ -339,19 +339,7 @@ class CkptManager:
         else:
             self.non_blocking_process.append(processes)
 
-    def wait_for_blocking_job(self):
-        for process in self.blocking_process:
-            process.join()
-
-        self.blocking_process = []
-
-        if self.world_info.local_rank == 0:
-            if self.config.topk is not None:
-                delete_topk(self.logger, self.config.path, self.config.topk)
-
     def _del__(self):
-        self.wait_for_blocking_job()
-
         for process in self.non_blocking_process:
             process.join()
 

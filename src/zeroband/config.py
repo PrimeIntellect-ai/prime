@@ -188,12 +188,6 @@ class Config(BaseConfig):
             )
         return self
 
-    @model_validator(mode="after")
-    def validate_live_recovery_rank_src(self):
-        if self.ckpt is not None and self.ckpt.live_recovery_rank_src is not None and self.diloco is None:
-            raise ValueError("live_recovery_rank_src is only supported with diloco")
-        return self
-
 
 def resolve_env_vars(config: Config) -> None:
     """

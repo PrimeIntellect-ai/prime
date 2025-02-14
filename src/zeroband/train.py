@@ -9,7 +9,6 @@ from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.autograd.profiler import record_function
 
 from zeroband.checkpoint import CkptManager, TrainingProgress
-from zeroband.comms import ElasticDeviceMesh
 from zeroband.config import Config, resolve_env_vars
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
 from zeroband.diloco import Diloco
@@ -138,10 +137,6 @@ def train(config: Config):
             num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
             apply_ac_ckpt(model, num)
 
-        elastic_device_mesh = ElasticDeviceMesh(
-            enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
-        )
-
         mp_policy = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
         )
@@ -156,14 +151,12 @@ def train(config: Config):
             fully_shard(
                 transformer_block,
                 mp_policy=mp_policy,
-                mesh=elastic_device_mesh.cuda_local_mesh,
                 reshard_after_forward=reshard_after_forward,
                 offload_policy=offload_policy,
             )
         fully_shard(
             model,
             mp_policy=mp_policy,
-            mesh=elastic_device_mesh.cuda_local_mesh,
             reshard_after_forward=config.train.reshard_after_forward,
             offload_policy=offload_policy,
         )
@@ -172,7 +165,7 @@ def train(config: Config):
     with sw.record_block("Optimizer Setup"):
         inner_optimizer = get_optimizer(config, model.parameters())
 
-        diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
+        diloco = Diloco(config.diloco, model) if config.diloco is not None else None
 
         scheduler = get_scheduler(
             sched_type=config.optim.sched_type,
@@ -309,13 +302,9 @@ def train(config: Config):
 
             with sw.record_block("Loss allreduce()"):
                 # Launch both allreduces at the same time to hide latency
-                loss_allreduce = dist.all_reduce(
-                    tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True
-                )
+                loss_allreduce = dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, async_op=True)
                 if config.optim.z_loss:
-                    z_loss_allreduce = dist.all_reduce(
-                        tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg, async_op=True
-                    )
+                    z_loss_allreduce = dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, async_op=True)
 
                 assert isinstance(loss_allreduce, torch.distributed.Work)
                 loss_allreduce.wait()
@@ -346,7 +335,9 @@ def train(config: Config):
             else:
                 # we count the total tokens with respect to all diloco workers
                 # might need to tweak this as some worker might fail to join the all reduce later
-                training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
+                raise NotImplementedError("Diloco is not implemented yet")
+                # todo(sami): add the number of diloco workers
+                # training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
 
             assert isinstance(loss_batch, torch.Tensor)
             metrics = {
@@ -374,8 +365,10 @@ def train(config: Config):
                 log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
 
             if config.diloco is not None:
-                metrics["num_peers"] = elastic_device_mesh.global_pg.size()
-                log += f", diloco_peers: {metrics['num_peers']}"
+                raise NotImplementedError("Diloco is not implemented yet")
+                # todo(sami): add the number of diloco workers
+                # metrics["num_peers"] = elastic_device_mesh.global_pg.size()
+                # log += f", diloco_peers: {metrics['num_peers']}"
 
             if world_info.rank == 0:
                 assert metric_logger is not None
@@ -445,10 +438,6 @@ def train(config: Config):
     if world_info.rank == 0:
         assert metric_logger is not None
         metric_logger.finish()
-
-    ckpt_manager.wait_for_blocking_job()
-
-    del elastic_device_mesh  # allow to clean up for smoother tests transition
 
     if config.train.memory_profiler is not None:
         logger.debug(f"Max memory used: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")

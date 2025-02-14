@@ -48,7 +48,7 @@ def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch
             ),
         )
     elif isinstance(_config, CPUAdamConfig):
-        from CPUOptimizer import CPUOptimizer
+        from CPUOptimizer import CPUOptimizer, StepKind
 
         # Closes over opt before it's defined. It's cursed but it's how cpython works.
         def pipeline_hook(param):
@@ -65,7 +65,7 @@ def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch
             weight_decay=_config.weight_decay,
             clip_max_norm=_config.clip_max_norm,
             pipeline_hook=pipeline_hook if _config.pipelined else None,
-            adamw = _config.adamw,
+            step_kind=StepKind.TORCH_ADAMW,
         )
     else:
         raise ValueError(f"Unknown optimizer {_config.optimizer}")

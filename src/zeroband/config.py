@@ -52,7 +52,6 @@ class SoapConfig(BaseConfig):
 
 class CPUAdamConfig(BaseConfig):
     type: Literal["cpu_adam"] = "cpu_adam"
-    adamw: bool = True
     lr: float = 4e-4
     betas1: float = 0.9
     betas2: float = 0.95

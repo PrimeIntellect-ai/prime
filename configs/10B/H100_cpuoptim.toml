@@ -29,7 +29,6 @@ z_loss = true
 
 [optim.optim]
 type = "cpu_adam"
-adamw = true
 lr = 0.000075
 betas1 = 0.9
 betas2 = 0.95

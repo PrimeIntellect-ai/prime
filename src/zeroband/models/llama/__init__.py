@@ -14,6 +14,7 @@ __all__ = ["Transformer"]
 
 llama2_configs = {
     "debugmodel": ModelArgs(dim=256, n_layers=2, n_heads=8),
+    "70M": ModelArgs(dim=512, n_layers=6, n_heads=8),
     "150M": ModelArgs(dim=1024, n_layers=12, n_heads=16),  # todo(sami): double check this
     "271M": ModelArgs(dim=1024, n_layers=16, n_heads=8),
     "1B": ModelArgs(dim=2048, n_layers=18, n_heads=16),

@@ -41,7 +41,7 @@ main() {
     fi
     
     log_info "Creating virtual environment..."
-    uv venv
+    uv venv --python 3.10
     
     log_info "Activating virtual environment..."
     source .venv/bin/activate

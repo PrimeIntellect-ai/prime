@@ -1,9 +1,9 @@
-name_model = "150M"
-project = "debug_150m_zero_band"
+name_model = "70M"
+project = "debug_70m_zero_band"
 type_model = "llama2"
 
 [train]
-micro_bs = 64 # change this base on the gpu
+micro_bs = 128 # change this base on the gpu
 reshard_after_forward = false
 
 [optim]

@@ -231,56 +231,12 @@ def train(config: Config):
 
     logger.debug("Finished setup in %f seconds", sw.elapsed())
 
-    need_live_recovery = config.ckpt.live_recovery_rank_src is not None
     while True:
         if num_inner_steps > 1:
             # if we don't use diloco we don't print the outer step logs
             logger.info(f"outer_step step: {training_progress.outer_step}")
 
         time_start_outer = time.perf_counter()
-
-        if config.diloco is not None:
-            assert diloco is not None
-            # this is a patch for now to allow live recovery worker to not affect the all reduce at all
-
-            if not need_live_recovery:
-                elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=True)
-
-                maybe_dest_rank = elastic_device_mesh.live_recovery.should_send_ckpt_to()
-                if maybe_dest_rank is not None:
-                    logger.info(f"Start live recovery to rank {maybe_dest_rank}")
-                    ckpt_manager.send_ckpt_to_peer(elastic_device_mesh.global_pg, maybe_dest_rank, blocking=True)
-
-                    elastic_device_mesh.live_recovery.reset()
-            else:
-                ## receiving
-                time_start_live_recovery = time.perf_counter()
-                logger.info(f"Start live recovery from rank {config.ckpt.live_recovery_rank_src}")
-
-                ## we create grad buffer and opts stats mamnually, the value will be overwritten by the ckpt but we need the DTensor to be correctly init before loading it
-
-                diloco.outer_optimizer.step()  # need to step to init the DTensor stats
-
-                ckpt_manager.recv_ckpt_from_peer(elastic_device_mesh.global_pg)
-
-                log_hash_training_state(
-                    config,
-                    model,
-                    inner_optimizer,
-                    diloco,
-                    metric_logger,
-                    step=training_progress.step,
-                    id="live_reco_recv",
-                )
-                need_live_recovery = False
-
-                if config.ckpt.remote_data_load:
-                    ckpt_manager.remote_data_load()
-
-                logger.info("live recovery done in %f", time.perf_counter() - time_start_live_recovery)
-
-        # at the beginning of the inner steps we allow joiner to arrive.
-        # We maybe reinit before the all reduce but only to allow leaving, not to join anymore
 
         for inner_step in range(num_inner_steps):
             logger.debug("Starting inner step.")

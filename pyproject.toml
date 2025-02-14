@@ -20,6 +20,7 @@ dependencies = [
     "psutil",
     "torch-shampoo @ git+https://github.com/facebookresearch/optimizers.git@main",
     "liger-kernel-nightly>=0.5.2.dev20250122195349",
+    "pccl @ git+ssh://git@github.com/PrimeIntellect-ai/pccl.git@main#subdirectory=python/framework",
 ]
 
 [project.optional-dependencies]

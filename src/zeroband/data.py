@@ -329,12 +329,12 @@ class PrefetchDataLoader(StatefulDataLoader):
             self._await_prefetch()
             return {
                 'dataloader_iter': self.dataloader_iter.state_dict(),
-                'ready_batch': {k: v.cpu() for k, v in self.ready_batch.items()}
+                'ready_batch': self.ready_batch
             }
 
         def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
             self.dataloader_iter = state_dict['dataloader_iter']
-            self.ready_batch = {k: v.cuda() for k, v in state_dict['ready_batch']}
+            self.ready_batch = state_dict['ready_batch']
 
         def _prefetch_next(self):
             def _task() -> None:

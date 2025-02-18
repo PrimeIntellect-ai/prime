@@ -10,7 +10,7 @@ from torch.autograd.profiler import record_function
 
 from zeroband.checkpoint import CkptManager, TrainingProgress
 from zeroband.comms import ElasticDeviceMesh
-from zeroband.config import Config, resolve_env_vars
+from zeroband.config import Config, OptimizersConfig, resolve_env_vars
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
 from zeroband.diloco import Diloco
 from zeroband.loss import compute_cross_entropy_loss
@@ -331,6 +331,8 @@ def train(config: Config):
                             loss = ce_loss / gradient_accumulation_steps
 
                     with sw.record_block("Run backward()"):
+                        if config.optim.optim.type == "cpu_optimizer" and config.optim.optim.pipelined:
+                            opt.begin_step() # type: ignore
                         loss.backward()
 
                     with record_function("Clone Loss"):
@@ -362,7 +364,12 @@ def train(config: Config):
                     z_loss_allreduce.wait()
 
             with sw.record_block("Clip Grad"):
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+                oconf: OptimizersConfig = config.optim.optim
+                if not (oconf.type == "cpu_optimizer" and config.optim.optim.clip_max_norm != 0 and oconf.pipelined):
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+                else:
+                    pass # Skip gradient clipping, as it is handled pipelined in the C++ CPUOptimizer module.
+
 
             with sw.record_block("Optimizer Step"):
                 inner_optimizer.step()
@@ -394,7 +401,6 @@ def train(config: Config):
                 "Perplexity": torch.exp(loss_batch).item(),
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
-                "grad_norm": grad_norm.item(),
             }
 
             if config.optim.z_loss:

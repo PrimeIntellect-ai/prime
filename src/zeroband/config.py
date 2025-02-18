@@ -33,23 +33,37 @@ class AdamConfig(BaseConfig):
         "adam"  # the literal is used to distinguish between the different optimizers configuration in the union type
     )
     lr: float = 4e-4
-    weight_decay: float = 0.1
     betas1: float = 0.9
     betas2: float = 0.95
+    eps: float = 1e-8
+    weight_decay: float = 0.1
 
 
 class SoapConfig(BaseConfig):
     type: Literal["soap"] = "soap"
     lr: float = 4e-4
-    weight_decay: float = 1e-05
     betas1: float = 0.9
     betas2: float = 0.95
+    eps: float = 1e-12
+    weight_decay: float = 1e-05
 
     max_preconditioner_dim: int = 8192
     precondition_frequency: int = 100
 
 
-OptimizersConfig: TypeAlias = AdamConfig | SoapConfig
+class CPUOptimizerConfig(BaseConfig):
+    type: Literal["cpu_optimizer"] = "cpu_optimizer"
+    step_kind: Literal["adam", "adamw", "torch_adamw"] = "torch_adamw"
+    lr: float = 4e-4
+    betas1: float = 0.9
+    betas2: float = 0.95
+    eps: float = 1e-8
+    weight_decay: float = 0.0
+    clip_max_norm: float = 0.0
+    pipelined: bool = False
+
+
+OptimizersConfig: TypeAlias = AdamConfig | SoapConfig | CPUOptimizerConfig
 
 
 class OptimConfig(BaseConfig):

@@ -4,14 +4,7 @@ import torch
 import torch.distributed.fsdp
 import torch.distributed.tensor
 
-from distributed_shampoo import (
-    DefaultEigenvalueCorrectedShampooConfig,
-    DistributedShampoo,
-    FullyShardShampooConfig,
-    ShampooPT2CompileConfig,
-)
-
-from zeroband.config import Config, AdamConfig, SoapConfig, OptimizersConfig
+from zeroband.config import Config, AdamConfig, SoapConfig, CPUOptimizerConfig, OptimizersConfig
 
 
 def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch.optim.Optimizer:
@@ -29,6 +22,13 @@ def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch
             betas=(_config.betas1, _config.betas2),
         )
     elif isinstance(_config, SoapConfig):
+        from distributed_shampoo import (
+            DefaultEigenvalueCorrectedShampooConfig,
+            DistributedShampoo,
+            FullyShardShampooConfig,
+            ShampooPT2CompileConfig,
+        )
+
         opt = DistributedShampoo(
             params,
             lr=_config.lr,
@@ -45,6 +45,23 @@ def get_optimizer(config: Config, params: Iterable[torch.nn.Parameter]) -> torch
             shampoo_pt2_compile_config=ShampooPT2CompileConfig(
                 enable_shampoo_pt2_dynamic_shape=False
             ),
+        )
+    elif isinstance(_config, CPUOptimizerConfig):
+        from CPUOptimizer import CPUOptimizer, kind_name_map
+
+        # Closes over opt before it's even defined. Welcome to python :3
+        def pipeline_hook(param):
+            opt.step_param(param)
+
+        opt = CPUOptimizer(
+            params,
+            lr=_config.lr,
+            betas=(_config.betas1, _config.betas2),
+            eps=_config.eps,
+            weight_decay=_config.weight_decay,
+            clip_max_norm=_config.clip_max_norm,
+            pipeline_hook=pipeline_hook if _config.pipelined else None,
+            step_kind=kind_name_map[_config.step_kind],
         )
     else:
         raise ValueError(f"Unknown optimizer {_config.optimizer}")

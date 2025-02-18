@@ -111,7 +111,7 @@ def train(config: Config):
             world_size=world_info.world_size,
             rank=world_info.rank,
             batch_size=config.train.micro_bs,
-            config=config,
+            data_config=config.data,
         )
         train_dataloader_iterator = iter(train_dataloader)
 

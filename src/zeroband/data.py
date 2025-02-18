@@ -7,7 +7,7 @@ import threading
 from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.utils.logger import get_logger
 from zeroband.utils.world_info import get_world_info
-from zeroband.config import Config, DataConfig
+from zeroband.config import DataConfig
 
 import torch
 from torch.utils.data import IterableDataset, Dataset
@@ -284,8 +284,8 @@ class PrefetchDataLoader(StatefulDataLoader):
     We're also using it to hide the latency of torch compiling FlexAttention block masks.
     """
 
-    def __init__(self, original_dataloader: StatefulDataLoader, config: Config):
-        self.config = config
+    def __init__(self, original_dataloader: StatefulDataLoader, data_config: DataConfig):
+        self.config = data_config
         self.original_dataloader = original_dataloader
         self._prefetch_iterator = None
 
@@ -316,7 +316,7 @@ class PrefetchDataLoader(StatefulDataLoader):
             self._prefetch_iterator = self._PrefetchIterator(self.original_dataloader, self.config)
 
     class _PrefetchIterator(Stateful):
-        def __init__(self, original_dataloader: StatefulDataLoader, config: Config):
+        def __init__(self, original_dataloader: StatefulDataLoader, config: DataConfig):
             self.dataloader_iter = iter(original_dataloader)
             self.config = config
             self.ready_batch = None
@@ -351,13 +351,13 @@ class PrefetchDataLoader(StatefulDataLoader):
 
                 # Transfer to CUDA asynchronously and create block mask in another cuda stream
                 newstream = torch.cuda.Stream(local_rank)
-                with torch.cuda.stream(newstream):
+                with torch.cuda.stream(newstream): #type: ignore (cuda stream is a cuda stream :) )
                     input_ids = batch["input_ids"].to("cuda", non_blocking=True)
                     labels = batch["labels"].to("cuda", non_blocking=True)
 
                     # Create block mask if needed
                     block_mask = None
-                    if self.config.train.sequence_packing:
+                    if self.config.sequence_packing:
                         seqlens = batch.get("seqlens")
                         if seqlens is not None:
                             seqlens = [s.to("cuda", non_blocking=True) for s in seqlens]
@@ -398,9 +398,8 @@ def get_dataloader(
     world_size: int,
     rank: int,
     batch_size: int,
-    config: Config,
+    data_config: DataConfig,
 ) -> StatefulDataLoader:
-    data_config = config.data
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
     else:
@@ -415,7 +414,7 @@ def get_dataloader(
         collate_fn=collate_fn,
         num_workers=data_config.num_workers,
     )
-    return PrefetchDataLoader(mp_batch_dataloader, config)
+    return PrefetchDataLoader(mp_batch_dataloader, data_config)
 
 
 @functools.lru_cache(maxsize=None)

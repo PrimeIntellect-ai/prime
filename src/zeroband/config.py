@@ -15,6 +15,7 @@ class Compression(Enum):
 class DataConfig(BaseConfig):
     dataset_name_or_paths: str = "datasets/fineweb-edu"
     val_dataset_name_or_paths: str | None = None
+    sequence_packing: bool = True
     seq_length: int = 1024
     fake: bool = False
     num_workers: int = 4
@@ -91,8 +92,6 @@ class TrainConfig(BaseConfig):
     memory_profiler: MemoryProfilerConfig | None = None
 
     torch_profiler: bool = False
-
-    sequence_packing: bool = True
 
     torch_compile: bool = True
 

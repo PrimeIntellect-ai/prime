@@ -26,7 +26,7 @@ snapshot_dir = "logs/"
 sched_type = "wsd-sqrt"
 batch_size = 128
 warmup_steps = 0
-total_steps = 1 # 2_000
+total_steps = 5 # 2_000
 z_loss = true
 
 [optim.optim]

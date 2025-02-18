@@ -51,8 +51,9 @@ class SoapConfig(BaseConfig):
     precondition_frequency: int = 100
 
 
-class CPUAdamConfig(BaseConfig):
-    type: Literal["cpu_adam"] = "cpu_adam"
+class CPUOptimizerConfig(BaseConfig):
+    type: Literal["cpu_optimizer"] = "cpu_optimizer"
+    step_kind: Literal["adam", "adamw", "torch_adamw"] = "torch_adamw"
     lr: float = 4e-4
     betas1: float = 0.9
     betas2: float = 0.95
@@ -62,7 +63,7 @@ class CPUAdamConfig(BaseConfig):
     pipelined: bool = False
 
 
-OptimizersConfig: TypeAlias = AdamConfig | SoapConfig | CPUAdamConfig
+OptimizersConfig: TypeAlias = AdamConfig | SoapConfig | CPUOptimizerConfig
 
 
 class OptimConfig(BaseConfig):

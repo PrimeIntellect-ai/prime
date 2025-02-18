@@ -331,8 +331,8 @@ def train(config: Config):
                             loss = ce_loss / gradient_accumulation_steps
 
                     with sw.record_block("Run backward()"):
-                        if config.optim.optim.type == "cpu_optimizer" and config.optim.optim.pipelined:
-                            opt.begin_step() # type: ignore
+                        if config.optim.optim.type == "cpu_optimizer":
+                            inner_optimizer.begin_step() # type: ignore (Begin step)
                         loss.backward()
 
                     with record_function("Clone Loss"):

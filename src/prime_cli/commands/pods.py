@@ -597,8 +597,9 @@ def terminate(pod_id: str) -> None:
             console.print("Termination cancelled")
             raise typer.Exit(0)
 
-        # Delete the pod
-        pods_client.delete(pod_id)
+        with console.status("[bold blue]Terminating pod...", spinner="dots"):
+            pods_client.delete(pod_id)
+
         console.print(f"[green]Successfully terminated pod {pod_id}[/green]")
 
     except APIError as e:
@@ -635,13 +636,38 @@ def ssh(pod_id: str) -> None:
         if not os.path.exists(ssh_key_path):
             console.print(f"[red]SSH key not found at {ssh_key_path}[/red]")
             raise typer.Exit(1)
+
         ssh_conn = status.ssh_connection
         # Handle ssh_conn being either a string or list of strings
-        connection_str: str
+        connections: List[str] = []
         if isinstance(ssh_conn, List):
-            connection_str = ssh_conn[0] if ssh_conn else ""
+            # Filter out None values and convert to strings
+            connections = [str(conn) for conn in ssh_conn if conn is not None]
         else:
-            connection_str = str(ssh_conn) if ssh_conn else ""
+            connections = [str(ssh_conn)] if ssh_conn else []
+
+        if not connections:
+            console.print("[red]No valid SSH connections available[/red]")
+            raise typer.Exit(1)
+
+        # If multiple connections available, let user choose
+        connection_str: str
+        if len(connections) > 1:
+            console.print("\nMultiple nodes available. Please select one:")
+            for idx, conn in enumerate(connections):
+                console.print(f"[blue]{idx + 1}[/blue]) {conn}")
+
+            choice = typer.prompt(
+                "Enter node number", type=int, default=1, show_default=False
+            )
+
+            if choice < 1 or choice > len(connections):
+                console.print("[red]Invalid selection[/red]")
+                raise typer.Exit(1)
+
+            connection_str = connections[choice - 1]
+        else:
+            connection_str = connections[0]
 
         connection_parts = connection_str.split(" -p ")
         host = connection_parts[0]

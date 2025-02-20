@@ -66,8 +66,8 @@ class Pod(BaseModel):
     prime_port_mapping: Optional[List[PortMapping]] = Field(
         None, alias="primePortMapping"
     )
-    ssh_connection: Optional[str] = Field(None, alias="sshConnection")
-    ip: Optional[str]
+    ssh_connection: Optional[Union[str, List[str]]] = Field(None, alias="sshConnection")
+    ip: Optional[Union[str, List[str]]]
     price_hr: Optional[float] = Field(None, alias="priceHr")
     environment_type: Optional[str] = Field(None, alias="environmentType")
     socket: Optional[str]

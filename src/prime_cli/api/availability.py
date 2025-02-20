@@ -89,19 +89,40 @@ class AvailabilityClient:
         gpu_type: Optional[str] = None,
     ) -> Dict[str, List[GPUAvailability]]:
         """
-        Get GPU availability information.
+        Get both single GPU and cluster availability information.
+
+        Args:
+            regions: Optional list of regions to filter by
+            gpu_count: Optional number of GPUs to filter by
+            gpu_type: Optional GPU type to filter by
+
+        Returns:
+            Dictionary mapping GPU types to lists of availability information,
+            combining both single GPU and cluster availability
         """
-        params = {}
+        params: Dict[str, Any] = {}
         if regions:
-            params["regions"] = ",".join(regions)
+            params["regions"] = []
+            for region in regions:
+                params["regions"].extend(r.strip() for r in region.split(","))
         if gpu_count:
             params["gpu_count"] = str(gpu_count)
         if gpu_type:
             params["gpu_type"] = gpu_type
 
-        response = self.client.get("/availability", params=params)
+        single_response = self.client.get("/availability", params=params)
+        cluster_response = self.client.get("/availability/clusters", params=params)
 
-        return {
-            gpu_type: [GPUAvailability(**gpu) for gpu in gpus]
-            for gpu_type, gpus in response.items()
-        }
+        combined: Dict[str, List[GPUAvailability]] = {}
+        for gpu_type, gpus in single_response.items():
+            if gpu_type is not None:
+                combined[gpu_type] = [GPUAvailability(**gpu) for gpu in gpus]
+
+        for gpu_type, gpus in cluster_response.items():
+            if gpu_type is not None:
+                if gpu_type in combined:
+                    combined[gpu_type].extend([GPUAvailability(**gpu) for gpu in gpus])
+                else:
+                    combined[gpu_type] = [GPUAvailability(**gpu) for gpu in gpus]
+
+        return combined

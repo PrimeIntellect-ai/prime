@@ -11,6 +11,7 @@ console = Console()
 @app.command()
 def view() -> None:
     """View current configuration"""
+    console.print("[blue]Test[/blue]")
     config = Config()
     settings = config.view()
 
@@ -43,14 +44,12 @@ def view() -> None:
 def set_api_key(
     api_key: str = typer.Option(
         ...,
-        prompt="Enter your API key",
+        prompt="you can create an API key at https://app.primeintellect.ai/dashboard/tokens\nEnter your API key",  # noqa: E501
         help="Your Prime Intellect API key",
         hide_input=True,
     ),
 ) -> None:
     """Set your API key"""
-    console.print("[yellow]Note: Your input will be hidden for security[/yellow]")
-    api_key = typer.prompt("Enter your API key", hide_input=True)
     config = Config()
     config.set_api_key(api_key)
     masked_key = f"{api_key[:6]}***{api_key[-4:]}" if len(api_key) > 10 else "***"

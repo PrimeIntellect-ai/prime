@@ -233,11 +233,26 @@ def create(
     disk_size: Optional[int] = typer.Option(None, help="Disk size in GB"),
     vcpus: Optional[int] = typer.Option(None, help="Number of vCPUs"),
     memory: Optional[int] = typer.Option(None, help="Memory in GB"),
-    image: Optional[str] = typer.Option(None, help="Custom image"),
+    image: Optional[str] = typer.Option(
+        None, help="Image name or 'custom_template' when using custom template ID"
+    ),
+    custom_template_id: Optional[str] = typer.Option(None, help="Custom template ID"),
     team_id: Optional[str] = typer.Option(None, help="Team ID to use for the pod"),
 ) -> None:
     """Create a new pod with an interactive setup process"""
     try:
+        # Validate custom template usage
+        if custom_template_id and not image == "custom_template":
+            console.print(
+                "[red]Error: Must set image='custom_template' when using custom_template_id[/red]"  # noqa: E501
+            )
+            raise typer.Exit(1)
+        if image == "custom_template" and not custom_template_id:
+            console.print(
+                "[red]Error: Must provide custom_template_id when image='custom_template'[/red]"  # noqa: E501
+            )
+            raise typer.Exit(1)
+
         base_client = APIClient()
         availability_client = AvailabilityClient(base_client)
         pods_client = PodsClient(base_client)
@@ -507,11 +522,11 @@ def create(
                 "image": image,
                 "dataCenterId": selected_gpu.data_center,
                 "maxPrice": None,
-                "customTemplateId": None,
                 "country": None,
                 "security": None,
                 "jupyterPassword": None,
                 "autoRestart": False,
+                "customTemplateId": custom_template_id,
             },
             "provider": {"type": selected_gpu.provider}
             if selected_gpu.provider

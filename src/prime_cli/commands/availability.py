@@ -179,7 +179,9 @@ def list(
                 gpu_entry["stock_status"],
                 gpu_entry["price"],
                 str(gpu_entry["gpu_memory"]),
-                gpu_entry["security"],
+                "community"
+                if gpu_entry["security"] == "community_cloud"
+                else "datacenter",
                 str(gpu_entry["vcpu"]),
                 str(gpu_entry["memory"]),
             )

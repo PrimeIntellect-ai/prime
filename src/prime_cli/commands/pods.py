@@ -383,9 +383,12 @@ def create(
 
         if not name:
             while True:
+                gpu_name = selected_gpu.gpu_type.lower().split("_")[0]
+                default_name = f"{gpu_name}-{selected_gpu.gpu_count}"
                 name = typer.prompt(
                     "Pod name (alphanumeric and dashes only, must contain at least "
                     "1 letter)",
+                    default=default_name,
                 )
                 if (
                     name
@@ -468,21 +471,25 @@ def create(
                     raise typer.Exit(1)
 
         if not image and selected_gpu.images:
-            # Show available images
-            console.print("\n[bold]Available Images:[/bold]")
-            for idx, img in enumerate(selected_gpu.images):
-                console.print(f"{idx + 1}. {img}")
+            if len(selected_gpu.images) == 1:
+                # If only one image available, use it directly
+                image = selected_gpu.images[0]
+            else:
+                # Show available images
+                console.print("\n[bold]Available Images:[/bold]")
+                for idx, img in enumerate(selected_gpu.images):
+                    console.print(f"{idx + 1}. {img}")
 
-            # Prompt for image selection
-            image_idx = typer.prompt(
-                "Select image number", type=int, default=1, show_default=False
-            )
+                # Prompt for image selection
+                image_idx = typer.prompt(
+                    "Select image number", type=int, default=1, show_default=False
+                )
 
-            if image_idx < 1 or image_idx > len(selected_gpu.images):
-                console.print("[red]Invalid image selection[/red]")
-                raise typer.Exit(1)
+                if image_idx < 1 or image_idx > len(selected_gpu.images):
+                    console.print("[red]Invalid image selection[/red]")
+                    raise typer.Exit(1)
 
-            image = selected_gpu.images[image_idx - 1]
+                image = selected_gpu.images[image_idx - 1]
 
         # Get team ID from config if not provided
         if not team_id:

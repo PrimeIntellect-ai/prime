@@ -57,6 +57,9 @@ def list(
     socket: Optional[str] = typer.Option(
         None, help="Filter by socket type (e.g., PCIe, SXM5, SXM4)"
     ),
+    provider: Optional[str] = typer.Option(
+        None, help="Filter by provider (e.g., aws, azure, google)"
+    ),
     group_similar: bool = typer.Option(
         True, help="Group similar configurations from same provider"
     ),
@@ -71,6 +74,13 @@ def list(
         availability_data: Dict[str, List[GPUAvailability]] = availability_client.get(
             gpu_type=gpu_type, gpu_count=gpu_count, regions=regions
         )
+
+        # Filter by provider if provided
+        if provider:
+            availability_data = {
+                gpu_type: [gpu for gpu in gpus if gpu.provider == provider]
+                for gpu_type, gpus in availability_data.items()
+            }
 
         # Create display table
         table = Table(title="Available GPU Resources")

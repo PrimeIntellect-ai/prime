@@ -92,10 +92,10 @@ def list(
         table.add_column("Location", style="green")
         table.add_column("Stock", style="yellow")
         table.add_column("Price/Hr", style="magenta")
-        table.add_column("Memory (GB)", style="blue")
         table.add_column("Security", style="white")
         table.add_column("vCPUs", style="blue")
         table.add_column("RAM (GB)", style="blue")
+        table.add_column("Disk (GB)", style="blue")
 
         all_gpus: List[Dict[str, Any]] = []
         for gpu_type, gpus in availability_data.items():
@@ -113,6 +113,14 @@ def list(
                 location = f"{gpu.country or 'N/A'}"
 
                 short_id = generate_short_id(gpu)
+
+                disk_info: str = str(gpu.disk.default_count)
+                if (
+                    gpu.disk.max_count is not None
+                    and gpu.disk.max_count != gpu.disk.default_count
+                ):
+                    disk_info = f"{gpu.disk.default_count}+"
+
                 gpu_data = {
                     "short_id": short_id,
                     "cloud_id": gpu.cloud_id,
@@ -129,6 +137,7 @@ def list(
                     "vcpu": gpu.vcpu.default_count,
                     "memory": gpu.memory.default_count,
                     "is_spot": gpu.is_spot,
+                    "disk": disk_info,
                 }
                 all_gpus.append(gpu_data)
 
@@ -158,8 +167,14 @@ def list(
                     max_vcpu = max(g["vcpu"] for g in group)
                     min_mem = min(g["memory"] for g in group)
                     max_mem = max(g["memory"] for g in group)
-                    vcpu_range = f"{min_vcpu}-{max_vcpu}"
-                    memory_range = f"{min_mem}-{max_mem}"
+                    vcpu_range = (
+                        f"{min_vcpu}-{max_vcpu}"
+                        if min_vcpu != max_vcpu
+                        else str(min_vcpu)
+                    )
+                    memory_range = (
+                        f"{min_mem}-{max_mem}" if min_mem != max_mem else str(min_mem)
+                    )
                     base["vcpu"] = vcpu_range
                     base["memory"] = memory_range
                     filtered_gpus.append(base)
@@ -178,7 +193,7 @@ def list(
                 f"{gpu_entry['gpu_type']} (Spot)"
                 if gpu_entry["is_spot"]
                 else gpu_entry["gpu_type"]
-            )
+            ).replace("_", " ")
             table.add_row(
                 gpu_entry["short_id"],
                 gpu_type_display,
@@ -188,10 +203,12 @@ def list(
                 gpu_entry["location"],
                 gpu_entry["stock_status"],
                 gpu_entry["price"],
-                str(gpu_entry["gpu_memory"]),
-                gpu_entry["security"],
+                "community"
+                if gpu_entry["security"] == "community_cloud"
+                else "datacenter",
                 str(gpu_entry["vcpu"]),
                 str(gpu_entry["memory"]),
+                str(gpu_entry["disk"]),
             )
 
         console.print(table)

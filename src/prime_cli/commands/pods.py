@@ -620,9 +620,10 @@ def terminate(pod_id: str) -> None:
         raise typer.Exit(1)
 
 
-@app.command()
-def ssh(pod_id: str) -> None:
-    """SSH into a pod using configured SSH key"""
+@app.command(name="connect")
+@app.command(name="ssh")
+def connect(pod_id: str) -> None:
+    """SSH / connect to a pod using configured SSH key"""
     try:
         base_client = APIClient()
         pods_client = PodsClient(base_client)
@@ -643,6 +644,11 @@ def ssh(pod_id: str) -> None:
         if not os.path.exists(ssh_key_path):
             console.print(f"[red]SSH key not found at {ssh_key_path}[/red]")
             raise typer.Exit(1)
+
+        console.print(f"[blue]Using SSH key:[/blue] {ssh_key_path}")
+        console.print(
+            "[dim]To change SSH key path, use: prime config set-ssh-key-path[/dim]"
+        )
 
         ssh_conn = status.ssh_connection
         # Handle ssh_conn being either a string or list of strings

@@ -32,7 +32,7 @@ def gpu_types() -> None:
         gpu_types = sorted(availability_data.keys())
 
         for gpu_type in gpu_types:
-            table.add_row(gpu_type)
+            table.add_row(gpu_type.replace("_", " "))
 
         console.print(table)
 

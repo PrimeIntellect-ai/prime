@@ -94,7 +94,7 @@ def get_model(
 ) -> tuple[Transformer, ModelArgs]:
     """get the transformer model"""
 
-    config_model = LlamaConfig.from_pretrained("meta-llama/Meta-Llama-3-8B", attn_implementation="flex_attention")
+    config_model = LlamaConfig.from_pretrained("meta-llama/Meta-Llama-3-8B", attn_implementation="sdpa")
     model = LlamaForCausalLM.from_pretrained(pretrained_model_name_or_path="meta-llama/Meta-Llama-3-8B", config=config_model)
     
     return model, config_model

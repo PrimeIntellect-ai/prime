@@ -147,9 +147,9 @@ def train(config: Config):
 
         offload_policy = CPUOffloadPolicy(pin_memory=True) if config.train.fsdp_cpu_offload else None
 
-        for layer_id, transformer_block in model.layers.items():
+        for layer_id, transformer_block in enumerate(model.model.layers):
             if config.train.reshard_after_forward:
-                reshard_after_forward = int(layer_id) < len(model.layers) - 1
+                reshard_after_forward = int(layer_id) < len(model.model.layers) - 1
             else:
                 reshard_after_forward = False
             fully_shard(

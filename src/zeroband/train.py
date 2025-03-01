@@ -305,7 +305,7 @@ def train(config: Config):
                         block_mask = batch["block_mask"]
 
                     with sw.record_block("Run forward()"):
-                        logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
+                        logits = model(input_ids=input_ids).logits.contiguous()
                         flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b * seq) vocab
                         flatten_labels = labels.reshape(-1)  # b seq -> (b * seq)
 

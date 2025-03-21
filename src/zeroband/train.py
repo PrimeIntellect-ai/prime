@@ -37,7 +37,7 @@ from pydantic_config import parse_argv
 
 from zeroband.utils.world_info import get_local_world_info
 
-from pccl import Communicator, PCCLError, Attribute
+from pccl import Communicator, PCCLError, Attribute, SharedState, TensorInfo
 
 
 def log_hash_training_state(
@@ -177,7 +177,7 @@ def train(config: Config):
             num_training_steps=config.optim.total_steps,
         )
 
-        training_progress = TrainingProgress(total_tokens=0, outer_step=0, step=0)
+        training_progress = TrainingProgress(0, 0, 0)
 
         ckpt_manager = CkptManager(
             config=config.ckpt,
@@ -215,7 +215,7 @@ def train(config: Config):
                 data_path=config.ckpt.data_path,
             )
             log_hash_training_state(
-                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="resume"
+                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.num_performed_inner_steps, id="resume"
             )
 
     if config.train.memory_profiler is not None:
@@ -237,10 +237,17 @@ def train(config: Config):
     local_iter = 0
     world_size: int = communicator.get_attribute(Attribute.CURRENT_WORLD_SIZE)
 
+    num_syncs = 0
+    dummy_tensor = torch.zeros(1, device='cpu')
+    entries = [
+        TensorInfo.from_torch(dummy_tensor, "dummy", allow_content_inequality=False)
+    ]
+    shared_state: SharedState = SharedState(entries)
+
     while True:
         if num_inner_steps > 1:
             # if we don't use diloco we don't print the outer step logs
-            logger.info(f"outer_step step: {training_progress.outer_step}")
+            logger.info(f"outer_step step: {training_progress.num_performed_outer_steps}")
 
         if local_iter > 0:
             # keep retrying if it fails
@@ -259,6 +266,23 @@ def train(config: Config):
             time.sleep(1)
             local_iter += 1
             continue
+
+        current_device = torch.cuda.current_device() # refer to .set_device in the main function
+
+        # Perform cuda device synchronization
+        # if your shared state partially or fully resides on the GPU we must wait until all currently dispatched kernels have completed
+        # to avoid validating or potentially transmitting data that is currently being in-place modified.
+        torch.cuda.synchronize(current_device)
+
+        sync_info = communicator.sync_shared_state(shared_state)
+        num_syncs += 1
+        if num_syncs > 1:
+            # assert sync_info.rx_bytes == 0, "We should not be receiving any data after the initial sync; Otherwise, the peer has drifted"
+            pass
+
+        if shared_state.revision * num_inner_steps >= config.optim.total_steps:
+            logger.info("Reached the total number of steps, exiting ...")
+            break
 
         time_start_outer = time.perf_counter()
 
@@ -337,7 +361,7 @@ def train(config: Config):
                 inner_optimizer.zero_grad()
 
             # logging
-            training_progress.step += 1
+            training_progress.num_performed_inner_steps += 1
             inner_lr = [group["lr"] for group in inner_optimizer.param_groups][0]
 
             # syncing loss across all data parallel rank within a nodes
@@ -345,22 +369,22 @@ def train(config: Config):
             perf_counter.count_tokens(new_tokens)
 
             if config.diloco is None:
-                training_progress.total_tokens += new_tokens
-            # else:
-            # we count the total tokens with respect to all diloco workers
-            # might need to tweak this as some worker might fail to join the all reduce later
+                training_progress.num_trained_tokens += new_tokens
+            else:
+                # we count the total tokens with respect to all diloco workers
+                # might need to tweak this as some worker might fail to join the all reduce later
 
-            # this is technically a faulty approximation, but we don't necessarily care
-            # for what constitutes a high level monitoring summary statistic
-            training_progress.total_tokens += new_tokens * world_size
+                # this is technically a faulty approximation, but we don't necessarily care
+                # for what constitutes a high level monitoring summary statistic
+                training_progress.num_trained_tokens += new_tokens * world_size
 
             assert isinstance(loss_batch, torch.Tensor)
             metrics = {
                 "Loss": loss_batch.item(),
-                "step": training_progress.step,
+                "step": training_progress.num_performed_inner_steps,
                 "inner_lr": inner_lr,
                 "Perplexity": torch.exp(loss_batch).item(),
-                "total_tokens": training_progress.total_tokens,
+                "total_tokens": training_progress.num_trained_tokens,
                 "time": time.time(),
                 "grad_norm": grad_norm.item(),
             }
@@ -369,7 +393,7 @@ def train(config: Config):
                 assert isinstance(z_loss_batch, torch.Tensor)
                 metrics["z_loss"] = z_loss_batch.item()
 
-            log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
+            log = f"step: {training_progress.num_performed_inner_steps}, loss: {loss_batch.item():.4f}"
 
             tokens_per_second = perf_counter.get_tokens_per_second()
             if tokens_per_second is not None:
@@ -399,22 +423,22 @@ def train(config: Config):
             diloco_time = time.perf_counter() - time_start_inner
 
             log_hash_training_state(
-                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="outer_step"
+                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.num_performed_inner_steps, id="outer_step"
             )
 
-        training_progress.outer_step += 1
+        training_progress.num_performed_outer_steps += 1
 
         if (
             config.ckpt.interval is not None
-            and training_progress.step > 0
-            and training_progress.step % config.ckpt.interval == 0
+            and training_progress.num_performed_inner_steps > 0
+            and training_progress.num_performed_inner_steps % config.ckpt.interval == 0
         ):
             # we only allow to checkpoint after a outer step. For non diloco training outer step = 1 anyway
 
-            do_remote = config.ckpt.remote is not None and training_progress.step % config.ckpt.remote.interval == 0
+            do_remote = config.ckpt.remote is not None and training_progress.num_performed_inner_steps % config.ckpt.remote.interval == 0
             ckpt_manager.save(remote=do_remote)
             log_hash_training_state(
-                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="save"
+                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.num_performed_inner_steps, id="save"
             )
 
         if config.diloco:
@@ -432,19 +456,14 @@ def train(config: Config):
                 metric_logger.log(
                     {
                         "outer_mfu": mfu,
-                        "step": training_progress.step,
-                        "outer_step": training_progress.outer_step,
+                        "step": training_progress.num_performed_inner_steps,
+                        "outer_step": training_progress.num_performed_outer_steps,
                         "outer_tokens_per_second": tokens_per_second,
                         "all_reduce_step": diloco_time,
                     }
                 )
 
-        if training_progress.step >= config.optim.total_steps:
-            # we only allow to break outisde of the inner loop.
-            # This avoid ending the training in the middle of a the inner loop
-            # Since ckpt strategy and all reduce is done at the outer loop level.
-            break
-
+        shared_state.revision += 1
         local_iter += 1
 
     if local_world_info.rank == 0:

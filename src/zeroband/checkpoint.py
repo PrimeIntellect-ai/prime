@@ -43,17 +43,17 @@ from zeroband.utils.world_info import get_local_world_info
 # especially if it entails branching logic, which WILL deadlock your code
 @dataclass
 class TrainingProgress(Stateful):
-    total_tokens: int
-    outer_step: int
-    step: int
+    num_trained_tokens: int
+    num_performed_outer_steps: int
+    num_performed_inner_steps: int
 
     def state_dict(self) -> dict[str, Any]:
-        return {"total_tokens": self.total_tokens, "outer_step": self.outer_step, "step": self.step}
+        return {"num_trained_tokens": self.num_trained_tokens, "num_performed_outer_steps": self.num_performed_outer_steps, "num_performed_inner_steps": self.num_performed_inner_steps}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self.total_tokens = state_dict["total_tokens"]
-        self.outer_step = state_dict["outer_step"]
-        self.step = state_dict["step"]
+        self.num_trained_tokens = state_dict["total_tokens"]
+        self.num_performed_outer_steps = state_dict["num_outer_steps"]
+        self.num_performed_inner_steps = state_dict["num_performed_inner_steps"]
 
 
 class ModelWrapper(Stateful):
@@ -260,10 +260,10 @@ class CkptManager:
 
         """
 
-        step_ckpt_path = os.path.join(self.config.path, f"step_{self.training_progress.step}")
+        step_ckpt_path = os.path.join(self.config.path, f"step_{self.training_progress.num_performed_inner_steps}")
 
         if remote and self.config.remote is not None:
-            remote_ckpt_path = os.path.join(self.config.remote.path, f"step_{self.training_progress.step}")
+            remote_ckpt_path = os.path.join(self.config.remote.path, f"step_{self.training_progress.num_performed_inner_steps}")
 
         # if we are not in self recovery mode we save to disk
         time_start = time.perf_counter()
@@ -304,7 +304,7 @@ class CkptManager:
 
             if self.config.remote_data_path is not None:
                 remote_data_path = os.path.join(
-                    self.config.remote_data_path, f"data_{self.data_rank}", f"step_{self.training_progress.step}"
+                    self.config.remote_data_path, f"data_{self.data_rank}", f"step_{self.training_progress.num_performed_inner_steps}"
                 )
                 latest_remote_data_path = os.path.join(self.config.remote_data_path, f"data_{self.data_rank}", "latest")
 
@@ -403,7 +403,7 @@ class CkptManager:
         dcp.load(self.states, checkpoint_id=resume_ckpt_path)
 
         if self.config.token_count is not None:
-            self.training_progress.total_tokens = self.config.token_count
+            self.training_progress.num_trained_tokens = self.config.token_count
 
         self._logger.debug("sync inner model")
         # todo(refactor): here we should rather let the diloco class handle this logic

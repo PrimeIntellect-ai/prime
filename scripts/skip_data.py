@@ -24,7 +24,7 @@ from zeroband.train import Config
 
 from zeroband.data import get_dataloader
 
-from zeroband.utils.world_info import get_world_info
+from zeroband.utils.world_info import get_local_world_info
 from zeroband.utils.logger import get_logger
 
 
@@ -79,7 +79,7 @@ def skip_data(config: Config):
 if __name__ == "__main__":
     torch.manual_seed(42)
 
-    world_info = get_world_info()
+    world_info = get_local_world_info()
     logger = get_logger()
 
     config = Config(**parse_argv())

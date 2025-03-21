@@ -1,7 +1,7 @@
 import logging
 
 from zeroband.config import Config
-from zeroband.utils.world_info import get_world_info
+from zeroband.utils.world_info import get_local_world_info
 
 logger = None
 
@@ -18,7 +18,7 @@ class CustomFormatter(logging.Formatter):
         self.local_rank = local_rank
 
     def format(self, record):
-        log_format = "{asctime} [{levelname}] [Rank {local_rank}] {message}"
+        log_format = "{asctime} [{levelname}] [LocalRank {local_rank}] {message}"
         formatter = logging.Formatter(log_format, style="{", datefmt="%H:%M:%S")
         record.local_rank = self.local_rank  # Add this line to set the local rank in the record
         return formatter.format(record)
@@ -30,11 +30,11 @@ def get_logger(config: Config | None = None, name: str | None = None) -> logging
         return logger
 
     try:
-        world_info = get_world_info()
+        world_info = get_local_world_info()
     except KeyError:
-        from zeroband.utils.world_info import WorldInfo
+        from zeroband.utils.world_info import LocalWorldInfo
 
-        world_info = WorldInfo.__new__(WorldInfo)
+        world_info = LocalWorldInfo.__new__(LocalWorldInfo)
         world_info.local_rank = 0
     logger = logging.getLogger(name or __name__)
 

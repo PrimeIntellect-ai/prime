@@ -8,7 +8,7 @@ import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
 from torch.autograd.profiler import record_function
 
-from zeroband.checkpoint import CkptManager, TrainingProgress
+from zeroband.checkpoint import TrainingProgress, CkptManager
 from zeroband.config import Config, resolve_env_vars
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
 from zeroband.diloco import Diloco
@@ -29,12 +29,13 @@ from zeroband.utils import (
 from zeroband.utils.metric_logger import MetricLogger, WandbMetricLogger, DummyMetricLogger
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.utils.profiler import MemoryProfiler
-from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logger import get_logger
 from zeroband.utils.stopwatch import Stopwatch
 
 from transformers import AutoTokenizer
 from pydantic_config import parse_argv
+
+from zeroband.utils.world_info import get_local_world_info
 
 
 def log_hash_training_state(
@@ -70,15 +71,15 @@ def log_hash_training_state(
             metrics.update(
                 {f"outer_optimizer_hash_{id}": outer_optimizer_hash, f"outer_model_hash_{id}": outer_model_hash}
             )
-        if world_info.rank == 0:
+        if local_world_info.rank == 0:
             assert metric_logger is not None
             metric_logger.log(metrics)
 
 
 def train(config: Config):
     # batch_size is the total batch size for all GPUs
-    assert config.optim.batch_size % world_info.local_world_size == 0
-    batch_size = config.optim.batch_size // world_info.local_world_size
+    assert config.optim.batch_size % local_world_info.local_world_size == 0
+    batch_size = config.optim.batch_size // local_world_info.local_world_size
 
     assert batch_size % config.train.micro_bs == 0, (
         f"The micro batch size ({config.train.micro_bs}) must divide the number of samples on each GPU ({batch_size})."
@@ -107,8 +108,8 @@ def train(config: Config):
     with sw.record_block("Get Dataloader"):
         train_dataloader = get_dataloader(
             tokenizer=tokenizer,
-            world_size=world_info.world_size,
-            rank=world_info.rank,
+            world_size=local_world_info.world_size,
+            rank=local_world_info.rank,
             batch_size=config.train.micro_bs,
             data_config=config.data,
         )
@@ -189,11 +190,11 @@ def train(config: Config):
             diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None,  # type: ignore
         )
 
-    if world_info.rank == 0:
+    if local_world_info.rank == 0:
         logger_cls = WandbMetricLogger if config.metric_logger_type == "wandb" else DummyMetricLogger
         metric_logger = logger_cls(
             project=config.project,
-            logger_config={"config": config.model_dump(), "world_info": world_info.json()},
+            logger_config={"config": config.model_dump(), "world_info": local_world_info.json()},
             resume=config.wandb_resume,
         )
     else:
@@ -344,7 +345,7 @@ def train(config: Config):
             if tokens_per_second is not None:
                 metrics["tokens_per_second"] = tokens_per_second
                 metrics["mfu"] = (
-                    100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
+                        100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / local_world_info.local_world_size
                 )
                 log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
 
@@ -355,7 +356,7 @@ def train(config: Config):
                 metrics["num_peers"] = 1
                 log += f", diloco_peers: {metrics['num_peers']}"
 
-            if world_info.rank == 0:
+            if local_world_info.rank == 0:
                 assert metric_logger is not None
                 metric_logger.log(metrics)
 
@@ -396,10 +397,10 @@ def train(config: Config):
                 * config.data.seq_length
                 / (time.perf_counter() - time_start_outer)
             )
-            mfu = 100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
+            mfu = 100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / local_world_info.local_world_size
             logger.info(f"effective mfu: {mfu}")
 
-            if world_info.rank == 0:
+            if local_world_info.rank == 0:
                 assert metric_logger is not None
                 metric_logger.log(
                     {
@@ -417,7 +418,7 @@ def train(config: Config):
             # Since ckpt strategy and all reduce is done at the outer loop level.
             break
 
-    if world_info.rank == 0:
+    if local_world_info.rank == 0:
         assert metric_logger is not None
         metric_logger.finish()
 
@@ -438,11 +439,11 @@ if __name__ == "__main__":
 
     config = Config(**parse_argv())  # type: ignore
     resolve_env_vars(config)
-    world_info = get_world_info()
+    local_world_info = get_local_world_info()
     logger = get_logger(config)
 
     # torch.set_default_device("cuda")
-    torch.cuda.set_device(world_info.local_rank)
+    torch.cuda.set_device(local_world_info.local_rank)
 
     def pretty_dict(d, indent=2):
         for key, value in d.items():
@@ -456,7 +457,7 @@ if __name__ == "__main__":
     pretty_dict(config.model_dump())
 
     try:
-        if config.train.torch_profiler and world_info.rank == 0:
+        if config.train.torch_profiler and local_world_info.rank == 0:
             # NOTE(apaz-cli): I cannot seem to get the memory profiler to work.
             # Running into this issue: https://github.com/pytorch/pytorch/issues/64345
             # In the meantime, we can use the memory snapshotter.

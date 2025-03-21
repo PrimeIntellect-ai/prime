@@ -2,7 +2,7 @@ import re
 import time
 import torch
 from torch import nn
-from zeroband.utils.world_info import get_world_info
+from zeroband.utils.world_info import get_local_world_info
 from zeroband.utils.logger import get_logger
 from zeroband.config import DilocoConfig
 import torch.distributed as dist
@@ -54,14 +54,11 @@ class Diloco:
         self,
         config: DilocoConfig,
         model: nn.Module,
-        elastic_device_mesh,
     ):
         self.config = config
 
-        self.elastic_device_mesh = elastic_device_mesh
-
         self._logger = get_logger()
-        self.world_info = get_world_info()
+        self.world_info = get_local_world_info()
 
         self._init_offloaded_optimizer(model=model)
 
@@ -80,14 +77,8 @@ class Diloco:
         """
         _start_time = time.perf_counter()
 
-        self.elastic_device_mesh.maybe_reinit_global_pg(admit_joiners=False)
-        world_size_post_init = self.elastic_device_mesh.global_pg.size()
-
-        world_size = world_size_post_init
-
         self._logger.debug("sync pseudo gradient %s with world size %d", " fake" if fake else "", world_size)
 
-        global_pg = self.elastic_device_mesh.global_pg
         for i in range(self.config.retry_all_reduce):
             for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
                 assert isinstance(param_offloaded.grad, DTensor)
@@ -99,8 +90,6 @@ class Diloco:
             try:
                 self.offloaded_grad_flat_tensor.div_(world_size)
                 _collective_start_time = time.perf_counter()
-                self._logger.debug("Waiting on barrier")
-                self.elastic_device_mesh.monitored_barrier(flag)
 
                 self._logger.debug("Beginning all reduce")
                 # all_reduce(self.config.compression, self.offloaded_grad_flat_tensor, dist.ReduceOp.SUM, global_pg)
@@ -117,7 +106,6 @@ class Diloco:
                 break
             except Exception as e:
                 self._logger.error(f"Error syncing pseudo gradient: {e}, retry {i + 1}/{self.config.retry_all_reduce}")
-                global_pg = self.elastic_device_mesh.get_global_pg(maybe_reinit=True)
         else:
             self._logger.error(
                 "Failed to sync pseudo gradient after %d retries. Resorting to calculating pseudo-gradient without reduce",

@@ -2,7 +2,7 @@ import os
 import pickle
 import torch
 from zeroband.utils.logger import get_logger
-from zeroband.utils.world_info import get_world_info
+from zeroband.utils.world_info import get_local_world_info
 
 _MAX_ENTRIES = 10000
 
@@ -16,7 +16,7 @@ class MemoryProfiler:
         torch.cuda.memory._record_memory_history(max_entries=_MAX_ENTRIES)
         self.freq = freq
 
-        self.world_info = get_world_info()
+        self.world_info = get_local_world_info()
         self.logger = get_logger()
         self.step_num = 0
 

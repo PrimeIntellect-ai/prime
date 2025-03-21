@@ -38,7 +38,7 @@ def test_diloco_all_reduce(world_size, random_available_port, dist_environment):
             for param in model.parameters():
                 param.data = (rank + 1) * torch.ones_like(param.data).to("cuda")
 
-            diloco = Diloco(diloco_config, model, ShardingStrategy.FULL_SHARD, FakeElasticDeviceMesh())
+            diloco = Diloco(diloco_config, model)
 
             # simulate inner model updates
             for param in model.parameters():

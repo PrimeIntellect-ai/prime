@@ -6,8 +6,6 @@ import subprocess
 import pytest
 import socket
 
-from zeroband.diloco import Compression
-
 import torch
 
 num_gpu = torch.cuda.device_count()
@@ -96,12 +94,6 @@ def test_act_ckpt():
 def test_act_ckpt_num():
     num_gpus = [1, 2]
     _test_multi_gpu(num_gpus, "debug/normal.toml", extra_args=["--train.ac_ckpt", "2"])
-
-
-@pytest.mark.parametrize("backend", [Compression.NO, Compression.UINT8])
-def test_all_reduce_diloco(backend: Compression):
-    num_gpus = [2, 1]
-    _test_multi_gpu(num_gpus, "debug/diloco.toml", extra_args=["--diloco.compression", backend.value], diloco=True)
 
 
 def test_z_loss():

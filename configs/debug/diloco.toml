@@ -9,7 +9,7 @@ micro_bs = 8
 [optim]
 batch_size = 16
 warmup_steps = 10
-total_steps = 4
+total_steps = 128
 
 [data]
 fake = true

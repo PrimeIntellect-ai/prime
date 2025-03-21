@@ -13,11 +13,11 @@ from zeroband.config import Compression
 num_gpu = torch.cuda.device_count()
 
 
-def get_random_available_port_list(num_port):
+def get_random_available_port_list(num_ports):
     # https://stackoverflow.com/questions/1365265/on-localhost-how-do-i-pick-a-free-port-number
     ports = []
 
-    while len(ports) < num_port:
+    while len(ports) < num_ports:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("", 0))
             new_port = s.getsockname()[1]

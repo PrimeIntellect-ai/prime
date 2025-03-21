@@ -37,6 +37,10 @@ from zeroband.utils.world_info import get_local_world_info
 ## code inspired by torchtitan https://github.com/pytorch/torchtitan/blob/main/torchtitan/checkpoint.py
 
 
+# Note: this is grandfathered in code from before PCCL.
+# The veracity of this state is not enforced by PCCL.
+# This step count may diverge and should not be relied upon for critical operations,
+# especially if it entails branching logic, which WILL deadlock your code
 @dataclass
 class TrainingProgress(Stateful):
     total_tokens: int

@@ -37,6 +37,8 @@ from pydantic_config import parse_argv
 
 from zeroband.utils.world_info import get_local_world_info
 
+from pccl import Communicator, PCCLError, Attribute
+
 
 def log_hash_training_state(
     config: Config,
@@ -222,12 +224,41 @@ def train(config: Config):
     num_inner_steps = config.diloco.inner_steps if config.diloco is not None else 1
     perf_counter = PerfCounter(window_size=10)
 
+    logger.debug("Connecting to CCoIP master...")
+    communicator = Communicator(config.ccoip_master_addr)
+    try:
+        communicator.connect(n_attempts=config.ccoip_master_connection_attempts)
+    except PCCLError:
+        logger.error("Failed to connect to CCoIP master")
+        raise
+
     logger.debug("Finished setup in %f seconds", sw.elapsed())
+
+    local_iter = 0
+    world_size: int = communicator.get_attribute(Attribute.CURRENT_WORLD_SIZE)
 
     while True:
         if num_inner_steps > 1:
             # if we don't use diloco we don't print the outer step logs
             logger.info(f"outer_step step: {training_progress.outer_step}")
+
+        if local_iter > 0:
+            # keep retrying if it fails
+            while True:
+                try:
+                    communicator.update_topology()
+                    break
+                except PCCLError:
+                    # could be pccl.UpdateTopologyFailed or other
+                    logger.error("Failed to update topology, retrying...")
+                    time.sleep(0.1)
+            world_size = communicator.get_attribute(Attribute.CURRENT_WORLD_SIZE)
+
+        if world_size < 2:
+            logger.info("World size is less than 2, waiting for more peers...")
+            time.sleep(1)
+            local_iter += 1
+            continue
 
         time_start_outer = time.perf_counter()
 
@@ -296,7 +327,7 @@ def train(config: Config):
                     dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG)
 
             with sw.record_block("Clip Grad"):
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()
 
             with sw.record_block("Optimizer Step"):
                 inner_optimizer.step()
@@ -319,9 +350,9 @@ def train(config: Config):
             # we count the total tokens with respect to all diloco workers
             # might need to tweak this as some worker might fail to join the all reduce later
 
-            # TODO MIKE use pccl instead of elastic_device_mesh
-
-            # training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
+            # this is technically a faulty approximation, but we don't necessarily care
+            # for what constitutes a high level monitoring summary statistic
+            training_progress.total_tokens += new_tokens * world_size
 
             assert isinstance(loss_batch, torch.Tensor)
             metrics = {
@@ -349,10 +380,7 @@ def train(config: Config):
                 log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
 
             if config.diloco is not None:
-                # TODO MIKE use pccl instead of elastic_device_mesh
-                # metrics["num_peers"] = elastic_device_mesh.global_pg.size()
-
-                metrics["num_peers"] = 1
+                metrics["num_peers"] = world_size
                 log += f", diloco_peers: {metrics['num_peers']}"
 
             if local_world_info.rank == 0:
@@ -367,7 +395,7 @@ def train(config: Config):
         if config.diloco is not None:
             assert diloco is not None
             time_start_inner = time.perf_counter()
-            diloco.step(model=model, flag=str(training_progress.outer_step))
+            diloco.step(model, communicator)
             diloco_time = time.perf_counter() - time_start_inner
 
             log_hash_training_state(
@@ -416,6 +444,8 @@ def train(config: Config):
             # This avoid ending the training in the middle of a the inner loop
             # Since ckpt strategy and all reduce is done at the outer loop level.
             break
+
+        local_iter += 1
 
     if local_world_info.rank == 0:
         assert metric_logger is not None

@@ -2,6 +2,8 @@ import re
 import time
 import torch
 from torch import nn
+from torch.distributed import init_device_mesh
+
 from zeroband.utils.world_info import get_local_world_info
 from zeroband.utils.logger import get_logger
 from zeroband.config import DilocoConfig
@@ -51,14 +53,17 @@ class Diloco:
     """
 
     def __init__(
-        self,
-        config: DilocoConfig,
-        model: nn.Module,
+            self,
+            config: DilocoConfig,
+            model: nn.Module,
     ):
         self.config = config
 
         self._logger = get_logger()
-        self.world_info = get_local_world_info()
+        self.local_world_info = get_local_world_info()
+
+        self.cuda_local_mesh = init_device_mesh("cuda", mesh_shape=(self.local_world_info.world_size,))
+        self.cpu_local_mesh = init_device_mesh("cpu", mesh_shape=(self.local_world_info.world_size,))
 
         self._init_offloaded_optimizer(model=model)
 
@@ -77,7 +82,7 @@ class Diloco:
         """
         _start_time = time.perf_counter()
 
-        self._logger.debug("sync pseudo gradient %s with world size %d", " fake" if fake else "", world_size)
+        self._logger.debug("sync pseudo gradient %s with world size %d", " fake" if fake else "", self.local_world_info.world_size)
 
         for i in range(self.config.retry_all_reduce):
             for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
@@ -88,14 +93,13 @@ class Diloco:
                     param_offloaded.grad.to_local().copy_(param_offloaded.data.to_local())
                     param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device))
             try:
-                self.offloaded_grad_flat_tensor.div_(world_size)
                 _collective_start_time = time.perf_counter()
 
                 self._logger.debug("Beginning all reduce")
                 # all_reduce(self.config.compression, self.offloaded_grad_flat_tensor, dist.ReduceOp.SUM, global_pg)
                 for j, tensor_group in enumerate(self._offloaded_grad_grouped_tensor):
                     t0 = time.perf_counter()
-                    all_reduce(self.config.compression, tensor_group, dist.ReduceOp.SUM, global_pg)
+                    # all_reduce(self.config.compression, tensor_group, dist.ReduceOp.SUM, global_pg)
                     self._logger.debug(
                         f"{j}/{len(self._offloaded_grad_grouped_tensor)} all reduce bucket done in {time.perf_counter() - t0:.6f} seconds, numel: {tensor_group.numel()}"
                     )
@@ -161,14 +165,14 @@ class Diloco:
             offloaded_param = nn.Parameter(
                 DTensor.from_local(
                     data_tensor,
-                    device_mesh=self.elastic_device_mesh.cpu_local_mesh,
+                    device_mesh=self.cpu_local_mesh,
                     placements=param.data.placements,
                 )
             )
 
             offloaded_param.grad = DTensor.from_local(
                 grad_tensor,
-                device_mesh=self.elastic_device_mesh.cpu_local_mesh,
+                device_mesh=self.cpu_local_mesh,
                 placements=param.data.placements,
             )
             # here we pre-allocate the grad DTensor on cpu.

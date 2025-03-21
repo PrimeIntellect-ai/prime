@@ -165,8 +165,7 @@ def train(config: Config):
     with sw.record_block("Optimizer Setup"):
         inner_optimizer = get_optimizer(config, model.parameters())
 
-        # TODO MIKE use pccl instead of elastic_device_mesh
-        diloco = Diloco(config.diloco, model, None) if config.diloco is not None else None
+        diloco = Diloco(config.diloco, model) if config.diloco is not None else None
 
         scheduler = get_scheduler(
             sched_type=config.optim.sched_type,

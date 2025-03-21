@@ -2,8 +2,6 @@ import re
 import time
 import torch
 from torch import nn
-from zeroband.comms import ElasticDeviceMesh
-from zeroband.collectives import Compression, all_reduce
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logger import get_logger
 from zeroband.config import DilocoConfig
@@ -19,6 +17,11 @@ def _find_first_number(s: str) -> int:
         return int(match.group())
     else:
         return -1
+
+
+def all_reduce(*args, **kwargs):
+    ...
+    # place holder to pass precommit need mike pccl
 
 
 class Diloco:
@@ -51,13 +54,9 @@ class Diloco:
         self,
         config: DilocoConfig,
         model: nn.Module,
-        elastic_device_mesh: ElasticDeviceMesh,
+        elastic_device_mesh,
     ):
         self.config = config
-
-        if config.compression == Compression.UINT8:
-            from zeroband.C.collectives import ring_allreduce as _  # noqa: F401
-            # just force compilation
 
         self.elastic_device_mesh = elastic_device_mesh
 
@@ -117,7 +116,7 @@ class Diloco:
                 )
                 break
             except Exception as e:
-                self._logger.error(f"Error syncing pseudo gradient: {e}, retry {i+1}/{self.config.retry_all_reduce}")
+                self._logger.error(f"Error syncing pseudo gradient: {e}, retry {i + 1}/{self.config.retry_all_reduce}")
                 global_pg = self.elastic_device_mesh.get_global_pg(maybe_reinit=True)
         else:
             self._logger.error(

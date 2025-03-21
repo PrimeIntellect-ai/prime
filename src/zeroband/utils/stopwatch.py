@@ -34,7 +34,7 @@ class Stopwatch:
         self.timers: dict[str, dict[str, float]] = {}  # Timer name -> {start_time, last_lap_time}
         self.stack: list[str] = []  # List timer names in order of last constructed
         self.logger = get_logger(config)
-        self.disabled = (config.log_level != "DEBUG") if config else False
+        self.disabled = True
 
     def _resolve_name(self, name: str | None) -> str:
         if name is None:

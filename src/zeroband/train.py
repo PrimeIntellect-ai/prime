@@ -1,7 +1,6 @@
 import os
 import time
 from typing import TYPE_CHECKING
-from multiprocessing.process import _children  # type: ignore
 
 import torch
 import torch.distributed as dist
@@ -394,59 +393,4 @@ if __name__ == "__main__":
     # torch.set_default_device("cuda")
     torch.cuda.set_device(world_info.local_rank)
 
-    def pretty_dict(d, indent=2):
-        for key, value in d.items():
-            if isinstance(value, dict):
-                logger.debug(" " * indent + f"{key}:")
-                pretty_dict(value, indent + 2)
-            else:
-                logger.debug(" " * indent + f"{key}: {value}")
-
-    logger.debug("config:")
-    pretty_dict(config.model_dump())
-
-    try:
-        if config.train.torch_profiler and world_info.rank == 0:
-            # NOTE(apaz-cli): I cannot seem to get the memory profiler to work.
-            # Running into this issue: https://github.com/pytorch/pytorch/issues/64345
-            # In the meantime, we can use the memory snapshotter.
-
-            logger.debug("Running train() with profiler.")
-            prof = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-                record_shapes=True,
-                # profile_memory=True,
-                # with_stack=True,
-            )
-            try:
-                prof.__enter__()
-                train(config)
-            finally:
-                logger.debug("Exiting profiler context.")
-                prof.__exit__(None, None, None)
-
-            logger.info("Exporting chrome trace.")
-            prof.export_chrome_trace("logs/profile.json.gz")
-
-            width = 30
-            logger.info("\n" + "*" * width + " GPU TIME " + "*" * width)
-            logger.info(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-
-            logger.info("\n" + "*" * width + " GPU MEM " + "*" * width)
-            logger.info(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
-
-            # logger.info("Exporting memory timeline.")
-            # prof.export_memory_timeline(f"logs/mem_timeline.html", device="cuda:0")
-        else:
-            train(config)
-    except Exception as e:
-        # Subprocesses can prevent the main process from exiting, so we need to terminate them
-        logger.info("Caught an exception, terminating children")
-        logger.info(e)
-        for p in _children:
-            p.terminate()
-
-        raise e
+    train(config)

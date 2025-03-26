@@ -29,12 +29,6 @@ from torch.distributed.checkpoint.stateful import Stateful
 import warnings
 import logging
 from torch.distributed._tensor.api import DTensor
-from zeroband.utils.state_dict_send_recv import (
-    _get_sendable_state_dict,
-    recv_state_dict,
-    send_state_dict,
-    send_tensor_and_state_dict,
-)
 from distributed_shampoo import DistributedShampoo
 from zeroband.utils.logger import get_logger
 from zeroband.config import CkptConfig
@@ -152,6 +146,7 @@ def non_error_barrier():
         dist.barrier()
     except Exception as e:
         from zeroband.utils.logger import get_logger
+
         get_logger().info(f"Error in data checkpointing barrier: {e}, continuing training")
 
 
@@ -191,9 +186,9 @@ class CkptManager:
         self.training_progress = training_progress
         self.data_rank = data_rank
 
-        assert (diloco_offloaded_param_list is None) == (
-            diloco_offloaded_optimizer is None
-        ), "diloco_offloaded_model and diloco_offloaded_optimizer must be both None or both have values"
+        assert (diloco_offloaded_param_list is None) == (diloco_offloaded_optimizer is None), (
+            "diloco_offloaded_model and diloco_offloaded_optimizer must be both None or both have values"
+        )
 
         self.diloco_offloaded_optimizer = diloco_offloaded_optimizer  # he we don't use Wrapper because it failed
         # which might make the ckpt less generic in term of loading from different number of device. FSDP ckpt seems to be a mess tho
@@ -438,115 +433,6 @@ class CkptManager:
         rsync_fsspec(remote_data_path, os.path.join(dest, "data"))
         data_path = dest
         self._load_data(data_path)
-
-    @torch.no_grad()
-    def recv_ckpt_from_peer(self, global_pg: dist.ProcessGroup):
-        assert self.diloco_offloaded_param_list is not None, "recv_ckpt_from_peers is only supported with diloco"
-
-        time_start = time.perf_counter()
-        self._logger.debug(f"Start receiving ckpt from rank {self.config.live_recovery_rank_src}")
-
-        jobs = []
-        buffers = []
-        for i, param in enumerate(self.diloco_offloaded_param_list):
-            data = param.data
-            if isinstance(param.data, DTensor):
-                data = param.data.to_local()
-
-            buffer = torch.empty_like(data)
-            buffers.append(buffer)
-            jobs.append(global_pg.recv([buffer], self.config.live_recovery_rank_src, i))
-
-        for job in jobs:
-            job.wait()
-
-        for buffer, param in zip(buffers, self.model.parameters()):
-            data = param.data
-            if isinstance(data, DTensor):
-                data = data.to_local()
-            data.copy_(buffer)
-
-        self._logger.debug("live recovery progress: offloaded model received 1/5")
-
-        outer_opt_state_dict = recv_state_dict(
-            global_pg, self.config.live_recovery_rank_src, self.diloco_offloaded_optimizer.state_dict()
-        )
-        self.diloco_offloaded_optimizer.load_state_dict(outer_opt_state_dict)
-
-        self._logger.debug("live recovery progress: outer optimizer state dict received 2/5")
-
-        training_process_state_dict = recv_state_dict(
-            global_pg, self.config.live_recovery_rank_src, self.training_progress.state_dict()
-        )
-        self.training_progress.load_state_dict(training_process_state_dict)
-        self._logger.debug("live recovery progress: training progress state dict received 3/5")
-
-        for group in self.optimizer.param_groups:
-            for p in group["params"]:
-                p.grad = torch.randn_like(p)
-
-        self.optimizer.step()
-        self.optimizer.zero_grad()
-
-        inner_opt_state_dict = recv_state_dict(
-            global_pg, self.config.live_recovery_rank_src, self.optimizer.state_dict()
-        )
-        self.optimizer.load_state_dict(inner_opt_state_dict)
-
-        self._logger.debug("live recovery progress: inner optimizer state dict received 4/5")
-
-        sheduler_state_dict = recv_state_dict(
-            global_pg, self.config.live_recovery_rank_src, self.scheduler.state_dict()
-        )
-        self.scheduler.load_state_dict(sheduler_state_dict)
-
-        self._logger.debug("live recovery progress: scheduler state dict received 5/5")
-
-        self._logger.debug(
-            f"Received ckpt from rank {self.config.live_recovery_rank_src} in {time.perf_counter() - time_start} seconds"
-        )
-
-    @torch.no_grad()
-    def send_ckpt_to_peer(self, global_pg: dist.ProcessGroup, dest_rank: int, blocking: bool = False):
-        def async_send():
-            assert self.diloco_offloaded_param_list is not None, "send_ckpt_to_peers is only supported with diloco"
-            time_start = time.perf_counter()
-            self._logger.debug(f"Start sending ckpt to rank {dest_rank}")
-
-            try:
-                jobs = []
-                for i, param in enumerate(self.diloco_offloaded_param_list):
-                    data = param.data
-                    if isinstance(data, DTensor):
-                        data = data.to_local()
-                    jobs.append(global_pg.send([data], dest_rank, i))
-
-                for job in jobs:
-                    job.wait()
-
-                send_state_dict(global_pg, self.diloco_offloaded_optimizer.state_dict(), dest_rank)
-                send_state_dict(global_pg, self.training_progress.state_dict(), dest_rank)
-
-                inner_optimizer_non_tensor_state_dict, inner_optimizer_tensors = _get_sendable_state_dict(
-                    self.optimizer.state_dict()
-                )
-                send_tensor_and_state_dict(
-                    global_pg, dest_rank, inner_optimizer_non_tensor_state_dict, inner_optimizer_tensors
-                )
-
-                send_state_dict(global_pg, self.scheduler.state_dict(), dest_rank)
-            except RuntimeError as e:
-                self._logger.error(f"Error sending ckpt to rank {dest_rank}: {e}")
-            else:
-                self._logger.debug(f"Sent ckpt to rank {dest_rank} in {time.perf_counter() - time_start} seconds")
-
-        thread = threading.Thread(target=async_send)
-        thread.start()
-        self._logger.debug("Live recovery thread started")
-        if blocking:
-            thread.join()
-        else:
-            self._live_reco_thread = thread
 
 
 def delete_topk(logger: logging.Logger, ckpt_path: str, topk: int):

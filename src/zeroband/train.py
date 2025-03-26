@@ -8,9 +8,8 @@ from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.autograd.profiler import record_function
 
 from zeroband.checkpoint import CkptManager, TrainingProgress
-from zeroband.config import Config, resolve_env_vars
+from zeroband.config import Config
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
-from zeroband.diloco import Diloco
 from zeroband.loss import compute_cross_entropy_loss
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
@@ -25,7 +24,7 @@ from zeroband.utils import (
 from zeroband.utils.metric_logger import WandbMetricLogger, DummyMetricLogger
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.utils.profiler import MemoryProfiler
-from zeroband.utils.world_info import get_world_info
+from zeroband.utils.world_info import WorldInfo, get_world_info
 from zeroband.utils.logger import get_logger
 from zeroband.utils.stopwatch import Stopwatch
 
@@ -33,44 +32,43 @@ from transformers import AutoTokenizer
 from pydantic_config import parse_argv
 
 
-def train(config: Config):
-    # batch_size is the total batch size for all GPUs
-    assert config.optim.batch_size % world_info.local_world_size == 0
-    batch_size = config.optim.batch_size // world_info.local_world_size
+def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, world_info: WorldInfo) -> int:
+    assert batch_size % world_info.world_size == 0
+    batch_size = batch_size // world_info.world_size
 
-    assert batch_size % config.train.micro_bs == 0, (
-        f"The micro batch size ({config.train.micro_bs}) must divide the number of samples on each GPU ({batch_size})."
+    assert batch_size % micro_bs == 0, str(
+        f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})"
     )
-    gradient_accumulation_steps = batch_size // config.train.micro_bs
 
-    if config.ckpt is not None and config.ckpt.interval is not None and config.diloco is not None:
-        assert config.ckpt.interval % config.diloco.inner_steps == 0, (
-            "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
-        )
+    return batch_size // micro_bs
+
+
+def train(config: Config):
+    gradient_accumulation_steps = get_gradient_accumulation_steps(
+        config.optim.batch_size, config.train.micro_bs, world_info
+    )
 
     sw = Stopwatch(config)
     sw.start("train()")
 
     # Load tokenizer
-    with sw.record_block("Load Tokenizer"):
-        if config.data.fake and config.name_model == "debugmodel":
-            tokenizer = FakeTokenizer()
-        elif config.type_model == "llama2":
-            tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
-        elif config.type_model == "llama3":
-            tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
-        else:
-            raise ValueError(f"Model type {config.type_model} not supported")
+    if config.data.fake and config.name_model == "debugmodel":
+        tokenizer = FakeTokenizer()
+    elif config.type_model == "llama2":
+        tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
+    elif config.type_model == "llama3":
+        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
+    else:
+        raise ValueError(f"Model type {config.type_model} not supported")
 
-    with sw.record_block("Get Dataloader"):
-        train_dataloader = get_dataloader(
-            tokenizer=tokenizer,
-            world_size=world_info.world_size,
-            rank=world_info.rank,
-            batch_size=config.train.micro_bs,
-            data_config=config.data,
-        )
-        train_dataloader_iterator = iter(train_dataloader)
+    train_dataloader = get_dataloader(
+        tokenizer=tokenizer,
+        world_size=world_info.world_size,
+        rank=world_info.rank,
+        batch_size=config.train.micro_bs,
+        data_config=config.data,
+    )
+    train_dataloader_iterator = iter(train_dataloader)
 
     with sw.record_block("Get Model"):
         model, model_config = get_model(
@@ -123,7 +121,9 @@ def train(config: Config):
         inner_optimizer = get_optimizer(config, model.parameters())
 
         # TODO MIKE use pccl instead of elastic_device_mesh
-        diloco = Diloco(config.diloco, model, None) if config.diloco is not None else None
+
+        if config.diloco:
+            raise NotImplementedError("Diloco is not implemented yet")
 
         scheduler = get_scheduler(
             sched_type=config.optim.sched_type,
@@ -143,8 +143,8 @@ def train(config: Config):
             dataloader=train_dataloader,
             training_progress=training_progress,
             data_rank=config.data.data_rank,
-            diloco_offloaded_optimizer=diloco.outer_optimizer if config.diloco is not None else None,  # type: ignore
-            diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None,  # type: ignore
+            diloco_offloaded_optimizer=None,  # type: ignore
+            diloco_offloaded_param_list=None,  # type: ignore
         )
 
     if world_info.rank == 0:
@@ -184,9 +184,7 @@ def train(config: Config):
             # if we don't use diloco we don't print the outer step logs
             logger.info(f"outer_step step: {training_progress.outer_step}")
 
-        time_start_outer = time.perf_counter()
-
-        for inner_step in range(num_inner_steps):
+        for _inner_step in range(num_inner_steps):
             sw.start("inner_step")
 
             loss_batch = 0
@@ -320,12 +318,9 @@ def train(config: Config):
                 memory_profiler.step()
 
         if config.diloco is not None:
-            assert diloco is not None
-            time_start_inner = time.perf_counter()
-            diloco.step(model=model, flag=str(training_progress.outer_step))
-            diloco_time = time.perf_counter() - time_start_inner
+            ...
+            # diloco.step(model=model, flag=str(training_progress.outer_step))
 
-        training_progress.outer_step += 1
         training_progress.outer_step += 1
 
         if (
@@ -337,28 +332,6 @@ def train(config: Config):
 
             do_remote = config.ckpt.remote is not None and training_progress.step % config.ckpt.remote.interval == 0
             ckpt_manager.save(remote=do_remote)
-
-        if config.diloco:
-            tokens_per_second = (
-                config.optim.batch_size
-                * config.diloco.inner_steps
-                * config.data.seq_length
-                / (time.perf_counter() - time_start_outer)
-            )
-            mfu = 100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
-            logger.info(f"effective mfu: {mfu}")
-
-            if world_info.rank == 0:
-                assert metric_logger is not None
-                metric_logger.log(
-                    {
-                        "outer_mfu": mfu,
-                        "step": training_progress.step,
-                        "outer_step": training_progress.outer_step,
-                        "outer_tokens_per_second": tokens_per_second,
-                        "all_reduce_step": diloco_time,
-                    }
-                )
 
         if training_progress.step >= config.optim.total_steps:
             # we only allow to break outisde of the inner loop.
@@ -386,7 +359,6 @@ if __name__ == "__main__":
     torch.manual_seed(42)
 
     config = Config(**parse_argv())  # type: ignore
-    resolve_env_vars(config)
     world_info = get_world_info()
     logger = get_logger(config)
 

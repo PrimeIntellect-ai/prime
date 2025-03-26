@@ -5,13 +5,11 @@ from typing import TYPE_CHECKING
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
-from torch.autograd.profiler import record_function
 import wandb
 
 from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
 from zeroband.config import Config
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
-from zeroband.loss import compute_cross_entropy_loss
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
 from zeroband.models.llama.model import create_block_mask_from_seqlens
@@ -28,6 +26,7 @@ from zeroband.utils.stopwatch import Stopwatch
 
 from transformers import AutoTokenizer
 from pydantic_config import parse_argv
+import torch.nn.functional as F
 
 
 def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, world_info: WorldInfo) -> int:
@@ -165,7 +164,6 @@ def train(config: Config):
             sw.start("inner_step")
 
             loss_batch = 0
-            z_loss_batch = 0
 
             with sw.record_block("Grad Acc Steps"):
                 for grad_acc_step in range(gradient_accumulation_steps):
@@ -184,43 +182,14 @@ def train(config: Config):
                         flatten_labels = labels.reshape(-1)  # b seq -> (b * seq)
 
                     with sw.record_block("Loss Calculation"):
-                        ce_loss, z_loss = compute_cross_entropy_loss(
-                            flatten_logits,
-                            flatten_labels,
-                            z_weight=config.optim.z_loss_weight if config.optim.z_loss else None,
-                            num_chunks=config.optim.num_chunks,
-                            fused_linear_weight=model.output.weight if config.train.fused_linear_ce else None,
-                        )
-
-                        del logits
-                        del flatten_logits
-                        del flatten_labels
-
-                        if config.optim.z_loss:
-                            assert z_loss is not None
-                            ce_loss /= gradient_accumulation_steps
-                            z_loss /= gradient_accumulation_steps
-                            loss = ce_loss + z_loss
-                        else:
-                            loss = ce_loss / gradient_accumulation_steps
+                        loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
 
                     with sw.record_block("Run backward()"):
                         loss.backward()
 
-                    with record_function("Clone Loss"):
-                        # No need to time, takes 0 seconds
-                        if config.optim.z_loss:
-                            assert z_loss is not None
-                            loss_batch += ce_loss.detach().clone()
-                            z_loss_batch += z_loss.detach().clone()
-                        else:
-                            loss_batch += loss.detach().clone()
+                    loss_batch += loss.detach().clone()
 
-            with sw.record_block("Loss allreduce()"):
-                # Launch both allreduces at the same time to hide latency
-                dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
-                if config.optim.z_loss:
-                    dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG)
+            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
 
             with sw.record_block("Clip Grad"):
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
@@ -229,8 +198,7 @@ def train(config: Config):
                 inner_optimizer.step()
                 scheduler.step()
 
-            with sw.record_block("Optimizer Zero Grad"):
-                inner_optimizer.zero_grad()
+            inner_optimizer.zero_grad()
 
             # logging
             training_progress.step += 1
@@ -260,10 +228,6 @@ def train(config: Config):
                 "time": time.time(),
                 "grad_norm": grad_norm.item(),
             }
-
-            if config.optim.z_loss:
-                assert isinstance(z_loss_batch, torch.Tensor)
-                metrics["z_loss"] = z_loss_batch.item()
 
             log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
 

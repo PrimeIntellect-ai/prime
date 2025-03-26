@@ -171,10 +171,6 @@ def train(config: Config):
                 for grad_acc_step in range(gradient_accumulation_steps):
                     sw.start("grad_acc_step")
 
-                    is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-                    # no sync if we are accumulating gradients
-                    model.set_requires_gradient_sync(not is_accumulating)
-
                     with sw.record_block("Load batch"):
                         batch = next(train_dataloader_iterator)
                         input_ids = batch["input_ids"].to("cuda")

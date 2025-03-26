@@ -19,14 +19,11 @@ from zeroband.optimizers import get_optimizer
 from zeroband.utils import (
     FakeTokenizer,
     PerfCounter,
-    get_module_signature,
-    get_optimizer_signature,
-    get_tensor_list_signature,
     get_peak_flops,
     get_num_params,
     get_num_flop_per_token,
 )
-from zeroband.utils.metric_logger import MetricLogger, WandbMetricLogger, DummyMetricLogger
+from zeroband.utils.metric_logger import WandbMetricLogger, DummyMetricLogger
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.utils.profiler import MemoryProfiler
 from zeroband.utils.world_info import get_world_info
@@ -35,44 +32,6 @@ from zeroband.utils.stopwatch import Stopwatch
 
 from transformers import AutoTokenizer
 from pydantic_config import parse_argv
-
-
-def log_hash_training_state(
-    config: Config,
-    model: torch.nn.Module,
-    inner_optimizer: torch.optim.Optimizer,
-    diloco: Diloco | None,
-    metric_logger: MetricLogger | None,
-    step: int,
-    id: str = "",
-):
-    """Log the hash of the model and optimizer. This function is slow"""
-    if config.train.log_model_hash:
-        inner_model_hash = get_module_signature(model)
-        inner_optimizer_hash = get_optimizer_signature(inner_optimizer)
-
-        logger.debug(f"inner diloco model {id} : {inner_model_hash}")
-        logger.debug(f"inner optimizer hash {id} : {inner_optimizer_hash}")
-
-        metrics = {
-            "step": step,
-            f"inner_model_hash_{id}": inner_model_hash,
-            f"inner_optimizer_hash_{id}": inner_optimizer_hash,
-        }
-
-        if config.diloco is not None and diloco is not None:
-            outer_optimizer_hash = get_optimizer_signature(diloco.outer_optimizer)
-            outer_model_hash = get_tensor_list_signature(diloco.param_list_cpu)  # type: ignore
-
-            logger.debug(f"outer diloco optimizer hash {id} : {outer_optimizer_hash}")
-            logger.debug(f"outer diloco model hash {id} : {outer_model_hash}")
-
-            metrics.update(
-                {f"outer_optimizer_hash_{id}": outer_optimizer_hash, f"outer_model_hash_{id}": outer_model_hash}
-            )
-        if world_info.rank == 0:
-            assert metric_logger is not None
-            metric_logger.log(metrics)
 
 
 def train(config: Config):
@@ -211,9 +170,6 @@ def train(config: Config):
                 resume_ckpt_path=config.ckpt.resume,
                 skip_dataloader=config.ckpt.skip_dataloader,
                 data_path=config.ckpt.data_path,
-            )
-            log_hash_training_state(
-                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="resume"
             )
 
     if config.train.memory_profiler is not None:
@@ -370,10 +326,7 @@ def train(config: Config):
             diloco.step(model=model, flag=str(training_progress.outer_step))
             diloco_time = time.perf_counter() - time_start_inner
 
-            log_hash_training_state(
-                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="outer_step"
-            )
-
+        training_progress.outer_step += 1
         training_progress.outer_step += 1
 
         if (
@@ -385,9 +338,6 @@ def train(config: Config):
 
             do_remote = config.ckpt.remote is not None and training_progress.step % config.ckpt.remote.interval == 0
             ckpt_manager.save(remote=do_remote)
-            log_hash_training_state(
-                config, model, inner_optimizer, diloco, metric_logger, step=training_progress.step, id="save"
-            )
 
         if config.diloco:
             tokens_per_second = (

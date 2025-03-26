@@ -16,15 +16,13 @@ dependencies = [
     "ninja",
     "zstandard",
     "pyarrow",
-    "toposolve>=0.1.17",
     "psutil",
-    "torch-shampoo @ git+https://github.com/facebookresearch/optimizers.git@main",
-    "liger-kernel-nightly>=0.5.2.dev20250122195349",
+    "wandb",
 ]
 
 [project.optional-dependencies]
 
-all = ["wandb","lm-eval"]
+all = ["lm-eval"]
 
 
 [build-system]

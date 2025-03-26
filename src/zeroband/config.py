@@ -76,7 +76,6 @@ class DilocoConfig(BaseConfig):
     inner_steps: int
     compression: Compression = Compression.NO
 
-
 class MemoryProfilerConfig(BaseConfig):
     freq: int = 10
     snapshot_dir: str

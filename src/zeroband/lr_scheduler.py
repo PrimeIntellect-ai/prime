@@ -1,55 +1,54 @@
-from typing import Callable
-from functools import partial
 import math
 
-from torch.optim.lr_scheduler import LRScheduler, LambdaLR
 
-from transformers.optimization import get_cosine_schedule_with_warmup, get_linear_schedule_with_warmup
-
-
-def _get_linear_schedule_with_wsd_sqrt_lr_lambda(current_step: int, *, num_warmup_steps: int, num_stable_steps: int, num_training_steps: int):
-    if current_step < num_warmup_steps:
-        return float(current_step) / float(max(1, num_warmup_steps))
-    elif current_step < num_stable_steps:
-        return 1.0
-    else:
-        return max(0.0, 1 - math.sqrt(float(current_step - num_stable_steps) / float(num_training_steps - num_stable_steps)))
-
-def get_linear_schedule_with_wsd_sqrt(optimizer, num_warmup_steps: int, num_stable_steps: int, num_training_steps: int, last_epoch: int=-1) -> LRScheduler:
+def compute_current_lr_linear(step: int, num_total_steps: int,
+                              learning_rate_scheduler_config: LearningRateSchedulerConfig):
     """
-    Create a schedule with a learning rate that decreases linearly from the initial lr set in the optimizer to 0, after
-    a warmup period during which it increases linearly from 0 to the initial lr set in the optimizer.
-
-    Args:
-        optimizer ([`~torch.optim.Optimizer`]):
-            The optimizer for which to schedule the learning rate.
-        num_warmup_steps (`int`):
-            The number of steps for the warmup phase.
-        num_training_steps (`int`):
-            The total number of training steps.
-        last_epoch (`int`, *optional*, defaults to -1):
-            The index of the last epoch when resuming training.
-
-    Return:
-        `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.
+    Compute the current learning rate for the given step and learning rate scheduler configuration.
+    Will use the given schedule to interpolate between the initial and end learning rate and optionally apply warmup.
+    :param step: the current step post warmup
+    :param num_total_steps: the total number of steps
+    :param learning_rate_scheduler_config: the learning rate scheduler configuration
+    :return: the current learning rate for the given step
     """
+    relative = step / num_total_steps
+    lr_range = learning_rate_scheduler_config.initial_lr - learning_rate_scheduler_config.end_lr
+    return learning_rate_scheduler_config.initial_lr - lr_range * relative
 
-    lr_lambda = partial(
-        _get_linear_schedule_with_wsd_sqrt_lr_lambda,
-        num_warmup_steps=num_warmup_steps,
-        num_stable_steps=num_stable_steps,
-        num_training_steps=num_training_steps,
-    )
-    return LambdaLR(optimizer, lr_lambda, last_epoch)
 
-SCHED_MAP: dict[str, Callable[..., LRScheduler]] = {
-    "cosine": get_cosine_schedule_with_warmup,
-    "wsd-sqrt": get_linear_schedule_with_wsd_sqrt,
-    "linear": get_linear_schedule_with_warmup
-}
+def compute_current_lr_cosine(step: int, num_total_steps: int,
+                              learning_rate_scheduler_config: LearningRateSchedulerConfig):
+    """
+    Compute the current learning rate for the given step and learning rate scheduler configuration.
+    Will use the given schedule to interpolate between the initial and end learning rate and optionally apply warmup.
+    :param step: the current step post warmup
+    :param num_total_steps: the total number of steps
+    :param learning_rate_scheduler_config: the learning rate scheduler configuration
+    :return: the current learning rate for the given step
+    """
+    relative = step / num_total_steps
+    lr_range = learning_rate_scheduler_config.initial_lr - learning_rate_scheduler_config.end_lr
+    return learning_rate_scheduler_config.initial_lr - lr_range * math.sin(relative * math.pi / 2)
 
-def get_scheduler(sched_type: str, optimizer, num_warmup_steps: int, num_stable_steps: int, num_training_steps: int) -> LRScheduler:
-    if 'wsd' in sched_type:
-        return SCHED_MAP[sched_type](optimizer, num_warmup_steps=num_warmup_steps, num_stable_steps=num_stable_steps, num_training_steps=num_training_steps)
+
+def compute_current_lr(step: int, num_total_steps: int, learning_rate_scheduler_config: LearningRateSchedulerConfig):
+    """
+    Compute the current learning rate for the given step and learning rate scheduler configuration.
+    Will use the given schedule to interpolate between the initial and end learning rate and optionally apply warmup.
+    :param step: the current step
+    :param num_total_steps: the total number of steps
+    :param learning_rate_scheduler_config: the learning rate scheduler configuration
+    :return: the current learning rate for the given step
+    """
+    if learning_rate_scheduler_config.num_warmup_steps > 0:
+        if step < learning_rate_scheduler_config.num_warmup_steps:
+            return learning_rate_scheduler_config.initial_lr * (step / learning_rate_scheduler_config.num_warmup_steps)
+
+    post_warmup_step = step - learning_rate_scheduler_config.num_warmup_steps
+
+    if learning_rate_scheduler_config.scheduler_type == 'linear':
+        return compute_current_lr_linear(post_warmup_step, num_total_steps, learning_rate_scheduler_config)
+    elif learning_rate_scheduler_config.scheduler_type == 'cosine':
+        return compute_current_lr_cosine(post_warmup_step, num_total_steps, learning_rate_scheduler_config)
     else:
-        return SCHED_MAP[sched_type](optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps)
+        raise ValueError(f"Unsupported scheduler type {learning_rate_scheduler_config.scheduler_type}")

@@ -28,18 +28,23 @@ class DataConfig(BaseConfig):
     split_by_data_rank: bool = True
 
 
-class AdamConfig(BaseConfig):
-    type: Literal["adam"] = (
-        "adam"  # the literal is used to distinguish between the different optimizers configuration in the union type
-    )
-    lr: float = 4e-4
+class AdamConfig:
+    type: Literal["adam"] = "adam"
     weight_decay: float = 0.1
     betas1: float = 0.9
     betas2: float = 0.95
 
+class AdamWConfig:
+    type: Literal["adamw"] = "adamw"
+    weight_decay: float = 0.1
+    betas1: float = 0.9
+    betas2: float = 0.95
 
-OptimizersConfig: TypeAlias = AdamConfig
-
+# Union of all optimizer configuration types.
+# New optimizer configurations must be added here to be picked up by the config system.
+# Each configuration will be tried until a successful match is found.
+# The 'type' field determines which class to use because the string literal is distinct for each class.
+OptimizersConfig: TypeAlias = AdamConfig | AdamWConfig
 
 class OptimConfig(BaseConfig):
     optim: OptimizersConfig = AdamConfig()

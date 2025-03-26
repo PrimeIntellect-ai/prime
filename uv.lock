@@ -799,19 +799,6 @@ wheels = [
 ]
 
 [[package]]
-name = "liger-kernel-nightly"
-version = "0.5.2.dev20250129180649"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "torch" },
-    { name = "triton" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/07/23/fcab81f6e9dd018eecf112f462831f6648b9d85765fe2b70c35e73d4bdc5/liger_kernel_nightly-0.5.2.dev20250129180649.tar.gz", hash = "sha256:d11bdac72655c468ed498ca48a15bd14d2ecf2df4efd913288ab84d26bf5c3ff", size = 3460969 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2d/c7/a843f4c8289024034eeb03687326456b3ab356748d41f7d449551d4040a1/liger_kernel_nightly-0.5.2.dev20250129180649-py3-none-any.whl", hash = "sha256:2ae45799cea28e319e401217797ba7ba73cb6476db95cdd4a40497feb70e7ca6", size = 112180 },
-]
-
-[[package]]
 name = "lm-eval"
 version = "0.4.7"
 source = { registry = "https://pypi.org/simple" }
@@ -2463,26 +2450,6 @@ wheels = [
 ]
 
 [[package]]
-name = "toposolve"
-version = "0.1.17"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pybind11" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/51/5d/e24dd0bbbf9f508d9aa11120fdcc7b0e4caf1c1d401359495636470e0431/toposolve-0.1.17.tar.gz", hash = "sha256:539a1301ed36df5e2fbd0d3e1806f2c6cd7840c3527938647a61b0a7b53689f9", size = 5437 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c4/02/91db85f3ab2822377e90357b23783c5a1408cdb7c36f9f94a7d3db6783cc/toposolve-0.1.17-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:cc1a33e2438c29a29ccac4c957c6ffaf035b239b34f0e369f4665ed255b413c9", size = 125471 },
-    { url = "https://files.pythonhosted.org/packages/ed/4c/90f3b00b1f381ead4394cb1a1391b8dcd2a043490b2f77ebf71609e24b91/toposolve-0.1.17-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:dda111813910145f97df62e34d30ad38c39df45539f129b57df0e6c51e52902b", size = 125548 },
-    { url = "https://files.pythonhosted.org/packages/61/46/062d43764ac1cf6fff3edde81295846d6191c43a103550ddf27472da49ca/toposolve-0.1.17-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:141ba41c36e49ecd2280517031f4ef8c2c131b4fb93b85f38c10fead17974b7f", size = 95148 },
-    { url = "https://files.pythonhosted.org/packages/58/c0/854d8b5cc5cb23d99720c28908e5eff587e1ec25c797ceac219bf5f0f3a7/toposolve-0.1.17-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:8b13cdf80823dd86dd75bda7f94418b5b093cbb4989a4a6f0956f2595b8a7be1", size = 128253 },
-    { url = "https://files.pythonhosted.org/packages/b9/ab/9e062fe4e58729594eda886ed464e4839232162e1ddbd0e36b5bcb61d664/toposolve-0.1.17-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:baa9a76f54f295d8beb06559bd90c117c9a0c2f84aa4c9c661fb283a7529fd68", size = 128431 },
-    { url = "https://files.pythonhosted.org/packages/4f/3b/b6e6c863d06f8cb533068224f954b3b49722ba88cb6a0861fd62aefbc151/toposolve-0.1.17-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:ac94551501ca671d428c7ad435a50da5cd33f832c432c87e676f3ab8310bf19d", size = 96749 },
-    { url = "https://files.pythonhosted.org/packages/70/1e/7028dbd313ba931c086ecb24856566fb34cd159d3bd305cf05fa6b66bb3b/toposolve-0.1.17-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:e158c666e1492832dba077eaea9c4bcd88fbb3f45b8bfde8a8f545d5de8212e2", size = 127421 },
-    { url = "https://files.pythonhosted.org/packages/44/3b/a51dd6d756076853f1a6d18cc20761126b613a28a5ff9e37a113a546477b/toposolve-0.1.17-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:17666bdb0078cddcffc89cb9e7c0f0ce35007597b8a309f7b29c6a39a0fb6d8a", size = 127540 },
-    { url = "https://files.pythonhosted.org/packages/1e/8e/0d7b43f5c751490745bd25cf2cf1f1285627749e3ebfd2da131a9bbdac8c/toposolve-0.1.17-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1b238dadaced7fe98638fcb595596619104724a66ba1205914d0faebb2a2081b", size = 95545 },
-]
-
-[[package]]
 name = "torch"
 version = "2.5.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2522,14 +2489,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/5f/ba/607d013b55b9fd805db2a5c2662ec7551f1910b4eef39653eeaba182c5b2/torch-2.5.1-cp312-cp312-win_amd64.whl", hash = "sha256:73e58e78f7d220917c5dbfad1a40e09df9929d3b95d25e57d9f8558f84c9a11c", size = 203046841 },
     { url = "https://files.pythonhosted.org/packages/57/6c/bf52ff061da33deb9f94f4121fde7ff3058812cb7d2036c97bc167793bd1/torch-2.5.1-cp312-none-macosx_11_0_arm64.whl", hash = "sha256:8c712df61101964eb11910a846514011f0b6f5920c55dbf567bff8a34163d5b1", size = 63858109 },
     { url = "https://files.pythonhosted.org/packages/69/72/20cb30f3b39a9face296491a86adb6ff8f1a47a897e4d14667e6cf89d5c3/torch-2.5.1-cp313-cp313-manylinux1_x86_64.whl", hash = "sha256:9b61edf3b4f6e3b0e0adda8b3960266b9009d02b37555971f4d1c8f7a05afed7", size = 906393265 },
-]
-
-[[package]]
-name = "torch-shampoo"
-version = "1.0.0"
-source = { git = "https://github.com/facebookresearch/optimizers.git?rev=main#9c5700ad5ee81c28dc565c1a49c4b940da28eb8d" }
-dependencies = [
-    { name = "torch" },
 ]
 
 [[package]]
@@ -2596,7 +2555,7 @@ name = "triton"
 version = "3.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "filelock" },
+    { name = "filelock", marker = "python_full_version < '3.13' and sys_platform == 'linux'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/98/29/69aa56dc0b2eb2602b553881e34243475ea2afd9699be042316842788ff5/triton-3.1.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6b0dd10a925263abbe9fa37dcde67a5e9b2383fc269fdf59f5657cac38c5d1d8", size = 209460013 },
@@ -2861,25 +2820,22 @@ source = { editable = "." }
 dependencies = [
     { name = "datasets" },
     { name = "fsspec", extra = ["gcs"] },
-    { name = "liger-kernel-nightly" },
     { name = "ninja" },
     { name = "numpy" },
     { name = "psutil" },
     { name = "pyarrow" },
     { name = "pydantic-config" },
     { name = "setuptools" },
-    { name = "toposolve" },
     { name = "torch" },
-    { name = "torch-shampoo" },
     { name = "torchdata" },
     { name = "transformers" },
+    { name = "wandb" },
     { name = "zstandard" },
 ]
 
 [package.optional-dependencies]
 all = [
     { name = "lm-eval" },
-    { name = "wandb" },
 ]
 
 [package.dev-dependencies]
@@ -2894,7 +2850,6 @@ dev = [
 requires-dist = [
     { name = "datasets", specifier = ">=3.0.0" },
     { name = "fsspec", extras = ["gcs"], specifier = ">=2024.3.1" },
-    { name = "liger-kernel-nightly", specifier = ">=0.5.2.dev20250122195349" },
     { name = "lm-eval", marker = "extra == 'all'" },
     { name = "ninja" },
     { name = "numpy" },
@@ -2902,12 +2857,10 @@ requires-dist = [
     { name = "pyarrow" },
     { name = "pydantic-config", git = "https://github.com/samsja/pydantic_config.git?rev=b7becc3" },
     { name = "setuptools" },
-    { name = "toposolve", specifier = ">=0.1.17" },
     { name = "torch", specifier = "==2.5.1" },
-    { name = "torch-shampoo", git = "https://github.com/facebookresearch/optimizers.git?rev=main" },
     { name = "torchdata", specifier = ">=0.8.0" },
     { name = "transformers", specifier = ">=4.44.2" },
-    { name = "wandb", marker = "extra == 'all'" },
+    { name = "wandb" },
     { name = "zstandard" },
 ]
 

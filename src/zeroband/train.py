@@ -19,9 +19,6 @@ from zeroband.optimizers import get_optimizer
 from zeroband.utils import (
     FakeTokenizer,
     PerfCounter,
-    get_peak_flops,
-    get_num_params,
-    get_num_flop_per_token,
 )
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.utils.profiler import MemoryProfiler
@@ -77,16 +74,9 @@ def train(config: Config):
             vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
         )
 
-    gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
-    logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
+    perf_counter = PerfCounter(window_size=10, model=model, model_config=model_config, seq_len=config.data.seq_length)
 
-    num_params = get_num_params(model, exclude_embedding=True)
-    logger.info(f"Number of parameters: {num_params}")
-    num_flop_per_token = get_num_flop_per_token(
-        num_params,
-        model_config,
-        config.data.seq_length,
-    )
+    logger.info(f"Number of parameters: {perf_counter.num_params}")
 
     with sw.record_block("Shard Model"):
         if config.train.ac_ckpt:
@@ -163,7 +153,6 @@ def train(config: Config):
         memory_profiler = MemoryProfiler(config.train.memory_profiler.freq, config.train.memory_profiler.snapshot_dir)
 
     num_inner_steps = config.diloco.inner_steps if config.diloco is not None else 1
-    perf_counter = PerfCounter(window_size=10)
 
     logger.debug("Finished setup in %f seconds", sw.elapsed())
 
@@ -283,11 +272,10 @@ def train(config: Config):
             log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
 
             tokens_per_second = perf_counter.get_tokens_per_second()
+
             if tokens_per_second is not None:
                 metrics["tokens_per_second"] = tokens_per_second
-                metrics["mfu"] = (
-                    100 * num_flop_per_token * tokens_per_second / gpu_peak_flops / world_info.local_world_size
-                )
+                metrics["mfu"] = perf_counter.get_mfu()
                 log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
 
             if config.diloco is not None:

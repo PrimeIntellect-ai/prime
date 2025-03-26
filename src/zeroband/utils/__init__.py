@@ -2,29 +2,10 @@ import hashlib
 import socket
 import time
 import torch
-from torch.distributed.fsdp import ShardingStrategy
 from torch.distributed._tensor.api import DTensor
 from distributed_shampoo import DistributedShampoo
 
-
-__all__ = ["get_sharding_strategy", "get_peak_flops", "get_num_flop_per_token", "get_num_params"]
-
-
-def get_sharding_strategy(sharding_strategy: str) -> ShardingStrategy:
-    if sharding_strategy == "FULL_SHARD":
-        return ShardingStrategy.FULL_SHARD
-    elif sharding_strategy == "SHARD_GRAD_OP":
-        return ShardingStrategy.SHARD_GRAD_OP
-    elif sharding_strategy == "NO_SHARD":
-        return ShardingStrategy.NO_SHARD
-    elif sharding_strategy == "HYBRID_SHARD":
-        return ShardingStrategy.HYBRID_SHARD
-    elif sharding_strategy == "_HYBRID_SHARD_ZERO2":
-        return ShardingStrategy._HYBRID_SHARD_ZERO2
-    else:
-        raise ValueError(
-            f"Invalid sharding_strategy: {sharding_strategy}. Please choose 'FULL_SHARD', 'SHARD_GRAD_OP', 'NO_SHARD', 'HYBRID_SHARD', or '_HYBRID_SHARD_ZERO2'."
-        )
+from zeroband.utils.world_info import get_world_info
 
 
 ### code above inspired and copied from https://github.com/pytorch/torchtitan/blob/4b3f2e41a084bf79a8540068ed525539d1244edd/torchtitan/utils.py#L119
@@ -78,10 +59,17 @@ class PerfCounter:
     we use a rollowing window because time perf counter is not precise enough in some case
     """
 
-    def __init__(self, window_size: int):
+    def __init__(self, window_size: int, model: torch.nn.Module, model_config, seq_len: int):
         self.window_size = window_size
         self.tokens = []
         self.times = []
+        self.model = model
+
+        self.gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
+        self.num_params = get_num_params(model, exclude_embedding=True)
+        self.num_flop_per_token = get_num_flop_per_token(self.num_params, model_config, seq_len=seq_len)
+
+        self._world_info = get_world_info()
 
     def count_tokens(self, tokens: int):
         self.tokens.append(tokens)
@@ -94,6 +82,12 @@ class PerfCounter:
         if len(self.tokens) < 2:
             return None
         return sum(self.tokens[1:]) / (self.times[-1] - self.times[0])
+
+    def get_mfu(self) -> float | None:
+        tokens_per_second = self.get_tokens_per_second()
+        if tokens_per_second is None:
+            return None
+        return 100 * self.num_flop_per_token * tokens_per_second / self.gpu_peak_flops / self._world_info.world_size
 
 
 TENSOR_SIG_SAMPLE_SIZE = 100

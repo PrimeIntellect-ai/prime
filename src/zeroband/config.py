@@ -38,18 +38,7 @@ class AdamConfig(BaseConfig):
     betas2: float = 0.95
 
 
-class SoapConfig(BaseConfig):
-    type: Literal["soap"] = "soap"
-    lr: float = 4e-4
-    weight_decay: float = 1e-05
-    betas1: float = 0.9
-    betas2: float = 0.95
-
-    max_preconditioner_dim: int = 8192
-    precondition_frequency: int = 100
-
-
-OptimizersConfig: TypeAlias = AdamConfig | SoapConfig
+OptimizersConfig: TypeAlias = AdamConfig
 
 
 class OptimConfig(BaseConfig):

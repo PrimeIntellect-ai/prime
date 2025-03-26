@@ -13,7 +13,6 @@ from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
 from zeroband.models.llama.model import create_block_mask_from_seqlens
-from zeroband.optimizers import get_optimizer
 from zeroband.utils import (
     FakeTokenizer,
     PerfCounter,
@@ -108,7 +107,12 @@ def train(config: Config):
 
     # Setup optimizers
     with sw.record_block("Optimizer Setup"):
-        inner_optimizer = get_optimizer(config, model.parameters())
+        inner_optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config.optim.optim.lr,
+            weight_decay=config.optim.optim.weight_decay,
+            betas=(config.optim.optim.betas1, config.optim.optim.betas2),
+        )
 
         # TODO MIKE use pccl instead of elastic_device_mesh
 

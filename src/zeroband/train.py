@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
 from torch.autograd.profiler import record_function
+import wandb
 
 from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
 from zeroband.config import Config
@@ -22,7 +23,6 @@ from zeroband.utils import (
     get_num_params,
     get_num_flop_per_token,
 )
-from zeroband.utils.metric_logger import WandbMetricLogger, DummyMetricLogger
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.utils.profiler import MemoryProfiler
 from zeroband.utils.world_info import WorldInfo, get_world_info
@@ -136,15 +136,11 @@ def train(config: Config):
 
         training_progress = TrainingProgress(total_tokens=0, outer_step=0, step=0)
 
-    if world_info.rank == 0:
-        logger_cls = WandbMetricLogger if config.metric_logger_type == "wandb" else DummyMetricLogger
-        metric_logger = logger_cls(
+    if world_info.rank == 0 and config.wandb:
+        wandb.init(
             project=config.project,
-            logger_config={"config": config.model_dump(), "world_info": world_info.json()},
-            resume=config.wandb_resume,
+            config={"config": config.model_dump(), "world_info": world_info.json()},
         )
-    else:
-        metric_logger = None
 
     with sw.record_block("Compile Model"):
         if config.train.torch_compile:
@@ -301,9 +297,8 @@ def train(config: Config):
                 metrics["num_peers"] = 1
                 log += f", diloco_peers: {metrics['num_peers']}"
 
-            if world_info.rank == 0:
-                assert metric_logger is not None
-                metric_logger.log(metrics)
+            if world_info.rank == 0 and config.wandb:
+                wandb.log(metrics)
 
             logger.info(log)
 
@@ -337,9 +332,8 @@ def train(config: Config):
             # Since ckpt strategy and all reduce is done at the outer loop level.
             break
 
-    if world_info.rank == 0:
-        assert metric_logger is not None
-        metric_logger.finish()
+        if world_info.rank == 0:
+            wandb.finish()
 
     if config.train.memory_profiler is not None:
         logger.debug(f"Max memory used: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")

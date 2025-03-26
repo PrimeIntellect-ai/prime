@@ -1,6 +1,5 @@
 name_model = "debugmodel"
-project = "/tmp/debug"
-metric_logger_type = "dummy"
+wandb = false
 type_model = "llama2"
 
 [train]

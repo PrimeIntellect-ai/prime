@@ -145,6 +145,8 @@ class Config(BaseConfig):
 
     ckpt: CkptConfig = CkptConfig()
 
+    wandb: bool = True
+
     @model_validator(mode="after")
     def ckpt_diloco_step(self):
         if self.ckpt is not None and self.ckpt.interval is not None and self.diloco is not None:

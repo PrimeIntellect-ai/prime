@@ -1,12 +1,9 @@
 from dataclasses import dataclass, asdict
 import random
-from typing import Any, Generator, Optional, List, Dict, TypedDict, Union
+from typing import Any, Generator, Optional, List, Dict, TypedDict
 import functools
-import threading
 
-from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.utils.logger import get_logger
-from zeroband.utils.world_info import get_world_info
 from zeroband.config import DataConfig
 
 import torch
@@ -276,123 +273,6 @@ class InterleaveDataset(IterableDataset, Stateful):
         self._init_random_state()
 
 
-class PrefetchDataLoader(StatefulDataLoader):
-    """
-    This class is a wrapper around a dataloader that prefetches the next batch asynchronously on another thread.
-    This is useful to hide the latency of transferring the batch to GPU.
-    We can't integrate this into the StatefulDataloader's collate_fn() because it runs in another process.
-    We're also using it to hide the latency of torch compiling FlexAttention block masks.
-    """
-
-    def __init__(self, original_dataloader: StatefulDataLoader, data_config: DataConfig):
-        self.config = data_config
-        self.original_dataloader = original_dataloader
-        self._prefetch_iterator = None
-
-    def __iter__(self):
-        if self._prefetch_iterator is not None:
-            return self._prefetch_iterator
-
-        self._prefetch_iterator = self._PrefetchIterator(
-            self.original_dataloader,
-            self.config,
-        )
-        return self._prefetch_iterator
-
-    def state_dict(self):
-        if self._prefetch_iterator is not None:
-            self._prefetch_iterator._await_prefetch()
-
-        # Only keep around one or the other
-        return {
-            'dataloader_state': None if self._prefetch_iterator else self.original_dataloader.state_dict(),
-            '_prefetch_iterator': None if self._prefetch_iterator is None else self._prefetch_iterator.state_dict(),
-        }
-
-    def load_state_dict(self, state_dict):
-        if state_dict['dataloader_state'] is not None:
-            self.original_dataloader.load_state_dict(state_dict['dataloader_state'])
-        if state_dict['_prefetch_iterator'] is not None:
-            self._prefetch_iterator = self._PrefetchIterator(self.original_dataloader, self.config)
-
-    class _PrefetchIterator(Stateful):
-        def __init__(self, original_dataloader: StatefulDataLoader, config: DataConfig):
-            self.dataloader_iter = iter(original_dataloader)
-            self.config = config
-            self.ready_batch = None
-            self.thread = None
-
-            # Immediately transfer first batch async.
-            self._prefetch_next()
-
-        def state_dict(self) -> Dict[str, Any]:
-            self._await_prefetch()
-            return {
-                'dataloader_iter': self.dataloader_iter.state_dict(),
-                'ready_batch': self.ready_batch
-            }
-
-        def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-            self.dataloader_iter = state_dict['dataloader_iter']
-            self.ready_batch = state_dict['ready_batch']
-
-        def _prefetch_next(self):
-            def _task() -> None:
-                # NOTE: Each thread gets its own threadlocal CUDA context and has to reset the device.
-                local_rank = get_world_info().local_rank
-                torch.cuda.set_device(local_rank)
-
-                # Grab batch or return sentinel
-                try:
-                    batch = next(self.dataloader_iter)
-                except StopIteration:
-                    self.ready_batch = StopIteration
-                    return None
-
-                # Transfer to CUDA asynchronously and create block mask in another cuda stream
-                newstream = torch.cuda.Stream(local_rank)
-                with torch.cuda.stream(newstream): #type: ignore (cuda stream is a cuda stream :) )
-                    input_ids = batch["input_ids"].to("cuda", non_blocking=True)
-                    labels = batch["labels"].to("cuda", non_blocking=True)
-
-                    # Create block mask if needed
-                    block_mask = None
-                    if self.config.sequence_packing:
-                        seqlens = batch.get("seqlens")
-                        if seqlens is not None:
-                            seqlens = [s.to("cuda", non_blocking=True) for s in seqlens]
-                            block_mask = create_block_mask_from_seqlens(seqlens)
-
-                # Construct and return processed batch.
-                self.ready_batch = {
-                    "input_ids": input_ids,
-                    "labels": labels,
-                    "block_mask": block_mask
-                }
-                return None
-
-            self.thread = threading.Thread(target=_task)
-            self.thread.start()
-
-        def __next__(self):
-            self._await_prefetch()
-            if self.ready_batch is StopIteration:
-                raise StopIteration
-
-            batch = self.ready_batch
-            self.ready_batch = None
-
-            self._prefetch_next()
-            return batch
-
-        def _await_prefetch(self):
-            if self.thread is not None and self.thread.is_alive():
-                self.thread.join()
-                self.thread = None
-
-        def __del__(self):
-            self._await_prefetch()
-
 def get_dataloader(
     tokenizer,
     world_size: int,
@@ -408,13 +288,12 @@ def get_dataloader(
         )
 
     dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
-    mp_batch_dataloader = StatefulDataLoader(
+    return StatefulDataLoader(
         dataset,
         batch_size=batch_size,
         collate_fn=collate_fn,
         num_workers=data_config.num_workers,
     )
-    return PrefetchDataLoader(mp_batch_dataloader, data_config)
 
 
 @functools.lru_cache(maxsize=None)
@@ -432,15 +311,6 @@ def _get_datafiles(path: str, name: Optional[str] = None, split: str = "train") 
         else:
             name = "default"
     return builder_config[name].data_files[split]
-
-
-def _nice_print(kwargs: Dict[str, Union[str, List[str]]]) -> str:
-    def _foo(a):
-        if isinstance(a, list):
-            return str(a[:5]) + "..." + str(a[-5:]) if len(a) > 10 else str(a)
-        return str(a)
-
-    return str({k: _foo(v) for k, v in kwargs.items()})
 
 
 def _load_datasets(
@@ -514,7 +384,6 @@ def load_all_datasets(
     else:
         split_rank = rank
         split_world_size = world_size
-
 
     get_logger().info("Loading Train dataset(s)")
 

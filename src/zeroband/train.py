@@ -7,12 +7,13 @@ import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
 from torch.autograd.profiler import record_function
 
-from zeroband.checkpoint import CkptManager, TrainingProgress
+from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
 from zeroband.config import Config
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
 from zeroband.loss import compute_cross_entropy_loss
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
+from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.optimizers import get_optimizer
 from zeroband.utils import (
     FakeTokenizer,
@@ -135,18 +136,6 @@ def train(config: Config):
 
         training_progress = TrainingProgress(total_tokens=0, outer_step=0, step=0)
 
-        ckpt_manager = CkptManager(
-            config=config.ckpt,
-            model=model,
-            optimizer=inner_optimizer,
-            scheduler=scheduler,
-            dataloader=train_dataloader,
-            training_progress=training_progress,
-            data_rank=config.data.data_rank,
-            diloco_offloaded_optimizer=None,  # type: ignore
-            diloco_offloaded_param_list=None,  # type: ignore
-        )
-
     if world_info.rank == 0:
         logger_cls = WandbMetricLogger if config.metric_logger_type == "wandb" else DummyMetricLogger
         metric_logger = logger_cls(
@@ -165,10 +154,13 @@ def train(config: Config):
     if config.ckpt.resume is not None:
         with sw.record_block("Resume Checkpoint"):
             # all is inplace
-            ckpt_manager.load(
-                resume_ckpt_path=config.ckpt.resume,
-                skip_dataloader=config.ckpt.skip_dataloader,
-                data_path=config.ckpt.data_path,
+            load_checkpoint_fsdp_state(
+                model=model,
+                optimizers=[inner_optimizer],
+                training_progress=training_progress,
+                dataloader=train_dataloader,
+                scheduler=scheduler,
+                path_root=config.ckpt.path,
             )
 
     if config.train.memory_profiler is not None:
@@ -200,9 +192,10 @@ def train(config: Config):
 
                     with sw.record_block("Load batch"):
                         batch = next(train_dataloader_iterator)
-                        input_ids = batch["input_ids"]
-                        labels = batch["labels"]
-                        block_mask = batch["block_mask"]
+                        input_ids = batch["input_ids"].to("cuda")
+                        labels = batch["labels"].to("cuda")
+                        seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
+                        block_mask = create_block_mask_from_seqlens(seqlens)
 
                     with sw.record_block("Run forward()"):
                         logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
@@ -329,9 +322,14 @@ def train(config: Config):
             and training_progress.step % config.ckpt.interval == 0
         ):
             # we only allow to checkpoint after a outer step. For non diloco training outer step = 1 anyway
-
-            do_remote = config.ckpt.remote is not None and training_progress.step % config.ckpt.remote.interval == 0
-            ckpt_manager.save(remote=do_remote)
+            save_checkpoint_fsdp_state(
+                model=model,
+                optimizers=[inner_optimizer],
+                training_progress=training_progress,
+                dataloader=train_dataloader,
+                scheduler=scheduler,
+                path_root=config.ckpt.path,
+            )
 
         if training_progress.step >= config.optim.total_steps:
             # we only allow to break outisde of the inner loop.
@@ -342,8 +340,6 @@ def train(config: Config):
     if world_info.rank == 0:
         assert metric_logger is not None
         metric_logger.finish()
-
-    ckpt_manager.wait_for_blocking_job()
 
     if config.train.memory_profiler is not None:
         logger.debug(f"Max memory used: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")

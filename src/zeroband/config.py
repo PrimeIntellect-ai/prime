@@ -116,40 +116,8 @@ class RemoteConfig(BaseConfig):
 class CkptConfig(BaseConfig):
     path: str | None = None
     interval: int | None = None
-    topk: int | None = None
-
-    remote: RemoteConfig | None = None
-
-    remote_data_path: str | None = None
-    remote_data_load: bool = False
 
     resume: str | None = None
-
-    skip_dataloader: bool = False
-
-    live_recovery_rank_src: int | None = None
-
-    data_path: str | None = None
-
-    token_count: int | None = None
-
-    @model_validator(mode="after")
-    def validate_path_and_interval(self):
-        if (self.path is None) != (self.interval is None):
-            raise ValueError("path and interval must be both set or both None")
-        if self.path is None and self.remote is not None:
-            raise ValueError("remote_path is set but path is not set")
-
-        return self
-
-    @model_validator(mode="after")
-    def validate_remote_data_path(self):
-        if self.remote_data_load and self.data_path is not None:
-            raise ValueError("remote_data_load and data_path are mutually exclusive")
-
-        if self.remote_data_load and self.remote_data_path is None:
-            raise ValueError("remote_data_load is set but remote_data_path is not set")
-        return self
 
 
 class Config(BaseConfig):
@@ -183,10 +151,4 @@ class Config(BaseConfig):
             assert self.ckpt.interval % self.diloco.inner_steps == 0, (
                 "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
             )
-        return self
-
-    @model_validator(mode="after")
-    def validate_live_recovery_rank_src(self):
-        if self.ckpt is not None and self.ckpt.live_recovery_rank_src is not None and self.diloco is None:
-            raise ValueError("live_recovery_rank_src is only supported with diloco")
         return self

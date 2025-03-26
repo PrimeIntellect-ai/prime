@@ -61,10 +61,6 @@ class OptimConfig(BaseConfig):
     total_steps: int = 88_000
     batch_size: int = 512
 
-    z_loss: bool = False
-    z_loss_weight: float = 2e-4
-    num_chunks: int | None = None
-
 
 class DilocoConfig(BaseConfig):
     outer_lr: float = 0.7
@@ -94,8 +90,6 @@ class TrainConfig(BaseConfig):
     torch_profiler: bool = False
 
     torch_compile: bool = True
-
-    fused_linear_ce: bool = False
 
     fsdp_cpu_offload: bool = False
 

@@ -13,8 +13,6 @@ warmup_steps = 1000
 stable_steps = 74700
 total_steps = 90400
 
-z_loss = true
-
 [optim.optim]
 lr = 7.5e-5
 betas1 = 0.9

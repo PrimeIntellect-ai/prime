@@ -61,8 +61,6 @@ class ModelArgs:
     depth_init: bool = True
     norm_type: str = "fused_rmsnorm"
 
-    fused_linear_ce: bool = False
-
     attn_fn: AttnFnType = "flex"  # slow for testing
 
 
@@ -520,7 +518,7 @@ class Transformer(nn.Module):
             h = layer(h, self.freqs_cis, block_mask=block_mask)
 
         h = self.norm(h) if self.norm else h
-        output = self.output(h).float() if (self.output and not self.model_args.fused_linear_ce) else h
+        output = self.output(h)
         return output
 
     @classmethod

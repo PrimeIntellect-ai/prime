@@ -41,6 +41,7 @@ def test_cosine_no_warmup():
         initial_lr=1.0,
         end_lr=0.0,
         num_warmup_steps=0,
+        num_decay_steps=10,
         scheduler_type='cosine'
     )
     assert compute_current_lr(0, config) == pytest.approx(1.0)
@@ -53,6 +54,7 @@ def test_cosine_with_warmup():
         initial_lr=1.0,
         end_lr=0.0,
         num_warmup_steps=10,
+        num_decay_steps=10,
         scheduler_type='cosine'
     )
     assert compute_current_lr(0, config) == pytest.approx(0.0)

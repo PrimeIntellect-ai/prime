@@ -28,17 +28,35 @@ class DataConfig(BaseConfig):
     split_by_data_rank: bool = True
 
 
-class AdamConfig:
+class AdamConfig(BaseConfig):
     type: Literal["adam"] = "adam"
     weight_decay: float = 0.1
     betas1: float = 0.9
     betas2: float = 0.95
 
-class AdamWConfig:
+
+class AdamWConfig(BaseConfig):
     type: Literal["adamw"] = "adamw"
     weight_decay: float = 0.1
     betas1: float = 0.9
     betas2: float = 0.95
+
+
+class LearningRateSchedulerConfig(BaseConfig):
+    initial_lr: float = 3e-4
+    end_lr: float = 0.0
+    num_decay_steps: int = 0
+    num_warmup_steps: int = 1000
+    num_stable_steps: int = 0
+    scheduler_type: Literal["linear", "cosine"] = "linear"
+
+    @property
+    def num_total_steps(self):
+        """
+        The total number of steps that the learning rate scheduler defines in its current configuration.
+        """
+        return self.num_decay_steps + self.num_warmup_steps + self.num_stable_steps
+
 
 # Union of all optimizer configuration types.
 # New optimizer configurations must be added here to be picked up by the config system.
@@ -46,22 +64,17 @@ class AdamWConfig:
 # The 'type' field determines which class to use because the string literal is distinct for each class.
 OptimizersConfig: TypeAlias = AdamConfig | AdamWConfig
 
+
 class OptimConfig(BaseConfig):
     optim: OptimizersConfig = AdamConfig()
-
-    sched_type: Literal["cosine", "linear", "wsd-sqrt"] = "cosine"
-    warmup_steps: int = 1000
-    stable_steps: int = 80_000
-    total_steps: int = 88_000
     batch_size: int = 512
+    learning_rate_scheduler: LearningRateSchedulerConfig = LearningRateSchedulerConfig()
 
 
 class DilocoConfig(BaseConfig):
     outer_lr: float = 0.7
     inner_steps: int
     compression: Compression = Compression.NO
-
-    retry_all_reduce: int = 3
 
 
 class MemoryProfilerConfig(BaseConfig):
@@ -104,7 +117,6 @@ class RemoteConfig(BaseConfig):
 class CkptConfig(BaseConfig):
     path: str | None = None
     interval: int | None = None
-
     resume: str | None = None
 
 

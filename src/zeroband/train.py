@@ -4,18 +4,20 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+from torch.distributed.tensor import DTensor
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
 import wandb
 
 from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
 from zeroband.config import Config
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
-from zeroband.lr_scheduler import get_scheduler
+from zeroband.lr_scheduler import compute_current_lr
 from zeroband.models.llama import get_model
 from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.utils import (
     FakeTokenizer,
     PerfCounter,
+    optim_utils
 )
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.utils.profiler import MemoryProfiler
@@ -119,14 +121,6 @@ def train(config: Config):
         if config.diloco:
             raise NotImplementedError("Diloco is not implemented yet")
 
-        scheduler = get_scheduler(
-            sched_type=config.optim.sched_type,
-            optimizer=inner_optimizer,
-            num_warmup_steps=config.optim.warmup_steps,
-            num_stable_steps=config.optim.stable_steps,
-            num_training_steps=config.optim.total_steps,
-        )
-
         training_progress = TrainingProgress(total_tokens=0, outer_step=0, step=0)
 
     if world_info.rank == 0 and config.wandb:
@@ -148,7 +142,6 @@ def train(config: Config):
                 optimizers=[inner_optimizer],
                 training_progress=training_progress,
                 dataloader=train_dataloader,
-                scheduler=scheduler,
                 path_root=config.ckpt.path,
             )
 
@@ -173,6 +166,9 @@ def train(config: Config):
                 for grad_acc_step in range(gradient_accumulation_steps):
                     sw.start("grad_acc_step")
 
+                    current_lr = compute_current_lr(training_progress.step, config.optim.learning_rate_scheduler)
+                    optim_utils.set_optimizer_lr(inner_optimizer, current_lr)
+
                     with sw.record_block("Load batch"):
                         batch = next(train_dataloader_iterator)
                         input_ids = batch["input_ids"].to("cuda")
@@ -196,11 +192,11 @@ def train(config: Config):
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
 
             with sw.record_block("Clip Grad"):
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+                grad_norm: DTensor = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # type: ignore
+                grad_norm = grad_norm.full_tensor()  # type: ignore
 
             with sw.record_block("Optimizer Step"):
                 inner_optimizer.step()
-                scheduler.step()
 
             inner_optimizer.zero_grad()
 
@@ -264,9 +260,9 @@ def train(config: Config):
         training_progress.outer_step += 1
 
         if (
-            config.ckpt.interval is not None
-            and training_progress.step > 0
-            and training_progress.step % config.ckpt.interval == 0
+                config.ckpt.interval is not None
+                and training_progress.step > 0
+                and training_progress.step % config.ckpt.interval == 0
         ):
             # we only allow to checkpoint after a outer step. For non diloco training outer step = 1 anyway
             save_checkpoint_fsdp_state(
@@ -274,7 +270,6 @@ def train(config: Config):
                 optimizers=[inner_optimizer],
                 training_progress=training_progress,
                 dataloader=train_dataloader,
-                scheduler=scheduler,
                 path_root=config.ckpt.path,
             )
 
@@ -288,7 +283,7 @@ def train(config: Config):
             wandb.finish()
 
     if config.train.memory_profiler is not None:
-        logger.debug(f"Max memory used: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")
+        logger.debug(f"Max memory used: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
 
     logger.info("Training finished, exiting ...")
 

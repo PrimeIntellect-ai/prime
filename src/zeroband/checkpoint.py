@@ -35,12 +35,11 @@ def _pathify(path: str | Path) -> Path:
 
 
 def save_checkpoint_fsdp_state(
-    model: Transformer,
-    optimizers: list[torch.optim.Optimizer],
-    training_progress: TrainingProgress,
-    dataloader: StatefulDataLoader,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
-    path_root: str | Path,
+        model: Transformer,
+        optimizers: list[torch.optim.Optimizer],
+        training_progress: TrainingProgress,
+        dataloader: StatefulDataLoader,
+        path_root: str | Path,
 ):
     """
     Checkpoint the model in a way that is compatible with FSDP.
@@ -53,29 +52,31 @@ def save_checkpoint_fsdp_state(
     if not os.path.exists(path_root):
         os.makedirs(path_root)
 
+    state = {
+        "model": model.state_dict(),
+        "optimizers": [optimizer.state_dict() for optimizer in optimizers],
+        "training_progress": training_progress,
+        "dataloader": dataloader.state_dict()
+    }
     with open(path_file, "wb") as f:
-        state = {}
-        state["model"] = model.state_dict()
-        state["optimizers"] = [optimizer.state_dict() for optimizer in optimizers]
-        state["training_progress"] = training_progress
-        state["dataloader"] = dataloader.state_dict()
-        state["scheduler"] = scheduler.state_dict()
-
         torch.save(state, f)
 
 
 def load_checkpoint_fsdp_state(
-    model: Transformer,
-    optimizers: list[torch.optim.Optimizer],
-    training_progress: TrainingProgress,
-    dataloader: StatefulDataLoader,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
-    path: str | Path,
+        model: Transformer,
+        optimizers: list[torch.optim.Optimizer],
+        training_progress: TrainingProgress,
+        dataloader: StatefulDataLoader,
+        path_root: str | Path,
 ):
     """
     Load the checkpoint state.
     """
-    path = _pathify(path)
+    path = _pathify(path_root)
+
+    assert os.path.exists(path), f"Checkpoint directory {path} must exist"
+    assert os.path.isdir(path), f"Checkpoint directory {path} must be a directory"
+
     world_info = get_world_info()
 
     path_file = _local_file_path(path, world_info.local_rank)
@@ -95,4 +96,3 @@ def load_checkpoint_fsdp_state(
     training_progress.step = state["training_progress"].step
 
     dataloader.load_state_dict(state["dataloader"])
-    scheduler.load_state_dict(state["scheduler"])

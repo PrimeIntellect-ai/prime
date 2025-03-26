@@ -82,6 +82,7 @@ def test_packing_simple(llama_config: ModelArgs):
     assert output.shape == (bs, seq_len, llama_config.dim)
 
 
+@pytest.mark.skip(reason="test failing with torch 2.6.0")
 def test_sequence_packing_two_time_same_sequence(llama_config: ModelArgs):
     """
     In this test we take a sequence and pack it with itself along the seqlen dimension.
@@ -115,6 +116,7 @@ def test_sequence_packing_two_time_same_sequence(llama_config: ModelArgs):
     torch.testing.assert_close(output_left, output_right, atol=atol, rtol=rtol)
 
 
+@pytest.mark.skip(reason="test failing with torch 2.6.0")
 def test_sequence_packing_vs_normal(llama_config: ModelArgs):
     """
     take two sequences and compare the outout of attention on individual sequences vs the output of attention on the packed sequence
@@ -161,6 +163,9 @@ def test_sequence_packing_vs_normal(llama_config: ModelArgs):
     torch.testing.assert_close(output_2, output_packed_2, atol=atol, rtol=rtol)
 
 
+# see here for failint test https://github.com/pytorch/pytorch/issues/146260#issuecomment-2644460479
+# should be fix with torch 2.6.1 or higher
+@pytest.mark.skip(reason="test failing with torch 2.6.0")
 def test_sequence_packing_vs_normal_random(llama_config: ModelArgs):
     """
     take two sequences and compare the outout of attention on individual sequences vs the output of attention on the packed sequence

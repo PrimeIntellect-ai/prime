@@ -3,8 +3,6 @@ import socket
 import time
 import torch
 from torch.distributed._tensor.api import DTensor
-from distributed_shampoo import DistributedShampoo
-
 from zeroband.utils.world_info import get_world_info
 
 
@@ -132,9 +130,6 @@ def get_optimizer_signature(optimizer: torch.optim.Optimizer, compress: bool = T
     """
     Get the optimizer signature
     """
-
-    if isinstance(optimizer, DistributedShampoo):
-        return "mocked signature because shampoo does not support state_dict()"
 
     def unwrap_tensor(state_dict: dict) -> dict:
         new_dict = {}

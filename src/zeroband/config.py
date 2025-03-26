@@ -56,9 +56,6 @@ class DilocoConfig(BaseConfig):
     inner_steps: int
     compression: Compression = Compression.NO
 
-    retry_all_reduce: int = 3
-
-
 class MemoryProfilerConfig(BaseConfig):
     freq: int = 10
     snapshot_dir: str

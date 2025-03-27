@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from zeroband.models.norms import build_norm
 from zeroband.config import AttnFnType
@@ -279,7 +278,7 @@ class Attention(nn.Module):
 
     def _sdpa_attention(self, xq, xk, xv) -> torch.Tensor:
         with sdpa_kernel(SDPBackend.MATH) if self.attn_fn == "math" else contextlib.nullcontext():
-            output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+            output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
         output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         return output
 
@@ -336,7 +335,7 @@ class FeedForward(nn.Module):
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
     def forward(self, x):
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        return self.w2(torch.nn.functional.silu(self.w1(x)) * self.w3(x))
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)

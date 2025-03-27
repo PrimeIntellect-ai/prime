@@ -14,27 +14,24 @@ import wandb
 
 from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
 from zeroband.config import Config
-from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
+from zeroband.data import DEBUG_VOCAB_SIZE, get_dataloader
 from zeroband.lr_scheduler import compute_current_lr
-from zeroband.models.llama import get_model
+from zeroband.models.llama import make_model
 from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.utils import (
-    FakeTokenizer,
     PerfCounter,
     optim_utils
 )
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.utils.profiler import MemoryProfiler
+from zeroband.utils.tokenizer_utils import make_tokenizer
 from zeroband.utils.world_info import WorldInfo, get_world_info
 from zeroband.utils.logger import get_logger
 from zeroband.utils.stopwatch import Stopwatch
 
-from transformers import AutoTokenizer
 from pydantic_config import parse_argv
-import torch.nn.functional as F
 
-
-def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, world_info: WorldInfo) -> int:
+def calc_gradient_accumulation_steps(batch_size: int, micro_bs: int, world_info: WorldInfo) -> int:
     assert batch_size % world_info.world_size == 0
     batch_size = batch_size // world_info.world_size
 
@@ -46,7 +43,7 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, world_info: 
 
 
 def train(logger: Logger, config: Config, world_info: WorldInfo):
-    gradient_accumulation_steps = get_gradient_accumulation_steps(
+    grad_accum_steps = calc_gradient_accumulation_steps(
         config.train.batch_size, config.hardware.micro_batch_size, world_info
     )
 
@@ -54,14 +51,7 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
     sw.start("train()")
 
     # Load tokenizer
-    if config.data.fake and config.model_name == "debugmodel":
-        tokenizer = FakeTokenizer()
-    elif config.model_type == "llama2":
-        tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
-    elif config.model_type == "llama3":
-        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
-    else:
-        raise ValueError(f"Model type {config.model_type} not supported")
+    tokenizer = make_tokenizer(config)
 
     train_dataloader = get_dataloader(
         tokenizer=tokenizer,
@@ -73,9 +63,9 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
     train_dataloader_iterator = iter(train_dataloader)
 
     with sw.record_block("Get Model"):
-        model, model_config = get_model(
+        model, model_config = make_model(
             config,
-            vocab_size=len(tokenizer) if config.model_name != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
+            vocab_size=len(tokenizer),
         )
 
     perf_counter = PerfCounter(window_size=10, model=model, model_config=model_config, seq_len=config.data.seq_length)
@@ -130,7 +120,6 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
 
     with sw.record_block("Compile Model"):
         if config.hardware.torch_compile:
-            # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
             model = torch.compile(model) if not TYPE_CHECKING else model
 
     if config.ckpt.resume is not None:
@@ -163,7 +152,7 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
             loss_batch = 0
 
             with sw.record_block("Grad Acc Steps"):
-                for grad_acc_step in range(gradient_accumulation_steps):
+                for grad_acc_step in range(grad_accum_steps):
                     sw.start("grad_acc_step")
 
                     current_lr = compute_current_lr(training_progress.step, config.train.lr_scheduler)
@@ -182,7 +171,7 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
                         flatten_labels = labels.reshape(-1)  # b seq -> (b * seq)
 
                     with sw.record_block("Loss Calculation"):
-                        loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
+                        loss = torch.nn.functional.cross_entropy(flatten_logits, flatten_labels) / grad_accum_steps
 
                     with sw.record_block("Run backward()"):
                         loss.backward()

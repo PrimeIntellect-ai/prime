@@ -15,7 +15,7 @@ from transformers import PreTrainedTokenizer
 from zeroband.config import DataConfig
 from zeroband.utils.logger import get_logger
 
-TEST_VOCAB_SIZE = 1024
+DEBUG_VOCAB_SIZE = 1024
 
 
 class StatefulDataset(IterableDataset, Stateful, ABC):
@@ -283,7 +283,7 @@ def get_dataloader(
         data_config: DataConfig,
 ) -> StatefulDataLoader:
     if data_config.fake:
-        train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
+        train_dataset = FakeTokenizedDataset(data_config.seq_length, DEBUG_VOCAB_SIZE)
     else:
         train_dataset = load_all_datasets(
             data_config=data_config, split="train", tokenizer=tokenizer, rank=rank, world_size=world_size

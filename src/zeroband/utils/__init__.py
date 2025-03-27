@@ -3,6 +3,8 @@ import socket
 import time
 import torch
 from torch.distributed.tensor import DTensor
+
+from zeroband.data import DEBUG_VOCAB_SIZE
 from zeroband.utils.world_info import get_world_info
 
 
@@ -176,7 +178,7 @@ def get_random_available_port():
 
 class FakeTokenizer(object):
     def __init__(self):
-        self.vocab_size = 1000
+        self.vocab_size = DEBUG_VOCAB_SIZE
         self.bos_token_id = 0
         self.eos_token_id = 1
         self.pad_token_id = 2

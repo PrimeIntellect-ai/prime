@@ -1,7 +1,7 @@
 import os
 import time
 from logging import Logger
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Iterator
 
 import torch
 import torch.distributed as dist
@@ -23,13 +23,18 @@ from zeroband.utils import (
     optim_utils
 )
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
-from zeroband.utils.profiler import MemoryProfiler
+from zeroband.utils.memory_profiler import MemoryProfiler
 from zeroband.utils.tokenizer_utils import make_tokenizer
 from zeroband.utils.world_info import WorldInfo, get_world_info
 from zeroband.utils.logger import get_logger
-from zeroband.utils.stopwatch import Stopwatch
+from zeroband.utils.profiler import Profiler, ProfilerCollection
 
 from pydantic_config import parse_argv
+
+PRIME_SETUP_PROFILER_PRINT_TIMINGS: bool = os.getenv("PRIME_SETUP_PROFILER_PRINT_TIMINGS") == "1"
+PRIME_TRAIN_PROFILER_PRINT_TIMINGS: bool = os.getenv("PRIME_TRAIN_PROFILER_PRINT_TIMINGS") == "1"
+PRIME_TRAIN_PROFILER_EXPORT_VIDEO_INTERVAL: int = int(os.getenv("PRIME_TRAIN_PROFILER_EXPORT_VIDEO_INTERVAL", "-1"))
+
 
 def calc_gradient_accumulation_steps(batch_size: int, micro_bs: int, world_info: WorldInfo) -> int:
     assert batch_size % world_info.world_size == 0
@@ -42,13 +47,55 @@ def calc_gradient_accumulation_steps(batch_size: int, micro_bs: int, world_info:
     return batch_size // micro_bs
 
 
-def train(logger: Logger, config: Config, world_info: WorldInfo):
+def perform_grad_accum_steps(
+        config: Config,
+        profiler: Profiler,
+        training_progress: TrainingProgress,
+        train_dataloader_iterator: Iterator,
+        grad_accum_steps: int,
+        model: torch.nn.Module,
+        inner_optimizer: torch.optim.Optimizer,
+        device: torch.device) -> torch.Tensor:
+    """
+    Performs n gradient accumulated micro-steps and returns the total loss of each step
+    """
+    total_loss = torch.tensor([0.0], dtype=torch.float32, device=device)
+    for grad_acc_step in range(grad_accum_steps):
+        profiler.start_session("grad_acc_step")
+
+        current_lr = compute_current_lr(training_progress.step, config.train.lr_scheduler)
+        optim_utils.set_optimizer_lr(inner_optimizer, current_lr)
+
+        with profiler.session("train_dataloader_iterator.__next__"):
+            batch = next(train_dataloader_iterator)
+            input_ids = batch["input_ids"].to("cuda")
+            labels = batch["labels"].to("cuda")
+            seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
+            block_mask = create_block_mask_from_seqlens(seqlens)
+
+        with profiler.session("model.forward"):
+            logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
+
+        with profiler.session("torch::nn::functional::cross_entropy"):
+            flatten_logits = logits.view(-1, logits.size(-1))  # b seq vocab -> (b * seq) vocab
+            flatten_labels = labels.view(-1)  # b seq -> (b * seq)
+            loss = torch.nn.functional.cross_entropy(flatten_logits, flatten_labels) / grad_accum_steps
+
+        with profiler.session("loss.backward"):
+            loss.backward()
+
+        total_loss += loss.detach().clone()
+        profiler.end_session()
+
+    return total_loss
+
+
+def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.device):
     grad_accum_steps = calc_gradient_accumulation_steps(
         config.train.batch_size, config.hardware.micro_batch_size, world_info
     )
 
-    sw = Stopwatch(config)
-    sw.start("train()")
+    setup_profiler = Profiler()
 
     # Load tokenizer
     tokenizer = make_tokenizer(config)
@@ -62,7 +109,7 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
     )
     train_dataloader_iterator = iter(train_dataloader)
 
-    with sw.record_block("Get Model"):
+    with setup_profiler.session("::make_model"):
         model, model_config = make_model(
             config,
             vocab_size=len(tokenizer),
@@ -72,7 +119,7 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
 
     logger.info(f"Number of parameters: {perf_counter.num_params}")
 
-    with sw.record_block("Shard Model"):
+    with setup_profiler.session("::apply_ac_ckpt"):
         if config.hardware.act_ckpt:
             num = 1 if isinstance(config.hardware.act_ckpt, bool) else config.hardware.act_ckpt
             apply_ac_ckpt(model, num)
@@ -102,7 +149,7 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
         )
 
     # Setup optimizers
-    with sw.record_block("Optimizer Setup"):
+    with setup_profiler.session("optim_utils::make_optimizer"):
         inner_optimizer = optim_utils.make_optimizer(model, config.train.optimizer)
 
         # TODO MIKE use pccl instead of elastic_device_mesh
@@ -118,12 +165,12 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
             config={"config": config.model_dump(), "world_info": world_info.json()},
         )
 
-    with sw.record_block("Compile Model"):
+    with setup_profiler.session("torch::compile"):
         if config.hardware.torch_compile:
             model = torch.compile(model) if not TYPE_CHECKING else model
 
     if config.ckpt.resume is not None:
-        with sw.record_block("Resume Checkpoint"):
+        with setup_profiler.session("::load_checkpoint_fsdp_state"):
             # all is inplace
             load_checkpoint_fsdp_state(
                 model=model,
@@ -140,52 +187,36 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
 
     num_inner_steps = config.diloco.inner_steps if config.diloco is not None else 1
 
-    logger.debug("Finished setup in %f seconds", sw.elapsed())
+    if PRIME_SETUP_PROFILER_PRINT_TIMINGS:
+        setup_profiler.print_report()
 
+    train_profiler_collection = ProfilerCollection()
     while True:
+        train_profiler = Profiler()
+
         if num_inner_steps > 1:
             # if we don't use diloco we don't print the outer step logs
             logger.info(f"outer_step step: {training_progress.outer_step}")
 
         for _inner_step in range(num_inner_steps):
-            sw.start("inner_step")
+            train_profiler.start_session("inner_step")
 
-            loss_batch = 0
-
-            with sw.record_block("Grad Acc Steps"):
-                for grad_acc_step in range(grad_accum_steps):
-                    sw.start("grad_acc_step")
-
-                    current_lr = compute_current_lr(training_progress.step, config.train.lr_scheduler)
-                    optim_utils.set_optimizer_lr(inner_optimizer, current_lr)
-
-                    with sw.record_block("Load batch"):
-                        batch = next(train_dataloader_iterator)
-                        input_ids = batch["input_ids"].to("cuda")
-                        labels = batch["labels"].to("cuda")
-                        seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
-                        block_mask = create_block_mask_from_seqlens(seqlens)
-
-                    with sw.record_block("Run forward()"):
-                        logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
-                        flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b * seq) vocab
-                        flatten_labels = labels.reshape(-1)  # b seq -> (b * seq)
-
-                    with sw.record_block("Loss Calculation"):
-                        loss = torch.nn.functional.cross_entropy(flatten_logits, flatten_labels) / grad_accum_steps
-
-                    with sw.record_block("Run backward()"):
-                        loss.backward()
-
-                    loss_batch += loss.detach().clone()
+            with train_profiler.session("::perform_grad_accum_steps"):
+                loss_batch = perform_grad_accum_steps(config, train_profiler,
+                                                      training_progress,
+                                                      train_dataloader_iterator,
+                                                      grad_accum_steps,
+                                                      model,
+                                                      inner_optimizer,
+                                                      device)
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
 
-            with sw.record_block("Clip Grad"):
+            with train_profiler.session("torch::nn::utils::clip_grad_norm_"):
                 grad_norm: DTensor = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # type: ignore
                 grad_norm = grad_norm.full_tensor()  # type: ignore
 
-            with sw.record_block("Optimizer Step"):
+            with train_profiler.session("inner_optimizer.step"):
                 inner_optimizer.step()
 
             inner_optimizer.zero_grad()
@@ -243,6 +274,20 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
 
             if memory_profiler is not None:
                 memory_profiler.step()
+            train_profiler.end_session()
+
+        # post inner steps
+        if PRIME_TRAIN_PROFILER_PRINT_TIMINGS:
+            train_profiler.print_report()
+
+        export_interval = PRIME_TRAIN_PROFILER_EXPORT_VIDEO_INTERVAL
+        if export_interval != -1:
+            train_profiler_collection.add_profiler(train_profiler, f'Step {training_progress.outer_step}')
+
+            # this is slightly not nice, but inner steps seems like the better unit to use here
+            # despite the fact that we are rendering full outer steps per frame which may or may not be = 1 inner step
+            if training_progress.step > 0 and training_progress.step % export_interval == 0:
+                train_profiler_collection.render_as_video(f'profiler_video_{training_progress.step}.mp4', fps=10)
 
         if config.diloco is not None:
             ...
@@ -293,8 +338,9 @@ def main():
 
     # torch.set_default_device("cuda")
     torch.cuda.set_device(world_info.local_rank)
+    device = torch.cuda.current_device()
 
-    train(logger, config, world_info)
+    train(logger, config, world_info, device)
 
 
 if __name__ == "__main__":

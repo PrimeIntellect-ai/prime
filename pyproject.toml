@@ -18,6 +18,7 @@ dependencies = [
     "pyarrow",
     "psutil",
     "wandb",
+    "imageio[ffmpeg]"
 ]
 
 [project.optional-dependencies]

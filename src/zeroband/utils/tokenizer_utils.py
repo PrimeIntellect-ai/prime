@@ -1,4 +1,3 @@
-from tokenizers import Tokenizer
 from transformers import AutoTokenizer
 
 from zeroband.config import Config

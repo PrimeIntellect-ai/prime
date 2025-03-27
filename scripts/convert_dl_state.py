@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 # Example Usage:
-# python scripts/convert_dl_state.py @configs/10B/H100.toml --input_path /workspace/step_49200/diloco_0/data/_3.pt --output_path ./meow.pt --rank 3 --world_size 8
+# python scripts/convert_dl_state.py @configs/10B/H100_intellect1.toml --input_path /workspace/step_49200/diloco_0/data/_3.pt --output_path ./meow.pt --rank 3 --world_size 8
 
 import torch
 from zeroband.config import resolve_env_vars
@@ -72,18 +72,18 @@ class ExportConfig(Config):
 def main(config: ExportConfig):
     old_state_dict = torch.load(config.input_path)["data_loader"]
 
-    if config.type_model == "llama2":
+    if config.model_type == "llama2":
         tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
-    elif config.type_model == "llama3":
+    elif config.model_type == "llama3":
         tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
     else:
-        raise ValueError(f"Model type {config.type_model} not supported")
+        raise ValueError(f"Model type {config.model_type} not supported")
 
     dl = get_dataloader(
         tokenizer=tokenizer,
         world_size=config.world_size,
         rank=config.rank,
-        batch_size=config.train.micro_bs,
+        batch_size=config.hardware.micro_batch_size,
         data_config=config.data,
     )
 
@@ -107,18 +107,18 @@ def main(config: ExportConfig):
 
 
 def test_dl(config: ExportConfig):
-    if config.type_model == "llama2":
+    if config.model_type == "llama2":
         tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
-    elif config.type_model == "llama3":
+    elif config.model_type == "llama3":
         tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
     else:
-        raise ValueError(f"Model type {config.type_model} not supported")
+        raise ValueError(f"Model type {config.model_type} not supported")
 
     dl = get_dataloader(
         tokenizer=tokenizer,
         world_size=config.world_size,
         rank=config.rank,
-        batch_size=config.train.micro_bs,
+        batch_size=config.hardware.micro_batch_size,
         data_config=config.data,
     )
     dl.load_state_dict(torch.load(config.output_path, weights_only=True)["data_loader"])

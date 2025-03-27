@@ -1,18 +1,20 @@
-name_model = "debugmodel"
+model_name = "debugmodel"
+model_type = "llama2"
+
 wandb = false
-type_model = "llama2"
+
+[hardware]
+micro_batch_size = 8
 
 [train]
-micro_bs = 8
-
-[optim]
 batch_size = 16
-warmup_steps = 10
-total_steps = 4
+
+[train.lr_scheduler]
+num_warmup_steps = 10
+num_decay_steps = 10
 
 [data]
 fake = true
 
 [diloco]
 inner_steps = 5
-

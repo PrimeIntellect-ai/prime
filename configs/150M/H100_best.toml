@@ -1,18 +1,22 @@
-name_model = "150M"
 project = "debug_150m_zero_band"
-type_model = "llama2"
+model_name = "150M"
+model_type = "llama2"
 
-[train]
-micro_bs = 64 # change this base on the gpu
+[hardware]
+micro_batch_size = 64
 reshard_after_forward = false
 
-[optim]
+[train]
 batch_size = 512
-warmup_steps = 278
-total_steps = 8192
 
-[optim.optim]
+[train.lr_scheduler]
+decay_type = 'cosine'
+num_warmup_steps = 278
+num_decay_steps = 7914 # 278 + 7914 = 8192
 lr = 0.003551730141097694
+
+[train.optimizer]
+type = 'adamw'
 betas1 = 0.9454835470717078
 betas2 = 0.9190488086654895
 weight_decay = 0.24530252977858977

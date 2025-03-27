@@ -4,7 +4,6 @@ import torch
 from zeroband.models.llama import Transformer, llama2_configs
 from zeroband.models.llama.model import Attention, ModelArgs, create_block_mask_from_seqlens
 
-
 VOCAB_SIZE = 1024
 
 ERROR_ATOL = {
@@ -163,8 +162,6 @@ def test_sequence_packing_vs_normal(llama_config: ModelArgs):
     torch.testing.assert_close(output_2, output_packed_2, atol=atol, rtol=rtol)
 
 
-# see here for failint test https://github.com/pytorch/pytorch/issues/146260#issuecomment-2644460479
-# should be fix with torch 2.6.1 or higher
 @pytest.mark.skip(reason="test failing with torch 2.6.0")
 def test_sequence_packing_vs_normal_random(llama_config: ModelArgs):
     """

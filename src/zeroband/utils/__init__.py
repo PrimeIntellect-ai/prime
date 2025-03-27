@@ -4,7 +4,6 @@ import time
 import torch
 from torch.distributed.tensor import DTensor
 
-from zeroband.data import DEBUG_VOCAB_SIZE
 from zeroband.utils.world_info import get_world_info
 
 

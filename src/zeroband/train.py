@@ -4,9 +4,11 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+
 from torch.distributed import destroy_process_group
 from torch.distributed.tensor import DTensor
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
+
 import wandb
 
 from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state

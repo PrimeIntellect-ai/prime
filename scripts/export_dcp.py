@@ -6,7 +6,7 @@
 import torch
 from typing import Literal
 import torch.distributed.checkpoint as dcp
-from zeroband.models.llama import get_model
+from zeroband.models.llama import make_model
 from zeroband.config import resolve_env_vars
 from zeroband.checkpoint import ModelWrapper
 from zeroband.utils import get_module_signature
@@ -134,12 +134,9 @@ def main(config: ExportConfig):
         raise ValueError(f"Model type {config.model_type} not supported")
 
     logger.info("Getting model")
-    model, model_config = get_model(
-        config.model_name,
-        config.model_type,
-        vocab_size=len(tokenizer),
-        seq_length=config.data.seq_length,
-        attn_fn=config.hardware.attn_fn,
+    model, model_config = make_model(
+        config,
+        vocab_size=len(tokenizer)
     )
 
     # Convert ZeroBand config to HuggingFace config

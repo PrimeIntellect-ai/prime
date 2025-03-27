@@ -10,7 +10,7 @@
 from zeroband.config import Config
 from zeroband.models.llama.model import ModelArgs, Transformer
 
-__all__ = ["Transformer"]
+__all__ = ["Transformer", "make_model"]
 
 llama2_configs = {
     "debugmodel": ModelArgs(dim=256, n_layers=2, n_heads=8),
@@ -82,7 +82,7 @@ llama3_configs = {
 }
 
 
-def get_model(
+def make_model(
     config: Config,
     vocab_size: int,
 ) -> tuple[Transformer, ModelArgs]:

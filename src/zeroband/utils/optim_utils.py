@@ -2,7 +2,7 @@ import torch
 from zeroband.config import OptimizerConfig
 
 
-def make_optimizer(model: torch.nn.Module, config: OptimizerConfig):
+def make_optimizer(model: torch.nn.Module, config: OptimizerConfig) -> torch.optim.Optimizer:
     """
     Creates an optimizer instance for the parameters of the supplied model according to the given optimizer configuration
     :param model the model to optimize

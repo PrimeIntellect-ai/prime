@@ -291,7 +291,7 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
 
 
 def main():
-    # Allow eager fallback during production so that that the training runs dont die
+    # Allow eager fallback during production so that the training runs don't die
     # However, in development, we want to know that we broke torch compile
     torch._dynamo.config.suppress_errors = "ZERO_BAND_DEV" not in os.environ  # type: ignore
     torch.set_float32_matmul_precision("high")

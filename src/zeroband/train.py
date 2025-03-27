@@ -4,8 +4,9 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+from torch.distributed import destroy_process_group
 from torch.distributed.tensor import DTensor
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
 import wandb
 
 from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
@@ -43,27 +44,27 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, world_info: 
 
 def train(config: Config):
     gradient_accumulation_steps = get_gradient_accumulation_steps(
-        config.optim.batch_size, config.train.micro_bs, world_info
+        config.train.batch_size, config.hardware.micro_batch_size, world_info
     )
 
     sw = Stopwatch(config)
     sw.start("train()")
 
     # Load tokenizer
-    if config.data.fake and config.name_model == "debugmodel":
+    if config.data.fake and config.model_name == "debugmodel":
         tokenizer = FakeTokenizer()
-    elif config.type_model == "llama2":
+    elif config.model_type == "llama2":
         tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
-    elif config.type_model == "llama3":
+    elif config.model_type == "llama3":
         tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
     else:
-        raise ValueError(f"Model type {config.type_model} not supported")
+        raise ValueError(f"Model type {config.model_type} not supported")
 
     train_dataloader = get_dataloader(
         tokenizer=tokenizer,
         world_size=world_info.world_size,
         rank=world_info.rank,
-        batch_size=config.train.micro_bs,
+        batch_size=config.hardware.micro_batch_size,
         data_config=config.data,
     )
     train_dataloader_iterator = iter(train_dataloader)
@@ -71,7 +72,7 @@ def train(config: Config):
     with sw.record_block("Get Model"):
         model, model_config = get_model(
             config,
-            vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
+            vocab_size=len(tokenizer) if config.model_name != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
         )
 
     perf_counter = PerfCounter(window_size=10, model=model, model_config=model_config, seq_len=config.data.seq_length)
@@ -79,18 +80,18 @@ def train(config: Config):
     logger.info(f"Number of parameters: {perf_counter.num_params}")
 
     with sw.record_block("Shard Model"):
-        if config.train.ac_ckpt:
-            num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
+        if config.hardware.act_ckpt:
+            num = 1 if isinstance(config.hardware.act_ckpt, bool) else config.hardware.act_ckpt
             apply_ac_ckpt(model, num)
 
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
+            param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.hardware.reduce_fp32 else None
         )
 
-        offload_policy = CPUOffloadPolicy(pin_memory=True) if config.train.fsdp_cpu_offload else None
+        offload_policy = CPUOffloadPolicy(pin_memory=True) if config.hardware.fsdp_cpu_offload else None
 
         for layer_id, transformer_block in model.layers.items():
-            if config.train.reshard_after_forward:
+            if config.hardware.reshard_after_forward:
                 reshard_after_forward = int(layer_id) < len(model.layers) - 1
             else:
                 reshard_after_forward = False
@@ -103,18 +104,13 @@ def train(config: Config):
         fully_shard(
             model,
             mp_policy=mp_policy,
-            reshard_after_forward=config.train.reshard_after_forward,
+            reshard_after_forward=config.hardware.reshard_after_forward,
             offload_policy=offload_policy,
         )
 
     # Setup optimizers
     with sw.record_block("Optimizer Setup"):
-        inner_optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=config.optim.optim.lr,
-            weight_decay=config.optim.optim.weight_decay,
-            betas=(config.optim.optim.betas1, config.optim.optim.betas2),
-        )
+        inner_optimizer = optim_utils.make_optimizer(model, config.train.optimizer)
 
         # TODO MIKE use pccl instead of elastic_device_mesh
 
@@ -130,7 +126,7 @@ def train(config: Config):
         )
 
     with sw.record_block("Compile Model"):
-        if config.train.torch_compile:
+        if config.hardware.torch_compile:
             # we need to compile AFTER creating the CKPT manager, DON'T ASK ME WHY
             model = torch.compile(model) if not TYPE_CHECKING else model
 
@@ -145,8 +141,8 @@ def train(config: Config):
                 path_root=config.ckpt.path,
             )
 
-    if config.train.memory_profiler is not None:
-        memory_profiler = MemoryProfiler(config.train.memory_profiler.freq, config.train.memory_profiler.snapshot_dir)
+    if config.hardware.memory_profiler is not None:
+        memory_profiler = MemoryProfiler(config.hardware.memory_profiler.freq, config.hardware.memory_profiler.snapshot_dir)
 
     num_inner_steps = config.diloco.inner_steps if config.diloco is not None else 1
 
@@ -166,7 +162,7 @@ def train(config: Config):
                 for grad_acc_step in range(gradient_accumulation_steps):
                     sw.start("grad_acc_step")
 
-                    current_lr = compute_current_lr(training_progress.step, config.optim.learning_rate_scheduler)
+                    current_lr = compute_current_lr(training_progress.step, config.train.lr_scheduler)
                     optim_utils.set_optimizer_lr(inner_optimizer, current_lr)
 
                     with sw.record_block("Load batch"):
@@ -205,7 +201,7 @@ def train(config: Config):
             inner_lr = [group["lr"] for group in inner_optimizer.param_groups][0]
 
             # syncing loss across all data parallel rank within a nodes
-            new_tokens = config.data.seq_length * config.optim.batch_size
+            new_tokens = config.data.seq_length * config.train.batch_size
             perf_counter.count_tokens(new_tokens)
 
             if config.diloco is None:
@@ -234,9 +230,10 @@ def train(config: Config):
             tokens_per_second = perf_counter.get_tokens_per_second()
 
             if tokens_per_second is not None:
+                metrics["inner_lr"] = inner_lr
                 metrics["tokens_per_second"] = tokens_per_second
                 metrics["mfu"] = perf_counter.get_mfu()
-                log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
+                log += f", inner_lr: {inner_lr}, tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
 
             if config.diloco is not None:
                 # TODO MIKE use pccl instead of elastic_device_mesh
@@ -250,7 +247,7 @@ def train(config: Config):
 
             logger.info(log)
 
-            if config.train.memory_profiler is not None:
+            if config.hardware.memory_profiler is not None:
                 memory_profiler.step()
 
         if config.diloco is not None:
@@ -273,7 +270,7 @@ def train(config: Config):
                 path_root=config.ckpt.path,
             )
 
-        if training_progress.step >= config.optim.total_steps:
+        if training_progress.step >= config.train.lr_scheduler.num_total_steps:
             # we only allow to break outisde of the inner loop.
             # This avoid ending the training in the middle of a the inner loop
             # Since ckpt strategy and all reduce is done at the outer loop level.
@@ -282,10 +279,12 @@ def train(config: Config):
         if world_info.rank == 0:
             wandb.finish()
 
-    if config.train.memory_profiler is not None:
+    if config.hardware.memory_profiler is not None:
         logger.debug(f"Max memory used: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
 
     logger.info("Training finished, exiting ...")
+    destroy_process_group()
+
 
 
 if __name__ == "__main__":

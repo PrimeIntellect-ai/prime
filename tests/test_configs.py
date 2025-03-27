@@ -1,6 +1,7 @@
 """
-Tests all of the config file. usefull to catch mismatch key after a renaming of a arg name
-Need to be run from the root folder
+Tests all the config files in the ./configs folder.
+Useful to catch mismatch key after renaming config arguments.
+Working directory must be the project root folder.
 """
 
 import os
@@ -19,7 +20,6 @@ def get_all_toml_files(directory):
 
 
 config_file_paths = get_all_toml_files("configs")
-
 
 @pytest.mark.parametrize("config_file_path", config_file_paths)
 def test_load_config(config_file_path):

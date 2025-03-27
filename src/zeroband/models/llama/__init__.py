@@ -88,15 +88,15 @@ def get_model(
 ) -> tuple[Transformer, ModelArgs]:
     """get the transformer model"""
 
-    if config.type_model == "llama2":
-        model_config = llama2_configs[config.name_model]
-    elif config.type_model == "llama3":
-        model_config = llama3_configs[config.name_model]
+    if config.model_type == "llama2":
+        model_config = llama2_configs[config.model_name]
+    elif config.model_type == "llama3":
+        model_config = llama3_configs[config.model_name]
     else:
-        raise ValueError(f"Model type {config.type_model} not supported")
+        raise ValueError(f"Model type {config.model_type} not supported")
 
     model_config.vocab_size = vocab_size
     model_config.max_seq_len = config.data.seq_length
-    model_config.attn_fn = config.train.attn_fn
+    model_config.attn_fn = config.hardware.attn_fn
 
     return Transformer(model_config), model_config

@@ -1,17 +1,15 @@
-name_model = "7B"
 project = "debug_7B_zero_band"
-type_model = "llama2"
+
+model_name = "7B"
+model_type = "llama2"
+
+[hardware]
+micro_batch_size = 64
+reshard_after_forward = false
 
 [train]
-micro_bs = 1
-
-[optim]
-batch_size = 1024 #2M tokens bs
-warmup_steps = 1000
-total_steps = 88_000
-
-[optim.optim]
-lr = 3e-4
+batch_size = 512
 
 [data]
-seq_length = 2048
+seq_length = 1024
+dataset_name_or_paths = "datasets/fineweb-edu"

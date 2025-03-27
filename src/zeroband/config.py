@@ -4,9 +4,6 @@ from typing import Literal, TypeAlias
 from pydantic import model_validator
 from pydantic_config import BaseConfig
 
-AttnFnType: TypeAlias = Literal["flex", "math"]
-
-
 class Compression(Enum):
     NO = "no"
     UINT8 = "uint8"
@@ -30,7 +27,6 @@ class DataConfig(BaseConfig):
 
 class AdamConfig(BaseConfig):
     type: Literal["adam"] = "adam"
-    weight_decay: float = 0.1
     betas1: float = 0.9
     betas2: float = 0.95
 
@@ -43,12 +39,12 @@ class AdamWConfig(BaseConfig):
 
 
 class LearningRateSchedulerConfig(BaseConfig):
-    initial_lr: float = 3e-4
+    decay_type: Literal["linear", "cosine", "sqrt"] = "linear"
+    lr: float = 6e-4
     end_lr: float = 0.0
-    num_decay_steps: int = 0
-    num_warmup_steps: int = 1000
+    num_decay_steps: int = 60000
+    num_warmup_steps: int = 2000
     num_stable_steps: int = 0
-    scheduler_type: Literal["linear", "cosine"] = "linear"
 
     @property
     def num_total_steps(self):
@@ -62,14 +58,13 @@ class LearningRateSchedulerConfig(BaseConfig):
 # New optimizer configurations must be added here to be picked up by the config system.
 # Each configuration will be tried until a successful match is found.
 # The 'type' field determines which class to use because the string literal is distinct for each class.
-OptimizersConfig: TypeAlias = AdamConfig | AdamWConfig
+OptimizerConfig: TypeAlias = AdamConfig | AdamWConfig
 
 
-class OptimConfig(BaseConfig):
-    optim: OptimizersConfig = AdamConfig()
+class TrainConfig(BaseConfig):
+    optimizer: OptimizerConfig = AdamConfig()
     batch_size: int = 512
-    learning_rate_scheduler: LearningRateSchedulerConfig = LearningRateSchedulerConfig()
-
+    lr_scheduler: LearningRateSchedulerConfig = LearningRateSchedulerConfig()
 
 class DilocoConfig(BaseConfig):
     outer_lr: float = 0.7
@@ -80,11 +75,12 @@ class MemoryProfilerConfig(BaseConfig):
     freq: int = 10
     snapshot_dir: str
 
+AttnFnType: TypeAlias = Literal["flex", "math"]
 
-class TrainConfig(BaseConfig):
-    micro_bs: int = 1
+class HardwareConfig(BaseConfig):
+    micro_batch_size: int = 1
 
-    ac_ckpt: bool | int = False
+    act_ckpt: bool | int = False
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
 
     reduce_fp32: bool = False  # should be True if SXM. Keep to false as default for backward compatibility
@@ -120,14 +116,14 @@ class CkptConfig(BaseConfig):
 
 
 class Config(BaseConfig):
-    # main config
-    name_model: Literal["debugmodel", "70M", "150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
-    type_model: Literal["llama2", "llama3"] = "llama3"
-
     # Project/Run
     project: str = "zeroband"
     run_id: str | None = None
     run_name: str | None = None
+
+    # Model config
+    model_name: Literal["debugmodel", "70M", "150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
+    model_type: Literal["llama2", "llama3"] = "llama3"
 
     # Logger
     metric_logger_type: Literal["wandb", "dummy"] = "wandb"
@@ -138,8 +134,8 @@ class Config(BaseConfig):
     # sub config
     diloco: DilocoConfig | None = None
     data: DataConfig = DataConfig()
-    optim: OptimConfig = OptimConfig()
-    train: TrainConfig
+    train: TrainConfig = TrainConfig()
+    hardware: HardwareConfig
     monitor: MonitorConfig | None = None
 
     ckpt: CkptConfig = CkptConfig()

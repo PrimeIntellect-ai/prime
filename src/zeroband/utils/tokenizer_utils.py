@@ -1,7 +1,18 @@
 from transformers import AutoTokenizer
 
 from zeroband.config import Config
-from zeroband.utils import FakeTokenizer
+from zeroband.data import DEBUG_VOCAB_SIZE
+
+
+class FakeTokenizer(object):
+    def __init__(self):
+        self.vocab_size = DEBUG_VOCAB_SIZE
+        self.bos_token_id = 0
+        self.eos_token_id = 1
+        self.pad_token_id = 2
+
+    def __len__(self):
+        return self.vocab_size
 
 
 def make_tokenizer(config: Config):

@@ -174,14 +174,3 @@ def get_random_available_port_list(num_port):
 
 def get_random_available_port():
     return get_random_available_port_list(1)[0]
-
-
-class FakeTokenizer(object):
-    def __init__(self):
-        self.vocab_size = DEBUG_VOCAB_SIZE
-        self.bos_token_id = 0
-        self.eos_token_id = 1
-        self.pad_token_id = 2
-
-    def __len__(self):
-        return self.vocab_size

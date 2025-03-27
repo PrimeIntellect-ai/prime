@@ -1,7 +1,7 @@
 import os
 import time
 from logging import Logger
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.distributed as dist
@@ -133,6 +133,7 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
                 path_root=config.ckpt.path,
             )
 
+    memory_profiler: Optional[MemoryProfiler] = None
     if config.hardware.memory_profiler is not None:
         memory_profiler = MemoryProfiler(config.hardware.memory_profiler.freq,
                                          config.hardware.memory_profiler.snapshot_dir)
@@ -240,7 +241,7 @@ def train(logger: Logger, config: Config, world_info: WorldInfo):
 
             logger.info(log)
 
-            if config.hardware.memory_profiler is not None:
+            if memory_profiler is not None:
                 memory_profiler.step()
 
         if config.diloco is not None:

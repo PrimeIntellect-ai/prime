@@ -10,7 +10,7 @@ from zeroband.utils.world_info import get_world_info
 
 
 # hardcoded BF16 type peak flops for NVIDIA A100 and H100 GPU
-def get_peak_flops(device_name: str) -> int:
+def get_peak_flops(device_name: str) -> float:
     if "A100" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/a100/
         return 312e12

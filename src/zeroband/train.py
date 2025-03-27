@@ -1,5 +1,6 @@
 import os
 import time
+from logging import Logger
 from typing import TYPE_CHECKING
 
 import torch
@@ -44,7 +45,7 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, world_info: 
     return batch_size // micro_bs
 
 
-def train(config: Config):
+def train(logger: Logger, config: Config, world_info: WorldInfo):
     gradient_accumulation_steps = get_gradient_accumulation_steps(
         config.train.batch_size, config.hardware.micro_batch_size, world_info
     )
@@ -144,7 +145,8 @@ def train(config: Config):
             )
 
     if config.hardware.memory_profiler is not None:
-        memory_profiler = MemoryProfiler(config.hardware.memory_profiler.freq, config.hardware.memory_profiler.snapshot_dir)
+        memory_profiler = MemoryProfiler(config.hardware.memory_profiler.freq,
+                                         config.hardware.memory_profiler.snapshot_dir)
 
     num_inner_steps = config.diloco.inner_steps if config.diloco is not None else 1
 
@@ -288,8 +290,7 @@ def train(config: Config):
     destroy_process_group()
 
 
-
-if __name__ == "__main__":
+def main():
     # Allow eager fallback during production so that that the training runs dont die
     # However, in development, we want to know that we broke torch compile
     torch._dynamo.config.suppress_errors = "ZERO_BAND_DEV" not in os.environ  # type: ignore
@@ -303,4 +304,8 @@ if __name__ == "__main__":
     # torch.set_default_device("cuda")
     torch.cuda.set_device(world_info.local_rank)
 
-    train(config)
+    train(logger, config, world_info)
+
+
+if __name__ == "__main__":
+    main()

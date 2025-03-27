@@ -1,25 +1,27 @@
-from dataclasses import dataclass, asdict
-import random
-from typing import Any, Generator, Optional, List, Dict, TypedDict
 import functools
-
-from zeroband.utils.logger import get_logger
-from zeroband.config import DataConfig
+import random
+from abc import ABC
+from dataclasses import dataclass, asdict
+from typing import Any, Generator, Optional, List, Dict, TypedDict
 
 import torch
-from torch.utils.data import IterableDataset, Dataset
-from torchdata.stateful_dataloader import StatefulDataLoader
-from torch.distributed.checkpoint.stateful import Stateful
-
 from datasets import load_dataset_builder, BuilderConfig
 from pyarrow import parquet as pq
+from torch.distributed.checkpoint.stateful import Stateful
+from torch.utils.data import IterableDataset
+from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import PreTrainedTokenizer
 
+from zeroband.config import DataConfig
+from zeroband.utils.logger import get_logger
 
 TEST_VOCAB_SIZE = 1024
 
 
-class FakeTokenizedDataset(IterableDataset):
+class StatefulDataset(IterableDataset, Stateful, ABC):
+    ...
+
+class FakeTokenizedDataset(StatefulDataset):
     """This is a dummy dataset that generates random sequences of length seq_len and vocab_size"""
 
     def __init__(self, seq_len: int, vocab_size: int):
@@ -58,13 +60,13 @@ class SequencePackingDataSetState:
     seqlens: list[int]
 
 
-class SequencePackingDataSet(IterableDataset, Stateful):
+class SequencePackingDataSet(StatefulDataset):
     """
     This class wrap a dataset and wrap it into an iterable that return sequence of max_seq_length
     packed
     """
 
-    def __init__(self, dataset: Dataset, max_seq_length: int, eos_token: int):
+    def __init__(self, dataset: StatefulDataset, max_seq_length: int, eos_token: int):
         self.dataset = dataset
         self.max_seq_length = max_seq_length
         self.eos_token = eos_token
@@ -139,7 +141,7 @@ class PQDatasetState:
     init_row_index: int
 
 
-class ParquetDataset(IterableDataset, Stateful):
+class ParquetDataset(StatefulDataset):
     """
     this class is a wrapper around a parquet dataset compatible with datasets and statefull compatible. The dataset is infinite and will restart from the last state if the iterator is exhausted.
     TODO:
@@ -168,7 +170,7 @@ class ParquetDataset(IterableDataset, Stateful):
                 )
                 return
 
-            files = self.arg_files[worker_info.id :: worker_info.num_workers]
+            files = self.arg_files[worker_info.id:: worker_info.num_workers]
         else:
             files = self.arg_files
 
@@ -214,7 +216,7 @@ class InterleaveDatasetState:
     seed: int
 
 
-class InterleaveDataset(IterableDataset, Stateful):
+class InterleaveDataset(StatefulDataset):
     """This class take a list of datasets and interleave them. It is stateful and can be used with pytorch dataloader.
 
     It draw a sample from each dataset with a probability given by the probabilities list.
@@ -274,11 +276,11 @@ class InterleaveDataset(IterableDataset, Stateful):
 
 
 def get_dataloader(
-    tokenizer,
-    world_size: int,
-    rank: int,
-    batch_size: int,
-    data_config: DataConfig,
+        tokenizer,
+        world_size: int,
+        rank: int,
+        batch_size: int,
+        data_config: DataConfig,
 ) -> StatefulDataLoader:
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
@@ -314,14 +316,14 @@ def _get_datafiles(path: str, name: Optional[str] = None, split: str = "train") 
 
 
 def _load_datasets(
-    dataset_names: str,
-    split: str,
-    tokenizer: PreTrainedTokenizer,
-    data_rank: Optional[int] = None,
-    data_world_size: Optional[int] = None,
-    streaming: bool = True,
-    probabilities: Optional[List[float]] = None,
-    reverse_data_files: bool = False,
+        dataset_names: str,
+        split: str,
+        tokenizer: PreTrainedTokenizer,
+        data_rank: Optional[int] = None,
+        data_world_size: Optional[int] = None,
+        streaming: bool = True,
+        probabilities: Optional[List[float]] = None,
+        reverse_data_files: bool = False,
 ) -> InterleaveDataset:
     get_logger().debug(dataset_names)
     ds_args = []
@@ -368,16 +370,16 @@ def _get_probabilities(data_config: DataConfig) -> Optional[List[float]]:
 
 
 def load_all_datasets(
-    data_config: DataConfig,
-    split: str,
-    tokenizer: PreTrainedTokenizer,
-    rank: int,
-    world_size: int,
+        data_config: DataConfig,
+        split: str,
+        tokenizer: PreTrainedTokenizer,
+        rank: int,
+        world_size: int,
 ) -> InterleaveDataset:
     """Load all datasets and interleave them"""
 
     if data_config.split_by_data_rank and (
-        data_config.data_rank is not None and data_config.data_world_size is not None
+            data_config.data_rank is not None and data_config.data_world_size is not None
     ):
         split_rank = data_config.data_rank * world_size + rank
         split_world_size = data_config.data_world_size * world_size

@@ -17,8 +17,8 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
-from torch.distributed._tensor import Partial, Replicate, Shard
-from torch.distributed._tensor.experimental import local_map
+from torch.distributed.tensor import Partial, Replicate, Shard
+from torch.distributed.tensor.experimental import local_map
 
 
 def build_norm(norm_type: str, dim: int, eps: float = 1e-6):
@@ -55,9 +55,9 @@ class FusedRMSNorm(nn.Module):
     """Fused RMS Norm, wraps a fused Triton Kernel"""
 
     def __init__(
-        self,
-        dim: int,
-        eps: float = 1e-6,
+            self,
+            dim: int,
+            eps: float = 1e-6,
     ):
         super().__init__()
         self.eps = eps
@@ -126,16 +126,16 @@ class RMSNorm(nn.Module):
 )
 @triton.jit
 def _rms_norm_fwd_kernel(
-    X,
-    stride_x,
-    Y,
-    stride_y,
-    W,
-    Rstd,
-    eps,
-    M,  # num rows
-    N,  # num cols
-    block_N: tl.constexpr,
+        X,
+        stride_x,
+        Y,
+        stride_y,
+        W,
+        Rstd,
+        eps,
+        M,  # num rows
+        N,  # num cols
+        block_N: tl.constexpr,
 ):
     row = tl.program_id(0)
     cols = tl.arange(0, block_N)
@@ -174,20 +174,20 @@ def _rms_norm_fwd_kernel(
 )
 @triton.jit
 def _rms_norm_bwd_kernel_sm(
-    X,
-    stride_x,
-    W,
-    DY,
-    stride_dy,
-    DX,
-    stride_dx,
-    Rstd,
-    DW,
-    eps,
-    M,  # num rows
-    N,  # num cols
-    rows_per_program,
-    block_N: tl.constexpr,
+        X,
+        stride_x,
+        W,
+        DY,
+        stride_dy,
+        DX,
+        stride_dx,
+        Rstd,
+        DW,
+        eps,
+        M,  # num rows
+        N,  # num cols
+        rows_per_program,
+        block_N: tl.constexpr,
 ):
     row_block_id = tl.program_id(0)
     row_start = row_block_id * rows_per_program
@@ -222,12 +222,12 @@ def _rms_norm_bwd_kernel_sm(
 
 
 class TritonFusedRMSNorm(torch.autograd.Function):
+    @staticmethod
     @partial(
         local_map,
         out_placements=[Shard(1)],
         in_placements=(None, [Shard(1)], [Replicate()], None),
     )
-    @staticmethod
     def forward(ctx, x, weight, eps):
         x_shape_start = x.shape
 
@@ -269,12 +269,12 @@ class TritonFusedRMSNorm(torch.autograd.Function):
         y = y.reshape(x_shape_start)
         return y
 
+    @staticmethod
     @partial(
         local_map,
         out_placements=([Shard(1)], [Partial()], None),
         in_placements=(None, [Shard(1)]),
     )
-    @staticmethod
     def backward(ctx, dy):
         x, weight, rstd = ctx.saved_tensors
         eps = ctx.eps
@@ -322,9 +322,9 @@ class TritonFusedRMSNorm(torch.autograd.Function):
 
 # expose fusedRMSNorm as a function
 def fused_rms_norm_fn(
-    x,
-    weight,
-    eps=1e-6,
+        x,
+        weight,
+        eps=1e-6,
 ):
     return TritonFusedRMSNorm.apply(
         x,

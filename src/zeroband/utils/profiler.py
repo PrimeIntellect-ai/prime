@@ -136,7 +136,6 @@ class Profiler:
             label_text = f"{t:.2f}s"
             bbox = draw.textbbox((0, 0), label_text, font=font)
             w = bbox[2] - bbox[0]
-            h = bbox[3] - bbox[1]
             draw.text((x_tick - w // 2, axis_y + tick_size + 2), label_text, fill=(0, 0, 0), font=font)
 
         # Helper to truncate text if bar is too short

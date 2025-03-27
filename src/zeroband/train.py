@@ -14,7 +14,7 @@ import wandb
 
 from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
 from zeroband.config import Config
-from zeroband.data import DEBUG_VOCAB_SIZE, get_dataloader
+from zeroband.data import get_dataloader
 from zeroband.lr_scheduler import compute_current_lr
 from zeroband.models.llama import make_model
 from zeroband.models.llama.model import create_block_mask_from_seqlens

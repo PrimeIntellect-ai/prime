@@ -11,7 +11,6 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
 
 import wandb
-from wandb.cli.cli import start
 
 from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
 from zeroband.config import Config

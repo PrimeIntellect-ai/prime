@@ -217,7 +217,6 @@ class FlopCounter:
         assert S_k == S_v, "source sequence length must match for k & v"  # L may differ from S_k & S_v
 
         N = N_q
-        H = H_k
         S = S_k
         E = E_q
 

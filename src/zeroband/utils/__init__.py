@@ -3,8 +3,6 @@ import socket
 import torch
 from torch.distributed.tensor import DTensor
 
-from zeroband.utils.world_info import get_world_info
-
 TENSOR_SIG_SAMPLE_SIZE = 100
 
 

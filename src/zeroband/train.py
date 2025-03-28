@@ -8,7 +8,6 @@ import torch.distributed as dist
 
 from torch.distributed import destroy_process_group
 from torch.distributed.tensor import DTensor
-from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
 
 import wandb
 

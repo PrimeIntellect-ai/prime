@@ -86,7 +86,10 @@ def make_model(
     config: Config,
     vocab_size: int,
 ) -> tuple[Transformer, ModelArgs]:
-    """get the transformer model"""
+    """
+    Constructs a model instance according to the supplied configuration and target vocab size
+    :return the created model instance
+    """
 
     if config.model_type == "llama2":
         model_config = llama2_configs[config.model_name]

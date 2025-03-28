@@ -22,7 +22,7 @@ from zeroband.checkpoint import CkptManager
 from zeroband.config import resolve_env_vars
 from zeroband.train import Config
 
-from zeroband.data import get_dataloader
+from zeroband.data import make_dataloader
 
 from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logger import get_logger
@@ -45,7 +45,7 @@ def skip_data(config: Config):
 
     logger.debug("tokenizer loaded")
 
-    train_dataloader = get_dataloader(
+    train_dataloader = make_dataloader(
         tokenizer=tokenizer,
         world_size=world_info.world_size,
         rank=world_info.rank,

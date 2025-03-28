@@ -125,7 +125,7 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
             act_checkpointing.enable_activation_checkpointing(model, num)
 
     with setup_profiler.session("sharding_utils::apply_sharding"):
-        sharding_utils.apply_sharding(config, model)
+        sharding_utils.apply_sharding(config.hardware, model)
 
     # Setup optimizers
     with setup_profiler.session("optim_utils::make_optimizer"):

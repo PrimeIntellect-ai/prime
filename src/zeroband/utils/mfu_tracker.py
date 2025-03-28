@@ -123,6 +123,11 @@ def get_flops_promised(device_name: str, precision_mode: PrecisionMode):
     return _interpolate_performance(flagship_performance, db_entry, precision_mode)
 
 class FlopCounter:
+    """
+    Flop counter object used to track flops performed by performed tensor operations.
+    The flop counter will infer forward and backward flops given the tracked operation type and supplied operand shapes.
+    Backward flops inference can be optionally disabled.
+    """
 
     def __init__(self, no_infer_bwd_flops: bool = False):
         self._num_forward_flops: int = 0

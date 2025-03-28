@@ -6,7 +6,7 @@ from zeroband.utils.logger import get_logger
 
 
 def enable_activation_checkpointing(model: Transformer, num: int):
-    """Enable activation checkpointing to the model.
+    """Enable activation checkpointing for the model.
     Apply to layers multiple of `num`.
 
     Example if `num=2` only half of the layers are checkpointed.

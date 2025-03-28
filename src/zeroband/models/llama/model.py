@@ -246,7 +246,7 @@ class Attention(nn.Module):
             x: torch.Tensor,
             freqs_cis: torch.Tensor,
             block_mask: BlockMask | None,
-            flop_counter: FlopCounter
+            flop_counter: FlopCounter = FlopCounter()
     ):
         """
         Forward pass of the attention module.
@@ -355,7 +355,7 @@ class FeedForward(nn.Module):
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
-    def forward(self, x: torch.Tensor, flop_counter: FlopCounter):
+    def forward(self, x: torch.Tensor, flop_counter: FlopCounter = FlopCounter()):
         flop_counter.track_linear(self.w1, x)
         w1_act = self.w1(x)
 
@@ -426,7 +426,7 @@ class TransformerBlock(nn.Module):
             x: torch.Tensor,
             freqs_cis: torch.Tensor,
             block_mask: BlockMask | None,
-            flop_counter: FlopCounter,
+            flop_counter: FlopCounter = FlopCounter(),
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -549,7 +549,7 @@ class Transformer(nn.Module):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor, block_mask: BlockMask | None, flop_counter: FlopCounter):
+    def forward(self, tokens: torch.Tensor, block_mask: BlockMask | None, flop_counter: FlopCounter = FlopCounter()):
         """
         Perform a forward pass through the Transformer model.
 

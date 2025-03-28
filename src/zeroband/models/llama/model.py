@@ -245,7 +245,7 @@ class Attention(nn.Module):
             self,
             x: torch.Tensor,
             freqs_cis: torch.Tensor,
-            block_mask: BlockMask | None,
+            block_mask: BlockMask | None = None,
             flop_counter: FlopCounter = FlopCounter()
     ):
         """
@@ -549,7 +549,7 @@ class Transformer(nn.Module):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor, block_mask: BlockMask | None, flop_counter: FlopCounter = FlopCounter()):
+    def forward(self, tokens: torch.Tensor, block_mask: BlockMask | None = None, flop_counter: FlopCounter = FlopCounter()):
         """
         Perform a forward pass through the Transformer model.
 

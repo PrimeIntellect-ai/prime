@@ -1,0 +1,21 @@
+project = "debug_150m_zero_band"
+
+model_name = "150M"
+model_type = "llama2"
+
+wandb = false
+
+[hardware]
+micro_batch_size = 64
+torch_compile = true
+
+[train]
+batch_size = 512
+
+[train.lr_scheduler]
+num_warmup_steps = 10
+num_decay_steps = 1000
+
+[data]
+fake = true
+

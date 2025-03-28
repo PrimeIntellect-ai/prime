@@ -23,6 +23,8 @@ from zeroband.config import AttnFnType
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention, BlockMask, _DEFAULT_SPARSE_BLOCK_SIZE
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from zeroband.utils.mfu_tracker import FlopCounter
+
 _flex_attention_compiled = torch.compile(flex_attention, dynamic=False)
 
 
@@ -33,10 +35,10 @@ _flex_attention_compiled = torch.compile(flex_attention, dynamic=False)
 # is compiled or not, and flex attention always remains compiled.
 @torch.compiler.disable(recursive=False)
 def flex_attention_compiled(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    block_mask: BlockMask,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        block_mask: BlockMask,
 ) -> torch.Tensor:
     return _flex_attention_compiled(q, k, v, block_mask=block_mask)
 
@@ -113,9 +115,10 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Ten
 
 
 def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
+        xq: torch.Tensor,
+        xk: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        flop_counter: FlopCounter,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary embeddings to input tensors using the given frequency tensor.
@@ -129,6 +132,7 @@ def apply_rotary_emb(
         xq (torch.Tensor): Query tensor to apply rotary embeddings.
         xk (torch.Tensor): Key tensor to apply rotary embeddings.
         freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
+        flop_counter (FlopCounter): The flop counter used to track performed flops
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
@@ -136,8 +140,12 @@ def apply_rotary_emb(
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
+
     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    flop_counter.track_binary(xq_, freqs_cis)
+    flop_counter.track_binary(xk_, freqs_cis)
+
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
@@ -234,10 +242,11 @@ class Attention(nn.Module):
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
 
     def forward(
-        self,
-        x: torch.Tensor,
-        freqs_cis: torch.Tensor,
-        block_mask: BlockMask | None = None,
+            self,
+            x: torch.Tensor,
+            freqs_cis: torch.Tensor,
+            block_mask: BlockMask | None,
+            flop_counter: FlopCounter
     ):
         """
         Forward pass of the attention module.
@@ -246,12 +255,17 @@ class Attention(nn.Module):
             x (torch.Tensor): Input tensor.
             freqs_cis (torch.Tensor): Precomputed frequency tensor.
             seqlens (torch.Tensor | None): Sequence lengths tensor for packing.
+            flop_counter (FlopCounter): object for counting performed flops
 
         Returns:
             torch.Tensor: Output tensor after attention.
 
         """
         bs, seqlen, _ = x.shape
+
+        flop_counter.track_linear(self.wq, x)
+        flop_counter.track_linear(self.wk, x)
+        flop_counter.track_linear(self.wv, x)
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
         # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
@@ -261,7 +275,7 @@ class Attention(nn.Module):
         xk = xk.view(bs, seqlen, -1, self.head_dim)
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, flop_counter=flop_counter)
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -271,19 +285,24 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        output = self.self_attention(xq, xk, xv, block_mask)
+        output = self.self_attention(xq, xk, xv, block_mask, flop_counter=flop_counter)
 
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
 
-    def _sdpa_attention(self, xq, xk, xv) -> torch.Tensor:
+    def _sdpa_attention(self, xq, xk, xv, flop_counter: FlopCounter) -> torch.Tensor:
         with sdpa_kernel(SDPBackend.MATH) if self.attn_fn == "math" else contextlib.nullcontext():
             output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+            flop_counter.track_mha_attention(xq, xk, xv, is_causal=True)
+
         output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         return output
 
-    def _flex_attention_with_seqlens(self, xq, xk, xv, block_mask: BlockMask) -> torch.Tensor:
+    def _flex_attention_with_seqlens(self, xq, xk, xv, block_mask: BlockMask,
+                                     flop_counter: FlopCounter) -> torch.Tensor:
+
         output = flex_attention_compiled(xq, xk, xv, block_mask=block_mask)
+        flop_counter.track_flex_attention(xq, xk, xv, mask_sparsity=block_mask)
         output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         return output
         # output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
@@ -291,12 +310,14 @@ class Attention(nn.Module):
         # return output
 
     def self_attention(
-        self, xq: torch.Tensor, xk: torch.Tensor, xv: torch.Tensor, block_mask: BlockMask | None = None
+            self, xq: torch.Tensor, xk: torch.Tensor, xv: torch.Tensor,
+            block_mask: BlockMask | None,
+            flop_counter: FlopCounter,
     ) -> torch.Tensor:
         if block_mask is not None:
-            return self._flex_attention_with_seqlens(xq, xk, xv, block_mask)
+            return self._flex_attention_with_seqlens(xq, xk, xv, block_mask, flop_counter=flop_counter)
         else:
-            return self._sdpa_attention(xq, xk, xv)
+            return self._sdpa_attention(xq, xk, xv, flop_counter=flop_counter)
 
 
 class FeedForward(nn.Module):
@@ -317,11 +338,11 @@ class FeedForward(nn.Module):
     """
 
     def __init__(
-        self,
-        dim: int,
-        hidden_dim: int,
-        multiple_of: int,
-        ffn_dim_multiplier: Optional[float],
+            self,
+            dim: int,
+            hidden_dim: int,
+            multiple_of: int,
+            ffn_dim_multiplier: Optional[float],
     ):
         super().__init__()
         hidden_dim = int(2 * hidden_dim / 3)
@@ -334,8 +355,23 @@ class FeedForward(nn.Module):
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
-    def forward(self, x):
-        return self.w2(torch.nn.functional.silu(self.w1(x)) * self.w3(x))
+    def forward(self, x: torch.Tensor, flop_counter: FlopCounter):
+        flop_counter.track_linear(self.w1, x)
+        w1_act = self.w1(x)
+
+        flop_counter.track_unary(w1_act)
+        w1_act = torch.nn.functional.silu(w1_act)
+
+        flop_counter.track_linear(self.w3, x)
+        w3_act = self.w3(x)
+
+        flop_counter.track_binary(w1_act, w3_act)
+        w2_in = w1_act * w3_act
+
+        flop_counter.track_linear(self.w2, w2_in)
+        w2_out = self.w2(w2_in)
+
+        return w2_out
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
@@ -386,10 +422,11 @@ class TransformerBlock(nn.Module):
             self.weight_init_std = 0.02 / (2 * self.num_layers) ** 0.5
 
     def forward(
-        self,
-        x: torch.Tensor,
-        freqs_cis: torch.Tensor,
-        block_mask: BlockMask | None = None,
+            self,
+            x: torch.Tensor,
+            freqs_cis: torch.Tensor,
+            block_mask: BlockMask | None,
+            flop_counter: FlopCounter,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -397,13 +434,26 @@ class TransformerBlock(nn.Module):
         Args:
             x (torch.Tensor): Input tensor.
             freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
+            block_mask (BlockMask | None): The block mask to use for attention
+            flop_counter (FlopCounter): Counter used to track performed flops
 
         Returns:
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x), freqs_cis, block_mask=block_mask)
-        out = h + self.feed_forward(self.ffn_norm(h))
+        attn_out = self.attention(self.attention_norm(x), freqs_cis, block_mask=block_mask, flop_counter=flop_counter)
+
+        flop_counter.track_binary(x, attn_out)
+        h = x + attn_out
+
+        norm_out = self.ffn_norm(h)
+        flop_counter.track_norm(self.ffn_norm, h)
+
+        ffn_out = self.feed_forward(norm_out, flop_counter=flop_counter)
+
+        flop_counter.track_binary(h, ffn_out)
+        out = h + ffn_out
+
         return out
 
     def init_weights(self):
@@ -479,7 +529,7 @@ class Transformer(nn.Module):
                 layer.init_weights()
         if self.norm is not None:
             self.norm.reset_parameters()
-        final_out_std = self.model_args.dim**-0.5
+        final_out_std = self.model_args.dim ** -0.5
         cutoff_factor = 3
         if self.output is not None:
             nn.init.trunc_normal_(
@@ -499,25 +549,31 @@ class Transformer(nn.Module):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor, block_mask: BlockMask | None = None):
+    def forward(self, tokens: torch.Tensor, block_mask: BlockMask | None, flop_counter: FlopCounter):
         """
         Perform a forward pass through the Transformer model.
 
         Args:
             tokens (torch.Tensor): Input token indices.
-            block_mask (BlockMask | None): Block mask for attention.
+            block_mask (BlockMask): Block mask for attention.
+            flop_counter: (FlopCounter): FlopCounter used to track performed flops
         Returns:
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens  # just reads, not real flops
 
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis, block_mask=block_mask)
+            h = layer(h, self.freqs_cis, block_mask=block_mask, flop_counter=flop_counter)
 
-        h = self.norm(h) if self.norm else h
+        if self.norm:
+            flop_counter.track_norm(self.norm, h)
+            h = self.norm(h)
+
+        flop_counter.track_linear(self.output, h)
         output = self.output(h)
+
         return output
 
     @classmethod
@@ -533,3 +589,14 @@ class Transformer(nn.Module):
 
         """
         return cls(model_args)
+
+    def count_parameters(self, exclude_embedding: bool = False) -> int:
+        """
+        Counts the number of parameters.
+        :param exclude_embedding whether to exclude the embedding matrix from the parameter calculation
+        :return the number of parameters for the current model configuration
+        """
+        num_params = sum(p.numel() for p in self.parameters())
+        if exclude_embedding:
+            num_params -= self.tok_embeddings.weight.numel()
+        return num_params

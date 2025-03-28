@@ -275,7 +275,7 @@ class InterleaveDataset(StatefulDataset):
         self._init_random_state()
 
 
-def get_dataloader(
+def make_dataloader(
         tokenizer,
         world_size: int,
         rank: int,

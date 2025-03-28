@@ -11,19 +11,19 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
 
 import wandb
+from wandb.cli.cli import start
 
 from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
 from zeroband.config import Config
-from zeroband.data import get_dataloader
+from zeroband.data import make_dataloader
 from zeroband.lr_scheduler import compute_current_lr
 from zeroband.models.llama import make_model
 from zeroband.models.llama.model import create_block_mask_from_seqlens
-from zeroband.utils import (
-    PerfCounter,
-    optim_utils
-)
-from zeroband.utils.activation_ckpt import apply_ac_ckpt
+from zeroband.utils import optim_utils, sharding_utils, act_checkpointing, metrics_utils
+
 from zeroband.utils.memory_profiler import MemoryProfiler
+from zeroband.utils.mfu_tracker import FlopCounter, PrecisionMode, \
+    get_flops_promised_torch
 from zeroband.utils.tokenizer_utils import make_tokenizer
 from zeroband.utils.world_info import WorldInfo, get_world_info
 from zeroband.utils.logger import get_logger
@@ -50,16 +50,19 @@ def calc_gradient_accumulation_steps(batch_size: int, micro_bs: int, world_info:
 def perform_grad_accum_steps(
         config: Config,
         profiler: Profiler,
+        flop_counter: FlopCounter,
         training_progress: TrainingProgress,
         train_dataloader_iterator: Iterator,
         grad_accum_steps: int,
         model: torch.nn.Module,
         inner_optimizer: torch.optim.Optimizer,
-        device: torch.device) -> torch.Tensor:
+        device: torch.device) -> (torch.Tensor, float):
     """
     Performs n gradient accumulated micro-steps and returns the total loss of each step
+    :return (total_loss, current_lr)
     """
     total_loss = torch.tensor([0.0], dtype=torch.float32, device=device)
+    current_lr = 0.0
     for grad_acc_step in range(grad_accum_steps):
         profiler.start_session("grad_acc_step")
 
@@ -74,12 +77,13 @@ def perform_grad_accum_steps(
             block_mask = create_block_mask_from_seqlens(seqlens)
 
         with profiler.session("model.forward"):
-            logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
+            logits = model(tokens=input_ids, block_mask=block_mask, flop_counter=flop_counter)
 
         with profiler.session("torch::nn::functional::cross_entropy"):
             flatten_logits = logits.view(-1, logits.size(-1))  # b seq vocab -> (b * seq) vocab
             flatten_labels = labels.view(-1)  # b seq -> (b * seq)
             loss = torch.nn.functional.cross_entropy(flatten_logits, flatten_labels) / grad_accum_steps
+            flop_counter.track_cross_entropy(flatten_logits)
 
         with profiler.session("loss.backward"):
             loss.backward()
@@ -87,7 +91,7 @@ def perform_grad_accum_steps(
         total_loss += loss.detach().clone()
         profiler.end_session()
 
-    return total_loss
+    return total_loss, current_lr
 
 
 def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.device):
@@ -100,7 +104,7 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
     # Load tokenizer
     tokenizer = make_tokenizer(config)
 
-    train_dataloader = get_dataloader(
+    train_dataloader = make_dataloader(
         tokenizer=tokenizer,
         world_size=world_info.world_size,
         rank=world_info.rank,
@@ -114,39 +118,16 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
             config,
             vocab_size=len(tokenizer),
         )
+        num_param_scalars = model.count_parameters()
+        logger.info(f"Number of parameters: {num_param_scalars}")
 
-    perf_counter = PerfCounter(window_size=10, model=model, model_config=model_config, seq_len=config.data.seq_length)
-
-    logger.info(f"Number of parameters: {perf_counter.num_params}")
-
-    with setup_profiler.session("::apply_ac_ckpt"):
-        if config.hardware.act_ckpt:
+    if config.hardware.act_ckpt:
+        with setup_profiler.session("act_checkpointing::enable_activation_checkpointing"):
             num = 1 if isinstance(config.hardware.act_ckpt, bool) else config.hardware.act_ckpt
-            apply_ac_ckpt(model, num)
+            act_checkpointing.enable_activation_checkpointing(model, num)
 
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.hardware.reduce_fp32 else None
-        )
-
-        offload_policy = CPUOffloadPolicy(pin_memory=True) if config.hardware.fsdp_cpu_offload else None
-
-        for layer_id, transformer_block in model.layers.items():
-            if config.hardware.reshard_after_forward:
-                reshard_after_forward = int(layer_id) < len(model.layers) - 1
-            else:
-                reshard_after_forward = False
-            fully_shard(
-                transformer_block,
-                mp_policy=mp_policy,
-                reshard_after_forward=reshard_after_forward,
-                offload_policy=offload_policy,
-            )
-        fully_shard(
-            model,
-            mp_policy=mp_policy,
-            reshard_after_forward=config.hardware.reshard_after_forward,
-            offload_policy=offload_policy,
-        )
+    with setup_profiler.session("sharding_utils::apply_sharding"):
+        sharding_utils.apply_sharding(config, model)
 
     # Setup optimizers
     with setup_profiler.session("optim_utils::make_optimizer"):
@@ -157,7 +138,7 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
         if config.diloco:
             raise NotImplementedError("Diloco is not implemented yet")
 
-        training_progress = TrainingProgress(total_tokens=0, outer_step=0, step=0)
+    training_progress = TrainingProgress(total_tokens=0, outer_step=0, step=0)
 
     if world_info.rank == 0 and config.wandb:
         wandb.init(
@@ -191,6 +172,8 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
         setup_profiler.print_report()
 
     train_profiler_collection = ProfilerCollection()
+
+    timing_events = []
     while True:
         train_profiler = Profiler()
 
@@ -201,36 +184,66 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
         for _inner_step in range(num_inner_steps):
             train_profiler.start_session("inner_step")
 
+            flop_counter = FlopCounter()
+
+            start_event = torch.cuda.Event(enable_timing=True, blocking=False)
+            end_event = torch.cuda.Event(enable_timing=True, blocking=False)
+
+            start_event.record()
+
             with train_profiler.session("::perform_grad_accum_steps"):
-                loss_batch = perform_grad_accum_steps(config, train_profiler,
-                                                      training_progress,
-                                                      train_dataloader_iterator,
-                                                      grad_accum_steps,
-                                                      model,
-                                                      inner_optimizer,
-                                                      device)
+                loss_batch: torch.Tensor
+                inner_lr: float
+                loss_batch, inner_lr = perform_grad_accum_steps(config, train_profiler, flop_counter,
+                                                                    training_progress,
+                                                                    train_dataloader_iterator,
+                                                                    grad_accum_steps,
+                                                                    model,
+                                                                    inner_optimizer,
+                                                                    device)
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
 
             with train_profiler.session("torch::nn::utils::clip_grad_norm_"):
+                # compute pow, plus (assert clip is rare, no 3N)
+                flop_counter.track_backward_flops(2 * num_param_scalars)
+
                 grad_norm: DTensor = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # type: ignore
                 grad_norm = grad_norm.full_tensor()  # type: ignore
 
             with train_profiler.session("inner_optimizer.step"):
+                flop_counter.track_optimizer_step(inner_optimizer, num_param_scalars)
                 inner_optimizer.step()
-
             inner_optimizer.zero_grad()
+
+            end_event.record()
+            timing_events.append((start_event, end_event))
 
             # logging
             training_progress.step += 1
-            inner_lr = [group["lr"] for group in inner_optimizer.param_groups][0]
 
             # syncing loss across all data parallel rank within a nodes
             new_tokens = config.data.seq_length * config.train.batch_size
-            perf_counter.count_tokens(new_tokens)
+
+            # find next available timing event from some step in the past
+            # that the gpu has already finished executing.
+            # Realistically, this should at most be -1 steps into the past
+            time_seconds = None
+            for pair in timing_events:
+                start_event, end_event = pair
+                if end_event.query():
+                    end_event.synchronize()
+                    time_seconds = start_event.elapsed_time(end_event) * 1e-3
+                    timing_events.remove(pair)
+                    break
+
+            tokens_per_second = None
+            if time_seconds is not None:
+                tokens_per_second = new_tokens / time_seconds
 
             if config.diloco is None:
                 training_progress.total_tokens += new_tokens
+
             # else:
             # we count the total tokens with respect to all diloco workers
             # might need to tweak this as some worker might fail to join the all reduce later
@@ -239,37 +252,42 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
 
             # training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
 
-            assert isinstance(loss_batch, torch.Tensor)
+            tflops_max = get_flops_promised_torch(device, PrecisionMode.PRECISION_BF16)
+
             metrics = {
-                "Loss": loss_batch.item(),
+                "loss/train": loss_batch.item(),
                 "step": training_progress.step,
                 "inner_lr": inner_lr,
                 "Perplexity": torch.exp(loss_batch).item(),
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
                 "grad_norm": grad_norm.item(),
+                'tflops_max': tflops_max
             }
 
-            log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
+            if time_seconds is not None:
+                tflops_per_second = (flop_counter.get_performed_flops() * 1e-12) / time_seconds
+                mfu = (tflops_per_second / tflops_max) * 100.0
 
-            tokens_per_second = perf_counter.get_tokens_per_second()
+                metrics.update({
+                    "mfu": mfu,
+                    "tflops": tflops_per_second
+                })
 
-            if tokens_per_second is not None:
-                metrics["inner_lr"] = inner_lr
-                metrics["tokens_per_second"] = tokens_per_second
-                metrics["mfu"] = perf_counter.get_mfu()
-                log += f", inner_lr: {inner_lr}, tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
+            metrics.update({
+                "inner_lr": inner_lr,
+                "tokens_per_second": tokens_per_second
+            })
 
             if config.diloco is not None:
                 # TODO MIKE use pccl instead of elastic_device_mesh
                 # metrics["num_peers"] = elastic_device_mesh.global_pg.size()
-
                 metrics["num_peers"] = 1
-                log += f", diloco_peers: {metrics['num_peers']}"
 
             if world_info.rank == 0 and config.wandb:
                 wandb.log(metrics)
 
+            log = metrics_utils.build_metrics_string(metrics, whitelist_keys={'step', 'loss', 'mfu', 'tflops', 'tokens_per_second', 'tflops_max'})
             logger.info(log)
 
             if memory_profiler is not None:
@@ -310,7 +328,7 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
             )
 
         if training_progress.step >= config.train.lr_scheduler.num_total_steps:
-            # we only allow to break outisde of the inner loop.
+            # we only allow to break outside of the inner loop.
             # This avoid ending the training in the middle of a the inner loop
             # Since ckpt strategy and all reduce is done at the outer loop level.
             break
@@ -338,7 +356,7 @@ def main():
 
     # torch.set_default_device("cuda")
     torch.cuda.set_device(world_info.local_rank)
-    device = torch.cuda.current_device()
+    device = torch.device(f'cuda:{torch.cuda.current_device()}')
 
     train(logger, config, world_info, device)
 

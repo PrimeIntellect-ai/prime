@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 import subprocess
 from datetime import datetime
@@ -33,6 +35,9 @@ def format_ip_display(ip: Optional[Union[str, List[str]]]) -> str:
 def list(
     limit: int = typer.Option(100, help="Maximum number of pods to list"),
     offset: int = typer.Option(0, help="Number of pods to skip"),
+    watch: bool = typer.Option(
+        False, "--watch", "-w", help="Watch pods list in real-time"
+    ),
 ) -> None:
     """List your running pods"""
     try:
@@ -40,59 +45,97 @@ def list(
         base_client = APIClient()
         pods_client = PodsClient(base_client)
 
-        # Get pods list
-        pods_list = pods_client.list(offset=offset, limit=limit)
+        last_pods_hash = None
 
-        # Create display table
-        table = Table(
-            title=f"Compute Pods (Total: {pods_list.total_count})", show_lines=True
-        )
-        table.add_column("ID", style="cyan", no_wrap=True)
-        table.add_column("Name", style="blue")
-        table.add_column("GPU", style="green")
-        table.add_column("Status", style="yellow")
-        table.add_column("Created", style="blue")
+        while True:
+            # Get pods list
+            pods_list = pods_client.list(offset=offset, limit=limit)
 
-        # Add rows for each pod
-        for pod in pods_list.data:
-            # Format status with color
-            display_status = pod.status
-            if pod.status == "ACTIVE" and pod.installation_status != "FINISHED":
-                display_status = "INSTALLING"
+            current_pods_hash = hashlib.md5(
+                json.dumps(
+                    [pod.model_dump() for pod in pods_list.data], sort_keys=True
+                ).encode()
+            ).hexdigest()
 
-            status_color = {
-                "ACTIVE": "green",
-                "PENDING": "yellow",
-                "ERROR": "red",
-                "INSTALLING": "yellow",
-            }.get(display_status, "white")
+            # Only update display if data changed or first run
+            if current_pods_hash != last_pods_hash:
+                # Clear screen if watching
+                if watch:
+                    os.system("cls" if os.name == "nt" else "clear")
 
-            # Format created time
-            created_at = datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
-            created_str = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+                # Create display table
+                table = Table(
+                    title=f"Compute Pods (Total: {pods_list.total_count})",
+                    show_lines=True,
+                )
+                table.add_column("ID", style="cyan", no_wrap=True)
+                table.add_column("Name", style="blue")
+                table.add_column("GPU", style="green")
+                table.add_column("Status", style="yellow")
+                table.add_column("Created", style="blue")
 
-            table.add_row(
-                pod.id,
-                pod.name or "N/A",
-                f"{pod.gpu_type} x{pod.gpu_count}",
-                Text(display_status, style=status_color),
-                created_str,
-            )
+                # Add rows for each pod
+                for pod in pods_list.data:
+                    # Format status with color
+                    display_status = pod.status
+                    if pod.status == "ACTIVE" and pod.installation_status != "FINISHED":
+                        display_status = "INSTALLING"
 
-        console.print(table)
-        console.print(
-            "\n[blue]Use 'prime pods status <pod-id>' to see detailed information "
-            "about a specific pod[/blue]"
-        )
+                    status_color = {
+                        "ACTIVE": "green",
+                        "PENDING": "yellow",
+                        "ERROR": "red",
+                        "INSTALLING": "yellow",
+                    }.get(display_status, "white")
 
-        # If there are more pods, show a message
-        if pods_list.total_count > offset + limit:
-            remaining = pods_list.total_count - (offset + limit)
-            console.print(
-                f"\n[yellow]Showing {limit} of {pods_list.total_count} pods. "
-                f"Use --offset {offset + limit} to see the next "
-                f"{min(limit, remaining)} pods.[/yellow]"
-            )
+                    # Format created time
+                    created_at = datetime.fromisoformat(
+                        pod.created_at.replace("Z", "+00:00")
+                    )
+                    created_str = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+                    table.add_row(
+                        pod.id,
+                        pod.name or "N/A",
+                        f"{pod.gpu_type} x{pod.gpu_count}",
+                        Text(display_status, style=status_color),
+                        created_str,
+                    )
+
+                console.print(table)
+
+                # Update hash after displaying
+            if not watch:
+                console.print(
+                    "\n[blue]Use 'prime pods status <pod-id>' to "
+                    "see detailed information about a specific pod[/blue]"
+                )
+
+                # If there are more pods, show a message
+                if pods_list.total_count > offset + limit:
+                    remaining = pods_list.total_count - (offset + limit)
+                    console.print(
+                        f"\n[yellow]Showing {limit} of {pods_list.total_count} pods. "
+                        f"Use --offset {offset + limit} to see the next "
+                        f"{min(limit, remaining)} pods.[/yellow]"
+                    )
+
+                break
+            else:
+                # Only print the message when we're not repeating due to unchanged data
+                if current_pods_hash != last_pods_hash or last_pods_hash is None:
+                    console.print("\n[dim]Press Ctrl+C to exit watch mode[/dim]")
+                last_pods_hash = current_pods_hash
+                try:
+                    # Wait before refreshing
+                    import time
+
+                    time.sleep(5)
+                except KeyboardInterrupt:
+                    # Clear the progress dots on exit
+                    if current_pods_hash == last_pods_hash:
+                        console.print("\n")
+                    break
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

@@ -1,9 +1,9 @@
 [project]
 name = "prime-cli"
-version = "0.2.6"
+version = "0.2.7"
 description = "Prime Intellect CLI"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = "MIT"
 authors = [
     { name = "Prime Intellect", email = "contact@primeintellect.ai" }
@@ -64,7 +64,7 @@ extend-select = [
 ]
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.9"
 disallow_untyped_defs = true
 check_untyped_defs = true
 warn_redundant_casts = true

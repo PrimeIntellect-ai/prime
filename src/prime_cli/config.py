@@ -40,9 +40,8 @@ class Config:
     def _load_config(self) -> None:
         """Load configuration from file"""
         if self.config_file.exists():
-            self.config = ConfigModel(
-                **json.loads(self.config_file.read_text())
-            ).model_dump()
+            config_data = json.loads(self.config_file.read_text())
+            self.config = ConfigModel(**config_data).model_dump()
         else:
             self.config = {}
 

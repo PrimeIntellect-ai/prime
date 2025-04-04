@@ -24,7 +24,7 @@ def callback(
 ) -> None:
     """Prime Intellect CLI"""
     if version_flag:
-        typer.echo(f"Prime CLI version: {version('prime-cli')}")
+        typer.echo(f"Prime CLI version: {__version__}")
         raise typer.Exit()
     if ctx.invoked_subcommand is None:
         ctx.get_help()

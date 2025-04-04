@@ -1,12 +1,14 @@
 from dataclasses import dataclass
 import os
 from pathlib import Path
-from typing import Any
+from tabnanny import check
+from typing import Any, Optional
 import torch
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.distributed.checkpoint.stateful import Stateful
+
+from zeroband.ccl.ccl_utils import MPIConfig
 from zeroband.models.llama.model import Transformer
-from zeroband.utils.world_info import get_world_info
 
 
 @dataclass
@@ -34,20 +36,32 @@ def _pathify(path: str | Path) -> Path:
     return path
 
 
-def save_checkpoint_fsdp_state(
+@dataclass
+class CheckpointInfo:
+    # The number of performed outer steps
+    num_performed_outer_steps: int
+
+    # The current shared state revision when this checkpoint was saved.
+    # This may differ from num_performed_outer_steps if shared state synchronization
+    # is skipped during outer steps when possible (e.g. no peers joined)
+    shared_state_revision: int
+
+
+def save_checkpoint(
         model: Transformer,
         optimizers: list[torch.optim.Optimizer],
         training_progress: TrainingProgress,
         dataloader: StatefulDataLoader,
         path_root: str | Path,
+        checkpoint_info: CheckpointInfo,
+        mpi_config: Optional[MPIConfig]
 ):
     """
     Checkpoint the model in a way that is compatible with FSDP.
     """
     path_root = _pathify(path_root) / f"step_{training_progress.step}"
-    world_info = get_world_info()
 
-    path_file = _local_file_path(path_root, world_info.local_rank)
+    path_file = _local_file_path(path_root, mpi_config.mpi_rank if mpi_config is not None else 1)
 
     if not os.path.exists(path_root):
         os.makedirs(path_root)
@@ -56,30 +70,34 @@ def save_checkpoint_fsdp_state(
         "model": model.state_dict(),
         "optimizers": [optimizer.state_dict() for optimizer in optimizers],
         "training_progress": training_progress,
-        "dataloader": dataloader.state_dict()
+        "dataloader": dataloader.state_dict(),
+
+        # checkpoint info
+        "num_performed_outer_steps": checkpoint_info.num_performed_outer_steps,
+        "shared_state_revision": checkpoint_info.shared_state_revision
     }
     with open(path_file, "wb") as f:
         torch.save(state, f)
 
 
-def load_checkpoint_fsdp_state(
+def load_checkpoint(
         model: Transformer,
         optimizers: list[torch.optim.Optimizer],
         training_progress: TrainingProgress,
         dataloader: StatefulDataLoader,
         path_root: str | Path,
-):
+        mpi_config: Optional[MPIConfig]
+) -> CheckpointInfo:
     """
     Load the checkpoint state.
+    :return checkpoint meta-data information
     """
     path = _pathify(path_root)
 
     assert os.path.exists(path), f"Checkpoint directory {path} must exist"
     assert os.path.isdir(path), f"Checkpoint directory {path} must be a directory"
 
-    world_info = get_world_info()
-
-    path_file = _local_file_path(path, world_info.local_rank)
+    path_file = _local_file_path(path, mpi_config.mpi_rank if mpi_config is not None else 1)
 
     if not os.path.exists(path_file):
         raise FileNotFoundError(f"Checkpoint step {training_progress.step} not found at {path_file}")
@@ -96,3 +114,7 @@ def load_checkpoint_fsdp_state(
     training_progress.step = state["training_progress"].step
 
     dataloader.load_state_dict(state["dataloader"])
+    return CheckpointInfo(
+        num_performed_outer_steps=state["num_performed_outer_steps"],
+        shared_state_revision=state["shared_state_revision"]
+    )

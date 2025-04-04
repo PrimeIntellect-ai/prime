@@ -1,29 +1,32 @@
 import os
 import time
+from dataclasses import asdict
 from logging import Logger
-from typing import TYPE_CHECKING, Optional, Iterator
+from typing import TYPE_CHECKING, Optional, Iterator, List, Dict
 
 import torch
 import torch.distributed as dist
+from pccl import SharedState, TensorInfo
 
 from torch.distributed import destroy_process_group
 from torch.distributed.tensor import DTensor
 
 import wandb
 
-from zeroband.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
+from zeroband.ccl import ccl_utils
+from zeroband.ccl.ccl_utils import MPIConfig
+from zeroband.checkpoint import TrainingProgress, load_checkpoint, save_checkpoint, CheckpointInfo
 from zeroband.config import Config
 from zeroband.data import make_dataloader
 from zeroband.lr_scheduler import compute_current_lr
 from zeroband.models.llama import make_model
 from zeroband.models.llama.model import create_block_mask_from_seqlens
-from zeroband.utils import optim_utils, sharding_utils, act_checkpointing, metrics_utils
+from zeroband.utils import optim_utils, sharding_utils, act_checkpointing, metrics_utils, torch_utils
 
 from zeroband.utils.memory_profiler import MemoryProfiler
 from zeroband.utils.mfu_tracker import FlopCounter, PrecisionMode, \
     get_flops_promised_torch
 from zeroband.utils.tokenizer_utils import make_tokenizer
-from zeroband.utils.world_info import WorldInfo, get_world_info
 from zeroband.utils.logger import get_logger
 from zeroband.utils.profiler import Profiler, ProfilerCollection
 
@@ -34,9 +37,10 @@ PRIME_TRAIN_PROFILER_PRINT_TIMINGS: bool = os.getenv("PRIME_TRAIN_PROFILER_PRINT
 PRIME_TRAIN_PROFILER_EXPORT_VIDEO_INTERVAL: int = int(os.getenv("PRIME_TRAIN_PROFILER_EXPORT_VIDEO_INTERVAL", "-1"))
 
 
-def calc_gradient_accumulation_steps(batch_size: int, micro_bs: int, world_info: WorldInfo) -> int:
-    assert batch_size % world_info.world_size == 0
-    batch_size = batch_size // world_info.world_size
+def calc_gradient_accumulation_steps(batch_size: int, micro_bs: int, mpi_config: Optional[MPIConfig]) -> int:
+    mpi_world_size = mpi_config.mpi_world_size if mpi_config is not None else 1
+    assert batch_size % mpi_world_size == 0
+    batch_size = batch_size // mpi_world_size
 
     assert batch_size % micro_bs == 0, str(
         f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})"
@@ -92,9 +96,9 @@ def perform_grad_accum_steps(
     return total_loss, current_lr
 
 
-def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.device):
+def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], device: torch.device):
     grad_accum_steps = calc_gradient_accumulation_steps(
-        config.train.batch_size, config.hardware.micro_batch_size, world_info
+        config.train.batch_size, config.hardware.micro_batch_size, mpi_config
     )
 
     setup_profiler = Profiler()
@@ -104,18 +108,19 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
 
     train_dataloader = make_dataloader(
         tokenizer=tokenizer,
-        world_size=world_info.world_size,
-        rank=world_info.rank,
+        mpi_world_size=mpi_config.mpi_world_size if mpi_config is not None else 1,
+        mpi_rank=mpi_config.mpi_rank if mpi_config is not None else 1,
         batch_size=config.hardware.micro_batch_size,
         data_config=config.data,
     )
     train_dataloader_iterator = iter(train_dataloader)
 
     with setup_profiler.session("::make_model"):
-        model, model_config = make_model(
-            config,
-            vocab_size=len(tokenizer),
-        )
+        with torch_utils.default_device('cuda'):
+            model, model_config = make_model(
+                config,
+                vocab_size=len(tokenizer),
+            )
         num_param_scalars = model.count_parameters()
         logger.info(f"Number of parameters: {num_param_scalars}")
 
@@ -125,39 +130,86 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
             act_checkpointing.enable_activation_checkpointing(model, num)
 
     with setup_profiler.session("sharding_utils::apply_sharding"):
-        sharding_utils.apply_sharding(config.hardware, model)
+        if mpi_config is not None:
+            sharding_utils.apply_sharding(config.hardware, model)
+        else:
+            logger.info("MPI config not set, skipping application of model sharding...")
 
     # Setup optimizers
     with setup_profiler.session("optim_utils::make_optimizer"):
-        inner_optimizer = optim_utils.make_optimizer(model, config.train.optimizer)
+        inner_optimizer = optim_utils.make_optimizer(list(model.parameters()), config.train.optimizer)
 
-        # TODO MIKE use pccl instead of elastic_device_mesh
+    # None if diloco is disabled
+    outer_optimizer: Optional[torch.optim.Optimizer] = None
 
-        if config.diloco:
-            raise NotImplementedError("Diloco is not implemented yet")
+    # empty if diloco is disabled
+    outer_parameters: Dict[str, torch.nn.Parameter] = dict()
+    outer_parameters_list: List[torch.nn.Parameter] = []
+
+    # none if diloco is disabled
+    shared_state: Optional[SharedState] = None
 
     training_progress = TrainingProgress(total_tokens=0, outer_step=0, step=0)
 
-    if world_info.rank == 0 and config.wandb:
-        wandb.init(
-            project=config.project,
-            config={"config": config.model_dump(), "world_info": world_info.json()},
-        )
-
-    with setup_profiler.session("torch::compile"):
-        if config.hardware.torch_compile:
-            model = torch.compile(model) if not TYPE_CHECKING else model
-
+    checkpoint_info: Optional[CheckpointInfo] = None
     if config.ckpt.resume is not None:
         with setup_profiler.session("::load_checkpoint_fsdp_state"):
             # all is inplace
-            load_checkpoint_fsdp_state(
+            checkpoint_info = load_checkpoint(
                 model=model,
                 optimizers=[inner_optimizer],
                 training_progress=training_progress,
                 dataloader=train_dataloader,
                 path_root=config.ckpt.path,
+                mpi_config=mpi_config
             )
+
+    if config.diloco:
+        # create outer parameters
+        for name, local_p in model.named_parameters():
+            outer_param = outer_parameters[name] = torch.nn.Parameter(local_p.detach().cpu())
+            outer_parameters_list.append(outer_param)
+
+        with setup_profiler.session("optim_utils::make_optimizer[diloco]"):
+            outer_optimizer = optim_utils.make_optimizer(outer_parameters_list, config.train.outer_optimizer)
+
+            # do a dummy step to initialize outer optimizer state
+            for op in outer_parameters_list:
+                op.grad = torch.zeros_like(op)
+            outer_optimizer.step()
+
+        # Build the shared state that includes:
+        #   - The inner parameters
+        #   - The outer optimizer state (e.g. momentum buffers)
+        shared_state_dict = {}
+        for name, param in model.named_parameters():
+            shared_state_dict[name] = param
+
+        # Outer optimizer momentum buffers in shared state
+        for name, outer_p in outer_parameters.items():
+            state = outer_optimizer.state[outer_p]
+            optim_utils.add_optimizer_state(shared_state_dict, name, state, type(outer_optimizer))
+
+        entries = [
+            TensorInfo.from_torch(tensor, name, allow_content_inequality=False)
+            for name, tensor in shared_state_dict.items()
+        ]
+        shared_state = SharedState(entries)
+        if checkpoint_info is not None:
+            shared_state.revision = checkpoint_info.num_performed_outer_steps
+        else:
+            shared_state.revision = 0
+
+    if (mpi_config is None or mpi_config.mpi_rank == 0) and config.wandb:
+        wandb.init(
+            project=config.project,
+            config={"config": config.model_dump(),
+                    "mpi_config": asdict(mpi_config) if mpi_config is not None else None},
+        )
+
+    with setup_profiler.session("torch::compile"):
+        if config.hardware.torch_compile:
+            model = torch.compile(model) if not TYPE_CHECKING else model
 
     memory_profiler: Optional[MemoryProfiler] = None
     if config.hardware.memory_profiler is not None:
@@ -165,6 +217,9 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
                                          config.hardware.memory_profiler.snapshot_dir)
 
     num_inner_steps = config.diloco.inner_steps if config.diloco is not None else 1
+
+    # initialize ccl library
+    ccl_utils.init_ccl_library(config, mpi_config)
 
     if PRIME_SETUP_PROFILER_PRINT_TIMINGS:
         setup_profiler.print_report()
@@ -193,21 +248,23 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
                 loss_batch: torch.Tensor
                 inner_lr: float
                 loss_batch, inner_lr = perform_grad_accum_steps(config, train_profiler, flop_counter,
-                                                                    training_progress,
-                                                                    train_dataloader_iterator,
-                                                                    grad_accum_steps,
-                                                                    model,
-                                                                    inner_optimizer,
-                                                                    device)
+                                                                training_progress,
+                                                                train_dataloader_iterator,
+                                                                grad_accum_steps,
+                                                                model,
+                                                                inner_optimizer,
+                                                                device)
 
-            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
+            if mpi_config is not None:
+                dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
 
             with train_profiler.session("torch::nn::utils::clip_grad_norm_"):
                 # compute pow, plus (assert clip is rare, no 3N)
                 flop_counter.track_backward_flops(2 * num_param_scalars)
 
-                grad_norm: DTensor = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # type: ignore
-                grad_norm = grad_norm.full_tensor()  # type: ignore
+                grad_norm: torch.nn.Tensor | DTensor = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # type: ignore
+                if isinstance(grad_norm, DTensor):
+                    grad_norm = grad_norm.full_tensor()  # type: ignore
 
             with train_profiler.session("inner_optimizer.step"):
                 flop_counter.track_optimizer_step(inner_optimizer, num_param_scalars)
@@ -282,10 +339,11 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
                 # metrics["num_peers"] = elastic_device_mesh.global_pg.size()
                 metrics["num_peers"] = 1
 
-            if world_info.rank == 0 and config.wandb:
+            if (mpi_config is None or mpi_config.mpi_rank == 0) and config.wandb:
                 wandb.log(metrics)
 
-            log = metrics_utils.build_metrics_string(metrics, whitelist_keys={'step', 'loss', 'mfu', 'tflops', 'tokens_per_second', 'tflops_max'})
+            log = metrics_utils.build_metrics_string(metrics, whitelist_keys={'step', 'loss', 'mfu', 'tflops',
+                                                                              'tokens_per_second', 'tflops_max'})
             logger.info(log)
 
             if memory_profiler is not None:
@@ -317,12 +375,17 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
                 and training_progress.step % config.ckpt.interval == 0
         ):
             # we only allow to checkpoint after a outer step. For non diloco training outer step = 1 anyway
-            save_checkpoint_fsdp_state(
+            save_checkpoint(
                 model=model,
                 optimizers=[inner_optimizer],
                 training_progress=training_progress,
                 dataloader=train_dataloader,
                 path_root=config.ckpt.path,
+                checkpoint_info=CheckpointInfo(
+                    num_performed_outer_steps=training_progress.outer_step,
+                    shared_state_revision=shared_state.revision if shared_state is not None else -1,
+                ),
+                mpi_config=mpi_config
             )
 
         if training_progress.step >= config.train.lr_scheduler.num_total_steps:
@@ -331,14 +394,15 @@ def train(logger: Logger, config: Config, world_info: WorldInfo, device: torch.d
             # Since ckpt strategy and all reduce is done at the outer loop level.
             break
 
-        if world_info.rank == 0:
+        if mpi_config is None or mpi_config.mpi_rank == 0:
             wandb.finish()
 
     if config.hardware.memory_profiler is not None:
         logger.debug(f"Max memory used: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
 
     logger.info("Training finished, exiting ...")
-    destroy_process_group()
+    if mpi_config is not None:
+        destroy_process_group()
 
 
 def main():
@@ -348,15 +412,20 @@ def main():
     torch.set_float32_matmul_precision("high")
     torch.manual_seed(42)
 
-    config = Config(**parse_argv())  # type: ignore
-    world_info = get_world_info()
-    logger = get_logger(config)
+    mpi_config: Optional[MPIConfig] = ccl_utils.make_mpi_config(
+        mpi_rank=os.getenv("MPI_RANK"),
+        mpi_world_size=os.getenv("MPI_WORLD_SIZE")
+    )  # may return None
 
-    # torch.set_default_device("cuda")
-    torch.cuda.set_device(world_info.local_rank)
+    config = Config(**parse_argv())  # type: ignore
+    logger = get_logger(config, mpi_config)
+
+    gpu_ordinal = int(os.getenv("GPU_ORDINAL", "0"))
+
+    torch.cuda.set_device(gpu_ordinal)
     device = torch.device(f'cuda:{torch.cuda.current_device()}')
 
-    train(logger, config, world_info, device)
+    train(logger, config, mpi_config, device)
 
 
 if __name__ == "__main__":

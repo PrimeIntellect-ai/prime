@@ -4,6 +4,7 @@ from typing import Literal, TypeAlias
 from pydantic import model_validator
 from pydantic_config import BaseConfig
 
+
 class Compression(Enum):
     NO = "no"
     UINT8 = "uint8"
@@ -23,6 +24,12 @@ class DataConfig(BaseConfig):
     data_world_size: int | None = None
     reverse_data_files: bool = False
     split_by_data_rank: bool = True
+
+
+class SGDConfig(BaseConfig):
+    type: Literal["sgd"] = "sgd"
+    momentum: float = 0.0
+    nesterov: bool = False
 
 
 class AdamConfig(BaseConfig):
@@ -58,24 +65,34 @@ class LearningRateSchedulerConfig(BaseConfig):
 # New optimizer configurations must be added here to be picked up by the config system.
 # Each configuration will be tried until a successful match is found.
 # The 'type' field determines which class to use because the string literal is distinct for each class.
-OptimizerConfig: TypeAlias = AdamConfig | AdamWConfig
+OptimizerConfig: TypeAlias = SGDConfig | AdamConfig | AdamWConfig
 
 
 class TrainConfig(BaseConfig):
     optimizer: OptimizerConfig = AdamConfig()
+    outer_optimizer: OptimizerConfig = SGDConfig()
     batch_size: int = 512
     lr_scheduler: LearningRateSchedulerConfig = LearningRateSchedulerConfig()
+
+    # make DiLoCo equal to DDP by default
+    outer_lr_scheduler: LearningRateSchedulerConfig = LearningRateSchedulerConfig(lr=1.0, end_lr=1.0,
+                                                                                  num_warmup_steps=0)
+
 
 class DilocoConfig(BaseConfig):
     outer_lr: float = 0.7
     inner_steps: int
     compression: Compression = Compression.NO
 
+
 class MemoryProfilerConfig(BaseConfig):
     freq: int = 10
     snapshot_dir: str
 
+
 AttnFnType: TypeAlias = Literal["flex", "math"]
+CclLibType: TypeAlias = Literal["nccl", "pccl"]
+
 
 class HardwareConfig(BaseConfig):
     micro_batch_size: int = 1
@@ -98,6 +115,8 @@ class HardwareConfig(BaseConfig):
 
     attn_fn: AttnFnType = "flex"
 
+    ccl_library: CclLibType = "pccl"
+
 
 class MonitorConfig(BaseConfig):
     log_flush_interval: int = 10
@@ -114,6 +133,11 @@ class CkptConfig(BaseConfig):
     path: str | None = None
     interval: int | None = None
     resume: str | None = None
+
+
+class PcclConfig(BaseConfig):
+    ccoip_host: str
+    peer_group: int = 0
 
 
 class Config(BaseConfig):
@@ -138,6 +162,7 @@ class Config(BaseConfig):
     train: TrainConfig = TrainConfig()
     hardware: HardwareConfig
     monitor: MonitorConfig | None = None
+    pccl: PcclConfig | None = None
 
     ckpt: CkptConfig = CkptConfig()
 
@@ -149,4 +174,7 @@ class Config(BaseConfig):
             assert self.ckpt.interval % self.diloco.inner_steps == 0, (
                 "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
             )
+
+        if self.hardware.ccl_library == 'pccl':
+            assert self.pccl is not None, "[pccl] must be configured if 'pccl' is used as ccl library"
         return self

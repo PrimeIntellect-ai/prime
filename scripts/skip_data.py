@@ -47,8 +47,8 @@ def skip_data(config: Config):
 
     train_dataloader = make_dataloader(
         tokenizer=tokenizer,
-        world_size=world_info.world_size,
-        rank=world_info.rank,
+        mpi_world_size=world_info.world_size,
+        mpi_rank=world_info.rank,
         batch_size=config.hardware.micro_batch_size,
         data_config=config.data,
     )

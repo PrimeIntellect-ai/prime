@@ -1,8 +1,11 @@
 import os
 import pickle
+from typing import Optional
+
 import torch
+
+from zeroband.ccl.ccl_utils import MPIConfig
 from zeroband.utils.logger import get_logger
-from zeroband.utils.world_info import get_world_info
 
 _MAX_ENTRIES = 10000
 
@@ -12,11 +15,11 @@ class MemoryProfiler:
     The output are pickles file that can be visualized here: https://pytorch.org/memory_viz
     """
 
-    def __init__(self, freq: int, snapshot_dir: str):
+    def __init__(self, freq: int, snapshot_dir: str, mpi_config: Optional[MPIConfig]):
         torch.cuda.memory._record_memory_history(max_entries=_MAX_ENTRIES)
         self.freq = freq
 
-        self.world_info = get_world_info()
+        self.mpi_rank = mpi_config.mpi_rank if mpi_config is not None else 0
         self.logger = get_logger()
         self.step_num = 0
 
@@ -29,15 +32,15 @@ class MemoryProfiler:
         allocated_memory = torch.cuda.memory_allocated()
 
         # Save the memory summary to a file
-        with open(f"{curr_snapshot_dir}/rank{self.world_info.rank}_memory_summary.txt", "w") as summary_file:
+        with open(f"{curr_snapshot_dir}/rank{self.mpi_rank}_memory_summary.txt", "w") as summary_file:
             summary_file.write(summary)
 
         # Save the allocated memory as a text log
-        with open(f"{curr_snapshot_dir}/rank{self.world_info.rank}_memory_allocated.txt", "w") as alloc_file:
+        with open(f"{curr_snapshot_dir}/rank{self.mpi_rank}_memory_allocated.txt", "w") as alloc_file:
             alloc_file.write(f"Allocated memory: {allocated_memory / 1024 ** 2:.2f} MB\n")
 
         # log this information using the logger
-        self.logger.info(f"Memory summary and allocation saved for rank {self.world_info.rank} at step {self.step_num}")
+        self.logger.info(f"Memory summary and allocation saved for rank {self.mpi_rank} at step {self.step_num}")
 
     def step(self):
         self.step_num += 1
@@ -51,7 +54,7 @@ class MemoryProfiler:
             os.makedirs(curr_snapshot_dir, exist_ok=True)
 
         # Save memory snapshot
-        with open(f"{curr_snapshot_dir}/rank{self.world_info.rank}_memory_snapshot.pickle", "wb") as output:
+        with open(f"{curr_snapshot_dir}/rank{self.mpi_rank}_memory_snapshot.pickle", "wb") as output:
             pickle.dump(torch.cuda.memory._snapshot(), output)
 
         # Log memory summary and allocated memory

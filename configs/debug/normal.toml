@@ -5,6 +5,7 @@ wandb = false
 
 [hardware]
 micro_batch_size = 8
+ccl_library = 'pccl'
 
 [train]
 batch_size = 16
@@ -16,3 +17,6 @@ num_decay_steps = 10
 [data]
 fake = true
 
+[pccl]
+ccoip_host = "127.0.0.1:48148"
+peer_group = 0

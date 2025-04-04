@@ -914,6 +914,15 @@ wheels = [
 ]
 
 [[package]]
+name = "ipaddress"
+version = "1.0.23"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b9/9a/3e9da40ea28b8210dd6504d3fe9fe7e013b62bf45902b458d1cdc3c34ed9/ipaddress-1.0.23.tar.gz", hash = "sha256:b7f8e0369580bb4a24d5ba1d7cc29660a4a6987763faf1d8a8046830e020e7e2", size = 32958 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c2/f8/49697181b1651d8347d24c095ce46c7346c37335ddc7d255833e7cde674d/ipaddress-1.0.23-py2.py3-none-any.whl", hash = "sha256:6e0f4a39e66cb5bb9a137b00276a2eff74f93b71dcbdad6f10ff7df9d3557fcc", size = 18159 },
+]
+
+[[package]]
 name = "jinja2"
 version = "3.1.5"
 source = { registry = "https://pypi.org/simple" }
@@ -1745,6 +1754,16 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/92/87/c7a2f51cc62df0495acb0ed2533a7c74cc895e569a1b020ee5f6e9fa4e21/pathvalidate-3.2.3.tar.gz", hash = "sha256:59b5b9278e30382d6d213497623043ebe63f10e29055be4419a9c04c721739cb", size = 61717 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/50/14/c5a0e1a947909810fc4c043b84cac472b70e438148d34f5393be1bac663f/pathvalidate-3.2.3-py3-none-any.whl", hash = "sha256:5eaf0562e345d4b6d0c0239d0f690c3bd84d2a9a3c4c73b99ea667401b27bee1", size = 24130 },
+]
+
+[[package]]
+name = "pccl"
+version = "0.1.0"
+source = { git = "https://github.com/PrimeIntellect-ai/pccl.git?subdirectory=python%2Fframework&rev=main#19acdc799ccbb805c54cbea56fbdace73f6d9b87" }
+dependencies = [
+    { name = "cffi" },
+    { name = "ipaddress" },
+    { name = "pycparser" },
 ]
 
 [[package]]
@@ -3196,6 +3215,7 @@ dependencies = [
     { name = "imageio", extra = ["ffmpeg"] },
     { name = "ninja" },
     { name = "numpy" },
+    { name = "pccl" },
     { name = "psutil" },
     { name = "pyarrow" },
     { name = "pydantic-config" },
@@ -3229,6 +3249,7 @@ requires-dist = [
     { name = "lm-eval", marker = "extra == 'all'" },
     { name = "ninja" },
     { name = "numpy" },
+    { name = "pccl", git = "https://github.com/PrimeIntellect-ai/pccl.git?subdirectory=python%2Fframework&rev=main" },
     { name = "psutil" },
     { name = "pyarrow" },
     { name = "pydantic-config", git = "https://github.com/samsja/pydantic_config.git?rev=b7becc3" },

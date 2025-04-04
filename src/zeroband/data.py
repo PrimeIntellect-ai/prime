@@ -277,8 +277,8 @@ class InterleaveDataset(StatefulDataset):
 
 def make_dataloader(
         tokenizer,
-        world_size: int,
-        rank: int,
+        mpi_world_size: int,
+        mpi_rank: int,
         batch_size: int,
         data_config: DataConfig,
 ) -> StatefulDataLoader:
@@ -286,7 +286,7 @@ def make_dataloader(
         train_dataset = FakeTokenizedDataset(data_config.seq_length, DEBUG_VOCAB_SIZE)
     else:
         train_dataset = load_all_datasets(
-            data_config=data_config, split="train", tokenizer=tokenizer, rank=rank, world_size=world_size
+            data_config=data_config, split="train", tokenizer=tokenizer, mpi_rank=mpi_rank, mpi_world_size=mpi_world_size
         )
 
     dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
@@ -373,19 +373,19 @@ def load_all_datasets(
         data_config: DataConfig,
         split: str,
         tokenizer: PreTrainedTokenizer,
-        rank: int,
-        world_size: int,
+        mpi_rank: int,
+        mpi_world_size: int,
 ) -> InterleaveDataset:
     """Load all datasets and interleave them"""
 
     if data_config.split_by_data_rank and (
             data_config.data_rank is not None and data_config.data_world_size is not None
     ):
-        split_rank = data_config.data_rank * world_size + rank
-        split_world_size = data_config.data_world_size * world_size
+        split_rank = data_config.data_rank * mpi_world_size + mpi_rank
+        split_world_size = data_config.data_world_size * mpi_world_size
     else:
-        split_rank = rank
-        split_world_size = world_size
+        split_rank = mpi_rank
+        split_world_size = mpi_world_size
 
     get_logger().info("Loading Train dataset(s)")
 

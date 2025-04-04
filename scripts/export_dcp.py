@@ -146,7 +146,6 @@ def main(config: ExportConfig):
     hf_config.to_json_file(save_path / "config.json")
 
     # Load checkpoint
-    logger.info("Before load: %s", get_module_signature(model))
     states = {
         "model": ModelWrapper(model),
     }
@@ -155,8 +154,6 @@ def main(config: ExportConfig):
         state_dict=states,
         checkpoint_id=config.ckpt.resume,
     )
-
-    logger.info("After load: %s", get_module_signature(model))
 
     # Convert model to HuggingFace format
     num_shards = int(sum(p.numel() for p in model.parameters()) / 1e9)

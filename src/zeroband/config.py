@@ -83,6 +83,7 @@ class DilocoConfig(BaseConfig):
     outer_lr: float = 0.7
     inner_steps: int
     compression: Compression = Compression.NO
+    delayed_update: bool
 
 
 class MemoryProfilerConfig(BaseConfig):

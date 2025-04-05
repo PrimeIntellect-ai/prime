@@ -107,7 +107,7 @@ def _interpolate_performance(flagship_performance: FlagshipPerformance,
     return adjusted_tflops
 
 
-def get_flops_promised_torch(device: torch.device, precision_mode: PrecisionMode):
+def get_flops_promised_pt(device: torch.device, precision_mode: PrecisionMode):
     assert device.type == 'cuda', 'get_flops_promised_torch cannot be invoked for non-cuda torch device!'
     device_name = torch.cuda.get_device_name(device)
     return get_flops_promised(device_name, precision_mode)

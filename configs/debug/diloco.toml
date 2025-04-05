@@ -12,13 +12,14 @@ batch_size = 32
 
 [train.lr_scheduler]
 num_warmup_steps = 10
-num_decay_steps = 10
+num_decay_steps = 1000
 
 [data]
 fake = true
 
 [diloco]
-inner_steps = 5
+inner_steps = 16
+delayed_update = true
 
 [pccl]
 ccoip_host = "127.0.0.1:48148"

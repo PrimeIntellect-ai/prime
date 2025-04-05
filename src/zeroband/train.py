@@ -1,7 +1,10 @@
 import os
+import threading
 import time
+import zlib
 from dataclasses import asdict
 from logging import Logger
+from tabnanny import check
 from typing import TYPE_CHECKING, Optional, Iterator, List, Dict
 
 import torch
@@ -25,7 +28,7 @@ from zeroband.utils import optim_utils, sharding_utils, act_checkpointing, metri
 
 from zeroband.utils.memory_profiler import MemoryProfiler
 from zeroband.utils.mfu_tracker import FlopCounter, PrecisionMode, \
-    get_flops_promised_torch
+    get_flops_promised_pt
 from zeroband.utils.tokenizer_utils import make_tokenizer
 from zeroband.utils.logger import get_logger
 from zeroband.utils.profiler import Profiler, ProfilerCollection
@@ -95,6 +98,21 @@ def perform_grad_accum_steps(
 
     return total_loss, current_lr
 
+def compute_crc32(tensor: torch.Tensor) -> int:
+    tensor_cpu = tensor.detach().cpu()
+    tensor_contiguous = tensor_cpu.contiguous()
+    tensor_np = tensor_contiguous.numpy()
+    tensor_bytes = tensor_np.tobytes()
+    checksum = zlib.crc32(tensor_bytes)
+    return checksum
+
+
+def print_outer_crc32s(outer_optimizer: torch.optim.Optimizer):
+    for outer_enry in outer_optimizer.state.values():
+        for key, value in outer_enry.items():
+            if isinstance(value, torch.Tensor):
+                checksum = compute_crc32(value)
+                print(f"{key} checksum: {checksum}")
 
 def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], device: torch.device):
     grad_accum_steps = calc_gradient_accumulation_steps(
@@ -164,13 +182,23 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
                 mpi_config=mpi_config
             )
 
+    iter_num = 0
+    if checkpoint_info is not None:
+        iter_num = checkpoint_info.num_performed_outer_steps
+
+    # -------------------------------------------------------------------------
+    # ! Critical PCCL-related training-loop-state tracking variables !
+    iter_num = torch.tensor([iter_num], dtype=torch.int64, device='cpu')
+    # -------------------------------------------------------------------------
+
+
     if config.diloco:
         # create outer parameters
         for name, local_p in model.named_parameters():
             if isinstance(local_p, DTensor):
                 local_p = local_p.to_local()
-            outer_param = outer_parameters[name] = torch.nn.Parameter(local_p.detach().cpu())
-            outer_parameters_list.append(outer_param)
+            outer_p = outer_parameters[name] = torch.nn.Parameter(local_p.detach().cpu())
+            outer_parameters_list.append(outer_p)
 
         with setup_profiler.session("optim_utils::make_optimizer[diloco]"):
             outer_optimizer = optim_utils.make_optimizer(outer_parameters_list, config.train.outer_optimizer)
@@ -181,19 +209,23 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
             outer_optimizer.step()
 
         # Build the shared state that includes:
-        #   - The inner parameters
+        #   - The outer parameters
         #   - The outer optimizer state (e.g. momentum buffers)
         shared_state_dict = {}
 
+        # Reference outer parameters and parameter-specific optimizer state
         name: str
-        param: torch.nn.Parameter  # [ torch.Tensor | DTensor ]
-        for name, param in model.named_parameters():
-            shared_state_dict[name] = param
-
-        # Outer optimizer momentum buffers in shared state
+        outer_p: torch.nn.Parameter  # [ torch.Tensor | DTensor ]
         for name, outer_p in outer_parameters.items():
+            # add outer parameter parameter as shared state
+            shared_state_dict[name] = outer_p
+
+            # add parameter-specific optimizer state
             state = outer_optimizer.state[outer_p]
             optim_utils.add_optimizer_state(shared_state_dict, name, state, type(outer_optimizer))
+
+        # Also make iter_num synchronized shared state
+        shared_state_dict['iter_num'] = iter_num
 
         entries = [
             TensorInfo.from_torch(
@@ -204,10 +236,7 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
             for name, param in shared_state_dict.items()
         ]
         shared_state = SharedState(entries)
-        if checkpoint_info is not None:
-            shared_state.revision = checkpoint_info.num_performed_outer_steps
-        else:
-            shared_state.revision = 0
+        shared_state.revision = 0
 
     if (mpi_config is None or mpi_config.mpi_rank == 0) and config.wandb:
         wandb.init(
@@ -245,50 +274,23 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
     local_world_size: int = communicator.get_attribute(Attribute.LOCAL_WORLD_SIZE)
     # -------------------------------------------------------------------------
 
-    timing_events = []
-    while True:
-        train_profiler = Profiler()
 
-        if num_inner_steps > 1:
-            # if we don't use diloco we don't print the outer step logs
-            logger.info(f"outer_step step: {training_progress.outer_step}")
+    # -------------------------------------------------------------------------
+    # ! Critical PCCL-related state for async DiLoCo
+    all_reduce_thread: Optional[threading.Thread] = None
+    last_pseudo_grads: List[torch.Tensor] = []
+    # -------------------------------------------------------------------------
 
-        global_world_size = communicator.get_attribute(Attribute.GLOBAL_WORLD_SIZE)
 
-        # 1) Possibly update topology / wait for enough peers
-        mpi_ranks_pending = False
-        with train_profiler.session("pccl::update_topology"):
-            if mpi_config is not None:
-                mpi_ranks_pending = global_world_size < mpi_config.mpi_world_size
-
-            if local_iter_num > 1 or mpi_ranks_pending or local_world_size == 1:
-                while True:
-                    try:
-                        communicator.update_topology()
-                        break
-                    except PCCLError as e:
-                        print(f"update_topology() failed => {e}, retrying...")
-                        time.sleep(1)
-
-        if mpi_ranks_pending:
-            print("Not all MPI ranks have joined...")
-            time.sleep(1)
-            continue
-
-        # TODO: Make minimum num pccl peers configurable
-        # local_world_size = communicator.get_attribute(Attribute.LOCAL_WORLD_SIZE)
-        # if local_world_size < 2:
-        #    print("Waiting for more workers to join...")
-        #    time.sleep(1)
-        #    continue
-
+    def run_shared_state_sync(late_joiner: bool = False):
+        nonlocal num_syncs
         # 3) Sync shared state => ensures we have the same aggregator (outer) parameters
         with train_profiler.session("pccl::sync_shared_state"):
             sync_info = communicator.sync_shared_state(shared_state)
             shared_state.revision += 1
             print(f"sync_info tx_bytes: {sync_info.tx_bytes}, rx_bytes: {sync_info.rx_bytes}")
             num_syncs += 1
-            if num_syncs > 1:
+            if num_syncs > 1 and not late_joiner:
                 assert sync_info.rx_bytes == 0, "Shared state drifted unexpectedly in peers!"
 
             # initialize inner state on first sync
@@ -303,6 +305,70 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
                         if isinstance(inner_tensor, DTensor):
                             inner_tensor = inner_tensor.to_local()
                         inner_tensor.copy_(outer_param.data)
+
+    def sync_inner_with_outer_state():
+        with torch.no_grad():
+            inner_param: torch.nn.Parameter  # [ torch.Tensor | DTensor ]
+            outer_param: torch.nn.Parameter  # [ torch.Tensor ]
+            for inner_param, outer_param in zip(model.parameters(), outer_parameters_list):
+                param_tensor = inner_param.data
+                if isinstance(param_tensor, DTensor):
+                    param_tensor = param_tensor.to_local()
+                param_tensor.copy_(outer_param, non_blocking=True)
+
+    timing_events = []
+    while True:
+        local_iter_num += 1
+
+        train_profiler = Profiler()
+
+        if num_inner_steps > 1:
+            # if we don't use diloco we don't print the outer step logs
+            logger.info(f"outer_step step: {training_progress.outer_step}")
+
+        global_world_size = communicator.get_attribute(Attribute.GLOBAL_WORLD_SIZE)
+
+        topology_updated = False
+        if local_iter_num == 1:
+            # Assume the topology was updated in the first iteration because we just joined and got accepted
+            topology_updated = True
+
+        # Possibly update topology / wait for enough peers
+        mpi_ranks_pending = False
+        with train_profiler.session("pccl::update_topology"):
+            if mpi_config is not None:
+                mpi_ranks_pending = global_world_size < mpi_config.mpi_world_size
+
+            if local_iter_num > 1 or mpi_ranks_pending or local_world_size == 1:
+                while True:
+                    try:
+                        if communicator.are_peers_pending():
+                            logger.info(
+                                "Join-Candidate peers pending; awaiting concurrent collective operations to accept new peers...")
+                            if all_reduce_thread is not None:
+                                all_reduce_thread.join()
+                            communicator.update_topology()
+                            topology_updated = True
+                        break
+                    except PCCLError as e:
+                        logger.info(f"Updating PCCL topology failed {e}, retrying...")
+                        time.sleep(1)
+
+        if mpi_ranks_pending:
+            print("Not all MPI ranks have joined...")
+            time.sleep(1)
+            continue
+
+        # TODO: Make minimum num pccl peers configurable
+        local_world_size = communicator.get_attribute(Attribute.LOCAL_WORLD_SIZE)
+        if local_world_size < 2:
+            print("Waiting for more workers to join...")
+            time.sleep(1)
+            continue
+
+        if topology_updated:
+            run_shared_state_sync()
+
 
         for _inner_step in range(num_inner_steps):
             train_profiler.start_session("inner_step")
@@ -340,7 +406,7 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
             with train_profiler.session("inner_optimizer.step"):
                 flop_counter.track_optimizer_step(inner_optimizer, num_param_scalars)
                 inner_optimizer.step()
-            inner_optimizer.zero_grad()
+                inner_optimizer.zero_grad(set_to_none=False)
 
             end_event.record()
             timing_events.append((start_event, end_event))
@@ -369,16 +435,10 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
 
             if config.diloco is None:
                 training_progress.total_tokens += new_tokens
+            else:
+                training_progress.total_tokens += new_tokens * local_world_size
 
-            # else:
-            # we count the total tokens with respect to all diloco workers
-            # might need to tweak this as some worker might fail to join the all reduce later
-
-            # TODO MIKE use pccl instead of elastic_device_mesh
-
-            # training_progress.total_tokens += new_tokens * elastic_device_mesh.global_pg.size()
-
-            tflops_max = get_flops_promised_torch(device, PrecisionMode.PRECISION_BF16)
+            tflops_max = get_flops_promised_pt(device, PrecisionMode.PRECISION_BF16)
 
             metrics = {
                 "loss/train": loss_batch.item(),
@@ -411,7 +471,7 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
             if (mpi_config is None or mpi_config.mpi_rank == 0) and config.wandb:
                 wandb.log(metrics)
 
-            log = metrics_utils.build_metrics_string(metrics, whitelist_keys={'step', 'loss', 'mfu', 'tflops',
+            log = metrics_utils.build_metrics_string(metrics, whitelist_keys={'loss/train', 'step', 'loss', 'mfu', 'tflops',
                                                                               'tokens_per_second', 'tflops_max'})
             logger.info(log)
 
@@ -434,45 +494,108 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
 
         if config.diloco is not None:
             with train_profiler.session("outer_step"):
-                outer_grads = []
+                # await previous all reduce, if one exists
+                can_outer_step = False
+                if all_reduce_thread is not None:
+                    all_reduce_thread.join()
+                    can_outer_step = True
+
+                    # populate outer param grads with last pseudo-gradients set by thread
+                    for pseudo_grad, outer_p in zip(last_pseudo_grads, outer_parameters_list):
+                        outer_p.grad = pseudo_grad
+
+                # Compute current pseudo grads as difference between outer and inner state.
+                # Inner state is advanced by inner steps, outer state is unchanged
+                outer_grads: List[torch.Tensor] = []
                 param: torch.nn.Parameter  # [ torch.Tensor | DTensor ]
                 outer_p: torch.nn.Parameter  # [ torch.Tensor ]
                 for param, outer_p in zip(model.parameters(), outer_parameters_list):
-                    outer_p_data: torch.Tensor = outer_p.data
                     param_data: torch.Tensor | DTensor = param.data
+                    outer_p_data: torch.Tensor = outer_p.data
                     if isinstance(param_data, DTensor):
                         param_data = param_data.to_local()
                     outer_p.grad = outer_p_data - param_data.to('cpu')
                     outer_grads.append(outer_p.grad)
 
-                with train_profiler.session("all_reduce_multiple_with_retry"):
-                    start_time = time.time()
+                if can_outer_step:
+                    outer_optimizer.step()  # Note that there is no zero-grad because grads get re-instantiated every step
 
-                    all_reduce_success = pccl_utils.all_reduce_multiple_with_retry(
-                        communicator,
-                        outer_grads,
-                        ReduceOp.AVG
-                    )
+                    print_outer_crc32s(outer_optimizer)
 
-                    end_time = time.time()
-                    print(f"All-Reduce took {end_time - start_time} seconds")
-                    if not all_reduce_success:
-                        print("All peers left except me... continuing alone.")
+                    # Copy aggregator result into local model
+                    sync_inner_with_outer_state()
 
-                outer_optimizer.step()
-                outer_optimizer.zero_grad()
+                    if topology_updated and iter_num > 0:
+                        # If the topology was updated and iter_num is > 0
+                        # then a new peer just joined the run with needs to be properly inserted into
+                        # the N-1 async pipeline.
+                        # To do this we first initially sync the weights such that the peer can
+                        # start computing the current step like the pre-existing peers, however
+                        # the newly joined peer cannot be "retroactively inserted" into
+                        # the N-1 async reduce that was started last step.
+                        # So it needs to "eavesdrop" on the result that the other peers are about to compute
+                        # with a second shared state re-transmission.
+                        # Hence, both pre-existing peers and newly joined peer(s) have to perform shared state
+                        # synchronization.
+                        # The pre-existing peers first apply the outer optimizer and THEN call run_shared_state_sync
+                        # because the new peer(s) need to obtain the shared state as it is after the all reduce
+                        # is applied that they were not part of.
+                        logger.info(
+                            "Topology updated mid run; re-running shared state synchronization to properly insert new peer...")
+                        run_shared_state_sync()
+                else:
+                    if topology_updated and iter_num > 0:
+                        # If the topology was updated and iter_num is > 0 and can_outer_step is False,
+                        # then WE are the joining peer to an ongoing run.
+                        # In this case, we have to obtain the shared state from the pre-existing peers.
+                        # We obtain the shared state first and then simply copy it into the inner model afterwards.
+                        # Also: late_joiner here means that we tolerate actually receiving bytes here despite that this is the second sync that was performed.
+                        # This is necessary for the pipeline insertion algorithm to function
+                        run_shared_state_sync(late_joiner=True)
 
-                # Copy aggregator result into local model
-                with torch.no_grad():
-                    param: torch.nn.Parameter  # [ torch.Tensor | DTensor ]
-                    outer_p: torch.nn.Parameter  # [ torch.Tensor ]
-                    for param, outer_p in zip(model.parameters(), outer_parameters_list):
-                        param_tensor = param.data
-                        if isinstance(param_tensor, DTensor):
-                            param_tensor = param_tensor.to_local()
-                        param_tensor.copy_(outer_p, non_blocking=True)
+                    # This is the boostrap for the 1-step behind asynchronous training step.
+                    # Reset the inner state here to be equal to the unmodified outer state.
+                    # This essentially resets the model back to initialization state.
+                    # Why do this?
+                    # a) because the next shared state sync needs to see all outer states as equal.
+                    # We haven't communicated yet, so we have by definition diverged.
+                    # But we will hide this for now.
+                    # b) what we are accomplishing here is as follows:
+                    # We know that the pseudo-grads constitute a valid update to the weights
+                    # to decrease the loss when applied to the initial model state.
+                    # These changes will be applied in the next loop iteration.
+                    # We will hide the communication with compute of the next iteration.
+                    # Afterward, we will apply said delta to the still initial weights.
+                    # At this stage, we haven't done anything questionable at all.
+                    # We have applied a valid update to exactly the base weights they were grads for.
+                    # However, now in the next outer step, the reduce of the pseudo-gradients of step two is awaited
+                    # and these are updates from initial weights also - just derived from different input data.
+                    # We have already moved on from the initial weights
+                    # at this point. And yet, we still apply them. This is the 1-step behind assertion
+                    # that we make that it is reasonable to still apply these gradients, even though they
+                    # are slightly outdated. From then onwards, outer step updates are always one step behind.
+                    sync_inner_with_outer_state()
 
-        training_progress.outer_step += 1
+            def run_all_reduce():
+                nonlocal last_pseudo_grads
+                last_pseudo_grads = outer_grads.copy()
+                start_time = time.time()
+                pccl_utils.all_reduce_multiple_with_retry(
+                    communicator,
+                    last_pseudo_grads,
+                    ReduceOp.AVG
+                )
+                end_time = time.time()
+                print(f"All-Reduce took {end_time - start_time} seconds")
+
+            logger.debug("Launching all reduce...")
+            all_reduce_thread = threading.Thread(target=run_all_reduce, name="ReduceThread")
+
+            # NOTE: no zero-grad on outer grads, as they continue to get referenced by this thread.
+            all_reduce_thread.start()
+
+        iter_num += 1
+        training_progress.outer_step = iter_num.item()
 
         if (
                 config.ckpt.interval is not None
@@ -515,12 +638,13 @@ def main():
     # However, in development, we want to know that we broke torch compile
     torch._dynamo.config.suppress_errors = "ZERO_BAND_DEV" not in os.environ  # type: ignore
     torch.set_float32_matmul_precision("high")
-    torch.manual_seed(42)
 
     mpi_config: Optional[MPIConfig] = ccl_utils.make_mpi_config(
         mpi_rank=os.getenv("RANK"),
         mpi_world_size=os.getenv("WORLD_SIZE")
     )  # may return None
+
+    # Don't set torch seed; Random seed is necessary to prevent unexpected equivalence of rank state
 
     config = Config(**parse_argv())  # type: ignore
     logger = get_logger(config, mpi_config)
@@ -529,7 +653,6 @@ def main():
 
     num_total_gpus = torch.cuda.device_count()
     logger.info(f"Using gpu ordinal:{gpu_ordinal}/num_total:{num_total_gpus}")
-
 
     torch.cuda.set_device(gpu_ordinal)
     device = torch.device(f'cuda:{torch.cuda.current_device()}')

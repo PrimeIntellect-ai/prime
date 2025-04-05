@@ -6,14 +6,14 @@ from typing import TYPE_CHECKING, Optional, Iterator, List, Dict
 
 import torch
 import torch.distributed as dist
-from pccl import SharedState, TensorInfo, Attribute, Communicator, PCCLError
+from pccl import SharedState, TensorInfo, Attribute, Communicator, PCCLError, ReduceOp
 
 from torch.distributed import destroy_process_group
 from torch.distributed.tensor import DTensor
 
 import wandb
 
-from zeroband.ccl import ccl_utils
+from zeroband.ccl import ccl_utils, pccl_utils
 from zeroband.ccl.ccl_utils import MPIConfig
 from zeroband.checkpoint import TrainingProgress, load_checkpoint, save_checkpoint, CheckpointInfo
 from zeroband.config import Config
@@ -167,6 +167,8 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
     if config.diloco:
         # create outer parameters
         for name, local_p in model.named_parameters():
+            if isinstance(local_p, DTensor):
+                local_p = local_p.to_local()
             outer_param = outer_parameters[name] = torch.nn.Parameter(local_p.detach().cpu())
             outer_parameters_list.append(outer_param)
 
@@ -279,6 +281,28 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
         #    print("Waiting for more workers to join...")
         #    time.sleep(1)
         #    continue
+
+        # 3) Sync shared state => ensures we have the same aggregator (outer) parameters
+        with train_profiler.session("pccl::sync_shared_state"):
+            sync_info = communicator.sync_shared_state(shared_state)
+            shared_state.revision += 1
+            print(f"sync_info tx_bytes: {sync_info.tx_bytes}, rx_bytes: {sync_info.rx_bytes}")
+            num_syncs += 1
+            if num_syncs > 1:
+                assert sync_info.rx_bytes == 0, "Shared state drifted unexpectedly in peers!"
+
+            # initialize inner state on first sync
+            if num_syncs == 1:
+                print("Initializing inner state...")
+                with torch.no_grad():
+                    outer_param: torch.nn.Parameter  # [ torch.Tensor ]
+                    inner_param: torch.nn.Parameter  # [ torch.Tensor | DTensor ]
+                    for outer_param, inner_param in zip(outer_parameters_list, model.parameters()):
+                        # noinspection PyTypeChecker
+                        inner_tensor: torch.Tensor | DTensor = inner_param.data
+                        if isinstance(inner_tensor, DTensor):
+                            inner_tensor = inner_tensor.to_local()
+                        inner_tensor.copy_(outer_param.data)
 
         for _inner_step in range(num_inner_steps):
             train_profiler.start_session("inner_step")
@@ -409,8 +433,44 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
                 train_profiler_collection.render_as_video(f'profiler_video_{training_progress.step}.mp4', fps=10)
 
         if config.diloco is not None:
-            ...
-            # diloco.step(model=model, flag=str(training_progress.outer_step))
+            with train_profiler.session("outer_step"):
+                outer_grads = []
+                param: torch.nn.Parameter  # [ torch.Tensor | DTensor ]
+                outer_p: torch.nn.Parameter  # [ torch.Tensor ]
+                for param, outer_p in zip(model.parameters(), outer_parameters_list):
+                    outer_p_data: torch.Tensor = outer_p.data
+                    param_data: torch.Tensor | DTensor = param.data
+                    if isinstance(param_data, DTensor):
+                        param_data = param_data.to_local()
+                    outer_p.grad = outer_p_data - param_data.to('cpu')
+                    outer_grads.append(outer_p.grad)
+
+                with train_profiler.session("all_reduce_multiple_with_retry"):
+                    start_time = time.time()
+
+                    all_reduce_success = pccl_utils.all_reduce_multiple_with_retry(
+                        communicator,
+                        outer_grads,
+                        ReduceOp.AVG
+                    )
+
+                    end_time = time.time()
+                    print(f"All-Reduce took {end_time - start_time} seconds")
+                    if not all_reduce_success:
+                        print("All peers left except me... continuing alone.")
+
+                outer_optimizer.step()
+                outer_optimizer.zero_grad()
+
+                # Copy aggregator result into local model
+                with torch.no_grad():
+                    param: torch.nn.Parameter  # [ torch.Tensor | DTensor ]
+                    outer_p: torch.nn.Parameter  # [ torch.Tensor ]
+                    for param, outer_p in zip(model.parameters(), outer_parameters_list):
+                        param_tensor = param.data
+                        if isinstance(param_tensor, DTensor):
+                            param_tensor = param_tensor.to_local()
+                        param_tensor.copy_(outer_p, non_blocking=True)
 
         training_progress.outer_step += 1
 

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional, Iterator, List, Dict
 
 import torch
 import torch.distributed as dist
-from pccl import SharedState, TensorInfo
+from pccl import SharedState, TensorInfo, Attribute, Communicator, PCCLError
 
 from torch.distributed import destroy_process_group
 from torch.distributed.tensor import DTensor
@@ -182,6 +182,9 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
         #   - The inner parameters
         #   - The outer optimizer state (e.g. momentum buffers)
         shared_state_dict = {}
+
+        name: str
+        param: torch.nn.Parameter  # [ torch.Tensor | DTensor ]
         for name, param in model.named_parameters():
             shared_state_dict[name] = param
 
@@ -191,8 +194,12 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
             optim_utils.add_optimizer_state(shared_state_dict, name, state, type(outer_optimizer))
 
         entries = [
-            TensorInfo.from_torch(tensor, name, allow_content_inequality=False)
-            for name, tensor in shared_state_dict.items()
+            TensorInfo.from_torch(
+                param.data.to_local() if isinstance(param.data, DTensor) else param.data,
+                name,
+                allow_content_inequality=False
+            )
+            for name, param in shared_state_dict.items()
         ]
         shared_state = SharedState(entries)
         if checkpoint_info is not None:
@@ -214,17 +221,27 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
     memory_profiler: Optional[MemoryProfiler] = None
     if config.hardware.memory_profiler is not None:
         memory_profiler = MemoryProfiler(config.hardware.memory_profiler.freq,
-                                         config.hardware.memory_profiler.snapshot_dir)
+                                         config.hardware.memory_profiler.snapshot_dir,
+                                         mpi_config)
 
     num_inner_steps = config.diloco.inner_steps if config.diloco is not None else 1
 
-    # initialize ccl library
-    ccl_utils.init_ccl_library(config, mpi_config)
+    # initialize PCCL
+    communicator = Communicator(config.pccl.ccoip_host, mpi_config.mpi_rank if mpi_config is not None else 0)
+    communicator.connect(n_attempts=15)
+    print("Connected to master via PCCL")
 
     if PRIME_SETUP_PROFILER_PRINT_TIMINGS:
         setup_profiler.print_report()
 
     train_profiler_collection = ProfilerCollection()
+
+    # -------------------------------------------------------------------------
+    # ! Critical PCCL-related training-loop-state tracking variables !
+    local_iter_num = 0
+    num_syncs = 0
+    local_world_size: int = communicator.get_attribute(Attribute.LOCAL_WORLD_SIZE)
+    # -------------------------------------------------------------------------
 
     timing_events = []
     while True:
@@ -233,6 +250,35 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
         if num_inner_steps > 1:
             # if we don't use diloco we don't print the outer step logs
             logger.info(f"outer_step step: {training_progress.outer_step}")
+
+        global_world_size = communicator.get_attribute(Attribute.GLOBAL_WORLD_SIZE)
+
+        # 1) Possibly update topology / wait for enough peers
+        mpi_ranks_pending = False
+        with train_profiler.session("pccl::update_topology"):
+            if mpi_config is not None:
+                mpi_ranks_pending = global_world_size < mpi_config.mpi_world_size
+
+            if local_iter_num > 1 or mpi_ranks_pending or local_world_size == 1:
+                while True:
+                    try:
+                        communicator.update_topology()
+                        break
+                    except PCCLError as e:
+                        print(f"update_topology() failed => {e}, retrying...")
+                        time.sleep(1)
+
+        if mpi_ranks_pending:
+            print("Not all MPI ranks have joined...")
+            time.sleep(1)
+            continue
+
+        # TODO: Make minimum num pccl peers configurable
+        # local_world_size = communicator.get_attribute(Attribute.LOCAL_WORLD_SIZE)
+        # if local_world_size < 2:
+        #    print("Waiting for more workers to join...")
+        #    time.sleep(1)
+        #    continue
 
         for _inner_step in range(num_inner_steps):
             train_profiler.start_session("inner_step")
@@ -262,7 +308,8 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
                 # compute pow, plus (assert clip is rare, no 3N)
                 flop_counter.track_backward_flops(2 * num_param_scalars)
 
-                grad_norm: torch.nn.Tensor | DTensor = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # type: ignore
+                grad_norm: torch.Tensor | DTensor = torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                                                                   1.0)  # type: ignore
                 if isinstance(grad_norm, DTensor):
                     grad_norm = grad_norm.full_tensor()  # type: ignore
 
@@ -335,9 +382,7 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
             })
 
             if config.diloco is not None:
-                # TODO MIKE use pccl instead of elastic_device_mesh
-                # metrics["num_peers"] = elastic_device_mesh.global_pg.size()
-                metrics["num_peers"] = 1
+                metrics["num_peers"] = communicator.get_attribute(Attribute.LOCAL_WORLD_SIZE)
 
             if (mpi_config is None or mpi_config.mpi_rank == 0) and config.wandb:
                 wandb.log(metrics)
@@ -413,17 +458,22 @@ def main():
     torch.manual_seed(42)
 
     mpi_config: Optional[MPIConfig] = ccl_utils.make_mpi_config(
-        mpi_rank=os.getenv("MPI_RANK"),
-        mpi_world_size=os.getenv("MPI_WORLD_SIZE")
+        mpi_rank=os.getenv("RANK"),
+        mpi_world_size=os.getenv("WORLD_SIZE")
     )  # may return None
 
     config = Config(**parse_argv())  # type: ignore
     logger = get_logger(config, mpi_config)
 
-    gpu_ordinal = int(os.getenv("GPU_ORDINAL", "0"))
+    gpu_ordinal = int(os.getenv("GPU_ORDINAL", os.getenv("RANK", "0")))
+
+    num_total_gpus = torch.cuda.device_count()
+    logger.info(f"Using gpu ordinal:{gpu_ordinal}/num_total:{num_total_gpus}")
+
 
     torch.cuda.set_device(gpu_ordinal)
     device = torch.device(f'cuda:{torch.cuda.current_device()}')
+    logger.info(f"Using device: {torch.cuda.get_device_name(device)}")
 
     train(logger, config, mpi_config, device)
 

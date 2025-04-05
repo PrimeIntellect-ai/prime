@@ -36,7 +36,7 @@ def get_logger(config: Config | None = None, mpi_config: MPIConfig | None = None
     if mpi_rank == 0:
         logger.setLevel(level=getattr(logging, log_level, logging.INFO))
     else:
-        if (not config) or config.log_all_rank:
+        if (not config) or config.log_all_ranks:
             logger.setLevel(level=getattr(logging, log_level, logging.INFO))
         else:
             logger.setLevel(level=logging.CRITICAL)  # Disable logging for non-zero ranks

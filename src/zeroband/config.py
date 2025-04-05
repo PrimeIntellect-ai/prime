@@ -115,8 +115,6 @@ class HardwareConfig(BaseConfig):
 
     attn_fn: AttnFnType = "flex"
 
-    ccl_library: CclLibType = "pccl"
-
 
 class MonitorConfig(BaseConfig):
     log_flush_interval: int = 10
@@ -137,7 +135,6 @@ class CkptConfig(BaseConfig):
 
 class PcclConfig(BaseConfig):
     ccoip_host: str
-    peer_group: int = 0
 
 
 class Config(BaseConfig):
@@ -154,7 +151,7 @@ class Config(BaseConfig):
     metric_logger_type: Literal["wandb", "dummy"] = "wandb"
     wandb_resume: bool = False
     log_level: Literal["NOTSET", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
-    log_all_rank: bool = False
+    log_all_ranks: bool = False
 
     # sub config
     diloco: DilocoConfig | None = None
@@ -174,7 +171,5 @@ class Config(BaseConfig):
             assert self.ckpt.interval % self.diloco.inner_steps == 0, (
                 "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
             )
-
-        if self.hardware.ccl_library == 'pccl':
-            assert self.pccl is not None, "[pccl] must be configured if 'pccl' is used as ccl library"
+        assert self.pccl is not None, "[pccl] must be configured!"
         return self

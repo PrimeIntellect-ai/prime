@@ -1,12 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from mpmath.libmp import mpi_mid
-
-from zeroband.ccl.nccl_ccllib import init_nccl
-from zeroband.ccl.pccl_ccllib import init_pccl
-from zeroband.config import Config
-
 
 @dataclass
 class MPIConfig:
@@ -19,17 +13,6 @@ class MPIConfig:
     """
     mpi_rank: int
     mpi_world_size: int
-
-
-def init_ccl_library(config: Config, mpi_config: Optional[MPIConfig]):
-    ccl_library = config.hardware.ccl_library
-    if ccl_library == "nccl":
-        if mpi_config is None:
-            raise RuntimeError("Cannot initialize with ccl library 'nccl' when mpi config is not supplied!")
-        init_nccl(mpi_config.mpi_rank, mpi_config.mpi_world_size)
-    elif ccl_library == "pccl":
-        init_pccl(config)
-
 
 def make_mpi_config(mpi_rank: Optional[str], mpi_world_size: Optional[str]) -> Optional[MPIConfig]:
     """

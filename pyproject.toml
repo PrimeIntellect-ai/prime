@@ -11,6 +11,7 @@ dependencies = [
     "transformers>=4.44.2",
     "datasets>=3.0.0",
     "pydantic_config @ git+https://github.com/samsja/pydantic_config.git@b7becc3",
+    "tomili",
     "torchdata>=0.8.0",
     "fsspec[gcs]>=2024.3.1",
     "ninja",

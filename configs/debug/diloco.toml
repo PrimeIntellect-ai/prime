@@ -2,13 +2,13 @@ model_name = "debugmodel"
 model_type = "llama2"
 
 wandb = false
+log_all_ranks = true
 
 [hardware]
 micro_batch_size = 8
-ccl_library = 'pccl'
 
 [train]
-batch_size = 16
+batch_size = 32
 
 [train.lr_scheduler]
 num_warmup_steps = 10
@@ -22,4 +22,3 @@ inner_steps = 5
 
 [pccl]
 ccoip_host = "127.0.0.1:48148"
-peer_group = 0

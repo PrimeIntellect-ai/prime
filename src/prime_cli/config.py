@@ -28,7 +28,6 @@ class Config:
         else:
             self.config_dir = Path.home() / ".prime"
 
-
         self.config_file = self.config_dir / "config.json"
         self._ensure_config_dir()
         self._load_config()

@@ -101,23 +101,6 @@ def perform_grad_accum_steps(
     return total_loss, current_lr
 
 
-def compute_crc32(tensor: torch.Tensor) -> int:
-    tensor_cpu = tensor.detach().cpu()
-    tensor_contiguous = tensor_cpu.contiguous()
-    tensor_np = tensor_contiguous.numpy()
-    tensor_bytes = tensor_np.tobytes()
-    checksum = zlib.crc32(tensor_bytes)
-    return checksum
-
-
-def print_outer_crc32s(outer_optimizer: torch.optim.Optimizer):
-    for outer_enry in outer_optimizer.state.values():
-        for key, value in outer_enry.items():
-            if isinstance(value, torch.Tensor):
-                checksum = compute_crc32(value)
-                print(f"{key} checksum: {checksum}")
-
-
 def run_inner_steps(
         model: torch.nn.Module,
         train_dataloader_iterator: iter,
@@ -371,6 +354,85 @@ def run_async_outer_step(
     return all_reduce_thread
 
 
+def run_sync_outer_step(
+        model: torch.nn.Module,
+        last_pseudo_grads: List[torch.Tensor],
+        outer_parameters_list: List[torch.nn.Parameter],
+        outer_optimizer: torch.optim.Optimizer,
+        shared_state: SharedState,
+
+        all_reduce_thread: threading.Thread,
+
+        communicator: Communicator,
+        train_profiler: Profiler,
+        logger: Logger,
+
+        topology_updated: bool,
+        iter_num: int,
+        num_syncs: IntRef
+):
+    # Compute current pseudo grads as difference between outer and inner state.
+    # Inner state is advanced by inner steps, outer state is unchanged
+    outer_grads: List[torch.Tensor] = []
+    param: torch.nn.Parameter  # [ torch.Tensor | DTensor ]
+    outer_p: torch.nn.Parameter  # [ torch.Tensor ]
+    for param, outer_p in zip(model.parameters(), outer_parameters_list):
+        param_data: torch.Tensor | DTensor = param.data
+        outer_p_data: torch.Tensor = outer_p.data
+        if isinstance(param_data, DTensor):
+            param_data = param_data.to_local()
+        outer_p.grad = outer_p_data - param_data.to('cpu')
+        outer_grads.append(outer_p.grad)
+
+    with train_profiler.session("all_reduce_multiple_with_retry"):
+        start_time = time.time()
+
+        all_reduce_success = pccl_utils.all_reduce_multiple_with_retry(
+            communicator,
+            outer_grads,
+            ReduceOp.AVG
+        )
+
+        end_time = time.time()
+        print(f"All-Reduce took {end_time - start_time} seconds")
+        if not all_reduce_success:
+            print("All peers left except me... continuing alone.")
+
+    outer_optimizer.step()
+    outer_optimizer.zero_grad()
+
+    sync_inner_with_outer_state(model, outer_parameters_list)
+
+
+def run_outer_step(
+        model: torch.nn.Module,
+        last_pseudo_grads: List[torch.Tensor],
+        outer_parameters_list: List[torch.nn.Parameter],
+        outer_optimizer: torch.optim.Optimizer,
+        shared_state: SharedState,
+
+        all_reduce_thread: threading.Thread,
+
+        communicator: Communicator,
+        train_profiler: Profiler,
+        logger: Logger,
+
+        topology_updated: bool,
+        iter_num: int,
+        num_syncs: IntRef,
+        delayed_update: bool
+) -> Optional[threading.Thread]:
+    if delayed_update:
+        return run_async_outer_step(model, last_pseudo_grads, outer_parameters_list, outer_optimizer, shared_state,
+                                    all_reduce_thread, communicator, train_profiler, logger, topology_updated, iter_num,
+                                    num_syncs)
+    else:
+        run_sync_outer_step(model, last_pseudo_grads, outer_parameters_list, outer_optimizer, shared_state,
+                            all_reduce_thread, communicator, train_profiler, logger, topology_updated, iter_num,
+                            num_syncs)
+        return None
+
+
 def sync_inner_with_outer_state(model: torch.nn.Module, outer_parameters_list: List[torch.nn.Parameter]):
     with torch.no_grad():
         inner_param: torch.nn.Parameter  # [ torch.Tensor | DTensor ]
@@ -409,7 +471,6 @@ def run_shared_state_sync(
 def make_shared_state(outer_parameters: Dict[str, torch.nn.Parameter],
                       outer_optimizer: Optimizer,
                       iter_num: torch.Tensor):
-
     # Build the shared state that includes:
     #   - The outer parameters
     #   - The outer optimizer state (e.g. momentum buffers)
@@ -575,9 +636,9 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
 
     # -------------------------------------------------------------------------
     # ! Critical PCCL-related state for async DiLoCo
+    # None / empty if async DiLoCo is not used
     all_reduce_thread: Optional[threading.Thread] = None
     last_pseudo_grads: List[torch.Tensor] = []
-
     # -------------------------------------------------------------------------
 
     timing_events = []
@@ -660,9 +721,10 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
 
         if config.diloco is not None:
             with train_profiler.session("outer_step"):
-                all_reduce_thread = run_async_outer_step(model, last_pseudo_grads, outer_parameters_list,
-                                                         outer_optimizer, shared_state, all_reduce_thread, communicator,
-                                                         train_profiler, logger, topology_updated, iter_num, num_syncs)
+                all_reduce_thread = run_outer_step(model, last_pseudo_grads, outer_parameters_list,
+                                                   outer_optimizer, shared_state, all_reduce_thread, communicator,
+                                                   train_profiler, logger, topology_updated, iter_num, num_syncs,
+                                                   config.diloco.delayed_update)
 
         iter_num += 1
         training_progress.outer_step = iter_num.item()

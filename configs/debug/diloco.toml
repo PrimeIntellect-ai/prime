@@ -19,7 +19,7 @@ fake = true
 
 [diloco]
 inner_steps = 16
-delayed_update = true
+delayed_update = false
 
 [pccl]
 ccoip_host = "127.0.0.1:48148"

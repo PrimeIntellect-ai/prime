@@ -11,12 +11,13 @@ class Compression(Enum):
 
 
 class DataConfig(BaseConfig):
-    dataset_name_or_paths: str = "datasets/fineweb-edu"
+    dataset_name_or_paths: str | None = None
     val_dataset_name_or_paths: str | None = None
     sequence_packing: bool = True
     seq_length: int = 1024
+    token_bit_size: int = 16
     fake: bool = False
-    num_workers: int = 4
+    num_workers: int = 1
     max_train_samples: int | None = None
     max_eval_samples: int | None = None
     dataset_ratio: str | None = None
@@ -25,6 +26,30 @@ class DataConfig(BaseConfig):
     reverse_data_files: bool = False
     split_by_data_rank: bool = True
 
+    @model_validator(mode="after")
+    def data_config_valid(self):
+        assert self.fake == (
+                    self.dataset_name_or_paths is None), "Data must be fake if 'dataset_name_or_paths' is not set"
+
+        if self.dataset_ratio is None:
+            return self
+
+        assert self.dataset_name_or_paths is not None, "'dataset_name_or_paths' must be set if 'dataset_ratio' is set"
+        dataset_files = self.dataset_name_or_paths.split(',')
+        ratio_texts = self.dataset_ratio.split(":")
+        assert len(dataset_files) == len(
+            ratio_texts), "Number of files specified in 'dataset_name_or_paths' must be the same as number of ratios specified in 'dataset_ratio'"
+
+        ratios = []
+        ratio_sum = 0
+        for ratio_text in ratio_texts:
+            assert ratio_text.isdigit(), "Ratio must be an integer"
+            ratio = int(ratio_text)
+            ratios.append(ratio)
+            ratio_sum += ratio
+
+        assert ratio_sum == 100, "Dataset ratios must sum to 100%"
+        return self
 
 class SGDConfig(BaseConfig):
     type: Literal["sgd"] = "sgd"
@@ -156,8 +181,8 @@ class Config(BaseConfig):
 
     # sub config
     diloco: DilocoConfig | None = None
-    data: DataConfig = DataConfig()
-    train: TrainConfig = TrainConfig()
+    data: DataConfig
+    train: TrainConfig
     hardware: HardwareConfig
     monitor: MonitorConfig | None = None
     pccl: PcclConfig | None = None

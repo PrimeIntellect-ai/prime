@@ -1,11 +1,12 @@
 model_name = "debugmodel"
-model_type = "llama2"
+model_type = "llama3"
 
 wandb = false
 log_all_ranks = true
 
 [hardware]
 micro_batch_size = 8
+torch_compile = false
 
 [train]
 batch_size = 32
@@ -15,7 +16,9 @@ num_warmup_steps = 10
 num_decay_steps = 1000
 
 [data]
-fake = true
+dataset_name_or_paths = '/home/mike/IntelliJProjects/dataproctest/working_dir/train_0.bin,/home/mike/IntelliJProjects/dataproctest/working_dir/train_1.bin'
+dataset_ratio = "90:10"
+token_bit_size = 17
 
 [diloco]
 inner_steps = 16

@@ -1,10 +1,8 @@
 import os
 import threading
 import time
-import zlib
 from dataclasses import asdict
 from logging import Logger
-from tabnanny import check
 from typing import TYPE_CHECKING, Optional, Iterator, List, Dict, Iterable, Tuple
 
 import torch
@@ -31,7 +29,7 @@ from zeroband.utils.memory_profiler import MemoryProfiler
 from zeroband.utils.mfu_tracker import FlopCounter, PrecisionMode, \
     get_flops_promised_pt
 from zeroband.utils.misc_utils import IntRef
-from zeroband.utils.tokenizer_utils import make_tokenizer
+from zeroband.utils.tokenizer_utils import get_tokenizer_info
 from zeroband.utils.logger import get_logger
 from zeroband.utils.profiler import Profiler, ProfilerCollection
 
@@ -80,8 +78,8 @@ def perform_grad_accum_steps(
             batch = next(train_dataloader_iterator)
             input_ids = batch["input_ids"].to("cuda")
             labels = batch["labels"].to("cuda")
-            seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
-            block_mask = create_block_mask_from_seqlens(seqlens)
+            seq_lengths = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
+            block_mask = create_block_mask_from_seqlens(seq_lengths)
 
         with profiler.session("model.forward"):
             logits = model(tokens=input_ids, block_mask=block_mask, flop_counter=flop_counter)
@@ -356,20 +354,11 @@ def run_async_outer_step(
 
 def run_sync_outer_step(
         model: torch.nn.Module,
-        last_pseudo_grads: List[torch.Tensor],
         outer_parameters_list: List[torch.nn.Parameter],
         outer_optimizer: torch.optim.Optimizer,
-        shared_state: SharedState,
-
-        all_reduce_thread: threading.Thread,
-
         communicator: Communicator,
         train_profiler: Profiler,
-        logger: Logger,
-
-        topology_updated: bool,
-        iter_num: int,
-        num_syncs: IntRef
+        logger: Logger
 ):
     # Compute current pseudo grads as difference between outer and inner state.
     # Inner state is advanced by inner steps, outer state is unchanged
@@ -394,9 +383,9 @@ def run_sync_outer_step(
         )
 
         end_time = time.time()
-        print(f"All-Reduce took {end_time - start_time} seconds")
+        logger.info(f"All-Reduce took {end_time - start_time} seconds")
         if not all_reduce_success:
-            print("All peers left except me... continuing alone.")
+            logger.info("All peers left except me... continuing alone.")
 
     outer_optimizer.step()
     outer_optimizer.zero_grad()
@@ -427,9 +416,7 @@ def run_outer_step(
                                     all_reduce_thread, communicator, train_profiler, logger, topology_updated, iter_num,
                                     num_syncs)
     else:
-        run_sync_outer_step(model, last_pseudo_grads, outer_parameters_list, outer_optimizer, shared_state,
-                            all_reduce_thread, communicator, train_profiler, logger, topology_updated, iter_num,
-                            num_syncs)
+        run_sync_outer_step(model, outer_parameters_list, outer_optimizer, communicator, train_profiler, logger)
         return None
 
 
@@ -511,10 +498,10 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
     setup_profiler = Profiler()
 
     # Load tokenizer
-    tokenizer = make_tokenizer(config)
+    tokenizer_info = get_tokenizer_info(config)
 
     train_dataloader = make_dataloader(
-        tokenizer=tokenizer,
+        tokenizer_info=tokenizer_info,
         mpi_world_size=mpi_config.mpi_world_size if mpi_config is not None else 1,
         mpi_rank=mpi_config.mpi_rank if mpi_config is not None else 1,
         batch_size=config.hardware.micro_batch_size,
@@ -526,7 +513,7 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
         with torch_utils.default_device('cuda'):
             model, model_config = make_model(
                 config,
-                vocab_size=len(tokenizer),
+                vocab_size=tokenizer_info.vocab_size,
             )
         num_param_scalars = model.count_parameters()
         logger.info(f"Number of parameters: {num_param_scalars}")
@@ -686,10 +673,10 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
 
         # TODO: Make minimum num pccl peers configurable
         local_world_size = communicator.get_attribute(Attribute.LOCAL_WORLD_SIZE)
-        if local_world_size < 2:
-            print("Waiting for more workers to join...")
-            time.sleep(1)
-            continue
+        #if local_world_size < 2:
+            # print("Waiting for more workers to join...")
+            #time.sleep(1)
+            #continue
 
         if topology_updated:
             run_shared_state_sync(shared_state, communicator, model, outer_parameters_list, num_syncs, train_profiler,

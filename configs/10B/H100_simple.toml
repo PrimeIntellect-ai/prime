@@ -25,3 +25,7 @@ weight_decay = 0.1
 [data]
 seq_length = 8192
 num_workers = 4
+fake = true
+
+[pccl]
+ccoip_host = "127.0.0.1:48148"

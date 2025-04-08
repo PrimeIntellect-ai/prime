@@ -227,3 +227,7 @@ def test_end_to_end_packing(llama_config: ModelArgs):
 
     loss = output.mean()
     loss.backward()  # test that the backward for fa2
+
+
+if __name__ == '__main__':
+    pytest.main()

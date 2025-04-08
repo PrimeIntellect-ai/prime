@@ -19,3 +19,5 @@ num_decay_steps = 1000
 [data]
 fake = true
 
+[pccl]
+ccoip_host = "127.0.0.1:48148"

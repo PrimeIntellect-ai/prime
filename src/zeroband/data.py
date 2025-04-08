@@ -1,4 +1,3 @@
-import functools
 import os.path
 import random
 from abc import ABC

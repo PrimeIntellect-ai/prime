@@ -3,7 +3,7 @@ import threading
 import time
 from dataclasses import asdict
 from logging import Logger
-from typing import TYPE_CHECKING, Optional, Iterator, List, Dict, Iterable, Tuple
+from typing import TYPE_CHECKING, Optional, Iterator, List, Dict, Tuple
 
 import torch
 import torch.distributed as dist

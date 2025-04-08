@@ -18,7 +18,7 @@ from torch.optim import Optimizer
 from zeroband.ccl import ccl_utils, pccl_utils
 from zeroband.ccl.ccl_utils import MPIConfig
 from zeroband.checkpoint import TrainingProgress, load_checkpoint, save_checkpoint, CheckpointInfo
-from zeroband.config import Config
+from zeroband.config import Config, LearningRateSchedulerConfig
 from zeroband.data import make_dataloader
 from zeroband.lr_scheduler import compute_current_lr
 from zeroband.models.llama import make_model
@@ -406,14 +406,22 @@ def run_outer_step(
         train_profiler: Profiler,
         logger: Logger,
 
+        training_progress: TrainingProgress,
+        outer_lr_scheduler_config: LearningRateSchedulerConfig,
+
         topology_updated: bool,
         iter_num: int,
         num_syncs: IntRef,
         delayed_update: bool
 ) -> Optional[threading.Thread]:
+
+    current_lr = compute_current_lr(training_progress.outer_step, outer_lr_scheduler_config)
+    optim_utils.set_optimizer_lr(outer_optimizer, current_lr)
+
     if delayed_update:
         return run_async_outer_step(model, last_pseudo_grads, outer_parameters_list, outer_optimizer, shared_state,
-                                    all_reduce_thread, communicator, train_profiler, logger, topology_updated, iter_num,
+                                    all_reduce_thread, communicator, train_profiler, logger,
+                                    topology_updated, iter_num,
                                     num_syncs)
     else:
         run_sync_outer_step(model, outer_parameters_list, outer_optimizer, communicator, train_profiler, logger)
@@ -673,10 +681,10 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
 
         # TODO: Make minimum num pccl peers configurable
         local_world_size = communicator.get_attribute(Attribute.LOCAL_WORLD_SIZE)
-        #if local_world_size < 2:
-            # print("Waiting for more workers to join...")
-            #time.sleep(1)
-            #continue
+        if local_world_size < 2:
+            print("Waiting for more workers to join...")
+            time.sleep(1)
+            continue
 
         if topology_updated:
             run_shared_state_sync(shared_state, communicator, model, outer_parameters_list, num_syncs, train_profiler,
@@ -710,7 +718,9 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
             with train_profiler.session("outer_step"):
                 all_reduce_thread = run_outer_step(model, last_pseudo_grads, outer_parameters_list,
                                                    outer_optimizer, shared_state, all_reduce_thread, communicator,
-                                                   train_profiler, logger, topology_updated, iter_num, num_syncs,
+                                                   train_profiler, logger,
+                                                   training_progress, config.train.outer_lr_scheduler,
+                                                   topology_updated, iter_num, num_syncs,
                                                    config.diloco.delayed_update)
 
         iter_num += 1

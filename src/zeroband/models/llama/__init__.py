@@ -34,6 +34,15 @@ llama2_configs = {
 
 llama3_configs = {
     "debugmodel": ModelArgs(dim=256, n_layers=8, n_heads=16, rope_theta=500000),
+    "150M": ModelArgs(
+        dim=1024,
+        n_layers=12,
+        n_heads=16,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.3,
+        multiple_of=256,
+        rope_theta=500000,
+    ),
     "1B": ModelArgs(
         dim=2048,
         n_layers=18,
@@ -83,8 +92,8 @@ llama3_configs = {
 
 
 def make_model(
-    config: Config,
-    vocab_size: int,
+        config: Config,
+        vocab_size: int,
 ) -> tuple[Transformer, ModelArgs]:
     """
     Constructs a model instance according to the supplied configuration and target vocab size

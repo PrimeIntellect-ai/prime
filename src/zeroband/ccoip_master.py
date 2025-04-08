@@ -1,4 +1,4 @@
-from pccl import *
+from pccl import MasterNode
 
 HOST: str = '0.0.0.0:48148'
 

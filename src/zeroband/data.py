@@ -288,7 +288,7 @@ def make_mixed_nibble_dataset(data_config: DataConfig, tokenizer_info: Tokenizer
         if not os.path.exists(dataset_path):
             raise ValueError(f"Dataset path {dataset_path} does not exist")
         if not dataset_path.endswith('.bin'):
-            raise ValueError(f"Cannot mix nibble- with non-nibble dataset files!")
+            raise ValueError("Cannot mix nibble- with non-nibble dataset files!")
 
     rand = random.Random()
 
@@ -325,7 +325,7 @@ def make_mixed_parquet_dataset(data_config: DataConfig, tokenizer_info: Tokenize
         if not os.path.isdir(dataset_path):
             raise ValueError(f"Dataset path {dataset_path} must be a directory containing .parquet files")
         if dataset_path.endswith('.bin'):
-            raise ValueError(f"Cannot mix nibble- with non-nibble dataset files!")
+            raise ValueError("Cannot mix nibble- with non-nibble dataset files!")
 
     rand = random.Random()
 

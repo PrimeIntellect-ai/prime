@@ -1,12 +1,11 @@
-project = "debug_150m_zero_band"
-
 model_name = "150M"
-model_type = "llama2"
+model_type = "llama3"
 
 wandb = false
+log_all_ranks = true
 
 [hardware]
-micro_batch_size = 64
+micro_batch_size = 32
 torch_compile = true
 
 [train]
@@ -16,8 +15,25 @@ batch_size = 512
 num_warmup_steps = 10
 num_decay_steps = 1000
 
+[train.outer_lr_scheduler]
+lr = 1.0
+end_lr = 1.0
+num_decay_steps = 0
+num_warmup_steps = 0
+num_stable_steps = 0
+
+[train.outer_optimizer]
+type = "sgd"
+
 [data]
-fake = true
+dataset_name_or_paths = 'tests/test_data/parquet/parquet_ds_folder_1,tests/test_data/parquet/parquet_ds_folder_2'
+#dataset_name_or_paths = '/home/mike/IntelliJProjects/dataproctest/working_dir/train_0.bin,/home/mike/IntelliJProjects/dataproctest/working_dir/train_1.bin'
+dataset_ratio = "50:50"
+token_bit_size = 17
+
+[diloco]
+inner_steps = 16
+delayed_update = true
 
 [pccl]
 ccoip_host = "127.0.0.1:48148"

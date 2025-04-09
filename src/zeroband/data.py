@@ -2,16 +2,19 @@ import os.path
 import random
 from abc import ABC
 from dataclasses import dataclass, asdict
-from typing import Any, Generator, List
+from typing import Any, Generator, List, Dict
 
 import torch
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
+from transformers import PreTrainedTokenizer, AutoTokenizer
 
 from zeroband.config import DataConfig
 from zeroband.utils import rand_utils, nibble_utils, math_utils
 from zeroband.utils.tokenizer_utils import TokenizerInfo
+
+from pyarrow import parquet as pq, Table
 
 DEBUG_VOCAB_SIZE = 1024
 
@@ -106,10 +109,10 @@ class NibbleDataset(StatefulDataset):
                 yield {'input_ids': input_ids, 'labels': labels, 'seqlens': document_lengths}
 
     def state_dict(self):
-        return {"lsr_seed": self.lsr_seed}
+        return {"lsfr_seed": self.lsr_seed}
 
     def load_state_dict(self, state_dict):
-        self.lsr_seed = state_dict["lsr_seed"]
+        self.lsr_seed = state_dict["lsfr_seed"]
 
 
 @dataclass
@@ -174,6 +177,88 @@ class InterleaveDataset(StatefulDataset):
         self._init_random_state()
 
 
+@dataclass
+class PQDatasetState:
+    files: List[str]
+    lsfr_seed: int
+
+
+class ParquetDataset(StatefulDataset):
+
+    def __init__(self, files: List[str], seq_len: int, seed: int, tokenizer: PreTrainedTokenizer):
+        self.arg_files = files
+        self.seq_len = seq_len
+        self.tokenizer = tokenizer
+        self.state = PQDatasetState(
+            files=files,
+            lsfr_seed=seed
+        )
+        self.parquet_tables: Dict[str, Table] = {}
+
+    def __iter__(self):
+        while True:
+            # choose random file
+            file_idx, self.state.lsfr_seed = rand_utils.lsfr_rand_u64(self.state.lsfr_seed, len(self.state.files))
+            parquet_table = self._lazy_get_table(file_idx)
+
+            tokens = []
+            document_lengths = []
+            while True:
+                # choose random row
+                row_idx, self.state.lsfr_seed = rand_utils.lsfr_rand_u64(self.state.lsfr_seed, len(parquet_table))
+                row = parquet_table[row_idx]
+
+                new_tokens = self.tokenizer.encode(str(row), add_special_tokens=True)
+
+                target_num_tokens = self.seq_len + 1
+
+                new_length = len(tokens) + len(new_tokens)
+                if new_length > target_num_tokens:
+                    over_shoot = new_length - target_num_tokens
+                    new_tokens = new_tokens[:-over_shoot]
+
+                # Track document length
+                # Note: target_num_tokens is seq_len + 1 because we obtain one block that we extract
+                # both input and labels from. however, seqlens declares document lengths within only the inputs.
+                # hence, we need to account for the discrepancy in the last document, which becomes one token shorter.
+                if new_length >= target_num_tokens:
+                    document_lengths.append(len(new_tokens) - 1)
+                else:
+                    document_lengths.append(len(new_tokens))
+
+                tokens.extend(new_tokens)
+
+                if len(tokens) >= target_num_tokens:
+                    break
+
+            tokens = torch.tensor(tokens, dtype=torch.int64, device='cpu')
+
+            input_ids = tokens[:-1]
+            labels = tokens[1:]
+
+            document_lengths = torch.tensor(document_lengths, dtype=torch.int64, device='cpu')
+            yield {'input_ids': input_ids, 'labels': labels, 'seqlens': document_lengths}
+
+    @property
+    def is_empty(self):
+        return len(self.arg_files) == 0
+
+    def state_dict(self) -> dict[str, Any]:
+        return asdict(self.state) if self.state is not None else {}
+
+    def load_state_dict(self, state_dict):
+        self.state = PQDatasetState(**state_dict)
+
+    def _lazy_get_table(self, file_idx: int) -> Table:
+        file_path = self.state.files[file_idx]
+        parquet_table = self.parquet_tables.get(file_path, None)
+        if parquet_table is None:
+            parquet_table = pq.ParquetFile(file_path)
+            parquet_table = parquet_table.read()['text']
+            self.parquet_tables[file_path] = parquet_table
+        return parquet_table
+
+
 def collate_fn(samples: list[dict[str, torch.LongTensor]]) -> dict[str, torch.LongTensor | list[torch.LongTensor]]:
     assert samples[0].keys() == {"input_ids", "labels", "seqlens"}
 
@@ -195,9 +280,15 @@ def collate_fn(samples: list[dict[str, torch.LongTensor]]) -> dict[str, torch.Lo
     }
 
 
-def make_mixed_dataset(data_config: DataConfig, tokenizer_info: TokenizerInfo) -> StatefulDataset:
+def make_mixed_nibble_dataset(data_config: DataConfig, tokenizer_info: TokenizerInfo) -> StatefulDataset:
     dataset_paths = data_config.dataset_name_or_paths.split(',')
     probabilities = [int(ratio) / 100 for ratio in data_config.dataset_ratio.split(':')]
+
+    for dataset_path in dataset_paths:
+        if not os.path.exists(dataset_path):
+            raise ValueError(f"Dataset path {dataset_path} does not exist")
+        if not dataset_path.endswith('.bin'):
+            raise ValueError(f"Cannot mix nibble- with non-nibble dataset files!")
 
     rand = random.Random()
 
@@ -213,6 +304,42 @@ def make_mixed_dataset(data_config: DataConfig, tokenizer_info: TokenizerInfo) -
         probabilities
     )
 
+def get_parquet_files(dataset_path: str) -> List[str]:
+    files = os.listdir(dataset_path)
+    parquet_files = []
+    for file in files:
+        if file.endswith('.parquet'):
+            parquet_files.append(os.path.join(dataset_path, file))
+    return parquet_files
+
+def get_hf_tokenizer(tokenizer_info: TokenizerInfo) -> PreTrainedTokenizer:
+    return AutoTokenizer.from_pretrained(tokenizer_info.hf_name, use_fast=True)
+
+def make_mixed_parquet_dataset(data_config: DataConfig, tokenizer_info: TokenizerInfo) -> StatefulDataset:
+    dataset_paths = data_config.dataset_name_or_paths.split(',')
+    probabilities = [int(ratio) / 100 for ratio in data_config.dataset_ratio.split(':')]
+
+    for dataset_path in dataset_paths:
+        if not os.path.exists(dataset_path):
+            raise ValueError(f"Dataset path {dataset_path} does not exist")
+        if not os.path.isdir(dataset_path):
+            raise ValueError(f"Dataset path {dataset_path} must be a directory containing .parquet files")
+        if dataset_path.endswith('.bin'):
+            raise ValueError(f"Cannot mix nibble- with non-nibble dataset files!")
+
+    rand = random.Random()
+
+    # iterator seed *must* be random to avoid different peers training on same data, killing the point of DDP
+    # There is no "rank" in PCCL, and even if there was it would still not be a safe seed.
+    # There are internal UUIDs, but they are not exposed for now.
+    # Random is fine for now.
+    iterator_seed = rand.randint(0, 2 ** 31 - 1)
+
+    return InterleaveDataset(
+        [ParquetDataset(get_parquet_files(dataset_path), data_config.seq_length, iterator_seed, get_hf_tokenizer(tokenizer_info)) for dataset_path in dataset_paths],
+        probabilities
+    )
+
 
 def make_dataloader(
         tokenizer_info: TokenizerInfo,
@@ -224,7 +351,11 @@ def make_dataloader(
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, DEBUG_VOCAB_SIZE)
     else:
-        train_dataset = make_mixed_dataset(data_config, tokenizer_info)
+        is_nibble_file = any([path.endswith('.bin') for path in data_config.dataset_name_or_paths.split(',')])
+        if is_nibble_file:
+            train_dataset = make_mixed_nibble_dataset(data_config, tokenizer_info)
+        else:
+            train_dataset = make_mixed_parquet_dataset(data_config, tokenizer_info)
 
     return StatefulDataLoader(
         train_dataset,

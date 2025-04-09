@@ -575,7 +575,6 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
     # -------------------------------------------------------------------------
 
     if config.diloco:
-
         for name, local_p in model.named_parameters():
             if isinstance(local_p, DTensor):
                 local_p = local_p.to_local()

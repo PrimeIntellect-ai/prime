@@ -5,7 +5,7 @@ from pccl import Communicator, torch, ReduceOp, ReduceOpDescriptor, ReduceDescri
 def all_reduce_multiple_with_retry(communicator: Communicator,
                                    tensors: list[torch.Tensor],
                                    op: ReduceOp,
-                                   max_in_flight: int = 16):
+                                   max_in_flight: int = 128):
     descriptors = []
     tag = 0
     for tensor in tensors:

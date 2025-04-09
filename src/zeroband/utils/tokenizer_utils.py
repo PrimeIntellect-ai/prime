@@ -5,17 +5,22 @@ from zeroband.config import Config
 if TYPE_CHECKING:
     from zeroband.data import DEBUG_VOCAB_SIZE
 
+
 @dataclass
 class TokenizerInfo:
+    hf_name: str  # TODO: REMOVE
+
     vocab_size: int
     bot_token: int
     eot_token: int
+
 
 def get_tokenizer_info(config: Config) -> TokenizerInfo:
     if config.data.fake and config.model_name == "debugmodel":
         return DEBUG_VOCAB_SIZE
     elif config.model_type == "llama2":
         return TokenizerInfo(
+            hf_name="mistralai/Mistral-7B-v0.1",
             # print(len(AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)))
             vocab_size=32000,
             # print(AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True).bos_token_id)
@@ -25,6 +30,7 @@ def get_tokenizer_info(config: Config) -> TokenizerInfo:
         )
     elif config.model_type == "llama3":
         return TokenizerInfo(
+            hf_name="meta-llama/Meta-Llama-3-8B",
             # print(len(AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)))
             vocab_size=128256,
             # print(AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True).bos_token_id)

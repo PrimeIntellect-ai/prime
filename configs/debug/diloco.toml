@@ -5,11 +5,11 @@ wandb = false
 log_all_ranks = true
 
 [hardware]
-micro_batch_size = 8
+micro_batch_size = 32
 torch_compile = true
 
 [train]
-batch_size = 32
+batch_size = 512
 
 [train.lr_scheduler]
 num_warmup_steps = 10
@@ -26,8 +26,9 @@ num_stable_steps = 0
 type = "sgd"
 
 [data]
-dataset_name_or_paths = '/home/mike/IntelliJProjects/dataproctest/working_dir/train_0.bin,/home/mike/IntelliJProjects/dataproctest/working_dir/train_1.bin'
-dataset_ratio = "90:10"
+dataset_name_or_paths = 'tests/test_data/parquet/parquet_ds_folder_1,tests/test_data/parquet/parquet_ds_folder_2'
+#dataset_name_or_paths = '/home/mike/IntelliJProjects/dataproctest/working_dir/train_0.bin,/home/mike/IntelliJProjects/dataproctest/working_dir/train_1.bin'
+dataset_ratio = "50:50"
 token_bit_size = 17
 
 [diloco]

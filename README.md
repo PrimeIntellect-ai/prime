@@ -186,4 +186,4 @@ You can then upload the model to huggingface using huggingface-cli:
 # Usage:  huggingface-cli upload [repo_id] [local_path] [path_in_repo]
 huggingface-cli upload username/mymodel /path/to/save/converted_model . --private
 ```
-The repo will be created if `repo_id` does not exist. The `--private` will create the repo as a private repo and cab ne ommited to create a publicly accessible repo.
+The repo will be created if `repo_id` does not exist. The `--private` will create the repo as a private repo and can be ommited to create a publicly accessible repo.

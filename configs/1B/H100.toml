@@ -1,15 +1,15 @@
-name_model = "1B"
 project = "debug_1B_zero_band"
-type_model = "llama2"
+
+model_name = "1B"
+model_type = "llama2"
+
+[hardware]
+micro_batch_size = 64
+reshard_after_forward = false
 
 [train]
-micro_bs = 32
-reshard_after_forward = true
+batch_size = 512
 
-[optim]
-batch_size = 1024
-warmup_steps = 1000
-total_steps = 8192
-
-[optim.optim]
-lr = 7e-4
+[data]
+seq_length = 1024
+dataset_name_or_paths = "datasets/fineweb-edu"

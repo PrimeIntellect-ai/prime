@@ -1,9 +1,10 @@
-name_model = "debugmodel"
 project = "debug_150m_zero_band"
-type_model = "llama2"
 
-[train]
-micro_bs = 4  # change this base on the gpu
+model_name = "debugmodel"
+model_type = "llama2"
+
+[hardware]
+micro_batch_size = 4
 
 [data]
 seq_length = 8192
@@ -11,10 +12,15 @@ dataset_name_or_paths = "/data/datasets/open-web-math"
 dataset_ratio = "100"
 num_workers = 1
 
-[optim]
+[train]
 batch_size = 128
-warmup_steps = 1000
-total_steps = 88_000
 
-[optim.optim]
-lr = 4e-4
+[train.optimizer]
+type = "adam"
+
+[train.lr_scheduler]
+decay_type = "linear"
+num_warmup_steps = 1000
+lr = 3e-4
+end_lr = 0.0
+num_decay_steps = 80000

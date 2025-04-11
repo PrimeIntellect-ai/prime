@@ -10,7 +10,7 @@
 from zeroband.config import Config
 from zeroband.models.llama.model import ModelArgs, Transformer
 
-__all__ = ["Transformer"]
+__all__ = ["Transformer", "make_model"]
 
 llama2_configs = {
     "debugmodel": ModelArgs(dim=256, n_layers=2, n_heads=8),
@@ -82,22 +82,24 @@ llama3_configs = {
 }
 
 
-def get_model(
+def make_model(
     config: Config,
     vocab_size: int,
 ) -> tuple[Transformer, ModelArgs]:
-    """get the transformer model"""
+    """
+    Constructs a model instance according to the supplied configuration and target vocab size
+    :return the created model instance
+    """
 
-    if config.type_model == "llama2":
-        model_config = llama2_configs[config.name_model]
-    elif config.type_model == "llama3":
-        model_config = llama3_configs[config.name_model]
+    if config.model_type == "llama2":
+        model_config = llama2_configs[config.model_name]
+    elif config.model_type == "llama3":
+        model_config = llama3_configs[config.model_name]
     else:
-        raise ValueError(f"Model type {config.type_model} not supported")
+        raise ValueError(f"Model type {config.model_type} not supported")
 
     model_config.vocab_size = vocab_size
     model_config.max_seq_len = config.data.seq_length
-    model_config.attn_fn = config.train.attn_fn
-    model_config.fused_linear_ce = config.train.fused_linear_ce
+    model_config.attn_fn = config.hardware.attn_fn
 
     return Transformer(model_config), model_config

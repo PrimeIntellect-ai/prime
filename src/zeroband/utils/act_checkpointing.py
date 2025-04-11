@@ -5,8 +5,8 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoi
 from zeroband.utils.logger import get_logger
 
 
-def apply_ac_ckpt(model: Transformer, num: int):
-    """Apply activation checkpointing to the model.
+def enable_activation_checkpointing(model: Transformer, num: int):
+    """Enable activation checkpointing for the model.
     Apply to layers multiple of `num`.
 
     Example if `num=2` only half of the layers are checkpointed.

@@ -118,7 +118,7 @@ uv run pytest
 To eval you need first to convert the checkpoint to a huggingface compatible model.
 
 ```bash
-uv run python scripts/export_dcp.py @configs/10B/H100.toml --ckpt.path CONVERTED_MODEL_PATH --ckpt.resume CHECKPOINT_PATH --torch_dtype bfloat16  --ckpt.interval 1
+uv run python scripts/export_dcp.py @configs/10B/H100_simple.toml --ckpt.path CONVERTED_MODEL_PATH --ckpt.resume CHECKPOINT_PATH --torch_dtype bfloat16  --ckpt.interval 1
 ```
 
 
@@ -178,7 +178,7 @@ You may also pass the `torch_dtype` argument to either `float32` or `bfloat16` t
 
 Example export command:
 ```bash
-python scripts/export_dcp.py @configs/10B/H100.toml --ckpt.path /path/to/save/converted_model --ckpt.resume /path/to/ckpt/step_84000 --torch_dtype bfloat16
+python scripts/export_dcp.py @configs/10B/H100_simple.toml --ckpt.path /path/to/save/converted_model --ckpt.resume /path/to/ckpt/step_84000 --torch_dtype bfloat16
 ```
 
 You can then upload the model to huggingface using huggingface-cli:

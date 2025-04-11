@@ -1,11 +1,8 @@
 from enum import Enum
-from typing import Any, Literal, TypeAlias
-import os
+from typing import Literal, TypeAlias
 
-from pydantic import create_model, model_validator
+from pydantic import model_validator
 from pydantic_config import BaseConfig
-
-AttnFnType: TypeAlias = Literal["flex", "math"]
 
 class Compression(Enum):
     NO = "no"
@@ -29,60 +26,62 @@ class DataConfig(BaseConfig):
 
 
 class AdamConfig(BaseConfig):
-    type: Literal["adam"] = (
-        "adam"  # the literal is used to distinguish between the different optimizers configuration in the union type
-    )
-    lr: float = 4e-4
+    type: Literal["adam"] = "adam"
+    betas1: float = 0.9
+    betas2: float = 0.95
+
+
+class AdamWConfig(BaseConfig):
+    type: Literal["adamw"] = "adamw"
     weight_decay: float = 0.1
     betas1: float = 0.9
     betas2: float = 0.95
 
 
-class SoapConfig(BaseConfig):
-    type: Literal["soap"] = "soap"
-    lr: float = 4e-4
-    weight_decay: float = 1e-05
-    betas1: float = 0.9
-    betas2: float = 0.95
+class LearningRateSchedulerConfig(BaseConfig):
+    decay_type: Literal["linear", "cosine", "sqrt"] = "linear"
+    lr: float = 6e-4
+    end_lr: float = 0.0
+    num_decay_steps: int = 60000
+    num_warmup_steps: int = 2000
+    num_stable_steps: int = 0
 
-    max_preconditioner_dim: int = 8192
-    precondition_frequency: int = 100
+    @property
+    def num_total_steps(self):
+        """
+        The total number of steps that the learning rate scheduler defines in its current configuration.
+        """
+        return self.num_decay_steps + self.num_warmup_steps + self.num_stable_steps
 
 
-OptimizersConfig: TypeAlias = AdamConfig | SoapConfig
+# Union of all optimizer configuration types.
+# New optimizer configurations must be added here to be picked up by the config system.
+# Each configuration will be tried until a successful match is found.
+# The 'type' field determines which class to use because the string literal is distinct for each class.
+OptimizerConfig: TypeAlias = AdamConfig | AdamWConfig
 
 
-class OptimConfig(BaseConfig):
-    optim: OptimizersConfig = AdamConfig()
-
-    sched_type: Literal["cosine", "linear", "wsd-sqrt"] = "cosine"
-    warmup_steps: int = 1000
-    stable_steps: int = 80_000
-    total_steps: int = 88_000
+class TrainConfig(BaseConfig):
+    optimizer: OptimizerConfig = AdamConfig()
     batch_size: int = 512
-
-    z_loss: bool = False
-    z_loss_weight: float = 2e-4
-    num_chunks: int | None = None
-
+    lr_scheduler: LearningRateSchedulerConfig = LearningRateSchedulerConfig()
 
 class DilocoConfig(BaseConfig):
     outer_lr: float = 0.7
     inner_steps: int
     compression: Compression = Compression.NO
 
-    retry_all_reduce: int = 3
-
-
 class MemoryProfilerConfig(BaseConfig):
     freq: int = 10
     snapshot_dir: str
 
+AttnFnType: TypeAlias = Literal["flex", "math"]
 
-class TrainConfig(BaseConfig):
-    micro_bs: int = 1
+class HardwareConfig(BaseConfig):
+    micro_batch_size: int = 1
 
-    ac_ckpt: bool | int = False
+    act_ckpt: bool | int = False
+
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
 
     reduce_fp32: bool = False  # should be True if SXM. Keep to false as default for backward compatibility
@@ -94,8 +93,6 @@ class TrainConfig(BaseConfig):
     torch_profiler: bool = False
 
     torch_compile: bool = True
-
-    fused_linear_ce: bool = False
 
     fsdp_cpu_offload: bool = False
 
@@ -116,53 +113,18 @@ class RemoteConfig(BaseConfig):
 class CkptConfig(BaseConfig):
     path: str | None = None
     interval: int | None = None
-    topk: int | None = None
-
-    remote: RemoteConfig | None = None
-
-    remote_data_path: str | None = None
-    remote_data_load: bool = False
-
     resume: str | None = None
 
-    skip_dataloader: bool = False
-
-    live_recovery_rank_src: int | None = None
-
-    data_path: str | None = None
-
-    token_count: int | None = None
-
-    @model_validator(mode="after")
-    def validate_path_and_interval(self):
-        if (self.path is None) != (self.interval is None):
-            raise ValueError("path and interval must be both set or both None")
-        if self.path is None and self.remote is not None:
-            raise ValueError("remote_path is set but path is not set")
-
-        return self
-
-    @model_validator(mode="after")
-    def validate_remote_data_path(self):
-        if self.remote_data_load and self.data_path is not None:
-            raise ValueError("remote_data_load and data_path are mutually exclusive")
-
-        if self.remote_data_load and self.remote_data_path is None:
-            raise ValueError("remote_data_load is set but remote_data_path is not set")
-        return self
-
-
-ENV_VAR_PREFIX = "ZERO_BAND_"
 
 class Config(BaseConfig):
-    # main config
-    name_model: Literal["debugmodel", "70M","150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
-    type_model: Literal["llama2", "llama3"] = "llama3"
-
     # Project/Run
     project: str = "zeroband"
     run_id: str | None = None
     run_name: str | None = None
+
+    # Model config
+    model_name: Literal["debugmodel", "70M", "150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
+    model_type: Literal["llama2", "llama3"] = "llama3"
 
     # Logger
     metric_logger_type: Literal["wandb", "dummy"] = "wandb"
@@ -173,102 +135,18 @@ class Config(BaseConfig):
     # sub config
     diloco: DilocoConfig | None = None
     data: DataConfig = DataConfig()
-    optim: OptimConfig = OptimConfig()
-    train: TrainConfig
+    train: TrainConfig = TrainConfig()
+    hardware: HardwareConfig
     monitor: MonitorConfig | None = None
 
     ckpt: CkptConfig = CkptConfig()
 
+    wandb: bool = True
+
     @model_validator(mode="after")
     def ckpt_diloco_step(self):
         if self.ckpt is not None and self.ckpt.interval is not None and self.diloco is not None:
-            assert (
-                self.ckpt.interval % self.diloco.inner_steps == 0
-            ), "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
+            assert self.ckpt.interval % self.diloco.inner_steps == 0, (
+                "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
+            )
         return self
-
-    @model_validator(mode="after")
-    def validate_live_recovery_rank_src(self):
-        if self.ckpt is not None and self.ckpt.live_recovery_rank_src is not None and self.diloco is None:
-            raise ValueError("live_recovery_rank_src is only supported with diloco")
-        return self
-
-
-def resolve_env_vars(config: Config) -> None:
-    """
-    Resolve environment variables for config fields.
-    Modifies the config in place.
-    Environment variables should be prefixed with ZERO_BAND_.
-    """
-
-    def _resolve_value(env_var: str, field_name: str, config_obj: Any) -> Any:
-        """
-        Resolve a single value from an environment variable
-        env_var: full environment variable name (e.g. ZERO_BAND_TRAIN_MICRO_BS)
-        field_name: actual field name in the config object (e.g. micro_bs)
-        """
-        value = os.environ.get(env_var)
-        if value is not None:
-            if (field_info := config_obj.__class__.model_fields.get(field_name)) is None:
-                raise AttributeError(f"Config {config_obj} has no attribute {field_name}")
-
-            try:
-                # Create a temporary model with just this field, then validate and rip it out.
-                py_model = create_model('TempModel', __base__ = BaseConfig, **{field_name: (field_info.annotation, ...)}) # type: ignore
-                validated = py_model.model_validate({field_name: value})
-                return getattr(validated, field_name)
-            except Exception as e:
-                raise ValueError(f"Error setting {env_var}={value}: {e}")
-        return None
-
-    def _resolve_nested(prefix: str, config_obj: Any) -> None:
-        if not hasattr(config_obj, 'model_fields'):
-            return
-
-        for field_name, _ in config_obj.__class__.model_fields.items():
-            # Build the full env var name
-            full_env_var = f"{ENV_VAR_PREFIX}{prefix}_{field_name}".upper() if prefix else f"{ENV_VAR_PREFIX}{field_name}".upper()
-
-            # Try to resolve the field directly using the local field name
-            value = _resolve_value(full_env_var, field_name, config_obj)
-            if value is not None:
-                setattr(config_obj, field_name, value)
-
-            # Handle nested configs
-            field_value = getattr(config_obj, field_name)
-            if field_value is not None and hasattr(field_value, 'model_fields'):
-                # Pass the prefix for building env var names, but use local field names for lookup
-                _resolve_nested(f"{prefix}_{field_name}" if prefix else field_name, field_value)
-
-    def _get_valid_env_vars(prefix: str, config_obj: Any) -> set[str]:
-        """Recursively collect all valid environment variable names"""
-        valid_vars = set()
-        if not hasattr(config_obj, 'model_fields'):
-            return valid_vars
-
-        for field_name, _ in config_obj.__class__.model_fields.items():
-            full_env_var = f"{ENV_VAR_PREFIX}{prefix}_{field_name}".upper() if prefix else f"{ENV_VAR_PREFIX}{field_name}".upper()
-            valid_vars.add(full_env_var)
-
-            field_value = getattr(config_obj, field_name)
-            if field_value is not None and hasattr(field_value, 'model_fields'):
-                nested_prefix = f"{prefix}_{field_name}" if prefix else field_name
-                valid_vars.update(_get_valid_env_vars(nested_prefix, field_value))
-
-        return valid_vars
-
-    # Check for any invalid ZERO_BAND_ environment variables
-    valid_env_vars = _get_valid_env_vars("", config)
-    invalid_vars = []
-    for env_var in os.environ:
-        if env_var.startswith(ENV_VAR_PREFIX) and env_var not in valid_env_vars:
-            invalid_vars.append(env_var)
-
-    if invalid_vars:
-        raise ValueError(
-            f"Found invalid environment variables with {ENV_VAR_PREFIX} prefix: {', '.join(invalid_vars)}\n"
-             "See the full list of valid config veriables in src/zeroband/config.py."
-        )
-
-    # Now resolve the valid ones.
-    _resolve_nested("", config)

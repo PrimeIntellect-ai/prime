@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 # coding: utf-8
 # Example Usage:
-# python scripts/export_dcp.py @configs/10B/H100.toml --ckpt.path /data/intellect-1-step17000 --ckpt.resume /data/10b/step_17000/diloco_0
+# python scripts/export_dcp.py @configs/10B/H100_intellect1.toml --ckpt.path /data/intellect-1-step17000 --ckpt.resume /data/10b/step_17000/diloco_0
 
 import torch
 from typing import Literal
 import torch.distributed.checkpoint as dcp
-from zeroband.models.llama import get_model
+from zeroband.models.llama import make_model
 from zeroband.config import resolve_env_vars
 from zeroband.checkpoint import ModelWrapper
 from zeroband.utils import get_module_signature
@@ -126,25 +126,22 @@ def main(config: ExportConfig):
 
     # Load model
     logger.info("Getting tokenizer (for vocab size)")
-    if config.type_model == "llama2":
+    if config.model_type == "llama2":
         tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
-    elif config.type_model == "llama3":
+    elif config.model_type == "llama3":
         tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
     else:
-        raise ValueError(f"Model type {config.type_model} not supported")
+        raise ValueError(f"Model type {config.model_type} not supported")
 
     logger.info("Getting model")
-    model, model_config = get_model(
-        config.name_model,
-        config.type_model,
-        vocab_size=len(tokenizer),
-        seq_length=config.data.seq_length,
-        attn_fn=config.train.attn_fn,
+    model, model_config = make_model(
+        config,
+        vocab_size=len(tokenizer)
     )
 
     # Convert ZeroBand config to HuggingFace config
     hf_config = convert_config_zb_to_hf(
-        model_config, with_debug_automap=config.with_debug_automap, type_model=config.type_model
+        model_config, with_debug_automap=config.with_debug_automap, type_model=config.model_type
     )
     hf_config.to_json_file(save_path / "config.json")
 

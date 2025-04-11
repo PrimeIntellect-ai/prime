@@ -47,7 +47,7 @@ def _compute_decayed_lr_linear(step: int,
     :param learning_rate_scheduler_config: the learning rate scheduler configuration
     :return: the current learning rate for the given step
     """
-    relative = step / learning_rate_scheduler_config.num_decay_steps
+    relative = step / learning_rate_scheduler_config.num_decay_steps if learning_rate_scheduler_config.num_decay_steps > 0 else 0
     lr_range = learning_rate_scheduler_config.lr - learning_rate_scheduler_config.end_lr
     return learning_rate_scheduler_config.lr - lr_range * relative
 

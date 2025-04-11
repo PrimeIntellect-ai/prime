@@ -24,3 +24,6 @@ num_warmup_steps = 1000
 lr = 3e-4
 end_lr = 0.0
 num_decay_steps = 80000
+
+[pccl]
+ccoip_host = "127.0.0.1:48148"

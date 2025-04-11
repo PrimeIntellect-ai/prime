@@ -4,18 +4,20 @@ from typing import Literal, TypeAlias
 from pydantic import model_validator
 from pydantic_config import BaseConfig
 
+
 class Compression(Enum):
     NO = "no"
     UINT8 = "uint8"
 
 
 class DataConfig(BaseConfig):
-    dataset_name_or_paths: str = "datasets/fineweb-edu"
+    dataset_name_or_paths: str | None = None
     val_dataset_name_or_paths: str | None = None
     sequence_packing: bool = True
     seq_length: int = 1024
+    token_bit_size: int = 16
     fake: bool = False
-    num_workers: int = 4
+    num_workers: int = 1
     max_train_samples: int | None = None
     max_eval_samples: int | None = None
     dataset_ratio: str | None = None
@@ -23,6 +25,36 @@ class DataConfig(BaseConfig):
     data_world_size: int | None = None
     reverse_data_files: bool = False
     split_by_data_rank: bool = True
+
+    @model_validator(mode="after")
+    def data_config_valid(self):
+        assert self.fake == (
+                    self.dataset_name_or_paths is None), "Data must be fake if 'dataset_name_or_paths' is not set"
+
+        if self.dataset_ratio is None:
+            return self
+
+        assert self.dataset_name_or_paths is not None, "'dataset_name_or_paths' must be set if 'dataset_ratio' is set"
+        dataset_files = self.dataset_name_or_paths.split(',')
+        ratio_texts = self.dataset_ratio.split(":")
+        assert len(dataset_files) == len(
+            ratio_texts), "Number of files specified in 'dataset_name_or_paths' must be the same as number of ratios specified in 'dataset_ratio'"
+
+        ratios = []
+        ratio_sum = 0
+        for ratio_text in ratio_texts:
+            assert ratio_text.isdigit(), "Ratio must be an integer"
+            ratio = int(ratio_text)
+            ratios.append(ratio)
+            ratio_sum += ratio
+
+        assert ratio_sum == 100, "Dataset ratios must sum to 100%"
+        return self
+
+class SGDConfig(BaseConfig):
+    type: Literal["sgd"] = "sgd"
+    momentum: float = 0.0
+    nesterov: bool = False
 
 
 class AdamConfig(BaseConfig):
@@ -58,24 +90,35 @@ class LearningRateSchedulerConfig(BaseConfig):
 # New optimizer configurations must be added here to be picked up by the config system.
 # Each configuration will be tried until a successful match is found.
 # The 'type' field determines which class to use because the string literal is distinct for each class.
-OptimizerConfig: TypeAlias = AdamConfig | AdamWConfig
+OptimizerConfig: TypeAlias = SGDConfig | AdamConfig | AdamWConfig
 
 
 class TrainConfig(BaseConfig):
     optimizer: OptimizerConfig = AdamConfig()
+    outer_optimizer: OptimizerConfig = SGDConfig()
     batch_size: int = 512
     lr_scheduler: LearningRateSchedulerConfig = LearningRateSchedulerConfig()
+
+    # make DiLoCo equal to DDP by default
+    outer_lr_scheduler: LearningRateSchedulerConfig = LearningRateSchedulerConfig(lr=1.0, end_lr=1.0,
+                                                                                  num_warmup_steps=0)
+
 
 class DilocoConfig(BaseConfig):
     outer_lr: float = 0.7
     inner_steps: int
     compression: Compression = Compression.NO
+    delayed_update: bool
+
 
 class MemoryProfilerConfig(BaseConfig):
     freq: int = 10
     snapshot_dir: str
 
+
 AttnFnType: TypeAlias = Literal["flex", "math"]
+CclLibType: TypeAlias = Literal["nccl", "pccl"]
+
 
 class HardwareConfig(BaseConfig):
     micro_batch_size: int = 1
@@ -116,6 +159,10 @@ class CkptConfig(BaseConfig):
     resume: str | None = None
 
 
+class PcclConfig(BaseConfig):
+    ccoip_host: str
+
+
 class Config(BaseConfig):
     # Project/Run
     project: str = "zeroband"
@@ -130,14 +177,15 @@ class Config(BaseConfig):
     metric_logger_type: Literal["wandb", "dummy"] = "wandb"
     wandb_resume: bool = False
     log_level: Literal["NOTSET", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
-    log_all_rank: bool = False
+    log_all_ranks: bool = False
 
     # sub config
     diloco: DilocoConfig | None = None
-    data: DataConfig = DataConfig()
-    train: TrainConfig = TrainConfig()
+    data: DataConfig
+    train: TrainConfig
     hardware: HardwareConfig
     monitor: MonitorConfig | None = None
+    pccl: PcclConfig | None = None
 
     ckpt: CkptConfig = CkptConfig()
 
@@ -149,4 +197,5 @@ class Config(BaseConfig):
             assert self.ckpt.interval % self.diloco.inner_steps == 0, (
                 "ckpt interval must be a multiple of diloco inner steps as we only save at the end of an outer step"
             )
+        assert self.pccl is not None, "[pccl] must be configured!"
         return self

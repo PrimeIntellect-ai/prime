@@ -13,3 +13,6 @@ batch_size = 512
 [data]
 seq_length = 1024
 dataset_name_or_paths = "datasets/fineweb-edu"
+
+[pccl]
+ccoip_host = "127.0.0.1:48148"

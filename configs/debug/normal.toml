@@ -7,7 +7,7 @@ wandb = false
 micro_batch_size = 8
 
 [train]
-batch_size = 16
+batch_size = 32
 
 [train.lr_scheduler]
 num_warmup_steps = 10
@@ -16,3 +16,5 @@ num_decay_steps = 10
 [data]
 fake = true
 
+[pccl]
+ccoip_host = "127.0.0.1:48148"

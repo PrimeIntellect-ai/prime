@@ -24,19 +24,34 @@ betas1 = 0.9
 betas2 = 0.95
 weight_decay = 0.1
 
+[train.outer_lr_scheduler]
+lr = 0.7
+end_lr = 0.7
+num_decay_steps = 0
+num_warmup_steps = 0
+num_stable_steps = 0
+
+[train.outer_optimizer]
+type = "sgd"
+momentum = 0.9
+nesterov = true
+
 [data]
 seq_length = 8192
-dataset_name_or_paths = "/data/datasets/fineweb-edu,/data/datasets/fineweb,/data/datasets/StackV1-popular,/data/datasets/dclm-baseline-1.0-parquet,/data/datasets/open-web-math"
+dataset_name_or_paths = "/data/datasets/fineweb-edu.bin,/data/datasets/fineweb.bin,/data/datasets/StackV1-popular.bin,/data/datasets/dclm-baseline-1.0-parquet.bin,/data/datasets/open-web-math.bin"
+token_bit_size = 17
 dataset_ratio = "55:10:20:10:5"
 num_workers = 4
 reverse_data_files = true
 split_by_data_rank = false # the 10b training assume that data was already split by datarank. Keeping this for backward compatibility
 
-
 [diloco]
 inner_steps = 100
-compression = "uint8"
+delayed_update = true
 
 [ckpt]
 interval = 100
 path = "/data/10B"
+
+[pccl]
+ccoip_host = "127.0.0.1:48148"

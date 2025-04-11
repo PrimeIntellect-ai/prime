@@ -147,9 +147,9 @@ def train(config: Config):
 
         offload_policy = CPUOffloadPolicy(pin_memory=True) if config.train.fsdp_cpu_offload else None
 
-        for layer_id, transformer_block in model.layers.items():
+        for layer_id, transformer_block in enumerate(model.model.layers):
             if config.train.reshard_after_forward:
-                reshard_after_forward = int(layer_id) < len(model.layers) - 1
+                reshard_after_forward = int(layer_id) < len(model.model.layers) - 1
             else:
                 reshard_after_forward = False
             fully_shard(
@@ -305,7 +305,7 @@ def train(config: Config):
                         block_mask = batch["block_mask"]
 
                     with sw.record_block("Run forward()"):
-                        logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
+                        logits = model(input_ids=input_ids).logits.contiguous()
                         flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b * seq) vocab
                         flatten_labels = labels.reshape(-1)  # b seq -> (b * seq)
 

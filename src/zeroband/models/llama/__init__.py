@@ -9,7 +9,13 @@
 
 from zeroband.config import Config
 from zeroband.models.llama.model import ModelArgs, Transformer
-
+from transformers import (
+    AutoTokenizer,
+    LlamaConfig,
+    LlamaForCausalLM,
+    Qwen2Config,
+    Qwen2ForCausalLM,
+)
 __all__ = ["Transformer"]
 
 llama2_configs = {
@@ -88,16 +94,7 @@ def get_model(
 ) -> tuple[Transformer, ModelArgs]:
     """get the transformer model"""
 
-    if config.type_model == "llama2":
-        model_config = llama2_configs[config.name_model]
-    elif config.type_model == "llama3":
-        model_config = llama3_configs[config.name_model]
-    else:
-        raise ValueError(f"Model type {config.type_model} not supported")
-
-    model_config.vocab_size = vocab_size
-    model_config.max_seq_len = config.data.seq_length
-    model_config.attn_fn = config.train.attn_fn
-    model_config.fused_linear_ce = config.train.fused_linear_ce
-
-    return Transformer(model_config), model_config
+    config_model = LlamaConfig.from_pretrained("meta-llama/Meta-Llama-3-8B", attn_implementation="flex_attention")
+    model = LlamaForCausalLM.from_pretrained(pretrained_model_name_or_path="meta-llama/Meta-Llama-3-8B", config=config_model)
+    
+    return model, config_model

@@ -48,11 +48,11 @@ def get_peak_flops(device_name: str) -> int:
         return 312e12
 
 
-def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
+def get_num_flop_per_token(num_params: int, model_config, seq_len: int) -> int:
     l, h, q, t = (  # noqa: E741
-        model_config.n_layers,
-        model_config.n_heads,
-        model_config.dim // model_config.n_heads,
+        model_config.num_hidden_layers,
+        model_config.num_attention_heads,
+        model_config.hidden_size // model_config.num_attention_heads,
         seq_len,
     )
     # Reasoning behind the factor of 12 for the self-attention part of the formula:
@@ -66,10 +66,10 @@ def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
     return flop_per_token
 
 
-def get_num_params(model: torch.nn.Module, exclude_embedding: bool = False) -> int:
+def get_num_params(model, exclude_embedding: bool = False) -> int:
     num_params = sum(p.numel() for p in model.parameters())
     if exclude_embedding:
-        num_params -= model.tok_embeddings.weight.numel()
+        num_params -= model.lm_head.weight.numel()
     return num_params
 
 

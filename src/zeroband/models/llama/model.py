@@ -24,7 +24,7 @@ from zeroband.config import AttnFnType
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention, BlockMask, _DEFAULT_SPARSE_BLOCK_SIZE
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-_flex_attention_compiled = torch.compile(flex_attention, dynamic=False)
+_flex_attention_compiled = torch.compile(flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
 
 
 # copied from https://github.com/pytorch/torchtune/blob/f2bd4bc25b24587aef40f486087412b9da8f1d94/torchtune/modules/attention_utils.py#L27

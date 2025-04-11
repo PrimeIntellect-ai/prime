@@ -2,7 +2,7 @@ import io
 import pickle
 import torch
 from torch.distributed import ProcessGroup
-from torch.distributed._tensor.api import DTensor
+from torch.distributed.tensor import DTensor
 
 
 def _object_to_tensor(obj):

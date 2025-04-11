@@ -3,7 +3,7 @@ import socket
 import time
 import torch
 from torch.distributed.fsdp import ShardingStrategy
-from torch.distributed._tensor.api import DTensor
+from torch.distributed.tensor import DTensor
 from distributed_shampoo import DistributedShampoo
 
 

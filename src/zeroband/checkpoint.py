@@ -28,7 +28,7 @@ import torch.distributed as dist
 from torch.distributed.checkpoint.stateful import Stateful
 import warnings
 import logging
-from torch.distributed._tensor.api import DTensor
+from torch.distributed.tensor import DTensor
 from zeroband.utils.state_dict_send_recv import (
     _get_sendable_state_dict,
     recv_state_dict,

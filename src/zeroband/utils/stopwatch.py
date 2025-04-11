@@ -17,7 +17,7 @@ class _RecordBlockContext:
 
         if self.sw.disabled:
             return self
-        self.sw.start_block(message=f"Starting \"{self.prof_name}\"")
+        self.sw.start_block(message=f'Starting "{self.prof_name}"')
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -26,15 +26,15 @@ class _RecordBlockContext:
 
         if self.sw.disabled:
             return
-        self.sw.end_block(format_str=f"Finished \"{self.prof_name}\"")
+        self.sw.end_block(format_str=f'Finished "{self.prof_name}"')
 
 
 class Stopwatch:
     def __init__(self, config: Config | None = None):
-        self.timers: dict[str, dict[str, float]] = {} # Timer name -> {start_time, last_lap_time}
-        self.stack: list[str] = [] # List timer names in order of last constructed
+        self.timers: dict[str, dict[str, float]] = {}  # Timer name -> {start_time, last_lap_time}
+        self.stack: list[str] = []  # List timer names in order of last constructed
         self.logger = get_logger(config)
-        self.disabled = (config.log_level != "DEBUG") if config else False
+        self.disabled = True
 
     def _resolve_name(self, name: str | None) -> str:
         if name is None:
@@ -48,10 +48,7 @@ class Stopwatch:
             return
 
         current_time = time.perf_counter()
-        self.timers[name] = {
-            'start_time': current_time,
-            'last_lap_time': current_time
-        }
+        self.timers[name] = {"start_time": current_time, "last_lap_time": current_time}
         self.stack.append(name)
 
     def _lap(self, name: str | None = None) -> float:
@@ -67,8 +64,8 @@ class Stopwatch:
             raise ValueError(f"Timer '{name}' does not exist")
 
         current_time = time.perf_counter()
-        elapsed = current_time - timer['last_lap_time']
-        timer['last_lap_time'] = current_time
+        elapsed = current_time - timer["last_lap_time"]
+        timer["last_lap_time"] = current_time
         return elapsed
 
     def start_block(self, message: str | None = None, name: str | None = None) -> None:
@@ -83,13 +80,13 @@ class Stopwatch:
         if self.disabled:
             return
 
-        lap_time = self._lap(name)
-        if not format_str:
-            return
-        elif "{" in format_str:
-            self.logger.debug(format_str.format(name=name, time=lap_time))
-        else:
-            self.logger.debug(f"{format_str} in {lap_time:.2f} seconds")
+        # lap_time = self._lap(name)
+        # if not format_str:
+        #     return
+        # elif "{" in format_str:
+        #     self.logger.debug(format_str.format(name=name, time=lap_time))
+        # else:
+        #     self.logger.debug(f"{format_str} in {lap_time:.2f} seconds")
 
     def elapsed(self, name: str | None = None) -> float:
         if self.disabled:
@@ -101,7 +98,7 @@ class Stopwatch:
             raise ValueError(f"Timer '{name}' does not exist")
 
         current_time = time.perf_counter()
-        return current_time - timer['start_time']
+        return current_time - timer["start_time"]
 
     def stop(self, name: str | None = None) -> float:
         if self.disabled:
@@ -127,4 +124,3 @@ class Stopwatch:
         start_message is passed as start_block's message.
         """
         return _RecordBlockContext(self, prof_name)
-

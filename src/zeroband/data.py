@@ -6,7 +6,7 @@ import threading
 
 from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.utils.logger import get_logger
-from zeroband.utils.world_info import get_world_info
+from zeroband.utils.world_info import get_local_world_info
 from zeroband.config import DataConfig
 
 import torch
@@ -339,7 +339,7 @@ class PrefetchDataLoader(StatefulDataLoader):
         def _prefetch_next(self):
             def _task() -> None:
                 # NOTE: Each thread gets its own threadlocal CUDA context and has to reset the device.
-                local_rank = get_world_info().local_rank
+                local_rank = get_local_world_info().local_rank
                 torch.cuda.set_device(local_rank)
 
                 # Grab batch or return sentinel

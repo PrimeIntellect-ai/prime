@@ -29,33 +29,31 @@ from torch.distributed.checkpoint.stateful import Stateful
 import warnings
 import logging
 from torch.distributed._tensor.api import DTensor
-from zeroband.utils.state_dict_send_recv import (
-    _get_sendable_state_dict,
-    recv_state_dict,
-    send_state_dict,
-    send_tensor_and_state_dict,
-)
 from distributed_shampoo import DistributedShampoo
 from zeroband.utils.logger import get_logger
 from zeroband.config import CkptConfig
-from zeroband.utils.world_info import get_world_info
+from zeroband.utils.world_info import get_local_world_info
 
 ## code inspired by torchtitan https://github.com/pytorch/torchtitan/blob/main/torchtitan/checkpoint.py
 
 
+# Note: this is grandfathered in code from before PCCL.
+# The veracity of this state is not enforced by PCCL.
+# This step count may diverge and should not be relied upon for critical operations,
+# especially if it entails branching logic, which WILL deadlock your code
 @dataclass
 class TrainingProgress(Stateful):
-    total_tokens: int
-    outer_step: int
-    step: int
+    num_trained_tokens: int
+    num_performed_outer_steps: int
+    num_performed_inner_steps: int
 
     def state_dict(self) -> dict[str, Any]:
-        return {"total_tokens": self.total_tokens, "outer_step": self.outer_step, "step": self.step}
+        return {"num_trained_tokens": self.num_trained_tokens, "num_performed_outer_steps": self.num_performed_outer_steps, "num_performed_inner_steps": self.num_performed_inner_steps}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self.total_tokens = state_dict["total_tokens"]
-        self.outer_step = state_dict["outer_step"]
-        self.step = state_dict["step"]
+        self.num_trained_tokens = state_dict["total_tokens"]
+        self.num_performed_outer_steps = state_dict["num_outer_steps"]
+        self.num_performed_inner_steps = state_dict["num_performed_inner_steps"]
 
 
 class ModelWrapper(Stateful):
@@ -202,13 +200,13 @@ class CkptManager:
         self._init_state()
 
         self._logger = get_logger(config)
-        self.world_info = get_world_info()
+        self.local_world_info = get_local_world_info()
 
         self.non_blocking_process: list[multiprocessing.Process] = []
         self.blocking_process: list[multiprocessing.Process] = []
         self._live_reco_thread: threading.Thread | None = None
 
-        if self.world_info.local_rank == 0:
+        if self.local_world_info.local_rank == 0:
             if self.config.path is not None:
                 self.check_path_access(self.config.path)
 
@@ -262,10 +260,10 @@ class CkptManager:
 
         """
 
-        step_ckpt_path = os.path.join(self.config.path, f"step_{self.training_progress.step}")
+        step_ckpt_path = os.path.join(self.config.path, f"step_{self.training_progress.num_performed_inner_steps}")
 
         if remote and self.config.remote is not None:
-            remote_ckpt_path = os.path.join(self.config.remote.path, f"step_{self.training_progress.step}")
+            remote_ckpt_path = os.path.join(self.config.remote.path, f"step_{self.training_progress.num_performed_inner_steps}")
 
         # if we are not in self recovery mode we save to disk
         time_start = time.perf_counter()
@@ -274,7 +272,7 @@ class CkptManager:
 
         # push to remote
         non_error_barrier()
-        if self.world_info.local_rank == 0:
+        if self.local_world_info.local_rank == 0:
             if remote and self.config.remote is not None:
                 self._async_save_remote(step_ckpt_path, remote_ckpt_path)
 
@@ -293,20 +291,20 @@ class CkptManager:
             dcp.save(self.states, checkpoint_id=ckpt_path)
 
             if self.diloco_offloaded_optimizer:
-                with open(os.path.join(ckpt_path, f"__{self.world_info.local_rank}_0.pt"), "wb") as f:
+                with open(os.path.join(ckpt_path, f"__{self.local_world_info.local_rank}_0.pt"), "wb") as f:
                     state = {}
                     state["optimizer"] = OuterOptimizerWrapper(self.diloco_offloaded_optimizer).state_dict()
 
                     torch.save(state, f)
 
             data_path = os.path.join(ckpt_path, "data")
-            self.save_data(data_path, self.dataloader, self.world_info.local_rank)
+            self.save_data(data_path, self.dataloader, self.local_world_info.local_rank)
 
             non_error_barrier()
 
             if self.config.remote_data_path is not None:
                 remote_data_path = os.path.join(
-                    self.config.remote_data_path, f"data_{self.data_rank}", f"step_{self.training_progress.step}"
+                    self.config.remote_data_path, f"data_{self.data_rank}", f"step_{self.training_progress.num_performed_inner_steps}"
                 )
                 latest_remote_data_path = os.path.join(self.config.remote_data_path, f"data_{self.data_rank}", "latest")
 
@@ -352,7 +350,7 @@ class CkptManager:
 
         self.blocking_process = []
 
-        if self.world_info.local_rank == 0:
+        if self.local_world_info.local_rank == 0:
             if self.config.topk is not None:
                 delete_topk(self.logger, self.config.path, self.config.topk)
 
@@ -365,7 +363,7 @@ class CkptManager:
     @torch.no_grad()
     def _load_data(self, resume_ckpt_path: str):
         self._logger.debug(f"loading data from {resume_ckpt_path}")
-        world_info = get_world_info()
+        world_info = get_local_world_info()
 
         data_path = os.path.join(resume_ckpt_path, "data")
 
@@ -392,7 +390,7 @@ class CkptManager:
         """
         time_start = time.perf_counter()
 
-        world_info = get_world_info()
+        world_info = get_local_world_info()
 
         files = os.listdir(resume_ckpt_path)
 
@@ -405,7 +403,7 @@ class CkptManager:
         dcp.load(self.states, checkpoint_id=resume_ckpt_path)
 
         if self.config.token_count is not None:
-            self.training_progress.total_tokens = self.config.token_count
+            self.training_progress.num_trained_tokens = self.config.token_count
 
         self._logger.debug("sync inner model")
         # todo(refactor): here we should rather let the diloco class handle this logic
@@ -438,115 +436,6 @@ class CkptManager:
         rsync_fsspec(remote_data_path, os.path.join(dest, "data"))
         data_path = dest
         self._load_data(data_path)
-
-    @torch.no_grad()
-    def recv_ckpt_from_peer(self, global_pg: dist.ProcessGroup):
-        assert self.diloco_offloaded_param_list is not None, "recv_ckpt_from_peers is only supported with diloco"
-
-        time_start = time.perf_counter()
-        self._logger.debug(f"Start receiving ckpt from rank {self.config.live_recovery_rank_src}")
-
-        jobs = []
-        buffers = []
-        for i, param in enumerate(self.diloco_offloaded_param_list):
-            data = param.data
-            if isinstance(param.data, DTensor):
-                data = param.data.to_local()
-
-            buffer = torch.empty_like(data)
-            buffers.append(buffer)
-            jobs.append(global_pg.recv([buffer], self.config.live_recovery_rank_src, i))
-
-        for job in jobs:
-            job.wait()
-
-        for buffer, param in zip(buffers, self.model.parameters()):
-            data = param.data
-            if isinstance(data, DTensor):
-                data = data.to_local()
-            data.copy_(buffer)
-
-        self._logger.debug("live recovery progress: offloaded model received 1/5")
-
-        outer_opt_state_dict = recv_state_dict(
-            global_pg, self.config.live_recovery_rank_src, self.diloco_offloaded_optimizer.state_dict()
-        )
-        self.diloco_offloaded_optimizer.load_state_dict(outer_opt_state_dict)
-
-        self._logger.debug("live recovery progress: outer optimizer state dict received 2/5")
-
-        training_process_state_dict = recv_state_dict(
-            global_pg, self.config.live_recovery_rank_src, self.training_progress.state_dict()
-        )
-        self.training_progress.load_state_dict(training_process_state_dict)
-        self._logger.debug("live recovery progress: training progress state dict received 3/5")
-
-        for group in self.optimizer.param_groups:
-            for p in group["params"]:
-                p.grad = torch.randn_like(p)
-
-        self.optimizer.step()
-        self.optimizer.zero_grad()
-
-        inner_opt_state_dict = recv_state_dict(
-            global_pg, self.config.live_recovery_rank_src, self.optimizer.state_dict()
-        )
-        self.optimizer.load_state_dict(inner_opt_state_dict)
-
-        self._logger.debug("live recovery progress: inner optimizer state dict received 4/5")
-
-        sheduler_state_dict = recv_state_dict(
-            global_pg, self.config.live_recovery_rank_src, self.scheduler.state_dict()
-        )
-        self.scheduler.load_state_dict(sheduler_state_dict)
-
-        self._logger.debug("live recovery progress: scheduler state dict received 5/5")
-
-        self._logger.debug(
-            f"Received ckpt from rank {self.config.live_recovery_rank_src} in {time.perf_counter() - time_start} seconds"
-        )
-
-    @torch.no_grad()
-    def send_ckpt_to_peer(self, global_pg: dist.ProcessGroup, dest_rank: int, blocking: bool = False):
-        def async_send():
-            assert self.diloco_offloaded_param_list is not None, "send_ckpt_to_peers is only supported with diloco"
-            time_start = time.perf_counter()
-            self._logger.debug(f"Start sending ckpt to rank {dest_rank}")
-
-            try:
-                jobs = []
-                for i, param in enumerate(self.diloco_offloaded_param_list):
-                    data = param.data
-                    if isinstance(data, DTensor):
-                        data = data.to_local()
-                    jobs.append(global_pg.send([data], dest_rank, i))
-
-                for job in jobs:
-                    job.wait()
-
-                send_state_dict(global_pg, self.diloco_offloaded_optimizer.state_dict(), dest_rank)
-                send_state_dict(global_pg, self.training_progress.state_dict(), dest_rank)
-
-                inner_optimizer_non_tensor_state_dict, inner_optimizer_tensors = _get_sendable_state_dict(
-                    self.optimizer.state_dict()
-                )
-                send_tensor_and_state_dict(
-                    global_pg, dest_rank, inner_optimizer_non_tensor_state_dict, inner_optimizer_tensors
-                )
-
-                send_state_dict(global_pg, self.scheduler.state_dict(), dest_rank)
-            except RuntimeError as e:
-                self._logger.error(f"Error sending ckpt to rank {dest_rank}: {e}")
-            else:
-                self._logger.debug(f"Sent ckpt to rank {dest_rank} in {time.perf_counter() - time_start} seconds")
-
-        thread = threading.Thread(target=async_send)
-        thread.start()
-        self._logger.debug("Live recovery thread started")
-        if blocking:
-            thread.join()
-        else:
-            self._live_reco_thread = thread
 
 
 def delete_topk(logger: logging.Logger, ckpt_path: str, topk: int):

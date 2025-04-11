@@ -170,6 +170,10 @@ class Config(BaseConfig):
     log_level: Literal["NOTSET", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_all_rank: bool = False
 
+    # CCoIP / PCCL
+    ccoip_master_addr: str = '127.0.0.1:48148'
+    ccoip_master_connection_attempts: int = 15
+
     # sub config
     diloco: DilocoConfig | None = None
     data: DataConfig = DataConfig()

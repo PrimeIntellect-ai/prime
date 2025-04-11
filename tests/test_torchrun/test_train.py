@@ -6,18 +6,18 @@ import subprocess
 import pytest
 import socket
 
-from zeroband.diloco import Compression
-
 import torch
+
+from zeroband.config import Compression
 
 num_gpu = torch.cuda.device_count()
 
 
-def get_random_available_port_list(num_port):
+def get_random_available_port_list(num_ports):
     # https://stackoverflow.com/questions/1365265/on-localhost-how-do-i-pick-a-free-port-number
     ports = []
 
-    while len(ports) < num_port:
+    while len(ports) < num_ports:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("", 0))
             new_port = s.getsockname()[1]
@@ -146,42 +146,42 @@ def test_ckpt(tmp_path: Path, soap: bool):
         num_gpus,
         "debug/diloco.toml",
         extra_args=[
-            "--project",
-            str(v1_file),
-            "--ckpt.path",
-            str(v1_ckpt),
-            "--ckpt.interval",
-            "5",
-            "--optim.total_steps",
-            "20",
-            "--train.log_model_hash",
-            "--no-data.sequence_packing",
-            "--train.attn_fn",
-            "math",
-        ]
-        + (["--optim.optim.precondition_frequency", "1"] if soap else []),
+                       "--project",
+                       str(v1_file),
+                       "--ckpt.path",
+                       str(v1_ckpt),
+                       "--ckpt.interval",
+                       "5",
+                       "--optim.total_steps",
+                       "20",
+                       "--train.log_model_hash",
+                       "--no-data.sequence_packing",
+                       "--train.attn_fn",
+                       "math",
+                   ]
+                   + (["--optim.optim.precondition_frequency", "1"] if soap else []),
         diloco=True,
     )
     _test_multi_gpu(
         num_gpus,
         "debug/diloco.toml",
         extra_args=[
-            "--project",
-            str(v2_file),
-            "--ckpt.path",
-            str(v2_ckpt),
-            "--ckpt.interval",
-            "5",
-            "--ckpt.resume",
-            str(v1_ckpt / "step_5"),
-            "--optim.total_steps",
-            "20",
-            "--train.log_model_hash",
-            "--no-data.sequence_packing",
-            "--train.attn_fn",
-            "math",
-        ]
-        + (["--optim.optim.precondition_frequency", "1"] if soap else []),
+                       "--project",
+                       str(v2_file),
+                       "--ckpt.path",
+                       str(v2_ckpt),
+                       "--ckpt.interval",
+                       "5",
+                       "--ckpt.resume",
+                       str(v1_ckpt / "step_5"),
+                       "--optim.total_steps",
+                       "20",
+                       "--train.log_model_hash",
+                       "--no-data.sequence_packing",
+                       "--train.attn_fn",
+                       "math",
+                   ]
+                   + (["--optim.optim.precondition_frequency", "1"] if soap else []),
         diloco=True,
     )
     # _test_multi_gpu(

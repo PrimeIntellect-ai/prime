@@ -414,7 +414,6 @@ def run_outer_step(
         num_syncs: IntRef,
         delayed_update: bool
 ) -> Optional[threading.Thread]:
-
     current_lr = compute_current_lr(training_progress.outer_step, outer_lr_scheduler_config)
     optim_utils.set_optimizer_lr(outer_optimizer, current_lr)
 
@@ -645,20 +644,16 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
             # if we don't use diloco we don't print the outer step logs
             logger.info(f"outer_step step: {training_progress.outer_step}")
 
-        global_world_size = communicator.get_attribute(Attribute.GLOBAL_WORLD_SIZE)
-
         topology_updated = False
         if local_iter_num == 1:
             # Assume the topology was updated in the first iteration because we just joined and got accepted
             topology_updated = True
 
         # Possibly update topology / wait for enough peers
-        mpi_ranks_pending = False
+        global_world_size: int
         with train_profiler.session("pccl::update_topology"):
-            if mpi_config is not None:
-                mpi_ranks_pending = global_world_size < mpi_config.mpi_world_size
-
-            if local_iter_num > 1 or mpi_ranks_pending or local_world_size == 1:
+            if local_iter_num > 1 or local_world_size == 1:
+                logger.info("Checking are_peers_pending...")
                 while True:
                     try:
                         if communicator.are_peers_pending():
@@ -673,19 +668,26 @@ def train(logger: Logger, config: Config, mpi_config: Optional[MPIConfig], devic
                         logger.info(f"Updating PCCL topology failed {e}, retrying...")
                         time.sleep(1)
 
+            global_world_size = communicator.get_attribute(Attribute.GLOBAL_WORLD_SIZE) # obtain global world-size after join
+
+            if mpi_config is not None:
+                largest_peer_group_size = communicator.get_attribute(Attribute.LARGEST_PEER_GROUP_WORLD_SIZE)
+                mpi_ranks_pending = global_world_size < (mpi_config.mpi_world_size * largest_peer_group_size)
+
         if mpi_ranks_pending:
-            print("Not all MPI ranks have joined...")
+            logger.info("Not all MPI ranks have joined...")
             time.sleep(1)
             continue
 
         # TODO: Make minimum num pccl peers configurable
         local_world_size = communicator.get_attribute(Attribute.LOCAL_WORLD_SIZE)
         if local_world_size < 2:
-            print("Waiting for more workers to join...")
+            logger.info("Waiting for more workers to join...")
             time.sleep(1)
             continue
 
         if topology_updated:
+            logger.info("Running shared state synchronization...")
             run_shared_state_sync(shared_state, communicator, model, outer_parameters_list, num_syncs, train_profiler,
                                   False)
 

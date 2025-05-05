@@ -389,12 +389,13 @@ def create(
                     key=lambda x: x.prices.price if x.prices else float("inf")
                 )
 
-                # Remove duplicates while preserving order
-                seen_providers = set()
+                seen_provider_types = set()
                 unique_configs = []
                 for gpu in matching_configs:
-                    if gpu.provider not in seen_providers:
-                        seen_providers.add(gpu.provider)
+                    # Create unique key combining provider and spot status
+                    provider_type = (gpu.provider, gpu.is_spot)
+                    if provider_type not in seen_provider_types:
+                        seen_provider_types.add(provider_type)
                         unique_configs.append(gpu)
 
                 if len(unique_configs) > 1:
@@ -406,7 +407,10 @@ def create(
                             if price != float("inf")
                             else "N/A"
                         )
-                        console.print(f"{idx}. {gpu.provider} ({price_display})")
+                        spot_display = " (spot)" if gpu.is_spot else ""
+                        console.print(
+                            f"{idx}. {gpu.provider}{spot_display} ({price_display})"
+                        )
 
                     provider_idx = typer.prompt(
                         "Select provider number",

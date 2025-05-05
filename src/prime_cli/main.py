@@ -15,12 +15,6 @@ app.add_typer(config_app, name="config")
 app.add_typer(pods_app, name="pods")
 
 
-def version_callback(value: bool) -> None:
-    if value:
-        typer.echo(f"Prime CLI Version: {version('prime-cli')}")
-        raise typer.Exit()
-
-
 @app.callback(invoke_without_command=True)
 def callback(
     ctx: typer.Context,

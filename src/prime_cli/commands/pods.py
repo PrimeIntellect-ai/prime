@@ -327,13 +327,13 @@ def create(
                 for gpu in gpus:
                     if gpu.provider == "runpod":
                         continue
-
                     if gpu.images:
                         # Filter out ubuntu image
-                        gpu.images = [
+                        filtered_images = [
                             img for img in gpu.images if img != "ubuntu_22_cuda_12"
                         ]
-                        if len(gpu.images) > 0:
+                        if len(filtered_images) > 0:
+                            gpu.images = filtered_images
                             filtered_gpus.append(gpu)
 
                 if filtered_gpus:

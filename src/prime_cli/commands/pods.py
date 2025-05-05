@@ -320,6 +320,27 @@ def create(
         ):
             availabilities = availability_client.get()
 
+        if env_vars:
+            filtered_availabilities = {}
+            for availability_type, gpus in availabilities.items():
+                filtered_gpus = []
+                for gpu in gpus:
+                    if gpu.provider == "runpod":
+                        continue
+
+                    if gpu.images:
+                        # Filter out ubuntu image
+                        gpu.images = [
+                            img for img in gpu.images if img != "ubuntu_22_cuda_12"
+                        ]
+                        if len(gpu.images) > 0:
+                            filtered_gpus.append(gpu)
+
+                if filtered_gpus:
+                    filtered_availabilities[availability_type] = filtered_gpus
+
+            availabilities = filtered_availabilities
+
         if id or cloud_id:
             # Find the matching GPU configuration by ID or cloud_id
             for gpu_type_key, gpus in availabilities.items():
@@ -566,14 +587,16 @@ def create(
                     )
                     raise typer.Exit(1)
 
-        if not image and selected_gpu.images:
-            if len(selected_gpu.images) == 1:
+        available_images = selected_gpu.images
+
+        if not image and available_images:
+            if len(available_images) == 1:
                 # If only one image available, use it directly
-                image = selected_gpu.images[0]
+                image = available_images[0]
             else:
                 # Show available images
                 console.print("\n[bold]Available Images:[/bold]")
-                for idx, img in enumerate(selected_gpu.images):
+                for idx, img in enumerate(available_images):
                     console.print(f"{idx + 1}. {img}")
 
                 # Prompt for image selection
@@ -581,11 +604,11 @@ def create(
                     "Select image number", type=int, default=1, show_default=False
                 )
 
-                if image_idx < 1 or image_idx > len(selected_gpu.images):
+                if image_idx < 1 or image_idx > len(available_images):
                     console.print("[red]Invalid image selection[/red]")
                     raise typer.Exit(1)
 
-                image = selected_gpu.images[image_idx - 1]
+                image = available_images[image_idx - 1]
 
         # Get team ID from config if not provided
         if not team_id:

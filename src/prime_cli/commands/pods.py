@@ -157,6 +157,7 @@ def status(pod_id: str) -> None:
 
         # Get both pod status and details
         statuses = pods_client.get_status([pod_id])
+
         pod_details = pods_client.get(pod_id)
 
         if not statuses:
@@ -345,6 +346,55 @@ def create(
                     raise typer.Exit(1)
                 gpu_type = gpu_types[gpu_type_idx - 1]
 
+            def select_provider_from_configs(
+                matching_configs: List[GPUAvailability],
+            ) -> GPUAvailability:
+                if not matching_configs:
+                    raise ValueError("No matching GPU configurations found")
+
+                # Sort by price
+                matching_configs.sort(
+                    key=lambda x: x.prices.price if x.prices else float("inf")
+                )
+
+                # Remove duplicates while preserving order
+                seen_providers = set()
+                unique_configs = []
+                for gpu in matching_configs:
+                    if gpu.provider not in seen_providers:
+                        seen_providers.add(gpu.provider)
+                        unique_configs.append(gpu)
+
+                if len(unique_configs) > 1:
+                    console.print("\n[bold]Available Providers:[/bold]")
+                    for idx, gpu in enumerate(unique_configs, 1):
+                        price = gpu.prices.price if gpu.prices else float("inf")
+                        price_display = (
+                            f"${round(float(price), 2)}/hr"
+                            if price != float("inf")
+                            else "N/A"
+                        )
+                        console.print(f"{idx}. {gpu.provider} ({price_display})")
+
+                    provider_idx = typer.prompt(
+                        "Select provider number",
+                        type=int,
+                        default=1,
+                        show_default=False,
+                    )
+                    if provider_idx < 1 or provider_idx > len(unique_configs):
+                        console.print("[red]Invalid provider selection[/red]")
+                        raise typer.Exit(1)
+                    selected_gpu = unique_configs[provider_idx - 1]
+                    if not isinstance(selected_gpu, GPUAvailability):
+                        raise TypeError("Selected GPU is not of type GPUAvailability")
+                    return selected_gpu
+
+                selected_gpu = unique_configs[0]
+                if not isinstance(selected_gpu, GPUAvailability):
+                    raise TypeError("Selected GPU is not of type GPUAvailability")
+                return selected_gpu
+
             if not gpu_count:
                 console.print(f"\n[bold]Available {gpu_type} Configurations:[/bold]")
                 gpu_configs = availabilities.get(str(gpu_type), [])
@@ -388,17 +438,13 @@ def create(
                     console.print("[red]Invalid configuration selection[/red]")
                     raise typer.Exit(1)
 
-                # Find the best provider for selected configuration
+                # Find all providers for selected configuration
                 selected_count = config_list[config_idx - 1][0]
                 matching_configs = [
                     gpu for gpu in gpu_configs if gpu.gpu_count == selected_count
                 ]
 
-                # Sort by price
-                selected_gpu = sorted(
-                    matching_configs,
-                    key=lambda x: x.prices.price if x.prices else float("inf"),
-                )[0]
+                selected_gpu = select_provider_from_configs(matching_configs)
                 cloud_id = selected_gpu.cloud_id
             else:
                 # Find configuration matching GPU type and count
@@ -413,11 +459,7 @@ def create(
                     )
                     raise typer.Exit(1)
 
-                # Sort by price
-                selected_gpu = sorted(
-                    matching_configs,
-                    key=lambda x: x.prices.price if x.prices else float("inf"),
-                )[0]
+                selected_gpu = select_provider_from_configs(matching_configs)
                 cloud_id = selected_gpu.cloud_id
 
         if not selected_gpu:

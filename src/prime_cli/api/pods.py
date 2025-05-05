@@ -1,3 +1,4 @@
+import json
 from typing import List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -159,7 +160,11 @@ class PodsClient:
             return Pod(**response)
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to create pod: {e.response.text}")
+                error_text = e.response.text
+                error_json = json.loads(error_text)
+                if "detail" in error_json:
+                    error_text = error_json["detail"]
+                raise APIError(f"Failed to create pod: {error_text}")
             raise APIError(f"Failed to create pod: {str(e)}")
 
     def delete(self, pod_id: str) -> None:

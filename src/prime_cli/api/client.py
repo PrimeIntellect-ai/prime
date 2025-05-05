@@ -82,7 +82,7 @@ class APIClient:
                     "Payment required. Please check your billing status at "
                     "https://app.primeintellect.ai/dashboard/billing"
                 )
-            raise APIError(f"API request failed: {e}")
+            raise e
         except requests.exceptions.RequestException as e:
             raise APIError(f"Request failed: {e}")
 

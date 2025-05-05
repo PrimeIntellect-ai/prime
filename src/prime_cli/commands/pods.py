@@ -282,8 +282,19 @@ def create(
     ),
     custom_template_id: Optional[str] = typer.Option(None, help="Custom template ID"),
     team_id: Optional[str] = typer.Option(None, help="Team ID to use for the pod"),
+    env: Optional[List[str]] = typer.Option(
+        None,
+        help="Environment variables to set in the pod. Can be specified multiple times "
+        "using --env KEY=value --env KEY2=value2",
+    ),
 ) -> None:
     """Create a new pod with an interactive setup process"""
+    env_vars = []
+    if env:
+        for env_var in env:
+            key, value = env_var.split("=")
+            env_vars.append({"key": key, "value": value})
+
     try:
         # Validate custom template usage
         if custom_template_id and not image == "custom_template":
@@ -619,6 +630,7 @@ def create(
                 "jupyterPassword": None,
                 "autoRestart": False,
                 "customTemplateId": custom_template_id,
+                "envVars": env_vars,
             },
             "provider": {"type": selected_gpu.provider}
             if selected_gpu.provider

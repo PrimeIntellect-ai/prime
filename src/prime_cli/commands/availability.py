@@ -57,6 +57,9 @@ def list(
     socket: Optional[str] = typer.Option(
         None, help="Filter by socket type (e.g., PCIe, SXM5, SXM4)"
     ),
+    provider: Optional[str] = typer.Option(
+        None, help="Filter by provider (e.g., aws, azure, google)"
+    ),
     group_similar: bool = typer.Option(
         True, help="Group similar configurations from same provider"
     ),
@@ -72,6 +75,13 @@ def list(
             gpu_type=gpu_type, gpu_count=gpu_count, regions=regions
         )
 
+        # Filter by provider if provided
+        if provider:
+            availability_data = {
+                gpu_type: [gpu for gpu in gpus if gpu.provider == provider]
+                for gpu_type, gpus in availability_data.items()
+            }
+
         # Create display table
         table = Table(title="Available GPU Resources")
         table.add_column("ID", style="cyan", no_wrap=True)
@@ -82,10 +92,10 @@ def list(
         table.add_column("Location", style="green")
         table.add_column("Stock", style="yellow")
         table.add_column("Price/Hr", style="magenta")
-        table.add_column("Memory (GB)", style="blue")
         table.add_column("Security", style="white")
         table.add_column("vCPUs", style="blue")
         table.add_column("RAM (GB)", style="blue")
+        table.add_column("Disk (GB)", style="blue")
 
         all_gpus: List[Dict[str, Any]] = []
         for gpu_type, gpus in availability_data.items():
@@ -103,6 +113,14 @@ def list(
                 location = f"{gpu.country or 'N/A'}"
 
                 short_id = generate_short_id(gpu)
+
+                disk_info: str = str(gpu.disk.default_count)
+                if (
+                    gpu.disk.max_count is not None
+                    and gpu.disk.max_count != gpu.disk.default_count
+                ):
+                    disk_info = f"{gpu.disk.default_count}+"
+
                 gpu_data = {
                     "short_id": short_id,
                     "cloud_id": gpu.cloud_id,
@@ -118,6 +136,8 @@ def list(
                     "security": gpu.security or "N/A",
                     "vcpu": gpu.vcpu.default_count,
                     "memory": gpu.memory.default_count,
+                    "is_spot": gpu.is_spot,
+                    "disk": disk_info,
                 }
                 all_gpus.append(gpu_data)
 
@@ -147,8 +167,14 @@ def list(
                     max_vcpu = max(g["vcpu"] for g in group)
                     min_mem = min(g["memory"] for g in group)
                     max_mem = max(g["memory"] for g in group)
-                    vcpu_range = f"{min_vcpu}-{max_vcpu}"
-                    memory_range = f"{min_mem}-{max_mem}"
+                    vcpu_range = (
+                        f"{min_vcpu}-{max_vcpu}"
+                        if min_vcpu != max_vcpu
+                        else str(min_vcpu)
+                    )
+                    memory_range = (
+                        f"{min_mem}-{max_mem}" if min_mem != max_mem else str(min_mem)
+                    )
                     base["vcpu"] = vcpu_range
                     base["memory"] = memory_range
                     filtered_gpus.append(base)
@@ -163,19 +189,26 @@ def list(
                     filtered_gpus.append(gpu_config)
 
         for gpu_entry in filtered_gpus:
+            gpu_type_display = (
+                f"{gpu_entry['gpu_type']} (Spot)"
+                if gpu_entry["is_spot"]
+                else gpu_entry["gpu_type"]
+            ).replace("_", " ")
             table.add_row(
                 gpu_entry["short_id"],
-                gpu_entry["gpu_type"],
+                gpu_type_display,
                 str(gpu_entry["gpu_count"]),
                 gpu_entry["socket"],
                 gpu_entry["provider"],
                 gpu_entry["location"],
                 gpu_entry["stock_status"],
                 gpu_entry["price"],
-                str(gpu_entry["gpu_memory"]),
-                gpu_entry["security"],
+                "community"
+                if gpu_entry["security"] == "community_cloud"
+                else "datacenter",
                 str(gpu_entry["vcpu"]),
                 str(gpu_entry["memory"]),
+                str(gpu_entry["disk"]),
             )
 
         console.print(table)

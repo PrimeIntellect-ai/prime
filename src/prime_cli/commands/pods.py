@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 import subprocess
 from datetime import datetime
@@ -33,6 +35,9 @@ def format_ip_display(ip: Optional[Union[str, List[str]]]) -> str:
 def list(
     limit: int = typer.Option(100, help="Maximum number of pods to list"),
     offset: int = typer.Option(0, help="Number of pods to skip"),
+    watch: bool = typer.Option(
+        False, "--watch", "-w", help="Watch pods list in real-time"
+    ),
 ) -> None:
     """List your running pods"""
     try:
@@ -40,59 +45,97 @@ def list(
         base_client = APIClient()
         pods_client = PodsClient(base_client)
 
-        # Get pods list
-        pods_list = pods_client.list(offset=offset, limit=limit)
+        last_pods_hash = None
 
-        # Create display table
-        table = Table(
-            title=f"Compute Pods (Total: {pods_list.total_count})", show_lines=True
-        )
-        table.add_column("ID", style="cyan", no_wrap=True)
-        table.add_column("Name", style="blue")
-        table.add_column("GPU", style="green")
-        table.add_column("Status", style="yellow")
-        table.add_column("Created", style="blue")
+        while True:
+            # Get pods list
+            pods_list = pods_client.list(offset=offset, limit=limit)
 
-        # Add rows for each pod
-        for pod in pods_list.data:
-            # Format status with color
-            display_status = pod.status
-            if pod.status == "ACTIVE" and pod.installation_status != "FINISHED":
-                display_status = "INSTALLING"
+            current_pods_hash = hashlib.md5(
+                json.dumps(
+                    [pod.model_dump() for pod in pods_list.data], sort_keys=True
+                ).encode()
+            ).hexdigest()
 
-            status_color = {
-                "ACTIVE": "green",
-                "PENDING": "yellow",
-                "ERROR": "red",
-                "INSTALLING": "yellow",
-            }.get(display_status, "white")
+            # Only update display if data changed or first run
+            if current_pods_hash != last_pods_hash:
+                # Clear screen if watching
+                if watch:
+                    os.system("cls" if os.name == "nt" else "clear")
 
-            # Format created time
-            created_at = datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
-            created_str = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+                # Create display table
+                table = Table(
+                    title=f"Compute Pods (Total: {pods_list.total_count})",
+                    show_lines=True,
+                )
+                table.add_column("ID", style="cyan", no_wrap=True)
+                table.add_column("Name", style="blue")
+                table.add_column("GPU", style="green")
+                table.add_column("Status", style="yellow")
+                table.add_column("Created", style="blue")
 
-            table.add_row(
-                pod.id,
-                pod.name or "N/A",
-                f"{pod.gpu_type} x{pod.gpu_count}",
-                Text(display_status, style=status_color),
-                created_str,
-            )
+                # Add rows for each pod
+                for pod in pods_list.data:
+                    # Format status with color
+                    display_status = pod.status
+                    if pod.status == "ACTIVE" and pod.installation_status != "FINISHED":
+                        display_status = "INSTALLING"
 
-        console.print(table)
-        console.print(
-            "\n[blue]Use 'prime pods status <pod-id>' to see detailed information "
-            "about a specific pod[/blue]"
-        )
+                    status_color = {
+                        "ACTIVE": "green",
+                        "PENDING": "yellow",
+                        "ERROR": "red",
+                        "INSTALLING": "yellow",
+                    }.get(display_status, "white")
 
-        # If there are more pods, show a message
-        if pods_list.total_count > offset + limit:
-            remaining = pods_list.total_count - (offset + limit)
-            console.print(
-                f"\n[yellow]Showing {limit} of {pods_list.total_count} pods. "
-                f"Use --offset {offset + limit} to see the next "
-                f"{min(limit, remaining)} pods.[/yellow]"
-            )
+                    # Format created time
+                    created_at = datetime.fromisoformat(
+                        pod.created_at.replace("Z", "+00:00")
+                    )
+                    created_str = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+                    table.add_row(
+                        pod.id,
+                        pod.name or "N/A",
+                        f"{pod.gpu_type} x{pod.gpu_count}",
+                        Text(display_status, style=status_color),
+                        created_str,
+                    )
+
+                console.print(table)
+
+                # Update hash after displaying
+            if not watch:
+                console.print(
+                    "\n[blue]Use 'prime pods status <pod-id>' to "
+                    "see detailed information about a specific pod[/blue]"
+                )
+
+                # If there are more pods, show a message
+                if pods_list.total_count > offset + limit:
+                    remaining = pods_list.total_count - (offset + limit)
+                    console.print(
+                        f"\n[yellow]Showing {limit} of {pods_list.total_count} pods. "
+                        f"Use --offset {offset + limit} to see the next "
+                        f"{min(limit, remaining)} pods.[/yellow]"
+                    )
+
+                break
+            else:
+                # Only print the message when we're not repeating due to unchanged data
+                if current_pods_hash != last_pods_hash or last_pods_hash is None:
+                    console.print("\n[dim]Press Ctrl+C to exit watch mode[/dim]")
+                last_pods_hash = current_pods_hash
+                try:
+                    # Wait before refreshing
+                    import time
+
+                    time.sleep(5)
+                except KeyboardInterrupt:
+                    # Clear the progress dots on exit
+                    if current_pods_hash == last_pods_hash:
+                        console.print("\n")
+                    break
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
@@ -114,6 +157,7 @@ def status(pod_id: str) -> None:
 
         # Get both pod status and details
         statuses = pods_client.get_status([pod_id])
+
         pod_details = pods_client.get(pod_id)
 
         if not statuses:
@@ -233,11 +277,37 @@ def create(
     disk_size: Optional[int] = typer.Option(None, help="Disk size in GB"),
     vcpus: Optional[int] = typer.Option(None, help="Number of vCPUs"),
     memory: Optional[int] = typer.Option(None, help="Memory in GB"),
-    image: Optional[str] = typer.Option(None, help="Custom image"),
+    image: Optional[str] = typer.Option(
+        None, help="Image name or 'custom_template' when using custom template ID"
+    ),
+    custom_template_id: Optional[str] = typer.Option(None, help="Custom template ID"),
     team_id: Optional[str] = typer.Option(None, help="Team ID to use for the pod"),
+    env: Optional[List[str]] = typer.Option(
+        None,
+        help="Environment variables to set in the pod. Can be specified multiple times "
+        "using --env KEY=value --env KEY2=value2",
+    ),
 ) -> None:
     """Create a new pod with an interactive setup process"""
+    env_vars = []
+    if env:
+        for env_var in env:
+            key, value = env_var.split("=")
+            env_vars.append({"key": key, "value": value})
+
     try:
+        # Validate custom template usage
+        if custom_template_id and not image == "custom_template":
+            console.print(
+                "[red]Error: Must set image='custom_template' when using custom_template_id[/red]"  # noqa: E501
+            )
+            raise typer.Exit(1)
+        if image == "custom_template" and not custom_template_id:
+            console.print(
+                "[red]Error: Must provide custom_template_id when image='custom_template'[/red]"  # noqa: E501
+            )
+            raise typer.Exit(1)
+
         base_client = APIClient()
         availability_client = AvailabilityClient(base_client)
         pods_client = PodsClient(base_client)
@@ -249,6 +319,27 @@ def create(
             "[bold blue]Loading available GPU configurations...", spinner="dots"
         ):
             availabilities = availability_client.get()
+
+        if env_vars:
+            filtered_availabilities = {}
+            for availability_type, gpus in availabilities.items():
+                filtered_gpus = []
+                for gpu in gpus:
+                    if gpu.provider == "runpod":
+                        continue
+                    if gpu.images:
+                        # Filter out ubuntu image
+                        filtered_images = [
+                            img for img in gpu.images if img != "ubuntu_22_cuda_12"
+                        ]
+                        if len(filtered_images) > 0:
+                            gpu.images = filtered_images
+                            filtered_gpus.append(gpu)
+
+                if filtered_gpus:
+                    filtered_availabilities[availability_type] = filtered_gpus
+
+            availabilities = filtered_availabilities
 
         if id or cloud_id:
             # Find the matching GPU configuration by ID or cloud_id
@@ -286,6 +377,55 @@ def create(
                     console.print("[red]Invalid GPU type selection[/red]")
                     raise typer.Exit(1)
                 gpu_type = gpu_types[gpu_type_idx - 1]
+
+            def select_provider_from_configs(
+                matching_configs: List[GPUAvailability],
+            ) -> GPUAvailability:
+                if not matching_configs:
+                    raise ValueError("No matching GPU configurations found")
+
+                # Sort by price
+                matching_configs.sort(
+                    key=lambda x: x.prices.price if x.prices else float("inf")
+                )
+
+                # Remove duplicates while preserving order
+                seen_providers = set()
+                unique_configs = []
+                for gpu in matching_configs:
+                    if gpu.provider not in seen_providers:
+                        seen_providers.add(gpu.provider)
+                        unique_configs.append(gpu)
+
+                if len(unique_configs) > 1:
+                    console.print("\n[bold]Available Providers:[/bold]")
+                    for idx, gpu in enumerate(unique_configs, 1):
+                        price = gpu.prices.price if gpu.prices else float("inf")
+                        price_display = (
+                            f"${round(float(price), 2)}/hr"
+                            if price != float("inf")
+                            else "N/A"
+                        )
+                        console.print(f"{idx}. {gpu.provider} ({price_display})")
+
+                    provider_idx = typer.prompt(
+                        "Select provider number",
+                        type=int,
+                        default=1,
+                        show_default=False,
+                    )
+                    if provider_idx < 1 or provider_idx > len(unique_configs):
+                        console.print("[red]Invalid provider selection[/red]")
+                        raise typer.Exit(1)
+                    selected_gpu = unique_configs[provider_idx - 1]
+                    if not isinstance(selected_gpu, GPUAvailability):
+                        raise TypeError("Selected GPU is not of type GPUAvailability")
+                    return selected_gpu
+
+                selected_gpu = unique_configs[0]
+                if not isinstance(selected_gpu, GPUAvailability):
+                    raise TypeError("Selected GPU is not of type GPUAvailability")
+                return selected_gpu
 
             if not gpu_count:
                 console.print(f"\n[bold]Available {gpu_type} Configurations:[/bold]")
@@ -330,17 +470,13 @@ def create(
                     console.print("[red]Invalid configuration selection[/red]")
                     raise typer.Exit(1)
 
-                # Find the best provider for selected configuration
+                # Find all providers for selected configuration
                 selected_count = config_list[config_idx - 1][0]
                 matching_configs = [
                     gpu for gpu in gpu_configs if gpu.gpu_count == selected_count
                 ]
 
-                # Sort by price
-                selected_gpu = sorted(
-                    matching_configs,
-                    key=lambda x: x.prices.price if x.prices else float("inf"),
-                )[0]
+                selected_gpu = select_provider_from_configs(matching_configs)
                 cloud_id = selected_gpu.cloud_id
             else:
                 # Find configuration matching GPU type and count
@@ -355,11 +491,7 @@ def create(
                     )
                     raise typer.Exit(1)
 
-                # Sort by price
-                selected_gpu = sorted(
-                    matching_configs,
-                    key=lambda x: x.prices.price if x.prices else float("inf"),
-                )[0]
+                selected_gpu = select_provider_from_configs(matching_configs)
                 cloud_id = selected_gpu.cloud_id
 
         if not selected_gpu:
@@ -368,9 +500,12 @@ def create(
 
         if not name:
             while True:
+                gpu_name = selected_gpu.gpu_type.lower().split("_")[0]
+                default_name = f"{gpu_name}-{selected_gpu.gpu_count}"
                 name = typer.prompt(
                     "Pod name (alphanumeric and dashes only, must contain at least "
                     "1 letter)",
+                    default=default_name,
                 )
                 if (
                     name
@@ -452,22 +587,28 @@ def create(
                     )
                     raise typer.Exit(1)
 
-        if not image and selected_gpu.images:
-            # Show available images
-            console.print("\n[bold]Available Images:[/bold]")
-            for idx, img in enumerate(selected_gpu.images):
-                console.print(f"{idx + 1}. {img}")
+        available_images = selected_gpu.images
 
-            # Prompt for image selection
-            image_idx = typer.prompt(
-                "Select image number", type=int, default=1, show_default=False
-            )
+        if not image and available_images:
+            if len(available_images) == 1:
+                # If only one image available, use it directly
+                image = available_images[0]
+            else:
+                # Show available images
+                console.print("\n[bold]Available Images:[/bold]")
+                for idx, img in enumerate(available_images):
+                    console.print(f"{idx + 1}. {img}")
 
-            if image_idx < 1 or image_idx > len(selected_gpu.images):
-                console.print("[red]Invalid image selection[/red]")
-                raise typer.Exit(1)
+                # Prompt for image selection
+                image_idx = typer.prompt(
+                    "Select image number", type=int, default=1, show_default=False
+                )
 
-            image = selected_gpu.images[image_idx - 1]
+                if image_idx < 1 or image_idx > len(available_images):
+                    console.print("[red]Invalid image selection[/red]")
+                    raise typer.Exit(1)
+
+                image = available_images[image_idx - 1]
 
         # Get team ID from config if not provided
         if not team_id:
@@ -507,11 +648,12 @@ def create(
                 "image": image,
                 "dataCenterId": selected_gpu.data_center,
                 "maxPrice": None,
-                "customTemplateId": None,
                 "country": None,
                 "security": None,
                 "jupyterPassword": None,
                 "autoRestart": False,
+                "customTemplateId": custom_template_id,
+                "envVars": env_vars,
             },
             "provider": {"type": selected_gpu.provider}
             if selected_gpu.provider
@@ -598,9 +740,10 @@ def terminate(pod_id: str) -> None:
         raise typer.Exit(1)
 
 
-@app.command()
-def ssh(pod_id: str) -> None:
-    """SSH into a pod using configured SSH key"""
+@app.command(name="connect")
+@app.command(name="ssh")
+def connect(pod_id: str) -> None:
+    """SSH / connect to a pod using configured SSH key"""
     try:
         base_client = APIClient()
         pods_client = PodsClient(base_client)
@@ -621,6 +764,11 @@ def ssh(pod_id: str) -> None:
         if not os.path.exists(ssh_key_path):
             console.print(f"[red]SSH key not found at {ssh_key_path}[/red]")
             raise typer.Exit(1)
+
+        console.print(f"[blue]Using SSH key:[/blue] {ssh_key_path}")
+        console.print(
+            "[dim]To change SSH key path, use: prime config set-ssh-key-path[/dim]"
+        )
 
         ssh_conn = status.ssh_connection
         # Handle ssh_conn being either a string or list of strings

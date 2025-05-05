@@ -352,13 +352,22 @@ def create(
                 if not matching_configs:
                     raise ValueError("No matching GPU configurations found")
 
+                # Sort by price
                 matching_configs.sort(
                     key=lambda x: x.prices.price if x.prices else float("inf")
                 )
 
-                if len(matching_configs) > 1:
+                # Remove duplicates while preserving order
+                seen_providers = set()
+                unique_configs = []
+                for gpu in matching_configs:
+                    if gpu.provider not in seen_providers:
+                        seen_providers.add(gpu.provider)
+                        unique_configs.append(gpu)
+
+                if len(unique_configs) > 1:
                     console.print("\n[bold]Available Providers:[/bold]")
-                    for idx, gpu in enumerate(matching_configs, 1):
+                    for idx, gpu in enumerate(unique_configs, 1):
                         price = gpu.prices.price if gpu.prices else float("inf")
                         price_display = (
                             f"${round(float(price), 2)}/hr"
@@ -373,15 +382,15 @@ def create(
                         default=1,
                         show_default=False,
                     )
-                    if provider_idx < 1 or provider_idx > len(matching_configs):
+                    if provider_idx < 1 or provider_idx > len(unique_configs):
                         console.print("[red]Invalid provider selection[/red]")
                         raise typer.Exit(1)
-                    selected_gpu = matching_configs[provider_idx - 1]
+                    selected_gpu = unique_configs[provider_idx - 1]
                     if not isinstance(selected_gpu, GPUAvailability):
                         raise TypeError("Selected GPU is not of type GPUAvailability")
                     return selected_gpu
 
-                selected_gpu = matching_configs[0]
+                selected_gpu = unique_configs[0]
                 if not isinstance(selected_gpu, GPUAvailability):
                     raise TypeError("Selected GPU is not of type GPUAvailability")
                 return selected_gpu

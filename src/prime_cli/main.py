@@ -4,6 +4,7 @@ import typer
 
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
+from .commands.login import app as login_app
 from .commands.pods import app as pods_app
 
 __version__ = version("prime-cli")
@@ -13,6 +14,7 @@ app = typer.Typer(name="prime", help=f"Prime Intellect CLI (v{__version__})")
 app.add_typer(availability_app, name="availability")
 app.add_typer(config_app, name="config")
 app.add_typer(pods_app, name="pods")
+app.add_typer(login_app, name="login")
 
 
 @app.callback(invoke_without_command=True)

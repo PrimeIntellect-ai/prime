@@ -1,5 +1,6 @@
 import base64
 import time
+from typing import Optional
 
 import requests
 import typer
@@ -14,7 +15,7 @@ app = typer.Typer(help="Login to Prime Intellect")
 console = Console()
 
 
-def generate_ephemeral_keypair():
+def generate_ephemeral_keypair() -> tuple[rsa.RSAPrivateKey, str]:
     """Generate a temporary RSA key pair for secure communication"""
     try:
         private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -32,10 +33,12 @@ def generate_ephemeral_keypair():
         raise typer.Exit(1)
 
 
-def decrypt_challenge_response(private_key, encrypted_response):
+def decrypt_challenge_response(
+    private_key: rsa.RSAPrivateKey, encrypted_response: bytes
+) -> Optional[bytes]:
     """Decrypt the challenge response using the private key"""
     try:
-        decrypted = private_key.decrypt(
+        decrypted: bytes = private_key.decrypt(
             encrypted_response,
             asym_padding.OAEP(
                 mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
@@ -57,7 +60,8 @@ def login() -> None:
 
     if not settings["base_url"]:
         console.print(
-            "[red]Base URL not configured. Please run 'prime config set-base-url' first.[/red]"
+            "[red]Base URL not configured.",
+            "Please run 'prime config set-base-url' first.",
         )
         raise typer.Exit(1)
 
@@ -66,8 +70,6 @@ def login() -> None:
         # Generate secure keypair
         private_key, public_pem = generate_ephemeral_keypair()
 
-        print(f"{settings['base_url']}/api/v1/auth_challenge/generate")
-
         response = requests.post(
             f"{settings['base_url']}/api/v1/auth_challenge/generate",
             json={
@@ -75,48 +77,61 @@ def login() -> None:
             },
         )
 
-        print(response.json())
         if response.status_code != 200:
-            console.print("[red]Failed to generate challenge[/red]")
+            console.print(
+                "[red]Failed to generate challenge:",
+                f"{response.json().get('detail', 'Unknown error')}[/red]",
+            )
             raise typer.Exit(1)
 
         challenge_response = response.json()
 
         console.print("\n[bold blue]To login, please follow these steps:[/bold blue]")
         console.print(
-            "1. Open [link]https://app.primeintellect.ai/dashboard/tokens/challenge[/link]"
+            "1. Open ",
+            "[link]https://app.primeintellect.ai/dashboard/tokens/challenge[/link]",
         )
         console.print(
-            f"2. Enter this code: [bold green]{challenge_response['challenge']}[/bold green]"
+            "2. Enter this code:",
+            f"[bold green]{challenge_response['challenge']}[/bold green]",
         )
         console.print("\nWaiting for authentication...")
 
+        challenge_auth_header = f"Bearer {challenge_response['status_auth_token']}"
         while True:
-            status_response = requests.get(
-                f"{settings['base_url']}/api/v1/auth_challenge/status",
-                params={"challenge": challenge_response["challenge"]},
-            )
-
-            if status_response.status_code == 404:
-                console.print("[red]Challenge expired[/red]")
-                break
-
-            status_data = status_response.json()
-            if status_data.get("result"):
-                # Decrypt the result
-                encrypted_result = base64.b64decode(status_data["result"])
-                decrypted_result = decrypt_challenge_response(
-                    private_key, encrypted_result
+            try:
+                status_response = requests.get(
+                    f"{settings['base_url']}/api/v1/auth_challenge/status",
+                    params={"challenge": challenge_response["challenge"]},
+                    headers={"Authorization": challenge_auth_header},
                 )
-                if decrypted_result:
-                    # Update config with decrypted token
-                    config.set_api_key(decrypted_result.decode())
-                    console.print("[green]Successfully logged in![/green]")
-                else:
-                    console.print("[red]Failed to decrypt authentication token[/red]")
-                break
 
-            time.sleep(5)
+                if status_response.status_code == 404:
+                    console.print("[red]Challenge expired[/red]")
+                    break
+
+                status_data = status_response.json()
+                if status_data.get("result"):
+                    # Decrypt the result
+                    encrypted_result = base64.b64decode(status_data["result"])
+                    decrypted_result = decrypt_challenge_response(
+                        private_key, encrypted_result
+                    )
+                    if decrypted_result:
+                        # Update config with decrypted token
+                        config.set_api_key(decrypted_result.decode())
+                        console.print("[green]Successfully logged in![/green]")
+                    else:
+                        console.print(
+                            "[red]Failed to decrypt authentication token[/red]"
+                        )
+                    break
+
+                time.sleep(5)
+            except requests.exceptions.RequestException:
+                console.print("[red]Failed to connect to server. Retrying...[/red]")
+                time.sleep(5)
+                continue
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Login cancelled by user[/yellow]")

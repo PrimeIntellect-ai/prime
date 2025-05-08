@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import subprocess
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -752,16 +753,22 @@ def connect(pod_id: str) -> None:
         base_client = APIClient()
         pods_client = PodsClient(base_client)
 
-        # Get pod status to check SSH connection details
-        statuses = pods_client.get_status([pod_id])
-        if not statuses:
-            console.print(f"[red]No status found for pod {pod_id}[/red]")
-            raise typer.Exit(1)
+        # Keep trying until SSH connection is available
+        status_message = "[bold blue]Waiting for SSH connection to become available..."
+        with console.status(status_message, spinner="dots"):
+            while True:
+                # Get pod status to check SSH connection details
+                statuses = pods_client.get_status([pod_id])
+                if not statuses:
+                    console.print(f"[red]No status found for pod {pod_id}[/red]")
+                    raise typer.Exit(1)
 
-        status = statuses[0]
-        if not status.ssh_connection:
-            console.print(f"[red]SSH connection not available for pod {pod_id}[/red]")
-            raise typer.Exit(1)
+                status = statuses[0]
+                if status.ssh_connection:
+                    break
+
+                # Wait before retrying
+                time.sleep(5)  # Wait 5 seconds before retrying
 
         # Get SSH key path from config
         ssh_key_path = config.ssh_key_path

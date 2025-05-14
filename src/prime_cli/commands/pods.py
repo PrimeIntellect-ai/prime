@@ -290,13 +290,13 @@ def create(
     ),
 ) -> None:
     """Create a new pod with an interactive setup process"""
-    env_vars = []
-    if env:
-        for env_var in env:
-            key, value = env_var.split("=")
-            env_vars.append({"key": key, "value": value})
-
     try:
+        env_vars = []
+        if env:
+            for env_var in env:
+                key, value = env_var.split("=")
+                env_vars.append({"key": key, "value": value})
+
         # Validate custom template usage
         if custom_template_id and not image == "custom_template":
             console.print(
@@ -359,25 +359,29 @@ def create(
         else:
             # Interactive GPU selection if no ID provided
             if not gpu_type:
-                # Show available GPU types
-                console.print("\n[bold]Available GPU Types:[/bold]")
-                gpu_types = sorted(
-                    [
-                        gpu_type
-                        for gpu_type, gpus in availabilities.items()
-                        if len(gpus) > 0
-                    ]
-                )
-                for idx, gpu_type_option in enumerate(gpu_types, 1):
-                    console.print(f"{idx}. {gpu_type_option}")
+                try:
+                    # Show available GPU types
+                    console.print("\n[bold]Available GPU Types:[/bold]")
+                    gpu_types = sorted(
+                        [
+                            gpu_type
+                            for gpu_type, gpus in availabilities.items()
+                            if len(gpus) > 0
+                        ]
+                    )
+                    for idx, gpu_type_option in enumerate(gpu_types, 1):
+                        console.print(f"{idx}. {gpu_type_option}")
 
-                gpu_type_idx = typer.prompt(
-                    "Select GPU type number", type=int, default=1
-                )
-                if gpu_type_idx < 1 or gpu_type_idx > len(gpu_types):
-                    console.print("[red]Invalid GPU type selection[/red]")
-                    raise typer.Exit(1)
-                gpu_type = gpu_types[gpu_type_idx - 1]
+                    gpu_type_idx = typer.prompt(
+                        "Select GPU type number", type=int, default=1
+                    )
+                    if gpu_type_idx < 1 or gpu_type_idx > len(gpu_types):
+                        console.print("[red]Invalid GPU type selection[/red]")
+                        raise typer.Exit(1)
+                    gpu_type = gpu_types[gpu_type_idx - 1]
+                except (KeyboardInterrupt, typer.Abort):
+                    console.print("\n[yellow]GPU type selection cancelled by user[/yellow]")
+                    raise typer.Exit(0)
 
             def select_provider_from_configs(
                 matching_configs: List[GPUAvailability],
@@ -400,32 +404,36 @@ def create(
                         unique_configs.append(gpu)
 
                 if len(unique_configs) > 1:
-                    console.print("\n[bold]Available Providers:[/bold]")
-                    for idx, gpu in enumerate(unique_configs, 1):
-                        price = gpu.prices.price if gpu.prices else float("inf")
-                        price_display = (
-                            f"${round(float(price), 2)}/hr"
-                            if price != float("inf")
-                            else "N/A"
-                        )
-                        spot_display = " (spot)" if gpu.is_spot else ""
-                        console.print(
-                            f"{idx}. {gpu.provider}{spot_display} ({price_display})"
-                        )
+                    try:
+                        console.print("\n[bold]Available Providers:[/bold]")
+                        for idx, gpu in enumerate(unique_configs, 1):
+                            price = gpu.prices.price if gpu.prices else float("inf")
+                            price_display = (
+                                f"${round(float(price), 2)}/hr"
+                                if price != float("inf")
+                                else "N/A"
+                            )
+                            spot_display = " (spot)" if gpu.is_spot else ""
+                            console.print(
+                                f"{idx}. {gpu.provider}{spot_display} ({price_display})"
+                            )
 
-                    provider_idx = typer.prompt(
-                        "Select provider number",
-                        type=int,
-                        default=1,
-                        show_default=False,
-                    )
-                    if provider_idx < 1 or provider_idx > len(unique_configs):
-                        console.print("[red]Invalid provider selection[/red]")
-                        raise typer.Exit(1)
-                    selected_gpu = unique_configs[provider_idx - 1]
-                    if not isinstance(selected_gpu, GPUAvailability):
-                        raise TypeError("Selected GPU is not of type GPUAvailability")
-                    return selected_gpu
+                        provider_idx = typer.prompt(
+                            "Select provider number",
+                            type=int,
+                            default=1,
+                            show_default=False,
+                        )
+                        if provider_idx < 1 or provider_idx > len(unique_configs):
+                            console.print("[red]Invalid provider selection[/red]")
+                            raise typer.Exit(1)
+                        selected_gpu = unique_configs[provider_idx - 1]
+                        if not isinstance(selected_gpu, GPUAvailability):
+                            raise TypeError("Selected GPU is not of type GPUAvailability")
+                        return selected_gpu
+                    except (KeyboardInterrupt, typer.Abort):
+                        console.print("\n[yellow]Provider selection cancelled by user[/yellow]")
+                        raise typer.Exit(0)
 
                 selected_gpu = unique_configs[0]
                 if not isinstance(selected_gpu, GPUAvailability):
@@ -433,56 +441,60 @@ def create(
                 return selected_gpu
 
             if not gpu_count:
-                console.print(f"\n[bold]Available {gpu_type} Configurations:[/bold]")
-                gpu_configs = availabilities.get(str(gpu_type), [])
+                try:
+                    console.print(f"\n[bold]Available {gpu_type} Configurations:[/bold]")
+                    gpu_configs = availabilities.get(str(gpu_type), [])
 
-                # Get unique GPU counts and find cheapest price for each count
-                unique_configs: Dict[int, Tuple[GPUAvailability, float]] = {}
-                for gpu in gpu_configs:
-                    gpu_count = gpu.gpu_count
-                    price = gpu.prices.price if gpu.prices else float("inf")
+                    # Get unique GPU counts and find cheapest price for each count
+                    unique_configs: Dict[int, Tuple[GPUAvailability, float]] = {}
+                    for gpu in gpu_configs:
+                        gpu_count = gpu.gpu_count
+                        price = gpu.prices.price if gpu.prices else float("inf")
 
-                    if (
-                        gpu_count not in unique_configs
-                        or price < unique_configs[gpu_count][1]
-                    ):
-                        unique_configs[gpu_count] = (gpu, price)
+                        if (
+                            gpu_count not in unique_configs
+                            or price < unique_configs[gpu_count][1]
+                        ):
+                            unique_configs[gpu_count] = (gpu, price)
 
-                # Display unique configurations with their cheapest prices
-                config_list = sorted(
-                    [
-                        (count, gpu, price)
-                        for count, (gpu, price) in unique_configs.items()
-                    ],
-                    key=lambda x: x[0],
-                )
-
-                for idx, (count, gpu, price) in enumerate(config_list, 1):
-                    price_display = (
-                        f"${round(float(price), 2)}/hr"
-                        if price != float("inf")
-                        else "N/A"
+                    # Display unique configurations with their cheapest prices
+                    config_list = sorted(
+                        [
+                            (count, gpu, price)
+                            for count, (gpu, price) in unique_configs.items()
+                        ],
+                        key=lambda x: x[0],
                     )
-                    console.print(f"{idx}. {count}x {gpu_type} ({price_display})")
 
-                config_idx = typer.prompt(
-                    "Select configuration number",
-                    type=int,
-                    default=1,
-                    show_default=False,
-                )
-                if config_idx < 1 or config_idx > len(config_list):
-                    console.print("[red]Invalid configuration selection[/red]")
-                    raise typer.Exit(1)
+                    for idx, (count, gpu, price) in enumerate(config_list, 1):
+                        price_display = (
+                            f"${round(float(price), 2)}/hr"
+                            if price != float("inf")
+                            else "N/A"
+                        )
+                        console.print(f"{idx}. {count}x {gpu_type} ({price_display})")
 
-                # Find all providers for selected configuration
-                selected_count = config_list[config_idx - 1][0]
-                matching_configs = [
-                    gpu for gpu in gpu_configs if gpu.gpu_count == selected_count
-                ]
+                    config_idx = typer.prompt(
+                        "Select configuration number",
+                        type=int,
+                        default=1,
+                        show_default=False,
+                    )
+                    if config_idx < 1 or config_idx > len(config_list):
+                        console.print("[red]Invalid configuration selection[/red]")
+                        raise typer.Exit(1)
 
-                selected_gpu = select_provider_from_configs(matching_configs)
-                cloud_id = selected_gpu.cloud_id
+                    # Find all providers for selected configuration
+                    selected_count = config_list[config_idx - 1][0]
+                    matching_configs = [
+                        gpu for gpu in gpu_configs if gpu.gpu_count == selected_count
+                    ]
+
+                    selected_gpu = select_provider_from_configs(matching_configs)
+                    cloud_id = selected_gpu.cloud_id
+                except (KeyboardInterrupt, typer.Abort):
+                    console.print("\n[yellow]Configuration selection cancelled by user[/yellow]")
+                    raise typer.Exit(0)
             else:
                 # Find configuration matching GPU type and count
                 matching_configs = [
@@ -504,140 +516,164 @@ def create(
             raise typer.Exit(1)
 
         if not name:
-            while True:
-                gpu_name = selected_gpu.gpu_type.lower().split("_")[0]
-                default_name = f"{gpu_name}-{selected_gpu.gpu_count}"
-                name = typer.prompt(
-                    "Pod name (alphanumeric and dashes only, must contain at least "
-                    "1 letter)",
-                    default=default_name,
-                )
-                if (
-                    name
-                    and any(c.isalpha() for c in name)
-                    and all(c.isalnum() or c == "-" for c in name)
-                ):
-                    break
-                console.print(
-                    "[red]Invalid name format. Use only letters, numbers and dashes. "
-                    "Must contain at least 1 letter.[/red]"
-                )
+            try:
+                while True:
+                    gpu_name = selected_gpu.gpu_type.lower().split("_")[0]
+                    default_name = f"{gpu_name}-{selected_gpu.gpu_count}"
+                    name = typer.prompt(
+                        "Pod name (alphanumeric and dashes only, must contain at least "
+                        "1 letter)",
+                        default=default_name,
+                    )
+                    if (
+                        name
+                        and any(c.isalpha() for c in name)
+                        and all(c.isalnum() or c == "-" for c in name)
+                    ):
+                        break
+                    console.print(
+                        "[red]Invalid name format. Use only letters, numbers and dashes. "
+                        "Must contain at least 1 letter.[/red]"
+                    )
+            except (KeyboardInterrupt, typer.Abort):
+                console.print("\n[yellow]Pod name selection cancelled by user[/yellow]")
+                raise typer.Exit(0)
 
         gpu_count = selected_gpu.gpu_count
 
         if not disk_size:
-            min_disk = selected_gpu.disk.min_count
-            max_disk = selected_gpu.disk.max_count
-            default_disk = selected_gpu.disk.default_count
+            try:
+                min_disk = selected_gpu.disk.min_count
+                max_disk = selected_gpu.disk.max_count
+                default_disk = selected_gpu.disk.default_count
 
-            if min_disk is None or max_disk is None:
-                disk_size = default_disk
-            else:
-                disk_size = typer.prompt(
-                    f"Disk size in GB (min: {min_disk}, max: {max_disk})",
-                    default=default_disk or min_disk,
-                    type=int,
-                )
-                if (
-                    min_disk is not None
-                    and disk_size is not None
-                    and disk_size < min_disk
-                ):
-                    console.print(f"[red]Disk size must be at least {min_disk}GB[/red]")
-                    raise typer.Exit(1)
-                if (
-                    max_disk is not None
-                    and disk_size is not None
-                    and disk_size > max_disk
-                ):
-                    console.print(f"[red]Disk size must be at most {max_disk}GB[/red]")
-                    raise typer.Exit(1)
+                if min_disk is None or max_disk is None:
+                    disk_size = default_disk
+                else:
+                    disk_size = typer.prompt(
+                        f"Disk size in GB (min: {min_disk}, max: {max_disk})",
+                        default=default_disk or min_disk,
+                        type=int,
+                    )
+                    if (
+                        min_disk is not None
+                        and disk_size is not None
+                        and disk_size < min_disk
+                    ):
+                        console.print(f"[red]Disk size must be at least {min_disk}GB[/red]")
+                        raise typer.Exit(1)
+                    if (
+                        max_disk is not None
+                        and disk_size is not None
+                        and disk_size > max_disk
+                    ):
+                        console.print(f"[red]Disk size must be at most {max_disk}GB[/red]")
+                        raise typer.Exit(1)
+            except (KeyboardInterrupt, typer.Abort):
+                console.print("\n[yellow]Disk size selection cancelled by user[/yellow]")
+                raise typer.Exit(0)
 
         if not vcpus:
-            min_vcpus = selected_gpu.vcpu.min_count
-            max_vcpus = selected_gpu.vcpu.max_count
-            default_vcpus = selected_gpu.vcpu.default_count
-            if min_vcpus is None or max_vcpus is None or default_vcpus is None:
-                vcpus = default_vcpus
-            else:
-                vcpus = typer.prompt(
-                    f"Number of vCPUs (min: {min_vcpus}, max: {max_vcpus})",
-                    default=default_vcpus,
-                    type=int,
-                )
-                if vcpus is None or vcpus < min_vcpus or vcpus > max_vcpus:
-                    console.print(
-                        f"[red]vCPU count must be between {min_vcpus} and "
-                        f"{max_vcpus}[/red]"
+            try:
+                min_vcpus = selected_gpu.vcpu.min_count
+                max_vcpus = selected_gpu.vcpu.max_count
+                default_vcpus = selected_gpu.vcpu.default_count
+                if min_vcpus is None or max_vcpus is None or default_vcpus is None:
+                    vcpus = default_vcpus
+                else:
+                    vcpus = typer.prompt(
+                        f"Number of vCPUs (min: {min_vcpus}, max: {max_vcpus})",
+                        default=default_vcpus,
+                        type=int,
                     )
-                    raise typer.Exit(1)
+                    if vcpus is None or vcpus < min_vcpus or vcpus > max_vcpus:
+                        console.print(
+                            f"[red]vCPU count must be between {min_vcpus} and "
+                            f"{max_vcpus}[/red]"
+                        )
+                        raise typer.Exit(1)
+            except (KeyboardInterrupt, typer.Abort):
+                console.print("\n[yellow]vCPU selection cancelled by user[/yellow]")
+                raise typer.Exit(0)
 
         if not memory:
-            min_memory = selected_gpu.memory.min_count
-            max_memory = selected_gpu.memory.max_count
-            default_memory = selected_gpu.memory.default_count
+            try:
+                min_memory = selected_gpu.memory.min_count
+                max_memory = selected_gpu.memory.max_count
+                default_memory = selected_gpu.memory.default_count
 
-            if min_memory is None or max_memory is None:
-                memory = default_memory
-            else:
-                memory = typer.prompt(
-                    f"Memory in GB (min: {min_memory}, max: {max_memory})",
-                    default=default_memory,
-                    type=int,
-                )
-                if memory is None or memory < min_memory or memory > max_memory:
-                    console.print(
-                        f"[red]Memory must be between {min_memory}GB and "
-                        f"{max_memory}GB[/red]"
+                if min_memory is None or max_memory is None:
+                    memory = default_memory
+                else:
+                    memory = typer.prompt(
+                        f"Memory in GB (min: {min_memory}, max: {max_memory})",
+                        default=default_memory,
+                        type=int,
                     )
-                    raise typer.Exit(1)
+                    if memory is None or memory < min_memory or memory > max_memory:
+                        console.print(
+                            f"[red]Memory must be between {min_memory}GB and "
+                            f"{max_memory}GB[/red]"
+                        )
+                        raise typer.Exit(1)
+            except (KeyboardInterrupt, typer.Abort):
+                console.print("\n[yellow]Memory selection cancelled by user[/yellow]")
+                raise typer.Exit(0)
 
         available_images = selected_gpu.images
 
         if not image and available_images:
-            if len(available_images) == 1:
-                # If only one image available, use it directly
-                image = available_images[0]
-            else:
-                # Show available images
-                console.print("\n[bold]Available Images:[/bold]")
-                for idx, img in enumerate(available_images):
-                    console.print(f"{idx + 1}. {img}")
+            try:
+                if len(available_images) == 1:
+                    # If only one image available, use it directly
+                    image = available_images[0]
+                else:
+                    # Show available images
+                    console.print("\n[bold]Available Images:[/bold]")
+                    for idx, img in enumerate(available_images):
+                        console.print(f"{idx + 1}. {img}")
 
-                # Prompt for image selection
-                image_idx = typer.prompt(
-                    "Select image number", type=int, default=1, show_default=False
-                )
+                    # Prompt for image selection
+                    image_idx = typer.prompt(
+                        "Select image number", type=int, default=1, show_default=False
+                    )
 
-                if image_idx < 1 or image_idx > len(available_images):
-                    console.print("[red]Invalid image selection[/red]")
-                    raise typer.Exit(1)
+                    if image_idx < 1 or image_idx > len(available_images):
+                        console.print("[red]Invalid image selection[/red]")
+                        raise typer.Exit(1)
 
-                image = available_images[image_idx - 1]
+                    image = available_images[image_idx - 1]
+            except (KeyboardInterrupt, typer.Abort):
+                console.print("\n[yellow]Image selection cancelled by user[/yellow]")
+                raise typer.Exit(0)
 
         # Get team ID from config if not provided
         if not team_id:
-            default_team_id = config.team_id
-            options = ["Personal Account", "Custom Team ID"]
-            if default_team_id:
-                options.insert(1, f"Pre-selected Team ({default_team_id})")
+            try:
+                default_team_id = config.team_id
+                options = ["Personal Account", "Custom Team ID"]
+                if default_team_id:
+                    options.insert(1, f"Pre-selected Team ({default_team_id})")
 
-            console.print("\n[bold]Select Team:[/bold]")
-            for idx, opt in enumerate(options, 1):
-                console.print(f"{idx}. {opt}")
+                console.print("\n[bold]Select Team:[/bold]")
+                for idx, opt in enumerate(options, 1):
+                    console.print(f"{idx}. {opt}")
 
-            choice = typer.prompt("Enter choice", type=int, default=1)
+                choice = typer.prompt("Enter choice", type=int, default=1)
 
-            if choice < 1 or choice > len(options):
-                console.print("[red]Invalid selection[/red]")
-                raise typer.Exit(1)
+                if choice < 1 or choice > len(options):
+                    console.print("[red]Invalid selection[/red]")
+                    raise typer.Exit(1)
 
-            if options[choice - 1] == "Personal Account":
-                team_id = None
-            elif "Pre-selected Team" in options[choice - 1]:
-                team_id = default_team_id
-            else:
-                team_id = typer.prompt("Enter team ID")
+                if options[choice - 1] == "Personal Account":
+                    team_id = None
+                elif "Pre-selected Team" in options[choice - 1]:
+                    team_id = default_team_id
+                else:
+                    team_id = typer.prompt("Enter team ID")
+            except (KeyboardInterrupt, typer.Abort):
+                console.print("\n[yellow]Team selection cancelled by user[/yellow]")
+                raise typer.Exit(0)
 
         # Create pod configuration
         pod_config = {
@@ -685,25 +721,29 @@ def create(
             console.print(f"provider: {pod_config['provider']['type']}")
         console.print(f"team: {team_id}")
 
-        if typer.confirm("\nDo you want to create this pod?", default=True):
-            try:
-                # Create the pod with loading animation
-                with console.status("[bold blue]Creating pod...", spinner="dots"):
-                    pod = pods_client.create(pod_config)
+        try:
+            if typer.confirm("\nDo you want to create this pod?", default=True):
+                try:
+                    # Create the pod with loading animation
+                    with console.status("[bold blue]Creating pod...", spinner="dots"):
+                        pod = pods_client.create(pod_config)
 
-                console.print(f"\n[green]Successfully created pod {pod.id}[/green]")
-                console.print(
-                    f"\n[blue]Use 'prime pods status {pod.id}' to check the pod "
-                    "status[/blue]"
-                )
-            except AttributeError:
-                console.print(
-                    "[red]Error: Failed to create pod - invalid API client "
-                    "configuration[/red]"
-                )
-                raise typer.Exit(1)
-        else:
-            console.print("\nPod creation cancelled")
+                    console.print(f"\n[green]Successfully created pod {pod.id}[/green]")
+                    console.print(
+                        f"\n[blue]Use 'prime pods status {pod.id}' to check the pod "
+                        "status[/blue]"
+                    )
+                except AttributeError:
+                    console.print(
+                        "[red]Error: Failed to create pod - invalid API client "
+                        "configuration[/red]"
+                    )
+                    raise typer.Exit(1)
+            else:
+                console.print("\nPod creation cancelled")
+                raise typer.Exit(0)
+        except (KeyboardInterrupt, typer.Abort):
+            console.print("\n[yellow]Pod creation cancelled by user[/yellow]")
             raise typer.Exit(0)
 
     except APIError as e:

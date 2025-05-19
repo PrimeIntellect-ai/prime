@@ -380,7 +380,9 @@ def create(
                         raise typer.Exit(1)
                     gpu_type = gpu_types[gpu_type_idx - 1]
                 except (KeyboardInterrupt, typer.Abort):
-                    console.print("\n[yellow]GPU type selection cancelled by user[/yellow]")
+                    console.print(
+                        "\n[yellow]GPU type selection cancelled by user[/yellow]"
+                    )
                     raise typer.Exit(0)
 
             def select_provider_from_configs(
@@ -429,10 +431,14 @@ def create(
                             raise typer.Exit(1)
                         selected_gpu = unique_configs[provider_idx - 1]
                         if not isinstance(selected_gpu, GPUAvailability):
-                            raise TypeError("Selected GPU is not of type GPUAvailability")
+                            raise TypeError(
+                                "Selected GPU is not of type GPUAvailability"
+                            )
                         return selected_gpu
                     except (KeyboardInterrupt, typer.Abort):
-                        console.print("\n[yellow]Provider selection cancelled by user[/yellow]")
+                        console.print(
+                            "\n[yellow]Provider selection cancelled by user[/yellow]"
+                        )
                         raise typer.Exit(0)
 
                 selected_gpu = unique_configs[0]
@@ -442,7 +448,9 @@ def create(
 
             if not gpu_count:
                 try:
-                    console.print(f"\n[bold]Available {gpu_type} Configurations:[/bold]")
+                    console.print(
+                        f"\n[bold]Available {gpu_type} Configurations:[/bold]"
+                    )
                     gpu_configs = availabilities.get(str(gpu_type), [])
 
                     # Get unique GPU counts and find cheapest price for each count
@@ -493,7 +501,9 @@ def create(
                     selected_gpu = select_provider_from_configs(matching_configs)
                     cloud_id = selected_gpu.cloud_id
                 except (KeyboardInterrupt, typer.Abort):
-                    console.print("\n[yellow]Configuration selection cancelled by user[/yellow]")
+                    console.print(
+                        "\n[yellow]Configuration selection cancelled by user[/yellow]"
+                    )
                     raise typer.Exit(0)
             else:
                 # Find configuration matching GPU type and count
@@ -560,17 +570,23 @@ def create(
                         and disk_size is not None
                         and disk_size < min_disk
                     ):
-                        console.print(f"[red]Disk size must be at least {min_disk}GB[/red]")
+                        console.print(
+                            f"[red]Disk size must be at least {min_disk}GB[/red]"
+                        )
                         raise typer.Exit(1)
                     if (
                         max_disk is not None
                         and disk_size is not None
                         and disk_size > max_disk
                     ):
-                        console.print(f"[red]Disk size must be at most {max_disk}GB[/red]")
+                        console.print(
+                            f"[red]Disk size must be at most {max_disk}GB[/red]"
+                        )
                         raise typer.Exit(1)
             except (KeyboardInterrupt, typer.Abort):
-                console.print("\n[yellow]Disk size selection cancelled by user[/yellow]")
+                console.print(
+                    "\n[yellow]Disk size selection cancelled by user[/yellow]"
+                )
                 raise typer.Exit(0)
 
         if not vcpus:

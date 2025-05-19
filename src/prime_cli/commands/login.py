@@ -114,17 +114,13 @@ def login() -> None:
                 if status_data.get("result"):
                     # Decrypt the result
                     encrypted_result = base64.b64decode(status_data["result"])
-                    decrypted_result = decrypt_challenge_response(
-                        private_key, encrypted_result
-                    )
+                    decrypted_result = decrypt_challenge_response(private_key, encrypted_result)
                     if decrypted_result:
                         # Update config with decrypted token
                         config.set_api_key(decrypted_result.decode())
                         console.print("[green]Successfully logged in![/green]")
                     else:
-                        console.print(
-                            "[red]Failed to decrypt authentication token[/red]"
-                        )
+                        console.print("[red]Failed to decrypt authentication token[/red]")
                     break
 
                 time.sleep(5)

@@ -20,9 +20,7 @@ app.add_typer(login_app, name="login")
 @app.callback(invoke_without_command=True)
 def callback(
     ctx: typer.Context,
-    version_flag: bool = typer.Option(
-        False, "--version", "-v", help="Show version and exit"
-    ),
+    version_flag: bool = typer.Option(False, "--version", "-v", help="Show version and exit"),
 ) -> None:
     """Prime Intellect CLI"""
     if version_flag:

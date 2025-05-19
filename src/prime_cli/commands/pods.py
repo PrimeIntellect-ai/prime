@@ -47,7 +47,6 @@ def list(
         last_pods_hash = None
 
         while True:
-            # Get pods list
             pods_list = pods_client.list(offset=offset, limit=limit)
 
             current_pods_hash = hashlib.md5(

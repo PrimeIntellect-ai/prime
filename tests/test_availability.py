@@ -26,9 +26,7 @@ def mock_api_client(monkeypatch: pytest.MonkeyPatch) -> APIClient:
     return mock_client
 
 
-def test_availability_list(
-    mock_api_client: APIClient, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_availability_list(mock_api_client: APIClient, capsys: pytest.CaptureFixture[str]) -> None:
     runner = CliRunner()
 
     # Invoke the CLI command

@@ -86,15 +86,11 @@ class APIClient:
         except requests.exceptions.RequestException as e:
             raise APIError(f"Request failed: {e}")
 
-    def get(
-        self, endpoint: str, params: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+    def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Make a GET request to the API"""
         return self.request("GET", endpoint, params=params)
 
-    def post(
-        self, endpoint: str, json: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+    def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Make a POST request to the API"""
         return self.request("POST", endpoint, json=json)
 

@@ -9,9 +9,7 @@ class DiskConfig(BaseModel):
     max_count: Optional[int] = Field(None, alias="maxCount")
     price_per_unit: Optional[float] = Field(None, alias="pricePerUnit")
     step: Optional[int]
-    default_included_in_price: Optional[bool] = Field(
-        None, alias="defaultIncludedInPrice"
-    )
+    default_included_in_price: Optional[bool] = Field(None, alias="defaultIncludedInPrice")
     additional_info: Optional[str] = Field(None, alias="additionalInfo")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -23,9 +21,7 @@ class ResourceConfig(BaseModel):
     max_count: Optional[int] = Field(None, alias="maxCount")
     price_per_unit: Optional[float] = Field(None, alias="pricePerUnit")
     step: Optional[int]
-    default_included_in_price: Optional[bool] = Field(
-        None, alias="defaultIncludedInPrice"
-    )
+    default_included_in_price: Optional[bool] = Field(None, alias="defaultIncludedInPrice")
     additional_info: Optional[str] = Field(None, alias="additionalInfo")
 
     model_config = ConfigDict(populate_by_name=True)

@@ -15,8 +15,8 @@ Command line interface for managing Prime Intellect GPU resources, enabling seam
 # Install from PyPI
 pip install prime-cli
 
-# Set up your API key
-prime config set-api-key
+# Authenticate 
+prime login 
 
 # List available GPU resources
 prime availability list

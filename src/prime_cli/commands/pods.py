@@ -469,7 +469,7 @@ def create(
                 gpu_name = selected_gpu.gpu_type.lower().split("_")[0]
                 default_name = f"{gpu_name}-{selected_gpu.gpu_count}"
                 name = typer.prompt(
-                    "Pod name (alphanumeric and dashes only, must contain at least " "1 letter)",
+                    "Pod name (alphanumeric and dashes only, must contain at least 1 letter)",
                     default=default_name,
                 )
                 if (
@@ -519,7 +519,7 @@ def create(
                 )
                 if vcpus is None or vcpus < min_vcpus or vcpus > max_vcpus:
                     console.print(
-                        f"[red]vCPU count must be between {min_vcpus} and " f"{max_vcpus}[/red]"
+                        f"[red]vCPU count must be between {min_vcpus} and {max_vcpus}[/red]"
                     )
                     raise typer.Exit(1)
 
@@ -538,7 +538,7 @@ def create(
                 )
                 if memory is None or memory < min_memory or memory > max_memory:
                     console.print(
-                        f"[red]Memory must be between {min_memory}GB and " f"{max_memory}GB[/red]"
+                        f"[red]Memory must be between {min_memory}GB and {max_memory}GB[/red]"
                     )
                     raise typer.Exit(1)
 

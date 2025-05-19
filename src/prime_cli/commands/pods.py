@@ -641,11 +641,11 @@ def create(
 
                 console.print(f"\n[green]Successfully created pod {pod.id}[/green]")
                 console.print(
-                    f"\n[blue]Use 'prime pods status {pod.id}' to check the pod " "status[/blue]"
+                    f"\n[blue]Use 'prime pods status {pod.id}' to check the pod status[/blue]"
                 )
             except AttributeError:
                 console.print(
-                    "[red]Error: Failed to create pod - invalid API client " "configuration[/red]"
+                    "[red]Error: Failed to create pod - invalid API client configuration[/red]"
                 )
                 raise typer.Exit(1)
         else:

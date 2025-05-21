@@ -60,7 +60,7 @@ def login() -> None:
 
     if not settings["base_url"]:
         console.print(
-            "[red]Base URL not configured.",
+            "Base URL not configured.",
             "Please run 'prime config set-base-url' first.",
         )
         raise typer.Exit(1)
@@ -79,8 +79,8 @@ def login() -> None:
 
         if response.status_code != 200:
             console.print(
-                "[red]Failed to generate challenge:",
-                f"{response.json().get('detail', 'Unknown error')}[/red]",
+                "[red]Failed to generate challenge:[/red]",
+                f"{response.json().get('detail', 'Unknown error')}",
             )
             raise typer.Exit(1)
 
@@ -132,8 +132,7 @@ def login() -> None:
     except KeyboardInterrupt:
         console.print("\n[yellow]Login cancelled by user[/yellow]")
         raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]An error occurred: {str(e)}[/red]")
+    except Exception:
         raise typer.Exit(1)
     finally:
         # Ensure private key is securely wiped

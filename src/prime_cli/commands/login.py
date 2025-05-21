@@ -1,5 +1,6 @@
 import base64
 import time
+import webbrowser
 from typing import Optional
 
 import requests
@@ -86,16 +87,33 @@ def login() -> None:
 
         challenge_response = response.json()
 
-        console.print("\n[bold blue]To login, please follow these steps:[/bold blue]")
-        console.print(
-            "1. Open ",
-            "[link]https://app.primeintellect.ai/dashboard/tokens/challenge[/link]",
+        challenge_code = challenge_response["challenge"]
+        challenge_url = (
+            f"https://app.primeintellect.ai/dashboard/tokens/challenge?code={challenge_code}"
         )
+
+        console.print("\n[bold blue]🔐 Login Required[/bold blue]")
+        console.print("\n[bold]Follow these steps to authenticate:[/bold]\n")
+
+        # Try to open the browser automatically
+        try:
+            webbrowser.open(challenge_url, new=2)
+            console.print(
+                "[bold yellow]1.[/bold yellow] We've opened the login page in your browser."
+            )
+        except Exception:
+            pass
+
         console.print(
-            "2. Enter this code:",
-            f"[bold green]{challenge_response['challenge']}[/bold green]",
+            f"[bold yellow]1.[/bold yellow] Open the following link in your browser:\n"
+            f"[link={challenge_url}]{challenge_url}[/link]"
         )
-        console.print("\nWaiting for authentication...")
+
+        console.print(
+            f"[bold yellow]2.[/bold yellow] Your code should be pre-filled. Code:\n\n"
+            f"[bold green]{challenge_code}[/bold green]\n"
+        )
+        console.print("[dim]Waiting for authentication...[/dim]")
 
         challenge_auth_header = f"Bearer {challenge_response['status_auth_token']}"
         while True:

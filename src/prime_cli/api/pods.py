@@ -22,9 +22,7 @@ class PodStatus(BaseModel):
     status: str
     ssh_connection: Optional[Union[str, List[str]]] = Field(None, alias="sshConnection")
     cost_per_hr: Optional[float] = Field(None, alias="priceHr")
-    prime_port_mapping: Optional[List[PortMapping]] = Field(
-        None, alias="primePortMapping"
-    )
+    prime_port_mapping: Optional[List[PortMapping]] = Field(None, alias="primePortMapping")
     ip: Optional[Union[str, List[str]]]
     installation_failure: Optional[str] = Field(None, alias="installationFailure")
     installation_progress: Optional[int] = Field(None, alias="installationProgress")
@@ -61,12 +59,8 @@ class Pod(BaseModel):
     installation_progress: Optional[int] = Field(None, alias="installationProgress")
     team_id: Optional[str] = Field(None, alias="teamId")
     resources: Optional[dict]
-    attached_resources: Optional[List[AttachedResource]] = Field(
-        None, alias="attachedResources"
-    )
-    prime_port_mapping: Optional[List[PortMapping]] = Field(
-        None, alias="primePortMapping"
-    )
+    attached_resources: Optional[List[AttachedResource]] = Field(None, alias="attachedResources")
+    prime_port_mapping: Optional[List[PortMapping]] = Field(None, alias="primePortMapping")
     ssh_connection: Optional[Union[str, List[str]]] = Field(None, alias="sshConnection")
     ip: Optional[Union[str, List[str]]]
     price_hr: Optional[float] = Field(None, alias="priceHr")

@@ -36,9 +36,7 @@ def format_ip_display(ip: Optional[Union[str, List[str]]]) -> str:
 def list(
     limit: int = typer.Option(100, help="Maximum number of pods to list"),
     offset: int = typer.Option(0, help="Number of pods to skip"),
-    watch: bool = typer.Option(
-        False, "--watch", "-w", help="Watch pods list in real-time"
-    ),
+    watch: bool = typer.Option(False, "--watch", "-w", help="Watch pods list in real-time"),
 ) -> None:
     """List your running pods"""
     try:
@@ -49,13 +47,10 @@ def list(
         last_pods_hash = None
 
         while True:
-            # Get pods list
             pods_list = pods_client.list(offset=offset, limit=limit)
 
             current_pods_hash = hashlib.md5(
-                json.dumps(
-                    [pod.model_dump() for pod in pods_list.data], sort_keys=True
-                ).encode()
+                json.dumps([pod.model_dump() for pod in pods_list.data], sort_keys=True).encode()
             ).hexdigest()
 
             # Only update display if data changed or first run
@@ -90,9 +85,7 @@ def list(
                     }.get(display_status, "white")
 
                     # Format created time
-                    created_at = datetime.fromisoformat(
-                        pod.created_at.replace("Z", "+00:00")
-                    )
+                    created_at = datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
                     created_str = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
 
                     table.add_row(
@@ -201,9 +194,7 @@ def status(pod_id: str) -> None:
             table.add_row("Cost per Hour", f"${status.cost_per_hr:.3f}")
 
         # Created time
-        created_at = datetime.fromisoformat(
-            pod_details.created_at.replace("Z", "+00:00")
-        )
+        created_at = datetime.fromisoformat(pod_details.created_at.replace("Z", "+00:00"))
         table.add_row("Created", created_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
 
         # Connection details
@@ -217,9 +208,7 @@ def status(pod_id: str) -> None:
         if status.installation_progress is not None:
             table.add_row("Installation Progress", f"{status.installation_progress}%")
         if status.installation_failure:
-            table.add_row(
-                "Installation Error", Text(status.installation_failure, style="red")
-            )
+            table.add_row("Installation Error", Text(status.installation_failure, style="red"))
 
         # Port mappings
         if status.prime_port_mapping:
@@ -316,9 +305,7 @@ def create(
         selected_gpu = None
 
         # Get availability info
-        with console.status(
-            "[bold blue]Loading available GPU configurations...", spinner="dots"
-        ):
+        with console.status("[bold blue]Loading available GPU configurations...", spinner="dots"):
             availabilities = availability_client.get()
 
         if env_vars:
@@ -330,9 +317,7 @@ def create(
                         continue
                     if gpu.images:
                         # Filter out ubuntu image
-                        filtered_images = [
-                            img for img in gpu.images if img != "ubuntu_22_cuda_12"
-                        ]
+                        filtered_images = [img for img in gpu.images if img != "ubuntu_22_cuda_12"]
                         if len(filtered_images) > 0:
                             gpu.images = filtered_images
                             filtered_gpus.append(gpu)
@@ -392,9 +377,7 @@ def create(
                     raise ValueError("No matching GPU configurations found")
 
                 # Sort by price
-                matching_configs.sort(
-                    key=lambda x: x.prices.price if x.prices else float("inf")
-                )
+                matching_configs.sort(key=lambda x: x.prices.price if x.prices else float("inf"))
 
                 seen_provider_types = set()
                 unique_configs = []
@@ -513,9 +496,7 @@ def create(
                     if gpu.gpu_count == gpu_count
                 ]
                 if not matching_configs:
-                    console.print(
-                        f"[red]No configuration found for {gpu_count}x {gpu_type}[/red]"
-                    )
+                    console.print(f"[red]No configuration found for {gpu_count}x {gpu_type}[/red]")
                     raise typer.Exit(1)
 
                 selected_gpu = select_provider_from_configs(matching_configs)
@@ -712,9 +693,7 @@ def create(
                 "customTemplateId": custom_template_id,
                 "envVars": env_vars,
             },
-            "provider": {"type": selected_gpu.provider}
-            if selected_gpu.provider
-            else {},
+            "provider": {"type": selected_gpu.provider} if selected_gpu.provider else {},
             "team": {
                 "teamId": team_id,
             }
@@ -833,9 +812,7 @@ def connect(pod_id: str) -> None:
             raise typer.Exit(1)
 
         console.print(f"[blue]Using SSH key:[/blue] {ssh_key_path}")
-        console.print(
-            "[dim]To change SSH key path, use: prime config set-ssh-key-path[/dim]"
-        )
+        console.print("[dim]To change SSH key path, use: prime config set-ssh-key-path[/dim]")
 
         ssh_conn = status.ssh_connection
         # Handle ssh_conn being either a string or list of strings
@@ -857,9 +834,7 @@ def connect(pod_id: str) -> None:
             for idx, conn in enumerate(connections):
                 console.print(f"[blue]{idx + 1}[/blue]) {conn}")
 
-            choice = typer.prompt(
-                "Enter node number", type=int, default=1, show_default=False
-            )
+            choice = typer.prompt("Enter node number", type=int, default=1, show_default=False)
 
             if choice < 1 or choice > len(connections):
                 console.print("[red]Invalid selection[/red]")

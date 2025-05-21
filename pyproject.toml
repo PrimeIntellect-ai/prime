@@ -1,6 +1,6 @@
 [project]
 name = "prime-cli"
-version = "0.2.12"
+version = "0.2.13"
 description = "Prime Intellect CLI"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -54,7 +54,7 @@ build-backend = "hatchling.build"
 
 [tool.ruff]
 src = ["."]
-line-length = 88
+line-length = 100 
 target-version = "py38"
 
 [tool.ruff.lint]

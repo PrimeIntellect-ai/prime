@@ -115,10 +115,7 @@ def list(
                 short_id = generate_short_id(gpu)
 
                 disk_info: str = str(gpu.disk.default_count)
-                if (
-                    gpu.disk.max_count is not None
-                    and gpu.disk.max_count != gpu.disk.default_count
-                ):
+                if gpu.disk.max_count is not None and gpu.disk.max_count != gpu.disk.default_count:
                     disk_info = f"{gpu.disk.default_count}+"
 
                 gpu_data = {
@@ -147,9 +144,7 @@ def list(
 
         if group_similar:
             grouped_gpus: Dict[str, List[Dict[str, Any]]] = {}
-            for gpu_config in sorted(
-                all_gpus, key=lambda x: (x["price_value"], x["short_id"])
-            ):
+            for gpu_config in sorted(all_gpus, key=lambda x: (x["price_value"], x["short_id"])):
                 key = (
                     f"{gpu_config['provider']}_{gpu_config['gpu_type']}_{gpu_config['gpu_count']}_"
                     f"{gpu_config['socket']}_{gpu_config['location']}_{gpu_config['security']}_{gpu_config['price']}"
@@ -167,32 +162,22 @@ def list(
                     max_vcpu = max(g["vcpu"] for g in group)
                     min_mem = min(g["memory"] for g in group)
                     max_mem = max(g["memory"] for g in group)
-                    vcpu_range = (
-                        f"{min_vcpu}-{max_vcpu}"
-                        if min_vcpu != max_vcpu
-                        else str(min_vcpu)
-                    )
-                    memory_range = (
-                        f"{min_mem}-{max_mem}" if min_mem != max_mem else str(min_mem)
-                    )
+                    vcpu_range = f"{min_vcpu}-{max_vcpu}" if min_vcpu != max_vcpu else str(min_vcpu)
+                    memory_range = f"{min_mem}-{max_mem}" if min_mem != max_mem else str(min_mem)
                     base["vcpu"] = vcpu_range
                     base["memory"] = memory_range
                     filtered_gpus.append(base)
                 else:
                     filtered_gpus.append(group[0])
         else:
-            for gpu_config in sorted(
-                all_gpus, key=lambda x: (x["price_value"], x["short_id"])
-            ):
+            for gpu_config in sorted(all_gpus, key=lambda x: (x["price_value"], x["short_id"])):
                 if gpu_config["short_id"] not in seen_ids:
                     seen_ids.add(gpu_config["short_id"])
                     filtered_gpus.append(gpu_config)
 
         for gpu_entry in filtered_gpus:
             gpu_type_display = (
-                f"{gpu_entry['gpu_type']} (Spot)"
-                if gpu_entry["is_spot"]
-                else gpu_entry["gpu_type"]
+                f"{gpu_entry['gpu_type']} (Spot)" if gpu_entry["is_spot"] else gpu_entry["gpu_type"]
             ).replace("_", " ")
             table.add_row(
                 gpu_entry["short_id"],
@@ -203,9 +188,7 @@ def list(
                 gpu_entry["location"],
                 gpu_entry["stock_status"],
                 gpu_entry["price"],
-                "community"
-                if gpu_entry["security"] == "community_cloud"
-                else "datacenter",
+                "community" if gpu_entry["security"] == "community_cloud" else "datacenter",
                 str(gpu_entry["vcpu"]),
                 str(gpu_entry["memory"]),
                 str(gpu_entry["disk"]),
@@ -214,9 +197,7 @@ def list(
         console.print(table)
 
         # Add deployment instructions
-        console.print(
-            "\n[bold blue]To deploy a pod with one of these configurations:[/bold blue]"
-        )
+        console.print("\n[bold blue]To deploy a pod with one of these configurations:[/bold blue]")
         console.print("1. Copy either the ID or Cloud ID of your desired configuration")
         console.print("2. Run one of the following commands:")
         console.print("   [green]prime pods create --id <ID>[/green]")

@@ -1,5 +1,6 @@
 import base64
 import time
+import webbrowser
 from typing import Optional
 
 import requests
@@ -60,7 +61,7 @@ def login() -> None:
 
     if not settings["base_url"]:
         console.print(
-            "[red]Base URL not configured.",
+            "Base URL not configured.",
             "Please run 'prime config set-base-url' first.",
         )
         raise typer.Exit(1)
@@ -79,23 +80,40 @@ def login() -> None:
 
         if response.status_code != 200:
             console.print(
-                "[red]Failed to generate challenge:",
-                f"{response.json().get('detail', 'Unknown error')}[/red]",
+                "[red]Failed to generate challenge:[/red]",
+                f"{response.json().get('detail', 'Unknown error')}",
             )
             raise typer.Exit(1)
 
         challenge_response = response.json()
 
-        console.print("\n[bold blue]To login, please follow these steps:[/bold blue]")
-        console.print(
-            "1. Open ",
-            "[link]https://app.primeintellect.ai/dashboard/tokens/challenge[/link]",
+        challenge_code = challenge_response["challenge"]
+        challenge_url = (
+            f"https://app.primeintellect.ai/dashboard/tokens/challenge?code={challenge_code}"
         )
+
+        console.print("\n[bold blue]🔐 Login Required[/bold blue]")
+        console.print("\n[bold]Follow these steps to authenticate:[/bold]\n")
+
+        # Try to open the browser automatically
+        try:
+            webbrowser.open(challenge_url, new=2)
+            console.print(
+                "[bold yellow]1.[/bold yellow] We've opened the login page in your browser."
+            )
+        except Exception:
+            pass
+
         console.print(
-            "2. Enter this code:",
-            f"[bold green]{challenge_response['challenge']}[/bold green]",
+            f"[bold yellow]1.[/bold yellow] Open the following link in your browser:\n"
+            f"[link={challenge_url}]{challenge_url}[/link]"
         )
-        console.print("\nWaiting for authentication...")
+
+        console.print(
+            f"[bold yellow]2.[/bold yellow] Your code should be pre-filled. Code:\n\n"
+            f"[bold green]{challenge_code}[/bold green]\n"
+        )
+        console.print("[dim]Waiting for authentication...[/dim]")
 
         challenge_auth_header = f"Bearer {challenge_response['status_auth_token']}"
         while True:
@@ -114,17 +132,13 @@ def login() -> None:
                 if status_data.get("result"):
                     # Decrypt the result
                     encrypted_result = base64.b64decode(status_data["result"])
-                    decrypted_result = decrypt_challenge_response(
-                        private_key, encrypted_result
-                    )
+                    decrypted_result = decrypt_challenge_response(private_key, encrypted_result)
                     if decrypted_result:
                         # Update config with decrypted token
                         config.set_api_key(decrypted_result.decode())
                         console.print("[green]Successfully logged in![/green]")
                     else:
-                        console.print(
-                            "[red]Failed to decrypt authentication token[/red]"
-                        )
+                        console.print("[red]Failed to decrypt authentication token[/red]")
                     break
 
                 time.sleep(5)
@@ -136,8 +150,7 @@ def login() -> None:
     except KeyboardInterrupt:
         console.print("\n[yellow]Login cancelled by user[/yellow]")
         raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]An error occurred: {str(e)}[/red]")
+    except Exception:
         raise typer.Exit(1)
     finally:
         # Ensure private key is securely wiped

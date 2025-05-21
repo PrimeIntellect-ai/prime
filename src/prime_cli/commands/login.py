@@ -99,13 +99,15 @@ def login() -> None:
         try:
             webbrowser.open(challenge_url, new=2)
             console.print(
-                "[bold yellow]1.[/bold yellow] We’ve opened the login page in your browser."
+                "[bold yellow]1.[/bold yellow] We've opened the login page in your browser."
             )
         except Exception:
-            console.print(
-                f"[bold yellow]1.[/bold yellow] Open the following link manually:\n"
-                f"[link={challenge_url}]{challenge_url}[/link]"
-            )
+            pass
+
+        console.print(
+            f"[bold yellow]1.[/bold yellow] Open the following link in your browser:\n"
+            f"[link={challenge_url}]{challenge_url}[/link]"
+        )
 
         console.print(
             f"[bold yellow]2.[/bold yellow] Your code should be pre-filled. Code:\n\n"

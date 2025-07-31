@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional
 import typer
 from rich.console import Console
 from rich.table import Table
-from verifiers.scripts.init import init_environment  # type: ignore[import-untyped]
+from verifiers.scripts.init import init_environment
 
 from ..api.client import APIClient, APIError
 
@@ -662,7 +662,7 @@ def install(
 
             # Stream output in real-time
             while True:
-                output = process.stdout.readline()
+                output = process.stdout.readline() if process.stdout else ""
                 if output == "" and process.poll() is not None:
                     break
                 if output:
@@ -680,7 +680,7 @@ def install(
             # Add to pyproject.toml if requested
             if add_to_project:
                 try:
-                    import toml  # type: ignore[import-untyped]
+                    import toml
 
                     pyproject_path = Path("pyproject.toml")
                     if pyproject_path.exists():
@@ -774,7 +774,7 @@ def sync() -> None:
 
             # Stream output in real-time
             while True:
-                output = process.stdout.readline()
+                output = process.stdout.readline() if process.stdout else ""
                 if output == "" and process.poll() is not None:
                     break
                 if output:
@@ -787,7 +787,7 @@ def sync() -> None:
                 console.print("[green]✓ Dependencies synced successfully[/green]")
             else:
                 raise subprocess.CalledProcessError(
-                    return_code, ["uv", "pip", "sync", "pyproject.toml"]
+                    return_code or 1, ["uv", "pip", "sync", "pyproject.toml"]
                 )
         except subprocess.CalledProcessError:
             # Try with pip compile + sync workflow
@@ -805,7 +805,7 @@ def sync() -> None:
                 )
 
                 while True:
-                    output = process.stdout.readline()
+                    output = process.stdout.readline() if process.stdout else ""
                     if output == "" and process.poll() is not None:
                         break
                     if output:
@@ -814,7 +814,7 @@ def sync() -> None:
                 compile_return_code = process.poll()
                 if compile_return_code != 0:
                     raise subprocess.CalledProcessError(
-                        compile_return_code, ["uv", "pip", "compile"]
+                        compile_return_code or 1, ["uv", "pip", "compile"]
                     )
 
                 console.print("Syncing from requirements...")
@@ -828,7 +828,7 @@ def sync() -> None:
                 )
 
                 while True:
-                    output = process.stdout.readline()
+                    output = process.stdout.readline() if process.stdout else ""
                     if output == "" and process.poll() is not None:
                         break
                     if output:
@@ -836,7 +836,9 @@ def sync() -> None:
 
                 sync_return_code = process.poll()
                 if sync_return_code != 0:
-                    raise subprocess.CalledProcessError(sync_return_code, ["uv", "pip", "sync"])
+                    raise subprocess.CalledProcessError(
+                        sync_return_code or 1, ["uv", "pip", "sync"]
+                    )
 
                 console.print("[green]✓ Dependencies synced successfully[/green]")
                 try:
@@ -930,7 +932,7 @@ def list_versions(
                     if "T" in created_date:
                         dt = datetime.fromisoformat(created_date.replace("Z", "+00:00"))
                         created_date = dt.strftime("%Y-%m-%d %H:%M")
-                except:
+                except Exception:
                     pass  # Keep original format if parsing fails
 
             # Show content hash
@@ -954,15 +956,13 @@ def list_versions(
         if versions_list:
             latest = versions_list[0]  # Assuming first is latest
             console.print(f"\n[dim]Latest version: {latest.get('version', 'unknown')}[/dim]")
-            console.print(
-                f"[dim]Install with: prime env install {env_id}@{latest.get('version', 'latest')}[/dim]"
-            )
+            install_cmd = f"prime env install {env_id}@{latest.get('version', 'latest')}"
+            console.print(f"[dim]Install with: {install_cmd}[/dim]")
 
         console.print("\n[dim]💡 Tips:[/dim]")
         console.print("[dim]• Use --full-hashes to see complete content hashes for deletion[/dim]")
-        console.print(
-            f"[dim]• Delete versions with: prime env version delete {env_id} <version|hash|tag>[/dim]"
-        )
+        delete_cmd = f"prime env version delete {env_id} <version|hash|tag>"
+        console.print(f"[dim]• Delete versions with: {delete_cmd}[/dim]")
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -982,18 +982,18 @@ def delete_version(
     try:
         if version == "latest" and not force:
             console.print("[yellow]Warning: You're about to delete the 'latest' tag![/yellow]")
-            console.print(
-                "[yellow]This will remove the latest reference but keep the actual version data.[/yellow]"
-            )
-            console.print(
-                "[yellow]Consider using a content hash to delete the specific version instead.[/yellow]"
-            )
+            msg = "This will remove the latest reference but keep the actual version data."
+            console.print(f"[yellow]{msg}[/yellow]")
+            advice = "Consider using a content hash to delete the specific version instead."
+            console.print(f"[yellow]{advice}[/yellow]")
 
         if not force:
             try:
-                confirm = typer.confirm(
-                    f"Are you sure you want to permanently delete version '{version}' from '{env_id}'?"
+                confirm_msg = (
+                    f"Are you sure you want to permanently delete version "
+                    f"'{version}' from '{env_id}'?"
                 )
+                confirm = typer.confirm(confirm_msg)
                 if not confirm:
                     console.print("Deletion cancelled.")
                     raise typer.Exit()
@@ -1040,9 +1040,11 @@ def delete(
     try:
         if not force:
             try:
-                confirm = typer.confirm(
-                    f"Are you sure you want to permanently delete entire environment '{env_id}' and ALL its versions?"
+                delete_msg = (
+                    f"Are you sure you want to permanently delete entire "
+                    f"environment '{env_id}' and ALL its versions?"
                 )
+                confirm = typer.confirm(delete_msg)
                 if not confirm:
                     console.print("Deletion cancelled.")
                     raise typer.Exit()

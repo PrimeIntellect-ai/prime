@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.10"]
+        python-version: ["3.11", "3.12"]
     steps:
     - uses: actions/checkout@v4
     
@@ -29,12 +29,12 @@ jobs:
         
     - name: Check types with MyPy
       run: |
-        mypy src/prime_cli/
+        uv run mypy src/prime_cli/
 
     - name: Check formatting with Ruff
       run: |
-        ruff format --check .
+        uv run ruff format --check .
         
     - name: Lint with Ruff
       run: |
-        ruff check .
+        uv run ruff check .

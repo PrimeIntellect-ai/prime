@@ -121,7 +121,7 @@ def push(
             raise typer.Exit(1)
 
         try:
-            import toml  # type: ignore[import-untyped]
+            import toml
 
             pyproject_data = toml.load(pyproject_path)
             project_info = pyproject_data.get("project", {})

@@ -28,6 +28,8 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Python Modules"
 ]
 
@@ -79,4 +81,12 @@ warn_return_any = true
 warn_unreachable = true 
 [[tool.mypy.overrides]]
 module = "pytest"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "verifiers.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "toml"
 ignore_missing_imports = true

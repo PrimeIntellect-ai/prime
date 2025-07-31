@@ -21,6 +21,9 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@v3
         
+    - name: Create virtual environment
+      run: uv venv
+        
     - name: Install dependencies
       run: uv pip install -e ".[dev]"
         

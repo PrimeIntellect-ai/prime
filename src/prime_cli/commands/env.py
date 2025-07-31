@@ -11,10 +11,24 @@ from ..api.client import APIClient, APIError
 app = typer.Typer(help="Manage verifier environments")
 console = Console()
 
+# Constants
+MAX_FILES_TO_SHOW = 10
+DEFAULT_HASH_LENGTH = 8
+DEFAULT_LIST_LIMIT = 20
+
+
+def _extract_response_data(result: Dict[str, Any], data_key: str = "data") -> Any:
+    """Extract data from API response, handling both wrapped and unwrapped formats."""
+    if "data" in result:
+        return result["data"]
+    return result
+
 
 @app.command("list")
 def list_cmd(
-    limit: int = typer.Option(20, "--limit", "-l", help="Number of environments to show"),
+    limit: int = typer.Option(
+        DEFAULT_LIST_LIMIT, "--limit", "-l", help="Number of environments to show"
+    ),
     offset: int = typer.Option(0, "--offset", "-o", help="Number of environments to skip"),
     owner: Optional[str] = typer.Option(None, "--owner", help="Filter by owner name"),
     visibility: Optional[str] = typer.Option(
@@ -37,12 +51,8 @@ def list_cmd(
 
         result = client.get("/environmentshub/", params=params)
 
-        if "data" in result:
-            environments = result["data"]
-            total = result.get("total_count", 0)
-        else:
-            environments = result.get("environments", [])
-            total = result.get("total", 0)
+        environments = result.get("data", result.get("environments", []))
+        total = result.get("total_count", result.get("total", 0))
 
         if not environments:
             console.print("No environments found.", style="yellow")
@@ -231,15 +241,12 @@ def push(
             # Hash key files that define the environment content
             files_to_hash = []
 
-            # Add pyproject.toml
             if pyproject_path.exists():
                 files_to_hash.append(pyproject_path)
 
-            # Add all Python files
             for py_file in env_path.glob("*.py"):
                 files_to_hash.append(py_file)
 
-            # Add README if it exists
             readme_path = env_path / "README.md"
             if readme_path.exists():
                 files_to_hash.append(readme_path)
@@ -253,14 +260,19 @@ def push(
                     with open(file_path, "rb") as f:
                         content_hasher.update(f.read())
                 except IOError:
-                    # Skip files we can't read
                     pass
 
             content_hash = content_hasher.hexdigest()
 
+            import time
+
+            timestamp = int(time.time())
+            base_name = wheel_path.stem  # filename without extension
+            unique_wheel_name = f"{base_name}-{timestamp}.whl"
+
             wheel_data = {
                 "content_hash": content_hash,
-                "filename": wheel_path.name,
+                "filename": unique_wheel_name,
                 "sha256": wheel_sha256,
                 "size": wheel_path.stat().st_size,
                 "metadata": {
@@ -268,6 +280,7 @@ def push(
                     "description": project_metadata.get("description", ""),
                     "dependencies": project_metadata.get("dependencies", []),
                     "python_requires": project_metadata.get("requires-python", ">=3.8"),
+                    "original_filename": wheel_path.name,
                 },
             }
 
@@ -281,32 +294,34 @@ def push(
 
                 wheel_id = wheel_response["wheel_id"]
                 wheel_upload_url = wheel_response["upload_url"]
+
             except APIError as e:
                 console.print(f"[red]Failed to prepare wheel upload: {e}[/red]")
                 raise typer.Exit(1)
 
-            try:
-                import requests
+            if wheel_upload_url:
+                try:
+                    import requests
 
-                with open(wheel_path, "rb") as f:
-                    upload_response = requests.put(
-                        wheel_upload_url,
-                        data=f.read(),
-                        headers={"Content-Type": "application/octet-stream"},
-                    )
-                    upload_response.raise_for_status()
-            except requests.RequestException as e:
-                console.print(f"[red]Failed to upload wheel: {e}[/red]")
-                raise typer.Exit(1)
-            except IOError as e:
-                console.print(f"[red]Failed to read wheel file for upload: {e}[/red]")
-                raise typer.Exit(1)
+                    with open(wheel_path, "rb") as f:
+                        upload_response = requests.put(
+                            wheel_upload_url,
+                            data=f.read(),
+                            headers={"Content-Type": "application/octet-stream"},
+                        )
+                        upload_response.raise_for_status()
+                except requests.RequestException as e:
+                    console.print(f"[red]Failed to upload wheel: {e}[/red]")
+                    raise typer.Exit(1)
+                except IOError as e:
+                    console.print(f"[red]Failed to read wheel file for upload: {e}[/red]")
+                    raise typer.Exit(1)
 
-            try:
-                client.post(f"/environmentshub/{env_id}/wheels/{wheel_id}/finalize")
-            except APIError as e:
-                console.print(f"[red]Failed to finalize wheel upload: {e}[/red]")
-                raise typer.Exit(1)
+                try:
+                    client.post(f"/environmentshub/{env_id}/wheels/{wheel_id}/finalize")
+                except APIError as e:
+                    console.print(f"[red]Failed to finalize wheel upload: {e}[/red]")
+                    raise typer.Exit(1)
 
             console.print("Creating source archive...")
             try:
@@ -323,11 +338,17 @@ def push(
                     with open(tmp.name, "rb") as f:
                         source_sha256 = hashlib.sha256(f.read()).hexdigest()
 
+                    version = project_metadata.get("version", "0.1.0")
+                    unique_source_name = f"{env_name}-{version}-{timestamp}.tar.gz"
+
                     source_data = {
                         "content_hash": content_hash,
-                        "filename": f"{env_name}-{project_metadata.get('version', '0.1.0')}.tar.gz",
+                        "filename": unique_source_name,
                         "sha256": source_sha256,
-                        "metadata": wheel_data["metadata"],
+                        "metadata": {
+                            **wheel_data["metadata"],  # type: ignore
+                            "original_filename": f"{env_name}-{version}.tar.gz",
+                        },
                     }
 
                     try:
@@ -342,6 +363,7 @@ def push(
 
                         version_id = version_response["version_id"]
                         source_upload_url = version_response["upload_url"]
+
                     except APIError as e:
                         console.print(f"[red]Failed to prepare source upload: {e}[/red]")
                         Path(tmp.name).unlink()
@@ -370,7 +392,6 @@ def push(
                             f"/environmentshub/{env_id}/versions/{version_id}/finalize"
                         )
 
-                        # Handle the new GenericResponse format
                         if "data" in response:
                             finalize_response = response["data"]
                         else:
@@ -461,7 +482,6 @@ def pull(
     try:
         client = APIClient()
 
-        # Parse env_id
         parts = env_id.split("/")
         if len(parts) != 2:
             console.print("[red]Error: Invalid environment ID format. Expected: owner/name[/red]")
@@ -472,10 +492,8 @@ def pull(
         console.print(f"Pulling {env_id}@{version}...")
 
         try:
-            # Get download details from API
             response = client.get(f"/environmentshub/{owner}/{name}/@{version}")
 
-            # Handle the new GenericResponse format
             if "data" in response:
                 details = response["data"]
             else:
@@ -485,7 +503,6 @@ def pull(
             console.print(f"[red]Failed to get environment details: {e}[/red]")
             raise typer.Exit(1)
 
-        # Check if environment has downloadable content
         if not details.get("download_object_key"):
             console.print("[red]Error: No downloadable package found[/red]")
             raise typer.Exit(1)
@@ -554,10 +571,11 @@ def pull(
             extracted_files = list(target_dir.iterdir())
             if extracted_files:
                 console.print("\nExtracted files:")
-                for file in extracted_files[:10]:  # Show first 10 files
+                for file in extracted_files[:MAX_FILES_TO_SHOW]:
                     console.print(f"  - {file.name}")
-                if len(extracted_files) > 10:
-                    console.print(f"  ... and {len(extracted_files) - 10} more files")
+                if len(extracted_files) > MAX_FILES_TO_SHOW:
+                    remaining = len(extracted_files) - MAX_FILES_TO_SHOW
+                    console.print(f"  ... and {remaining} more files")
         except OSError as e:
             console.print(f"[yellow]Warning: Could not list extracted files: {e}[/yellow]")
 
@@ -589,13 +607,11 @@ def install(
     try:
         client = APIClient()
 
-        # Parse env_id and extract version if specified
         if "@" in env_id:
             env_id, version = env_id.rsplit("@", 1)
 
         console.print(f"Resolving {env_id}@{version}...")
 
-        # Parse env_id
         parts = env_id.split("/")
         if len(parts) != 2:
             console.print("[red]Error: Invalid environment ID format. Expected: owner/name[/red]")
@@ -604,10 +620,8 @@ def install(
         owner, name = parts
 
         try:
-            # Get environment details from API
             response = client.get(f"/environmentshub/{owner}/{name}/@{version}")
 
-            # Handle the new GenericResponse format
             if "data" in response:
                 details = response["data"]
             else:
@@ -617,7 +631,6 @@ def install(
             console.print(f"[red]Failed to get environment details: {e}[/red]")
             raise typer.Exit(1)
 
-        # Check if environment has wheel URL
         wheel_url = details.get("wheel_url")
         if not wheel_url:
             console.print("[red]Error: No wheel file available for this environment.[/red]")
@@ -629,10 +642,8 @@ def install(
 
         console.print(f"[dim]Installing from: {wheel_url}[/dim]")
 
-        # Build uv command
         cmd_parts = ["uv", "pip", "install", "--upgrade"]
 
-        # Add Python version if specified, otherwise use current python
         if python:
             cmd_parts.extend(["--python", python])
         else:
@@ -650,7 +661,6 @@ def install(
         console.print(f"\n[cyan]Installing {env_id}@{version}...[/cyan]")
 
         try:
-            # Use Popen for real-time output streaming
             process = subprocess.Popen(
                 cmd_parts,
                 stdout=subprocess.PIPE,
@@ -660,24 +670,22 @@ def install(
                 universal_newlines=True,
             )
 
-            # Stream output in real-time
             while True:
                 output = process.stdout.readline() if process.stdout else ""
                 if output == "" and process.poll() is not None:
                     break
                 if output:
-                    # Print UV's output directly (preserves progress bars, colors, etc.)
                     print(output.rstrip())
 
-            # Wait for process to complete and check return code
             return_code = process.poll()
             if return_code != 0:
-                console.print(f"[red]Installation failed with exit code {return_code}[/red]")
+                console.print(
+                    f"[red]Environment installation failed with exit code {return_code}[/red]"
+                )
                 raise typer.Exit(1)
 
             console.print(f"\n[green]✓ Successfully installed {env_id}@{version}[/green]")
 
-            # Add to pyproject.toml if requested
             if add_to_project:
                 try:
                     import toml
@@ -687,16 +695,13 @@ def install(
                         with open(pyproject_path, "r") as f:
                             pyproject_data = toml.load(f)
 
-                        # Initialize project section if it doesn't exist
                         if "project" not in pyproject_data:
                             pyproject_data["project"] = {}
                         if "dependencies" not in pyproject_data["project"]:
                             pyproject_data["project"]["dependencies"] = []
 
-                        # Create the dependency URL
                         dependency_url = f"{name} @ {wheel_url}"
 
-                        # Check if already exists (avoid duplicates)
                         existing_deps = pyproject_data["project"]["dependencies"]
                         if not any(
                             dep.startswith(f"{name} @")
@@ -705,7 +710,6 @@ def install(
                         ):
                             existing_deps.append(dependency_url)
 
-                            # Write back to file
                             with open(pyproject_path, "w") as f:
                                 toml.dump(pyproject_data, f)
 
@@ -732,7 +736,7 @@ def install(
             console.print("[red]Failed to run UV command. Is UV installed?[/red]")
             raise typer.Exit(1)
         except Exception as e:
-            console.print(f"[red]Installation failed: {e}[/red]")
+            console.print(f"[red]Environment installation failed: {e}[/red]")
             raise typer.Exit(1)
 
     except APIError as e:
@@ -772,16 +776,13 @@ def sync() -> None:
                 universal_newlines=True,
             )
 
-            # Stream output in real-time
             while True:
                 output = process.stdout.readline() if process.stdout else ""
                 if output == "" and process.poll() is not None:
                     break
                 if output:
-                    # Print UV's output directly (preserves progress bars, colors, etc.)
                     print(output.rstrip())
 
-            # Wait for process to complete and check return code
             return_code = process.poll()
             if return_code == 0:
                 console.print("[green]✓ Dependencies synced successfully[/green]")
@@ -790,7 +791,6 @@ def sync() -> None:
                     return_code or 1, ["uv", "pip", "sync", "pyproject.toml"]
                 )
         except subprocess.CalledProcessError:
-            # Try with pip compile + sync workflow
             console.print("Trying uv pip compile workflow...")
 
             try:
@@ -864,7 +864,6 @@ def sync() -> None:
         raise typer.Exit(1)
 
 
-# Create a subcommand group for version management
 version_app = typer.Typer(help="Manage environment versions")
 app.add_typer(version_app, name="version")
 
@@ -880,7 +879,6 @@ def list_versions(
     try:
         client = APIClient()
 
-        # Parse env_id
         parts = env_id.split("/")
         if len(parts) != 2:
             console.print("[red]Error: Invalid environment ID format. Expected: owner/name[/red]")
@@ -891,10 +889,8 @@ def list_versions(
         console.print(f"Fetching versions for {env_id}...")
 
         try:
-            # Get environment versions from API
             response = client.get(f"/environmentshub/{owner}/{name}/versions")
 
-            # Handle the response format
             if "data" in response:
                 versions_data = response["data"]
             else:
@@ -908,7 +904,6 @@ def list_versions(
             console.print("No versions found.")
             return
 
-        # Create table for versions
         table = Table(title=f"Versions for {env_id}")
         table.add_column("Version", style="cyan")
         table.add_column("Created", style="green")
@@ -933,18 +928,14 @@ def list_versions(
                         dt = datetime.fromisoformat(created_date.replace("Z", "+00:00"))
                         created_date = dt.strftime("%Y-%m-%d %H:%M")
                 except Exception:
-                    pass  # Keep original format if parsing fails
+                    pass
 
-            # Show content hash
             content_hash = version.get("sha256", "")
             if full_hashes or version_display == "unknown":
-                # Show full hash if requested or if we don't have semantic version
                 content_hash_display = content_hash
             else:
-                # Show clean 8-character hash (copyable, no ellipsis)
-                content_hash_display = content_hash[:8] if content_hash else ""
+                content_hash_display = content_hash[:DEFAULT_HASH_LENGTH] if content_hash else ""
 
-            # Show artifact count
             artifact_count = version.get("size", 0)
             artifacts_str = f"{artifact_count} artifact{'s' if artifact_count != 1 else ''}"
 
@@ -952,7 +943,6 @@ def list_versions(
 
         console.print(table)
 
-        # Show usage tips
         if versions_list:
             latest = versions_list[0]  # Assuming first is latest
             console.print(f"\n[dim]Latest version: {latest.get('version', 'unknown')}[/dim]")
@@ -1003,7 +993,6 @@ def delete_version(
 
         client = APIClient()
 
-        # Parse env_id
         parts = env_id.split("/")
         if len(parts) != 2:
             console.print("[red]Error: Invalid environment ID format. Expected: owner/name[/red]")
@@ -1013,7 +1002,6 @@ def delete_version(
         console.print(f"Deleting version {version} from {env_id}...")
 
         try:
-            # Use DELETE request to the version-specific endpoint
             client.delete(f"/environmentshub/{owner}/{name}/@{version}")
             console.print(f"[green]✓ Version {version} deleted successfully from {env_id}[/green]")
         except APIError as e:
@@ -1068,12 +1056,3 @@ def delete(
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
         raise typer.Exit(1)
-
-
-# Backward compatibility alias
-@app.command("versions")
-def versions_alias(
-    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
-) -> None:
-    """List all versions of an environment (alias for 'prime env version list')"""
-    list_versions(env_id)

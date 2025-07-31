@@ -3,17 +3,20 @@ name = "prime-cli"
 version = "0.2.12"
 description = "Prime Intellect CLI"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11,<3.13"
 license = "MIT"
 authors = [
     { name = "Prime Intellect", email = "contact@primeintellect.ai" }
 ]
 dependencies = [
-    "typer[all]>=0.9.0",
+    "typer>=0.9.0",
     "requests>=2.31.0",
     "rich>=13.3.1",  
     "pydantic>=2.0.0",
-    "cryptography>=41.0.0"
+    "cryptography>=41.0.0",
+    "verifiers>=0.1.2",
+    "build>=1.0.0",
+    "toml>=0.10.0"
 ]
 keywords = ["cli", "gpu", "cloud", "compute"]
 classifiers = [
@@ -23,10 +26,8 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Python Modules"
 ]
 
@@ -44,7 +45,8 @@ dev = [
     "pytest>=7.0.0",
     "ruff>=0.1.8",      
     "mypy>=1.8.0",
-    "types-requests>=2.31.0", 
+    "types-requests>=2.31.0",
+    "types-toml>=0.10.0",
     "pre-commit>=3.5.0"    
 ]
 
@@ -52,10 +54,13 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.ruff]
 src = ["."]
 line-length = 100 
-target-version = "py38"
+target-version = "py311"
 
 [tool.ruff.lint]
 extend-select = [
@@ -65,7 +70,7 @@ extend-select = [
 ]
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.11"
 disallow_untyped_defs = true
 check_untyped_defs = true
 warn_redundant_casts = true

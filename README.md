@@ -6,14 +6,17 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/prime-cli?cacheSeconds=60)](https://pypi.org/project/prime-cli/)
 [![Downloads](https://img.shields.io/pypi/dm/prime-cli)](https://pypi.org/project/prime-cli/)
 
-Command line interface for managing Prime Intellect GPU resources, enabling seamless deployment and management of compute pods.
+Command line interface for managing Prime Intellect resources and environments.
 </div>
 
 ## 🚀 Quick Start
 
 ```bash
-# Install from PyPI
-pip install prime-cli
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install prime-cli with uv
+uv tool install prime-cli
 
 # Authenticate 
 prime login 
@@ -31,8 +34,18 @@ prime availability list
 
 ## 📦 Installation
 
-### From PyPI
+### Recommended: Using uv
 ```bash
+# Install uv if you haven't already
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install prime-cli
+uv tool install prime-cli
+```
+
+### Alternative: Using pip
+```bash
+# If you prefer traditional pip
 pip install prime-cli
 ```
 
@@ -42,12 +55,11 @@ pip install prime-cli
 git clone https://github.com/PrimeIntellect-ai/prime-cli
 cd prime-cli
 
-# Create and activate virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: .\venv\Scripts\activate
+# Create virtual environment with uv
+uv venv
 
-# Install in development mode
-pip install -e ".[dev]"
+# Install in development mode with all dependencies
+uv pip install -e ".[dev]"
 
 # Set up pre-commit hooks
 pre-commit install
@@ -101,17 +113,57 @@ prime pods ssh <pod-id>
 prime config set-team-id
 ```
 
+### Working Without uv
+
+While we recommend using uv for the best experience, all commands work with standard pip:
+
+```bash
+# Install without uv
+pip install prime-cli
+
+# Development setup without uv
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+Note: Without uv, operations will be slower and you'll need to manage virtual environments manually.
+
 ## 💻 Development
+
+### Prerequisites
+- Python 3.9+
+- uv (recommended): `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+### Setup
+```bash
+# Clone and setup with uv
+git clone https://github.com/PrimeIntellect-ai/prime-cli
+cd prime-cli
+uv venv
+uv pip install -e ".[dev]"
+
+# Run code quality checks
+uv run ruff format src/prime_cli
+uv run ruff check src/prime_cli
+uv run mypy src/prime_cli
+uv run pytest
+```
 
 ### Code Quality
 ```bash
 # Format code
-ruff format src/prime_cli
+uv run ruff format src/prime_cli
 
 # Run linter
-ruff check src/prime_cli
+uv run ruff check src/prime_cli
 
 # Run tests
+uv run pytest
+
+# Or if you have the venv activated:
+ruff format src/prime_cli
+ruff check src/prime_cli
 pytest
 ```
 
@@ -122,15 +174,21 @@ We use semantic versioning. Releases are automatically created when changes are 
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Run code quality checks
+3. Set up development environment with uv:
    ```bash
-   ruff format .
-   ruff check .
-   pytest
+   uv venv
+   uv pip install -e ".[dev]"
+   pre-commit install
    ```
-4. Commit your changes (`git commit -m 'Add amazing feature'`)
-5. Push to the branch (`git push origin feature/amazing-feature`)
-6. Open a Pull Request
+4. Run code quality checks:
+   ```bash
+   uv run ruff format .
+   uv run ruff check .
+   uv run pytest
+   ```
+5. Commit your changes (`git commit -m 'Add amazing feature'`)
+6. Push to the branch (`git push origin feature/amazing-feature`)
+7. Open a Pull Request
 
 ## 📝 License
 

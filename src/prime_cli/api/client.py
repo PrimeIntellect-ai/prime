@@ -65,10 +65,6 @@ class APIClient:
             response = self.session.request(method, url, params=params, json=json)
             response.raise_for_status()
 
-            # Handle 204 No Content responses
-            if response.status_code == 204:
-                return {"success": True}
-
             result = response.json()
             if not isinstance(result, dict):
                 raise APIError("API response was not a dictionary")

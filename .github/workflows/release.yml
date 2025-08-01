@@ -84,14 +84,19 @@ jobs:
         if: steps.check_tag.outputs.exists != 'true'
         uses: astral-sh/setup-uv@v3
         
-      - name: Install build tools
+      - name: Create virtual environment and install build tools
         if: steps.check_tag.outputs.exists != 'true'
-        run: uv pip install build twine
+        run: |
+          uv venv
+          source .venv/bin/activate
+          uv pip install build twine
 
       # Build package
       - name: Build package
         if: steps.check_tag.outputs.exists != 'true'
-        run: python -m build
+        run: |
+          source .venv/bin/activate
+          python -m build
 
       # Get release notes
       - name: Get release notes
@@ -119,4 +124,6 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: twine upload dist/*
+        run: |
+          source .venv/bin/activate
+          twine upload dist/*

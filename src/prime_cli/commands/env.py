@@ -259,8 +259,7 @@ def push(
             content_hash = content_hasher.hexdigest()
 
             timestamp = int(time.time())
-            base_name = wheel_path.stem  # filename without extension
-            unique_wheel_name = f"{base_name}-{timestamp}.whl"
+            unique_wheel_name = wheel_path.name
 
             wheel_data = {
                 "content_hash": content_hash,

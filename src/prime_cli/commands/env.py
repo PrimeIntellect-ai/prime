@@ -671,7 +671,7 @@ def install(
                 if output == "" and process.poll() is not None:
                     break
                 if output:
-                    print(output.rstrip())
+                    console.print(output.rstrip())
 
             return_code = process.poll()
             if return_code != 0:
@@ -694,11 +694,13 @@ def install(
                         if "dependencies" not in pyproject_data["project"]:
                             pyproject_data["project"]["dependencies"] = []
 
-                        dependency_url = f"{name} @ {wheel_url}"
+                        # PEP 508 compliant direct URL dependency format
+                        dependency_url = f"{name.replace('-', '_')} @ {wheel_url}"
 
+                        normalized_name = name.replace("-", "_")
                         existing_deps = pyproject_data["project"]["dependencies"]
                         if not any(
-                            dep.startswith(f"{name} @")
+                            dep.startswith(f"{normalized_name} @")
                             for dep in existing_deps
                             if isinstance(dep, str)
                         ):
@@ -708,11 +710,13 @@ def install(
                                 toml.dump(pyproject_data, f)
 
                             console.print(
-                                f"[green]✓ Added {name} to pyproject.toml dependencies[/green]"
+                                f"[green]✓ Added {normalized_name} to pyproject.toml "
+                                f"dependencies[/green]"
                             )
                         else:
                             console.print(
-                                f"[yellow]! {name} already exists in pyproject.toml[/yellow]"
+                                f"[yellow]! {normalized_name} already exists in "
+                                f"pyproject.toml[/yellow]"
                             )
                     else:
                         console.print(

@@ -1,6 +1,16 @@
+import hashlib
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import requests
+import toml
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -15,13 +25,6 @@ console = Console()
 MAX_FILES_TO_SHOW = 10
 DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
-
-
-def _extract_response_data(result: Dict[str, Any], data_key: str = "data") -> Any:
-    """Extract data from API response, handling both wrapped and unwrapped formats."""
-    if "data" in result:
-        return result["data"]
-    return result
 
 
 @app.command("list")
@@ -106,10 +109,6 @@ def push(
     ),
 ) -> None:
     """Push environment to registry"""
-    import shutil
-    import subprocess
-    import sys
-    from pathlib import Path
 
     try:
         env_path = Path(path).resolve()
@@ -121,8 +120,6 @@ def push(
             raise typer.Exit(1)
 
         try:
-            import toml
-
             pyproject_data = toml.load(pyproject_path)
             project_info = pyproject_data.get("project", {})
 
@@ -188,9 +185,6 @@ def push(
         console.print(f"[green]✓ Built {wheel_path.name} ({wheel_size:,} bytes)[/green]")
 
         console.print("\nUploading to Prime Intellect Hub...")
-        import hashlib
-        import tarfile
-        import tempfile
 
         try:
             client = APIClient()
@@ -264,8 +258,6 @@ def push(
 
             content_hash = content_hasher.hexdigest()
 
-            import time
-
             timestamp = int(time.time())
             base_name = wheel_path.stem  # filename without extension
             unique_wheel_name = f"{base_name}-{timestamp}.whl"
@@ -287,10 +279,7 @@ def push(
             try:
                 response = client.post(f"/environmentshub/{env_id}/wheels", json=wheel_data)
 
-                if "data" in response:
-                    wheel_response = response["data"]
-                else:
-                    wheel_response = response
+                wheel_response = response["data"]
 
                 wheel_id = wheel_response["wheel_id"]
                 wheel_upload_url = wheel_response["upload_url"]
@@ -301,8 +290,6 @@ def push(
 
             if wheel_upload_url:
                 try:
-                    import requests
-
                     with open(wheel_path, "rb") as f:
                         upload_response = requests.put(
                             wheel_upload_url,
@@ -358,10 +345,7 @@ def push(
                             f"/environmentshub/{env_id}/versions", json=source_data
                         )
 
-                        if "data" in response:
-                            version_response = response["data"]
-                        else:
-                            version_response = response
+                        version_response = response["data"]
 
                         version_id = version_response["version_id"]
                         source_upload_url = version_response["upload_url"]
@@ -391,11 +375,7 @@ def push(
                             f"/environmentshub/{env_id}/versions/{version_id}/finalize"
                         )
 
-                        if "data" in response:
-                            finalize_response = response["data"]
-                        else:
-                            # Fallback for old format
-                            finalize_response = response
+                        finalize_response = response["data"]
 
                     except APIError as e:
                         console.print(f"[red]Failed to finalize source upload: {e}[/red]")
@@ -524,11 +504,6 @@ def pull(
             console.print(f"[red]Error creating directory: {e}[/red]")
             raise typer.Exit(1)
 
-        import tarfile
-        import tempfile
-
-        import requests
-
         console.print(f"Downloading to {target_dir}...")
 
         temp_file_path = None
@@ -602,8 +577,6 @@ def install(
     ),
 ) -> None:
     """Install a verifier environment"""
-    import shutil
-    import subprocess
 
     try:
         client = APIClient()
@@ -689,8 +662,6 @@ def install(
 
             if add_to_project:
                 try:
-                    import toml
-
                     pyproject_path = Path("pyproject.toml")
                     if pyproject_path.exists():
                         with open(pyproject_path, "r") as f:
@@ -742,123 +713,6 @@ def install(
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
-
-
-@app.command()
-def sync() -> None:
-    """Sync dependencies for current verifier environment using uv"""
-    import shutil
-    import subprocess
-    from pathlib import Path
-
-    try:
-        if not shutil.which("uv"):
-            console.print("[red]Error: uv is not installed.[/red]")
-            console.print("Install it with: curl -LsSf https://astral.sh/uv/install.sh | sh")
-            raise typer.Exit(1)
-
-        if not Path("pyproject.toml").exists():
-            console.print("[red]Error: No pyproject.toml found in current directory[/red]")
-            raise typer.Exit(1)
-
-        console.print("Syncing dependencies with uv...")
-
-        try:
-            process = subprocess.Popen(
-                ["uv", "pip", "sync", "pyproject.toml"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # Merge stderr into stdout
-                text=True,
-                bufsize=1,  # Line buffered
-                universal_newlines=True,
-            )
-
-            while True:
-                output = process.stdout.readline() if process.stdout else ""
-                if output == "" and process.poll() is not None:
-                    break
-                if output:
-                    print(output.rstrip())
-
-            return_code = process.poll()
-            if return_code == 0:
-                console.print("[green]✓ Dependencies synced successfully[/green]")
-            else:
-                raise subprocess.CalledProcessError(
-                    return_code or 1, ["uv", "pip", "sync", "pyproject.toml"]
-                )
-        except subprocess.CalledProcessError:
-            console.print("Trying uv pip compile workflow...")
-
-            try:
-                console.print("Compiling requirements...")
-                process = subprocess.Popen(
-                    ["uv", "pip", "compile", "pyproject.toml", "-o", "requirements.txt"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    universal_newlines=True,
-                )
-
-                while True:
-                    output = process.stdout.readline() if process.stdout else ""
-                    if output == "" and process.poll() is not None:
-                        break
-                    if output:
-                        print(output.rstrip())
-
-                compile_return_code = process.poll()
-                if compile_return_code != 0:
-                    raise subprocess.CalledProcessError(
-                        compile_return_code or 1, ["uv", "pip", "compile"]
-                    )
-
-                console.print("Syncing from requirements...")
-                process = subprocess.Popen(
-                    ["uv", "pip", "sync", "requirements.txt"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    universal_newlines=True,
-                )
-
-                while True:
-                    output = process.stdout.readline() if process.stdout else ""
-                    if output == "" and process.poll() is not None:
-                        break
-                    if output:
-                        print(output.rstrip())
-
-                sync_return_code = process.poll()
-                if sync_return_code != 0:
-                    raise subprocess.CalledProcessError(
-                        sync_return_code or 1, ["uv", "pip", "sync"]
-                    )
-
-                console.print("[green]✓ Dependencies synced successfully[/green]")
-                try:
-                    Path("requirements.txt").unlink()
-                except OSError:
-                    pass
-
-            except subprocess.CalledProcessError as e:
-                console.print("[red]Dependency resolution failed![/red]")
-                if hasattr(e, "stderr") and e.stderr:
-                    console.print(e.stderr)
-                try:
-                    Path("requirements.txt").unlink()
-                except OSError:
-                    pass
-                raise typer.Exit(1)
-
-    except FileNotFoundError as e:
-        console.print(f"[red]Command not found: {e}[/red]")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
@@ -923,8 +777,6 @@ def list_versions(
             if created_date:
                 # Format date nicely if it's a full timestamp
                 try:
-                    from datetime import datetime
-
                     if "T" in created_date:
                         dt = datetime.fromisoformat(created_date.replace("Z", "+00:00"))
                         created_date = dt.strftime("%Y-%m-%d %H:%M")

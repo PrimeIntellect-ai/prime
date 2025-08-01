@@ -64,6 +64,7 @@ class APIClient:
         try:
             response = self.session.request(method, url, params=params, json=json)
             response.raise_for_status()
+
             result = response.json()
             if not isinstance(result, dict):
                 raise APIError("API response was not a dictionary")
@@ -81,7 +82,16 @@ class APIClient:
                     "Payment required. Please check your billing status at "
                     "https://app.primeintellect.ai/dashboard/billing"
                 )
-            raise e
+
+            # For other HTTP errors, try to extract the error message from the response
+            try:
+                error_response = e.response.json()
+                if isinstance(error_response, dict) and "detail" in error_response:
+                    raise APIError(f"HTTP {e.response.status_code}: {error_response['detail']}")
+            except (ValueError, KeyError):
+                pass
+
+            raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
         except requests.exceptions.RequestException as e:
             raise APIError(f"Request failed: {e}")
 

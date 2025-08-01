@@ -324,8 +324,10 @@ def push(
                     raise typer.Exit(1)
 
             console.print("Creating source archive...")
+            temp_file_path = None
             try:
                 with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+                    temp_file_path = tmp.name
                     with tarfile.open(tmp.name, "w:gz") as tar:
                         for pattern in ["README.md", "pyproject.toml", "*.py"]:
                             for file in env_path.glob(pattern):
@@ -366,7 +368,6 @@ def push(
 
                     except APIError as e:
                         console.print(f"[red]Failed to prepare source upload: {e}[/red]")
-                        Path(tmp.name).unlink()
                         raise typer.Exit(1)
 
                     try:
@@ -379,11 +380,9 @@ def push(
                             upload_response.raise_for_status()
                     except requests.RequestException as e:
                         console.print(f"[red]Failed to upload source archive: {e}[/red]")
-                        Path(tmp.name).unlink()
                         raise typer.Exit(1)
                     except IOError as e:
                         console.print(f"[red]Failed to read source archive for upload: {e}[/red]")
-                        Path(tmp.name).unlink()
                         raise typer.Exit(1)
 
                     # Finalize
@@ -400,13 +399,15 @@ def push(
 
                     except APIError as e:
                         console.print(f"[red]Failed to finalize source upload: {e}[/red]")
-                        Path(tmp.name).unlink()
                         raise typer.Exit(1)
-                    finally:
-                        Path(tmp.name).unlink()
+
             except (tarfile.TarError, OSError) as e:
                 console.print(f"[red]Failed to create source archive: {e}[/red]")
                 raise typer.Exit(1)
+            finally:
+                # Clean up temporary file if it was created
+                if temp_file_path and Path(temp_file_path).exists():
+                    Path(temp_file_path).unlink()
 
             if finalize_response.get("success"):
                 console.print(
@@ -530,8 +531,10 @@ def pull(
 
         console.print(f"Downloading to {target_dir}...")
 
+        temp_file_path = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+                temp_file_path = tmp.name
                 try:
                     resp = client.session.get(client.base_url + download_url, stream=True)
                     resp.raise_for_status()
@@ -541,11 +544,9 @@ def pull(
                             f.write(chunk)
                 except requests.RequestException as e:
                     console.print(f"[red]Download failed: {e}[/red]")
-                    Path(tmp.name).unlink()
                     raise typer.Exit(1)
                 except IOError as e:
                     console.print(f"[red]Failed to write downloaded file: {e}[/red]")
-                    Path(tmp.name).unlink()
                     raise typer.Exit(1)
 
                 try:
@@ -553,17 +554,17 @@ def pull(
                         tar.extractall(target_dir)
                 except tarfile.TarError as e:
                     console.print(f"[red]Failed to extract archive: {e}[/red]")
-                    Path(tmp.name).unlink()
                     raise typer.Exit(1)
                 except IOError as e:
                     console.print(f"[red]Failed to extract files: {e}[/red]")
-                    Path(tmp.name).unlink()
                     raise typer.Exit(1)
-                finally:
-                    Path(tmp.name).unlink()
         except OSError as e:
             console.print(f"[red]Failed to create temporary file: {e}[/red]")
             raise typer.Exit(1)
+        finally:
+            # Clean up temporary file if it was created
+            if temp_file_path and Path(temp_file_path).exists():
+                Path(temp_file_path).unlink()
 
         console.print(f"[green]✓ Environment pulled to {target_dir}[/green]")
 

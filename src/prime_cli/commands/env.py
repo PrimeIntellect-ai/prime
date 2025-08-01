@@ -285,7 +285,18 @@ def push(
                 wheel_upload_url = wheel_response["upload_url"]
 
             except APIError as e:
-                console.print(f"[red]Failed to prepare wheel upload: {e}[/red]")
+                if "content hash" in str(e).lower() and "already exists" in str(e):
+                    console.print(f"[red]Failed to prepare wheel upload: {e}[/red]")
+                    console.print(
+                        "[yellow]Tip: If you've made changes to your environment, "
+                        "ensure the content has actually changed.[/yellow]"
+                    )
+                    console.print(
+                        "[yellow]The content hash is based on your source files "
+                        "(*.py, pyproject.toml, README.md).[/yellow]"
+                    )
+                else:
+                    console.print(f"[red]Failed to prepare wheel upload: {e}[/red]")
                 raise typer.Exit(1)
 
             if wheel_upload_url:
@@ -351,7 +362,18 @@ def push(
                         source_upload_url = version_response["upload_url"]
 
                     except APIError as e:
-                        console.print(f"[red]Failed to prepare source upload: {e}[/red]")
+                        if "content hash" in str(e).lower() and "already exists" in str(e):
+                            console.print(f"[red]Failed to prepare source upload: {e}[/red]")
+                            console.print(
+                                "[yellow]Tip: If you've made changes to your environment, "
+                                "ensure the content has actually changed.[/yellow]"
+                            )
+                            console.print(
+                                "[yellow]The content hash is based on your source files "
+                                "(*.py, pyproject.toml, README.md).[/yellow]"
+                            )
+                        else:
+                            console.print(f"[red]Failed to prepare source upload: {e}[/red]")
                         raise typer.Exit(1)
 
                     try:
@@ -801,11 +823,6 @@ def list_versions(
             console.print(f"\n[dim]Latest version: {latest.get('version', 'unknown')}[/dim]")
             install_cmd = f"prime env install {env_id}@{latest.get('version', 'latest')}"
             console.print(f"[dim]Install with: {install_cmd}[/dim]")
-
-        console.print("\n[dim]💡 Tips:[/dim]")
-        console.print("[dim]• Use --full-hashes to see complete content hashes for deletion[/dim]")
-        delete_cmd = f"prime env version delete {env_id} <version|hash|tag>"
-        console.print(f"[dim]• Delete versions with: {delete_cmd}[/dim]")
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")

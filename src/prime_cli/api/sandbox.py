@@ -93,6 +93,22 @@ class UpdateSandboxRequest(BaseModel):
     environment_vars: Optional[Dict[str, str]] = None
 
 
+class CommandRequest(BaseModel):
+    """Execute command request model"""
+
+    command: str
+    working_dir: Optional[str] = None
+    env: Optional[Dict[str, str]] = None
+
+
+class CommandResponse(BaseModel):
+    """Execute command response model"""
+
+    stdout: str
+    stderr: str
+    exit_code: int
+
+
 class SandboxClient:
     """Client for sandbox API operations"""
 
@@ -112,6 +128,7 @@ class SandboxClient:
         status: Optional[str] = None,
         page: int = 1,
         per_page: int = 50,
+        exclude_terminated: Optional[bool] = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         params: Dict[str, Any] = {"page": page, "per_page": per_page}
@@ -119,6 +136,8 @@ class SandboxClient:
             params["team_id"] = team_id
         if status:
             params["status"] = status
+        if exclude_terminated is not None:
+            params["is_active"] = exclude_terminated
 
         response = self.client.request("GET", "/sandbox", params=params)
         return SandboxListResponse(**response)
@@ -143,3 +162,19 @@ class SandboxClient:
         """Update sandbox status from Kubernetes"""
         response = self.client.request("POST", f"/sandbox/{sandbox_id}/status")
         return Sandbox(**response)
+
+    def execute_command(
+        self,
+        sandbox_id: str,
+        command: str,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+    ) -> CommandResponse:
+        """Execute a command in a sandbox"""
+        request = CommandRequest(command=command, working_dir=working_dir, env=env)
+        response = self.client.request(
+            "POST",
+            f"/sandbox/{sandbox_id}/command",
+            json=request.model_dump(by_alias=False, exclude_none=True),
+        )
+        return CommandResponse(**response)

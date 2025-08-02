@@ -21,14 +21,22 @@ def list(
     status: Optional[str] = typer.Option(None, help="Filter by status"),
     page: int = typer.Option(1, help="Page number"),
     per_page: int = typer.Option(50, help="Items per page"),
+    all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
 ) -> None:
-    """List your sandboxes"""
+    """List your sandboxes (excludes terminated by default)"""
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
+        # Always exclude terminated sandboxes unless --all is specified or status filter is used
+        exclude_terminated = not all and status is None
+
         sandbox_list = sandbox_client.list(
-            team_id=team_id, status=status, page=page, per_page=per_page
+            team_id=team_id,
+            status=status,
+            page=page,
+            per_page=per_page,
+            exclude_terminated=exclude_terminated,
         )
 
         table = Table(
@@ -309,6 +317,70 @@ def status(sandbox_id: str) -> None:
 
         console.print(f"[green]Status updated for sandbox {sandbox.id}[/green]")
         console.print(f"Current status: [bold]{sandbox.status}[/bold]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        raise typer.Exit(1)
+
+
+@app.command()
+def run(
+    sandbox_id: str,
+    command: List[str] = typer.Argument(..., help="Command to execute"),
+    working_dir: Optional[str] = typer.Option(
+        None, "-w", "--working-dir", help="Working directory"
+    ),
+    env: Optional[List[str]] = typer.Option(
+        None,
+        "-e",
+        "--env",
+        help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
+    ),
+) -> None:
+    """Execute a command in a sandbox"""
+    try:
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        # Parse environment variables
+        env_vars = {}
+        if env:
+            for env_var in env:
+                if "=" not in env_var:
+                    console.print("[red]Environment variables must be in KEY=VALUE format[/red]")
+                    raise typer.Exit(1)
+                key, value = env_var.split("=", 1)
+                env_vars[key] = value
+
+        # Join command list into a single string
+        command_str = " ".join(command)
+
+        console.print(f"[bold blue]Executing command:[/bold blue] {command_str}")
+        if working_dir:
+            console.print(f"[bold blue]Working directory:[/bold blue] {working_dir}")
+        if env_vars:
+            console.print(f"[bold blue]Environment:[/bold blue] {env_vars}")
+
+        with console.status("[bold blue]Running command...", spinner="dots"):
+            result = sandbox_client.execute_command(
+                sandbox_id, command_str, working_dir, env_vars if env_vars else None
+            )
+
+        # Display output
+        if result.stdout:
+            console.print("\n[bold green]stdout:[/bold green]")
+            console.print(result.stdout)
+
+        if result.stderr:
+            console.print("\n[bold red]stderr:[/bold red]")
+            console.print(result.stderr)
+
+        if result.exit_code != 0:
+            console.print(f"\n[bold yellow]Exit code:[/bold yellow] {result.exit_code}")
+            raise typer.Exit(result.exit_code)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

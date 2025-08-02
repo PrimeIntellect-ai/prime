@@ -19,27 +19,77 @@ def main() -> None:
         request = CreateSandboxRequest(
             name="demo-sandbox",
             docker_image="python:3.11-slim",
-            start_command="python -c 'print(\"Hello World!\"); import time; time.sleep(60)'",
+            start_command="tail -f /dev/null",  # Keep container running indefinitely
             cpu_cores=1,
             memory_gb=2,
+            timeout_minutes=120,  # 2 hours to avoid timeout during demo
         )
 
         print("Creating sandbox...")
         sandbox = sandbox_client.create(request)
         print(f"✅ Created: {sandbox.name} ({sandbox.id})")
 
-        # 3. List all sandboxes
+        # 3. Wait for sandbox to be running
+        import time
+
+        print("\nWaiting for sandbox to be running...")
+        max_attempts = 30
+        for _ in range(max_attempts):
+            sandbox = sandbox_client.get(sandbox.id)
+            if sandbox.status == "RUNNING":
+                print("✅ Sandbox is running!")
+                # Give it a few extra seconds to be ready for commands
+                time.sleep(10)
+                break
+            elif sandbox.status in ["ERROR", "TERMINATED"]:
+                print(f"❌ Sandbox failed with status: {sandbox.status}")
+                return
+            time.sleep(2)
+
+        # 4. Execute commands in the sandbox
+        print("\nExecuting commands...")
+
+        # Test basic commands that definitely work
+        result = sandbox_client.execute_command(sandbox.id, "whoami")
+        print(f"Current user: {result.stdout.strip()}")
+
+        result = sandbox_client.execute_command(sandbox.id, "pwd")
+        print(f"Working directory: {result.stdout.strip()}")
+
+        result = sandbox_client.execute_command(sandbox.id, "python --version")
+        print(f"Python version: {result.stdout.strip()}")
+
+        # List files in working directory
+        result = sandbox_client.execute_command(sandbox.id, "ls -la")
+        print(f"Files in working directory:\n{result.stdout}")
+
+        # Test inline Python execution (no file creation needed)
+        result = sandbox_client.execute_command(
+            sandbox.id, "python -c 'print(\"Hello from sandbox!\")'"
+        )
+        print(f"Python hello: {result.stdout.strip()}")
+
+        result = sandbox_client.execute_command(
+            sandbox.id, "python -c 'print(f\"2 + 2 = {2 + 2}\")'"
+        )
+        print(f"Math result: {result.stdout.strip()}")
+
+        # Check environment
+        result = sandbox_client.execute_command(sandbox.id, "env | grep SANDBOX")
+        print(f"Sandbox environment variables:\n{result.stdout}")
+
+        # 5. List all sandboxes
         print("\nYour sandboxes:")
         sandbox_list = sandbox_client.list()
         for sb in sandbox_list.sandboxes:
             print(f"  {sb.name}: {sb.status}")
 
-        # 4. Get logs
+        # 6. Get logs
         print(f"\nLogs for {sandbox.name}:")
         logs = sandbox_client.get_logs(sandbox.id)
         print(logs)
 
-        # 5. Clean up
+        # 7. Clean up
         print(f"\nDeleting {sandbox.name}...")
         sandbox_client.delete(sandbox.id)
         print("✅ Deleted")

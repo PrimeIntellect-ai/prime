@@ -1,4 +1,6 @@
 import json
+import random
+import string
 from typing import List, Optional
 
 import typer
@@ -194,9 +196,6 @@ def create(
             )
             # Remove multiple consecutive dashes and trim
             clean_image = "-".join(filter(None, clean_image.split("-")))
-
-            import random
-            import string
 
             suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
             name = f"{clean_image}-{suffix}"

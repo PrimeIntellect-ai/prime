@@ -47,11 +47,9 @@ def view() -> None:
 
 @app.command()
 def set_api_key(
-    api_key: str = typer.Option(
+    api_key: str = typer.Argument(
         ...,
-        prompt="you can create an API key at https://app.primeintellect.ai/dashboard/tokens\nEnter your API key",  # noqa: E501
-        help="Your Prime Intellect API key",
-        hide_input=True,
+        help="Your Prime Intellect API key. Create one at https://app.primeintellect.ai/dashboard/tokens",
     ),
 ) -> None:
     """Set your API key"""
@@ -64,9 +62,7 @@ def set_api_key(
 
 @app.command()
 def set_team_id(
-    team_id: str = typer.Option(
-        ..., prompt="Enter your team ID", help="Your Prime Intellect team ID"
-    ),
+    team_id: str = typer.Argument(..., help="Your Prime Intellect team ID"),
 ) -> None:
     """Set your team ID"""
     config = Config()
@@ -84,9 +80,8 @@ def remove_team_id() -> None:
 
 @app.command()
 def set_base_url(
-    url: str = typer.Option(
+    url: str = typer.Argument(
         ...,
-        prompt="Enter the API base URL",
         help="Base URL for the Prime Intellect API",
     ),
 ) -> None:
@@ -98,9 +93,8 @@ def set_base_url(
 
 @app.command()
 def set_frontend_url(
-    url: str = typer.Option(
+    url: str = typer.Argument(
         ...,
-        prompt="Enter the frontend URL",
         help="Frontend URL for the Prime Intellect web app",
     ),
 ) -> None:
@@ -175,9 +169,8 @@ def list_environments() -> None:
 
 @app.command()
 def set_ssh_key_path(
-    path: str = typer.Option(
+    path: str = typer.Argument(
         ...,
-        prompt="Enter the SSH private key path",
         help="Path to your SSH private key file",
     ),
 ) -> None:
@@ -188,9 +181,11 @@ def set_ssh_key_path(
 
 
 @app.command()
-def reset() -> None:
+def reset(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
     """Reset configuration to defaults"""
-    if typer.confirm("Are you sure you want to reset all settings?"):
+    if yes or typer.confirm("Are you sure you want to reset all settings?"):
         config = Config()
         config.set_api_key("")
         config.set_team_id("")

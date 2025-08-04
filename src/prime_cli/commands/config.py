@@ -18,6 +18,9 @@ def view() -> None:
     table.add_column("Setting", style="cyan")
     table.add_column("Value", style="green")
 
+    # Show current environment
+    table.add_row("Current Environment", settings["current_environment"])
+
     # Show API key (partially hidden)
     api_key = settings["api_key"]
     if api_key:
@@ -32,6 +35,9 @@ def view() -> None:
 
     # Show base URL
     table.add_row("Base URL", settings["base_url"])
+
+    # Show frontend URL
+    table.add_row("Frontend URL", settings["frontend_url"])
 
     # Show SSH key path
     table.add_row("SSH Key Path", settings["ssh_key_path"])
@@ -91,6 +97,75 @@ def set_base_url(
 
 
 @app.command()
+def set_frontend_url(
+    url: str = typer.Option(
+        ...,
+        prompt="Enter the frontend URL",
+        help="Frontend URL for the Prime Intellect web app",
+    ),
+) -> None:
+    """Set the frontend URL"""
+    config = Config()
+    config.set_frontend_url(url)
+    console.print("[green]Frontend URL configured successfully![/green]")
+
+
+@app.command(name="set-environment")
+def set_environment(
+    env: str = typer.Argument(
+        ...,
+        help="Environment name: 'production' or a custom saved environment",
+    ),
+) -> None:
+    """Set URLs for a specific environment"""
+    config = Config()
+
+    # Try to load the environment (handles both built-in and custom)
+    if config.load_environment(env):
+        console.print(f"[green]Switched to environment '{env}'![/green]")
+    else:
+        console.print(f"[red]Unknown environment: {env}[/red]")
+        console.print("[yellow]Available environments:[/yellow]")
+        for env_name in config.list_environments():
+            console.print(f"  - {env_name}")
+        raise typer.Exit(1)
+
+    console.print("[blue]Run 'prime config view' to see the current configuration[/blue]")
+
+
+@app.command(name="save-environment")
+def save_environment(
+    name: str = typer.Argument(
+        ...,
+        help="Name for the environment",
+    ),
+) -> None:
+    """Save current configuration as a named environment (including API key)"""
+    config = Config()
+    config.save_environment(name)
+    console.print(f"[green]Saved current configuration as environment '{name}'![/green]")
+    console.print("[yellow]Note: This includes your API key[/yellow]")
+    console.print(f"[blue]Use 'prime config use {name}' to load it later[/blue]")
+
+
+@app.command(name="list-environments")
+def list_environments() -> None:
+    """List all available environments"""
+    config = Config()
+    environments = config.list_environments()
+
+    table = Table(title="Available Environments")
+    table.add_column("Environment", style="cyan")
+    table.add_column("Type", style="green")
+
+    for env in environments:
+        env_type = "Built-in" if env == "production" else "Custom"
+        table.add_row(env, env_type)
+
+    console.print(table)
+
+
+@app.command()
 def set_ssh_key_path(
     path: str = typer.Option(
         ...,
@@ -112,5 +187,25 @@ def reset() -> None:
         config.set_api_key("")
         config.set_team_id("")
         config.set_base_url(Config.DEFAULT_BASE_URL)
+        config.set_frontend_url(Config.DEFAULT_FRONTEND_URL)
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
         console.print("[green]Configuration reset to defaults![/green]")
+
+
+# Shorter aliases for environment commands
+@app.command(name="use")
+def use_environment(env: str = typer.Argument(..., help="Environment name")) -> None:
+    """Switch to a different environment (alias for set-environment)"""
+    set_environment(env)
+
+
+@app.command(name="save")
+def save_env(name: str = typer.Argument(..., help="Name for the environment")) -> None:
+    """Save current config as environment (alias for save-environment)"""
+    save_environment(name)
+
+
+@app.command(name="envs")
+def list_envs() -> None:
+    """List available environments (alias for list-environments)"""
+    list_environments()

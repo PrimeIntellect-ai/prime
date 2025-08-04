@@ -79,6 +79,19 @@ prime config set-ssh-key-path
 prime config view
 ```
 
+### Environment Management
+```bash
+# Save current config as an environment (includes API key)
+prime config save develop
+
+# Switch between environments
+prime config use production
+prime config use develop
+
+# List available environments
+prime config envs
+```
+
 ### GPU Resources
 ```bash
 # List all available GPUs
@@ -180,15 +193,26 @@ We use semantic versioning. Releases are automatically created when changes are 
    uv pip install -e ".[dev]"
    pre-commit install
    ```
-4. Run code quality checks:
+4. Set up your development environment:
+   ```bash
+   # Save your local development config
+   prime config set-base-url http://localhost:8000
+   prime config set-frontend-url http://localhost:3000
+   prime config save local
+   
+   # Switch between environments as needed
+   prime config use local       # For development
+   prime config use production  # For testing against prod
+   ```
+5. Run code quality checks:
    ```bash
    uv run ruff format .
    uv run ruff check .
    uv run pytest
    ```
-5. Commit your changes (`git commit -m 'Add amazing feature'`)
-6. Push to the branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
+6. Commit your changes (`git commit -m 'Add amazing feature'`)
+7. Push to the branch (`git push origin feature/amazing-feature`)
+8. Open a Pull Request
 
 ## 📝 License
 

@@ -89,7 +89,7 @@ def login() -> None:
 
         challenge_code = challenge_response["challenge"]
         challenge_url = (
-            f"https://app.primeintellect.ai/dashboard/tokens/challenge?code={challenge_code}"
+            f"{settings['frontend_url']}/dashboard/tokens/challenge?code={challenge_code}"
         )
 
         console.print("\n[bold blue]🔐 Login Required[/bold blue]")
@@ -136,6 +136,8 @@ def login() -> None:
                     if decrypted_result:
                         # Update config with decrypted token
                         config.set_api_key(decrypted_result.decode())
+                        # Also update the current environment's saved file
+                        config.update_current_environment_file()
                         console.print("[green]Successfully logged in![/green]")
                     else:
                         console.print("[red]Failed to decrypt authentication token[/red]")

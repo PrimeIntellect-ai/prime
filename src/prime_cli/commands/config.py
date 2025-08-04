@@ -121,13 +121,17 @@ def set_environment(
     config = Config()
 
     # Try to load the environment (handles both built-in and custom)
-    if config.load_environment(env):
-        console.print(f"[green]Switched to environment '{env}'![/green]")
-    else:
-        console.print(f"[red]Unknown environment: {env}[/red]")
-        console.print("[yellow]Available environments:[/yellow]")
-        for env_name in config.list_environments():
-            console.print(f"  - {env_name}")
+    try:
+        if config.load_environment(env):
+            console.print(f"[green]Switched to environment '{env}'![/green]")
+        else:
+            console.print(f"[red]Unknown environment: {env}[/red]")
+            console.print("[yellow]Available environments:[/yellow]")
+            for env_name in config.list_environments():
+                console.print(f"  - {env_name}")
+            raise typer.Exit(1)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
     console.print("[blue]Run 'prime config view' to see the current configuration[/blue]")
@@ -141,11 +145,15 @@ def save_environment(
     ),
 ) -> None:
     """Save current configuration as a named environment (including API key)"""
-    config = Config()
-    config.save_environment(name)
-    console.print(f"[green]Saved current configuration as environment '{name}'![/green]")
-    console.print("[yellow]Note: This includes your API key[/yellow]")
-    console.print(f"[blue]Use 'prime config use {name}' to load it later[/blue]")
+    try:
+        config = Config()
+        config.save_environment(name)
+        console.print(f"[green]Saved current configuration as environment '{name}'![/green]")
+        console.print("[yellow]Note: This includes your API key and team ID[/yellow]")
+        console.print(f"[blue]Use 'prime config use {name}' to load it later[/blue]")
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
 
 
 @app.command(name="list-environments")
@@ -189,6 +197,7 @@ def reset() -> None:
         config.set_base_url(Config.DEFAULT_BASE_URL)
         config.set_frontend_url(Config.DEFAULT_FRONTEND_URL)
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
+        config.set_current_environment("production")
         console.print("[green]Configuration reset to defaults![/green]")
 
 

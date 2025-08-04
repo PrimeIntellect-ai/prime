@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
@@ -126,6 +127,17 @@ class Config:
         self.config["current_environment"] = value
         self._save_config(self.config)
 
+    def _sanitize_environment_name(self, name: str) -> str:
+        """Sanitize environment name to prevent path traversal"""
+        # Only allow alphanumeric characters, hyphens, and underscores
+        sanitized = re.sub(r"[^a-zA-Z0-9_-]", "", name)
+        if not sanitized or sanitized != name:
+            raise ValueError(
+                f"Invalid environment name: {name!r}. "
+                "Only alphanumeric characters, hyphens, and underscores are allowed."
+            )
+        return sanitized
+
     def view(self) -> dict:
         """Get all config values"""
         return {
@@ -139,9 +151,14 @@ class Config:
 
     def save_environment(self, name: str) -> None:
         """Save current configuration as a named environment"""
-        env_file = self.environments_dir / f"{name}.json"
+        if name.lower() == "production":
+            raise ValueError("Cannot save custom environment with reserved name 'production'")
+
+        sanitized_name = self._sanitize_environment_name(name)
+        env_file = self.environments_dir / f"{sanitized_name}.json"
         env_config = {
             "api_key": self.api_key,
+            "team_id": self.team_id,
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
         }
@@ -153,37 +170,58 @@ class Config:
             # Built-in production environment
             self.set_base_url(self.DEFAULT_BASE_URL)
             self.set_frontend_url(self.DEFAULT_FRONTEND_URL)
+            self.set_team_id("")  # Production defaults to personal account
             self.set_current_environment("production")
             return True
 
-        env_file = self.environments_dir / f"{name}.json"
-        if env_file.exists():
-            env_config = json.loads(env_file.read_text())
-            if "api_key" in env_config:
-                self.set_api_key(env_config["api_key"])
-            self.set_base_url(env_config.get("base_url", self.DEFAULT_BASE_URL))
-            self.set_frontend_url(env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL))
-            self.set_current_environment(name)
-            return True
+        try:
+            sanitized_name = self._sanitize_environment_name(name)
+            env_file = self.environments_dir / f"{sanitized_name}.json"
+            if env_file.exists():
+                try:
+                    env_config = json.loads(env_file.read_text())
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"Invalid JSON in environment file {sanitized_name}.json: {e}")
+
+                if "api_key" in env_config:
+                    self.set_api_key(env_config["api_key"])
+                # Set team_id from environment, defaulting to empty string
+                self.set_team_id(env_config.get("team_id", ""))
+                self.set_base_url(env_config.get("base_url", self.DEFAULT_BASE_URL))
+                self.set_frontend_url(env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL))
+                self.set_current_environment(name)
+                return True
+        except ValueError:
+            # Re-raise sanitization errors
+            raise
         return False
 
     def update_current_environment_file(self) -> None:
         """Update the current environment's saved file with current config"""
         if self.current_environment != "production":
             # Only update custom environments, not the built-in production
-            env_file = self.environments_dir / f"{self.current_environment}.json"
-            if env_file.exists():
-                env_config = {
-                    "api_key": self.api_key,
-                    "base_url": self.base_url,
-                    "frontend_url": self.frontend_url,
-                }
-                env_file.write_text(json.dumps(env_config, indent=2))
+            try:
+                sanitized_name = self._sanitize_environment_name(self.current_environment)
+                env_file = self.environments_dir / f"{sanitized_name}.json"
+                if env_file.exists():
+                    env_config = {
+                        "api_key": self.api_key,
+                        "team_id": self.team_id,
+                        "base_url": self.base_url,
+                        "frontend_url": self.frontend_url,
+                    }
+                    env_file.write_text(json.dumps(env_config, indent=2))
+            except ValueError:
+                # Skip updating if environment name is invalid
+                pass
 
     def list_environments(self) -> list[str]:
         """List all saved environment names"""
         environments = ["production"]  # Built-in environment
         if self.environments_dir.exists():
             for env_file in self.environments_dir.glob("*.json"):
-                environments.append(env_file.stem)
+                env_name = env_file.stem
+                # Skip any files that would conflict with built-in environments
+                if env_name.lower() != "production":
+                    environments.append(env_name)
         return environments

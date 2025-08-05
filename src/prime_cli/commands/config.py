@@ -80,23 +80,23 @@ def set_api_key(
 def set_team_id(
     team_id: Optional[str] = typer.Argument(
         None,
-        help="Your Prime Intellect team ID. If not provided, you'll be prompted.",
+        help="Your Prime Intellect team ID. Leave empty for personal account.",
     ),
 ) -> None:
-    """Set your team ID (prompts if not provided)"""
-    if not team_id:
+    """Set your team ID. Empty team ID means personal account."""
+    if team_id is None:
         # Interactive mode with prompt
         team_id = typer.prompt(
-            "Enter your Prime Intellect team ID",
+            "Enter your Prime Intellect team ID (leave empty for personal account)",
             default="",
         )
-        if not team_id:
-            console.print("[red]Team ID is required[/red]")
-            return
 
     config = Config()
     config.set_team_id(team_id)
-    console.print("[green]Team ID configured successfully![/green]")
+    if team_id:
+        console.print(f"[green]Team ID '{team_id}' configured successfully![/green]")
+    else:
+        console.print("[green]Team ID cleared. Using personal account.[/green]")
 
 
 @app.command()

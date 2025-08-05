@@ -1,3 +1,5 @@
+from typing import Optional
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -47,17 +49,31 @@ def view() -> None:
 
 @app.command()
 def set_api_key(
-    api_key: str = typer.Argument(
-        ...,
-        help="Your Prime Intellect API key. Create one at https://app.primeintellect.ai/dashboard/tokens",
+    api_key: Optional[str] = typer.Argument(
+        None,
+        help="Your Prime Intellect API key. If not provided, you'll be prompted securely.",
     ),
 ) -> None:
-    """Set your API key"""
+    """Set your API key (prompts securely if not provided)"""
+    if not api_key:
+        # Interactive mode with secure prompt
+        api_key = typer.prompt(
+            "Enter your Prime Intellect API key",
+            hide_input=True,
+            confirmation_prompt=True,
+        )
+        if not api_key:
+            console.print("[red]API key is required[/red]")
+            return
+
     config = Config()
     config.set_api_key(api_key)
     masked_key = f"{api_key[:6]}***{api_key[-4:]}" if len(api_key) > 10 else "***"
     console.print(f"[green]API key {masked_key} configured successfully![/green]")
     console.print("[blue]You can verify your API key with 'prime config view'[/blue]")
+    console.print(
+        "\n[yellow]Tip: Get your API key at https://app.primeintellect.ai/dashboard/tokens[/yellow]"
+    )
 
 
 @app.command()
@@ -80,36 +96,53 @@ def remove_team_id() -> None:
 
 @app.command()
 def set_base_url(
-    url: str = typer.Argument(
-        ...,
-        help="Base URL for the Prime Intellect API",
+    url: Optional[str] = typer.Argument(
+        None,
+        help="Base URL for the Prime Intellect API. If not provided, you'll be prompted.",
     ),
 ) -> None:
-    """Set the API base URL"""
+    """Set the API base URL (prompts if not provided)"""
+    if not url:
+        config = Config()
+        url = typer.prompt(
+            "Enter the base URL for the Prime Intellect API",
+            default=config.base_url,
+        )
+        if not url:
+            console.print("[red]Base URL is required[/red]")
+            return
+
     config = Config()
     config.set_base_url(url)
-    console.print("[green]Base URL configured successfully![/green]")
+    console.print(f"[green]Base URL set to: {url}[/green]")
 
 
 @app.command()
 def set_frontend_url(
-    url: str = typer.Argument(
-        ...,
-        help="Frontend URL for the Prime Intellect web app",
+    url: Optional[str] = typer.Argument(
+        None,
+        help="Frontend URL for the Prime Intellect web app. If not provided, you'll be prompted.",
     ),
 ) -> None:
-    """Set the frontend URL"""
+    """Set the frontend URL (prompts if not provided)"""
+    if not url:
+        config = Config()
+        url = typer.prompt(
+            "Enter the frontend URL for the Prime Intellect web app",
+            default=config.frontend_url,
+        )
+        if not url:
+            console.print("[red]Frontend URL is required[/red]")
+            return
+
     config = Config()
     config.set_frontend_url(url)
-    console.print("[green]Frontend URL configured successfully![/green]")
+    console.print(f"[green]Frontend URL set to: {url}[/green]")
 
 
-@app.command(name="set-environment")
-def set_environment(
-    env: str = typer.Argument(
-        ...,
-        help="Environment name: 'production' or a custom saved environment",
-    ),
+# Helper functions (not commands)
+def _set_environment(
+    env: str,
 ) -> None:
     """Set URLs for a specific environment"""
     config = Config()
@@ -131,12 +164,8 @@ def set_environment(
     console.print("[blue]Run 'prime config view' to see the current configuration[/blue]")
 
 
-@app.command(name="save-environment")
-def save_environment(
-    name: str = typer.Argument(
-        ...,
-        help="Name for the environment",
-    ),
+def _save_environment(
+    name: str,
 ) -> None:
     """Save current configuration as a named environment (including API key)"""
     try:
@@ -150,8 +179,7 @@ def save_environment(
         raise typer.Exit(1)
 
 
-@app.command(name="list-environments")
-def list_environments() -> None:
+def _list_environments() -> None:
     """List all available environments"""
     config = Config()
     environments = config.list_environments()
@@ -196,20 +224,24 @@ def reset(
         console.print("[green]Configuration reset to defaults![/green]")
 
 
-# Shorter aliases for environment commands
+# Environment commands
 @app.command(name="use")
-def use_environment(env: str = typer.Argument(..., help="Environment name")) -> None:
-    """Switch to a different environment (alias for set-environment)"""
-    set_environment(env)
+def use_environment(
+    env: str = typer.Argument(
+        ..., help="Environment name: 'production' or a custom saved environment"
+    ),
+) -> None:
+    """Switch to a different environment"""
+    _set_environment(env)
 
 
 @app.command(name="save")
 def save_env(name: str = typer.Argument(..., help="Name for the environment")) -> None:
-    """Save current config as environment (alias for save-environment)"""
-    save_environment(name)
+    """Save current config as environment (including API key)"""
+    _save_environment(name)
 
 
 @app.command(name="envs")
 def list_envs() -> None:
-    """List available environments (alias for list-environments)"""
-    list_environments()
+    """List available environments"""
+    _list_environments()

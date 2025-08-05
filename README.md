@@ -68,16 +68,41 @@ pre-commit install
 ## 🛠️ Usage
 
 ### Configuration
+
+#### API Key Setup (Multiple Options)
+
 ```bash
-# Set up API key
+# Option 1: Interactive mode (recommended - hides input)
 prime config set-api-key
 
+# Option 2: Non-interactive mode (for automation)
+prime config set-api-key YOUR_API_KEY
+
+# Option 3: Environment variable (most secure for scripts)
+export PRIME_API_KEY="your-api-key-here"
+```
+
+#### Other Configuration
+```bash
 # Configure SSH key for pod access
 prime config set-ssh-key-path
+
+# Set base URL (interactive or non-interactive)
+prime config set-base-url
+prime config set-base-url https://api.primeintellect.ai
+
+# Set frontend URL (interactive or non-interactive)  
+prime config set-frontend-url
+prime config set-frontend-url https://app.primeintellect.ai
 
 # View current configuration
 prime config view
 ```
+
+**Security Note**: When using the non-interactive mode, be aware that the API key may be visible in your shell history. For enhanced security:
+- Use the interactive mode (no arguments) which hides your input
+- Use environment variables (`PRIME_API_KEY`)
+- Clear your shell history after setting sensitive values
 
 ### Environment Management
 ```bash
@@ -141,6 +166,29 @@ pip install -e ".[dev]"
 ```
 
 Note: Without uv, operations will be slower and you'll need to manage virtual environments manually.
+
+## 🔐 Security Best Practices
+
+### API Key Management
+1. **Never commit API keys to version control**
+2. **Use environment variables for automation**:
+   ```bash
+   export PRIME_API_KEY="your-api-key-here"
+   prime pods list  # Will use the environment variable
+   ```
+3. **Use interactive mode for one-time setup**:
+   ```bash
+   prime config set-api-key  # Prompts securely without showing input
+   ```
+4. **For CI/CD pipelines**, use secrets management:
+   - GitHub Actions: Use repository secrets
+   - GitLab CI: Use CI/CD variables
+   - Jenkins: Use credentials plugin
+
+### Secure Storage
+- API keys are stored in `~/.prime/config.json` with user-only permissions
+- Environment variables take precedence over stored configuration
+- Consider using a password manager for long-term API key storage
 
 ## 💻 Development
 

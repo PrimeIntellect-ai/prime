@@ -4,7 +4,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -218,7 +217,7 @@ def push(
                 console.print(f"[red]Failed to resolve environment: {e}[/red]")
                 raise typer.Exit(1)
 
-            console.print("Uploading wheel .. .. .. ...")
+            console.print("Uploading wheel ...")
 
             try:
                 with open(wheel_path, "rb") as f:
@@ -243,10 +242,19 @@ def push(
                 files_to_hash.append(readme_path)
 
             for subdir in env_path.iterdir():
-                if subdir.is_dir() and not subdir.name.startswith('.') and subdir.name not in ['dist', '__pycache__', 'build'] and not subdir.name.endswith('.egg-info'):
-                    content_hasher.update(f"dir:{subdir.name}".encode('utf-8'))
-                    for file in subdir.rglob('*'):
-                        if file.is_file() and not file.name.startswith('.') and '__pycache__' not in str(file):
+                if (
+                    subdir.is_dir()
+                    and not subdir.name.startswith(".")
+                    and subdir.name not in ["dist", "__pycache__", "build"]
+                    and not subdir.name.endswith(".egg-info")
+                ):
+                    content_hasher.update(f"dir:{subdir.name}".encode("utf-8"))
+                    for file in subdir.rglob("*"):
+                        if (
+                            file.is_file()
+                            and not file.name.startswith(".")
+                            and "__pycache__" not in str(file)
+                        ):
                             files_to_hash.append(file)
 
             files_to_hash.sort(key=lambda x: str(x.relative_to(env_path)))
@@ -255,14 +263,13 @@ def push(
                 try:
                     with open(file_path, "rb") as f:
                         rel_path = file_path.relative_to(env_path)
-                        content_hasher.update(str(rel_path).encode('utf-8'))
+                        content_hasher.update(str(rel_path).encode("utf-8"))
                         content_hasher.update(f.read())
                 except IOError:
                     pass
 
             content_hash = content_hasher.hexdigest()
 
-            timestamp = int(time.time())
             unique_wheel_name = wheel_path.name
 
             wheel_data = {
@@ -336,7 +343,12 @@ def push(
                                     tar.add(file, arcname=file.name)
 
                         for subdir in env_path.iterdir():
-                            if subdir.is_dir() and not subdir.name.startswith('.') and subdir.name not in ['dist', '__pycache__', 'build'] and not subdir.name.endswith('.egg-info'):
+                            if (
+                                subdir.is_dir()
+                                and not subdir.name.startswith(".")
+                                and subdir.name not in ["dist", "__pycache__", "build"]
+                                and not subdir.name.endswith(".egg-info")
+                            ):
                                 tar.add(subdir, arcname=subdir.name)
 
                     with open(tmp.name, "rb") as f:

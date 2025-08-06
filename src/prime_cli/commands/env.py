@@ -62,6 +62,60 @@ def should_include_directory_in_archive(dir_path: Path) -> bool:
     return True
 
 
+def compute_content_hash(env_path: Path) -> str:
+    """Compute deterministic, cross-platform content hash for environment files.
+
+    Args:
+        env_path: Path to the environment directory
+
+    Returns:
+        SHA256 hexdigest of the environment content
+    """
+    content_hasher = hashlib.sha256()
+
+    # Collect all items to hash in a deterministic order
+    items_to_hash = []
+
+    # Add root-level files
+    for pattern in ["pyproject.toml", "*.py", "README.md"]:
+        for file_path in env_path.glob(pattern):
+            if file_path.is_file():
+                items_to_hash.append(("file", file_path))
+
+    # Add subdirectory contents
+    for subdir in sorted(env_path.iterdir(), key=lambda x: x.name):
+        if should_include_directory_in_archive(subdir):
+            # Add directory marker
+            items_to_hash.append(("dir", subdir))
+
+            # Add files in subdirectory
+            for file_path in subdir.rglob("*"):
+                if should_include_file_in_archive(file_path, env_path):
+                    items_to_hash.append(("file", file_path))
+
+    # Sort all items by their relative path for deterministic ordering
+    items_to_hash.sort(key=lambda item: str(item[1].relative_to(env_path)).replace("\\", "/"))
+
+    # Hash items in sorted order
+    for item_type, item_path in items_to_hash:
+        rel_path = item_path.relative_to(env_path)
+        # Use forward slashes for cross-platform consistency
+        normalized_path = str(rel_path).replace("\\", "/")
+
+        if item_type == "dir":
+            content_hasher.update(f"dir:{normalized_path}".encode("utf-8"))
+        elif item_type == "file":
+            content_hasher.update(f"file:{normalized_path}".encode("utf-8"))
+            try:
+                with open(item_path, "rb") as f:
+                    content_hasher.update(f.read())
+            except IOError:
+                # Skip files that can't be read
+                pass
+
+    return content_hasher.hexdigest()
+
+
 @app.command("list")
 def list_cmd(
     limit: int = typer.Option(
@@ -264,39 +318,8 @@ def push(
 
             project_metadata = project_info
 
-            content_hasher = hashlib.sha256()
-            files_to_hash = []
-
-            if pyproject_path.exists():
-                files_to_hash.append(pyproject_path)
-
-            for py_file in env_path.glob("*.py"):
-                files_to_hash.append(py_file)
-
-            readme_path = env_path / "README.md"
-            if readme_path.exists():
-                files_to_hash.append(readme_path)
-
-            # Sort subdirectories for deterministic ordering and apply consistent filtering
-            for subdir in sorted(env_path.iterdir(), key=lambda x: x.name):
-                if should_include_directory_in_archive(subdir):
-                    content_hasher.update(f"dir:{subdir.name}".encode("utf-8"))
-                    for file in subdir.rglob("*"):
-                        if should_include_file_in_archive(file, env_path):
-                            files_to_hash.append(file)
-
-            files_to_hash.sort(key=lambda x: str(x.relative_to(env_path)))
-
-            for file_path in files_to_hash:
-                try:
-                    with open(file_path, "rb") as f:
-                        rel_path = file_path.relative_to(env_path)
-                        content_hasher.update(str(rel_path).encode("utf-8"))
-                        content_hasher.update(f.read())
-                except IOError:
-                    pass
-
-            content_hash = content_hasher.hexdigest()
+            # Compute deterministic content hash
+            content_hash = compute_content_hash(env_path)
 
             unique_wheel_name = wheel_path.name
 

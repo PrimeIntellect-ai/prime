@@ -218,7 +218,7 @@ def push(
                 console.print(f"[red]Failed to resolve environment: {e}[/red]")
                 raise typer.Exit(1)
 
-            console.print("Uploading wheel...")
+            console.print("Uploading wheel .. .. .. ...")
 
             try:
                 with open(wheel_path, "rb") as f:
@@ -229,10 +229,7 @@ def push(
 
             project_metadata = project_info
 
-            # Generate content hash based on actual file contents
             content_hasher = hashlib.sha256()
-
-            # Hash key files that define the environment content
             files_to_hash = []
 
             if pyproject_path.exists():
@@ -245,13 +242,20 @@ def push(
             if readme_path.exists():
                 files_to_hash.append(readme_path)
 
-            # Sort files for consistent hashing
-            files_to_hash.sort(key=lambda x: x.name)
+            for subdir in env_path.iterdir():
+                if subdir.is_dir() and not subdir.name.startswith('.') and subdir.name not in ['dist', '__pycache__', 'build'] and not subdir.name.endswith('.egg-info'):
+                    content_hasher.update(f"dir:{subdir.name}".encode('utf-8'))
+                    for file in subdir.rglob('*'):
+                        if file.is_file() and not file.name.startswith('.') and '__pycache__' not in str(file):
+                            files_to_hash.append(file)
 
-            # Hash the content of each file
+            files_to_hash.sort(key=lambda x: str(x.relative_to(env_path)))
+
             for file_path in files_to_hash:
                 try:
                     with open(file_path, "rb") as f:
+                        rel_path = file_path.relative_to(env_path)
+                        content_hasher.update(str(rel_path).encode('utf-8'))
                         content_hasher.update(f.read())
                 except IOError:
                     pass
@@ -331,14 +335,15 @@ def push(
                                 if file.is_file():
                                     tar.add(file, arcname=file.name)
 
-                        if (env_path / "docs").exists():
-                            tar.add(env_path / "docs", arcname="docs")
+                        for subdir in env_path.iterdir():
+                            if subdir.is_dir() and not subdir.name.startswith('.') and subdir.name not in ['dist', '__pycache__', 'build'] and not subdir.name.endswith('.egg-info'):
+                                tar.add(subdir, arcname=subdir.name)
 
                     with open(tmp.name, "rb") as f:
                         source_sha256 = hashlib.sha256(f.read()).hexdigest()
 
                     version = project_metadata.get("version", "0.1.0")
-                    unique_source_name = f"{env_name}-{version}-{timestamp}.tar.gz"
+                    unique_source_name = f"{env_name}-{version}-{content_hash[:8]}.tar.gz"
 
                     source_data = {
                         "content_hash": content_hash,

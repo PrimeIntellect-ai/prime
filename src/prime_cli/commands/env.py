@@ -4,7 +4,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -25,6 +24,96 @@ console = Console()
 MAX_FILES_TO_SHOW = 10
 DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
+
+
+def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
+    """Determine if a file should be included in the archive based on filtering rules."""
+    if not file_path.is_file():
+        return False
+
+    # Skip hidden files
+    if file_path.name.startswith("."):
+        return False
+
+    # Skip files in __pycache__ directories
+    if "__pycache__" in str(file_path.relative_to(base_path)):
+        return False
+
+    return True
+
+
+def should_include_directory_in_archive(dir_path: Path) -> bool:
+    """Determine if a directory should be included in the archive based on filtering rules."""
+    if not dir_path.is_dir():
+        return False
+
+    # Skip hidden directories
+    if dir_path.name.startswith("."):
+        return False
+
+    # Skip build artifacts and cache directories
+    if dir_path.name in ["dist", "__pycache__", "build"]:
+        return False
+
+    # Skip egg-info directories
+    if dir_path.name.endswith(".egg-info"):
+        return False
+
+    return True
+
+
+def compute_content_hash(env_path: Path) -> str:
+    """Compute deterministic, cross-platform content hash for environment files.
+
+    Args:
+        env_path: Path to the environment directory
+
+    Returns:
+        SHA256 hexdigest of the environment content
+    """
+    content_hasher = hashlib.sha256()
+
+    # Collect all items to hash in a deterministic order
+    items_to_hash = []
+
+    # Add root-level files
+    for pattern in ["pyproject.toml", "*.py", "README.md"]:
+        for file_path in env_path.glob(pattern):
+            if file_path.is_file():
+                items_to_hash.append(("file", file_path))
+
+    # Add subdirectory contents
+    for subdir in sorted(env_path.iterdir(), key=lambda x: x.name):
+        if should_include_directory_in_archive(subdir):
+            # Add directory marker
+            items_to_hash.append(("dir", subdir))
+
+            # Add files in subdirectory
+            for file_path in subdir.rglob("*"):
+                if should_include_file_in_archive(file_path, env_path):
+                    items_to_hash.append(("file", file_path))
+
+    # Sort all items by their relative path for deterministic ordering
+    items_to_hash.sort(key=lambda item: str(item[1].relative_to(env_path)).replace("\\", "/"))
+
+    # Hash items in sorted order
+    for item_type, item_path in items_to_hash:
+        rel_path = item_path.relative_to(env_path)
+        # Use forward slashes for cross-platform consistency
+        normalized_path = str(rel_path).replace("\\", "/")
+
+        if item_type == "dir":
+            content_hasher.update(f"dir:{normalized_path}".encode("utf-8"))
+        elif item_type == "file":
+            content_hasher.update(f"file:{normalized_path}".encode("utf-8"))
+            try:
+                with open(item_path, "rb") as f:
+                    content_hasher.update(f.read())
+            except IOError:
+                # Skip files that can't be read
+                pass
+
+    return content_hasher.hexdigest()
 
 
 @app.command("list")
@@ -148,6 +237,12 @@ def push(
 
         console.print(f"Building environment package at {env_path}...")
 
+        # Clean dist directory to ensure fresh build
+        dist_dir = env_path / "dist"
+        if dist_dir.exists():
+            console.print("[dim]Cleaning existing dist directory...[/dim]")
+            shutil.rmtree(dist_dir)
+
         console.print("Building wheel distribution...")
 
         try:
@@ -218,7 +313,7 @@ def push(
                 console.print(f"[red]Failed to resolve environment: {e}[/red]")
                 raise typer.Exit(1)
 
-            console.print("Uploading wheel...")
+            console.print("Uploading wheel ...")
 
             try:
                 with open(wheel_path, "rb") as f:
@@ -229,36 +324,9 @@ def push(
 
             project_metadata = project_info
 
-            # Generate content hash based on actual file contents
-            content_hasher = hashlib.sha256()
+            # Compute deterministic content hash
+            content_hash = compute_content_hash(env_path)
 
-            # Hash key files that define the environment content
-            files_to_hash = []
-
-            if pyproject_path.exists():
-                files_to_hash.append(pyproject_path)
-
-            for py_file in env_path.glob("*.py"):
-                files_to_hash.append(py_file)
-
-            readme_path = env_path / "README.md"
-            if readme_path.exists():
-                files_to_hash.append(readme_path)
-
-            # Sort files for consistent hashing
-            files_to_hash.sort(key=lambda x: x.name)
-
-            # Hash the content of each file
-            for file_path in files_to_hash:
-                try:
-                    with open(file_path, "rb") as f:
-                        content_hasher.update(f.read())
-                except IOError:
-                    pass
-
-            content_hash = content_hasher.hexdigest()
-
-            timestamp = int(time.time())
             unique_wheel_name = wheel_path.name
 
             wheel_data = {
@@ -331,14 +399,22 @@ def push(
                                 if file.is_file():
                                     tar.add(file, arcname=file.name)
 
-                        if (env_path / "docs").exists():
-                            tar.add(env_path / "docs", arcname="docs")
+                        # Sort subdirectories for deterministic ordering and apply filtering
+                        for subdir in sorted(env_path.iterdir(), key=lambda x: x.name):
+                            if should_include_directory_in_archive(subdir):
+                                # Add directory with custom filtering instead of entire subdirectory
+                                for file in subdir.rglob("*"):
+                                    if should_include_file_in_archive(file, env_path):
+                                        # Calculate relative path from env_path for consistent
+                                        # archive structure
+                                        arcname = file.relative_to(env_path)
+                                        tar.add(file, arcname=str(arcname))
 
                     with open(tmp.name, "rb") as f:
                         source_sha256 = hashlib.sha256(f.read()).hexdigest()
 
                     version = project_metadata.get("version", "0.1.0")
-                    unique_source_name = f"{env_name}-{version}-{timestamp}.tar.gz"
+                    unique_source_name = f"{env_name}-{version}-{content_hash[:8]}.tar.gz"
 
                     source_data = {
                         "content_hash": content_hash,
@@ -587,7 +663,12 @@ def pull(
 @app.command()
 def install(
     env_id: str = typer.Argument(..., help="Environment ID to install (owner/name)"),
-    version: str = typer.Option("latest", "--version", "-v", help="Version to install"),
+    version: str = typer.Option(
+        "latest",
+        "--version",
+        "-v",
+        help="Version to install (latest, semantic version like 0.1.0, or SHA256 hash)",
+    ),
     python: Optional[str] = typer.Option(
         None, "--python", "-p", help="Python version to use with uv"
     ),

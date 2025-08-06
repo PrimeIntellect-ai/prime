@@ -26,6 +26,42 @@ DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
 
 
+def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
+    """Determine if a file should be included in the archive based on filtering rules."""
+    if not file_path.is_file():
+        return False
+
+    # Skip hidden files
+    if file_path.name.startswith("."):
+        return False
+
+    # Skip files in __pycache__ directories
+    if "__pycache__" in str(file_path.relative_to(base_path)):
+        return False
+
+    return True
+
+
+def should_include_directory_in_archive(dir_path: Path) -> bool:
+    """Determine if a directory should be included in the archive based on filtering rules."""
+    if not dir_path.is_dir():
+        return False
+
+    # Skip hidden directories
+    if dir_path.name.startswith("."):
+        return False
+
+    # Skip build artifacts and cache directories
+    if dir_path.name in ["dist", "__pycache__", "build"]:
+        return False
+
+    # Skip egg-info directories
+    if dir_path.name.endswith(".egg-info"):
+        return False
+
+    return True
+
+
 @app.command("list")
 def list_cmd(
     limit: int = typer.Option(
@@ -241,20 +277,12 @@ def push(
             if readme_path.exists():
                 files_to_hash.append(readme_path)
 
-            for subdir in env_path.iterdir():
-                if (
-                    subdir.is_dir()
-                    and not subdir.name.startswith(".")
-                    and subdir.name not in ["dist", "__pycache__", "build"]
-                    and not subdir.name.endswith(".egg-info")
-                ):
+            # Sort subdirectories for deterministic ordering and apply consistent filtering
+            for subdir in sorted(env_path.iterdir(), key=lambda x: x.name):
+                if should_include_directory_in_archive(subdir):
                     content_hasher.update(f"dir:{subdir.name}".encode("utf-8"))
                     for file in subdir.rglob("*"):
-                        if (
-                            file.is_file()
-                            and not file.name.startswith(".")
-                            and "__pycache__" not in str(file)
-                        ):
+                        if should_include_file_in_archive(file, env_path):
                             files_to_hash.append(file)
 
             files_to_hash.sort(key=lambda x: str(x.relative_to(env_path)))
@@ -342,14 +370,16 @@ def push(
                                 if file.is_file():
                                     tar.add(file, arcname=file.name)
 
-                        for subdir in env_path.iterdir():
-                            if (
-                                subdir.is_dir()
-                                and not subdir.name.startswith(".")
-                                and subdir.name not in ["dist", "__pycache__", "build"]
-                                and not subdir.name.endswith(".egg-info")
-                            ):
-                                tar.add(subdir, arcname=subdir.name)
+                        # Sort subdirectories for deterministic ordering and apply filtering
+                        for subdir in sorted(env_path.iterdir(), key=lambda x: x.name):
+                            if should_include_directory_in_archive(subdir):
+                                # Add directory with custom filtering instead of entire subdirectory
+                                for file in subdir.rglob("*"):
+                                    if should_include_file_in_archive(file, env_path):
+                                        # Calculate relative path from env_path for consistent
+                                        # archive structure
+                                        arcname = file.relative_to(env_path)
+                                        tar.add(file, arcname=str(arcname))
 
                     with open(tmp.name, "rb") as f:
                         source_sha256 = hashlib.sha256(f.read()).hexdigest()

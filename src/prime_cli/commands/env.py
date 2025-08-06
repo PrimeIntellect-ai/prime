@@ -237,6 +237,12 @@ def push(
 
         console.print(f"Building environment package at {env_path}...")
 
+        # Clean dist directory to ensure fresh build
+        dist_dir = env_path / "dist"
+        if dist_dir.exists():
+            console.print("[dim]Cleaning existing dist directory...[/dim]")
+            shutil.rmtree(dist_dir)
+
         console.print("Building wheel distribution...")
 
         try:
@@ -657,7 +663,12 @@ def pull(
 @app.command()
 def install(
     env_id: str = typer.Argument(..., help="Environment ID to install (owner/name)"),
-    version: str = typer.Option("latest", "--version", "-v", help="Version to install"),
+    version: str = typer.Option(
+        "latest",
+        "--version",
+        "-v",
+        help="Version to install (latest, semantic version like 0.1.0, or SHA256 hash)",
+    ),
     python: Optional[str] = typer.Option(
         None, "--python", "-p", help="Python version to use with uv"
     ),

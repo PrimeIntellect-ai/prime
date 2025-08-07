@@ -6,7 +6,8 @@ import tarfile
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 import toml
@@ -661,165 +662,306 @@ def pull(
         raise typer.Exit(1)
 
 
-@app.command()
-def install(
-    env_id: str = typer.Argument(..., help="Environment ID to install (owner/name)"),
-    version: str = typer.Option(
-        "latest",
-        "--version",
-        "-v",
-        help="Version to install (latest, semantic version like 0.1.0, or SHA256 hash)",
-    ),
-    python: Optional[str] = typer.Option(
-        None, "--python", "-p", help="Python version to use with uv"
-    ),
-    add_to_project: bool = typer.Option(
-        True,
-        "--add-to-project/--no-add-to-project",
-        help="Add environment URL to pyproject.toml dependencies",
-    ),
-) -> None:
-    """Install a verifier environment"""
+def validate_env_id(env_id: str) -> Tuple[str, str]:
+    """Validate and parse environment ID.
 
+    Args:
+        env_id: Environment ID in format 'owner/name' or 'owner/name@version'
+
+    Returns:
+        Tuple of (env_id_without_version, version)
+
+    Raises:
+        ValueError: If format is invalid
+    """
+    if not env_id or not env_id.strip():
+        raise ValueError("Environment ID cannot be empty")
+
+    # Handle version suffix
+    version = "latest"
+    if "@" in env_id:
+        env_id, version = env_id.rsplit("@", 1)
+
+    parts = env_id.split("/")
+    if len(parts) != 2:
+        raise ValueError(
+            f"Invalid environment ID format: '{env_id}'. "
+            f"Expected: 'owner/name' or 'owner/name@version'"
+        )
+
+    owner, name = parts
+    if not owner or not name:
+        raise ValueError("Owner and name cannot be empty")
+
+    return env_id, version
+
+
+def is_valid_url(url: str) -> bool:
+    """Check if a string is a valid URL."""
+    try:
+        result = urlparse(url)
+        return all([result.scheme in ("http", "https"), result.netloc])
+    except Exception:
+        return False
+
+
+def normalize_package_name(name: str) -> str:
+    """Normalize package name according to Python packaging standards."""
+    return name.replace("-", "_").lower()
+
+
+def get_install_command(tool: str, wheel_url: str) -> List[str]:
+    """Generate install command for the specified tool."""
+    if tool == "uv":
+        return ["uv", "pip", "install", "--upgrade", wheel_url]
+    elif tool == "pip":
+        return ["pip", "install", "--upgrade", wheel_url]
+    else:
+        raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
+
+
+@app.command()
+def info(
+    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
+    version: str = typer.Option("latest", "--version", "-v", help="Version to show"),
+) -> None:
+    """Show environment details and installation commands"""
     try:
         client = APIClient()
 
-        if "@" in env_id:
-            env_id, version = env_id.rsplit("@", 1)
-
-        console.print(f"Resolving {env_id}@{version}...")
-
-        parts = env_id.split("/")
-        if len(parts) != 2:
-            console.print("[red]Error: Invalid environment ID format. Expected: owner/name[/red]")
+        # Validate and parse environment ID
+        try:
+            env_id, parsed_version = validate_env_id(env_id)
+            # Use parsed version if it was specified in the env_id, otherwise use the --version flag
+            if parsed_version != "latest":
+                target_version = parsed_version
+            else:
+                target_version = version
+        except ValueError as e:
+            console.print(f"[red]Error: {e}[/red]")
             raise typer.Exit(1)
 
-        owner, name = parts
+        owner, name = env_id.split("/")
 
+        console.print(f"Fetching {env_id}@{target_version}...")
+
+        # Fetch environment details
         try:
-            response = client.get(f"/environmentshub/{owner}/{name}/@{version}")
-
-            if "data" in response:
-                details = response["data"]
-            else:
-                # Fallback for old format
-                details = response
+            response = client.get(f"/environmentshub/{owner}/{name}/@{target_version}")
+            details = response.get("data", response)
         except APIError as e:
             console.print(f"[red]Failed to get environment details: {e}[/red]")
             raise typer.Exit(1)
 
-        wheel_url = details.get("wheel_url")
-        if not wheel_url:
-            console.print("[red]Error: No wheel file available for this environment.[/red]")
-            console.print("For now, use the pull command to download and inspect the environment.")
-            raise typer.Exit(1)
+        # Process wheel URL
+        wheel_url = process_wheel_url(details.get("wheel_url"))
 
-        # Construct full URL from relative path
-        wheel_url = f"{client.base_url}{wheel_url}"
+        # Display basic info with nice formatting
+        console.print()
+        console.print(f"[bold cyan]{owner}/{name}[/bold cyan][dim]@{target_version}[/dim]")
 
-        console.print(f"[dim]Installing from: {wheel_url}[/dim]")
+        # Display metadata if available
+        if metadata := details.get("metadata"):
+            if desc := metadata.get("description"):
+                console.print(f"[dim]{desc}[/dim]")
 
-        cmd_parts = ["uv", "pip", "install", "--upgrade"]
+        console.print()
 
-        if python:
-            cmd_parts.extend(["--python", python])
+        # Display key installation commands if wheel URL is available
+        if wheel_url:
+            normalized_name = normalize_package_name(name)
+
+            console.print("[bold yellow]Install (choose one)[/bold yellow]")
+            console.print(f"  [green]$[/green] prime env install {owner}/{name}@{target_version}")
+            console.print(f"  [green]$[/green] uv pip install {wheel_url}")
+            console.print(f"  [green]$[/green] uv add {normalized_name}@{wheel_url}")
+            console.print(f"  [green]$[/green] pip install {wheel_url}")
+
+            console.print()
+            console.print("[bold yellow]Usage[/bold yellow]")
+            console.print("  [blue]>>>[/blue] from verifiers import load_environment")
+            console.print(f"  [blue]>>>[/blue] env = load_environment('{name}')")
         else:
-            cmd_parts.extend(["--python", "python"])
+            console.print("[yellow]No wheel available for this version[/yellow]")
 
-        cmd_parts.append(wheel_url)
-
-        console.print(f"[green]✓ Found {env_id}@{version}[/green]")
-
-        if not shutil.which("uv"):
-            console.print("[red]Error: uv is not installed.[/red]")
-            console.print("Install it with: curl -LsSf https://astral.sh/uv/install.sh | sh")
-            raise typer.Exit(1)
-
-        console.print(f"\n[cyan]Installing {env_id}@{version}...[/cyan]")
-
-        try:
-            process = subprocess.Popen(
-                cmd_parts,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # Merge stderr into stdout
-                text=True,
-                bufsize=1,  # Line buffered
-                universal_newlines=True,
-            )
-
-            while True:
-                output = process.stdout.readline() if process.stdout else ""
-                if output == "" and process.poll() is not None:
-                    break
-                if output:
-                    console.print(output.rstrip())
-
-            return_code = process.poll()
-            if return_code != 0:
-                console.print(
-                    f"[red]Environment installation failed with exit code {return_code}[/red]"
-                )
-                raise typer.Exit(1)
-
-            console.print(f"\n[green]✓ Successfully installed {env_id}@{version}[/green]")
-
-            if add_to_project:
-                try:
-                    pyproject_path = Path("pyproject.toml")
-                    if pyproject_path.exists():
-                        with open(pyproject_path, "r") as f:
-                            pyproject_data = toml.load(f)
-
-                        if "project" not in pyproject_data:
-                            pyproject_data["project"] = {}
-                        if "dependencies" not in pyproject_data["project"]:
-                            pyproject_data["project"]["dependencies"] = []
-
-                        # PEP 508 compliant direct URL dependency format
-                        dependency_url = f"{name.replace('-', '_')} @ {wheel_url}"
-
-                        normalized_name = name.replace("-", "_")
-                        existing_deps = pyproject_data["project"]["dependencies"]
-                        if not any(
-                            dep.startswith(f"{normalized_name} @")
-                            for dep in existing_deps
-                            if isinstance(dep, str)
-                        ):
-                            existing_deps.append(dependency_url)
-
-                            with open(pyproject_path, "w") as f:
-                                toml.dump(pyproject_data, f)
-
-                            console.print(
-                                f"[green]✓ Added {normalized_name} to pyproject.toml "
-                                f"dependencies[/green]"
-                            )
-                        else:
-                            console.print(
-                                f"[yellow]! {normalized_name} already exists in "
-                                f"pyproject.toml[/yellow]"
-                            )
-                    else:
-                        console.print(
-                            "[yellow]Warning: No pyproject.toml found in current directory[/yellow]"
-                        )
-
-                except Exception as e:
-                    console.print(f"[yellow]Warning: Failed to update pyproject.toml: {e}[/yellow]")
-
-            console.print("\n[dim]Use in Python:[/dim]")
-            console.print("  from verifiers import load_environment")
-            console.print(f"  env = load_environment('{name}')")
-
-        except FileNotFoundError:
-            console.print("[red]Failed to run UV command. Is UV installed?[/red]")
-            raise typer.Exit(1)
-        except Exception as e:
-            console.print(f"[red]Environment installation failed: {e}[/red]")
-            raise typer.Exit(1)
+        console.print()
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+def fetch_environment_details(
+    client: APIClient, owner: str, name: str, version: str
+) -> Dict[str, Any]:
+    """Fetch environment details from the API.
+
+    Returns:
+        Dictionary containing environment details
+
+    Raises:
+        APIError: If the API request fails
+    """
+    response = client.get(f"/environmentshub/{owner}/{name}/@{version}")
+    details = response.get("data", response)
+    # Ensure we return a dict
+    if not isinstance(details, dict):
+        raise ValueError(f"Invalid response format: expected dict, got {type(details)}")
+    return details
+
+
+def process_wheel_url(wheel_url: Optional[str]) -> Optional[str]:
+    """Process and validate wheel URL.
+
+    Args:
+        wheel_url: The wheel URL from API (should be a full URL)
+
+    Returns:
+        Full wheel URL or None if not available
+    """
+    if not wheel_url:
+        return None
+
+    # Validate the URL
+    if not is_valid_url(wheel_url):
+        raise ValueError(f"Invalid wheel URL: {wheel_url}")
+
+    return wheel_url
+
+
+def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str) -> None:
+    """Execute the installation command with proper output handling.
+
+    Args:
+        cmd: Command to execute
+        env_id: Environment ID for display
+        version: Version for display
+        tool: Tool name for display
+
+    Raises:
+        typer.Exit: If installation fails
+    """
+    console.print(f"\n[cyan]Installing {env_id}@{version} with {tool}...[/cyan]")
+    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+        )
+
+        # Stream output line by line
+        while True:
+            output = process.stdout.readline() if process.stdout else ""
+            if output == "" and process.poll() is not None:
+                break
+            if output:
+                console.print(output.rstrip())
+
+        return_code = process.poll()
+        if return_code != 0:
+            console.print(
+                f"[red]Environment installation failed with exit code {return_code}[/red]"
+            )
+            raise typer.Exit(1)
+
+        console.print(f"\n[green]✓ Successfully installed {env_id}@{version}[/green]")
+
+    except FileNotFoundError:
+        console.print(f"[red]Failed to run command. Is {cmd[0]} installed?[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Installation failed: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def install(
+    env_id: str = typer.Argument(..., help="Environment ID to install (owner/name)"),
+    with_tool: str = typer.Option(
+        "uv",
+        "--with",
+        help="Package manager to use (uv or pip)",
+    ),
+) -> None:
+    """Install a verifier environment
+
+    Examples:
+        prime env install owner/environment
+        prime env install owner/environment@0.2.3
+        prime env install owner/environment --with pip
+    """
+    try:
+        client = APIClient()
+
+        # Validate package manager
+        if with_tool not in ["uv", "pip"]:
+            console.print(
+                f"[red]Error: Unsupported package manager '{with_tool}'. Use 'uv' or 'pip'.[/red]"
+            )
+            raise typer.Exit(1)
+
+        # Validate and parse environment ID
+        try:
+            env_id, target_version = validate_env_id(env_id)
+        except ValueError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            raise typer.Exit(1)
+
+        owner, name = env_id.split("/")
+
+        console.print(f"Resolving {env_id}@{target_version}...")
+
+        # Fetch environment details
+        try:
+            details = fetch_environment_details(client, owner, name, target_version)
+        except APIError as e:
+            console.print(f"[red]Failed to get environment details: {e}[/red]")
+            raise typer.Exit(1)
+
+        # Process wheel URL
+        wheel_url = process_wheel_url(details.get("wheel_url"))
+        if not wheel_url:
+            console.print("[red]Error: No wheel file available for this environment.[/red]")
+            console.print(
+                "Use 'prime env info' to see available options or 'pull' to download source."
+            )
+            raise typer.Exit(1)
+
+        console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
+
+        # Generate and execute install command
+        try:
+            cmd_parts = get_install_command(with_tool, wheel_url)
+        except ValueError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            raise typer.Exit(1)
+
+        # Check if tool is installed
+        if not shutil.which(cmd_parts[0]):
+            console.print(f"[red]Error: {cmd_parts[0]} is not installed.[/red]")
+            raise typer.Exit(1)
+
+        # Execute installation
+        execute_install_command(cmd_parts, env_id, target_version, with_tool)
+
+        # Display usage instructions
+        console.print("\n[dim]Use in Python:[/dim]")
+        console.print("  from verifiers import load_environment")
+        console.print(f"  env = load_environment('{name}')")
+
+    except APIError as e:
+        console.print(f"[red]API Error: {e}[/red]")
+        raise typer.Exit(1)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Installation cancelled by user[/yellow]")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")

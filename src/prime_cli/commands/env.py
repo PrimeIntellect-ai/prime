@@ -920,23 +920,26 @@ def list_versions(
 @version_app.command("delete")
 def delete_version(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
-    version: str = typer.Argument(..., help="Version to delete (content hash or tag)"),
+    content_hash: str = typer.Argument(..., help="Content hash of the version to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
 ) -> None:
-    """Delete a specific version of an environment"""
+    """Delete a specific version of an environment using its content hash"""
     try:
-        if version == "latest" and not force:
-            console.print("[yellow]Warning: You're about to delete the 'latest' tag![/yellow]")
-            msg = "This will remove the latest reference but keep the actual version data."
-            console.print(f"[yellow]{msg}[/yellow]")
-            advice = "Consider using a content hash to delete the specific version instead."
-            console.print(f"[yellow]{advice}[/yellow]")
+        # Validate that we have a proper content hash (basic validation)
+        if len(content_hash) < 8:
+            console.print(
+                "[red]Error: Please provide a valid content hash (at least 8 characters)[/red]"
+            )
+            console.print(
+                "[yellow]Use 'prime env version list' to see available content hashes[/yellow]"
+            )
+            raise typer.Exit(1)
 
         if not force:
             try:
                 confirm_msg = (
                     f"Are you sure you want to permanently delete version "
-                    f"'{version}' from '{env_id}'?"
+                    f"with content hash '{content_hash}' from '{env_id}'?"
                 )
                 confirm = typer.confirm(confirm_msg)
                 if not confirm:
@@ -954,14 +957,20 @@ def delete_version(
             raise typer.Exit(1)
 
         owner, name = parts
-        console.print(f"Deleting version {version} from {env_id}...")
+        console.print(f"Deleting version {content_hash} from {env_id}...")
 
         try:
-            client.delete(f"/environmentshub/{owner}/{name}/@{version}")
-            console.print(f"[green]✓ Version {version} deleted successfully from {env_id}[/green]")
+            url = f"/environmentshub/{owner}/{name}/@{content_hash}"
+            client.delete(url)
+            console.print(
+                f"[green]✓ Version {content_hash} deleted successfully from {env_id}[/green]"
+            )
         except APIError as e:
             if "404" in str(e):
-                console.print(f"[red]Version '{version}' not found in environment '{env_id}'[/red]")
+                console.print(
+                    f"[red]Version with content hash '{content_hash}' "
+                    f"not found in environment '{env_id}'[/red]"
+                )
             else:
                 console.print(f"[red]Failed to delete version: {e}[/red]")
             raise typer.Exit(1)

@@ -904,8 +904,7 @@ def install(
         # Validate package manager
         if with_tool not in ["uv", "pip"]:
             console.print(
-                f"[red]Error: Unsupported package manager '{with_tool}'. "
-                f"Use 'uv' or 'pip'.[/red]"
+                f"[red]Error: Unsupported package manager '{with_tool}'. Use 'uv' or 'pip'.[/red]"
             )
             raise typer.Exit(1)
 
@@ -932,7 +931,7 @@ def install(
         if not wheel_url:
             console.print("[red]Error: No wheel file available for this environment.[/red]")
             console.print(
-                "Use 'prime env info' to see available options or 'pull' to " "download source."
+                "Use 'prime env info' to see available options or 'pull' to download source."
             )
             raise typer.Exit(1)
 

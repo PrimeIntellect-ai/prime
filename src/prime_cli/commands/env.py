@@ -334,8 +334,8 @@ def push(
                 "filename": unique_wheel_name,
                 "sha256": wheel_sha256,
                 "size": wheel_path.stat().st_size,
+                "semantic_version": project_metadata.get("version"),
                 "metadata": {
-                    "version": project_metadata.get("version", "0.1.0"),
                     "description": project_metadata.get("description", ""),
                     "dependencies": project_metadata.get("dependencies", []),
                     "python_requires": project_metadata.get("requires-python", ">=3.8"),
@@ -420,8 +420,9 @@ def push(
                         "content_hash": content_hash,
                         "filename": unique_source_name,
                         "sha256": source_sha256,
+                        "semantic_version": version,
                         "metadata": {
-                            **wheel_data["metadata"],  # type: ignore
+                            **wheel_data["metadata"],
                             "original_filename": f"{env_name}-{version}.tar.gz",
                         },
                     }

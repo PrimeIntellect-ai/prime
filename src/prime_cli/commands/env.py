@@ -720,55 +720,6 @@ def get_install_command(tool: str, wheel_url: str) -> List[str]:
         raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
 
 
-def format_install_commands(wheel_url: str, package_name: str) -> List[Dict[str, str]]:
-    """Format installation commands for different package managers.
-
-    Returns:
-        List of dicts with 'title', 'command', and 'description' keys
-    """
-    normalized = normalize_package_name(package_name)
-
-    commands = [
-        {
-            "title": "UV (recommended)",
-            "command": f"uv pip install {wheel_url}",
-            "description": "Fast Python package installer",
-        },
-        {
-            "title": "UV add to project",
-            "command": f"uv add {normalized}@{wheel_url}",
-            "description": "Add to uv project dependencies",
-        },
-        {
-            "title": "Pip",
-            "command": f"pip install {wheel_url}",
-            "description": "Standard Python package installer",
-        },
-        {
-            "title": "Poetry",
-            "command": f"poetry add {package_name}@{wheel_url}",
-            "description": "Add to Poetry project",
-        },
-        {
-            "title": "Pipenv",
-            "command": f"pipenv install {wheel_url}",
-            "description": "Add to Pipenv project",
-        },
-        {
-            "title": "requirements.txt",
-            "command": f"{package_name} @ {wheel_url}",
-            "description": "Add to requirements file",
-        },
-        {
-            "title": "pyproject.toml dependencies",
-            "command": f'"{normalized} @ {wheel_url}"',
-            "description": "Add to project dependencies list",
-        },
-    ]
-
-    return commands
-
-
 @app.command()
 def info(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),

@@ -413,7 +413,7 @@ def push(
                     with open(tmp.name, "rb") as f:
                         source_sha256 = hashlib.sha256(f.read()).hexdigest()
 
-                    version = project_metadata.get("version", "0.1.0")
+                    version = project_metadata.get("version")
                     unique_source_name = f"{env_name}-{version}-{content_hash[:8]}.tar.gz"
 
                     source_data = {

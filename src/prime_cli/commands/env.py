@@ -528,7 +528,7 @@ def init(
         "./environments", "--path", "-p", help="Path to environments directory"
     ),
     skip_vf_prefix: bool = typer.Option(
-        False, "--skip-vf-prefix", help="Skip the vf- prefix in the environment id"
+        False, "--rewrite-readme", help="Overwrite README.md with template if it already exists"
     ),
 ) -> None:
     """Initialize a new verifier environment from template"""

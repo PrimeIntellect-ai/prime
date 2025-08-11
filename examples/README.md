@@ -27,7 +27,7 @@ The `sandbox_demo.py` script demonstrates both programmatic and CLI usage of the
 
 - Prime CLI installed and configured
 - Valid API key (run `prime login` first)
-- Python environment with prime-cli package available
+- Python environment with prime package available
 
 ### What the Demo Shows
 

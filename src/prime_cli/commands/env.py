@@ -130,7 +130,7 @@ def list_cmd(
 ) -> None:
     """List available verifier environments"""
     try:
-        client = APIClient()
+        client = APIClient(require_auth=False)
 
         params: Dict[str, Any] = {
             "include_teams": True,
@@ -727,7 +727,7 @@ def info(
 ) -> None:
     """Show environment details and installation commands"""
     try:
-        client = APIClient()
+        client = APIClient(require_auth=False)
 
         # Validate and parse environment ID
         try:
@@ -899,7 +899,7 @@ def install(
         prime env install owner/environment --with pip
     """
     try:
-        client = APIClient()
+        client = APIClient(require_auth=False)
 
         # Validate package manager
         if with_tool not in ["uv", "pip"]:
@@ -981,7 +981,7 @@ def list_versions(
 ) -> None:
     """List all versions of an environment"""
     try:
-        client = APIClient()
+        client = APIClient(require_auth=False)
 
         parts = env_id.split("/")
         if len(parts) != 2:

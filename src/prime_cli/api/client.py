@@ -24,13 +24,13 @@ class PaymentRequiredError(APIError):
 
 
 class APIClient:
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, require_auth: bool = True):
         # Load config
         self.config = Config()
 
         # Use provided API key or fall back to config
         self.api_key = api_key or self.config.api_key
-        if not self.api_key:
+        if require_auth and not self.api_key:
             raise APIError(
                 "No API key configured. Use command 'prime login' to configure your API key.",
             )
@@ -38,12 +38,10 @@ class APIClient:
         # Setup client
         self.base_url = self.config.base_url
         self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
-        )
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        self.session.headers.update(headers)
 
     def request(
         self,

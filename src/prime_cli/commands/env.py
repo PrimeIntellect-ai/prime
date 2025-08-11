@@ -527,13 +527,13 @@ def init(
     path: str = typer.Option(
         "./environments", "--path", "-p", help="Path to environments directory"
     ),
-    skip_vf_prefix: bool = typer.Option(
-        False, "--skip-vf-prefix", help="Skip the vf- prefix in the environment id"
+    rewrite_readme: bool = typer.Option(
+        False, "--rewrite-readme", help="Overwrite README.md with template if it already exists"
     ),
 ) -> None:
     """Initialize a new verifier environment from template"""
     try:
-        created_path = init_environment(name, path, skip_vf_prefix)
+        created_path = init_environment(name, path, rewrite_readme)
 
         console.print(f"[green]✓ Created environment template in {created_path}/[/green]")
         console.print("\nNext steps:")

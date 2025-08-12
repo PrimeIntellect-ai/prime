@@ -338,6 +338,8 @@ def push(
                 "semantic_version": project_metadata.get("version"),
                 "metadata": {
                     "description": project_metadata.get("description", ""),
+                    "tags": project_metadata.get("tags", []),
+                    "license": project_metadata.get("license", ""),
                     "dependencies": project_metadata.get("dependencies", []),
                     "python_requires": project_metadata.get("requires-python", ">=3.8"),
                     "original_filename": wheel_path.name,

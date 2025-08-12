@@ -9,7 +9,7 @@ from .commands.login import app as login_app
 from .commands.pods import app as pods_app
 from .commands.sandbox import app as sandbox_app
 
-__version__ = version("prime-cli")
+__version__ = version("prime")
 
 app = typer.Typer(name="prime", help=f"Prime Intellect CLI (v{__version__})")
 

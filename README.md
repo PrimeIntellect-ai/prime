@@ -2,9 +2,9 @@
 
 <div align="center">
 
-[![PyPI version](https://img.shields.io/pypi/v/prime-cli?cacheSeconds=60)](https://pypi.org/project/prime-cli/)
-[![Python versions](https://img.shields.io/pypi/pyversions/prime-cli?cacheSeconds=60)](https://pypi.org/project/prime-cli/)
-[![Downloads](https://img.shields.io/pypi/dm/prime-cli)](https://pypi.org/project/prime-cli/)
+[![PyPI version](https://img.shields.io/pypi/v/prime?cacheSeconds=60)](https://pypi.org/project/prime/)
+[![Python versions](https://img.shields.io/pypi/pyversions/prime?cacheSeconds=60)](https://pypi.org/project/prime/)
+[![Downloads](https://img.shields.io/pypi/dm/prime)](https://pypi.org/project/prime/)
 
 Command line interface for managing Prime Intellect resources and environments.
 </div>
@@ -15,8 +15,8 @@ Command line interface for managing Prime Intellect resources and environments.
 # Install uv (if not already installed)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install prime-cli with uv
-uv tool install prime-cli
+# Install prime with uv
+uv tool install prime
 
 # Authenticate 
 prime login 
@@ -39,14 +39,14 @@ prime availability list
 # Install uv if you haven't already
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install prime-cli
-uv tool install prime-cli
+# Install prime
+uv tool install prime
 ```
 
 ### Alternative: Using pip
 ```bash
 # If you prefer traditional pip
-pip install prime-cli
+pip install prime
 ```
 
 ### For Development
@@ -157,7 +157,7 @@ While we recommend using uv for the best experience, all commands work with stan
 
 ```bash
 # Install without uv
-pip install prime-cli
+pip install prime
 
 # Development setup without uv
 python -m venv .venv
@@ -269,5 +269,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🔗 Links
 
 - [Documentation](https://docs.primeintellect.ai)
-- [PyPI Package](https://pypi.org/project/prime-cli/)
+- [PyPI Package](https://pypi.org/project/prime/)
 - [Issue Tracker](https://github.com/PrimeIntellect-ai/prime-cli/issues)

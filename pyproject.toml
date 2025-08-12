@@ -1,7 +1,7 @@
 [project]
-name = "prime-cli"
-version = "0.3.8"
-description = "Prime Intellect CLI"
+name = "prime"
+version = "0.3.10"
+description = "Prime Intellect CLI + SDK"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = "MIT"
@@ -56,6 +56,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.metadata]
 allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/prime_cli"]
 
 [tool.ruff]
 src = ["."]

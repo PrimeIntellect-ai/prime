@@ -55,25 +55,27 @@ def set_api_key(
     ),
 ) -> None:
     """Set your API key (prompts securely if not provided)"""
-    if not api_key:
+    if api_key is None:
         # Interactive mode with secure prompt
         api_key = typer.prompt(
-            "Enter your Prime Intellect API key",
+            "Enter your Prime Intellicht API key (or press Enter to clear)",
             hide_input=True,
-            confirmation_prompt=True,
+            confirmation_prompt=False,
+            default="",
         )
-        if not api_key:
-            console.print("[red]API key is required[/red]")
-            return
 
     config = Config()
     config.set_api_key(api_key)
-    masked_key = f"{api_key[:6]}***{api_key[-4:]}" if len(api_key) > 10 else "***"
-    console.print(f"[green]API key {masked_key} configured successfully![/green]")
-    console.print("[blue]You can verify your API key with 'prime config view'[/blue]")
-    console.print(
-        "\n[yellow]Tip: Get your API key at https://app.primeintellect.ai/dashboard/tokens[/yellow]"
-    )
+
+    if api_key:
+        masked_key = f"{api_key[:6]}***{api_key[-4:]}" if len(api_key) > 10 else "***"
+        console.print(f"[green]API key {masked_key} configured successfully![/green]")
+        console.print("[blue]You can verify your API key with 'prime config view'[/blue]")
+        console.print(
+            "\n[yellow]Tip: Get your API key at https://app.primeintellect.ai/dashboard/tokens[/yellow]"
+        )
+    else:
+        console.print("[green]API key cleared successfully![/green]")
 
 
 @app.command()

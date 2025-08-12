@@ -155,7 +155,6 @@ def list_cmd(
         table.add_column("Environment", style="cyan")
         table.add_column("Description", style="green")
         table.add_column("Visibility", style="magenta")
-        table.add_column("Latest Version", style="yellow")
 
         for env in environments:
             owner_name = env["owner"]["name"]
@@ -163,14 +162,7 @@ def list_cmd(
             env_id = f"{owner_name}/{env_name}"
             description = env.get("description", "")
             visibility = env.get("visibility", "")
-
-            latest_version = ""
-            if env.get("latest_version"):
-                latest = env["latest_version"]
-                if isinstance(latest, dict) and "sha256" in latest:
-                    latest_version = f"sha256:{latest['sha256'][:8]}"
-
-            table.add_row(env_id, description, visibility, latest_version)
+            table.add_row(env_id, description, visibility)
 
         console.print(table)
 

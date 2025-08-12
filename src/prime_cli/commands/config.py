@@ -58,7 +58,7 @@ def set_api_key(
     if api_key is None:
         # Interactive mode with secure prompt
         api_key = typer.prompt(
-            "Enter your Prime Intellicht API key (or press Enter to clear)",
+            "Enter your Prime Intellect API key (or press Enter to clear)",
             hide_input=True,
             confirmation_prompt=False,
             default="",

@@ -617,7 +617,9 @@ def pull(
                             headers["Authorization"] = f"Bearer {client.api_key}"
                         resp = requests.get(download_url, stream=True, headers=headers)
                     else:
-                        resp = client.session.get(client.base_url + download_url, stream=True)
+                        console.print(f"[red]Error: Invalid download URL: {download_url}[/red]")
+                        raise typer.Exit(1)
+
                     resp.raise_for_status()
 
                     with open(tmp.name, "wb") as f:

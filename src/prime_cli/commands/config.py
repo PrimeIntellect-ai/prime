@@ -23,10 +23,12 @@ def view() -> None:
     # Show current environment
     table.add_row("Current Environment", settings["current_environment"])
 
-    # Show API key (partially hidden)
     api_key = settings["api_key"]
     if api_key:
         masked_key = f"{api_key[:6]}...{api_key[-4:]}" if len(api_key) > 10 else "***"
+        config_key = config.config.get("api_key", "")
+        if not config_key:
+            masked_key += " (from env var)"
     else:
         masked_key = "Not set"
     table.add_row("API Key", masked_key)

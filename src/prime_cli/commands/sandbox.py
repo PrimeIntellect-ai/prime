@@ -9,7 +9,7 @@ from rich.table import Table
 from rich.text import Text
 
 from ..api.client import APIClient, APIError
-from ..api.sandbox import CreateSandboxRequest, SandboxClient, AdvancedConfigs
+from ..api.sandbox import AdvancedConfigs, CreateSandboxRequest, SandboxClient
 from ..config import Config
 
 app = typer.Typer(help="Manage code sandboxes")
@@ -175,7 +175,11 @@ def create(
     ),
     advanced_configs: Optional[List[str]] = typer.Option(
         None,
-        help="Configs in KEY=VALUE format. Available options: container_user_uid (int, 1000-65535). Example: container_user_uid=1001. Can be specified multiple times.",
+        help=(
+            "Configs in KEY=VALUE format. Available options: container_user_uid "
+            "(int, 1000-65535). Example: container_user_uid=1001. "
+            "Can be specified multiple times."
+        ),
     ),
 ) -> None:
     """Create a new sandbox"""
@@ -214,7 +218,8 @@ def create(
                             raise typer.Exit(1)
                     else:
                         console.print(
-                            f"[red]Unsupported advanced config key: {key}. Only 'container_user_uid' is supported.[/red]"
+                            f"[red]Unsupported advanced config key: {key}. "
+                            f"Only 'container_user_uid' is supported.[/red]"
                         )
                         raise typer.Exit(1)
 

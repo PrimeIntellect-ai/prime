@@ -70,7 +70,9 @@ class AdvancedConfigs(BaseModel):
         None,
         ge=1000,
         le=65535,
-        description="Container user UID to overwrite default UID 1000 (must be non-root, minimum UID 1000)",
+        description=(
+            "Container user UID to overwrite default UID 1000 (must be non-root, minimum UID 1000)"
+        ),
     )
 
     model_config = {"extra": "forbid"}

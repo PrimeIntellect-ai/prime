@@ -60,8 +60,6 @@ class Sandbox(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
-
-
 class SandboxListResponse(BaseModel):
     """Sandbox list response model"""
 

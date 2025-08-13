@@ -18,6 +18,21 @@ class SandboxStatus(str, Enum):
     TERMINATED = "TERMINATED"
 
 
+class AdvancedConfigs(BaseModel):
+    """Advanced configuration options for sandbox"""
+
+    container_user_uid: Optional[int] = Field(
+        None,
+        ge=1000,
+        le=65535,
+        description=(
+            "Container user UID to overwrite default UID 1000 (must be non-root, minimum UID 1000)"
+        ),
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class Sandbox(BaseModel):
     """Sandbox model"""
 
@@ -33,7 +48,7 @@ class Sandbox(BaseModel):
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
     environment_vars: Optional[Dict[str, Any]] = Field(None, alias="environmentVars")
-    advanced_configs: Optional[Dict[str, Any]] = Field(None, alias="advancedConfigs")
+    advanced_configs: Optional[AdvancedConfigs] = Field(None, alias="advancedConfigs")
     created_at: datetime = Field(..., alias="createdAt")
     updated_at: datetime = Field(..., alias="updatedAt")
     started_at: Optional[datetime] = Field(None, alias="startedAt")
@@ -43,6 +58,8 @@ class Sandbox(BaseModel):
     kubernetes_job_id: Optional[str] = Field(None, alias="kubernetesJobId")
 
     model_config = ConfigDict(populate_by_name=True)
+
+
 
 
 class SandboxListResponse(BaseModel):
@@ -61,21 +78,6 @@ class SandboxLogsResponse(BaseModel):
     """Sandbox logs response model"""
 
     logs: str
-
-
-class AdvancedConfigs(BaseModel):
-    """Advanced configuration options for sandbox"""
-
-    container_user_uid: Optional[int] = Field(
-        None,
-        ge=1000,
-        le=65535,
-        description=(
-            "Container user UID to overwrite default UID 1000 (must be non-root, minimum UID 1000)"
-        ),
-    )
-
-    model_config = {"extra": "forbid"}
 
 
 class CreateSandboxRequest(BaseModel):

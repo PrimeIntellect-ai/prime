@@ -33,6 +33,7 @@ class Sandbox(BaseModel):
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
     environment_vars: Optional[Dict[str, Any]] = Field(None, alias="environmentVars")
+    advanced_configs: Optional[Dict[str, Any]] = Field(None, alias="advancedConfigs")
     created_at: datetime = Field(..., alias="createdAt")
     updated_at: datetime = Field(..., alias="updatedAt")
     started_at: Optional[datetime] = Field(None, alias="startedAt")
@@ -62,6 +63,18 @@ class SandboxLogsResponse(BaseModel):
     logs: str
 
 
+class AdvancedConfigs(BaseModel):
+    """Advanced configuration options for sandbox"""
+    container_user_uid: Optional[int] = Field(
+        None,
+        ge=1000,
+        le=65535,
+        description="Container user UID to overwrite default UID 1000 (must be non-root, minimum UID 1000)",
+    )
+
+    model_config = {"extra": "forbid"}
+
+
 class CreateSandboxRequest(BaseModel):
     """Create sandbox request model"""
 
@@ -75,6 +88,7 @@ class CreateSandboxRequest(BaseModel):
     timeout_minutes: int = 60
     environment_vars: Optional[Dict[str, str]] = None
     team_id: Optional[str] = None
+    advanced_configs: Optional[AdvancedConfigs] = None
 
 
 class UpdateSandboxRequest(BaseModel):

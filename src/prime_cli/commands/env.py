@@ -14,7 +14,6 @@ import toml
 import typer
 from rich.console import Console
 from rich.table import Table
-from verifiers.scripts.init import init_environment
 
 from ..api.client import APIClient, APIError
 
@@ -535,6 +534,9 @@ def init(
 ) -> None:
     """Initialize a new verifier environment from template"""
     try:
+        # this import is slow, so we do it inside the command
+        from verifiers.scripts.init import init_environment
+
         created_path = init_environment(name, path, rewrite_readme)
 
         console.print(f"[green]✓ Created environment template in {created_path}/[/green]")

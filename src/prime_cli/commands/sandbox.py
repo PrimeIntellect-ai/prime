@@ -136,7 +136,6 @@ def get(sandbox_id: str) -> None:
 
         table.add_row("User ID", sandbox.user_id or "N/A")
         table.add_row("Team ID", sandbox.team_id or "Personal")
-        table.add_row("Kubernetes Job ID", sandbox.kubernetes_job_id or "N/A")
 
         if sandbox.environment_vars:
             env_vars = json.dumps(sandbox.environment_vars, indent=2)

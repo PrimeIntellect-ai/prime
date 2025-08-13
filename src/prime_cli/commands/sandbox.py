@@ -203,7 +203,7 @@ def create(
                         console.print("[red]Advanced configs must be in KEY=VALUE format[/red]")
                         raise typer.Exit(1)
                     key, value = config_pair.split("=", 1)
-                    # Convert value to appropriate type
+                    # Only support container_user_uid for now
                     if key == "container_user_uid":
                         try:
                             config_dict[key] = int(value)
@@ -211,7 +211,8 @@ def create(
                             console.print(f"[red]container_user_uid must be an integer, got: {value}[/red]")
                             raise typer.Exit(1)
                     else:
-                        config_dict[key] = value
+                        console.print(f"[red]Unsupported advanced config key: {key}. Only 'container_user_uid' is supported.[/red]")
+                        raise typer.Exit(1)
 
                 advanced_configs_obj = AdvancedConfigs(**config_dict)
             except Exception as e:

@@ -337,9 +337,9 @@ def run_instances(
 
     # run instances in parallel
     print(f"Running {len(instances)} instances...")
-    run_threadpool(run_instance, payloads, max_workers)
+    # run_threadpool(run_instance, payloads, max_workers)
     # run_instance(*payloads[0])
-    # run_instance(*payloads[1])
+    run_instance(*payloads[1])
     print("All instances run.")
 
 

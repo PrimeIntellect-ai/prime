@@ -60,8 +60,8 @@ class Config:
 
     @property
     def api_key(self) -> str:
-        """Get API key from environment or config file"""
-        return os.getenv("PRIME_API_KEY") or self.config.get("api_key", "")
+        """Get API key from config file or environment"""
+        return self.config.get("api_key", "") or os.getenv("PRIME_API_KEY", "")
 
     def set_api_key(self, value: str) -> None:
         """Set API key in config file"""

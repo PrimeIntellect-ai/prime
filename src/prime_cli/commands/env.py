@@ -770,7 +770,7 @@ def info(
 
         console.print()
 
-        # Display key installation commands if wheel URL is available
+        # Display key installation commands based on availability
         if wheel_url:
             normalized_name = normalize_package_name(name)
 
@@ -784,6 +784,17 @@ def info(
             console.print("[bold yellow]Usage[/bold yellow]")
             console.print("  [blue]>>>[/blue] from verifiers import load_environment")
             console.print(f"  [blue]>>>[/blue] env = load_environment('{name}')")
+        elif details.get("visibility") == "PRIVATE":
+            console.print("[bold yellow]Install (private environment)[/bold yellow]")
+            console.print(f"  [green]$[/green] prime env pull {owner}/{name}@{target_version}")
+            console.print(
+                "  [dim]Note: Direct UV/pip install not available for private environments[/dim]"
+            )
+
+            console.print()
+            console.print("[bold yellow]After pulling[/bold yellow]")
+            console.print("  [green]$[/green] cd <target_directory>")
+            console.print("  [green]$[/green] uv pip install -e .")
         else:
             console.print("[yellow]No wheel available for this version[/yellow]")
 
@@ -931,7 +942,20 @@ def install(
 
         # Process wheel URL
         wheel_url = process_wheel_url(details.get("wheel_url"))
-        if not wheel_url:
+
+        # Check if this is a private environment without a direct wheel URL
+        if not wheel_url and details.get("visibility") == "PRIVATE":
+            console.print(
+                "[yellow]Private environment detected. Using authenticated download.[/yellow]"
+            )
+            console.print(
+                "[red]Direct wheel installation not available for private environments.[/red]\n"
+                "Please use one of these alternatives:\n"
+                "  1. Use 'prime env pull' to download and install locally\n"
+                "  2. Make the environment public to enable direct installation"
+            )
+            raise typer.Exit(1)
+        elif not wheel_url:
             console.print("[red]Error: No wheel file available for this environment.[/red]")
             console.print(
                 "Use 'prime env info' to see available options or 'pull' to download source."

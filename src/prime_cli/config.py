@@ -60,8 +60,8 @@ class Config:
 
     @property
     def api_key(self) -> str:
-        """Get API key from environment or config file"""
-        return os.getenv("PRIME_API_KEY") or self.config.get("api_key", "")
+        """Get API key from config file or environment"""
+        return self.config.get("api_key", "") or os.getenv("PRIME_API_KEY", "")
 
     def set_api_key(self, value: str) -> None:
         """Set API key in config file"""
@@ -70,8 +70,8 @@ class Config:
 
     @property
     def team_id(self) -> str:
-        """Get team ID from environment or config file"""
-        return os.getenv("PRIME_TEAM_ID") or self.config.get("team_id", "")
+        """Get team ID from config file or environment"""
+        return self.config.get("team_id", "") or os.getenv("PRIME_TEAM_ID", "")
 
     def set_team_id(self, value: str) -> None:
         """Set team ID in config file"""
@@ -106,9 +106,9 @@ class Config:
 
     @property
     def ssh_key_path(self) -> str:
-        """Get SSH private key path from environment or config file"""
-        return os.getenv("PRIME_SSH_KEY_PATH") or self.config.get(
-            "ssh_key_path", self.DEFAULT_SSH_KEY_PATH
+        """Get SSH private key path from config file or environment"""
+        return self.config.get("ssh_key_path", self.DEFAULT_SSH_KEY_PATH) or os.getenv(
+            "PRIME_SSH_KEY_PATH", self.DEFAULT_SSH_KEY_PATH
         )
 
     def set_ssh_key_path(self, value: str) -> None:

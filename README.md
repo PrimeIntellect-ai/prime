@@ -112,8 +112,10 @@ prime config view
 
 **Security Note**: When using the non-interactive mode, be aware that the API key may be visible in your shell history. For enhanced security:
 - Use the interactive mode (no arguments) which hides your input
-- Use environment variables (`PRIME_API_KEY`)
+- Use environment variables (`PRIME_API_KEY`) as fallback if no CLI config is set
 - Clear your shell history after setting sensitive values
+
+**Configuration Priority**: CLI config takes precedence over environment variables. If you set an API key via `prime auth login`, it will override any `PRIME_API_KEY` environment variable.
 
 ### Environment Management
 ```bash

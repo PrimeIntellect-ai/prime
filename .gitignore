@@ -23,3 +23,6 @@ venv/
 .venv/
 ENV/
 test_env/
+
+# swebench
+logs/

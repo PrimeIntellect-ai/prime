@@ -50,6 +50,10 @@ dev = [
     "pre-commit>=3.5.0"    
 ]
 
+swebench = [
+    "swebench"
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

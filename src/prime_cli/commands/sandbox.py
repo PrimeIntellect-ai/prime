@@ -143,7 +143,7 @@ def get(sandbox_id: str) -> None:
             table.add_row("Environment Variables", env_vars)
 
         if sandbox.advanced_configs:
-            advanced_configs = json.dumps(sandbox.advanced_configs, indent=2)
+            advanced_configs = json.dumps(sandbox.advanced_configs.model_dump(), indent=2)
             table.add_row("Advanced Configs", advanced_configs)
 
         console.print(table)

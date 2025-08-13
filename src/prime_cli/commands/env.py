@@ -564,7 +564,7 @@ def pull(
 ) -> None:
     """Pull environment for local inspection"""
     try:
-        client = APIClient()
+        client = APIClient(require_auth=False)
 
         parts = env_id.split("/")
         if len(parts) != 2:
@@ -587,11 +587,10 @@ def pull(
             console.print(f"[red]Failed to get environment details: {e}[/red]")
             raise typer.Exit(1)
 
-        if not details.get("download_object_key"):
+        download_url = details.get("package_url")
+        if not download_url:
             console.print("[red]Error: No downloadable package found[/red]")
             raise typer.Exit(1)
-
-        download_url = f"/environmentshub/{owner}/{name}/@{version}/download"
 
         if target:
             target_dir = Path(target)
@@ -614,7 +613,15 @@ def pull(
             with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
                 temp_file_path = tmp.name
                 try:
-                    resp = client.session.get(client.base_url + download_url, stream=True)
+                    if is_valid_url(download_url):
+                        headers = {}
+                        if client.api_key:
+                            headers["Authorization"] = f"Bearer {client.api_key}"
+                        resp = requests.get(download_url, stream=True, headers=headers)
+                    else:
+                        console.print(f"[red]Error: Invalid download URL: {download_url}[/red]")
+                        raise typer.Exit(1)
+
                     resp.raise_for_status()
 
                     with open(tmp.name, "wb") as f:

@@ -110,7 +110,6 @@ def get(sandbox_id: str) -> None:
         table.add_row("Name", sandbox.name)
         table.add_row("Docker Image", sandbox.docker_image)
         table.add_row("Start Command", sandbox.start_command or "N/A")
-        table.add_row("Working Directory", sandbox.working_dir)
 
         status_color = {
             "PENDING": "yellow",
@@ -125,6 +124,7 @@ def get(sandbox_id: str) -> None:
         table.add_row("CPU Cores", str(sandbox.cpu_cores))
         table.add_row("Memory (GB)", str(sandbox.memory_gb))
         table.add_row("Disk Size (GB)", str(sandbox.disk_size_gb))
+        table.add_row("Disk Mount Path", sandbox.disk_mount_path)
         table.add_row("GPU Count", str(sandbox.gpu_count))
         table.add_row("Timeout (minutes)", str(sandbox.timeout_minutes))
 
@@ -164,7 +164,6 @@ def create(
     disk_size_gb: int = typer.Option(10, help="Disk size in GB"),
     gpu_count: int = typer.Option(0, help="Number of GPUs"),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
-    working_dir: str = typer.Option("/workspace", help="Working directory"),
     team_id: Optional[str] = typer.Option(None, help="Team ID (optional)"),
     env: Optional[List[str]] = typer.Option(
         None,
@@ -217,7 +216,6 @@ def create(
             disk_size_gb=disk_size_gb,
             gpu_count=gpu_count,
             timeout_minutes=timeout_minutes,
-            working_dir=working_dir,
             environment_vars=env_vars if env_vars else None,
             team_id=team_id,
         )
@@ -231,7 +229,6 @@ def create(
         if gpu_count > 0:
             console.print(f"GPUs: {gpu_count}")
         console.print(f"Timeout: {timeout_minutes} minutes")
-        console.print(f"Working Directory: {working_dir}")
         console.print(f"Team: {team_id or 'Personal'}")
         if env_vars:
             console.print(f"Environment Variables: {env_vars}")

@@ -67,7 +67,6 @@ request = CreateSandboxRequest(
     disk_size_gb=20,
     gpu_count=0,
     timeout_minutes=60,
-    working_dir="/workspace",
     environment_vars={"ENV": "production"},
     team_id=None  # Use None for personal account
 )

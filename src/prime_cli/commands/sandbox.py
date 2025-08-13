@@ -208,10 +208,14 @@ def create(
                         try:
                             config_dict[key] = int(value)
                         except ValueError:
-                            console.print(f"[red]container_user_uid must be an integer, got: {value}[/red]")
+                            console.print(
+                                f"[red]container_user_uid must be an integer, got: {value}[/red]"
+                            )
                             raise typer.Exit(1)
                     else:
-                        console.print(f"[red]Unsupported advanced config key: {key}. Only 'container_user_uid' is supported.[/red]")
+                        console.print(
+                            f"[red]Unsupported advanced config key: {key}. Only 'container_user_uid' is supported.[/red]"
+                        )
                         raise typer.Exit(1)
 
                 advanced_configs_obj = AdvancedConfigs(**config_dict)

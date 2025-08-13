@@ -65,6 +65,7 @@ class SandboxLogsResponse(BaseModel):
 
 class AdvancedConfigs(BaseModel):
     """Advanced configuration options for sandbox"""
+
     container_user_uid: Optional[int] = Field(
         None,
         ge=1000,

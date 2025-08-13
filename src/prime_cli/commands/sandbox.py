@@ -9,7 +9,7 @@ from rich.table import Table
 from rich.text import Text
 
 from ..api.client import APIClient, APIError
-from ..api.sandbox import CreateSandboxRequest, SandboxClient
+from ..api.sandbox import AdvancedConfigs, CreateSandboxRequest, SandboxClient
 from ..config import Config
 
 app = typer.Typer(help="Manage code sandboxes")
@@ -110,7 +110,6 @@ def get(sandbox_id: str) -> None:
         table.add_row("Name", sandbox.name)
         table.add_row("Docker Image", sandbox.docker_image)
         table.add_row("Start Command", sandbox.start_command or "N/A")
-        table.add_row("Working Directory", sandbox.working_dir)
 
         status_color = {
             "PENDING": "yellow",
@@ -125,6 +124,7 @@ def get(sandbox_id: str) -> None:
         table.add_row("CPU Cores", str(sandbox.cpu_cores))
         table.add_row("Memory (GB)", str(sandbox.memory_gb))
         table.add_row("Disk Size (GB)", str(sandbox.disk_size_gb))
+        table.add_row("Disk Mount Path", sandbox.disk_mount_path)
         table.add_row("GPU Count", str(sandbox.gpu_count))
         table.add_row("Timeout (minutes)", str(sandbox.timeout_minutes))
 
@@ -140,6 +140,10 @@ def get(sandbox_id: str) -> None:
         if sandbox.environment_vars:
             env_vars = json.dumps(sandbox.environment_vars, indent=2)
             table.add_row("Environment Variables", env_vars)
+
+        if sandbox.advanced_configs:
+            advanced_configs = json.dumps(sandbox.advanced_configs.model_dump(), indent=2)
+            table.add_row("Advanced Configs", advanced_configs)
 
         console.print(table)
 
@@ -163,11 +167,18 @@ def create(
     disk_size_gb: int = typer.Option(10, help="Disk size in GB"),
     gpu_count: int = typer.Option(0, help="Number of GPUs"),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
-    working_dir: str = typer.Option("/workspace", help="Working directory"),
     team_id: Optional[str] = typer.Option(None, help="Team ID (optional)"),
     env: Optional[List[str]] = typer.Option(
         None,
         help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
+    ),
+    advanced_configs: Optional[List[str]] = typer.Option(
+        None,
+        help=(
+            "Configs in KEY=VALUE format. Available options: container_user_uid "
+            "(int, 1000-65535). Example: container_user_uid=1001. "
+            "Can be specified multiple times."
+        ),
     ),
 ) -> None:
     """Create a new sandbox"""
@@ -184,6 +195,37 @@ def create(
                     raise typer.Exit(1)
                 key, value = env_var.split("=", 1)
                 env_vars[key] = value
+
+        # Parse advanced configs
+        advanced_configs_obj = None
+        if advanced_configs:
+            try:
+                config_dict = {}
+                for config_pair in advanced_configs:
+                    if "=" not in config_pair:
+                        console.print("[red]Advanced configs must be in KEY=VALUE format[/red]")
+                        raise typer.Exit(1)
+                    key, value = config_pair.split("=", 1)
+                    # Only support container_user_uid for now
+                    if key == "container_user_uid":
+                        try:
+                            config_dict[key] = int(value)
+                        except ValueError:
+                            console.print(
+                                f"[red]container_user_uid must be an integer, got: {value}[/red]"
+                            )
+                            raise typer.Exit(1)
+                    else:
+                        console.print(
+                            f"[red]Unsupported advanced config key: {key}. "
+                            f"Only 'container_user_uid' is supported.[/red]"
+                        )
+                        raise typer.Exit(1)
+
+                advanced_configs_obj = AdvancedConfigs(**config_dict)
+            except Exception as e:
+                console.print(f"[red]Invalid advanced_configs: {str(e)}[/red]")
+                raise typer.Exit(1)
 
         # Auto-generate name if not provided
         if not name:
@@ -216,9 +258,9 @@ def create(
             disk_size_gb=disk_size_gb,
             gpu_count=gpu_count,
             timeout_minutes=timeout_minutes,
-            working_dir=working_dir,
             environment_vars=env_vars if env_vars else None,
             team_id=team_id,
+            advanced_configs=advanced_configs_obj,
         )
 
         # Show configuration summary
@@ -230,10 +272,11 @@ def create(
         if gpu_count > 0:
             console.print(f"GPUs: {gpu_count}")
         console.print(f"Timeout: {timeout_minutes} minutes")
-        console.print(f"Working Directory: {working_dir}")
         console.print(f"Team: {team_id or 'Personal'}")
         if env_vars:
             console.print(f"Environment Variables: {env_vars}")
+        if advanced_configs_obj:
+            console.print(f"Advanced Configs: {advanced_configs_obj.model_dump(exclude_none=True)}")
 
         if typer.confirm("\nDo you want to create this sandbox?", default=True):
             with console.status("[bold blue]Creating sandbox...", spinner="dots"):

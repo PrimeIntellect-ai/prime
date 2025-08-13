@@ -18,6 +18,21 @@ class SandboxStatus(str, Enum):
     TERMINATED = "TERMINATED"
 
 
+class AdvancedConfigs(BaseModel):
+    """Advanced configuration options for sandbox"""
+
+    container_user_uid: Optional[int] = Field(
+        None,
+        ge=1000,
+        le=65535,
+        description=(
+            "Container user UID to overwrite default UID 1000 (must be non-root, minimum UID 1000)"
+        ),
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class Sandbox(BaseModel):
     """Sandbox model"""
 
@@ -28,11 +43,12 @@ class Sandbox(BaseModel):
     cpu_cores: int = Field(..., alias="cpuCores")
     memory_gb: int = Field(..., alias="memoryGB")
     disk_size_gb: int = Field(..., alias="diskSizeGB")
+    disk_mount_path: str = Field(..., alias="diskMountPath")
     gpu_count: int = Field(..., alias="gpuCount")
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
-    working_dir: str = Field(..., alias="workingDir")
     environment_vars: Optional[Dict[str, Any]] = Field(None, alias="environmentVars")
+    advanced_configs: Optional[AdvancedConfigs] = Field(None, alias="advancedConfigs")
     created_at: datetime = Field(..., alias="createdAt")
     updated_at: datetime = Field(..., alias="updatedAt")
     started_at: Optional[datetime] = Field(None, alias="startedAt")
@@ -73,9 +89,9 @@ class CreateSandboxRequest(BaseModel):
     disk_size_gb: int = 10
     gpu_count: int = 0
     timeout_minutes: int = 60
-    working_dir: str = "/workspace"
     environment_vars: Optional[Dict[str, str]] = None
     team_id: Optional[str] = None
+    advanced_configs: Optional[AdvancedConfigs] = None
 
 
 class UpdateSandboxRequest(BaseModel):
@@ -89,7 +105,6 @@ class UpdateSandboxRequest(BaseModel):
     disk_size_gb: Optional[int] = None
     gpu_count: Optional[int] = None
     timeout_minutes: Optional[int] = None
-    working_dir: Optional[str] = None
     environment_vars: Optional[Dict[str, str]] = None
 
 

@@ -38,16 +38,9 @@ class CommandTimeoutError(RuntimeError):
 class AdvancedConfigs(BaseModel):
     """Advanced configuration options for sandbox"""
 
-    container_user_uid: Optional[int] = Field(
-        None,
-        ge=1000,
-        le=65535,
-        description=(
-            "Container user UID to overwrite default UID 1000 (must be non-root, minimum UID 1000)"
-        ),
-    )
-
-    model_config = ConfigDict(extra="forbid")
+    # Reserved for future advanced configuration options
+    # Allow extra fields for backward compatibility with existing data
+    model_config = ConfigDict(extra="allow")
 
 
 class Sandbox(BaseModel):

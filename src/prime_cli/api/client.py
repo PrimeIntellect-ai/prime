@@ -23,6 +23,12 @@ class PaymentRequiredError(APIError):
     pass
 
 
+class TimeoutError(APIError):
+    """Raised when API request times out"""
+
+    pass
+
+
 class APIClient:
     def __init__(self, api_key: Optional[str] = None, require_auth: bool = True):
         # Load config
@@ -49,6 +55,7 @@ class APIClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Make a request to the API"""
         # Ensure endpoint starts with /api/v1/
@@ -60,7 +67,7 @@ class APIClient:
         url = f"{self.base_url}{endpoint}"
 
         try:
-            response = self.session.request(method, url, params=params, json=json)
+            response = self.session.request(method, url, params=params, json=json, timeout=timeout)
             response.raise_for_status()
 
             result = response.json()
@@ -90,6 +97,8 @@ class APIClient:
                 pass
 
             raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
+        except requests.exceptions.Timeout as e:
+            raise TimeoutError(f"Request timed out: {e}")
         except requests.exceptions.RequestException as e:
             raise APIError(f"Request failed: {e}")
 

@@ -30,21 +30,10 @@ def main() -> None:
         print(f"✅ Created: {sandbox.name} ({sandbox.id})")
 
         # 3. Wait for sandbox to be running
-        import time
 
         print("\nWaiting for sandbox to be running...")
-        max_attempts = 30
-        for _ in range(max_attempts):
-            sandbox = sandbox_client.get(sandbox.id)
-            if sandbox.status == "RUNNING":
-                print("✅ Sandbox is running!")
-                # Give it a few extra seconds to be ready for commands
-                time.sleep(10)
-                break
-            elif sandbox.status in ["ERROR", "TERMINATED"]:
-                print(f"❌ Sandbox failed with status: {sandbox.status}")
-                return
-            time.sleep(2)
+        sandbox_client.wait_for_creation(sandbox.id, max_attempts=60)
+        print("✅ Sandbox is running!")
 
         # 4. Execute commands in the sandbox
         print("\nExecuting commands...")

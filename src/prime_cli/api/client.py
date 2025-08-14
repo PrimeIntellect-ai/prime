@@ -23,6 +23,12 @@ class PaymentRequiredError(APIError):
     pass
 
 
+class TimeoutError(APIError):
+    """Raised when API request times out"""
+
+    pass
+
+
 class APIClient:
     def __init__(self, api_key: Optional[str] = None, require_auth: bool = True):
         # Load config
@@ -91,6 +97,8 @@ class APIClient:
                 pass
 
             raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
+        except requests.exceptions.Timeout as e:
+            raise TimeoutError(f"Request timed out: {e}")
         except requests.exceptions.RequestException as e:
             raise APIError(f"Request failed: {e}")
 

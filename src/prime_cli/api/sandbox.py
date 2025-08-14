@@ -3,10 +3,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-import requests
 from pydantic import BaseModel, ConfigDict, Field
 
-from prime_cli.api.client import APIClient
+from prime_cli.api.client import APIClient, TimeoutError
 
 
 class SandboxStatus(str, Enum):
@@ -225,7 +224,7 @@ class SandboxClient:
                 timeout=timeout,
             )
             return CommandResponse(**response)
-        except requests.exceptions.Timeout:
+        except TimeoutError:
             raise CommandTimeoutError(sandbox_id, command, timeout or 0)
 
     def wait_for_sandbox(self, sandbox_id: str, max_attempts: int = 60) -> None:

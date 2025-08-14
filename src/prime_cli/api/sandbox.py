@@ -3,6 +3,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+import requests
 from pydantic import BaseModel, ConfigDict, Field
 
 from prime_cli.api.client import APIClient
@@ -24,6 +25,14 @@ class SandboxNotRunningError(RuntimeError):
 
     def __init__(self, sandbox_id: str, status: Optional[str] = None):
         msg = f"Sandbox {sandbox_id} is not running" + (f" (status={status})" if status else ".")
+        super().__init__(msg)
+
+
+class CommandTimeoutError(RuntimeError):
+    """Raised when a command execution times out."""
+
+    def __init__(self, sandbox_id: str, command: str, timeout: int):
+        msg = f"Command '{command}' timed out after {timeout}s in sandbox {sandbox_id}"
         super().__init__(msg)
 
 
@@ -193,15 +202,31 @@ class SandboxClient:
         command: str,
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
+        timeout: Optional[int] = None,
     ) -> CommandResponse:
-        """Execute a command in a sandbox"""
+        """Execute a command in a sandbox
+
+        Args:
+            sandbox_id: ID of the sandbox to execute the command in
+            command: Command to execute
+            working_dir: Working directory for the command
+            env: Environment variables for the command
+            timeout: Timeout in seconds for the command execution
+
+        Raises:
+            CommandTimeoutError: If the command execution times out
+        """
         request = CommandRequest(command=command, working_dir=working_dir, env=env)
-        response = self.client.request(
-            "POST",
-            f"/sandbox/{sandbox_id}/command",
-            json=request.model_dump(by_alias=False, exclude_none=True),
-        )
-        return CommandResponse(**response)
+        try:
+            response = self.client.request(
+                "POST",
+                f"/sandbox/{sandbox_id}/command",
+                json=request.model_dump(by_alias=False, exclude_none=True),
+                timeout=timeout,
+            )
+            return CommandResponse(**response)
+        except requests.exceptions.Timeout:
+            raise CommandTimeoutError(sandbox_id, command, timeout or 0)
 
     def wait_for_sandbox(self, sandbox_id: str, max_attempts: int = 60) -> None:
         for _ in range(max_attempts):
@@ -213,4 +238,4 @@ class SandboxClient:
             elif sandbox.status in ["ERROR", "TERMINATED"]:
                 raise SandboxNotRunningError(sandbox_id, sandbox.status)
             time.sleep(2)
-        raise SandboxNotRunningError(sandbox_id, "timeout")
+        raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")

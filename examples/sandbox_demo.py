@@ -32,7 +32,7 @@ def main() -> None:
         # 3. Wait for sandbox to be running
 
         print("\nWaiting for sandbox to be running...")
-        sandbox_client.wait_for_sandbox(sandbox.id, max_attempts=60)
+        sandbox_client.wait_for_creation(sandbox.id, max_attempts=60)
         print("✅ Sandbox is running!")
 
         # 4. Execute commands in the sandbox

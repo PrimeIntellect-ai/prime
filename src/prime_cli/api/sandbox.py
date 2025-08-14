@@ -227,7 +227,7 @@ class SandboxClient:
         except TimeoutError:
             raise CommandTimeoutError(sandbox_id, command, timeout or 0)
 
-    def wait_for_sandbox(self, sandbox_id: str, max_attempts: int = 60) -> None:
+    def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
         for _ in range(max_attempts):
             sandbox = self.get(sandbox_id)
             if sandbox.status == "RUNNING":

@@ -1,3 +1,4 @@
+import time
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -16,6 +17,14 @@ class SandboxStatus(str, Enum):
     STOPPED = "STOPPED"
     ERROR = "ERROR"
     TERMINATED = "TERMINATED"
+
+
+class SandboxNotRunningError(RuntimeError):
+    """Raised when an operation requires a RUNNING sandbox but it is not running."""
+
+    def __init__(self, sandbox_id: str, status: Optional[str] = None):
+        msg = f"Sandbox {sandbox_id} is not running" + (f" (status={status})" if status else ".")
+        super().__init__(msg)
 
 
 class AdvancedConfigs(BaseModel):
@@ -193,3 +202,15 @@ class SandboxClient:
             json=request.model_dump(by_alias=False, exclude_none=True),
         )
         return CommandResponse(**response)
+
+    def wait_for_sandbox(self, sandbox_id: str, max_attempts: int = 60) -> None:
+        for _ in range(max_attempts):
+            sandbox = self.get(sandbox_id)
+            if sandbox.status == "RUNNING":
+                # Give it a few extra seconds to be ready for commands
+                time.sleep(10)
+                return
+            elif sandbox.status in ["ERROR", "TERMINATED"]:
+                raise SandboxNotRunningError(sandbox_id, sandbox.status)
+            time.sleep(2)
+        raise SandboxNotRunningError(sandbox_id, "timeout")

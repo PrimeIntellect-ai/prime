@@ -39,7 +39,8 @@ class AdvancedConfigs(BaseModel):
     """Advanced configuration options for sandbox"""
 
     # Reserved for future advanced configuration options
-    model_config = ConfigDict(extra="forbid")
+    # Allow extra fields for backward compatibility with existing data
+    model_config = ConfigDict(extra="allow")
 
 
 class Sandbox(BaseModel):

@@ -17,8 +17,8 @@ console = Console()
 config = Config()
 
 
-@app.command()
-def list(
+@app.command("list")
+def list_sandboxes_cmd(
     team_id: Optional[str] = typer.Option(None, help="Filter by team ID"),
     status: Optional[str] = typer.Option(None, help="Filter by status"),
     page: int = typer.Option(1, help="Page number"),

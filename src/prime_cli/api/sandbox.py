@@ -383,7 +383,7 @@ class SandboxClient:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".tar") as tmp:
                 temp_file_path = tmp.name
 
-            with tarfile.open(temp_file_path, mode="w:") as tf:  # type: ignore[call-overload]
+            with tarfile.open(temp_file_path, mode="w:") as tf:
                 if os.path.isfile(local_path):
                     # For single files, add with just the filename
                     tf.add(local_path, arcname=os.path.basename(sandbox_path))
@@ -470,13 +470,13 @@ class SandboxClient:
             tf = None
             members = None
             try:
-                tf = tarfile.open(temp_file_path, mode="r:")  # type: ignore[call-overload]
+                tf = tarfile.open(temp_file_path, mode="r:")
                 members = list(tf.getmembers())
                 debug_log(f"Successfully opened tar file with {len(members)} members")
             except Exception as e:
                 debug_log(f"Failed to open tar file with mode 'r:': {e}")
                 # Try with different mode - explicitly specify no compression
-                tf = tarfile.open(temp_file_path, mode="r")  # type: ignore[call-overload]
+                tf = tarfile.open(temp_file_path, mode="r")
                 members = list(tf.getmembers())
                 debug_log(f"Successfully opened tar file with mode 'r' with {len(members)} members")
 
@@ -506,9 +506,13 @@ class SandboxClient:
                     # Find the first file in the archive and extract it to the exact destination
                     for member in members:
                         if member.isfile():
-                            with open(dst_abs, "wb") as f:
-                                f.write(tf.extractfile(member).read())
-                            break
+                            extract_file = tf.extractfile(member)
+                            if extract_file is not None:
+                                with open(dst_abs, "wb") as f:
+                                    f.write(extract_file.read())
+                                break
+                            else:
+                                raise Exception(f"Failed to extract file member: {member.name}")
                     else:
                         raise Exception("No file found in the archive")
                 else:

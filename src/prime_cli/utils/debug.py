@@ -23,7 +23,7 @@ class DebugLogger:
     def log_ascii(self, label: str, data: bytes) -> None:
         """Log ASCII representation of data if debug is enabled."""
         if self.debug_enabled:
-            print(f"DEBUG: {label} (ascii): {data}")
+            print(f"DEBUG: {label} (ascii): {data.decode('utf-8', errors='replace')}")
 
 
 # Global debug logger instance

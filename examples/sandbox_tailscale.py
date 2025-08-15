@@ -1,19 +1,8 @@
-import base64
 import os
 import sys
 
 from prime_cli.api.client import APIClient
-from prime_cli.api.sandbox import CommandResponse, CreateSandboxRequest, SandboxClient
-
-
-def pipe_file_content_into_sandbox(
-    sandbox_client: SandboxClient, sandbox_id: str, file_path: str, content: str
-) -> CommandResponse:
-    # Use base64 encoding to avoid shell parsing issues
-    encoded_content = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    return sandbox_client.execute_command(
-        sandbox_id, f"echo '{encoded_content}' | base64 -d > {file_path}"
-    )
+from prime_cli.api.sandbox import CreateSandboxRequest, SandboxClient
 
 
 def main() -> None:

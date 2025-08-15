@@ -5,6 +5,7 @@ Simple Sandbox API Demo - shows auth, basic usage, and file operations
 
 import os
 import tempfile
+
 from prime_cli.api.client import APIClient, APIError
 from prime_cli.api.sandbox import CreateSandboxRequest, SandboxClient
 
@@ -14,7 +15,7 @@ def create_test_file(content: str, filename: str) -> str:
     temp_dir = tempfile.mkdtemp()
     file_path = os.path.join(temp_dir, filename)
 
-    with open(file_path, 'w') as f:
+    with open(file_path, "w") as f:
         f.write(content)
 
     return file_path
@@ -80,9 +81,9 @@ def main() -> None:
         print(f"Sandbox environment variables:\n{result.stdout}")
 
         # 5. File Operations Demo
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print("FILE OPERATIONS DEMO")
-        print("="*50)
+        print("=" * 50)
 
         # Create a test file locally
         test_content = "Hello from local machine!\nThis is a test file for upload/download demo.\n"
@@ -93,9 +94,7 @@ def main() -> None:
         # Upload file to sandbox
         print("\n📤 Uploading file to sandbox...")
         upload_response = sandbox_client.upload_path(
-            sandbox_id=sandbox.id,
-            local_path=local_file_path,
-            sandbox_path="/tmp/test_upload.txt"
+            sandbox_id=sandbox.id, local_path=local_file_path, sandbox_path="/tmp/test_upload.txt"
         )
         print(f"✅ Upload successful: {upload_response.message}")
         print(f"   Files uploaded: {upload_response.files_uploaded}")
@@ -113,8 +112,7 @@ def main() -> None:
         print("\n📝 Creating file in sandbox...")
         sandbox_content = "Hello from sandbox!\nThis file was created inside the sandbox.\n"
         result = sandbox_client.execute_command(
-            sandbox.id,
-            f"echo '{sandbox_content}' > /tmp/sandbox_created.txt"
+            sandbox.id, f"echo '{sandbox_content}' > /tmp/sandbox_created.txt"
         )
         print(f"File creation result: {result.stdout.strip()}")
 
@@ -122,14 +120,12 @@ def main() -> None:
         print("\n📥 Downloading file from sandbox...")
         download_path = "/tmp/downloaded_sandbox_file.txt"
         sandbox_client.download_path(
-            sandbox_id=sandbox.id,
-            sandbox_path="/tmp/sandbox_created.txt",
-            local_path=download_path
+            sandbox_id=sandbox.id, sandbox_path="/tmp/sandbox_created.txt", local_path=download_path
         )
         print(f"✅ Downloaded to: {download_path}")
 
         # Verify downloaded content
-        with open(download_path, 'r') as f:
+        with open(download_path, "r") as f:
             downloaded_content = f.read()
         print(f"📄 Downloaded content: {repr(downloaded_content)}")
 
@@ -164,6 +160,7 @@ def main() -> None:
     except Exception as e:
         print(f"❌ Error: {e}")
         import traceback
+
         traceback.print_exc()
 
 

@@ -131,7 +131,7 @@ def run_instance(
                 timeout_minutes=120,  # 2 hours to avoid timeout during demo
             )
         )
-        sandbox_client.wait_for_sandbox(sandbox.id, max_attempts=120)
+        sandbox_client.wait_for_sandbox(sandbox.id, max_attempts=180)
         logger.info(f"Sandbox for {instance_id} started: {sandbox.id}")
         cmd_response = sandbox_client.execute_command(
             sandbox.id,
@@ -226,9 +226,17 @@ def run_instance(
         # Run eval script, write output to logs
         cmd_response = sandbox_client.execute_command(
             sandbox_id=sandbox.id,
-            command="/bin/bash /testbed/eval.sh",
+            command="/bin/bash /testbed/eval.sh > /testbed/test_output.txt 2>&1",
             # working_dir=DOCKER_WORKDIR,
+            env={"PYTHONUNBUFFERED": "0"},
         )
+
+        # Get test output
+        cmd_response = sandbox_client.execute_command(
+            sandbox_id=sandbox.id,
+            command="cat /testbed/test_output.txt",
+        )
+
         test_output_path = log_dir / LOG_TEST_OUTPUT
         test_output = cmd_response.stdout + "\n" + cmd_response.stderr
         logger.info(f"test_output: stdout: \n{test_output}\nstderr: \n{cmd_response.stderr}")

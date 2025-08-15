@@ -261,36 +261,6 @@ class SandboxClient:
             time.sleep(2)
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
 
-    def upload_stream(
-        self,
-        sandbox_id: str,
-        dest_path: str,
-        data_iter: Iterable[bytes],
-        compressed: bool = False,
-        strip_components: int = 0,
-        working_dir: Optional[str] = None,
-        timeout: Optional[int] = None,
-    ) -> SandboxUploadResponse:
-        params: Dict[str, Any] = {
-            "dest_path": dest_path,
-            "compressed": str(compressed).lower(),
-            "strip_components": strip_components,
-        }
-        if working_dir:
-            params["working_dir"] = working_dir
-
-        raw_response = self.client.stream_post(
-            f"/sandbox/{sandbox_id}/upload", params=params, data=data_iter, timeout=timeout
-        )
-
-        return SandboxUploadResponse(
-            success=raw_response.get("success", True),
-            message=raw_response.get("message", "Upload completed successfully"),
-            filesUploaded=raw_response.get("filesUploaded"),
-            bytesUploaded=raw_response.get("bytesUploaded"),
-            destPath=dest_path,
-        )
-
     def upload_file(
         self,
         sandbox_id: str,
@@ -300,39 +270,70 @@ class SandboxClient:
         strip_components: int = 0,
         working_dir: Optional[str] = None,
         timeout: Optional[int] = None,
+        is_tar_archive: bool = False,
     ) -> SandboxUploadResponse:
-        """Upload a file by streaming it to the backend.
+        """Upload a file using multipart form data to the backend.
 
-        Sends Content-Length when available to avoid chunked transfer, which may
-        help some proxies/backends and aligns with the backend's temp-file approach.
+        This approach is more efficient and follows standard HTTP file upload patterns.
         """
-        params: Dict[str, Any] = {
+        import logging
+        logger = logging.getLogger(__name__)
+
+        logger.debug(f"🚀 Upload File Debug:")
+        logger.debug(f"   Sandbox ID: {sandbox_id}")
+        logger.debug(f"   Local file: {file_path}")
+        logger.debug(f"   Dest path: {dest_path}")
+        logger.debug(f"   Compressed: {compressed}")
+        logger.debug(f"   Strip components: {strip_components}")
+        logger.debug(f"   Working dir: {working_dir}")
+
+        # Prepare form data
+        form_data: Dict[str, Any] = {
             "dest_path": dest_path,
             "compressed": str(compressed).lower(),
-            "strip_components": strip_components,
+            "strip_components": str(strip_components),
+            "is_tar_archive": str(is_tar_archive).lower(),
         }
         if working_dir:
-            params["working_dir"] = working_dir
+            form_data["working_dir"] = working_dir
 
-        file_size = os.path.getsize(file_path)
-        headers = {"Content-Length": str(file_size)}
-        # Use a real file object so requests/urllib3 can send a proper Content-Length body
-        with open(file_path, "rb") as f:
-            raw_response = self.client.stream_post(
+        logger.debug(f"📝 Form data prepared: {form_data}")
+
+        # Prepare file data with appropriate content type
+        if is_tar_archive:
+            # Use appropriate content type for tar archives
+            if compressed:
+                content_type = "application/gzip"
+            else:
+                content_type = "application/x-tar"
+        else:
+            # Use octet-stream for regular files
+            content_type = "application/octet-stream"
+
+        files_data = {"file": (os.path.basename(file_path), open(file_path, "rb"), content_type)}
+        logger.debug(f"📁 Files data prepared: {list(files_data.keys())} with content-type: {content_type}")
+
+        try:
+            logger.debug(f"📤 Sending multipart request...")
+            raw_response = self.client.multipart_post(
                 f"/sandbox/{sandbox_id}/upload",
-                params=params,
-                data=f,
-                headers=headers,
+                files=files_data,
+                data=form_data,
                 timeout=timeout,
             )
+            logger.debug(f"✅ Response received: {raw_response}")
 
-        return SandboxUploadResponse(
-            success=raw_response.get("success", True),
-            message=raw_response.get("message", "Upload completed successfully"),
-            filesUploaded=raw_response.get("filesUploaded"),
-            bytesUploaded=raw_response.get("bytesUploaded"),
-            destPath=dest_path,
-        )
+            return SandboxUploadResponse(
+                success=raw_response.get("success", True),
+                message=raw_response.get("message", "Upload completed successfully"),
+                filesUploaded=raw_response.get("filesUploaded"),
+                bytesUploaded=raw_response.get("bytesUploaded"),
+                destPath=dest_path,
+            )
+        finally:
+            # Ensure file is closed
+            files_data["file"][1].close()
+            logger.debug(f"🧹 File handle closed")
 
     def download_stream(
         self,
@@ -370,6 +371,7 @@ class SandboxClient:
         """Upload a local file or directory to a sandbox.
 
         This is a high-level method that handles:
+        - Direct file uploads for single files (no tar needed)
         - Creating tar archives for directories
         - Compression decision based on size
         - Temporary file management
@@ -386,27 +388,36 @@ class SandboxClient:
         Returns:
             SandboxUploadResponse with upload details
         """
-        # Auto-disable compression for small files
-        if compress:
-            abs_path = os.path.abspath(local_path)
-            if os.path.exists(abs_path):
-                if os.path.isfile(abs_path):
-                    size = os.path.getsize(abs_path)
-                    if size < 100 * 1024 * 1024:  # 100MB
-                        compress = False
-                else:
-                    # Calculate directory size
-                    total_size = 0
-                    for root, dirs, files in os.walk(abs_path):
-                        for file in files:
-                            try:
-                                total_size += os.path.getsize(os.path.join(root, file))
-                            except (OSError, IOError):
-                                pass
-                    if total_size < 100 * 1024 * 1024:  # 100MB
-                        compress = False
+        abs_path = os.path.abspath(local_path)
+        if not os.path.exists(abs_path):
+            raise FileNotFoundError(f"Path does not exist: {local_path}")
 
-        # Create tar archive
+        # For single files, use direct upload (no tar needed)
+        if os.path.isfile(abs_path):
+            return self.upload_file(
+                sandbox_id,
+                sandbox_path,
+                abs_path,
+                compressed=False,  # Files are uploaded as-is, no compression
+                working_dir=working_dir,
+                timeout=timeout,
+            )
+
+        # For directories, create tar archive (existing logic)
+        # Auto-disable compression for small directories
+        if compress:
+            # Calculate directory size
+            total_size = 0
+            for root, dirs, files in os.walk(abs_path):
+                for file in files:
+                    try:
+                        total_size += os.path.getsize(os.path.join(root, file))
+                    except (OSError, IOError):
+                        pass
+            if total_size < 100 * 1024 * 1024:  # 100MB
+                compress = False
+
+        # Create tar archive for directory
         temp_file_path = None
         try:
             mode = "w:gz" if compress else "w:"
@@ -416,13 +427,9 @@ class SandboxClient:
                 temp_file_path = tmp.name
 
             with tarfile.open(temp_file_path, mode=mode) as tf:  # type: ignore[call-overload]
-                if os.path.isfile(local_path):
-                    # For single files, add with just the filename
-                    tf.add(local_path, arcname=os.path.basename(sandbox_path))
-                else:
-                    # For directories, add the entire directory
-                    base_name = os.path.basename(local_path.rstrip("/"))
-                    tf.add(local_path, arcname=base_name)
+                # For directories, add the entire directory
+                base_name = os.path.basename(local_path.rstrip("/"))
+                tf.add(local_path, arcname=base_name)
 
             # Upload the archive
             result = self.upload_file(
@@ -432,6 +439,7 @@ class SandboxClient:
                 compressed=compress,
                 working_dir=working_dir,
                 timeout=timeout,
+                is_tar_archive=True,  # This is a tar archive
             )
 
             return result

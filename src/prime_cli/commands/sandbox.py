@@ -30,12 +30,23 @@ def _handle_local_to_sandbox(
     working_dir: Optional[str],
 ) -> None:
     """Handle copying from local to sandbox."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.debug(f"🔄 Local to Sandbox Copy Debug:")
+    logger.debug(f"   Source path: {source_path}")
+    logger.debug(f"   Sandbox ID: {sandbox_id}")
+    logger.debug(f"   Destination path: {destination_path}")
+    logger.debug(f"   Compress: {compress}")
+    logger.debug(f"   Working dir: {working_dir}")
+
     console.print(
         f"[blue]Uploading {source_path} to sandbox {sandbox_id}:{destination_path}...[/blue]"
     )
 
     try:
         with console.status("[bold blue]Uploading...", spinner="dots"):
+            logger.debug(f"📤 Calling sandbox_client.upload_path...")
             result = sandbox_client.upload_path(
                 sandbox_id,
                 source_path,
@@ -43,6 +54,7 @@ def _handle_local_to_sandbox(
                 compress=compress,
                 working_dir=working_dir,
             )
+            logger.debug(f"✅ upload_path result: {result}")
 
         # Success output
         console.print(f"[green]Upload completed[/green] {result.message}")
@@ -52,6 +64,8 @@ def _handle_local_to_sandbox(
             console.print(f"Bytes uploaded: {result.bytes_uploaded}")
 
     except Exception as e:
+        logger.error(f"❌ Upload failed with exception: {e}")
+        logger.error(f"   Exception type: {type(e)}")
         console.print(f"[red]Upload failed:[/red] {e}")
         raise
 

@@ -1,3 +1,7 @@
+import os
+import shutil
+import tarfile
+import tempfile
 import time
 from datetime import datetime
 from enum import Enum
@@ -302,8 +306,6 @@ class SandboxClient:
         Sends Content-Length when available to avoid chunked transfer, which may
         help some proxies/backends and aligns with the backend's temp-file approach.
         """
-        import os
-
         params: Dict[str, Any] = {
             "dest_path": dest_path,
             "compressed": str(compressed).lower(),
@@ -384,10 +386,6 @@ class SandboxClient:
         Returns:
             SandboxUploadResponse with upload details
         """
-        import os
-        import tarfile
-        import tempfile
-
         # Auto-disable compression for small files
         if compress:
             abs_path = os.path.abspath(local_path)
@@ -417,7 +415,7 @@ class SandboxClient:
             ) as tmp:
                 temp_file_path = tmp.name
 
-            with tarfile.open(temp_file_path, mode=mode) as tf:
+            with tarfile.open(temp_file_path, mode=mode) as tf:  # type: ignore[call-overload]
                 if os.path.isfile(local_path):
                     # For single files, add with just the filename
                     tf.add(local_path, arcname=os.path.basename(sandbox_path))
@@ -471,11 +469,6 @@ class SandboxClient:
             working_dir: Working directory in the sandbox
             timeout: Request timeout
         """
-        import os
-        import shutil
-        import tarfile
-        import tempfile
-
         # Download from sandbox
         response = self.download_stream(
             sandbox_id, sandbox_path, compress=compress, working_dir=working_dir, timeout=timeout
@@ -509,7 +502,7 @@ class SandboxClient:
 
             # Extract the archive
             mode = "r:gz" if compress else "r:"
-            with tarfile.open(temp_file_path, mode=mode) as tf:
+            with tarfile.open(temp_file_path, mode=mode) as tf:  # type: ignore[call-overload]
                 members = list(tf.getmembers())
 
                 if not members:

@@ -91,7 +91,7 @@ def _create_tar_archive(source_path: str, destination_path: str, compress: bool)
     if not os.path.exists(src_abs):
         raise FileNotFoundError(f"Source not found: {src_abs}")
 
-    mode = "w:gz" if compress else "w:"
+    mode = "w:gz" if compress else "w"
     tmp_path = None
 
     try:
@@ -109,7 +109,8 @@ def _create_tar_archive(source_path: str, destination_path: str, compress: bool)
         return tmp_path, bytes_written
 
     except Exception as e:
-        _cleanup_temp_file(tmp_path)
+        if tmp_path is not None:
+            _cleanup_temp_file(tmp_path)
         raise Exception(f"Failed to create tar archive: {e}")
 
 
@@ -118,10 +119,10 @@ def _extract_tar_archive(
 ) -> None:
     """Extract a tar archive to the destination path."""
     dst_abs = os.path.abspath(destination_path)
-    mode = "r:gz" if compress else "r:"
+    mode = "r:gz" if compress else "r"
 
     try:
-        with tarfile.open(temp_file_path, mode=mode) as tf:
+        with tarfile.open(temp_file_path, mode=mode) as tf:  # type: ignore[call-overload]
             members = list(tf.getmembers())
 
             if not members:

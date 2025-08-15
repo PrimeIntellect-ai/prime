@@ -187,8 +187,9 @@ class APIClient:
 
         # Debug logging
         import logging
+
         logger = logging.getLogger(__name__)
-        logger.debug(f"🔍 Multipart POST Debug:")
+        logger.debug("🔍 Multipart POST Debug:")
         logger.debug(f"   URL: {url}")
         logger.debug(f"   Headers: {req_headers}")
         logger.debug(f"   Files: {files}")
@@ -198,10 +199,12 @@ class APIClient:
             # For multipart requests, we need to let requests set the Content-Type automatically
             # Create a temporary session without the default Content-Type header
             temp_session = requests.Session()
-            temp_session.headers.update({
-                "Accept": "application/json",
-                "Authorization": self.session.headers.get("Authorization", "")
-            })
+            temp_session.headers.update(
+                {
+                    "Accept": "application/json",
+                    "Authorization": self.session.headers.get("Authorization", ""),
+                }
+            )
 
             response = temp_session.request(
                 "POST",
@@ -213,7 +216,7 @@ class APIClient:
             )
 
             # Debug response
-            logger.debug(f"📡 Response Debug:")
+            logger.debug("📡 Response Debug:")
             logger.debug(f"   Status: {response.status_code}")
             logger.debug(f"   Headers: {dict(response.headers)}")
             logger.debug(f"   Content-Type: {response.headers.get('content-type', 'N/A')}")

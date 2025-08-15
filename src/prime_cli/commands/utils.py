@@ -1,14 +1,10 @@
 """Utility functions for sandbox commands."""
 
-import os
 from typing import Optional, Tuple
 
 from rich.console import Console
 
 console = Console()
-
-
-
 
 
 def _parse_cp_arg(arg: str) -> Tuple[Optional[str], str]:

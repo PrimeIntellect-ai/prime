@@ -1,17 +1,17 @@
 import os
-import shutil
 import tarfile
 import tempfile
 import time
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 from pydantic import BaseModel, ConfigDict, Field
 
 from prime_cli.api.client import APIClient, TimeoutError
-from ..utils.debug import debug_log, debug_log_hex, debug_log_ascii
+
+from ..utils.debug import debug_log, debug_log_ascii, debug_log_hex
 
 
 class SandboxStatus(str, Enum):
@@ -276,9 +276,10 @@ class SandboxClient:
         This approach is more efficient and follows standard HTTP file upload patterns.
         """
         import logging
+
         logger = logging.getLogger(__name__)
 
-        logger.debug(f"🚀 Upload File Debug:")
+        logger.debug("🚀 Upload File Debug:")
         logger.debug(f"   Sandbox ID: {sandbox_id}")
         logger.debug(f"   Local file: {file_path}")
         logger.debug(f"   Dest path: {dest_path}")
@@ -300,10 +301,12 @@ class SandboxClient:
         content_type = "application/x-tar"
 
         files_data = {"file": (os.path.basename(file_path), open(file_path, "rb"), content_type)}
-        logger.debug(f"📁 Files data prepared: {list(files_data.keys())} with content-type: {content_type}")
+        logger.debug(
+            f"📁 Files data prepared: {list(files_data.keys())} with content-type: {content_type}"
+        )
 
         try:
-            logger.debug(f"📤 Sending multipart request...")
+            logger.debug("📤 Sending multipart request...")
             raw_response = self.client.multipart_post(
                 f"/sandbox/{sandbox_id}/upload",
                 files=files_data,
@@ -322,7 +325,7 @@ class SandboxClient:
         finally:
             # Ensure file is closed
             files_data["file"][1].close()
-            logger.debug(f"🧹 File handle closed")
+            logger.debug("🧹 File handle closed")
 
     def download_stream(
         self,
@@ -335,13 +338,17 @@ class SandboxClient:
         if working_dir:
             params["working_dir"] = working_dir
 
-        debug_log(f"Making download request to /sandbox/{sandbox_id}/download with params: {params}")
+        debug_log(
+            f"Making download request to /sandbox/{sandbox_id}/download with params: {params}"
+        )
         stream_response = self.client.stream_get(
             f"/sandbox/{sandbox_id}/download", params=params, timeout=timeout
         )
 
         debug_log(f"Got response with content-type: {stream_response.headers.get('content-type')}")
-        debug_log(f"Got response with content-length: {stream_response.headers.get('content-length')}")
+        debug_log(
+            f"Got response with content-length: {stream_response.headers.get('content-length')}"
+        )
 
         return SandboxDownloadStreamResponse(
             stream=stream_response,
@@ -419,7 +426,10 @@ class SandboxClient:
         working_dir: Optional[str] = None,
         timeout: Optional[int] = None,
     ) -> None:
-        debug_log(f"download_path called with sandbox_id={sandbox_id}, sandbox_path={sandbox_path}, local_path={local_path}")
+        debug_log(
+            f"download_path called with sandbox_id={sandbox_id}, "
+            f"sandbox_path={sandbox_path}, local_path={local_path}"
+        )
 
         """Download a file or directory from a sandbox to local path.
 
@@ -460,7 +470,7 @@ class SandboxClient:
                 debug_log(f"Downloaded {total_bytes} bytes to {temp_file_path}")
 
                 # Check the first few bytes to see what we got
-                with open(temp_file_path, 'rb') as f:
+                with open(temp_file_path, "rb") as f:
                     first_bytes = f.read(100)
                     debug_log_hex("First 100 bytes", first_bytes)
                     debug_log_ascii("First 100 bytes", first_bytes)
@@ -484,10 +494,14 @@ class SandboxClient:
                 raise Exception("Tar archive is empty")
 
             # Determine if this is a single file or directory based on the tar archive contents
-            # If the archive contains multiple members or the first member is a directory, treat as directory
+            # If the archive contains multiple members or the first member is a directory,
+            # treat as directory
             is_single_file = len(members) == 1 and members[0].isfile()
             debug_log(f"local_path='{local_path}', is_single_file={is_single_file}")
-            debug_log(f"members count={len(members)}, first member isfile={members[0].isfile() if members else 'N/A'}")
+            debug_log(
+                f"members count={len(members)}, "
+                f"first member isfile={members[0].isfile() if members else 'N/A'}"
+            )
 
             # Ensure destination directory exists
             dst_abs = os.path.abspath(local_path)
@@ -521,7 +535,10 @@ class SandboxClient:
                     # Extract all members, removing the first path component if it exists
                     debug_log(f"Extracting directory with {len(members)} members")
                     for member in members:
-                        debug_log(f"Processing member: {member.name} (isfile: {member.isfile()}, isdir: {member.isdir()})")
+                        debug_log(
+                            f"Processing member: {member.name} "
+                            f"(isfile: {member.isfile()}, isdir: {member.isdir()})"
+                        )
                         # Create a copy of the member with modified name
                         if "/" in member.name:
                             new_name = "/".join(member.name.split("/")[1:])

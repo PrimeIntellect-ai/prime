@@ -31,9 +31,10 @@ def _handle_local_to_sandbox(
 ) -> None:
     """Handle copying from local to sandbox."""
     import logging
+
     logger = logging.getLogger(__name__)
 
-    logger.debug(f"🔄 Local to Sandbox Copy Debug:")
+    logger.debug("🔄 Local to Sandbox Copy Debug:")
     logger.debug(f"   Source path: {source_path}")
     logger.debug(f"   Sandbox ID: {sandbox_id}")
     logger.debug(f"   Destination path: {destination_path}")
@@ -45,7 +46,7 @@ def _handle_local_to_sandbox(
 
     try:
         with console.status("[bold blue]Uploading...", spinner="dots"):
-            logger.debug(f"📤 Calling sandbox_client.upload_path...")
+            logger.debug("📤 Calling sandbox_client.upload_path...")
             result = sandbox_client.upload_path(
                 sandbox_id,
                 source_path,
@@ -76,7 +77,10 @@ def _handle_sandbox_to_local(
     working_dir: Optional[str],
 ) -> None:
     """Handle copying from sandbox to local."""
-    debug_log(f"_handle_sandbox_to_local called with sandbox_id={sandbox_id}, source_path={source_path}, destination_path={destination_path}")
+    debug_log(
+        f"_handle_sandbox_to_local called with sandbox_id={sandbox_id}, "
+        f"source_path={source_path}, destination_path={destination_path}"
+    )
 
     console.print(
         f"[blue]Downloading from sandbox {sandbox_id}:{source_path} to {destination_path}...[/blue]"
@@ -516,7 +520,10 @@ def cp(
 
         src_sid, src_path = _parse_cp_arg(source)
         dst_sid, dst_path = _parse_cp_arg(destination)
-        debug_log(f"Parsed args: src_sid={src_sid}, src_path={src_path}, dst_sid={dst_sid}, dst_path={dst_path}")
+        debug_log(
+            f"Parsed args: src_sid={src_sid}, src_path={src_path}, "
+            f"dst_sid={dst_sid}, dst_path={dst_path}"
+        )
 
         # Expand $HOME in sandbox paths for user convenience
         if src_sid is not None:
@@ -530,16 +537,12 @@ def cp(
 
         # Local -> Sandbox
         if src_sid is None and dst_sid is not None:
-            _handle_local_to_sandbox(
-                sandbox_client, src_path, dst_sid, dst_path, working_dir
-            )
+            _handle_local_to_sandbox(sandbox_client, src_path, dst_sid, dst_path, working_dir)
             return
 
         # Sandbox -> Local
         if src_sid is not None and dst_sid is None:
-            _handle_sandbox_to_local(
-                sandbox_client, src_sid, src_path, dst_path, working_dir
-            )
+            _handle_sandbox_to_local(sandbox_client, src_sid, src_path, dst_path, working_dir)
             return
 
         console.print("[red]Unsupported copy direction[/red]")

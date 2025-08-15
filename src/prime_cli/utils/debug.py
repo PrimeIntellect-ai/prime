@@ -1,7 +1,5 @@
 """Debug logging utility for prime-cli."""
 
-import os
-from typing import Any
 
 
 class DebugLogger:

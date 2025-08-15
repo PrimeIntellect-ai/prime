@@ -79,10 +79,10 @@ class APIClient:
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
                 raise UnauthorizedError(
-                    "API key unauthorized. ",
+                    "API key unauthorized. "
                     "Please check that your API key has the correct permissions, "
                     "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
-                    "or run 'prime login' to configure a new API key.",
+                    "or run 'prime login' to configure a new API key."
                 )
             if e.response.status_code == 402:
                 raise PaymentRequiredError(
@@ -152,10 +152,10 @@ class APIClient:
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
                 raise UnauthorizedError(
-                    "API key unauthorized. ",
-                    "Please check that your API key has the correct permissions, ",
-                    "generate a new one at https://app.primeintellect.ai/dashboard/tokens, ",
-                    "or run 'prime login' to configure a new API key.",
+                    "API key unauthorized. "
+                    "Please check that your API key has the correct permissions, "
+                    "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
+                    "or run 'prime login' to configure a new API key."
                 )
             if e.response.status_code == 402:
                 raise PaymentRequiredError(
@@ -234,10 +234,10 @@ class APIClient:
 
             if e.response.status_code == 401:
                 raise UnauthorizedError(
-                    "API key unauthorized. ",
-                    "Please check that your API key has the correct permissions, ",
-                    "generate a new one at https://app.primeintellect.ai/dashboard/tokens, ",
-                    "or run 'prime login' to configure a new API key.",
+                    "API key unauthorized. "
+                    "Please check that your API key has the correct permissions, "
+                    "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
+                    "or run 'prime login' to configure a new API key."
                 )
             if e.response.status_code == 402:
                 raise PaymentRequiredError(
@@ -270,10 +270,10 @@ class APIClient:
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
                 raise UnauthorizedError(
-                    "API key unauthorized. ",
-                    "Please check that your API key has the correct permissions, ",
-                    "generate a new one at https://app.primeintellect.ai/dashboard/tokens, ",
-                    "or run 'prime login' to configure a new API key.",
+                    "API key unauthorized. "
+                    "Please check that your API key has the correct permissions, "
+                    "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
+                    "or run 'prime login' to configure a new API key."
                 )
             if e.response.status_code == 402:
                 raise PaymentRequiredError(

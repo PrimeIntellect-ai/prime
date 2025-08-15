@@ -1,8 +1,9 @@
 import time
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
+import requests
 from pydantic import BaseModel, ConfigDict, Field
 
 from prime_cli.api.client import APIClient, TimeoutError
@@ -134,6 +135,30 @@ class CommandResponse(BaseModel):
     exit_code: int
 
 
+class SandboxUploadResponse(BaseModel):
+    """Sandbox upload response model"""
+
+    success: bool
+    message: str
+    files_uploaded: Optional[int] = Field(None, alias="filesUploaded")
+    bytes_uploaded: Optional[int] = Field(None, alias="bytesUploaded")
+    dest_path: str = Field(..., alias="destPath")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SandboxDownloadStreamResponse(BaseModel):
+    """Sandbox download stream response model"""
+
+    stream: requests.Response
+    src_path: str = Field(..., alias="srcPath")
+    compressed: bool
+    content_type: Optional[str] = Field(None, alias="contentType")
+    content_length: Optional[int] = Field(None, alias="contentLength")
+
+    model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
+
+
 class SandboxClient:
     """Client for sandbox API operations"""
 
@@ -231,3 +256,290 @@ class SandboxClient:
                 raise SandboxNotRunningError(sandbox_id, sandbox.status)
             time.sleep(2)
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
+
+    def upload_stream(
+        self,
+        sandbox_id: str,
+        dest_path: str,
+        data_iter: Iterable[bytes],
+        compressed: bool = False,
+        strip_components: int = 0,
+        working_dir: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ) -> SandboxUploadResponse:
+        params: Dict[str, Any] = {
+            "dest_path": dest_path,
+            "compressed": str(compressed).lower(),
+            "strip_components": strip_components,
+        }
+        if working_dir:
+            params["working_dir"] = working_dir
+
+        raw_response = self.client.stream_post(
+            f"/sandbox/{sandbox_id}/upload", params=params, data=data_iter, timeout=timeout
+        )
+
+        return SandboxUploadResponse(
+            success=raw_response.get("success", True),
+            message=raw_response.get("message", "Upload completed successfully"),
+            filesUploaded=raw_response.get("filesUploaded"),
+            bytesUploaded=raw_response.get("bytesUploaded"),
+            destPath=dest_path,
+        )
+
+    def upload_file(
+        self,
+        sandbox_id: str,
+        dest_path: str,
+        file_path: str,
+        compressed: bool = False,
+        strip_components: int = 0,
+        working_dir: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ) -> SandboxUploadResponse:
+        """Upload a file by streaming it to the backend.
+
+        Sends Content-Length when available to avoid chunked transfer, which may
+        help some proxies/backends and aligns with the backend's temp-file approach.
+        """
+        import os
+
+        params: Dict[str, Any] = {
+            "dest_path": dest_path,
+            "compressed": str(compressed).lower(),
+            "strip_components": strip_components,
+        }
+        if working_dir:
+            params["working_dir"] = working_dir
+
+        file_size = os.path.getsize(file_path)
+        headers = {"Content-Length": str(file_size)}
+        # Use a real file object so requests/urllib3 can send a proper Content-Length body
+        with open(file_path, "rb") as f:
+            raw_response = self.client.stream_post(
+                f"/sandbox/{sandbox_id}/upload",
+                params=params,
+                data=f,
+                headers=headers,
+                timeout=timeout,
+            )
+
+        return SandboxUploadResponse(
+            success=raw_response.get("success", True),
+            message=raw_response.get("message", "Upload completed successfully"),
+            filesUploaded=raw_response.get("filesUploaded"),
+            bytesUploaded=raw_response.get("bytesUploaded"),
+            destPath=dest_path,
+        )
+
+    def download_stream(
+        self,
+        sandbox_id: str,
+        src_path: str,
+        compress: bool = True,
+        working_dir: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ) -> SandboxDownloadStreamResponse:
+        params: Dict[str, Any] = {"src_path": src_path, "compress": str(compress).lower()}
+        if working_dir:
+            params["working_dir"] = working_dir
+
+        stream_response = self.client.stream_get(
+            f"/sandbox/{sandbox_id}/download", params=params, timeout=timeout
+        )
+
+        return SandboxDownloadStreamResponse(
+            stream=stream_response,
+            srcPath=src_path,
+            compressed=compress,
+            contentType=stream_response.headers.get("content-type"),
+            contentLength=int(stream_response.headers.get("content-length", 0)) or None,
+        )
+
+    def upload_path(
+        self,
+        sandbox_id: str,
+        local_path: str,
+        sandbox_path: str,
+        compress: bool = True,
+        working_dir: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ) -> SandboxUploadResponse:
+        """Upload a local file or directory to a sandbox.
+
+        This is a high-level method that handles:
+        - Creating tar archives for directories
+        - Compression decision based on size
+        - Temporary file management
+        - Cleanup
+
+        Args:
+            sandbox_id: ID of the target sandbox
+            local_path: Local path to file or directory
+            sandbox_path: Destination path in the sandbox
+            compress: Whether to compress (auto-disabled for small files)
+            working_dir: Working directory in the sandbox
+            timeout: Request timeout
+
+        Returns:
+            SandboxUploadResponse with upload details
+        """
+        import os
+        import tarfile
+        import tempfile
+
+        # Auto-disable compression for small files
+        if compress:
+            abs_path = os.path.abspath(local_path)
+            if os.path.exists(abs_path):
+                if os.path.isfile(abs_path):
+                    size = os.path.getsize(abs_path)
+                    if size < 100 * 1024 * 1024:  # 100MB
+                        compress = False
+                else:
+                    # Calculate directory size
+                    total_size = 0
+                    for root, dirs, files in os.walk(abs_path):
+                        for file in files:
+                            try:
+                                total_size += os.path.getsize(os.path.join(root, file))
+                            except (OSError, IOError):
+                                pass
+                    if total_size < 100 * 1024 * 1024:  # 100MB
+                        compress = False
+
+        # Create tar archive
+        temp_file_path = None
+        try:
+            mode = "w:gz" if compress else "w:"
+            with tempfile.NamedTemporaryFile(
+                delete=False, suffix=".tar.gz" if compress else ".tar"
+            ) as tmp:
+                temp_file_path = tmp.name
+
+            with tarfile.open(temp_file_path, mode=mode) as tf:
+                if os.path.isfile(local_path):
+                    # For single files, add with just the filename
+                    tf.add(local_path, arcname=os.path.basename(sandbox_path))
+                else:
+                    # For directories, add the entire directory
+                    base_name = os.path.basename(local_path.rstrip("/"))
+                    tf.add(local_path, arcname=base_name)
+
+            # Upload the archive
+            result = self.upload_file(
+                sandbox_id,
+                sandbox_path,
+                temp_file_path,
+                compressed=compress,
+                working_dir=working_dir,
+                timeout=timeout,
+            )
+
+            return result
+
+        finally:
+            # Clean up temporary file
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.unlink(temp_file_path)
+                except Exception:
+                    pass
+
+    def download_path(
+        self,
+        sandbox_id: str,
+        sandbox_path: str,
+        local_path: str,
+        compress: bool = True,
+        working_dir: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ) -> None:
+        """Download a file or directory from a sandbox to local path.
+
+        This is a high-level method that handles:
+        - Downloading the stream
+        - Extracting tar archives
+        - Temporary file management
+        - Cleanup
+
+        Args:
+            sandbox_id: ID of the source sandbox
+            sandbox_path: Path in the sandbox to download
+            local_path: Local destination path
+            compress: Whether the download is compressed
+            working_dir: Working directory in the sandbox
+            timeout: Request timeout
+        """
+        import os
+        import shutil
+        import tarfile
+        import tempfile
+
+        # Download from sandbox
+        response = self.download_stream(
+            sandbox_id, sandbox_path, compress=compress, working_dir=working_dir, timeout=timeout
+        )
+
+        if response.content_length == 0:
+            raise Exception("No data received from sandbox. The source path may not exist.")
+
+        # Save stream to temp file first
+        temp_file_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                delete=False, suffix=".tar.gz" if compress else ".tar"
+            ) as tmp_file:
+                temp_file_path = tmp_file.name
+
+                total_bytes = 0
+                for chunk in response.stream.iter_content(chunk_size=1024 * 64):
+                    if chunk:
+                        tmp_file.write(chunk)
+                        total_bytes += len(chunk)
+
+            # Ensure destination directory exists
+            dst_abs = os.path.abspath(local_path)
+            if os.path.splitext(sandbox_path)[1] or os.path.splitext(local_path)[1]:
+                # Likely a file
+                os.makedirs(os.path.dirname(dst_abs), exist_ok=True)
+            else:
+                # Likely a directory
+                os.makedirs(dst_abs, exist_ok=True)
+
+            # Extract the archive
+            mode = "r:gz" if compress else "r:"
+            with tarfile.open(temp_file_path, mode=mode) as tf:
+                members = list(tf.getmembers())
+
+                if not members:
+                    raise Exception("Tar archive is empty")
+
+                # Detect if it's a single file or directory
+                is_file = len(members) == 1 and members[0].isfile()
+
+                if is_file:
+                    # Handle single file extraction
+                    if os.path.isdir(dst_abs):
+                        shutil.rmtree(dst_abs)
+
+                    for member in members:
+                        if member.isfile():
+                            with open(dst_abs, "wb") as f:
+                                f.write(tf.extractfile(member).read())
+                            break
+                else:
+                    # Handle directory extraction
+                    for member in members:
+                        # Remove the first component of the path if it exists
+                        if "/" in member.name:
+                            member.name = "/".join(member.name.split("/")[1:])
+                        tf.extract(member, path=dst_abs)
+
+        finally:
+            # Clean up temporary file
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.unlink(temp_file_path)
+                except Exception:
+                    pass

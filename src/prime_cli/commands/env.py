@@ -151,7 +151,7 @@ def list_cmd(
             console.print("No environments found.", style="yellow")
             return
 
-        table = Table(title=f"verifiers Environments (Total: {total})")
+        table = Table(title=f"Environments (Total: {total})")
         table.add_column("Environment", style="cyan")
         table.add_column("Description", style="green")
         table.add_column("Visibility", style="magenta")

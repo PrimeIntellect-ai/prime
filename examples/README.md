@@ -39,6 +39,7 @@ The `sandbox_demo.py` script demonstrates both programmatic and CLI usage of the
 - Retrieving logs
 - Deleting sandboxes
 - Error handling
+- File upload/download
 
 **CLI Usage Examples:**
 - All available sandbox commands
@@ -98,6 +99,15 @@ prime sandbox logs SANDBOX_ID
 
 # Update status from Kubernetes
 prime sandbox status SANDBOX_ID
+
+# Execute command in sandbox
+prime sandbox run SANDBOX_ID COMMAND [--working_dir DIR] [--env KEY=VALUE]
+
+# Copy file/directory to sandbox (upload)
+prime sandbox cp LOCAL_PATH SANDBOX_ID:SANDBOX_PATH [--working_dir DIR] [--no-compress]
+
+# Copy file/directory from sandbox (download)
+prime sandbox cp SANDBOX_ID:SANDBOX_PATH LOCAL_PATH [--working_dir DIR] [--no-compress]
 ```
 
 ## Error Handling

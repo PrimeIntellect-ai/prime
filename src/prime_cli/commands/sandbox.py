@@ -17,6 +17,17 @@ console = Console()
 config = Config()
 
 
+def _obfuscate_env_vars(env_vars: dict) -> dict:
+    """Obfuscate environment variable values for display"""
+    obfuscated = {}
+    for key, value in env_vars.items():
+        if len(value) <= 3:
+            obfuscated[key] = "*" * len(value)
+        else:
+            obfuscated[key] = value[:2] + "*" * (len(value) - 4) + value[-2:]
+    return obfuscated
+
+
 @app.command("list")
 def list_sandboxes_cmd(
     team_id: Optional[str] = typer.Option(None, help="Filter by team ID"),
@@ -138,7 +149,8 @@ def get(sandbox_id: str) -> None:
         table.add_row("Team ID", sandbox.team_id or "Personal")
 
         if sandbox.environment_vars:
-            env_vars = json.dumps(sandbox.environment_vars, indent=2)
+            obfuscated_env = _obfuscate_env_vars(sandbox.environment_vars)
+            env_vars = json.dumps(obfuscated_env, indent=2)
             table.add_row("Environment Variables", env_vars)
 
         if sandbox.advanced_configs:
@@ -234,7 +246,8 @@ def create(
         console.print(f"Timeout: {timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
         if env_vars:
-            console.print(f"Environment Variables: {env_vars}")
+            obfuscated_env = _obfuscate_env_vars(env_vars)
+            console.print(f"Environment Variables: {obfuscated_env}")
 
         if typer.confirm("\nDo you want to create this sandbox?", default=True):
             with console.status("[bold blue]Creating sandbox...", spinner="dots"):
@@ -361,7 +374,8 @@ def run(
         if working_dir:
             console.print(f"[bold blue]Working directory:[/bold blue] {working_dir}")
         if env_vars:
-            console.print(f"[bold blue]Environment:[/bold blue] {env_vars}")
+            obfuscated_env = _obfuscate_env_vars(env_vars)
+            console.print(f"[bold blue]Environment:[/bold blue] {obfuscated_env}")
 
         with console.status("[bold blue]Running command...", spinner="dots"):
             result = sandbox_client.execute_command(

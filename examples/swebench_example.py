@@ -3,7 +3,7 @@
 adapted from https://github.com/SWE-bench/SWE-bench/blob/main/swebench/harness/run_evaluation.py
 """
 from __future__ import annotations
-
+import base64
 import json
 import traceback
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
@@ -53,10 +53,10 @@ GIT_APPLY_CMDS = [
 def pipe_file_content_into_sandbox(
     sandbox_client: SandboxClient, sandbox_id: str, file_path: str, content: str
 ) -> CommandResponse:
-    # Use cat with heredoc to avoid quote issues
-    escaped_content = content.replace("\\", "\\\\").replace("$", "\\$").replace("`", "\\`")
+    # Use base64 encoding to avoid shell parsing issues
+    encoded_content = base64.b64encode(content.encode('utf-8')).decode('ascii')
     return sandbox_client.execute_command(
-        sandbox_id, f"cat > {file_path} << 'EOF'\n{escaped_content}\nEOF"
+        sandbox_id, f"echo '{encoded_content}' | base64 -d > {file_path}"
     )
 
 
@@ -243,6 +243,8 @@ def run_instance(
             working_dir=DOCKER_WORKDIR,
         )
         git_diff_output_after = cmd_response.stdout
+
+        print(sandbox_client.get_logs(sandbox.id))
 
         # Check if git diff changed after running eval script
         logger.info(f"Git diff after:\n{git_diff_output_after}")

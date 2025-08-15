@@ -173,7 +173,9 @@ def create(
     name: Optional[str] = typer.Option(
         None, help="Name for the sandbox (auto-generated if not provided)"
     ),
-    start_command: Optional[str] = typer.Option(None, help="Command to run in the container"),
+    start_command: Optional[str] = typer.Option(
+        "tail -f /dev/null", help="Command to run in the container"
+    ),
     cpu_cores: int = typer.Option(1, help="Number of CPU cores"),
     memory_gb: int = typer.Option(2, help="Memory in GB"),
     disk_size_gb: int = typer.Option(10, help="Disk size in GB"),

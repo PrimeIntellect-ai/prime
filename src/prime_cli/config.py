@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
+from .utils.debug import debug_log
 
 
 class ConfigModel(BaseModel):
@@ -23,6 +24,7 @@ class Config:
     DEFAULT_SSH_KEY_PATH: str = str(Path.home() / ".ssh" / "id_rsa")
 
     def __init__(self) -> None:
+        debug_log("Config constructor called")
         self.config_dir = Path.home() / ".prime"
         self.config_file = self.config_dir / "config.json"
         self.environments_dir = self.config_dir / "environments"

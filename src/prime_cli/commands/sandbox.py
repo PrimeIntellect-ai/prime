@@ -11,6 +11,7 @@ from rich.text import Text
 from ..api.client import APIClient, APIError
 from ..api.sandbox import CreateSandboxRequest, SandboxClient
 from ..config import Config
+from ..utils.debug import debug_log, set_debug_enabled
 from .utils import (
     _expand_home_in_path,
     _parse_cp_arg,
@@ -26,7 +27,6 @@ def _handle_local_to_sandbox(
     source_path: str,
     sandbox_id: str,
     destination_path: str,
-    compress: bool,
     working_dir: Optional[str],
 ) -> None:
     """Handle copying from local to sandbox."""
@@ -37,7 +37,6 @@ def _handle_local_to_sandbox(
     logger.debug(f"   Source path: {source_path}")
     logger.debug(f"   Sandbox ID: {sandbox_id}")
     logger.debug(f"   Destination path: {destination_path}")
-    logger.debug(f"   Compress: {compress}")
     logger.debug(f"   Working dir: {working_dir}")
 
     console.print(
@@ -51,7 +50,6 @@ def _handle_local_to_sandbox(
                 sandbox_id,
                 source_path,
                 destination_path,
-                compress=compress,
                 working_dir=working_dir,
             )
             logger.debug(f"✅ upload_path result: {result}")
@@ -75,27 +73,29 @@ def _handle_sandbox_to_local(
     sandbox_id: str,
     source_path: str,
     destination_path: str,
-    compress: bool,
     working_dir: Optional[str],
 ) -> None:
     """Handle copying from sandbox to local."""
+    debug_log(f"_handle_sandbox_to_local called with sandbox_id={sandbox_id}, source_path={source_path}, destination_path={destination_path}")
+
     console.print(
         f"[blue]Downloading from sandbox {sandbox_id}:{source_path} to {destination_path}...[/blue]"
     )
 
     try:
+        debug_log("About to call sandbox_client.download_path")
         with console.status("[bold blue]Downloading...", spinner="dots"):
             sandbox_client.download_path(
                 sandbox_id,
                 source_path,
                 destination_path,
-                compress=compress,
                 working_dir=working_dir,
             )
 
         console.print(f"[green]Download completed to {destination_path}[/green]")
 
     except Exception as e:
+        debug_log(f"Exception caught in _handle_sandbox_to_local: {e}")
         console.print(f"[red]Download failed:[/red] {e}")
         raise
 
@@ -474,13 +474,13 @@ def run(
 
 @app.command("cp")
 def cp(
+    ctx: typer.Context,
     source: str = typer.Argument(
         ..., help="Source path or <sandbox-id>:<path>", show_default=False
     ),
     destination: str = typer.Argument(
         ..., help="Destination path or <sandbox-id>:<path>", show_default=False
     ),
-    compress: bool = typer.Option(True, help="Use gzip compression"),
     working_dir: Optional[str] = typer.Option(
         None, "-w", "--working-dir", help="Sandbox working dir"
     ),
@@ -492,11 +492,17 @@ def cp(
       prime sandbox cp <sandbox>:/work/out ./localdir
     """
     try:
+        # Set debug flag from context
+        debug_enabled = ctx.obj.get("debug", False) if ctx.obj else False
+        set_debug_enabled(debug_enabled)
+
+        debug_log(f"cp command called with source={source}, destination={destination}")
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
         src_sid, src_path = _parse_cp_arg(source)
         dst_sid, dst_path = _parse_cp_arg(destination)
+        debug_log(f"Parsed args: src_sid={src_sid}, src_path={src_path}, dst_sid={dst_sid}, dst_path={dst_path}")
 
         # Expand $HOME in sandbox paths for user convenience
         if src_sid is not None:
@@ -511,14 +517,14 @@ def cp(
         # Local -> Sandbox
         if src_sid is None and dst_sid is not None:
             _handle_local_to_sandbox(
-                sandbox_client, src_path, dst_sid, dst_path, compress, working_dir
+                sandbox_client, src_path, dst_sid, dst_path, working_dir
             )
             return
 
         # Sandbox -> Local
         if src_sid is not None and dst_sid is None:
             _handle_sandbox_to_local(
-                sandbox_client, src_sid, src_path, dst_path, compress, working_dir
+                sandbox_client, src_sid, src_path, dst_path, working_dir
             )
             return
 

@@ -25,18 +25,16 @@ app.add_typer(env_app, name="env")
 def callback(
     ctx: typer.Context,
     version_flag: bool = typer.Option(False, "--version", "-v", help="Show version and exit"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
 ) -> None:
     """Prime Intellect CLI"""
-    if verbose:
-        import logging
-        logging.basicConfig(level=logging.DEBUG)
-        logging.getLogger().setLevel(logging.DEBUG)
-        print("🔍 Verbose logging enabled")
-
     if version_flag:
         typer.echo(f"Prime CLI version: {__version__}")
         raise typer.Exit()
+
+    # Store debug flag in context for subcommands to access
+    ctx.obj = {"debug": debug}
+
     if ctx.invoked_subcommand is None:
         ctx.get_help()
 

@@ -3,6 +3,7 @@ from typing import Any, Dict, Iterable, Optional
 import requests
 
 from ..config import Config
+from ..utils.debug import debug_log
 
 
 class APIError(Exception):
@@ -31,6 +32,7 @@ class TimeoutError(APIError):
 
 class APIClient:
     def __init__(self, api_key: Optional[str] = None, require_auth: bool = True):
+        debug_log("APIClient constructor called")
         # Load config
         self.config = Config()
 

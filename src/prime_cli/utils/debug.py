@@ -1,7 +1,6 @@
 """Debug logging utility for prime-cli."""
 
 
-
 class DebugLogger:
     """Simple debug logger that respects the global debug flag."""
 

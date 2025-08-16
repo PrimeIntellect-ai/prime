@@ -2,6 +2,7 @@
 """
 adapted from https://github.com/SWE-bench/SWE-bench/blob/main/swebench/harness/run_evaluation.py
 """
+
 from __future__ import annotations
 
 import base64
@@ -170,9 +171,7 @@ def run_instance(
                 )
         if not applied_patch:
             logger.info(
-                f"{APPLY_PATCH_FAIL}:\n"
-                f"stdout: {cmd_response.stdout}\n"
-                f"stderr: {cmd_response.stderr}"
+                f"{APPLY_PATCH_FAIL}:\nstdout: {cmd_response.stdout}\nstderr: {cmd_response.stderr}"
             )
             raise EvaluationError(
                 instance_id,

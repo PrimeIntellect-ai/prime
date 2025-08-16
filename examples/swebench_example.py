@@ -125,18 +125,13 @@ def run_instance(
             CreateSandboxRequest(
                 name=f"swebench-{instance_id}",
                 docker_image=test_spec.instance_image_key,
-                start_command="tail -f /dev/null",
+                start_command="sleep infinity",
                 cpu_cores=1,
                 memory_gb=2,
-                timeout_minutes=120,  # 2 hours to avoid timeout during demo
             )
         )
         sandbox_client.wait_for_sandbox(sandbox.id, max_attempts=180)
         logger.info(f"Sandbox for {instance_id} started: {sandbox.id}")
-        cmd_response = sandbox_client.execute_command(
-            sandbox.id,
-            "git config --global --add safe.directory /testbed",
-        )
 
         # Copy model prediction as patch file to container
         patch_file = Path(log_dir / "patch.diff")
@@ -145,7 +140,6 @@ def run_instance(
             f"Intermediate patch for {instance_id} written to {patch_file}, "
             f"now applying to container..."
         )
-        logger.info(f"patch_file: \n{patch_file.read_text()}")
 
         # pipe predicted patch into sandbox
         cmd_response = pipe_file_content_into_sandbox(
@@ -199,47 +193,32 @@ def run_instance(
         eval_file = Path(log_dir / "eval.sh")
         eval_file.write_text(test_spec.eval_script)
         logger.info(
-            f"Eval script for {instance_id} written to {eval_file}; copying to container..."
+            f"Eval script for {instance_id} written to {eval_file}; copying to sandbox..."
         )
-        logger.info(f"\n{eval_file.read_text()}")
+        eval_file = Path(log_dir / "eval.sh")
 
         # pipe eval script into sandbox
         cmd_response = pipe_file_content_into_sandbox(
             sandbox_client=sandbox_client,
             sandbox_id=sandbox.id,
-            file_path="/testbed/eval.sh",
+            file_path="/eval.sh",
             content=eval_file.read_text(),
         )
-        # logger.info(
-        #     f"pipe_file_content_into_sandbox: \n"
-        #     f"stdout: \n{cmd_response.stdout}\n"
-        #     f"stderr: \n{cmd_response.stderr}"
-        # )
-
-        # ls_response = sandbox_client.execute_command(
-        #     sandbox_id=sandbox.id,
-        #     command="ls -lah /tmp",
-        # working_dir=DOCKER_WORKDIR,
-        # )
-        # logger.info(f"ls -lah: stdout: \n{ls_response.stdout}\nstderr: \n{ls_response.stderr}")
 
         # Run eval script, write output to logs
         cmd_response = sandbox_client.execute_command(
             sandbox_id=sandbox.id,
-            command="/bin/bash /testbed/eval.sh > /testbed/test_output.txt 2>&1",
-            # working_dir=DOCKER_WORKDIR,
-            env={"PYTHONUNBUFFERED": "0"},
+            command="/bin/bash /eval.sh > /test_output.txt 2>&1",
         )
 
         # Get test output
         cmd_response = sandbox_client.execute_command(
             sandbox_id=sandbox.id,
-            command="cat /testbed/test_output.txt",
+            command="cat /test_output.txt",
         )
 
         test_output_path = log_dir / LOG_TEST_OUTPUT
         test_output = cmd_response.stdout + "\n" + cmd_response.stderr
-        logger.info(f"test_output: stdout: \n{test_output}\nstderr: \n{cmd_response.stderr}")
         with open(test_output_path, "w") as f:
             f.write(test_output)
             logger.info(f"Test output for {instance_id} written to {test_output_path}")
@@ -252,10 +231,8 @@ def run_instance(
         )
         git_diff_output_after = cmd_response.stdout
 
-        print(sandbox_client.get_logs(sandbox.id))
-
         # Check if git diff changed after running eval script
-        logger.info(f"Git diff after:\n{git_diff_output_after}")
+        git_diff_output_after = cmd_response.stdout
         if git_diff_output_after != git_diff_output_before:
             logger.info("Git diff changed after running eval script")
 
@@ -348,8 +325,9 @@ def run_instances(
     # run instances in parallel
     print(f"Running {len(instances)} instances...")
     # run_threadpool(run_instance, payloads, max_workers)
-    # run_instance(*payloads[0])
-    run_instance(*payloads[1])
+    # TODO: revert to parallel run, after sandbox concurrency is fixed
+    for payload in payloads:
+        run_instance(*payload)
     print("All instances run.")
 
 

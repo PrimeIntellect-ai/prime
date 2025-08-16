@@ -16,7 +16,7 @@ uv pip install -e ".[swebench]"
 
 ### Usage
 
-The script accepts the a subset of arguments from the SWE-bench run_evaluation script.
+The script accepts a subset of arguments from the SWE-bench run_evaluation script.
 
 ```bash
 python examples/swebench_example.py \

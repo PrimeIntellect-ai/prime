@@ -3,6 +3,7 @@
 adapted from https://github.com/SWE-bench/SWE-bench/blob/main/swebench/harness/run_evaluation.py
 """
 from __future__ import annotations
+
 import base64
 import json
 import traceback
@@ -39,8 +40,8 @@ from swebench.harness.utils import (
     get_predictions_from_file,
     load_swebench_dataset,
     optional_str,
+    run_threadpool,  # noqa
     str2bool,
-    run_threadpool,
 )
 
 GIT_APPLY_CMDS = [
@@ -54,7 +55,7 @@ def pipe_file_content_into_sandbox(
     sandbox_client: SandboxClient, sandbox_id: str, file_path: str, content: str
 ) -> CommandResponse:
     # Use base64 encoding to avoid shell parsing issues
-    encoded_content = base64.b64encode(content.encode('utf-8')).decode('ascii')
+    encoded_content = base64.b64encode(content.encode("utf-8")).decode("ascii")
     return sandbox_client.execute_command(
         sandbox_id, f"echo '{encoded_content}' | base64 -d > {file_path}"
     )
@@ -130,7 +131,7 @@ def run_instance(
                 memory_gb=2,
             )
         )
-        sandbox_client.wait_for_sandbox(sandbox.id, max_attempts=180)
+        sandbox_client.wait_for_creation(sandbox.id, max_attempts=180)
         logger.info(f"Sandbox for {instance_id} started: {sandbox.id}")
 
         # Copy model prediction as patch file to container
@@ -192,9 +193,7 @@ def run_instance(
 
         eval_file = Path(log_dir / "eval.sh")
         eval_file.write_text(test_spec.eval_script)
-        logger.info(
-            f"Eval script for {instance_id} written to {eval_file}; copying to sandbox..."
-        )
+        logger.info(f"Eval script for {instance_id} written to {eval_file}; copying to sandbox...")
         eval_file = Path(log_dir / "eval.sh")
 
         # pipe eval script into sandbox

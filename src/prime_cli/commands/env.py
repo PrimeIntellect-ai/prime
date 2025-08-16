@@ -17,7 +17,7 @@ from rich.table import Table
 
 from ..api.client import APIClient, APIError
 
-app = typer.Typer(help="Manage verifier environments")
+app = typer.Typer(help="Manage verifiers environments")
 console = Console()
 
 # Constants
@@ -127,7 +127,7 @@ def list_cmd(
         None, "--visibility", help="Filter by visibility (PUBLIC/PRIVATE)"
     ),
 ) -> None:
-    """List available verifier environments"""
+    """List available verifiers environments"""
     try:
         client = APIClient(require_auth=False)
 
@@ -150,7 +150,7 @@ def list_cmd(
             console.print("No environments found.", style="yellow")
             return
 
-        table = Table(title=f"Verifier Environments (Total: {total})")
+        table = Table(title=f"Environments (Total: {total})")
         table.add_column("Environment", style="cyan")
         table.add_column("Description", style="green")
         table.add_column("Visibility", style="magenta")
@@ -524,7 +524,7 @@ def init(
         False, "--rewrite-readme", help="Overwrite README.md with template if it already exists"
     ),
 ) -> None:
-    """Initialize a new verifier environment from template"""
+    """Initialize a new verifiers environment from template"""
     try:
         # this import is slow, so we do it inside the command
         from verifiers.scripts.init import init_environment
@@ -894,7 +894,7 @@ def install(
         help="Package manager to use (uv or pip)",
     ),
 ) -> None:
-    """Install a verifier environment
+    """Install a verifiers environment
 
     Examples:
         prime env install owner/environment

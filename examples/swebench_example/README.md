@@ -1,7 +1,7 @@
 # Prime SWE-bench Example
 
 This directory contains an example script to run SWE-bench with Prime sandboxes.
-Each sandbox runs execution based verification of predicted patches. I.e. it runs the original test suite of the target repository with a Docker image specific to every example.
+Each sandbox runs execution based verification of predicted patches. I.e. it runs the original test suite of the patched repository with a Docker image specific to every example.
 
 ### Prerequisites
 

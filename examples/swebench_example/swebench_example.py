@@ -131,7 +131,7 @@ def run_instance(
                 ),  # don't infer architecture from local machine
                 start_command="sleep infinity",
                 cpu_cores=1,
-                memory_gb=2,
+                memory_gb=4,
             )
         )
         sandbox_client.wait_for_creation(sandbox.id, max_attempts=180)

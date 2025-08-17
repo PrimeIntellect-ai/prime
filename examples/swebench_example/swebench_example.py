@@ -324,10 +324,7 @@ def run_instances(
 
     # run instances in parallel
     print(f"Running {len(instances)} instances...")
-    # run_threadpool(run_instance, payloads, max_workers)
-    # TODO: revert to parallel run, after sandbox concurrency is fixed
-    for payload in payloads:
-        run_instance(*payload)
+    run_threadpool(run_instance, payloads, max_workers)
     print("All instances run.")
 
 

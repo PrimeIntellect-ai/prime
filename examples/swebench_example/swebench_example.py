@@ -126,7 +126,9 @@ def run_instance(
         sandbox = sandbox_client.create(
             CreateSandboxRequest(
                 name=f"swebench-{instance_id}",
-                docker_image=test_spec.instance_image_key,
+                docker_image=test_spec.instance_image_key.replace(
+                    "arm64", "x86_64"
+                ),  # don't infer architecture from local machine
                 start_command="sleep infinity",
                 cpu_cores=1,
                 memory_gb=2,

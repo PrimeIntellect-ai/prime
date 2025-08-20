@@ -771,14 +771,45 @@ def info(
         console.print()
 
         # Display key installation commands based on availability
-        if wheel_url:
+        simple_index_url = details.get("simple_index_url")
+        if wheel_url or simple_index_url:
             normalized_name = normalize_package_name(name)
 
             console.print("[bold yellow]Install (choose one)[/bold yellow]")
             console.print(f"  [green]$[/green] prime env install {owner}/{name}@{target_version}")
-            console.print(f"  [green]$[/green] uv pip install {wheel_url}")
-            console.print(f"  [green]$[/green] uv add {normalized_name}@{wheel_url}")
-            console.print(f"  [green]$[/green] pip install {wheel_url}")
+
+            # Use simple index if available, otherwise fall back to wheel URL
+            if simple_index_url:
+                # For versioned installs, show package name with version specification
+                if target_version and target_version != "latest":
+                    console.print(
+                        f"  [green]$[/green] uv pip install {normalized_name}=={target_version} "
+                        f"--extra-index-url {simple_index_url}"
+                    )
+                    console.print(
+                        f"  [green]$[/green] uv add {normalized_name}=={target_version} "
+                        f"--index {simple_index_url}"
+                    )
+                    console.print(
+                        f"  [green]$[/green] pip install {normalized_name}=={target_version} "
+                        f"--extra-index-url {simple_index_url}"
+                    )
+                else:
+                    console.print(
+                        f"  [green]$[/green] uv pip install {normalized_name} "
+                        f"--extra-index-url {simple_index_url}"
+                    )
+                    console.print(
+                        f"  [green]$[/green] uv add {normalized_name} --index {simple_index_url}"
+                    )
+                    console.print(
+                        f"  [green]$[/green] pip install {normalized_name} "
+                        f"--extra-index-url {simple_index_url}"
+                    )
+            elif wheel_url:
+                console.print(f"  [green]$[/green] uv pip install {wheel_url}")
+                console.print(f"  [green]$[/green] uv add {normalized_name}@{wheel_url}")
+                console.print(f"  [green]$[/green] pip install {wheel_url}")
 
             console.print()
             console.print("[bold yellow]Usage[/bold yellow]")
@@ -940,23 +971,26 @@ def install(
             console.print(f"[red]Failed to get environment details: {e}[/red]")
             raise typer.Exit(1)
 
-        # Process wheel URL
+        # Get both simple index URL and wheel URL
+        simple_index_url = details.get("simple_index_url")
         wheel_url = process_wheel_url(details.get("wheel_url"))
 
-        # Check if this is a private environment without a direct wheel URL
-        if not wheel_url and details.get("visibility") == "PRIVATE":
+        # Check if this is a private environment
+        if not simple_index_url and not wheel_url and details.get("visibility") == "PRIVATE":
             console.print(
                 "[yellow]Private environment detected. Using authenticated download.[/yellow]"
             )
             console.print(
-                "[red]Direct wheel installation not available for private environments.[/red]\n"
+                "[red]Direct installation not available for private environments.[/red]\n"
                 "Please use one of these alternatives:\n"
                 "  1. Use 'prime env pull' to download and install locally\n"
                 "  2. Make the environment public to enable direct installation"
             )
             raise typer.Exit(1)
-        elif not wheel_url:
-            console.print("[red]Error: No wheel file available for this environment.[/red]")
+        elif not simple_index_url and not wheel_url:
+            console.print(
+                "[red]Error: No installation method available for this environment.[/red]"
+            )
             console.print(
                 "Use 'prime env info' to see available options or 'pull' to download source."
             )
@@ -964,11 +998,57 @@ def install(
 
         console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
 
-        # Generate and execute install command
-        try:
-            cmd_parts = get_install_command(with_tool, wheel_url)
-        except ValueError as e:
-            console.print(f"[red]Error: {e}[/red]")
+        # Generate install command preferring simple index over wheel URL
+        normalized_name = normalize_package_name(name)
+
+        if simple_index_url:
+            # Prefer simple index approach
+            if with_tool == "uv":
+                if target_version and target_version != "latest":
+                    cmd_parts = [
+                        "uv",
+                        "pip",
+                        "install",
+                        f"{normalized_name}=={target_version}",
+                        "--extra-index-url",
+                        simple_index_url,
+                    ]
+                else:
+                    cmd_parts = [
+                        "uv",
+                        "pip",
+                        "install",
+                        normalized_name,
+                        "--extra-index-url",
+                        simple_index_url,
+                    ]
+            else:  # pip
+                if target_version and target_version != "latest":
+                    cmd_parts = [
+                        "pip",
+                        "install",
+                        f"{normalized_name}=={target_version}",
+                        "--extra-index-url",
+                        simple_index_url,
+                    ]
+                else:
+                    cmd_parts = [
+                        "pip",
+                        "install",
+                        normalized_name,
+                        "--extra-index-url",
+                        simple_index_url,
+                    ]
+        elif wheel_url:
+            # Fall back to wheel URL if simple index not available
+            try:
+                cmd_parts = get_install_command(with_tool, wheel_url)
+            except ValueError as e:
+                console.print(f"[red]Error: {e}[/red]")
+                raise typer.Exit(1)
+        else:
+            # Should not reach here due to earlier checks, but just in case
+            console.print("[red]Error: No installation method available.[/red]")
             raise typer.Exit(1)
 
         # Check if tool is installed

@@ -15,11 +15,30 @@ from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.client import APIClient, APIError
 from ..api.pods import PodsClient
 from ..config import Config
+from ..utils import confirm_or_skip, output_data_as_json, validate_output_format
 from ..helper.short_id import generate_short_id
 
 app = typer.Typer(help="Manage compute pods")
 console = Console()
 config = Config()
+
+
+def _format_pod_for_list(pod) -> Dict[str, Any]:
+    """Format pod data for list display (both table and JSON)"""
+    display_status = pod.status
+    if pod.status == "ACTIVE" and pod.installation_status != "FINISHED":
+        display_status = "INSTALLING"
+    
+    created_at = datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
+    created_str = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    
+    return {
+        "id": pod.id,
+        "name": pod.name,
+        "gpu": f"{pod.gpu_type} x{pod.gpu_count}",
+        "status": display_status,
+        "created": created_str,
+    }
 
 
 def format_ip_display(ip: Optional[Union[str, List[str]]]) -> str:
@@ -37,8 +56,15 @@ def list(
     limit: int = typer.Option(100, help="Maximum number of pods to list"),
     offset: int = typer.Option(0, help="Number of pods to skip"),
     watch: bool = typer.Option(False, "--watch", "-w", help="Watch pods list in real-time"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List your running pods"""
+    validate_output_format(output, console)
+    
+    if watch and output == "json":
+        console.print("[red]Error: --watch mode is not compatible with --output=json[/red]")
+        raise typer.Exit(1)
+    
     try:
         # Create API clients
         base_client = APIClient()
@@ -59,44 +85,48 @@ def list(
                 if watch:
                     os.system("cls" if os.name == "nt" else "clear")
 
-                # Create display table
-                table = Table(
-                    title=f"Compute Pods (Total: {pods_list.total_count})",
-                    show_lines=True,
-                )
-                table.add_column("ID", style="cyan", no_wrap=True)
-                table.add_column("Name", style="blue")
-                table.add_column("GPU", style="green")
-                table.add_column("Status", style="yellow")
-                table.add_column("Created", style="blue")
-
-                # Add rows for each pod
-                for pod in pods_list.data:
-                    # Format status with color
-                    display_status = pod.status
-                    if pod.status == "ACTIVE" and pod.installation_status != "FINISHED":
-                        display_status = "INSTALLING"
-
-                    status_color = {
-                        "ACTIVE": "green",
-                        "PENDING": "yellow",
-                        "ERROR": "red",
-                        "INSTALLING": "yellow",
-                    }.get(display_status, "white")
-
-                    # Format created time
-                    created_at = datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
-                    created_str = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-
-                    table.add_row(
-                        pod.id,
-                        pod.name or "N/A",
-                        f"{pod.gpu_type} x{pod.gpu_count}",
-                        Text(display_status, style=status_color),
-                        created_str,
+                if output == "json":
+                    # Output as JSON using shared formatting
+                    pods_data = [_format_pod_for_list(pod) for pod in pods_list.data]
+                    output_data = {
+                        "pods": pods_data,
+                        "total_count": pods_list.total_count,
+                        "offset": offset,
+                        "limit": limit,
+                    }
+                    output_data_as_json(output_data, console)
+                else:
+                    # Create display table
+                    table = Table(
+                        title=f"Compute Pods (Total: {pods_list.total_count})",
+                        show_lines=True,
                     )
+                    table.add_column("ID", style="cyan", no_wrap=True)
+                    table.add_column("Name", style="blue")
+                    table.add_column("GPU", style="green")
+                    table.add_column("Status", style="yellow")
+                    table.add_column("Created", style="blue")
 
-                console.print(table)
+                    # Add rows for each pod using shared formatting
+                    for pod in pods_list.data:
+                        pod_data = _format_pod_for_list(pod)
+                        
+                        status_color = {
+                            "ACTIVE": "green",
+                            "PENDING": "yellow",
+                            "ERROR": "red",
+                            "INSTALLING": "yellow",
+                        }.get(pod_data["status"], "white")
+
+                        table.add_row(
+                            pod_data["id"],
+                            pod_data["name"] or "N/A",
+                            pod_data["gpu"],
+                            Text(pod_data["status"], style=status_color),
+                            pod_data["created"],
+                        )
+
+                    console.print(table)
 
                 # Update hash after displaying
             if not watch:
@@ -634,7 +664,7 @@ def create(
             console.print(f"provider: {pod_config['provider']['type']}")
         console.print(f"team: {team_id}")
 
-        if yes or typer.confirm("\nDo you want to create this pod?", default=True):
+        if confirm_or_skip("\nDo you want to create this pod?", yes, default=True):
             try:
                 # Create the pod with loading animation
                 with console.status("[bold blue]Creating pod...", spinner="dots"):
@@ -675,7 +705,7 @@ def terminate(
         pods_client = PodsClient(base_client)
 
         # Confirm termination
-        if not yes and not typer.confirm(f"Are you sure you want to terminate pod {pod_id}?"):
+        if not confirm_or_skip(f"Are you sure you want to terminate pod {pod_id}?", yes):
             console.print("Termination cancelled")
             raise typer.Exit(0)
 

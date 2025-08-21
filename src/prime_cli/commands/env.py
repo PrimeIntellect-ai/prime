@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ..api.client import APIClient, APIError
+from ..utils import confirm_or_skip, output_data_as_json, validate_output_format
 
 app = typer.Typer(help="Manage verifiers environments")
 console = Console()
@@ -121,13 +122,16 @@ def list_cmd(
     limit: int = typer.Option(
         DEFAULT_LIST_LIMIT, "--limit", "-l", help="Number of environments to show"
     ),
-    offset: int = typer.Option(0, "--offset", "-o", help="Number of environments to skip"),
+    offset: int = typer.Option(0, "--offset", help="Number of environments to skip"),
     owner: Optional[str] = typer.Option(None, "--owner", help="Filter by owner name"),
     visibility: Optional[str] = typer.Option(
         None, "--visibility", help="Filter by visibility (PUBLIC/PRIVATE)"
     ),
+    output: str = typer.Option("table", "--output", help="Output format: table or json"),
 ) -> None:
     """List available verifiers environments"""
+    validate_output_format(output, console)
+    
     try:
         client = APIClient(require_auth=False)
 
@@ -147,28 +151,52 @@ def list_cmd(
         total = result.get("total_count", result.get("total", 0))
 
         if not environments:
-            console.print("No environments found.", style="yellow")
+            if output == "json":
+                output_data_as_json({"environments": [], "total": 0, "offset": offset, "limit": limit}, console)
+            else:
+                console.print("No environments found.", style="yellow")
             return
 
-        table = Table(title=f"Environments (Total: {total})")
-        table.add_column("Environment", style="cyan")
-        table.add_column("Description", style="green")
-        table.add_column("Visibility", style="magenta")
+        if output == "json":
+            # Format environments for JSON output
+            env_data = []
+            for env in environments:
+                owner_name = env["owner"]["name"]
+                env_name = env["name"]
+                env_data.append({
+                    "environment": f"{owner_name}/{env_name}",
+                    "description": env.get("description", ""),
+                    "visibility": env.get("visibility", ""),
+                })
+            
+            output_data = {
+                "environments": env_data,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+            }
+            output_data_as_json(output_data, console)
+        else:
+            # Table output
+            table = Table(title=f"Environments (Total: {total})")
+            table.add_column("Environment", style="cyan")
+            table.add_column("Description", style="green")
+            table.add_column("Visibility", style="magenta")
 
-        for env in environments:
-            owner_name = env["owner"]["name"]
-            env_name = env["name"]
-            env_id = f"{owner_name}/{env_name}"
-            description = env.get("description", "")
-            visibility = env.get("visibility", "")
-            table.add_row(env_id, description, visibility)
+            for env in environments:
+                owner_name = env["owner"]["name"]
+                env_name = env["name"]
+                env_id = f"{owner_name}/{env_name}"
+                description = env.get("description", "")
+                visibility = env.get("visibility", "")
+                table.add_row(env_id, description, visibility)
 
-        console.print(table)
+            console.print(table)
 
-        remaining = total - (offset + len(environments))
-        if remaining > 0:
-            next_offset = offset + limit
-            console.print(f"\n[dim]Use --offset {next_offset} to see the next environments.[/dim]")
+            remaining = total - (offset + len(environments))
+            if remaining > 0:
+                next_offset = offset + limit
+                console.print(f"\n[dim]Use --offset {next_offset} to see the next environments.[/dim]")
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")

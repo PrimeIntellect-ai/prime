@@ -12,6 +12,7 @@ from rich.text import Text
 from ..api.client import APIClient, APIError
 from ..api.sandbox import CreateSandboxRequest, Sandbox, SandboxClient
 from ..config import Config
+from ..utils import confirm_or_skip, output_data_as_json, validate_output_format
 
 app = typer.Typer(help="Manage code sandboxes")
 console = Console()
@@ -108,11 +109,7 @@ def list_sandboxes_cmd(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List your sandboxes (excludes terminated by default)"""
-    if output not in ["table", "json"]:
-        console.print(
-            f"[red]Error: Invalid output format '{output}'. Supported formats: table, json[/red]"
-        )
-        raise typer.Exit(1)
+    validate_output_format(output, console)
 
     try:
         base_client = APIClient()
@@ -153,7 +150,7 @@ def list_sandboxes_cmd(
                 "per_page": sandbox_list.per_page,
                 "has_next": sandbox_list.has_next,
             }
-            console.print(json.dumps(output_data, indent=2))
+            output_data_as_json(output_data, console)
         else:
             # Output as table using shared formatting
             for sandbox in sorted_sandboxes:
@@ -199,11 +196,7 @@ def get(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Get detailed information about a specific sandbox"""
-    if output not in ["table", "json"]:
-        console.print(
-            f"[red]Error: Invalid output format '{output}'. Supported formats: table, json[/red]"
-        )
-        raise typer.Exit(1)
+    validate_output_format(output, console)
 
     try:
         base_client = APIClient()
@@ -214,7 +207,7 @@ def get(
         if output == "json":
             # Output as JSON using shared formatting
             sandbox_data = _format_sandbox_for_details(sandbox)
-            console.print(json.dumps(sandbox_data, indent=2))
+            output_data_as_json(sandbox_data, console)
         else:
             # Output as table using shared formatting
             sandbox_data = _format_sandbox_for_details(sandbox)
@@ -357,7 +350,7 @@ def create(
             obfuscated_env = _obfuscate_env_vars(env_vars)
             console.print(f"Environment Variables: {obfuscated_env}")
 
-        if yes or typer.confirm("\nDo you want to create this sandbox?", default=True):
+        if confirm_or_skip("\nDo you want to create this sandbox?", yes, default=True):
             with console.status("[bold blue]Creating sandbox...", spinner="dots"):
                 sandbox = sandbox_client.create(request)
 
@@ -387,7 +380,7 @@ def delete(
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        if not yes and not typer.confirm(f"Are you sure you want to delete sandbox {sandbox_id}?"):
+        if not confirm_or_skip(f"Are you sure you want to delete sandbox {sandbox_id}?", yes):
             console.print("Delete cancelled")
             raise typer.Exit(0)
 

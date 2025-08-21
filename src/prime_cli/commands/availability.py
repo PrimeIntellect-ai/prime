@@ -209,9 +209,7 @@ def list(
 
         if output == "json":
             # Output as JSON using shared formatting
-            json_data = [
-                _format_availability_for_display(gpu_entry) for gpu_entry in filtered_gpus
-            ]
+            json_data = [_format_availability_for_display(gpu_entry) for gpu_entry in filtered_gpus]
             output_data = {
                 "gpu_resources": json_data,
                 "total_count": len(json_data),

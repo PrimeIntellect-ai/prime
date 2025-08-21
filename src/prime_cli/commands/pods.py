@@ -13,7 +13,7 @@ from rich.text import Text
 
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.client import APIClient, APIError
-from ..api.pods import PodsClient, Pod, PodStatus
+from ..api.pods import Pod, PodsClient, PodStatus
 from ..config import Config
 from ..helper.short_id import generate_short_id
 from ..utils import (

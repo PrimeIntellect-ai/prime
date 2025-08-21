@@ -1,6 +1,7 @@
 import json
 import random
 import string
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import typer
@@ -26,6 +27,28 @@ def _obfuscate_env_vars(env_vars: dict) -> dict:
         else:
             obfuscated[key] = value[:2] + "*" * (len(value) - 4) + value[-2:]
     return obfuscated
+
+
+def _format_age(created_at: datetime) -> str:
+    """Format time difference as human-readable age (like kubectl)"""
+    now = datetime.now(timezone.utc)
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    
+    diff = now - created_at
+    total_seconds = int(diff.total_seconds())
+    
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    elif total_seconds < 3600:
+        minutes = total_seconds // 60
+        return f"{minutes}m"
+    elif total_seconds < 86400:
+        hours = total_seconds // 3600
+        return f"{hours}h"
+    else:
+        days = total_seconds // 86400
+        return f"{days}d"
 
 
 @app.command("list")
@@ -61,9 +84,12 @@ def list_sandboxes_cmd(
         table.add_column("Image", style="green")
         table.add_column("Status", style="yellow")
         table.add_column("Resources", style="magenta")
-        table.add_column("Created", style="blue")
+        table.add_column("Age", style="blue")
 
-        for sandbox in sandbox_list.sandboxes:
+        # Sort sandboxes by created_at (oldest first)
+        sorted_sandboxes = sorted(sandbox_list.sandboxes, key=lambda s: s.created_at)
+
+        for sandbox in sorted_sandboxes:
             status_color = {
                 "PENDING": "yellow",
                 "PROVISIONING": "yellow",
@@ -73,7 +99,7 @@ def list_sandboxes_cmd(
                 "TERMINATED": "red",
             }.get(sandbox.status, "white")
 
-            created_at = sandbox.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            age = _format_age(sandbox.created_at)
 
             resources = f"{sandbox.cpu_cores}CPU/{sandbox.memory_gb}GB"
             if sandbox.gpu_count > 0:
@@ -85,7 +111,7 @@ def list_sandboxes_cmd(
                 sandbox.docker_image,
                 Text(sandbox.status, style=status_color),
                 resources,
-                created_at,
+                age,
             )
 
         console.print(table)
@@ -186,6 +212,7 @@ def create(
         None,
         help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
     ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Create a new sandbox"""
     try:
@@ -251,7 +278,7 @@ def create(
             obfuscated_env = _obfuscate_env_vars(env_vars)
             console.print(f"Environment Variables: {obfuscated_env}")
 
-        if typer.confirm("\nDo you want to create this sandbox?", default=True):
+        if yes or typer.confirm("\nDo you want to create this sandbox?", default=True):
             with console.status("[bold blue]Creating sandbox...", spinner="dots"):
                 sandbox = sandbox_client.create(request)
 
@@ -272,13 +299,16 @@ def create(
 
 
 @app.command()
-def delete(sandbox_id: str) -> None:
+def delete(
+    sandbox_id: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
     """Delete a sandbox"""
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        if not typer.confirm(f"Are you sure you want to delete sandbox {sandbox_id}?"):
+        if not yes and not typer.confirm(f"Are you sure you want to delete sandbox {sandbox_id}?"):
             console.print("Delete cancelled")
             raise typer.Exit(0)
 

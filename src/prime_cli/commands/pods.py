@@ -277,6 +277,7 @@ def create(
         help="Environment variables to set in the pod. Can be specified multiple times "
         "using --env KEY=value --env KEY2=value2",
     ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Create a new pod with an interactive setup process"""
     env_vars = []
@@ -633,7 +634,7 @@ def create(
             console.print(f"provider: {pod_config['provider']['type']}")
         console.print(f"team: {team_id}")
 
-        if typer.confirm("\nDo you want to create this pod?", default=True):
+        if yes or typer.confirm("\nDo you want to create this pod?", default=True):
             try:
                 # Create the pod with loading animation
                 with console.status("[bold blue]Creating pod...", spinner="dots"):
@@ -664,14 +665,17 @@ def create(
 
 
 @app.command()
-def terminate(pod_id: str) -> None:
+def terminate(
+    pod_id: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
     """Terminate a pod"""
     try:
         base_client = APIClient()
         pods_client = PodsClient(base_client)
 
         # Confirm termination
-        if not typer.confirm(f"Are you sure you want to terminate pod {pod_id}?"):
+        if not yes and not typer.confirm(f"Are you sure you want to terminate pod {pod_id}?"):
             console.print("Termination cancelled")
             raise typer.Exit(0)
 

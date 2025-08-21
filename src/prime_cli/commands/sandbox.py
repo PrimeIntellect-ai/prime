@@ -34,10 +34,10 @@ def _format_age(created_at: datetime) -> str:
     now = datetime.now(timezone.utc)
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=timezone.utc)
-    
+
     diff = now - created_at
     total_seconds = int(diff.total_seconds())
-    
+
     if total_seconds < 60:
         return f"{total_seconds}s"
     elif total_seconds < 3600:
@@ -56,7 +56,7 @@ def _format_sandbox_for_list(sandbox) -> dict:
     resources = f"{sandbox.cpu_cores}CPU/{sandbox.memory_gb}GB"
     if sandbox.gpu_count > 0:
         resources += f"/{sandbox.gpu_count}GPU"
-    
+
     return {
         "id": sandbox.id,
         "name": sandbox.name,
@@ -85,7 +85,7 @@ def _format_sandbox_for_details(sandbox) -> dict:
         "user_id": sandbox.user_id,
         "team_id": sandbox.team_id,
     }
-    
+
     if sandbox.started_at:
         data["started_at"] = sandbox.started_at.strftime("%Y-%m-%d %H:%M:%S UTC")
     if sandbox.terminated_at:
@@ -94,7 +94,7 @@ def _format_sandbox_for_details(sandbox) -> dict:
         data["environment_vars"] = _obfuscate_env_vars(sandbox.environment_vars)
     if sandbox.advanced_configs:
         data["advanced_configs"] = sandbox.advanced_configs.model_dump()
-        
+
     return data
 
 
@@ -152,7 +152,7 @@ def list_sandboxes_cmd(
             # Output as table using shared formatting
             for sandbox in sorted_sandboxes:
                 sandbox_data = _format_sandbox_for_list(sandbox)
-                
+
                 status_color = {
                     "PENDING": "yellow",
                     "PROVISIONING": "yellow",
@@ -206,7 +206,7 @@ def get(
         else:
             # Output as table using shared formatting
             sandbox_data = _format_sandbox_for_details(sandbox)
-            
+
             table = Table(title=f"Sandbox Details: {sandbox_id}")
             table.add_column("Property", style="cyan")
             table.add_column("Value", style="white")

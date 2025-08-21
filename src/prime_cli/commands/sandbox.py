@@ -2,7 +2,7 @@ import json
 import random
 import string
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
@@ -10,7 +10,7 @@ from rich.table import Table
 from rich.text import Text
 
 from ..api.client import APIClient, APIError
-from ..api.sandbox import CreateSandboxRequest, SandboxClient
+from ..api.sandbox import CreateSandboxRequest, Sandbox, SandboxClient
 from ..config import Config
 
 app = typer.Typer(help="Manage code sandboxes")
@@ -18,7 +18,7 @@ console = Console()
 config = Config()
 
 
-def _obfuscate_env_vars(env_vars: dict) -> dict:
+def _obfuscate_env_vars(env_vars: Dict[str, Any]) -> Dict[str, Any]:
     """Obfuscate environment variable values for display"""
     obfuscated = {}
     for key, value in env_vars.items():
@@ -51,7 +51,7 @@ def _format_age(created_at: datetime) -> str:
         return f"{days}d"
 
 
-def _format_sandbox_for_list(sandbox) -> dict:
+def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
     """Format sandbox data for list display (both table and JSON)"""
     resources = f"{sandbox.cpu_cores}CPU/{sandbox.memory_gb}GB"
     if sandbox.gpu_count > 0:
@@ -67,9 +67,9 @@ def _format_sandbox_for_list(sandbox) -> dict:
     }
 
 
-def _format_sandbox_for_details(sandbox) -> dict:
+def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
     """Format sandbox data for details display (both table and JSON)"""
-    data = {
+    data: Dict[str, Any] = {
         "id": sandbox.id,
         "name": sandbox.name,
         "docker_image": sandbox.docker_image,

@@ -58,6 +58,7 @@ def list_sandboxes_cmd(
     page: int = typer.Option(1, help="Page number"),
     per_page: int = typer.Option(50, help="Items per page"),
     all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List your sandboxes (excludes terminated by default)"""
     try:
@@ -89,38 +90,50 @@ def list_sandboxes_cmd(
         # Sort sandboxes by created_at (oldest first)
         sorted_sandboxes = sorted(sandbox_list.sandboxes, key=lambda s: s.created_at)
 
-        for sandbox in sorted_sandboxes:
-            status_color = {
-                "PENDING": "yellow",
-                "PROVISIONING": "yellow",
-                "RUNNING": "green",
-                "STOPPED": "blue",
-                "ERROR": "red",
-                "TERMINATED": "red",
-            }.get(sandbox.status, "white")
+        if output == "json":
+            # Output as JSON
+            output_data = {
+                "sandboxes": [sandbox.model_dump(by_alias=True) for sandbox in sorted_sandboxes],
+                "total": sandbox_list.total,
+                "page": sandbox_list.page,
+                "per_page": sandbox_list.per_page,
+                "has_next": sandbox_list.has_next,
+            }
+            console.print(json.dumps(output_data, indent=2, default=str))
+        else:
+            # Output as table
+            for sandbox in sorted_sandboxes:
+                status_color = {
+                    "PENDING": "yellow",
+                    "PROVISIONING": "yellow",
+                    "RUNNING": "green",
+                    "STOPPED": "blue",
+                    "ERROR": "red",
+                    "TERMINATED": "red",
+                }.get(sandbox.status, "white")
 
-            age = _format_age(sandbox.created_at)
+                age = _format_age(sandbox.created_at)
 
-            resources = f"{sandbox.cpu_cores}CPU/{sandbox.memory_gb}GB"
-            if sandbox.gpu_count > 0:
-                resources += f"/{sandbox.gpu_count}GPU"
+                resources = f"{sandbox.cpu_cores}CPU/{sandbox.memory_gb}GB"
+                if sandbox.gpu_count > 0:
+                    resources += f"/{sandbox.gpu_count}GPU"
 
-            table.add_row(
-                sandbox.id,
-                sandbox.name,
-                sandbox.docker_image,
-                Text(sandbox.status, style=status_color),
-                resources,
-                age,
-            )
+                table.add_row(
+                    sandbox.id,
+                    sandbox.name,
+                    sandbox.docker_image,
+                    Text(sandbox.status, style=status_color),
+                    resources,
+                    age,
+                )
 
-        console.print(table)
+            console.print(table)
 
-        if sandbox_list.has_next:
-            console.print(
-                f"\n[yellow]Showing page {page} of results. "
-                f"Use --page {page + 1} to see more.[/yellow]"
-            )
+            if sandbox_list.has_next:
+                console.print(
+                    f"\n[yellow]Showing page {page} of results. "
+                    f"Use --page {page + 1} to see more.[/yellow]"
+                )
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
@@ -131,7 +144,10 @@ def list_sandboxes_cmd(
 
 
 @app.command()
-def get(sandbox_id: str) -> None:
+def get(
+    sandbox_id: str,
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
     """Get detailed information about a specific sandbox"""
     try:
         base_client = APIClient()
@@ -139,51 +155,56 @@ def get(sandbox_id: str) -> None:
 
         sandbox = sandbox_client.get(sandbox_id)
 
-        table = Table(title=f"Sandbox Details: {sandbox_id}")
-        table.add_column("Property", style="cyan")
-        table.add_column("Value", style="white")
+        if output == "json":
+            # Output as JSON
+            console.print(json.dumps(sandbox.model_dump(by_alias=True), indent=2, default=str))
+        else:
+            # Output as table
+            table = Table(title=f"Sandbox Details: {sandbox_id}")
+            table.add_column("Property", style="cyan")
+            table.add_column("Value", style="white")
 
-        table.add_row("ID", sandbox.id)
-        table.add_row("Name", sandbox.name)
-        table.add_row("Docker Image", sandbox.docker_image)
-        table.add_row("Start Command", sandbox.start_command or "N/A")
+            table.add_row("ID", sandbox.id)
+            table.add_row("Name", sandbox.name)
+            table.add_row("Docker Image", sandbox.docker_image)
+            table.add_row("Start Command", sandbox.start_command or "N/A")
 
-        status_color = {
-            "PENDING": "yellow",
-            "PROVISIONING": "yellow",
-            "RUNNING": "green",
-            "STOPPED": "blue",
-            "ERROR": "red",
-            "TERMINATED": "red",
-        }.get(sandbox.status, "white")
-        table.add_row("Status", Text(sandbox.status, style=status_color))
+            status_color = {
+                "PENDING": "yellow",
+                "PROVISIONING": "yellow",
+                "RUNNING": "green",
+                "STOPPED": "blue",
+                "ERROR": "red",
+                "TERMINATED": "red",
+            }.get(sandbox.status, "white")
+            table.add_row("Status", Text(sandbox.status, style=status_color))
 
-        table.add_row("CPU Cores", str(sandbox.cpu_cores))
-        table.add_row("Memory (GB)", str(sandbox.memory_gb))
-        table.add_row("Disk Size (GB)", str(sandbox.disk_size_gb))
-        table.add_row("Disk Mount Path", sandbox.disk_mount_path)
-        table.add_row("GPU Count", str(sandbox.gpu_count))
-        table.add_row("Timeout (minutes)", str(sandbox.timeout_minutes))
+            table.add_row("CPU Cores", str(sandbox.cpu_cores))
+            table.add_row("Memory (GB)", str(sandbox.memory_gb))
+            table.add_row("Disk Size (GB)", str(sandbox.disk_size_gb))
+            table.add_row("Disk Mount Path", sandbox.disk_mount_path)
+            table.add_row("GPU Count", str(sandbox.gpu_count))
+            table.add_row("Timeout (minutes)", str(sandbox.timeout_minutes))
 
-        table.add_row("Created", sandbox.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
-        if sandbox.started_at:
-            table.add_row("Started", sandbox.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
-        if sandbox.terminated_at:
-            table.add_row("Terminated", sandbox.terminated_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
+            table.add_row("Created", sandbox.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
+            if sandbox.started_at:
+                table.add_row("Started", sandbox.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
+            if sandbox.terminated_at:
+                table.add_row("Terminated", sandbox.terminated_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
 
-        table.add_row("User ID", sandbox.user_id or "N/A")
-        table.add_row("Team ID", sandbox.team_id or "Personal")
+            table.add_row("User ID", sandbox.user_id or "N/A")
+            table.add_row("Team ID", sandbox.team_id or "Personal")
 
-        if sandbox.environment_vars:
-            obfuscated_env = _obfuscate_env_vars(sandbox.environment_vars)
-            env_vars = json.dumps(obfuscated_env, indent=2)
-            table.add_row("Environment Variables", env_vars)
+            if sandbox.environment_vars:
+                obfuscated_env = _obfuscate_env_vars(sandbox.environment_vars)
+                env_vars = json.dumps(obfuscated_env, indent=2)
+                table.add_row("Environment Variables", env_vars)
 
-        if sandbox.advanced_configs:
-            advanced_configs = json.dumps(sandbox.advanced_configs.model_dump(), indent=2)
-            table.add_row("Advanced Configs", advanced_configs)
+            if sandbox.advanced_configs:
+                advanced_configs = json.dumps(sandbox.advanced_configs.model_dump(), indent=2)
+                table.add_row("Advanced Configs", advanced_configs)
 
-        console.print(table)
+            console.print(table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

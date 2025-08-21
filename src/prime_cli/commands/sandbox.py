@@ -91,15 +91,30 @@ def list_sandboxes_cmd(
         sorted_sandboxes = sorted(sandbox_list.sandboxes, key=lambda s: s.created_at)
 
         if output == "json":
-            # Output as JSON
+            # Output as JSON with only table-visible fields
+            sandboxes_data = []
+            for sandbox in sorted_sandboxes:
+                resources = f"{sandbox.cpu_cores}CPU/{sandbox.memory_gb}GB"
+                if sandbox.gpu_count > 0:
+                    resources += f"/{sandbox.gpu_count}GPU"
+                
+                sandboxes_data.append({
+                    "id": sandbox.id,
+                    "name": sandbox.name,
+                    "image": sandbox.docker_image,
+                    "status": sandbox.status,
+                    "resources": resources,
+                    "age": _format_age(sandbox.created_at),
+                })
+            
             output_data = {
-                "sandboxes": [sandbox.model_dump(by_alias=True) for sandbox in sorted_sandboxes],
+                "sandboxes": sandboxes_data,
                 "total": sandbox_list.total,
                 "page": sandbox_list.page,
                 "per_page": sandbox_list.per_page,
                 "has_next": sandbox_list.has_next,
             }
-            console.print(json.dumps(output_data, indent=2, default=str))
+            console.print(json.dumps(output_data, indent=2))
         else:
             # Output as table
             for sandbox in sorted_sandboxes:
@@ -156,8 +171,34 @@ def get(
         sandbox = sandbox_client.get(sandbox_id)
 
         if output == "json":
-            # Output as JSON
-            console.print(json.dumps(sandbox.model_dump(by_alias=True), indent=2, default=str))
+            # Output as JSON with only table-visible fields
+            sandbox_data = {
+                "id": sandbox.id,
+                "name": sandbox.name,
+                "docker_image": sandbox.docker_image,
+                "start_command": sandbox.start_command,
+                "status": sandbox.status,
+                "cpu_cores": sandbox.cpu_cores,
+                "memory_gb": sandbox.memory_gb,
+                "disk_size_gb": sandbox.disk_size_gb,
+                "disk_mount_path": sandbox.disk_mount_path,
+                "gpu_count": sandbox.gpu_count,
+                "timeout_minutes": sandbox.timeout_minutes,
+                "created_at": sandbox.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "user_id": sandbox.user_id,
+                "team_id": sandbox.team_id,
+            }
+            
+            if sandbox.started_at:
+                sandbox_data["started_at"] = sandbox.started_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+            if sandbox.terminated_at:
+                sandbox_data["terminated_at"] = sandbox.terminated_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+            if sandbox.environment_vars:
+                sandbox_data["environment_vars"] = _obfuscate_env_vars(sandbox.environment_vars)
+            if sandbox.advanced_configs:
+                sandbox_data["advanced_configs"] = sandbox.advanced_configs.model_dump()
+                
+            console.print(json.dumps(sandbox_data, indent=2))
         else:
             # Output as table
             table = Table(title=f"Sandbox Details: {sandbox_id}")

@@ -3,7 +3,7 @@ import json
 import os
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import typer
@@ -23,6 +23,28 @@ console = Console()
 config = Config()
 
 
+def _format_age(created_at: datetime) -> str:
+    """Format time difference as human-readable age (like kubectl)"""
+    now = datetime.now(timezone.utc)
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    
+    diff = now - created_at
+    total_seconds = int(diff.total_seconds())
+    
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    elif total_seconds < 3600:
+        minutes = total_seconds // 60
+        return f"{minutes}m"
+    elif total_seconds < 86400:
+        hours = total_seconds // 3600
+        return f"{hours}h"
+    else:
+        days = total_seconds // 86400
+        return f"{days}d"
+
+
 def _format_pod_for_list(pod) -> Dict[str, Any]:
     """Format pod data for list display (both table and JSON)"""
     display_status = pod.status
@@ -30,14 +52,16 @@ def _format_pod_for_list(pod) -> Dict[str, Any]:
         display_status = "INSTALLING"
     
     created_at = datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
-    created_str = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    created_timestamp = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    age = _format_age(created_at)
     
     return {
         "id": pod.id,
         "name": pod.name,
         "gpu": f"{pod.gpu_type} x{pod.gpu_count}",
         "status": display_status,
-        "created": created_str,
+        "created_at": created_timestamp,  # For JSON output
+        "age": age,  # For table output
     }
 
 
@@ -86,8 +110,20 @@ def list(
                     os.system("cls" if os.name == "nt" else "clear")
 
                 if output == "json":
-                    # Output as JSON using shared formatting
-                    pods_data = [_format_pod_for_list(pod) for pod in pods_list.data]
+                    # Output as JSON with timestamp (for automation)
+                    pods_data = []
+                    for pod in pods_list.data:
+                        pod_data = _format_pod_for_list(pod)
+                        # For JSON, use timestamp instead of age
+                        json_pod = {
+                            "id": pod_data["id"],
+                            "name": pod_data["name"],
+                            "gpu": pod_data["gpu"],
+                            "status": pod_data["status"],
+                            "created_at": pod_data["created_at"],
+                        }
+                        pods_data.append(json_pod)
+                    
                     output_data = {
                         "pods": pods_data,
                         "total_count": pods_list.total_count,
@@ -105,7 +141,7 @@ def list(
                     table.add_column("Name", style="blue")
                     table.add_column("GPU", style="green")
                     table.add_column("Status", style="yellow")
-                    table.add_column("Created", style="blue")
+                    table.add_column("Age", style="blue")
 
                     # Add rows for each pod using shared formatting
                     for pod in pods_list.data:
@@ -123,7 +159,7 @@ def list(
                             pod_data["name"] or "N/A",
                             pod_data["gpu"],
                             Text(pod_data["status"], style=status_color),
-                            pod_data["created"],
+                            pod_data["age"],
                         )
 
                     console.print(table)

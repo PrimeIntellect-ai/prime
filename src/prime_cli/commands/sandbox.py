@@ -64,7 +64,8 @@ def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
         "image": sandbox.docker_image,
         "status": sandbox.status,
         "resources": resources,
-        "age": _format_age(sandbox.created_at),
+        "created_at": sandbox.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"),  # For JSON output
+        "age": _format_age(sandbox.created_at),  # For table output
     }
 
 
@@ -141,8 +142,21 @@ def list_sandboxes_cmd(
         sorted_sandboxes = sorted(sandbox_list.sandboxes, key=lambda s: s.created_at)
 
         if output == "json":
-            # Output as JSON using shared formatting
-            sandboxes_data = [_format_sandbox_for_list(sandbox) for sandbox in sorted_sandboxes]
+            # Output as JSON with timestamp (for automation)
+            sandboxes_data = []
+            for sandbox in sorted_sandboxes:
+                sandbox_data = _format_sandbox_for_list(sandbox)
+                # For JSON, use timestamp instead of age
+                json_sandbox = {
+                    "id": sandbox_data["id"],
+                    "name": sandbox_data["name"],
+                    "image": sandbox_data["image"],
+                    "status": sandbox_data["status"],
+                    "resources": sandbox_data["resources"],
+                    "created_at": sandbox_data["created_at"],
+                }
+                sandboxes_data.append(json_sandbox)
+            
             output_data = {
                 "sandboxes": sandboxes_data,
                 "total": sandbox_list.total,

@@ -45,6 +45,74 @@ def _format_age(created_at: datetime) -> str:
         return f"{days}d"
 
 
+def _format_pod_for_status(status, pod_details) -> Dict[str, Any]:
+    """Format pod status data for display (both table and JSON)"""
+    # Display status with installation state consideration
+    display_status = status.status
+    if (
+        status.status == "ACTIVE"
+        and status.installation_progress is not None
+        and status.installation_progress < 100
+    ):
+        display_status = "INSTALLING"
+    
+    created_at = datetime.fromisoformat(pod_details.created_at.replace("Z", "+00:00"))
+    created_timestamp = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    
+    # Build basic status data
+    status_data = {
+        "id": pod_details.id,
+        "status": display_status,
+        "name": pod_details.name,
+        "team_id": pod_details.team_id,
+        "provider": status.provider_type,
+        "gpu": f"{pod_details.gpu_type} x{pod_details.gpu_count}",
+        "image": pod_details.environment_type,
+        "created_at": created_timestamp,
+        "ip": format_ip_display(status.ip),
+        "ssh": format_ip_display(status.ssh_connection),
+    }
+    
+    # Add optional fields
+    if status.cost_per_hr:
+        status_data["cost_per_hour"] = status.cost_per_hr
+    
+    if pod_details.installation_status:
+        status_data["installation_status"] = pod_details.installation_status
+    
+    if status.installation_progress is not None:
+        status_data["installation_progress"] = status.installation_progress
+    
+    if status.installation_failure:
+        status_data["installation_error"] = status.installation_failure
+    
+    if status.prime_port_mapping:
+        status_data["port_mappings"] = [
+            {
+                "protocol": port.protocol,
+                "external": port.external,
+                "internal": port.internal,
+                "description": port.description,
+                "used_by": port.used_by,
+            }
+            for port in status.prime_port_mapping
+        ]
+    
+    if pod_details.attached_resources:
+        status_data["attached_resources"] = [
+            {
+                "id": str(resource.id),
+                "type": resource.type,
+                "status": resource.status,
+                "size": resource.size,
+                "mount_path": resource.mount_path,
+            }
+            for resource in pod_details.attached_resources
+        ]
+    
+    return status_data
+
+
 def _format_pod_for_list(pod) -> Dict[str, Any]:
     """Format pod data for list display (both table and JSON)"""
     display_status = pod.status
@@ -209,8 +277,13 @@ def list(
 
 
 @app.command()
-def status(pod_id: str) -> None:
+def status(
+    pod_id: str,
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
     """Get detailed status of a specific pod"""
+    validate_output_format(output, console)
+    
     try:
         base_client = APIClient()
         pods_client = PodsClient(base_client)
@@ -226,91 +299,86 @@ def status(pod_id: str) -> None:
 
         status = statuses[0]
 
-        # Create display table
-        table = Table(title=f"Pod Status: {pod_id}")
-        table.add_column("Property", style="cyan")
-        table.add_column("Value", style="white")
+        if output == "json":
+            # Output as JSON using shared formatting
+            status_data = _format_pod_for_status(status, pod_details)
+            output_data_as_json(status_data, console)
+        else:
+            # Create display table
+            status_data = _format_pod_for_status(status, pod_details)
+            
+            table = Table(title=f"Pod Status: {pod_id}")
+            table.add_column("Property", style="cyan")
+            table.add_column("Value", style="white")
 
-        # Display status with installation state consideration
-        display_status = status.status
-        if (
-            status.status == "ACTIVE"
-            and status.installation_progress is not None
-            and status.installation_progress < 100
-        ):
-            display_status = "INSTALLING"
-
-        table.add_row(
-            "Status",
-            Text(
-                display_status,
-                style="green" if display_status == "ACTIVE" else "yellow",
-            ),
-        )
-
-        # Basic pod info
-        table.add_row("Name", pod_details.name or "N/A")
-        table.add_row("Team", pod_details.team_id or "Personal")
-        table.add_row("Provider", status.provider_type)
-        table.add_row("GPU", f"{pod_details.gpu_type} x{pod_details.gpu_count}")
-        table.add_row("Image", pod_details.environment_type)
-
-        # Cost info if available
-        if status.cost_per_hr:
-            table.add_row("Cost per Hour", f"${status.cost_per_hr:.3f}")
-
-        # Created time
-        created_at = datetime.fromisoformat(pod_details.created_at.replace("Z", "+00:00"))
-        table.add_row("Created", created_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
-
-        # Connection details
-        table.add_row("IP", format_ip_display(status.ip))
-        ssh_display = format_ip_display(status.ssh_connection)
-        table.add_row("SSH", ssh_display)
-
-        # Installation status
-        if pod_details.installation_status:
-            table.add_row("Installation Status", pod_details.installation_status)
-        if status.installation_progress is not None:
-            table.add_row("Installation Progress", f"{status.installation_progress}%")
-        if status.installation_failure:
-            table.add_row("Installation Error", Text(status.installation_failure, style="red"))
-
-        # Port mappings
-        if status.prime_port_mapping:
-            ports = "\n".join(
-                [
-                    f"{port.protocol}:{port.external}->{port.internal} "
-                    f"({port.description + ' - ' if port.description else ''}"
-                    f"{port.used_by or 'unknown'})"
-                    for port in status.prime_port_mapping
-                ]
+            table.add_row(
+                "Status",
+                Text(
+                    status_data["status"],
+                    style="green" if status_data["status"] == "ACTIVE" else "yellow",
+                ),
             )
-            table.add_row("Port Mappings", ports)
 
-        console.print(table)
+            # Basic pod info
+            table.add_row("Name", status_data["name"] or "N/A")
+            table.add_row("Team", status_data["team_id"] or "Personal")
+            table.add_row("Provider", status_data["provider"])
+            table.add_row("GPU", status_data["gpu"])
+            table.add_row("Image", status_data["image"])
 
-        # Display attached resources in a separate table if they exist
-        if pod_details.attached_resources:
-            resource_table = Table(title="Attached Resources")
-            resource_table.add_column("ID", style="cyan")
-            resource_table.add_column("Type", style="white")
-            resource_table.add_column("Status", style="white")
-            resource_table.add_column("Size", style="white")
-            resource_table.add_column("Mount Path", style="white")
+            # Cost info if available
+            if "cost_per_hour" in status_data:
+                table.add_row("Cost per Hour", f"${status_data['cost_per_hour']:.3f}")
 
-            for resource in pod_details.attached_resources:
-                status_style = "green" if resource.status == "ACTIVE" else "yellow"
-                resource_table.add_row(
-                    str(resource.id),
-                    resource.type or "N/A",
-                    Text(resource.status or "N/A", style=status_style),
-                    str(resource.size) + "GB" if resource.size else "N/A",
-                    resource.mount_path or "N/A",
+            table.add_row("Created", status_data["created_at"])
+
+            # Connection details
+            table.add_row("IP", status_data["ip"])
+            table.add_row("SSH", status_data["ssh"])
+
+            # Installation status
+            if "installation_status" in status_data:
+                table.add_row("Installation Status", status_data["installation_status"])
+            if "installation_progress" in status_data:
+                table.add_row("Installation Progress", f"{status_data['installation_progress']}%")
+            if "installation_error" in status_data:
+                table.add_row("Installation Error", Text(status_data["installation_error"], style="red"))
+
+            # Port mappings
+            if "port_mappings" in status_data:
+                ports = "\n".join(
+                    [
+                        f"{port['protocol']}:{port['external']}->{port['internal']} "
+                        f"({port['description'] + ' - ' if port['description'] else ''}"
+                        f"{port['used_by'] or 'unknown'})"
+                        for port in status_data["port_mappings"]
+                    ]
                 )
+                table.add_row("Port Mappings", ports)
 
-            console.print("\n")  # Add spacing between tables
-            console.print(resource_table)
+            console.print(table)
+
+            # Display attached resources in a separate table if they exist
+            if "attached_resources" in status_data:
+                resource_table = Table(title="Attached Resources")
+                resource_table.add_column("ID", style="cyan")
+                resource_table.add_column("Type", style="white")
+                resource_table.add_column("Status", style="white")
+                resource_table.add_column("Size", style="white")
+                resource_table.add_column("Mount Path", style="white")
+
+                for resource in status_data["attached_resources"]:
+                    status_style = "green" if resource["status"] == "ACTIVE" else "yellow"
+                    resource_table.add_row(
+                        resource["id"],
+                        resource["type"] or "N/A",
+                        Text(resource["status"] or "N/A", style=status_style),
+                        str(resource["size"]) + "GB" if resource["size"] else "N/A",
+                        resource["mount_path"] or "N/A",
+                    )
+
+                console.print("\n")  # Add spacing between tables
+                console.print(resource_table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

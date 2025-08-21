@@ -177,10 +177,16 @@ def list(
                 if watch:
                     os.system("cls" if os.name == "nt" else "clear")
 
+                # Sort pods by created_at (oldest first, like sandbox list)
+                sorted_pods = sorted(
+                    pods_list.data, 
+                    key=lambda pod: datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
+                )
+
                 if output == "json":
                     # Output as JSON with timestamp (for automation)
                     pods_data = []
-                    for pod in pods_list.data:
+                    for pod in sorted_pods:
                         pod_data = _format_pod_for_list(pod)
                         # For JSON, use timestamp instead of age
                         json_pod = {
@@ -212,7 +218,7 @@ def list(
                     table.add_column("Age", style="blue")
 
                     # Add rows for each pod using shared formatting
-                    for pod in pods_list.data:
+                    for pod in sorted_pods:
                         pod_data = _format_pod_for_list(pod)
                         
                         status_color = {

@@ -3,7 +3,6 @@
 from datetime import datetime, timezone
 from typing import Any, List, Union
 
-
 ISO_FMT = "%Y-%m-%d %H:%M:%S UTC"
 
 
@@ -21,7 +20,7 @@ def human_age(created: datetime) -> str:
     """Format time difference as human-readable age (like kubectl)."""
     diff = now_utc() - to_utc(created)
     total_seconds = int(diff.total_seconds())
-    
+
     if total_seconds < 60:
         return f"{total_seconds}s"
     elif total_seconds < 3600:
@@ -42,11 +41,15 @@ def iso_timestamp(dt: Union[datetime, str]) -> str:
     return to_utc(dt).strftime(ISO_FMT)
 
 
-def sort_by_created(items: List[Any], attr: str = "created_at", reverse: bool = False, parse_iso: bool = False) -> List[Any]:
+def sort_by_created(
+    items: List[Any], attr: str = "created_at", reverse: bool = False, parse_iso: bool = False
+) -> List[Any]:
     """Sort items by creation time (oldest first by default)."""
     if parse_iso:
-        key_fn = lambda x: datetime.fromisoformat(getattr(x, attr).replace("Z", "+00:00"))
+        def key_fn(x):
+            return datetime.fromisoformat(getattr(x, attr).replace("Z", "+00:00"))
     else:
-        key_fn = lambda x: getattr(x, attr)
-    
+        def key_fn(x):
+            return getattr(x, attr)
+
     return sorted(items, key=key_fn, reverse=reverse)

@@ -4,7 +4,7 @@ import os
 import subprocess
 import time
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import typer
 from rich.console import Console

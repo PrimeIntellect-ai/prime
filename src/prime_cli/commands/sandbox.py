@@ -12,60 +12,29 @@ from rich.text import Text
 from ..api.client import APIClient, APIError
 from ..api.sandbox import CreateSandboxRequest, Sandbox, SandboxClient
 from ..config import Config
-from ..utils import confirm_or_skip, output_data_as_json, validate_output_format
+from ..utils.display import (
+    build_table, output_data_as_json, SANDBOX_STATUS_COLORS, 
+    status_color, validate_output_format
+)
+from ..utils.formatters import format_resources, obfuscate_env_vars
+from ..utils.prompt import confirm_or_skip
+from ..utils.time_utils import human_age, iso_timestamp, sort_by_created
 
 app = typer.Typer(help="Manage code sandboxes")
 console = Console()
 config = Config()
 
 
-def _obfuscate_env_vars(env_vars: Dict[str, Any]) -> Dict[str, Any]:
-    """Obfuscate environment variable values for display"""
-    obfuscated = {}
-    for key, value in env_vars.items():
-        if len(value) <= 3:
-            obfuscated[key] = "*" * len(value)
-        else:
-            obfuscated[key] = value[:2] + "*" * (len(value) - 4) + value[-2:]
-    return obfuscated
-
-
-def _format_age(created_at: datetime) -> str:
-    """Format time difference as human-readable age (like kubectl)"""
-    now = datetime.now(timezone.utc)
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
-
-    diff = now - created_at
-    total_seconds = int(diff.total_seconds())
-
-    if total_seconds < 60:
-        return f"{total_seconds}s"
-    elif total_seconds < 3600:
-        minutes = total_seconds // 60
-        return f"{minutes}m"
-    elif total_seconds < 86400:
-        hours = total_seconds // 3600
-        return f"{hours}h"
-    else:
-        days = total_seconds // 86400
-        return f"{days}d"
-
-
 def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
     """Format sandbox data for list display (both table and JSON)"""
-    resources = f"{sandbox.cpu_cores}CPU/{sandbox.memory_gb}GB"
-    if sandbox.gpu_count > 0:
-        resources += f"/{sandbox.gpu_count}GPU"
-
     return {
         "id": sandbox.id,
         "name": sandbox.name,
         "image": sandbox.docker_image,
         "status": sandbox.status,
-        "resources": resources,
-        "created_at": sandbox.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"),  # For JSON output
-        "age": _format_age(sandbox.created_at),  # For table output
+        "resources": format_resources(sandbox.cpu_cores, sandbox.memory_gb, sandbox.gpu_count),
+        "created_at": iso_timestamp(sandbox.created_at),  # For JSON output
+        "age": human_age(sandbox.created_at),  # For table output
     }
 
 
@@ -93,7 +62,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
     if sandbox.terminated_at:
         data["terminated_at"] = sandbox.terminated_at.strftime("%Y-%m-%d %H:%M:%S UTC")
     if sandbox.environment_vars:
-        data["environment_vars"] = _obfuscate_env_vars(sandbox.environment_vars)
+        data["environment_vars"] = obfuscate_env_vars(sandbox.environment_vars)
     if sandbox.advanced_configs:
         data["advanced_configs"] = sandbox.advanced_configs.model_dump()
 
@@ -127,19 +96,20 @@ def list_sandboxes_cmd(
             exclude_terminated=exclude_terminated,
         )
 
-        table = Table(
-            title=f"Code Sandboxes (Total: {sandbox_list.total})",
-            show_lines=True,
+        table = build_table(
+            f"Code Sandboxes (Total: {sandbox_list.total})",
+            [
+                ("ID", "cyan"),
+                ("Name", "blue"), 
+                ("Image", "green"),
+                ("Status", "yellow"),
+                ("Resources", "magenta"),
+                ("Age", "blue"),
+            ]
         )
-        table.add_column("ID", style="cyan", no_wrap=True)
-        table.add_column("Name", style="blue")
-        table.add_column("Image", style="green")
-        table.add_column("Status", style="yellow")
-        table.add_column("Resources", style="magenta")
-        table.add_column("Age", style="blue")
 
         # Sort sandboxes by created_at (oldest first)
-        sorted_sandboxes = sorted(sandbox_list.sandboxes, key=lambda s: s.created_at)
+        sorted_sandboxes = sort_by_created(sandbox_list.sandboxes)
 
         if output == "json":
             # Output as JSON with timestamp (for automation)
@@ -169,21 +139,14 @@ def list_sandboxes_cmd(
             # Output as table using shared formatting
             for sandbox in sorted_sandboxes:
                 sandbox_data = _format_sandbox_for_list(sandbox)
-
-                status_color = {
-                    "PENDING": "yellow",
-                    "PROVISIONING": "yellow",
-                    "RUNNING": "green",
-                    "STOPPED": "blue",
-                    "ERROR": "red",
-                    "TERMINATED": "red",
-                }.get(sandbox_data["status"], "white")
+                
+                color = status_color(sandbox_data["status"], SANDBOX_STATUS_COLORS)
 
                 table.add_row(
                     sandbox_data["id"],
                     sandbox_data["name"],
                     sandbox_data["image"],
-                    Text(sandbox_data["status"], style=status_color),
+                    Text(sandbox_data["status"], style=color),
                     sandbox_data["resources"],
                     sandbox_data["age"],
                 )
@@ -361,7 +324,7 @@ def create(
         console.print(f"Timeout: {timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
         if env_vars:
-            obfuscated_env = _obfuscate_env_vars(env_vars)
+            obfuscated_env = obfuscate_env_vars(env_vars)
             console.print(f"Environment Variables: {obfuscated_env}")
 
         if confirm_or_skip("\nDo you want to create this sandbox?", yes, default=True):

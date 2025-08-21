@@ -51,6 +51,53 @@ def _format_age(created_at: datetime) -> str:
         return f"{days}d"
 
 
+def _format_sandbox_for_list(sandbox) -> dict:
+    """Format sandbox data for list display (both table and JSON)"""
+    resources = f"{sandbox.cpu_cores}CPU/{sandbox.memory_gb}GB"
+    if sandbox.gpu_count > 0:
+        resources += f"/{sandbox.gpu_count}GPU"
+    
+    return {
+        "id": sandbox.id,
+        "name": sandbox.name,
+        "image": sandbox.docker_image,
+        "status": sandbox.status,
+        "resources": resources,
+        "age": _format_age(sandbox.created_at),
+    }
+
+
+def _format_sandbox_for_details(sandbox) -> dict:
+    """Format sandbox data for details display (both table and JSON)"""
+    data = {
+        "id": sandbox.id,
+        "name": sandbox.name,
+        "docker_image": sandbox.docker_image,
+        "start_command": sandbox.start_command,
+        "status": sandbox.status,
+        "cpu_cores": sandbox.cpu_cores,
+        "memory_gb": sandbox.memory_gb,
+        "disk_size_gb": sandbox.disk_size_gb,
+        "disk_mount_path": sandbox.disk_mount_path,
+        "gpu_count": sandbox.gpu_count,
+        "timeout_minutes": sandbox.timeout_minutes,
+        "created_at": sandbox.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "user_id": sandbox.user_id,
+        "team_id": sandbox.team_id,
+    }
+    
+    if sandbox.started_at:
+        data["started_at"] = sandbox.started_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    if sandbox.terminated_at:
+        data["terminated_at"] = sandbox.terminated_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    if sandbox.environment_vars:
+        data["environment_vars"] = _obfuscate_env_vars(sandbox.environment_vars)
+    if sandbox.advanced_configs:
+        data["advanced_configs"] = sandbox.advanced_configs.model_dump()
+        
+    return data
+
+
 @app.command("list")
 def list_sandboxes_cmd(
     team_id: Optional[str] = typer.Option(None, help="Filter by team ID"),
@@ -91,22 +138,8 @@ def list_sandboxes_cmd(
         sorted_sandboxes = sorted(sandbox_list.sandboxes, key=lambda s: s.created_at)
 
         if output == "json":
-            # Output as JSON with only table-visible fields
-            sandboxes_data = []
-            for sandbox in sorted_sandboxes:
-                resources = f"{sandbox.cpu_cores}CPU/{sandbox.memory_gb}GB"
-                if sandbox.gpu_count > 0:
-                    resources += f"/{sandbox.gpu_count}GPU"
-                
-                sandboxes_data.append({
-                    "id": sandbox.id,
-                    "name": sandbox.name,
-                    "image": sandbox.docker_image,
-                    "status": sandbox.status,
-                    "resources": resources,
-                    "age": _format_age(sandbox.created_at),
-                })
-            
+            # Output as JSON using shared formatting
+            sandboxes_data = [_format_sandbox_for_list(sandbox) for sandbox in sorted_sandboxes]
             output_data = {
                 "sandboxes": sandboxes_data,
                 "total": sandbox_list.total,
@@ -116,8 +149,10 @@ def list_sandboxes_cmd(
             }
             console.print(json.dumps(output_data, indent=2))
         else:
-            # Output as table
+            # Output as table using shared formatting
             for sandbox in sorted_sandboxes:
+                sandbox_data = _format_sandbox_for_list(sandbox)
+                
                 status_color = {
                     "PENDING": "yellow",
                     "PROVISIONING": "yellow",
@@ -125,21 +160,15 @@ def list_sandboxes_cmd(
                     "STOPPED": "blue",
                     "ERROR": "red",
                     "TERMINATED": "red",
-                }.get(sandbox.status, "white")
-
-                age = _format_age(sandbox.created_at)
-
-                resources = f"{sandbox.cpu_cores}CPU/{sandbox.memory_gb}GB"
-                if sandbox.gpu_count > 0:
-                    resources += f"/{sandbox.gpu_count}GPU"
+                }.get(sandbox_data["status"], "white")
 
                 table.add_row(
-                    sandbox.id,
-                    sandbox.name,
-                    sandbox.docker_image,
-                    Text(sandbox.status, style=status_color),
-                    resources,
-                    age,
+                    sandbox_data["id"],
+                    sandbox_data["name"],
+                    sandbox_data["image"],
+                    Text(sandbox_data["status"], style=status_color),
+                    sandbox_data["resources"],
+                    sandbox_data["age"],
                 )
 
             console.print(table)
@@ -171,44 +200,21 @@ def get(
         sandbox = sandbox_client.get(sandbox_id)
 
         if output == "json":
-            # Output as JSON with only table-visible fields
-            sandbox_data = {
-                "id": sandbox.id,
-                "name": sandbox.name,
-                "docker_image": sandbox.docker_image,
-                "start_command": sandbox.start_command,
-                "status": sandbox.status,
-                "cpu_cores": sandbox.cpu_cores,
-                "memory_gb": sandbox.memory_gb,
-                "disk_size_gb": sandbox.disk_size_gb,
-                "disk_mount_path": sandbox.disk_mount_path,
-                "gpu_count": sandbox.gpu_count,
-                "timeout_minutes": sandbox.timeout_minutes,
-                "created_at": sandbox.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
-                "user_id": sandbox.user_id,
-                "team_id": sandbox.team_id,
-            }
-            
-            if sandbox.started_at:
-                sandbox_data["started_at"] = sandbox.started_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-            if sandbox.terminated_at:
-                sandbox_data["terminated_at"] = sandbox.terminated_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-            if sandbox.environment_vars:
-                sandbox_data["environment_vars"] = _obfuscate_env_vars(sandbox.environment_vars)
-            if sandbox.advanced_configs:
-                sandbox_data["advanced_configs"] = sandbox.advanced_configs.model_dump()
-                
+            # Output as JSON using shared formatting
+            sandbox_data = _format_sandbox_for_details(sandbox)
             console.print(json.dumps(sandbox_data, indent=2))
         else:
-            # Output as table
+            # Output as table using shared formatting
+            sandbox_data = _format_sandbox_for_details(sandbox)
+            
             table = Table(title=f"Sandbox Details: {sandbox_id}")
             table.add_column("Property", style="cyan")
             table.add_column("Value", style="white")
 
-            table.add_row("ID", sandbox.id)
-            table.add_row("Name", sandbox.name)
-            table.add_row("Docker Image", sandbox.docker_image)
-            table.add_row("Start Command", sandbox.start_command or "N/A")
+            table.add_row("ID", sandbox_data["id"])
+            table.add_row("Name", sandbox_data["name"])
+            table.add_row("Docker Image", sandbox_data["docker_image"])
+            table.add_row("Start Command", sandbox_data["start_command"] or "N/A")
 
             status_color = {
                 "PENDING": "yellow",
@@ -217,32 +223,31 @@ def get(
                 "STOPPED": "blue",
                 "ERROR": "red",
                 "TERMINATED": "red",
-            }.get(sandbox.status, "white")
-            table.add_row("Status", Text(sandbox.status, style=status_color))
+            }.get(sandbox_data["status"], "white")
+            table.add_row("Status", Text(sandbox_data["status"], style=status_color))
 
-            table.add_row("CPU Cores", str(sandbox.cpu_cores))
-            table.add_row("Memory (GB)", str(sandbox.memory_gb))
-            table.add_row("Disk Size (GB)", str(sandbox.disk_size_gb))
-            table.add_row("Disk Mount Path", sandbox.disk_mount_path)
-            table.add_row("GPU Count", str(sandbox.gpu_count))
-            table.add_row("Timeout (minutes)", str(sandbox.timeout_minutes))
+            table.add_row("CPU Cores", str(sandbox_data["cpu_cores"]))
+            table.add_row("Memory (GB)", str(sandbox_data["memory_gb"]))
+            table.add_row("Disk Size (GB)", str(sandbox_data["disk_size_gb"]))
+            table.add_row("Disk Mount Path", sandbox_data["disk_mount_path"])
+            table.add_row("GPU Count", str(sandbox_data["gpu_count"]))
+            table.add_row("Timeout (minutes)", str(sandbox_data["timeout_minutes"]))
 
-            table.add_row("Created", sandbox.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
-            if sandbox.started_at:
-                table.add_row("Started", sandbox.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
-            if sandbox.terminated_at:
-                table.add_row("Terminated", sandbox.terminated_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
+            table.add_row("Created", sandbox_data["created_at"])
+            if "started_at" in sandbox_data:
+                table.add_row("Started", sandbox_data["started_at"])
+            if "terminated_at" in sandbox_data:
+                table.add_row("Terminated", sandbox_data["terminated_at"])
 
-            table.add_row("User ID", sandbox.user_id or "N/A")
-            table.add_row("Team ID", sandbox.team_id or "Personal")
+            table.add_row("User ID", sandbox_data["user_id"] or "N/A")
+            table.add_row("Team ID", sandbox_data["team_id"] or "Personal")
 
-            if sandbox.environment_vars:
-                obfuscated_env = _obfuscate_env_vars(sandbox.environment_vars)
-                env_vars = json.dumps(obfuscated_env, indent=2)
+            if "environment_vars" in sandbox_data:
+                env_vars = json.dumps(sandbox_data["environment_vars"], indent=2)
                 table.add_row("Environment Variables", env_vars)
 
-            if sandbox.advanced_configs:
-                advanced_configs = json.dumps(sandbox.advanced_configs.model_dump(), indent=2)
+            if "advanced_configs" in sandbox_data:
+                advanced_configs = json.dumps(sandbox_data["advanced_configs"], indent=2)
                 table.add_row("Advanced Configs", advanced_configs)
 
             console.print(table)

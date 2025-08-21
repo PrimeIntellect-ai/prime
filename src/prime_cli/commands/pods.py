@@ -15,7 +15,11 @@ from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.client import APIClient, APIError
 from ..api.pods import PodsClient
 from ..config import Config
-from ..utils import confirm_or_skip, output_data_as_json, validate_output_format
+from ..utils import (
+    confirm_or_skip, format_ip_display, output_data_as_json, 
+    status_color, validate_output_format
+)
+from ..utils.display import POD_STATUS_COLORS
 from ..helper.short_id import generate_short_id
 
 app = typer.Typer(help="Manage compute pods")
@@ -132,15 +136,6 @@ def _format_pod_for_list(pod) -> Dict[str, Any]:
         "age": age,  # For table output
     }
 
-
-def format_ip_display(ip: Optional[Union[str, List[str]]]) -> str:
-    """Format IP address(es) for display, handling both single and list cases"""
-    if not ip:
-        return "N/A"
-    # Handle both list and single IP cases by always converting to list
-    if isinstance(ip, str):
-        return ip
-    return ", ".join(str(x) for x in ip)
 
 
 @app.command()

@@ -12,13 +12,12 @@ from rich.text import Text
 from ..api.client import APIClient, APIError
 from ..api.sandbox import CreateSandboxRequest, Sandbox, SandboxClient
 from ..config import Config
-from ..utils.display import (
-    build_table, output_data_as_json, SANDBOX_STATUS_COLORS, 
-    status_color, validate_output_format
+from ..utils import (
+    build_table, confirm_or_skip, format_resources, human_age, 
+    iso_timestamp, obfuscate_env_vars, output_data_as_json, 
+    sort_by_created, status_color, validate_output_format
 )
-from ..utils.formatters import format_resources, obfuscate_env_vars
-from ..utils.prompt import confirm_or_skip
-from ..utils.time_utils import human_age, iso_timestamp, sort_by_created
+from ..utils.display import SANDBOX_STATUS_COLORS
 
 app = typer.Typer(help="Manage code sandboxes")
 console = Console()
@@ -455,7 +454,7 @@ def run(
         if working_dir:
             console.print(f"[bold blue]Working directory:[/bold blue] {working_dir}")
         if env_vars:
-            obfuscated_env = _obfuscate_env_vars(env_vars)
+            obfuscated_env = obfuscate_env_vars(env_vars)
             console.print(f"[bold blue]Environment:[/bold blue] {obfuscated_env}")
 
         with console.status("[bold blue]Running command...", spinner="dots"):

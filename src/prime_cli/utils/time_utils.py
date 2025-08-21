@@ -45,11 +45,10 @@ def sort_by_created(
     items: List[Any], attr: str = "created_at", reverse: bool = False, parse_iso: bool = False
 ) -> List[Any]:
     """Sort items by creation time (oldest first by default)."""
-    if parse_iso:
-        def key_fn(x: Any) -> datetime:
+    def key_fn(x: Any) -> Union[datetime, Any]:
+        if parse_iso:
             return datetime.fromisoformat(getattr(x, attr).replace("Z", "+00:00"))
-    else:
-        def key_fn(x: Any) -> Any:
+        else:
             return getattr(x, attr)
 
     return sorted(items, key=key_fn, reverse=reverse)

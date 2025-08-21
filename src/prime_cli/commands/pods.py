@@ -65,7 +65,7 @@ def _format_pod_for_status(status: PodStatus, pod_details: Pod) -> Dict[str, Any
     created_timestamp = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
 
     # Build basic status data
-    status_data = {
+    status_data: Dict[str, Any] = {
         "id": pod_details.id,
         "status": display_status,
         "name": pod_details.name,

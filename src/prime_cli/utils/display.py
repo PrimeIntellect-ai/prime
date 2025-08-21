@@ -11,7 +11,9 @@ from rich.table import Table
 def validate_output_format(output: str, console: Console) -> None:
     """Validate that output format is supported."""
     if output not in ["table", "json"]:
-        console.print(f"[red]Error: Invalid output format '{output}'. Supported formats: table, json[/red]")
+        console.print(
+            f"[red]Error: Invalid output format '{output}'. Supported formats: table, json[/red]"
+        )
         raise typer.Exit(1)
 
 
@@ -23,7 +25,7 @@ def output_data_as_json(data: Any, console: Console) -> None:
 def build_table(title: str, columns: List[Tuple[str, str]], show_lines: bool = True) -> Table:
     """
     Build a Rich table with standard styling.
-    
+
     Args:
         title: Table title
         columns: List of (header, style) tuples
@@ -43,7 +45,7 @@ def status_color(status: str, mapping: Dict[str, str], default: str = "white") -
 # Common status color mappings
 SANDBOX_STATUS_COLORS = {
     "PENDING": "yellow",
-    "PROVISIONING": "yellow", 
+    "PROVISIONING": "yellow",
     "RUNNING": "green",
     "STOPPED": "blue",
     "ERROR": "red",
@@ -53,12 +55,12 @@ SANDBOX_STATUS_COLORS = {
 POD_STATUS_COLORS = {
     "ACTIVE": "green",
     "PENDING": "yellow",
-    "ERROR": "red", 
+    "ERROR": "red",
     "INSTALLING": "yellow",
 }
 
 STOCK_STATUS_COLORS = {
     "High": "green",
-    "Medium": "yellow", 
+    "Medium": "yellow",
     "Low": "red",
 }

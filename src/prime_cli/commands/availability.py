@@ -19,7 +19,7 @@ def _format_availability_for_display(gpu_entry: Dict[str, Any]) -> Dict[str, Any
     gpu_type_display = (
         f"{gpu_entry['gpu_type']} (Spot)" if gpu_entry["is_spot"] else gpu_entry["gpu_type"]
     ).replace("_", " ")
-    
+
     return {
         "id": gpu_entry["short_id"],
         "cloud_id": gpu_entry["cloud_id"],
@@ -28,7 +28,9 @@ def _format_availability_for_display(gpu_entry: Dict[str, Any]) -> Dict[str, Any
         "socket": gpu_entry["socket"],
         "provider": gpu_entry["provider"],
         "location": gpu_entry["location"],
-        "stock_status": gpu_entry["stock_status"] if isinstance(gpu_entry["stock_status"], str) else gpu_entry["stock_status"].plain,
+        "stock_status": gpu_entry["stock_status"]
+        if isinstance(gpu_entry["stock_status"], str)
+        else gpu_entry["stock_status"].plain,
         "price_per_hour": gpu_entry["price"],
         "price_value": gpu_entry["price_value"],
         "security": "community" if gpu_entry["security"] == "community_cloud" else "datacenter",
@@ -94,7 +96,7 @@ def list(
 ) -> None:
     """List available GPU resources"""
     validate_output_format(output, console)
-    
+
     try:
         # Create API clients
         base_client = APIClient()
@@ -207,10 +209,12 @@ def list(
 
         if output == "json":
             # Output as JSON using shared formatting
-            availability_data = [_format_availability_for_display(gpu_entry) for gpu_entry in filtered_gpus]
+            json_data = [
+                _format_availability_for_display(gpu_entry) for gpu_entry in filtered_gpus
+            ]
             output_data = {
-                "gpu_resources": availability_data,
-                "total_count": len(availability_data),
+                "gpu_resources": json_data,
+                "total_count": len(json_data),
                 "filters": {
                     "gpu_type": gpu_type,
                     "gpu_count": gpu_count,
@@ -218,20 +222,20 @@ def list(
                     "socket": socket,
                     "provider": provider,
                     "group_similar": group_similar,
-                }
+                },
             }
             output_data_as_json(output_data, console)
         else:
             # Table output
             for gpu_entry in filtered_gpus:
                 display_data = _format_availability_for_display(gpu_entry)
-                
+
                 # Convert stock_status back to Text for table display
                 stock_color = {"High": "green", "Medium": "yellow", "Low": "red"}.get(
                     display_data["stock_status"], "white"
                 )
                 stock_text = Text(display_data["stock_status"], style=stock_color)
-                
+
                 table.add_row(
                     display_data["id"],
                     display_data["gpu_type"],
@@ -250,7 +254,9 @@ def list(
             console.print(table)
 
             # Add deployment instructions
-            console.print("\n[bold blue]To deploy a pod with one of these configurations:[/bold blue]")
+            console.print(
+                "\n[bold blue]To deploy a pod with one of these configurations:[/bold blue]"
+            )
             console.print("1. Copy either the ID or Cloud ID of your desired configuration")
             console.print("2. Run one of the following commands:")
             console.print("   [green]prime pods create --id <ID>[/green]")

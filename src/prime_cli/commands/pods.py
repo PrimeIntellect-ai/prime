@@ -4,7 +4,7 @@ import os
 import subprocess
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import typer
 from rich.console import Console
@@ -13,14 +13,15 @@ from rich.text import Text
 
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.client import APIClient, APIError
-from ..api.pods import PodsClient
+from ..api.pods import PodsClient, Pod, PodStatus
 from ..config import Config
-from ..utils import (
-    confirm_or_skip, format_ip_display, output_data_as_json, 
-    status_color, validate_output_format
-)
-from ..utils.display import POD_STATUS_COLORS
 from ..helper.short_id import generate_short_id
+from ..utils import (
+    confirm_or_skip,
+    format_ip_display,
+    output_data_as_json,
+    validate_output_format,
+)
 
 app = typer.Typer(help="Manage compute pods")
 console = Console()
@@ -32,10 +33,10 @@ def _format_age(created_at: datetime) -> str:
     now = datetime.now(timezone.utc)
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=timezone.utc)
-    
+
     diff = now - created_at
     total_seconds = int(diff.total_seconds())
-    
+
     if total_seconds < 60:
         return f"{total_seconds}s"
     elif total_seconds < 3600:
@@ -49,7 +50,7 @@ def _format_age(created_at: datetime) -> str:
         return f"{days}d"
 
 
-def _format_pod_for_status(status, pod_details) -> Dict[str, Any]:
+def _format_pod_for_status(status: PodStatus, pod_details: Pod) -> Dict[str, Any]:
     """Format pod status data for display (both table and JSON)"""
     # Display status with installation state consideration
     display_status = status.status
@@ -59,10 +60,10 @@ def _format_pod_for_status(status, pod_details) -> Dict[str, Any]:
         and status.installation_progress < 100
     ):
         display_status = "INSTALLING"
-    
+
     created_at = datetime.fromisoformat(pod_details.created_at.replace("Z", "+00:00"))
     created_timestamp = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    
+
     # Build basic status data
     status_data = {
         "id": pod_details.id,
@@ -76,20 +77,20 @@ def _format_pod_for_status(status, pod_details) -> Dict[str, Any]:
         "ip": format_ip_display(status.ip),
         "ssh": format_ip_display(status.ssh_connection),
     }
-    
+
     # Add optional fields
     if status.cost_per_hr:
         status_data["cost_per_hour"] = status.cost_per_hr
-    
+
     if pod_details.installation_status:
         status_data["installation_status"] = pod_details.installation_status
-    
+
     if status.installation_progress is not None:
         status_data["installation_progress"] = status.installation_progress
-    
+
     if status.installation_failure:
         status_data["installation_error"] = status.installation_failure
-    
+
     if status.prime_port_mapping:
         status_data["port_mappings"] = [
             {
@@ -101,7 +102,7 @@ def _format_pod_for_status(status, pod_details) -> Dict[str, Any]:
             }
             for port in status.prime_port_mapping
         ]
-    
+
     if pod_details.attached_resources:
         status_data["attached_resources"] = [
             {
@@ -113,20 +114,20 @@ def _format_pod_for_status(status, pod_details) -> Dict[str, Any]:
             }
             for resource in pod_details.attached_resources
         ]
-    
+
     return status_data
 
 
-def _format_pod_for_list(pod) -> Dict[str, Any]:
+def _format_pod_for_list(pod: Pod) -> Dict[str, Any]:
     """Format pod data for list display (both table and JSON)"""
     display_status = pod.status
     if pod.status == "ACTIVE" and pod.installation_status != "FINISHED":
         display_status = "INSTALLING"
-    
+
     created_at = datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
     created_timestamp = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
     age = _format_age(created_at)
-    
+
     return {
         "id": pod.id,
         "name": pod.name,
@@ -135,7 +136,6 @@ def _format_pod_for_list(pod) -> Dict[str, Any]:
         "created_at": created_timestamp,  # For JSON output
         "age": age,  # For table output
     }
-
 
 
 @app.command()
@@ -147,11 +147,11 @@ def list(
 ) -> None:
     """List your running pods"""
     validate_output_format(output, console)
-    
+
     if watch and output == "json":
         console.print("[red]Error: --watch mode is not compatible with --output=json[/red]")
         raise typer.Exit(1)
-    
+
     try:
         # Create API clients
         base_client = APIClient()
@@ -174,8 +174,8 @@ def list(
 
                 # Sort pods by created_at (oldest first, like sandbox list)
                 sorted_pods = sorted(
-                    pods_list.data, 
-                    key=lambda pod: datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
+                    pods_list.data,
+                    key=lambda pod: datetime.fromisoformat(pod.created_at.replace("Z", "+00:00")),
                 )
 
                 if output == "json":
@@ -192,7 +192,7 @@ def list(
                             "created_at": pod_data["created_at"],
                         }
                         pods_data.append(json_pod)
-                    
+
                     output_data = {
                         "pods": pods_data,
                         "total_count": pods_list.total_count,
@@ -215,7 +215,7 @@ def list(
                     # Add rows for each pod using shared formatting
                     for pod in sorted_pods:
                         pod_data = _format_pod_for_list(pod)
-                        
+
                         status_color = {
                             "ACTIVE": "green",
                             "PENDING": "yellow",
@@ -284,7 +284,7 @@ def status(
 ) -> None:
     """Get detailed status of a specific pod"""
     validate_output_format(output, console)
-    
+
     try:
         base_client = APIClient()
         pods_client = PodsClient(base_client)
@@ -307,7 +307,7 @@ def status(
         else:
             # Create display table
             status_data = _format_pod_for_status(status, pod_details)
-            
+
             table = Table(title=f"Pod Status: {pod_id}")
             table.add_column("Property", style="cyan")
             table.add_column("Value", style="white")
@@ -343,7 +343,9 @@ def status(
             if "installation_progress" in status_data:
                 table.add_row("Installation Progress", f"{status_data['installation_progress']}%")
             if "installation_error" in status_data:
-                table.add_row("Installation Error", Text(status_data["installation_error"], style="red"))
+                table.add_row(
+                    "Installation Error", Text(status_data["installation_error"], style="red")
+                )
 
             # Port mappings
             if "port_mappings" in status_data:

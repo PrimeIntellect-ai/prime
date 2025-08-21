@@ -16,7 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ..api.client import APIClient, APIError
-from ..utils import confirm_or_skip, output_data_as_json, validate_output_format
+from ..utils import output_data_as_json, validate_output_format
 
 app = typer.Typer(help="Manage verifiers environments")
 console = Console()
@@ -131,7 +131,7 @@ def list_cmd(
 ) -> None:
     """List available verifiers environments"""
     validate_output_format(output, console)
-    
+
     try:
         client = APIClient(require_auth=False)
 
@@ -152,7 +152,9 @@ def list_cmd(
 
         if not environments:
             if output == "json":
-                output_data_as_json({"environments": [], "total": 0, "offset": offset, "limit": limit}, console)
+                output_data_as_json(
+                    {"environments": [], "total": 0, "offset": offset, "limit": limit}, console
+                )
             else:
                 console.print("No environments found.", style="yellow")
             return
@@ -163,12 +165,14 @@ def list_cmd(
             for env in environments:
                 owner_name = env["owner"]["name"]
                 env_name = env["name"]
-                env_data.append({
-                    "environment": f"{owner_name}/{env_name}",
-                    "description": env.get("description", ""),
-                    "visibility": env.get("visibility", ""),
-                })
-            
+                env_data.append(
+                    {
+                        "environment": f"{owner_name}/{env_name}",
+                        "description": env.get("description", ""),
+                        "visibility": env.get("visibility", ""),
+                    }
+                )
+
             output_data = {
                 "environments": env_data,
                 "total": total,
@@ -196,7 +200,9 @@ def list_cmd(
             remaining = total - (offset + len(environments))
             if remaining > 0:
                 next_offset = offset + limit
-                console.print(f"\n[dim]Use --offset {next_offset} to see the next environments.[/dim]")
+                console.print(
+                    f"\n[dim]Use --offset {next_offset} to see the next environments.[/dim]"
+                )
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")

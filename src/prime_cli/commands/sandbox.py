@@ -1,7 +1,6 @@
 import json
 import random
 import string
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import typer
@@ -13,9 +12,16 @@ from ..api.client import APIClient, APIError
 from ..api.sandbox import CreateSandboxRequest, Sandbox, SandboxClient
 from ..config import Config
 from ..utils import (
-    build_table, confirm_or_skip, format_resources, human_age, 
-    iso_timestamp, obfuscate_env_vars, output_data_as_json, 
-    sort_by_created, status_color, validate_output_format
+    build_table,
+    confirm_or_skip,
+    format_resources,
+    human_age,
+    iso_timestamp,
+    obfuscate_env_vars,
+    output_data_as_json,
+    sort_by_created,
+    status_color,
+    validate_output_format,
 )
 from ..utils.display import SANDBOX_STATUS_COLORS
 
@@ -99,12 +105,12 @@ def list_sandboxes_cmd(
             f"Code Sandboxes (Total: {sandbox_list.total})",
             [
                 ("ID", "cyan"),
-                ("Name", "blue"), 
+                ("Name", "blue"),
                 ("Image", "green"),
                 ("Status", "yellow"),
                 ("Resources", "magenta"),
                 ("Age", "blue"),
-            ]
+            ],
         )
 
         # Sort sandboxes by created_at (oldest first)
@@ -125,7 +131,7 @@ def list_sandboxes_cmd(
                     "created_at": sandbox_data["created_at"],
                 }
                 sandboxes_data.append(json_sandbox)
-            
+
             output_data = {
                 "sandboxes": sandboxes_data,
                 "total": sandbox_list.total,
@@ -138,7 +144,7 @@ def list_sandboxes_cmd(
             # Output as table using shared formatting
             for sandbox in sorted_sandboxes:
                 sandbox_data = _format_sandbox_for_list(sandbox)
-                
+
                 color = status_color(sandbox_data["status"], SANDBOX_STATUS_COLORS)
 
                 table.add_row(

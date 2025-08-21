@@ -8,9 +8,36 @@ from rich.text import Text
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.client import APIClient, APIError
 from ..helper.short_id import generate_short_id
+from ..utils import output_data_as_json, validate_output_format
 
 app = typer.Typer(help="Check GPU availability and pricing")
 console = Console()
+
+
+def _format_availability_for_display(gpu_entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Format availability data for display (both table and JSON)"""
+    gpu_type_display = (
+        f"{gpu_entry['gpu_type']} (Spot)" if gpu_entry["is_spot"] else gpu_entry["gpu_type"]
+    ).replace("_", " ")
+    
+    return {
+        "id": gpu_entry["short_id"],
+        "cloud_id": gpu_entry["cloud_id"],
+        "gpu_type": gpu_type_display,
+        "gpu_count": gpu_entry["gpu_count"],
+        "socket": gpu_entry["socket"],
+        "provider": gpu_entry["provider"],
+        "location": gpu_entry["location"],
+        "stock_status": gpu_entry["stock_status"] if isinstance(gpu_entry["stock_status"], str) else gpu_entry["stock_status"].plain,
+        "price_per_hour": gpu_entry["price"],
+        "price_value": gpu_entry["price_value"],
+        "security": "community" if gpu_entry["security"] == "community_cloud" else "datacenter",
+        "vcpus": str(gpu_entry["vcpu"]),
+        "memory_gb": str(gpu_entry["memory"]),
+        "disk_gb": str(gpu_entry["disk"]),
+        "gpu_memory": gpu_entry["gpu_memory"],
+        "is_spot": gpu_entry["is_spot"],
+    }
 
 
 @app.command()
@@ -63,8 +90,11 @@ def list(
     group_similar: bool = typer.Option(
         True, help="Group similar configurations from same provider"
     ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List available GPU resources"""
+    validate_output_format(output, console)
+    
     try:
         # Create API clients
         base_client = APIClient()
@@ -175,36 +205,59 @@ def list(
                     seen_ids.add(gpu_config["short_id"])
                     filtered_gpus.append(gpu_config)
 
-        for gpu_entry in filtered_gpus:
-            gpu_type_display = (
-                f"{gpu_entry['gpu_type']} (Spot)" if gpu_entry["is_spot"] else gpu_entry["gpu_type"]
-            ).replace("_", " ")
-            table.add_row(
-                gpu_entry["short_id"],
-                gpu_type_display,
-                str(gpu_entry["gpu_count"]),
-                gpu_entry["socket"],
-                gpu_entry["provider"],
-                gpu_entry["location"],
-                gpu_entry["stock_status"],
-                gpu_entry["price"],
-                "community" if gpu_entry["security"] == "community_cloud" else "datacenter",
-                str(gpu_entry["vcpu"]),
-                str(gpu_entry["memory"]),
-                str(gpu_entry["disk"]),
+        if output == "json":
+            # Output as JSON using shared formatting
+            availability_data = [_format_availability_for_display(gpu_entry) for gpu_entry in filtered_gpus]
+            output_data = {
+                "gpu_resources": availability_data,
+                "total_count": len(availability_data),
+                "filters": {
+                    "gpu_type": gpu_type,
+                    "gpu_count": gpu_count,
+                    "regions": regions,
+                    "socket": socket,
+                    "provider": provider,
+                    "group_similar": group_similar,
+                }
+            }
+            output_data_as_json(output_data, console)
+        else:
+            # Table output
+            for gpu_entry in filtered_gpus:
+                display_data = _format_availability_for_display(gpu_entry)
+                
+                # Convert stock_status back to Text for table display
+                stock_color = {"High": "green", "Medium": "yellow", "Low": "red"}.get(
+                    display_data["stock_status"], "white"
+                )
+                stock_text = Text(display_data["stock_status"], style=stock_color)
+                
+                table.add_row(
+                    display_data["id"],
+                    display_data["gpu_type"],
+                    str(display_data["gpu_count"]),
+                    display_data["socket"],
+                    display_data["provider"],
+                    display_data["location"],
+                    stock_text,
+                    display_data["price_per_hour"],
+                    display_data["security"],
+                    display_data["vcpus"],
+                    display_data["memory_gb"],
+                    display_data["disk_gb"],
+                )
+
+            console.print(table)
+
+            # Add deployment instructions
+            console.print("\n[bold blue]To deploy a pod with one of these configurations:[/bold blue]")
+            console.print("1. Copy either the ID or Cloud ID of your desired configuration")
+            console.print("2. Run one of the following commands:")
+            console.print("   [green]prime pods create --id <ID>[/green]")
+            console.print(
+                "\nThe command will guide you through an interactive ",
+                "setup process to configure the pod.",
             )
-
-        console.print(table)
-
-        # Add deployment instructions
-        console.print("\n[bold blue]To deploy a pod with one of these configurations:[/bold blue]")
-        console.print("1. Copy either the ID or Cloud ID of your desired configuration")
-        console.print("2. Run one of the following commands:")
-        console.print("   [green]prime pods create --id <ID>[/green]")
-        console.print(
-            "\nThe command will guide you through an interactive ",
-            "setup process to configure the pod.",
-        )
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

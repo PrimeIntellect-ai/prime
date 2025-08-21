@@ -108,6 +108,10 @@ def list_sandboxes_cmd(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List your sandboxes (excludes terminated by default)"""
+    if output not in ["table", "json"]:
+        console.print(f"[red]Error: Invalid output format '{output}'. Supported formats: table, json[/red]")
+        raise typer.Exit(1)
+        
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
@@ -193,6 +197,10 @@ def get(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Get detailed information about a specific sandbox"""
+    if output not in ["table", "json"]:
+        console.print(f"[red]Error: Invalid output format '{output}'. Supported formats: table, json[/red]")
+        raise typer.Exit(1)
+        
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)

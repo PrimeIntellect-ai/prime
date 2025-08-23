@@ -825,7 +825,7 @@ wheels = [
 
 [[package]]
 name = "prime"
-version = "0.3.18"
+version = "0.3.19"
 source = { editable = "." }
 dependencies = [
     { name = "build" },
@@ -863,7 +863,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.9.0" },
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.31.0" },
     { name = "types-toml", marker = "extra == 'dev'", specifier = ">=0.10.0" },
-    { name = "verifiers", specifier = ">=0.1.2.post0" },
+    { name = "verifiers", specifier = ">=0.1.2.post1" },
 ]
 provides-extras = ["dev"]
 
@@ -1261,17 +1261,18 @@ wheels = [
 
 [[package]]
 name = "verifiers"
-version = "0.1.2.post0"
+version = "0.1.2.post1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "datasets" },
     { name = "jinja2" },
     { name = "openai" },
     { name = "pydantic" },
+    { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/79/fc/1fa1b7720db72726dfaeade8a614f6ecd01277435116e67913ebafffb2ef/verifiers-0.1.2.post0.tar.gz", hash = "sha256:55db1d184e1ceab2605e815c79e82af95cd0d78033afd78fe7024a7cc89cba3b", size = 101596, upload-time = "2025-08-09T00:38:28.206Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/91/99/9a3eaac622620a1b9b5edca9470381c886be5d2ffbd5e634a82af465f82c/verifiers-0.1.2.post1.tar.gz", hash = "sha256:e2a06e59976d8d6ae9a425e9dc46f9ccd8b93a262c89edb8daecc10baf73fbdc", size = 101008, upload-time = "2025-08-23T08:20:50.5Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2f/37/fb56c370e8092601a01cb3518da82424bda6e4afd7bbf8cdcd691466342e/verifiers-0.1.2.post0-py3-none-any.whl", hash = "sha256:27d704ac033faec39e08dbb3b751ef3cbae7deddb89b0e911fa8923fef15998d", size = 94184, upload-time = "2025-08-09T00:38:26.719Z" },
+    { url = "https://files.pythonhosted.org/packages/c5/df/ec9c5da83e9109563d8db2ac9fbdba01b7dea081b3445eebb19114a6ada5/verifiers-0.1.2.post1-py3-none-any.whl", hash = "sha256:9e0c811a15bb2dd8bd8de1560d0b99b378d03b8e4829266d39aa6ae0ac54446c", size = 93878, upload-time = "2025-08-23T08:20:48.923Z" },
 ]
 
 [[package]]

@@ -30,7 +30,13 @@ class TimeoutError(APIError):
 
 
 class APIClient:
-    def __init__(self, api_key: Optional[str] = None, require_auth: bool = True):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        team_id: Optional[str] = None,
+        require_auth: bool = True,
+    ):
+        self.team_id: Optional[str]
         # Load config
         self.config = Config()
 
@@ -40,6 +46,13 @@ class APIClient:
             raise APIError(
                 "No API key configured. Use command 'prime login' to configure your API key.",
             )
+
+        # Resolve team_id from parameter, config, or None (personal account)
+        if team_id is not None:
+            self.team_id = team_id
+        else:
+            configured_team_id = self.config.team_id
+            self.team_id = configured_team_id if configured_team_id else None
 
         # Setup client
         self.base_url = self.config.base_url
@@ -63,6 +76,12 @@ class APIClient:
             endpoint = f"/api/v1/{endpoint}"
         else:
             endpoint = f"/api/v1{endpoint}"
+
+        # Automatically add team_id to params if configured
+        if params is None:
+            params = {}
+        if self.team_id and "team_id" not in params:
+            params["team_id"] = self.team_id
 
         url = f"{self.base_url}{endpoint}"
 

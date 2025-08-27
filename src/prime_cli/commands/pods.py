@@ -385,7 +385,9 @@ def create(
         None, help="Image name or 'custom_template' when using custom template ID"
     ),
     custom_template_id: Optional[str] = typer.Option(None, help="Custom template ID"),
-    team_id: Optional[str] = typer.Option(None, help="Team ID to use for the pod"),
+    team_id: Optional[str] = typer.Option(
+        None, help="Team ID to use for the pod (uses config team_id if not specified)"
+    ),
     env: Optional[List[str]] = typer.Option(
         None,
         help="Environment variables to set in the pod. Can be specified multiple times "
@@ -413,7 +415,7 @@ def create(
             )
             raise typer.Exit(1)
 
-        base_client = APIClient()
+        base_client = APIClient(team_id=team_id)
         availability_client = AvailabilityClient(base_client)
         pods_client = PodsClient(base_client)
 
@@ -681,7 +683,7 @@ def create(
                 image = available_images[image_idx - 1]
 
         # Get team ID from config if not provided
-        if not team_id:
+        if team_id is None:
             default_team_id = config.team_id
             options = ["Personal Account", "Custom Team ID"]
             if default_team_id:

@@ -77,7 +77,9 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
 
 @app.command("list")
 def list_sandboxes_cmd(
-    team_id: Optional[str] = typer.Option(None, help="Filter by team ID"),
+    team_id: Optional[str] = typer.Option(
+        None, help="Filter by team ID (uses config team_id if not specified)"
+    ),
     status: Optional[str] = typer.Option(None, help="Filter by status"),
     page: int = typer.Option(1, help="Page number"),
     per_page: int = typer.Option(50, help="Items per page"),
@@ -88,7 +90,7 @@ def list_sandboxes_cmd(
     validate_output_format(output, console)
 
     try:
-        base_client = APIClient()
+        base_client = APIClient(team_id=team_id)
         sandbox_client = SandboxClient(base_client)
 
         # Always exclude terminated sandboxes unless --all is specified or status filter is used
@@ -255,7 +257,9 @@ def create(
     disk_size_gb: int = typer.Option(10, help="Disk size in GB"),
     gpu_count: int = typer.Option(0, help="Number of GPUs"),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
-    team_id: Optional[str] = typer.Option(None, help="Team ID (optional)"),
+    team_id: Optional[str] = typer.Option(
+        None, help="Team ID (uses config team_id if not specified)"
+    ),
     env: Optional[List[str]] = typer.Option(
         None,
         help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
@@ -264,7 +268,7 @@ def create(
 ) -> None:
     """Create a new sandbox"""
     try:
-        base_client = APIClient()
+        base_client = APIClient(team_id=team_id)
         sandbox_client = SandboxClient(base_client)
 
         # Parse environment variables
@@ -290,14 +294,6 @@ def create(
 
             suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
             name = f"{clean_image}-{suffix}"
-
-        # Get team ID from config if not provided
-        if not team_id:
-            team_id = config.team_id
-
-        # Ensure empty string is converted to None
-        if team_id == "":
-            team_id = None
 
         request = CreateSandboxRequest(
             name=name,

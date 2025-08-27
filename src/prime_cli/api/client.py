@@ -36,7 +36,6 @@ class APIClient:
         team_id: Optional[str] = None,
         require_auth: bool = True,
     ):
-        self.team_id: Optional[str]
         # Load config
         self.config = Config()
 
@@ -49,7 +48,7 @@ class APIClient:
 
         # Resolve team_id from parameter, config, or None (personal account)
         if team_id is not None:
-            self.team_id = team_id
+            self.team_id: Optional[str] = team_id
         else:
             configured_team_id = self.config.team_id
             self.team_id = configured_team_id if configured_team_id else None

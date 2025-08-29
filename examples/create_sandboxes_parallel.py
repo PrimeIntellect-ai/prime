@@ -28,27 +28,180 @@ Specifications:
 import argparse
 import csv
 import random
+import signal
+import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
+from queue import Queue
 
 from prime_cli.api.client import APIClient, APIError
 from prime_cli.api.sandbox import CreateSandboxRequest, SandboxClient
 
+# Global flag for graceful shutdown
+graceful_shutdown = threading.Event()
+
+def signal_handler(signum, frame):
+    """Handle SIGINT (Ctrl+C) and SIGTERM gracefully"""
+    signal_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+    print(f"\n🛑 Received {signal_name}! Initiating graceful shutdown...")
+    print("📊 Will generate summary with current data and exit...")
+    graceful_shutdown.set()
 
 class RateLimitError(APIError):
     """Raised when API returns 429 rate limit error"""
     pass
 
 
+class SandboxWatcher:
+    """Real-time sandbox status watcher that runs in a separate thread"""
+
+    def __init__(self, sandbox_client: SandboxClient, stats: 'SandboxCreationStats'):
+        self.sandbox_client = sandbox_client
+        self.stats = stats
+        self.watch_queue: Queue[str] = Queue()  # Queue of sandbox IDs to watch
+        self.stop_event = threading.Event()
+        self.watcher_thread: Optional[threading.Thread] = None
+        self.watching_sandboxes: Set[str] = set()  # Currently being watched
+        self._lock = threading.Lock()
+        self.current_user_id: Optional[str] = None  # Track current user ID for filtering
+
+    def start_watching(self):
+        """Start the watcher thread"""
+        if self.watcher_thread is None or not self.watcher_thread.is_alive():
+            self.stop_event.clear()
+            self.watcher_thread = threading.Thread(target=self._watch_loop, daemon=True)
+            self.watcher_thread.start()
+            print("🔍 Started sandbox watcher thread")
+
+    def stop_watching(self):
+        """Stop the watcher thread"""
+        self.stop_event.set()
+        if self.watcher_thread and self.watcher_thread.is_alive():
+            self.watcher_thread.join(timeout=5)
+            print("🛑 Stopped sandbox watcher thread")
+
+    def add_sandbox_to_watch(self, sandbox_id: str, user_id: Optional[str] = None):
+        """Add a sandbox ID to the watch queue"""
+        with self._lock:
+            # Set current user ID if provided and not already set
+            if user_id and self.current_user_id is None:
+                self.current_user_id = user_id
+                print(f"🔐 Tracking sandboxes for user {user_id[:8]}...")
+
+            if sandbox_id not in self.watching_sandboxes:
+                self.watch_queue.put(sandbox_id)
+                self.watching_sandboxes.add(sandbox_id)
+                print(f"👀 Added {sandbox_id} to watch queue")
+
+    def _watch_loop(self):
+        """Main watcher loop that runs in the background thread"""
+        check_interval = 2  # Check every 2 seconds
+        pending_sandboxes: Set[str] = set()
+
+        while not self.stop_event.is_set() and not graceful_shutdown.is_set():
+            try:
+                # Add new sandboxes from the queue
+                while not self.watch_queue.empty():
+                    try:
+                        sandbox_id = self.watch_queue.get_nowait()
+                        pending_sandboxes.add(sandbox_id)
+                        print(f"🔍 Now watching {sandbox_id}")
+                    except:
+                        break
+
+                # Check status of pending sandboxes
+                if pending_sandboxes:
+                    completed_sandboxes = set()
+
+                    for sandbox_id in list(pending_sandboxes):
+                        if self.stop_event.is_set() or graceful_shutdown.is_set():
+                            break
+
+                        result = self._check_sandbox_status_with_retry(sandbox_id)
+
+                        if result is None:
+                            # Failed to get status, will retry in next iteration
+                            continue
+
+                        status, sandbox_user_id = result
+
+                        # Verify sandbox belongs to current user (if we have user ID info)
+                        if self.current_user_id and sandbox_user_id and sandbox_user_id != self.current_user_id:
+                            print(f"⚠️  Skipping {sandbox_id} - belongs to different user ({sandbox_user_id[:8]}...)")
+                            completed_sandboxes.add(sandbox_id)
+                            continue
+
+                        if status == "RUNNING":
+                            self.stats.add_ready_sandbox(sandbox_id)
+                            completed_sandboxes.add(sandbox_id)
+                            print(f"✅ Watcher detected {sandbox_id} is ready! ({self.stats.ready_count}/{len(self.stats.created_sandbox_ids)})")
+
+                        elif status in ["ERROR", "TERMINATED"]:
+                            print(f"❌ Watcher detected {sandbox_id} failed with status: {status}")
+                            completed_sandboxes.add(sandbox_id)
+
+                    # Remove completed sandboxes from pending set
+                    for sandbox_id in completed_sandboxes:
+                        pending_sandboxes.discard(sandbox_id)
+                        with self._lock:
+                            self.watching_sandboxes.discard(sandbox_id)
+
+                # Sleep before next check cycle
+                if not self.stop_event.is_set():
+                    time.sleep(check_interval)
+
+            except Exception as e:
+                print(f"⚠️  Error in watcher loop: {e}")
+                time.sleep(check_interval)
+
+    def _check_sandbox_status_with_retry(self, sandbox_id: str, max_retries: int = 3) -> Optional[Tuple[str, Optional[str]]]:
+        """Check sandbox status with exponential backoff retry logic"""
+        base_delay = 1.0
+        max_delay = 8.0
+
+        for attempt in range(max_retries + 1):
+            try:
+                sandbox = self.sandbox_client.get(sandbox_id)
+                return (sandbox.status, sandbox.user_id)
+
+            except Exception as e:
+                error_str = str(e)
+
+                # Check if this is a rate limiting error (429)
+                if "HTTP 429" in error_str or "rate limit" in error_str.lower():
+                    if attempt < max_retries:
+                        # Calculate exponential backoff delay with jitter
+                        delay = min(base_delay * (2 ** attempt), max_delay)
+                        jitter = random.uniform(0, 0.1 * delay)
+                        total_delay = delay + jitter
+
+                        print(f"🚫 Watcher rate limited checking {sandbox_id}, retrying in {total_delay:.1f}s")
+                        time.sleep(total_delay)
+                        continue
+                    else:
+                        print(f"❌ Watcher rate limit exceeded for {sandbox_id}")
+                        return None
+                else:
+                    # Non-rate-limit error, don't retry
+                    print(f"⚠️  Watcher error checking {sandbox_id}: {e}")
+                    return None
+
+        return None
+
+
 class SandboxCreationStats:
-    """Track sandbox creation statistics"""
+    """Track sandbox creation statistics (thread-safe)"""
 
     def __init__(self, target_count: int = None, batch_size: int = None):
         # Configuration
         self.target_count = target_count
         self.batch_size = batch_size
+
+        # Thread safety
+        self._lock = threading.Lock()
 
         self.total_created = 0
         self.total_failed = 0
@@ -73,85 +226,92 @@ class SandboxCreationStats:
         self.individual_creation_durations: List[float] = []  # Individual creation times
 
     def add_success(self, creation_time: float):
-        """Record a successful sandbox creation"""
-        self.total_created += 1
-        self.creation_times.append(creation_time)
-        self.individual_creation_durations.append(creation_time)
+        """Record a successful sandbox creation (thread-safe)"""
+        with self._lock:
+            self.total_created += 1
+            self.creation_times.append(creation_time)
+            self.individual_creation_durations.append(creation_time)
 
     def add_failure(self, error_msg: str, batch_num: Optional[int] = None, creation_duration: Optional[float] = None):
-        """Record a failed sandbox creation"""
-        self.total_failed += 1
-        self.failed_attempts.append(error_msg)
+        """Record a failed sandbox creation (thread-safe)"""
+        with self._lock:
+            self.total_failed += 1
+            self.failed_attempts.append(error_msg)
 
-        # Track failed creation duration for statistics (if available)
-        if creation_duration is not None:
-            self.individual_creation_durations.append(creation_duration)
+            # Track failed creation duration for statistics (if available)
+            if creation_duration is not None:
+                self.individual_creation_durations.append(creation_duration)
 
-        # Record failed attempt for CSV export
-        record = {
-            'sandbox_id': f'failed-{self.total_failed}',
-            'batch_number': batch_num,
-            'creation_request_time': datetime.fromtimestamp(time.time()).isoformat(),
-            'creation_duration_seconds': creation_duration,
-            'creation_timestamp': time.time(),
-            'ready_time': None,
-            'startup_time_seconds': None,
-            'status': 'failed',
-            'error_message': error_msg
-        }
-        self.detailed_records.append(record)
+            # Record failed attempt for CSV export
+            record = {
+                'sandbox_id': f'failed-{self.total_failed}',
+                'batch_number': batch_num,
+                'creation_request_time': datetime.fromtimestamp(time.time()).isoformat(),
+                'creation_duration_seconds': creation_duration,
+                'creation_timestamp': time.time(),
+                'ready_time': None,
+                'startup_time_seconds': None,
+                'status': 'failed',
+                'error_message': error_msg
+            }
+            self.detailed_records.append(record)
 
     def add_retry(self):
-        """Record a retry attempt"""
-        self.total_retries += 1
+        """Record a retry attempt (thread-safe)"""
+        with self._lock:
+            self.total_retries += 1
 
     def add_rate_limit_hit(self):
-        """Record a rate limit hit"""
-        self.rate_limit_hits += 1
+        """Record a rate limit hit (thread-safe)"""
+        with self._lock:
+            self.rate_limit_hits += 1
 
     def add_created_sandbox(self, sandbox_id: str, creation_timestamp: Optional[float] = None, batch_num: Optional[int] = None, creation_duration: Optional[float] = None):
-        """Record a successfully created sandbox ID with its creation timestamp"""
-        self.created_sandbox_ids.append(sandbox_id)
-        if creation_timestamp is None:
-            creation_timestamp = time.time()
-        self.sandbox_creation_times[sandbox_id] = creation_timestamp
+        """Record a successfully created sandbox ID with its creation timestamp (thread-safe)"""
+        with self._lock:
+            self.created_sandbox_ids.append(sandbox_id)
+            if creation_timestamp is None:
+                creation_timestamp = time.time()
+            self.sandbox_creation_times[sandbox_id] = creation_timestamp
 
-        # Record detailed information for CSV export
-        record = {
-            'sandbox_id': sandbox_id,
-            'batch_number': batch_num,
-            'creation_request_time': datetime.fromtimestamp(creation_timestamp).isoformat(),
-            'creation_duration_seconds': creation_duration,
-            'creation_timestamp': creation_timestamp,
-            'ready_time': None,
-            'startup_time_seconds': None,
-            'status': 'created'
-        }
-        self.detailed_records.append(record)
+            # Record detailed information for CSV export
+            record = {
+                'sandbox_id': sandbox_id,
+                'batch_number': batch_num,
+                'creation_request_time': datetime.fromtimestamp(creation_timestamp).isoformat(),
+                'creation_duration_seconds': creation_duration,
+                'creation_timestamp': creation_timestamp,
+                'ready_time': None,
+                'startup_time_seconds': None,
+                'status': 'created'
+            }
+            self.detailed_records.append(record)
 
     def add_ready_sandbox(self, sandbox_id: str):
-        """Record when a sandbox becomes ready and calculate its startup time"""
+        """Record when a sandbox becomes ready and calculate its startup time (thread-safe)"""
         current_time = time.time()
-        self.ready_count += 1
 
-        # Calculate individual startup time
-        startup_time = None
-        if sandbox_id in self.sandbox_creation_times:
-            startup_time = current_time - self.sandbox_creation_times[sandbox_id]
-            self.sandbox_startup_times.append(startup_time)
+        with self._lock:
+            self.ready_count += 1
 
-        # Update detailed record for CSV export
-        for record in self.detailed_records:
-            if record['sandbox_id'] == sandbox_id:
-                record['ready_time'] = datetime.fromtimestamp(current_time).isoformat()
-                record['startup_time_seconds'] = startup_time
-                record['status'] = 'ready'
-                break
+            # Calculate individual startup time
+            startup_time = None
+            if sandbox_id in self.sandbox_creation_times:
+                startup_time = current_time - self.sandbox_creation_times[sandbox_id]
+                self.sandbox_startup_times.append(startup_time)
 
-        if self.first_ready_time is None:
-            self.first_ready_time = current_time
+            # Update detailed record for CSV export
+            for record in self.detailed_records:
+                if record['sandbox_id'] == sandbox_id:
+                    record['ready_time'] = datetime.fromtimestamp(current_time).isoformat()
+                    record['startup_time_seconds'] = startup_time
+                    record['status'] = 'ready'
+                    break
 
-        self.last_ready_time = current_time
+            if self.first_ready_time is None:
+                self.first_ready_time = current_time
+
+            self.last_ready_time = current_time
 
     def calculate_percentile(self, data: List[float], percentile: float) -> float:
         """Calculate the given percentile of a dataset"""
@@ -293,6 +453,8 @@ def create_single_sandbox_with_retry(
     sandbox_client: SandboxClient,
     sandbox_name: str,
     stats: SandboxCreationStats,
+    batch_num: int,
+    watcher: Optional[SandboxWatcher] = None,
     max_retries: int = 5
 ) -> Tuple[bool, str, float, Optional[str], Optional[float]]:
     """
@@ -321,13 +483,17 @@ def create_single_sandbox_with_retry(
                 cpu_cores=1,
                 memory_gb=1,
                 disk_size_gb=1,
-                timeout_minutes=5
+                timeout_minutes=15
             )
 
             # Create the sandbox
             sandbox = sandbox_client.create(request)
             creation_time = time.time() - start_time
             creation_timestamp = time.time()  # Record when the sandbox was created
+
+            # Add to watcher if available (eliminates race condition)
+            if watcher:
+                watcher.add_sandbox_to_watch(sandbox.id, sandbox.user_id)
 
             return True, f"Created sandbox {sandbox.id}", creation_time, sandbox.id, creation_timestamp
 
@@ -366,14 +532,55 @@ def create_single_sandbox_with_retry(
     return False, f"Max retries exceeded", creation_time, None, None
 
 
-def get_current_sandbox_count(sandbox_client: SandboxClient) -> int:
-    """Get the current number of active sandboxes using pagination"""
+def get_current_user_sandbox_count(sandbox_client: SandboxClient) -> int:
+    """Get the current number of active sandboxes for the current user only"""
     try:
-        # Get first page to check total count (API limit is 100 per page)
-        response = sandbox_client.list(exclude_terminated=True, per_page=100, page=1)
-        total_count = response.total
+        # Get all active sandboxes with pagination
+        all_user_sandboxes = []
+        page = 1
+        per_page = 100  # API limit
+        current_user_id = None  # Declare outside the loop
 
-        print(f"📊 Found {total_count} active sandboxes")
+        while True:
+            response = sandbox_client.list(exclude_terminated=True, per_page=per_page, page=page)
+
+            if not response.sandboxes:
+                break
+
+            # The API should already filter by current user, but let's be explicit
+            # In case the API returns sandboxes from other users, we'll filter them out
+            user_sandboxes = []
+
+            # First, try to determine the current user ID from any sandbox
+            for sandbox in response.sandboxes:
+                if sandbox.user_id:
+                    if current_user_id is None:
+                        current_user_id = sandbox.user_id
+
+                    # Only count sandboxes that belong to the same user as the first one
+                    # This assumes all returned sandboxes belong to the current user
+                    if sandbox.user_id == current_user_id:
+                        user_sandboxes.append(sandbox)
+                else:
+                    # If user_id is not set, assume it belongs to current user
+                    # (this handles cases where the API doesn't populate user_id)
+                    user_sandboxes.append(sandbox)
+
+            all_user_sandboxes.extend(user_sandboxes)
+
+            # Check if there are more pages
+            if not response.has_next or len(response.sandboxes) < per_page:
+                break
+
+            page += 1
+
+        total_count = len(all_user_sandboxes)
+
+        if current_user_id:
+            print(f"📊 Found {total_count} active sandboxes for user {current_user_id[:8]}...")
+        else:
+            print(f"📊 Found {total_count} active sandboxes for current user")
+
         return total_count
 
     except APIError as e:
@@ -388,7 +595,7 @@ def get_current_sandbox_count(sandbox_client: SandboxClient) -> int:
         return 0
 
 
-def create_sandboxes_batch(sandbox_client: SandboxClient, batch_size: int, batch_num: int, stats: SandboxCreationStats) -> List[Tuple[bool, str, float, Optional[str], Optional[float]]]:
+def create_sandboxes_batch(sandbox_client: SandboxClient, batch_size: int, batch_num: int, stats: SandboxCreationStats, watcher: Optional[SandboxWatcher] = None) -> List[Tuple[bool, str, float, Optional[str], Optional[float]]]:
     """Create a batch of sandboxes in parallel using ThreadPoolExecutor"""
     results = []
 
@@ -399,7 +606,9 @@ def create_sandboxes_batch(sandbox_client: SandboxClient, batch_size: int, batch
                 create_single_sandbox_with_retry,
                 sandbox_client,
                 f"batch-{batch_num}-sandbox-{i+1}",
-                stats
+                stats,
+                batch_num,
+                watcher
             ): f"batch-{batch_num}-sandbox-{i+1}"
             for i in range(batch_size)
         }
@@ -602,6 +811,10 @@ Examples:
 
 def main():
     """Main function to create sandboxes in parallel until reaching 250 total"""
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
+
     args = parse_arguments()
 
     print("🚀 Starting parallel sandbox creation script")
@@ -611,6 +824,7 @@ def main():
     print(f"   📦 Batch size: {args.batch_size}")
     print(f"   ⏳ Wait until ready: {'Yes' if args.wait_until_ready else 'No (default)'}")
     print("=" * 60)
+    print("💡 Press Ctrl+C anytime for graceful shutdown with current data summary")
 
     # Initialize the API client and sandbox client
     try:
@@ -624,7 +838,7 @@ def main():
 
     # Get current sandbox count
     print("\n📊 Checking current sandbox count...")
-    current_count = get_current_sandbox_count(sandbox_client)
+    current_count = get_current_user_sandbox_count(sandbox_client)
     print(f"📈 Current active sandboxes: {current_count}")
 
     # Calculate how many more sandboxes we need
@@ -640,11 +854,20 @@ def main():
     # Initialize statistics
     stats = SandboxCreationStats(target_count=args.count, batch_size=args.batch_size)
 
+    # Determine if we should wait for readiness
+    wait_until_ready = args.wait_until_ready
+
+    # Initialize watcher if we're waiting for readiness
+    watcher = None
+    if wait_until_ready:
+        watcher = SandboxWatcher(sandbox_client, stats)
+        watcher.start_watching()
+
     # Create sandboxes in batches
     batch_size = args.batch_size
     batch_num = 1
 
-    while stats.total_created < remaining_needed:
+    while stats.total_created < remaining_needed and not graceful_shutdown.is_set():
         # Calculate how many to create in this batch
         sandboxes_left = remaining_needed - stats.total_created
         current_batch_size = min(batch_size, sandboxes_left)
@@ -653,7 +876,7 @@ def main():
         batch_start_time = time.time()
 
         # Create batch of sandboxes
-        batch_results = create_sandboxes_batch(sandbox_client, current_batch_size, batch_num, stats)
+        batch_results = create_sandboxes_batch(sandbox_client, current_batch_size, batch_num, stats, watcher)
 
         # Process batch results
         batch_successes = 0
@@ -683,17 +906,54 @@ def main():
         batch_num += 1
 
         # Small delay between batches to avoid overwhelming the API
-        if stats.total_created < remaining_needed:
+        if stats.total_created < remaining_needed and not graceful_shutdown.is_set():
             print("⏸️  Waiting 2 seconds before next batch...")
             time.sleep(2)
 
+    # Check if we were interrupted during creation
+    if graceful_shutdown.is_set():
+        print(f"\n🛑 Graceful shutdown during creation. Created {stats.total_created} out of {remaining_needed} requested sandboxes.")
+
     # Wait for all sandboxes to be ready (if enabled)
-    if args.wait_until_ready and stats.created_sandbox_ids:
-        print(f"\n🕒 Waiting for all {len(stats.created_sandbox_ids)} sandboxes to be ready...")
-        wait_for_sandboxes_ready(sandbox_client, stats)
-    elif not args.wait_until_ready and stats.created_sandbox_ids:
-        print(f"\n⏭️  Skipping readiness wait for {len(stats.created_sandbox_ids)} sandboxes (--no-wait enabled)")
+    if wait_until_ready and stats.created_sandbox_ids:
+        print(f"\n🕒 Waiting for watcher to detect all {len(stats.created_sandbox_ids)} sandboxes as ready...")
+
+        # Wait for watcher to complete (with timeout)
+        max_wait_time = 600  # 10 minutes
+        start_wait = time.time()
+        last_progress = 0
+
+        while stats.ready_count < len(stats.created_sandbox_ids) and (time.time() - start_wait) < max_wait_time and not graceful_shutdown.is_set():
+            elapsed = time.time() - start_wait
+
+            # Progress update every 30 seconds
+            if elapsed - last_progress >= 30:
+                print(f"📊 Watcher progress: {stats.ready_count}/{len(stats.created_sandbox_ids)} ready after {elapsed:.0f}s")
+                last_progress = elapsed
+
+            time.sleep(5)  # Check every 5 seconds
+
+        # Final status
+        if graceful_shutdown.is_set():
+            total_wait_time = time.time() - start_wait
+            print(f"🛑 Graceful shutdown requested. {stats.ready_count}/{len(stats.created_sandbox_ids)} sandboxes ready after {total_wait_time:.2f}s")
+        elif stats.ready_count >= len(stats.created_sandbox_ids):
+            total_wait_time = time.time() - start_wait
+            print(f"🎉 Watcher detected all sandboxes are ready! Total wait time: {total_wait_time:.2f}s")
+        else:
+            print(f"⏰ Timeout reached. {stats.ready_count}/{len(stats.created_sandbox_ids)} sandboxes ready")
+
+        # Stop the watcher
+        if watcher:
+            watcher.stop_watching()
+
+    elif not wait_until_ready and stats.created_sandbox_ids:
+        print(f"\n⏭️  Skipping readiness wait for {len(stats.created_sandbox_ids)} sandboxes (fast mode)")
         print("💡 Sandboxes will continue provisioning in the background")
+
+        # Stop the watcher if it was started (shouldn't happen, but just in case)
+        if watcher:
+            watcher.stop_watching()
 
     # Export detailed data to CSV
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -715,7 +975,7 @@ def main():
 
         # Final verification
     print("\n🔍 Verifying final sandbox count...")
-    final_count = get_current_sandbox_count(sandbox_client)
+    final_count = get_current_user_sandbox_count(sandbox_client)
     print(f"📈 Final active sandboxes: {final_count}")
 
     if final_count >= target_count:

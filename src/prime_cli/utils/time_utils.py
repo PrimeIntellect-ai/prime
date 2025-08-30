@@ -41,9 +41,7 @@ def iso_timestamp(dt: Union[datetime, str]) -> str:
     return to_utc(dt).strftime(ISO_FMT)
 
 
-def sort_by_created(
-    items: List[Any], attr: str = "created_at", reverse: bool = False
-) -> List[Any]:
+def sort_by_created(items: List[Any], attr: str = "created_at", reverse: bool = False) -> List[Any]:
     """Sort items by creation time (oldest first by default).
 
     Expects datetime objects but gracefully handles other types without failing.

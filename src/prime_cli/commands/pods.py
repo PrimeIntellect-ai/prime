@@ -31,8 +31,6 @@ console = Console()
 config = Config()
 
 
-
-
 def _format_pod_for_status(status: PodStatus, pod_details: Pod) -> Dict[str, Any]:
     """Format pod status data for display (both table and JSON)"""
     # Display status with installation state consideration

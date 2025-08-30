@@ -3,14 +3,15 @@
 from typing import Any, Dict, List, Optional, Union
 
 
-def obfuscate_env_vars(env_vars: Dict[str, Any]) -> Dict[str, Any]:
+def obfuscate_env_vars(env_vars: Dict[str, Any]) -> Dict[str, str]:
     """Obfuscate environment variable values for display."""
-    obfuscated = {}
+    obfuscated: Dict[str, str] = {}
     for key, value in env_vars.items():
-        if len(value) <= 3:
-            obfuscated[key] = "*" * len(value)
+        str_value = str(value)  # Ensure value is a string
+        if len(str_value) <= 3:
+            obfuscated[key] = "*" * len(str_value)
         else:
-            obfuscated[key] = value[:2] + "*" * (len(value) - 4) + value[-2:]
+            obfuscated[key] = str_value[:2] + "*" * (len(str_value) - 4) + str_value[-2:]
     return obfuscated
 
 

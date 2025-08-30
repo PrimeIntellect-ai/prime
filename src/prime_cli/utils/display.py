@@ -38,7 +38,7 @@ def build_table(title: str, columns: List[Tuple[str, str]], show_lines: bool = T
 
 
 def status_color(status: str, mapping: Dict[str, str], default: str = "white") -> str:
-    """Get color for status based on mapping."""
+    """Get color for status based on mapping with fallback to default."""
     return mapping.get(status, default)
 
 

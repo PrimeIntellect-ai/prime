@@ -58,15 +58,15 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "disk_mount_path": sandbox.disk_mount_path,
         "gpu_count": sandbox.gpu_count,
         "timeout_minutes": sandbox.timeout_minutes,
-        "created_at": sandbox.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "created_at": iso_timestamp(sandbox.created_at),
         "user_id": sandbox.user_id,
         "team_id": sandbox.team_id,
     }
 
     if sandbox.started_at:
-        data["started_at"] = sandbox.started_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        data["started_at"] = iso_timestamp(sandbox.started_at)
     if sandbox.terminated_at:
-        data["terminated_at"] = sandbox.terminated_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        data["terminated_at"] = iso_timestamp(sandbox.terminated_at)
     if sandbox.environment_vars:
         data["environment_vars"] = obfuscate_env_vars(sandbox.environment_vars)
     if sandbox.advanced_configs:

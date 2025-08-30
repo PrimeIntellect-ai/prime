@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import Any, List, Union
 
-ISO_FMT = "%Y-%m-%d %H:%M:%S UTC"
+ISO_FMT: str = "%Y-%m-%d %H:%M:%S UTC"
 
 
 def now_utc() -> datetime:
@@ -44,7 +44,28 @@ def iso_timestamp(dt: Union[datetime, str]) -> str:
 def sort_by_created(items: List[Any], attr: str = "created_at", reverse: bool = False) -> List[Any]:
     """Sort items by creation time (oldest first by default).
 
-    Expects datetime objects but gracefully handles other types without failing.
+    Handles datetime objects, ISO strings, and other types with robust fallback.
     """
 
-    return sorted(items, key=lambda x: getattr(x, attr, datetime.min), reverse=reverse)
+    def get_sort_key(item: Any) -> datetime:
+        value = getattr(item, attr, None)
+
+        if value is None:
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+        if isinstance(value, datetime):
+            return to_utc(value)
+
+        if isinstance(value, str):
+            try:
+                # Handle ISO strings with or without 'Z' suffix
+                iso_string = value.replace("Z", "+00:00")
+                return to_utc(datetime.fromisoformat(iso_string))
+            except (ValueError, TypeError):
+                # If parsing fails, fall back to minimum datetime
+                return datetime.min.replace(tzinfo=timezone.utc)
+
+        # For any other type, use minimum datetime as fallback
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    return sorted(items, key=get_sort_key, reverse=reverse)

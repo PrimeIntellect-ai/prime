@@ -20,6 +20,7 @@ from ..utils import (
     confirm_or_skip,
     format_ip_display,
     human_age,
+    iso_timestamp,
     output_data_as_json,
     status_color,
     validate_output_format,
@@ -43,7 +44,7 @@ def _format_pod_for_status(status: PodStatus, pod_details: Pod) -> Dict[str, Any
         display_status = "INSTALLING"
 
     created_at = datetime.fromisoformat(pod_details.created_at.replace("Z", "+00:00"))
-    created_timestamp = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    created_timestamp = iso_timestamp(created_at)
 
     # Build basic status data
     status_data: Dict[str, Any] = {
@@ -106,7 +107,7 @@ def _format_pod_for_list(pod: Pod) -> Dict[str, Any]:
         display_status = "INSTALLING"
 
     created_at = datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
-    created_timestamp = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    created_timestamp = iso_timestamp(created_at)
     age = human_age(created_at)
 
     return {

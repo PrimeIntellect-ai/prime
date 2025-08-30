@@ -3,7 +3,7 @@ import json
 import os
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import typer
@@ -19,6 +19,7 @@ from ..helper.short_id import generate_short_id
 from ..utils import (
     confirm_or_skip,
     format_ip_display,
+    human_age,
     output_data_as_json,
     validate_output_format,
 )
@@ -28,26 +29,6 @@ console = Console()
 config = Config()
 
 
-def _format_age(created_at: datetime) -> str:
-    """Format time difference as human-readable age (like kubectl)"""
-    now = datetime.now(timezone.utc)
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
-
-    diff = now - created_at
-    total_seconds = int(diff.total_seconds())
-
-    if total_seconds < 60:
-        return f"{total_seconds}s"
-    elif total_seconds < 3600:
-        minutes = total_seconds // 60
-        return f"{minutes}m"
-    elif total_seconds < 86400:
-        hours = total_seconds // 3600
-        return f"{hours}h"
-    else:
-        days = total_seconds // 86400
-        return f"{days}d"
 
 
 def _format_pod_for_status(status: PodStatus, pod_details: Pod) -> Dict[str, Any]:
@@ -126,7 +107,7 @@ def _format_pod_for_list(pod: Pod) -> Dict[str, Any]:
 
     created_at = datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
     created_timestamp = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    age = _format_age(created_at)
+    age = human_age(created_at)
 
     return {
         "id": pod.id,

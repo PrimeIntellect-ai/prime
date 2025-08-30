@@ -1,6 +1,7 @@
 import json
 import random
 import string
+import time
 from typing import List, Optional
 
 import typer
@@ -379,10 +380,17 @@ def run(
             obfuscated_env = _obfuscate_env_vars(env_vars)
             console.print(f"[bold blue]Environment:[/bold blue] {obfuscated_env}")
 
+        # Start timing
+        start_time = time.perf_counter()
+
         with console.status("[bold blue]Running command...", spinner="dots"):
             result = sandbox_client.execute_command(
                 sandbox_id, command_str, working_dir, env_vars if env_vars else None
             )
+
+        # End timing
+        end_time = time.perf_counter()
+        execution_time_ms = (end_time - start_time) * 1000
 
         # Display output
         if result.stdout:
@@ -392,6 +400,8 @@ def run(
         if result.stderr:
             console.print("\n[bold red]stderr:[/bold red]")
             console.print(result.stderr)
+
+        console.print(f"\n[dim]Execution time: {execution_time_ms:.1f}ms[/dim]")
 
         if result.exit_code != 0:
             console.print(f"\n[bold yellow]Exit code:[/bold yellow] {result.exit_code}")

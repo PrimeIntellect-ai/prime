@@ -45,18 +45,8 @@ def sort_by_created(
     items: List[Any], attr: str = "created_at", reverse: bool = False
 ) -> List[Any]:
     """Sort items by creation time (oldest first by default).
-    
-    Automatically handles both datetime objects and ISO string timestamps.
+
+    Expects datetime objects but gracefully handles other types without failing.
     """
 
-    def key_fn(x: Any) -> datetime:
-        value = getattr(x, attr)
-        if isinstance(value, str):
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        elif isinstance(value, datetime):
-            return value
-        else:
-            # Fallback for other types - let sorting handle comparison
-            return value
-
-    return sorted(items, key=key_fn, reverse=reverse)
+    return sorted(items, key=lambda x: getattr(x, attr, datetime.min), reverse=reverse)

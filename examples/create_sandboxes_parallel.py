@@ -98,8 +98,9 @@ class SandboxWatcher:
 
     def _watch_loop(self):
         """Main watcher loop that runs in the background thread"""
-        check_interval = 2  # Check every 2 seconds
+        check_interval = 30  # Check every 30 seconds using list API (precision comes from API timestamps)
         pending_sandboxes: Set[str] = set()
+        running_sandboxes: Set[str] = set()  # Track sandboxes that transitioned to RUNNING
 
         while not self.stop_event.is_set() and not graceful_shutdown.is_set():
             try:
@@ -112,40 +113,74 @@ class SandboxWatcher:
                     except:
                         break
 
-                # Check status of pending sandboxes
+                # Check status of pending sandboxes using list API
                 if pending_sandboxes:
                     completed_sandboxes = set()
+                    
+                    # Use list API instead of individual get calls to avoid rate limiting
+                    sandbox_status_map = self._get_sandbox_statuses_batch(pending_sandboxes)
+                    
+                    if sandbox_status_map is not None:
+                        for sandbox_id in list(pending_sandboxes):
+                            if self.stop_event.is_set() or graceful_shutdown.is_set():
+                                break
 
-                    for sandbox_id in list(pending_sandboxes):
-                        if self.stop_event.is_set() or graceful_shutdown.is_set():
-                            break
+                            if sandbox_id not in sandbox_status_map:
+                                # Sandbox not found in list, may be terminated or deleted
+                                print(f"⚠️  Sandbox {sandbox_id} not found in list API, removing from watch")
+                                completed_sandboxes.add(sandbox_id)
+                                continue
 
-                        result = self._check_sandbox_status_with_retry(sandbox_id)
+                            status, sandbox_user_id = sandbox_status_map[sandbox_id]
 
-                        if result is None:
-                            # Failed to get status, will retry in next iteration
-                            continue
+                            # Verify sandbox belongs to current user (if we have user ID info)
+                            if self.current_user_id and sandbox_user_id and sandbox_user_id != self.current_user_id:
+                                print(f"⚠️  Skipping {sandbox_id} - belongs to different user ({sandbox_user_id[:8]}...)")
+                                completed_sandboxes.add(sandbox_id)
+                                continue
 
-                        status, sandbox_user_id = result
+                            if status == "RUNNING":
+                                # Mark as running but don't complete watching yet
+                                if sandbox_id not in running_sandboxes:
+                                    running_sandboxes.add(sandbox_id)
+                                    print(f"🔄 Sandbox {sandbox_id} is RUNNING, getting detailed ready time...")
+                                    
+                                    # Get actual startup duration from API timestamps
+                                    actual_startup_duration = self._get_sandbox_ready_time(sandbox_id)
+                                    if actual_startup_duration is not None:
+                                        self.stats.add_ready_sandbox(sandbox_id, actual_startup_duration)
+                                        completed_sandboxes.add(sandbox_id)
+                                        print(f"✅ Watcher detected {sandbox_id} is ready! ({self.stats.ready_count}/{len(self.stats.created_sandbox_ids)}) - API Duration: {actual_startup_duration:.2f}s")
+                                    else:
+                                        # Will retry getting details in next iteration
+                                        print(f"⚠️  Could not get startup duration for {sandbox_id}, will retry")
 
-                        # Verify sandbox belongs to current user (if we have user ID info)
-                        if self.current_user_id and sandbox_user_id and sandbox_user_id != self.current_user_id:
-                            print(f"⚠️  Skipping {sandbox_id} - belongs to different user ({sandbox_user_id[:8]}...)")
-                            completed_sandboxes.add(sandbox_id)
-                            continue
+                            elif status in ["ERROR", "TERMINATED"]:
+                                print(f"❌ Watcher detected {sandbox_id} failed with status: {status}")
+                                completed_sandboxes.add(sandbox_id)
 
-                        if status == "RUNNING":
-                            self.stats.add_ready_sandbox(sandbox_id)
-                            completed_sandboxes.add(sandbox_id)
-                            print(f"✅ Watcher detected {sandbox_id} is ready! ({self.stats.ready_count}/{len(self.stats.created_sandbox_ids)})")
+                    else:
+                        # List API failed, fall back to individual checks but with longer delay
+                        print("⚠️  List API failed, using fallback individual checks")
+                        for sandbox_id in list(pending_sandboxes)[:3]:  # Limit to 3 to avoid rate limiting
+                            if self.stop_event.is_set() or graceful_shutdown.is_set():
+                                break
 
-                        elif status in ["ERROR", "TERMINATED"]:
-                            print(f"❌ Watcher detected {sandbox_id} failed with status: {status}")
-                            completed_sandboxes.add(sandbox_id)
+                            result = self._check_sandbox_status_with_retry(sandbox_id)
+                            if result is not None:
+                                status, sandbox_user_id = result
+                                if status == "RUNNING":
+                                    self.stats.add_ready_sandbox(sandbox_id)
+                                    completed_sandboxes.add(sandbox_id)
+                                    print(f"✅ Watcher detected {sandbox_id} is ready! ({self.stats.ready_count}/{len(self.stats.created_sandbox_ids)})")
+                                elif status in ["ERROR", "TERMINATED"]:
+                                    print(f"❌ Watcher detected {sandbox_id} failed with status: {status}")
+                                    completed_sandboxes.add(sandbox_id)
 
-                    # Remove completed sandboxes from pending set
+                    # Remove completed sandboxes from pending and running sets
                     for sandbox_id in completed_sandboxes:
                         pending_sandboxes.discard(sandbox_id)
+                        running_sandboxes.discard(sandbox_id)
                         with self._lock:
                             self.watching_sandboxes.discard(sandbox_id)
 
@@ -156,6 +191,105 @@ class SandboxWatcher:
             except Exception as e:
                 print(f"⚠️  Error in watcher loop: {e}")
                 time.sleep(check_interval)
+
+    def _get_sandbox_statuses_batch(self, sandbox_ids: Set[str], max_retries: int = 3) -> Optional[Dict[str, Tuple[str, Optional[str]]]]:
+        """Get status for multiple sandboxes using the list API to avoid rate limiting"""
+        base_delay = 2.0
+        max_delay = 16.0
+        
+        for attempt in range(max_retries + 1):
+            try:
+                # Use list API with pagination to get all user sandboxes
+                sandbox_status_map = {}
+                page = 1
+                per_page = 100
+                
+                while True:
+                    response = self.sandbox_client.list(exclude_terminated=False, per_page=per_page, page=page)
+                    
+                    if not response.sandboxes:
+                        break
+                        
+                    # Build map for sandboxes we're watching
+                    for sandbox in response.sandboxes:
+                        if sandbox.id in sandbox_ids:
+                            sandbox_status_map[sandbox.id] = (sandbox.status, sandbox.user_id)
+                    
+                    # Check if there are more pages
+                    if not response.has_next or len(response.sandboxes) < per_page:
+                        break
+                    
+                    page += 1
+                
+                return sandbox_status_map
+                
+            except Exception as e:
+                error_str = str(e)
+                
+                # Check if this is a rate limiting error (429)
+                if "HTTP 429" in error_str or "rate limit" in error_str.lower():
+                    if attempt < max_retries:
+                        # Calculate exponential backoff delay with jitter
+                        delay = min(base_delay * (2 ** attempt), max_delay)
+                        jitter = random.uniform(0, 0.1 * delay)
+                        total_delay = delay + jitter
+                        
+                        print(f"🚫 List API rate limited, retrying in {total_delay:.1f}s (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(total_delay)
+                        continue
+                    else:
+                        print(f"❌ List API rate limit exceeded after {max_retries} retries")
+                        return None
+                else:
+                    # Non-rate-limit error
+                    print(f"⚠️  Error in list API: {e}")
+                    return None
+                    
+        return None
+
+    def _get_sandbox_ready_time(self, sandbox_id: str, max_retries: int = 3) -> Optional[float]:
+        """Get detailed sandbox information to determine actual startup duration"""
+        base_delay = 1.0
+        max_delay = 8.0
+        
+        for attempt in range(max_retries + 1):
+            try:
+                sandbox = self.sandbox_client.get(sandbox_id)
+                
+                # Calculate actual startup duration using API timestamps
+                if sandbox.started_at and sandbox.created_at:
+                    # Duration from creation request to actually running
+                    duration = sandbox.started_at - sandbox.created_at
+                    startup_seconds = duration.total_seconds()
+                    print(f"📊 {sandbox_id} actual startup time: {startup_seconds:.2f}s (created: {sandbox.created_at}, started: {sandbox.started_at})")
+                    return startup_seconds
+                else:
+                    print(f"⚠️  {sandbox_id} missing timestamp data - created_at: {sandbox.created_at}, started_at: {sandbox.started_at}")
+                    return None
+                
+            except Exception as e:
+                error_str = str(e)
+                
+                # Check if this is a rate limiting error (429)
+                if "HTTP 429" in error_str or "rate limit" in error_str.lower():
+                    if attempt < max_retries:
+                        # Calculate exponential backoff delay with jitter
+                        delay = min(base_delay * (2 ** attempt), max_delay)
+                        jitter = random.uniform(0, 0.1 * delay)
+                        total_delay = delay + jitter
+                        
+                        print(f"🚫 Get details rate limited for {sandbox_id}, retrying in {total_delay:.1f}s")
+                        time.sleep(total_delay)
+                        continue
+                    else:
+                        print(f"❌ Get details rate limit exceeded for {sandbox_id}")
+                        return None
+                else:
+                    # Non-rate-limit error
+                    print(f"⚠️  Error getting details for {sandbox_id}: {e}")
+                    return None
+                    
+        return None
 
     def _check_sandbox_status_with_retry(self, sandbox_id: str, max_retries: int = 3) -> Optional[Tuple[str, Optional[str]]]:
         """Check sandbox status with exponential backoff retry logic"""
@@ -287,17 +421,21 @@ class SandboxCreationStats:
             }
             self.detailed_records.append(record)
 
-    def add_ready_sandbox(self, sandbox_id: str):
-        """Record when a sandbox becomes ready and calculate its startup time (thread-safe)"""
+    def add_ready_sandbox(self, sandbox_id: str, actual_startup_duration: Optional[float] = None):
+        """Record when a sandbox becomes ready and its startup time (thread-safe)"""
         current_time = time.time()
 
         with self._lock:
             self.ready_count += 1
 
-            # Calculate individual startup time
-            startup_time = None
-            if sandbox_id in self.sandbox_creation_times:
+            # Use actual API startup duration if provided, otherwise calculate from our timestamps
+            startup_time = actual_startup_duration
+            if startup_time is None and sandbox_id in self.sandbox_creation_times:
+                # Fallback to our approximation if API duration not available
                 startup_time = current_time - self.sandbox_creation_times[sandbox_id]
+                print(f"📊 Using approximate startup time for {sandbox_id}: {startup_time:.2f}s (API timestamps not available)")
+            
+            if startup_time is not None:
                 self.sandbox_startup_times.append(startup_time)
 
             # Update detailed record for CSV export
@@ -306,6 +444,10 @@ class SandboxCreationStats:
                     record['ready_time'] = datetime.fromtimestamp(current_time).isoformat()
                     record['startup_time_seconds'] = startup_time
                     record['status'] = 'ready'
+                    if actual_startup_duration is not None:
+                        record['duration_source'] = 'api_timestamps'  # Track data source
+                    else:
+                        record['duration_source'] = 'approximated'
                     break
 
             if self.first_ready_time is None:
@@ -340,6 +482,7 @@ class SandboxCreationStats:
             'creation_duration_seconds',
             'ready_time',
             'startup_time_seconds',
+            'duration_source',
             'status',
             'error_message'
         ]

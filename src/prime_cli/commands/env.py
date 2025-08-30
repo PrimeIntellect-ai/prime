@@ -621,7 +621,7 @@ def pull(
         if target:
             target_dir = Path(target)
         else:
-            target_dir = Path.cwd() / f"{name}-{version}"
+            target_dir = Path.cwd() / f"{owner}-{name}-{version}"
 
         try:
             target_dir.mkdir(parents=True, exist_ok=True)

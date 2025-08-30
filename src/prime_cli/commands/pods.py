@@ -21,8 +21,10 @@ from ..utils import (
     format_ip_display,
     human_age,
     output_data_as_json,
+    status_color,
     validate_output_format,
 )
+from ..utils.display import POD_STATUS_COLORS
 
 app = typer.Typer(help="Manage compute pods")
 console = Console()
@@ -197,18 +199,13 @@ def list(
                     for pod in sorted_pods:
                         pod_data = _format_pod_for_list(pod)
 
-                        status_color = {
-                            "ACTIVE": "green",
-                            "PENDING": "yellow",
-                            "ERROR": "red",
-                            "INSTALLING": "yellow",
-                        }.get(pod_data["status"], "white")
+                        pod_status_color = status_color(pod_data["status"], POD_STATUS_COLORS)
 
                         table.add_row(
                             pod_data["id"],
                             pod_data["name"] or "N/A",
                             pod_data["gpu"],
-                            Text(pod_data["status"], style=status_color),
+                            Text(pod_data["status"], style=pod_status_color),
                             pod_data["age"],
                         )
 

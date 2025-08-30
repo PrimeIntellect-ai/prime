@@ -8,7 +8,8 @@ from rich.text import Text
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.client import APIClient, APIError
 from ..helper.short_id import generate_short_id
-from ..utils import output_data_as_json, validate_output_format
+from ..utils import output_data_as_json, status_color, validate_output_format
+from ..utils.display import STOCK_STATUS_COLORS
 
 app = typer.Typer(help="Check GPU availability and pricing")
 console = Console()
@@ -138,9 +139,7 @@ def list(
                 price = gpu.prices.price
                 price_str = f"${price:.2f}" if price != float("inf") else "N/A"
 
-                stock_color = {"High": "green", "Medium": "yellow", "Low": "red"}.get(
-                    gpu.stock_status, "white"
-                )
+                stock_status_color = status_color(gpu.stock_status, STOCK_STATUS_COLORS)
 
                 location = f"{gpu.country or 'N/A'}"
 
@@ -158,7 +157,7 @@ def list(
                     "socket": gpu.socket or "N/A",
                     "provider": gpu.provider or "N/A",
                     "location": location,
-                    "stock_status": Text(gpu.stock_status, style=stock_color),
+                    "stock_status": Text(gpu.stock_status, style=stock_status_color),
                     "price": price_str,
                     "price_value": price,
                     "gpu_memory": gpu.gpu_memory,
@@ -229,10 +228,8 @@ def list(
                 display_data = _format_availability_for_display(gpu_entry)
 
                 # Convert stock_status back to Text for table display
-                stock_color = {"High": "green", "Medium": "yellow", "Low": "red"}.get(
-                    display_data["stock_status"], "white"
-                )
-                stock_text = Text(display_data["stock_status"], style=stock_color)
+                stock_status_color = status_color(display_data["stock_status"], STOCK_STATUS_COLORS)
+                stock_text = Text(display_data["stock_status"], style=stock_status_color)
 
                 table.add_row(
                     display_data["id"],

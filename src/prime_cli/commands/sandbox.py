@@ -203,15 +203,8 @@ def get(
             table.add_row("Docker Image", sandbox_data["docker_image"])
             table.add_row("Start Command", sandbox_data["start_command"] or "N/A")
 
-            status_color = {
-                "PENDING": "yellow",
-                "PROVISIONING": "yellow",
-                "RUNNING": "green",
-                "STOPPED": "blue",
-                "ERROR": "red",
-                "TERMINATED": "red",
-            }.get(sandbox_data["status"], "white")
-            table.add_row("Status", Text(sandbox_data["status"], style=status_color))
+            sandbox_status_color = status_color(sandbox_data["status"], SANDBOX_STATUS_COLORS)
+            table.add_row("Status", Text(sandbox_data["status"], style=sandbox_status_color))
 
             table.add_row("CPU Cores", str(sandbox_data["cpu_cores"]))
             table.add_row("Memory (GB)", str(sandbox_data["memory_gb"]))

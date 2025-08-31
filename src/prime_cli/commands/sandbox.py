@@ -92,7 +92,7 @@ def list_sandboxes_cmd(
     try:
         # Use team_id from parameter or fallback to config
         if team_id is None:
-            team_id = config.team_id
+            team_id = config.team_id or None
 
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
@@ -274,7 +274,7 @@ def create(
     try:
         # Use team_id from parameter or fallback to config
         if team_id is None:
-            team_id = config.team_id
+            team_id = config.team_id or None
 
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)

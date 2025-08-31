@@ -314,6 +314,8 @@ def push(
             resolve_data = {"name": env_name, "visibility": visibility}
             if team:
                 resolve_data["team_slug"] = team
+            elif client.config.team_id:
+                resolve_data["team_id"] = client.config.team_id
 
             try:
                 response = client.post("/environmentshub/resolve", json=resolve_data)

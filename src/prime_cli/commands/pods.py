@@ -415,7 +415,11 @@ def create(
             )
             raise typer.Exit(1)
 
-        base_client = APIClient(team_id=team_id)
+        # Use team_id from parameter or fallback to config
+        if team_id is None:
+            team_id = config.team_id
+
+        base_client = APIClient()
         availability_client = AvailabilityClient(base_client)
         pods_client = PodsClient(base_client)
 
@@ -423,7 +427,7 @@ def create(
 
         # Get availability info
         with console.status("[bold blue]Loading available GPU configurations...", spinner="dots"):
-            availabilities = availability_client.get()
+            availabilities = availability_client.get(team_id=team_id)
 
         if env_vars:
             filtered_availabilities = {}
@@ -681,30 +685,6 @@ def create(
                     raise typer.Exit(1)
 
                 image = available_images[image_idx - 1]
-
-        # Get team ID from config if not provided
-        if team_id is None:
-            default_team_id = config.team_id
-            options = ["Personal Account", "Custom Team ID"]
-            if default_team_id:
-                options.insert(1, f"Pre-selected Team ({default_team_id})")
-
-            console.print("\n[bold]Select Team:[/bold]")
-            for idx, opt in enumerate(options, 1):
-                console.print(f"{idx}. {opt}")
-
-            choice = typer.prompt("Enter choice", type=int, default=1)
-
-            if choice < 1 or choice > len(options):
-                console.print("[red]Invalid selection[/red]")
-                raise typer.Exit(1)
-
-            if options[choice - 1] == "Personal Account":
-                team_id = None
-            elif "Pre-selected Team" in options[choice - 1]:
-                team_id = default_team_id
-            else:
-                team_id = typer.prompt("Enter team ID")
 
         # Create pod configuration
         pod_config = {

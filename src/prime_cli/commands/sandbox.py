@@ -90,7 +90,11 @@ def list_sandboxes_cmd(
     validate_output_format(output, console)
 
     try:
-        base_client = APIClient(team_id=team_id)
+        # Use team_id from parameter or fallback to config
+        if team_id is None:
+            team_id = config.team_id
+
+        base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
         # Always exclude terminated sandboxes unless --all is specified or status filter is used
@@ -268,7 +272,11 @@ def create(
 ) -> None:
     """Create a new sandbox"""
     try:
-        base_client = APIClient(team_id=team_id)
+        # Use team_id from parameter or fallback to config
+        if team_id is None:
+            team_id = config.team_id
+
+        base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
         # Parse environment variables

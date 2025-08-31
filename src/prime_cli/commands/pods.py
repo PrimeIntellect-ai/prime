@@ -4,7 +4,7 @@ import os
 import subprocess
 import time
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import typer
 from rich.console import Console
@@ -13,23 +13,111 @@ from rich.text import Text
 
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.client import APIClient, APIError
-from ..api.pods import PodsClient
+from ..api.pods import Pod, PodsClient, PodStatus
 from ..config import Config
 from ..helper.short_id import generate_short_id
+from ..utils import (
+    confirm_or_skip,
+    format_ip_display,
+    human_age,
+    iso_timestamp,
+    output_data_as_json,
+    status_color,
+    validate_output_format,
+)
+from ..utils.display import POD_STATUS_COLORS
 
 app = typer.Typer(help="Manage compute pods")
 console = Console()
 config = Config()
 
 
-def format_ip_display(ip: Optional[Union[str, List[str]]]) -> str:
-    """Format IP address(es) for display, handling both single and list cases"""
-    if not ip:
-        return "N/A"
-    # Handle both list and single IP cases by always converting to list
-    if isinstance(ip, str):
-        return ip
-    return ", ".join(str(x) for x in ip)
+def _format_pod_for_status(status: PodStatus, pod_details: Pod) -> Dict[str, Any]:
+    """Format pod status data for display (both table and JSON)"""
+    # Display status with installation state consideration
+    display_status = status.status
+    if (
+        status.status == "ACTIVE"
+        and status.installation_progress is not None
+        and status.installation_progress < 100
+    ):
+        display_status = "INSTALLING"
+
+    created_at = datetime.fromisoformat(pod_details.created_at.replace("Z", "+00:00"))
+    created_timestamp = iso_timestamp(created_at)
+
+    # Build basic status data
+    status_data: Dict[str, Any] = {
+        "id": pod_details.id,
+        "status": display_status,
+        "name": pod_details.name,
+        "team_id": pod_details.team_id,
+        "provider": status.provider_type,
+        "gpu": f"{pod_details.gpu_type} x{pod_details.gpu_count}",
+        "image": pod_details.environment_type,
+        "created_at": created_timestamp,
+        "ip": format_ip_display(status.ip),
+        "ssh": format_ip_display(status.ssh_connection),
+    }
+
+    # Add optional fields
+    if status.cost_per_hr:
+        status_data["cost_per_hour"] = status.cost_per_hr
+
+    if pod_details.installation_status:
+        status_data["installation_status"] = pod_details.installation_status
+
+    if status.installation_progress is not None:
+        status_data["installation_progress"] = status.installation_progress
+
+    if status.installation_failure:
+        status_data["installation_error"] = status.installation_failure
+
+    if status.prime_port_mapping:
+        status_data["port_mappings"] = [
+            {
+                "protocol": port.protocol,
+                "external": port.external,
+                "internal": port.internal,
+                "description": port.description,
+                "used_by": port.used_by,
+            }
+            for port in status.prime_port_mapping
+        ]
+
+    if pod_details.attached_resources:
+        status_data["attached_resources"] = [
+            {
+                "id": str(resource.id),
+                "type": resource.type,
+                "status": resource.status,
+                "size": resource.size,
+                "mount_path": resource.mount_path,
+            }
+            for resource in pod_details.attached_resources
+        ]
+
+    return status_data
+
+
+def _format_pod_for_list(pod: Pod) -> Dict[str, Any]:
+    """Format pod data for list display (both table and JSON)"""
+    display_status = pod.status
+    if pod.status == "ACTIVE" and pod.installation_status != "FINISHED":
+        display_status = "INSTALLING"
+
+    created_at = datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
+    created_timestamp = iso_timestamp(created_at)
+    age = human_age(created_at)
+
+    return {
+        "id": pod.id,
+        "name": pod.name,
+        "gpu": f"{pod.gpu_type} x{pod.gpu_count}",
+        "status": display_status,
+        "created_at": created_timestamp,  # For JSON output
+        "age": age,  # For table output
+    }
 
 
 @app.command()
@@ -37,8 +125,15 @@ def list(
     limit: int = typer.Option(100, help="Maximum number of pods to list"),
     offset: int = typer.Option(0, help="Number of pods to skip"),
     watch: bool = typer.Option(False, "--watch", "-w", help="Watch pods list in real-time"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List your running pods"""
+    validate_output_format(output, console)
+
+    if watch and output == "json":
+        console.print("[red]Error: --watch mode is not compatible with --output=json[/red]")
+        raise typer.Exit(1)
+
     try:
         # Create API clients
         base_client = APIClient()
@@ -59,44 +154,61 @@ def list(
                 if watch:
                     os.system("cls" if os.name == "nt" else "clear")
 
-                # Create display table
-                table = Table(
-                    title=f"Compute Pods (Total: {pods_list.total_count})",
-                    show_lines=True,
+                # Sort pods by created_at (oldest first, like sandbox list)
+                sorted_pods = sorted(
+                    pods_list.data,
+                    key=lambda pod: datetime.fromisoformat(pod.created_at.replace("Z", "+00:00")),
                 )
-                table.add_column("ID", style="cyan", no_wrap=True)
-                table.add_column("Name", style="blue")
-                table.add_column("GPU", style="green")
-                table.add_column("Status", style="yellow")
-                table.add_column("Created", style="blue")
 
-                # Add rows for each pod
-                for pod in pods_list.data:
-                    # Format status with color
-                    display_status = pod.status
-                    if pod.status == "ACTIVE" and pod.installation_status != "FINISHED":
-                        display_status = "INSTALLING"
+                if output == "json":
+                    # Output as JSON with timestamp (for automation)
+                    pods_data = []
+                    for pod in sorted_pods:
+                        pod_data = _format_pod_for_list(pod)
+                        # For JSON, use timestamp instead of age
+                        json_pod = {
+                            "id": pod_data["id"],
+                            "name": pod_data["name"],
+                            "gpu": pod_data["gpu"],
+                            "status": pod_data["status"],
+                            "created_at": pod_data["created_at"],
+                        }
+                        pods_data.append(json_pod)
 
-                    status_color = {
-                        "ACTIVE": "green",
-                        "PENDING": "yellow",
-                        "ERROR": "red",
-                        "INSTALLING": "yellow",
-                    }.get(display_status, "white")
-
-                    # Format created time
-                    created_at = datetime.fromisoformat(pod.created_at.replace("Z", "+00:00"))
-                    created_str = created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-
-                    table.add_row(
-                        pod.id,
-                        pod.name or "N/A",
-                        f"{pod.gpu_type} x{pod.gpu_count}",
-                        Text(display_status, style=status_color),
-                        created_str,
+                    output_data = {
+                        "pods": pods_data,
+                        "total_count": pods_list.total_count,
+                        "offset": offset,
+                        "limit": limit,
+                    }
+                    output_data_as_json(output_data, console)
+                else:
+                    # Create display table
+                    table = Table(
+                        title=f"Compute Pods (Total: {pods_list.total_count})",
+                        show_lines=True,
                     )
+                    table.add_column("ID", style="cyan", no_wrap=True)
+                    table.add_column("Name", style="blue")
+                    table.add_column("GPU", style="green")
+                    table.add_column("Status", style="yellow")
+                    table.add_column("Age", style="blue")
 
-                console.print(table)
+                    # Add rows for each pod using shared formatting
+                    for pod in sorted_pods:
+                        pod_data = _format_pod_for_list(pod)
+
+                        pod_status_color = status_color(pod_data["status"], POD_STATUS_COLORS)
+
+                        table.add_row(
+                            pod_data["id"],
+                            pod_data["name"] or "N/A",
+                            pod_data["gpu"],
+                            Text(pod_data["status"], style=pod_status_color),
+                            pod_data["age"],
+                        )
+
+                    console.print(table)
 
                 # Update hash after displaying
             if not watch:
@@ -143,8 +255,13 @@ def list(
 
 
 @app.command()
-def status(pod_id: str) -> None:
+def status(
+    pod_id: str,
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
     """Get detailed status of a specific pod"""
+    validate_output_format(output, console)
+
     try:
         base_client = APIClient()
         pods_client = PodsClient(base_client)
@@ -160,91 +277,88 @@ def status(pod_id: str) -> None:
 
         status = statuses[0]
 
-        # Create display table
-        table = Table(title=f"Pod Status: {pod_id}")
-        table.add_column("Property", style="cyan")
-        table.add_column("Value", style="white")
+        if output == "json":
+            # Output as JSON using shared formatting
+            status_data = _format_pod_for_status(status, pod_details)
+            output_data_as_json(status_data, console)
+        else:
+            # Create display table
+            status_data = _format_pod_for_status(status, pod_details)
 
-        # Display status with installation state consideration
-        display_status = status.status
-        if (
-            status.status == "ACTIVE"
-            and status.installation_progress is not None
-            and status.installation_progress < 100
-        ):
-            display_status = "INSTALLING"
+            table = Table(title=f"Pod Status: {pod_id}")
+            table.add_column("Property", style="cyan")
+            table.add_column("Value", style="white")
 
-        table.add_row(
-            "Status",
-            Text(
-                display_status,
-                style="green" if display_status == "ACTIVE" else "yellow",
-            ),
-        )
-
-        # Basic pod info
-        table.add_row("Name", pod_details.name or "N/A")
-        table.add_row("Team", pod_details.team_id or "Personal")
-        table.add_row("Provider", status.provider_type)
-        table.add_row("GPU", f"{pod_details.gpu_type} x{pod_details.gpu_count}")
-        table.add_row("Image", pod_details.environment_type)
-
-        # Cost info if available
-        if status.cost_per_hr:
-            table.add_row("Cost per Hour", f"${status.cost_per_hr:.3f}")
-
-        # Created time
-        created_at = datetime.fromisoformat(pod_details.created_at.replace("Z", "+00:00"))
-        table.add_row("Created", created_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
-
-        # Connection details
-        table.add_row("IP", format_ip_display(status.ip))
-        ssh_display = format_ip_display(status.ssh_connection)
-        table.add_row("SSH", ssh_display)
-
-        # Installation status
-        if pod_details.installation_status:
-            table.add_row("Installation Status", pod_details.installation_status)
-        if status.installation_progress is not None:
-            table.add_row("Installation Progress", f"{status.installation_progress}%")
-        if status.installation_failure:
-            table.add_row("Installation Error", Text(status.installation_failure, style="red"))
-
-        # Port mappings
-        if status.prime_port_mapping:
-            ports = "\n".join(
-                [
-                    f"{port.protocol}:{port.external}->{port.internal} "
-                    f"({port.description + ' - ' if port.description else ''}"
-                    f"{port.used_by or 'unknown'})"
-                    for port in status.prime_port_mapping
-                ]
+            table.add_row(
+                "Status",
+                Text(
+                    status_data["status"],
+                    style="green" if status_data["status"] == "ACTIVE" else "yellow",
+                ),
             )
-            table.add_row("Port Mappings", ports)
 
-        console.print(table)
+            # Basic pod info
+            table.add_row("Name", status_data["name"] or "N/A")
+            table.add_row("Team", status_data["team_id"] or "Personal")
+            table.add_row("Provider", status_data["provider"])
+            table.add_row("GPU", status_data["gpu"])
+            table.add_row("Image", status_data["image"])
 
-        # Display attached resources in a separate table if they exist
-        if pod_details.attached_resources:
-            resource_table = Table(title="Attached Resources")
-            resource_table.add_column("ID", style="cyan")
-            resource_table.add_column("Type", style="white")
-            resource_table.add_column("Status", style="white")
-            resource_table.add_column("Size", style="white")
-            resource_table.add_column("Mount Path", style="white")
+            # Cost info if available
+            if "cost_per_hour" in status_data:
+                table.add_row("Cost per Hour", f"${status_data['cost_per_hour']:.3f}")
 
-            for resource in pod_details.attached_resources:
-                status_style = "green" if resource.status == "ACTIVE" else "yellow"
-                resource_table.add_row(
-                    str(resource.id),
-                    resource.type or "N/A",
-                    Text(resource.status or "N/A", style=status_style),
-                    str(resource.size) + "GB" if resource.size else "N/A",
-                    resource.mount_path or "N/A",
+            table.add_row("Created", status_data["created_at"])
+
+            # Connection details
+            table.add_row("IP", status_data["ip"])
+            table.add_row("SSH", status_data["ssh"])
+
+            # Installation status
+            if "installation_status" in status_data:
+                table.add_row("Installation Status", status_data["installation_status"])
+            if "installation_progress" in status_data:
+                table.add_row("Installation Progress", f"{status_data['installation_progress']}%")
+            if "installation_error" in status_data:
+                table.add_row(
+                    "Installation Error", Text(status_data["installation_error"], style="red")
                 )
 
-            console.print("\n")  # Add spacing between tables
-            console.print(resource_table)
+            # Port mappings
+            if "port_mappings" in status_data:
+                ports = "\n".join(
+                    [
+                        f"{port['protocol']}:{port['external']}->{port['internal']} "
+                        f"({port['description'] + ' - ' if port['description'] else ''}"
+                        f"{port['used_by'] or 'unknown'})"
+                        for port in status_data["port_mappings"]
+                    ]
+                )
+                table.add_row("Port Mappings", ports)
+
+            console.print(table)
+
+            # Display attached resources in a separate table if they exist
+            if "attached_resources" in status_data:
+                resource_table = Table(title="Attached Resources")
+                resource_table.add_column("ID", style="cyan")
+                resource_table.add_column("Type", style="white")
+                resource_table.add_column("Status", style="white")
+                resource_table.add_column("Size", style="white")
+                resource_table.add_column("Mount Path", style="white")
+
+                for resource in status_data["attached_resources"]:
+                    status_style = "green" if resource["status"] == "ACTIVE" else "yellow"
+                    resource_table.add_row(
+                        resource["id"],
+                        resource["type"] or "N/A",
+                        Text(resource["status"] or "N/A", style=status_style),
+                        str(resource["size"]) + "GB" if resource["size"] else "N/A",
+                        resource["mount_path"] or "N/A",
+                    )
+
+                console.print("\n")  # Add spacing between tables
+                console.print(resource_table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
@@ -277,6 +391,7 @@ def create(
         help="Environment variables to set in the pod. Can be specified multiple times "
         "using --env KEY=value --env KEY2=value2",
     ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Create a new pod with an interactive setup process"""
     env_vars = []
@@ -633,7 +748,7 @@ def create(
             console.print(f"provider: {pod_config['provider']['type']}")
         console.print(f"team: {team_id}")
 
-        if typer.confirm("\nDo you want to create this pod?", default=True):
+        if confirm_or_skip("\nDo you want to create this pod?", yes, default=True):
             try:
                 # Create the pod with loading animation
                 with console.status("[bold blue]Creating pod...", spinner="dots"):
@@ -664,14 +779,17 @@ def create(
 
 
 @app.command()
-def terminate(pod_id: str) -> None:
+def terminate(
+    pod_id: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
     """Terminate a pod"""
     try:
         base_client = APIClient()
         pods_client = PodsClient(base_client)
 
         # Confirm termination
-        if not typer.confirm(f"Are you sure you want to terminate pod {pod_id}?"):
+        if not confirm_or_skip(f"Are you sure you want to terminate pod {pod_id}?", yes):
             console.print("Termination cancelled")
             raise typer.Exit(0)
 

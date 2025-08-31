@@ -385,7 +385,9 @@ def create(
         None, help="Image name or 'custom_template' when using custom template ID"
     ),
     custom_template_id: Optional[str] = typer.Option(None, help="Custom template ID"),
-    team_id: Optional[str] = typer.Option(None, help="Team ID to use for the pod"),
+    team_id: Optional[str] = typer.Option(
+        None, help="Team ID to use for the pod (uses config team_id if not specified)"
+    ),
     env: Optional[List[str]] = typer.Option(
         None,
         help="Environment variables to set in the pod. Can be specified multiple times "
@@ -412,6 +414,10 @@ def create(
                 "[red]Error: Must provide custom_template_id when image='custom_template'[/red]"  # noqa: E501
             )
             raise typer.Exit(1)
+
+        # Use team_id from parameter or fallback to config
+        if team_id is None:
+            team_id = config.team_id
 
         base_client = APIClient()
         availability_client = AvailabilityClient(base_client)
@@ -679,30 +685,6 @@ def create(
                     raise typer.Exit(1)
 
                 image = available_images[image_idx - 1]
-
-        # Get team ID from config if not provided
-        if not team_id:
-            default_team_id = config.team_id
-            options = ["Personal Account", "Custom Team ID"]
-            if default_team_id:
-                options.insert(1, f"Pre-selected Team ({default_team_id})")
-
-            console.print("\n[bold]Select Team:[/bold]")
-            for idx, opt in enumerate(options, 1):
-                console.print(f"{idx}. {opt}")
-
-            choice = typer.prompt("Enter choice", type=int, default=1)
-
-            if choice < 1 or choice > len(options):
-                console.print("[red]Invalid selection[/red]")
-                raise typer.Exit(1)
-
-            if options[choice - 1] == "Personal Account":
-                team_id = None
-            elif "Pre-selected Team" in options[choice - 1]:
-                team_id = default_team_id
-            else:
-                team_id = typer.prompt("Enter team ID")
 
         # Create pod configuration
         pod_config = {

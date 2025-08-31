@@ -30,7 +30,11 @@ class TimeoutError(APIError):
 
 
 class APIClient:
-    def __init__(self, api_key: Optional[str] = None, require_auth: bool = True):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        require_auth: bool = True,
+    ):
         # Load config
         self.config = Config()
 

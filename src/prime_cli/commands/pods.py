@@ -427,7 +427,7 @@ def create(
 
         # Get availability info
         with console.status("[bold blue]Loading available GPU configurations...", spinner="dots"):
-            availabilities = availability_client.get(team_id=team_id)
+            availabilities = availability_client.get()
 
         if env_vars:
             filtered_availabilities = {}

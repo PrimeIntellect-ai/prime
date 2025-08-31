@@ -218,7 +218,12 @@ def push(
     name: Optional[str] = typer.Option(
         None, "--name", "-n", help="Override environment name (defaults to pyproject.toml name)"
     ),
-    team: Optional[str] = typer.Option(None, "--team", "-t", help="Team slug for team ownership"),
+    team: Optional[str] = typer.Option(
+        None,
+        "--team",
+        "-t",
+        help="Team slug for team ownership (uses config team_id if not provided)",
+    ),
     visibility: str = typer.Option(
         "PUBLIC", "--visibility", "-v", help="Environment visibility (PUBLIC/PRIVATE)"
     ),

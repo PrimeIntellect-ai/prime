@@ -8,21 +8,24 @@ IMPORTANT: Run this script from the prime-cli directory with the proper environm
 3. Install dependencies if needed:
    uv pip install ".[dev]"
 4. Run the script:
-   ./create_sandboxes_parallel.py --count 200 --batch-size 10
+   python create_sandboxes_parallel.py                    # Create 100 NEW sandboxes (default)
+   python create_sandboxes_parallel.py --count 200        # Create 200 NEW sandboxes
+   python create_sandboxes_parallel.py --count 50 --batch-size 10  # Create 50 NEW sandboxes in batches of 10
 """
 """
 Parallel Sandbox Creation Script
 
-This script uses the prime-cli SDK to create sandboxes in parallel until reaching 250 total sandboxes.
+This script uses the prime-cli SDK to create a specified number of NEW sandboxes in parallel.
 
 Specifications:
 - Image: python
-- Timeout: 5 minutes
+- Timeout: 15 minutes
 - Start command: "sleep infinity"
 - CPU: 1 core
 - Memory: 1GB
 - Disk: 1GB
-- Creates 50 sandboxes in parallel at a time until reaching 250 total
+- Creates sandboxes in parallel batches (default: 10 at a time)
+- Default: Creates 100 NEW sandboxes
 """
 
 import argparse
@@ -109,17 +112,16 @@ class SandboxWatcher:
                     try:
                         sandbox_id = self.watch_queue.get_nowait()
                         pending_sandboxes.add(sandbox_id)
-                        print(f"🔍 Now watching {sandbox_id}")
                     except:
                         break
 
                 # Check status of pending sandboxes using list API
                 if pending_sandboxes:
                     completed_sandboxes = set()
-                    
+
                     # Use list API instead of individual get calls to avoid rate limiting
                     sandbox_status_map = self._get_sandbox_statuses_batch(pending_sandboxes)
-                    
+
                     if sandbox_status_map is not None:
                         for sandbox_id in list(pending_sandboxes):
                             if self.stop_event.is_set() or graceful_shutdown.is_set():
@@ -144,7 +146,7 @@ class SandboxWatcher:
                                 if sandbox_id not in running_sandboxes:
                                     running_sandboxes.add(sandbox_id)
                                     print(f"🔄 Sandbox {sandbox_id} is RUNNING, getting detailed ready time...")
-                                    
+
                                     # Get actual startup duration from API timestamps
                                     actual_startup_duration = self._get_sandbox_ready_time(sandbox_id)
                                     if actual_startup_duration is not None:
@@ -194,38 +196,38 @@ class SandboxWatcher:
 
     def _get_sandbox_statuses_batch(self, sandbox_ids: Set[str], max_retries: int = 3) -> Optional[Dict[str, Tuple[str, Optional[str]]]]:
         """Get status for multiple sandboxes using the list API to avoid rate limiting"""
-        base_delay = 2.0
-        max_delay = 16.0
-        
+        base_delay = 1.0
+        max_delay = 5.0
+
         for attempt in range(max_retries + 1):
             try:
                 # Use list API with pagination to get all user sandboxes
                 sandbox_status_map = {}
                 page = 1
                 per_page = 100
-                
+
                 while True:
-                    response = self.sandbox_client.list(exclude_terminated=False, per_page=per_page, page=page)
-                    
+                    response = self.sandbox_client.list(exclude_terminated=True, per_page=per_page, page=page)
+
                     if not response.sandboxes:
                         break
-                        
+
                     # Build map for sandboxes we're watching
                     for sandbox in response.sandboxes:
                         if sandbox.id in sandbox_ids:
                             sandbox_status_map[sandbox.id] = (sandbox.status, sandbox.user_id)
-                    
+
                     # Check if there are more pages
                     if not response.has_next or len(response.sandboxes) < per_page:
                         break
-                    
+
                     page += 1
-                
+
                 return sandbox_status_map
-                
+
             except Exception as e:
                 error_str = str(e)
-                
+
                 # Check if this is a rate limiting error (429)
                 if "HTTP 429" in error_str or "rate limit" in error_str.lower():
                     if attempt < max_retries:
@@ -233,7 +235,7 @@ class SandboxWatcher:
                         delay = min(base_delay * (2 ** attempt), max_delay)
                         jitter = random.uniform(0, 0.1 * delay)
                         total_delay = delay + jitter
-                        
+
                         print(f"🚫 List API rate limited, retrying in {total_delay:.1f}s (attempt {attempt + 1}/{max_retries})")
                         time.sleep(total_delay)
                         continue
@@ -244,18 +246,18 @@ class SandboxWatcher:
                     # Non-rate-limit error
                     print(f"⚠️  Error in list API: {e}")
                     return None
-                    
+
         return None
 
     def _get_sandbox_ready_time(self, sandbox_id: str, max_retries: int = 3) -> Optional[float]:
         """Get detailed sandbox information to determine actual startup duration"""
         base_delay = 1.0
-        max_delay = 8.0
-        
+        max_delay = 5.0
+
         for attempt in range(max_retries + 1):
             try:
                 sandbox = self.sandbox_client.get(sandbox_id)
-                
+
                 # Calculate actual startup duration using API timestamps
                 if sandbox.started_at and sandbox.created_at:
                     # Duration from creation request to actually running
@@ -266,10 +268,10 @@ class SandboxWatcher:
                 else:
                     print(f"⚠️  {sandbox_id} missing timestamp data - created_at: {sandbox.created_at}, started_at: {sandbox.started_at}")
                     return None
-                
+
             except Exception as e:
                 error_str = str(e)
-                
+
                 # Check if this is a rate limiting error (429)
                 if "HTTP 429" in error_str or "rate limit" in error_str.lower():
                     if attempt < max_retries:
@@ -277,7 +279,7 @@ class SandboxWatcher:
                         delay = min(base_delay * (2 ** attempt), max_delay)
                         jitter = random.uniform(0, 0.1 * delay)
                         total_delay = delay + jitter
-                        
+
                         print(f"🚫 Get details rate limited for {sandbox_id}, retrying in {total_delay:.1f}s")
                         time.sleep(total_delay)
                         continue
@@ -288,7 +290,7 @@ class SandboxWatcher:
                     # Non-rate-limit error
                     print(f"⚠️  Error getting details for {sandbox_id}: {e}")
                     return None
-                    
+
         return None
 
     def _check_sandbox_status_with_retry(self, sandbox_id: str, max_retries: int = 3) -> Optional[Tuple[str, Optional[str]]]:
@@ -434,7 +436,7 @@ class SandboxCreationStats:
                 # Fallback to our approximation if API duration not available
                 startup_time = current_time - self.sandbox_creation_times[sandbox_id]
                 print(f"📊 Using approximate startup time for {sandbox_id}: {startup_time:.2f}s (API timestamps not available)")
-            
+
             if startup_time is not None:
                 self.sandbox_startup_times.append(startup_time)
 
@@ -905,14 +907,14 @@ def wait_for_sandboxes_ready(sandbox_client: SandboxClient, stats: SandboxCreati
 def parse_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
-        description="Create sandboxes in parallel until reaching 250 total",
+        description="Create a specific number of NEW sandboxes in parallel",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python create_sandboxes_parallel.py                    # Create sandboxes and wait until ready
+  python create_sandboxes_parallel.py                    # Create 100 NEW sandboxes (default)
   python create_sandboxes_parallel.py --no-wait          # Create sandboxes but don't wait for readiness
-  python create_sandboxes_parallel.py --count 100        # Create until 100 total sandboxes
-  python create_sandboxes_parallel.py --count 50 --batch-size 10  # Create 50 sandboxes in batches of 10
+  python create_sandboxes_parallel.py --count 100        # Create exactly 100 NEW sandboxes
+  python create_sandboxes_parallel.py --count 50 --batch-size 10  # Create 50 NEW sandboxes in batches of 10
         """
     )
 
@@ -932,8 +934,8 @@ Examples:
     parser.add_argument(
         "--count",
         type=int,
-        default=250,
-        help="Target number of total sandboxes (default: 250)"
+        default=100,
+        help="Number of NEW sandboxes to create (default: 100)"
     )
 
     parser.add_argument(
@@ -953,7 +955,7 @@ Examples:
 
 
 def main():
-    """Main function to create sandboxes in parallel until reaching 250 total"""
+    """Main function to create sandboxes in parallel"""
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
     signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
@@ -963,7 +965,7 @@ def main():
     print("🚀 Starting parallel sandbox creation script")
     print("=" * 60)
     print(f"📊 Configuration:")
-    print(f"   🎯 Target sandboxes: {args.count}")
+    print(f"   🎯 NEW sandboxes to create: {args.count}")
     print(f"   📦 Batch size: {args.batch_size}")
     print(f"   ⏳ Wait until ready: {'Yes' if args.wait_until_ready else 'No (default)'}")
     print("=" * 60)
@@ -979,23 +981,18 @@ def main():
         print("💡 Make sure you're logged in with 'prime login' or have PRIME_API_KEY set")
         return
 
-    # Get current sandbox count
+    # Get current sandbox count (for information only)
     print("\n📊 Checking current sandbox count...")
     current_count = get_current_user_sandbox_count(sandbox_client)
     print(f"📈 Current active sandboxes: {current_count}")
 
-    # Calculate how many more sandboxes we need
-    target_count = args.count
-    remaining_needed = target_count - current_count
-
-    if remaining_needed <= 0:
-        print(f"🎉 Already have {current_count} sandboxes (target: {target_count}). No action needed!")
-        return
-
-    print(f"🎯 Need to create {remaining_needed} more sandboxes to reach {target_count}")
+    # We will create exactly the requested number of NEW sandboxes
+    sandboxes_to_create = args.count
+    print(f"🎯 Will create {sandboxes_to_create} NEW sandboxes")
+    print(f"📊 After creation, you will have approximately {current_count + sandboxes_to_create} total sandboxes")
 
     # Initialize statistics
-    stats = SandboxCreationStats(target_count=args.count, batch_size=args.batch_size)
+    stats = SandboxCreationStats(target_count=sandboxes_to_create, batch_size=args.batch_size)
 
     # Determine if we should wait for readiness
     wait_until_ready = args.wait_until_ready
@@ -1010,9 +1007,9 @@ def main():
     batch_size = args.batch_size
     batch_num = 1
 
-    while stats.total_created < remaining_needed and not graceful_shutdown.is_set():
+    while stats.total_created < sandboxes_to_create and not graceful_shutdown.is_set():
         # Calculate how many to create in this batch
-        sandboxes_left = remaining_needed - stats.total_created
+        sandboxes_left = sandboxes_to_create - stats.total_created
         current_batch_size = min(batch_size, sandboxes_left)
 
         print(f"\n🔄 Starting batch {batch_num} - Creating {current_batch_size} sandboxes...")
@@ -1039,23 +1036,23 @@ def main():
         print(f"\n📊 Batch {batch_num} completed in {batch_time:.2f}s:")
         print(f"   ✅ Successful: {batch_successes}")
         print(f"   ❌ Failed: {batch_failures}")
-        print(f"   📈 Total created so far: {stats.total_created}/{remaining_needed}")
+        print(f"   📈 Total created so far: {stats.total_created}/{sandboxes_to_create}")
 
         # Check if we've reached our target
-        if stats.total_created >= remaining_needed:
-            print(f"\n🎉 Target reached! Created {stats.total_created} sandboxes.")
+        if stats.total_created >= sandboxes_to_create:
+            print(f"\n🎉 Target reached! Created {stats.total_created} NEW sandboxes.")
             break
 
         batch_num += 1
 
         # Small delay between batches to avoid overwhelming the API
-        if stats.total_created < remaining_needed and not graceful_shutdown.is_set():
+        if stats.total_created < sandboxes_to_create and not graceful_shutdown.is_set():
             print("⏸️  Waiting 2 seconds before next batch...")
             time.sleep(2)
 
     # Check if we were interrupted during creation
     if graceful_shutdown.is_set():
-        print(f"\n🛑 Graceful shutdown during creation. Created {stats.total_created} out of {remaining_needed} requested sandboxes.")
+        print(f"\n🛑 Graceful shutdown during creation. Created {stats.total_created} out of {sandboxes_to_create} requested NEW sandboxes.")
 
     # Wait for all sandboxes to be ready (if enabled)
     if wait_until_ready and stats.created_sandbox_ids:
@@ -1121,10 +1118,13 @@ def main():
     final_count = get_current_user_sandbox_count(sandbox_client)
     print(f"📈 Final active sandboxes: {final_count}")
 
-    if final_count >= target_count:
-        print(f"🎉 SUCCESS! Reached target of {target_count} sandboxes!")
+    expected_final = current_count + stats.total_created
+    print(f"📊 Expected total: {expected_final} (started with {current_count}, created {stats.total_created} new)")
+
+    if stats.total_created >= sandboxes_to_create:
+        print(f"🎉 SUCCESS! Created {stats.total_created} NEW sandboxes as requested!")
     else:
-        print(f"⚠️  Warning: Only {final_count} sandboxes active (target: {target_count})")
+        print(f"⚠️  Warning: Only created {stats.total_created} new sandboxes (target: {sandboxes_to_create})")
 
     print(f"\n📄 Detailed measurements saved to: {csv_filename}")
     print(f"💡 Use this CSV file for further analysis and visualization")

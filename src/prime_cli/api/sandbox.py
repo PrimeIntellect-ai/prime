@@ -149,7 +149,7 @@ class CreateSandboxRequest(BaseModel):
     disk_size_gb: int = 10
     gpu_count: int = 0
     timeout_minutes: int = 60
-    environment_vars: dict[str, str | None] | None = None
+    environment_vars: dict[str, str] | None = None
     team_id: str | None = None
     advanced_configs: AdvancedConfigs | None = None
 
@@ -165,7 +165,7 @@ class UpdateSandboxRequest(BaseModel):
     disk_size_gb: int | None = None
     gpu_count: int | None = None
     timeout_minutes: int | None = None
-    environment_vars: dict[str, str | None] | None = None
+    environment_vars: dict[str, str] | None = None
 
 
 class CommandRequest(BaseModel):
@@ -173,7 +173,7 @@ class CommandRequest(BaseModel):
 
     command: str
     working_dir: str | None = None
-    env: dict[str, str | None] | None = None
+    env: dict[str, str] | None = None
 
 
 class CommandResponse(BaseModel):
@@ -275,7 +275,7 @@ class SandboxClient:
         sandbox_id: str,
         command: str,
         working_dir: str | None = None,
-        env: dict[str, str | None] | None = None,
+        env: dict[str, str] | None = None,
         timeout: int | None = None,
     ) -> CommandResponse:
         """Execute a command in a sandbox
@@ -388,7 +388,7 @@ class AsyncSandboxClient:
         sandbox_id: str,
         command: str,
         working_dir: str | None = None,
-        env: dict[str, str | None] | None = None,
+        env: dict[str, str] | None = None,
         timeout: int | None = None,
     ) -> CommandResponse:
         """Execute a command in a sandbox
@@ -512,7 +512,7 @@ class AsyncSandboxClient:
             stream=stream_response,
             srcPath=src_path,
             contentType=stream_response.headers.get("content-type"),
-            contentLength=int(stream_response.headers.get("content-length", 0)) or None,
+            contentLength=int(stream_response.headers.get("content-length", 0)) if stream_response.headers.get("content-length") else None,
         )
 
     async def upload_path(
@@ -683,19 +683,32 @@ class AsyncSandboxClient:
                     else:
                         # For directories, ensure the directory itself exists
                         os.makedirs(dst_abs, exist_ok=True)
-                        # Extract all members safely
+                        # Extract all members safely 
                         for member in members:
+                            # Skip invalid members
+                            if not member.name or member.name == "/":
+                                continue
+                                
                             # Strip first component if it exists (common in tar archives)
+                            new_name = member.name
                             if "/" in member.name:
-                                new_name = "/".join(member.name.split("/")[1:])
-                                # Re-validate the new name
-                                if not is_safe_path(dst_abs, new_name):
-                                    continue  # Skip unsafe members
-                                member.name = new_name
+                                parts = member.name.split("/")
+                                if len(parts) > 1:
+                                    new_name = "/".join(parts[1:])
+                                    # Skip if name becomes empty after stripping
+                                    if not new_name or new_name == "/":
+                                        continue
                             
                             # Final safety check before extraction
-                            if is_safe_path(dst_abs, member.name):
-                                tf.extract(member, path=dst_abs)
+                            if is_safe_path(dst_abs, new_name):
+                                # Use a safe approach: create temp member with safe name
+                                temp_member = member
+                                original_name = member.name
+                                try:
+                                    member.name = new_name
+                                    tf.extract(member, path=dst_abs)
+                                finally:
+                                    member.name = original_name  # Restore original name
             
             await asyncio.get_event_loop().run_in_executor(None, extract_tar)
             

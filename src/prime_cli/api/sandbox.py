@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-import requests
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from prime_cli.api.client import APIClient, AsyncAPIClient, TimeoutError
@@ -155,7 +155,7 @@ class SandboxUploadResponse(BaseModel):
 class SandboxDownloadStreamResponse(BaseModel):
     """Sandbox download stream response model"""
 
-    stream: requests.Response
+    stream: httpx.Response
     src_path: str = Field(..., alias="srcPath")
     content_type: Optional[str] = Field(None, alias="contentType")
     content_length: Optional[int] = Field(None, alias="contentLength")
@@ -280,9 +280,31 @@ class SandboxClient:
         working_dir: Optional[str] = None,
         timeout: Optional[int] = None,
     ) -> SandboxUploadResponse:
-        """Upload a file using multipart form data to the backend.
+        """Upload a tar archive file directly to the sandbox (low-level method).
 
-        This approach is more efficient and follows standard HTTP file upload patterns.
+        This is the low-level upload method that expects a tar archive file.
+        Most users should use `upload_path()` instead, which handles tar creation
+        automatically.
+
+        Use this method when:
+        - You already have a tar archive prepared
+        - You need fine control over tar archive creation
+        - You're implementing custom upload logic
+
+        Use `upload_path()` instead when:
+        - You want to upload regular files or directories (recommended)
+        - You don't want to manage tar archive creation/cleanup
+
+        Args:
+            sandbox_id: ID of the target sandbox
+            dest_path: Destination path in the sandbox
+            file_path: Path to the tar archive file to upload
+            strip_components: Number of leading path components to strip
+            working_dir: Working directory in the sandbox
+            timeout: Request timeout
+
+        Returns:
+            SandboxUploadResponse with upload details
         """
         import logging
 
@@ -309,12 +331,12 @@ class SandboxClient:
         # Prepare file data with appropriate content type
         content_type = "application/x-tar"
 
-        files_data = {"file": (os.path.basename(file_path), open(file_path, "rb"), content_type)}
-        logger.debug(
-            f"📁 Files data prepared: {list(files_data.keys())} with content-type: {content_type}"
-        )
+        with open(file_path, "rb") as file_handle:
+            files_data = {"file": (os.path.basename(file_path), file_handle, content_type)}
+            logger.debug(
+                f"📁 Files data prepared: {list(files_data.keys())} with content-type: {content_type}"
+            )
 
-        try:
             logger.debug("📤 Sending multipart request...")
             raw_response = self.client.multipart_post(
                 f"/sandbox/{sandbox_id}/upload",
@@ -331,10 +353,6 @@ class SandboxClient:
                 bytesUploaded=raw_response.get("bytesUploaded"),
                 destPath=dest_path,
             )
-        finally:
-            # Ensure file is closed
-            files_data["file"][1].close()
-            logger.debug("🧹 File handle closed")
 
     def download_stream(
         self,
@@ -343,6 +361,30 @@ class SandboxClient:
         working_dir: Optional[str] = None,
         timeout: Optional[int] = None,
     ) -> SandboxDownloadStreamResponse:
+        """Download a file/directory as a tar archive stream (low-level method).
+
+        This is the low-level download method that returns a raw tar archive stream.
+        Most users should use `download_path()` instead, which handles tar extraction
+        automatically.
+
+        Use this method when:
+        - You need to process the tar stream directly
+        - You want to implement custom tar extraction logic
+        - You're streaming data to another service without saving to disk
+
+        Use `download_path()` instead when:
+        - You want to download and save files/directories to disk (recommended)
+        - You don't want to handle tar extraction manually
+
+        Args:
+            sandbox_id: ID of the source sandbox
+            src_path: Path in the sandbox to download
+            working_dir: Working directory in the sandbox
+            timeout: Request timeout
+
+        Returns:
+            SandboxDownloadStreamResponse with the tar archive stream
+        """
         params: Dict[str, Any] = {"src_path": src_path, "compress": "false"}
         if working_dir:
             params["working_dir"] = working_dir
@@ -374,14 +416,30 @@ class SandboxClient:
         working_dir: Optional[str] = None,
         timeout: Optional[int] = None,
     ) -> SandboxUploadResponse:
-        """Upload a local file or directory to a sandbox.
+        """Upload a local file or directory to a sandbox (high-level method).
 
-        This method always creates a tar archive for consistency and reliability.
-        Tar archives handle stream completion naturally and preserve file metadata.
+        This is the recommended method for uploading files and directories.
+        It automatically handles tar archive creation and cleanup.
+
+        Use this method when:
+        - You want to upload regular files or directories (recommended)
+        - You want automatic tar archive handling
+        - You don't need custom tar creation logic
+
+        Use `upload_file()` instead when:
+        - You already have a tar archive prepared
+        - You need fine control over the tar archive format
+        - You're implementing a custom upload pipeline
+
+        This method:
+        - Creates a temporary tar archive of your file/directory
+        - Uploads it to the sandbox
+        - Cleans up the temporary archive automatically
+        - Preserves file metadata and directory structure
 
         Args:
             sandbox_id: ID of the target sandbox
-            local_path: Local path to file or directory
+            local_path: Local path to file or directory to upload
             sandbox_path: Destination path in the sandbox
             working_dir: Working directory in the sandbox
             timeout: Request timeout
@@ -435,27 +493,39 @@ class SandboxClient:
         working_dir: Optional[str] = None,
         timeout: Optional[int] = None,
     ) -> None:
-        debug_log(
-            f"download_path called with sandbox_id={sandbox_id}, "
-            f"sandbox_path={sandbox_path}, local_path={local_path}"
-        )
+        """Download a file or directory from a sandbox to local path (high-level method).
 
-        """Download a file or directory from a sandbox to local path.
+        This is the recommended method for downloading files and directories.
+        It automatically handles tar stream extraction and file saving.
 
-        This method handles:
-        - Downloading the stream
-        - Extracting tar archives
-        - Proper handling of single files vs directories
-        - Temporary file management
-        - Cleanup
+        Use this method when:
+        - You want to download and save files/directories to disk (recommended)
+        - You want automatic tar extraction
+        - You don't need to process the stream directly
+
+        Use `download_stream()` instead when:
+        - You need the raw tar archive stream
+        - You want to implement custom extraction logic
+        - You're streaming data to another service
+
+        This method:
+        - Downloads the tar stream from the sandbox
+        - Extracts the tar archive automatically
+        - Handles single files vs directories correctly
+        - Manages temporary files and cleanup
+        - Preserves file metadata and permissions
 
         Args:
             sandbox_id: ID of the source sandbox
             sandbox_path: Path in the sandbox to download
-            local_path: Local destination path
+            local_path: Local destination path where files will be saved
             working_dir: Working directory in the sandbox
             timeout: Request timeout
         """
+        debug_log(
+            f"download_path called with sandbox_id={sandbox_id}, "
+            f"sandbox_path={sandbox_path}, local_path={local_path}"
+        )
         # Download from sandbox
         response = self.download_stream(
             sandbox_id, sandbox_path, working_dir=working_dir, timeout=timeout

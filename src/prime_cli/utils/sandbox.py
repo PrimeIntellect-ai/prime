@@ -1,11 +1,13 @@
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, TYPE_CHECKING
 from rich.console import Console
 
-from prime_cli.api.sandbox import Sandbox, SandboxClient
 from prime_cli.utils.formatters import format_resources
 from prime_cli.utils.time_utils import human_age, iso_timestamp
 from prime_cli.utils.formatters import obfuscate_env_vars
 from prime_cli.utils.debug import debug_log
+
+if TYPE_CHECKING:
+    from prime_cli.api.sandbox import Sandbox, SandboxClient
 
 
 def parse_cp_arg(arg: str) -> Tuple[Optional[str], str]:
@@ -32,7 +34,7 @@ def expand_home_in_path(path: str) -> str:
     return path
 
 def handle_local_to_sandbox(
-    sandbox_client: SandboxClient,
+    sandbox_client: "SandboxClient",
     source_path: str,
     sandbox_id: str,
     destination_path: str,
@@ -80,7 +82,7 @@ def handle_local_to_sandbox(
 
 
 def handle_sandbox_to_local(
-    sandbox_client: SandboxClient,
+    sandbox_client: "SandboxClient",
     sandbox_id: str,
     source_path: str,
     destination_path: str,
@@ -114,7 +116,7 @@ def handle_sandbox_to_local(
         console.print(f"[red]Download failed:[/red] {e}")
         raise
 
-def format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
+def format_sandbox_for_list(sandbox: "Sandbox") -> Dict[str, Any]:
     """Format sandbox data for list display (both table and JSON)"""
     return {
         "id": sandbox.id,
@@ -127,7 +129,7 @@ def format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
     }
 
 
-def format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
+def format_sandbox_for_details(sandbox: "Sandbox") -> Dict[str, Any]:
     """Format sandbox data for details display (both table and JSON)"""
     data: Dict[str, Any] = {
         "id": sandbox.id,

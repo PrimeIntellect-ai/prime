@@ -139,7 +139,7 @@ class APIClient:
         if headers:
             req_headers.update(headers)
         try:
-            response = self.session.request(
+            response = self.client.request(
                 "POST",
                 url,
                 params=params,
@@ -152,7 +152,7 @@ class APIClient:
             if not isinstance(result, dict):
                 raise APIError("API response was not a dictionary")
             return result
-        except requests.exceptions.HTTPError as e:
+        except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
                 raise UnauthorizedError(
                     "API key unauthorized. "
@@ -172,9 +172,9 @@ class APIClient:
             except (ValueError, KeyError):
                 pass
             raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
-        except requests.exceptions.Timeout as e:
+        except httpx.TimeoutException as e:
             raise TimeoutError(f"Request timed out: {e}")
-        except requests.exceptions.RequestException as e:
+        except httpx.RequestError as e:
             raise APIError(f"Request failed: {e}")
 
     def multipart_post(
@@ -199,37 +199,34 @@ class APIClient:
         logger.debug(f"   Data: {data}")
 
         try:
-            # For multipart requests, we need to let requests set the Content-Type automatically
-            # Create a temporary session without the default Content-Type header
-            temp_session = requests.Session()
-            temp_session.headers.update(
-                {
-                    "Accept": "application/json",
-                    "Authorization": self.session.headers.get("Authorization", ""),
-                }
-            )
+            # For multipart requests, we need to let httpx set the Content-Type automatically
+            # Create a temporary client without the default Content-Type header
+            temp_headers = {"Accept": "application/json"}
+            if self.api_key:
+                temp_headers["Authorization"] = f"Bearer {self.api_key}"
 
-            response = temp_session.request(
-                "POST",
-                url,
-                files=files,
-                data=data,
-                headers=req_headers,
-                timeout=timeout,
-            )
+            # Use a context manager for the temporary client
+            with httpx.Client(headers=temp_headers, follow_redirects=True) as temp_client:
+                response = temp_client.request(
+                    "POST",
+                    url,
+                    files=files,
+                    data=data,
+                    timeout=timeout,
+                )
 
-            # Debug response
-            logger.debug("📡 Response Debug:")
-            logger.debug(f"   Status: {response.status_code}")
-            logger.debug(f"   Headers: {dict(response.headers)}")
-            logger.debug(f"   Content-Type: {response.headers.get('content-type', 'N/A')}")
+                # Debug response
+                logger.debug("📡 Response Debug:")
+                logger.debug(f"   Status: {response.status_code}")
+                logger.debug(f"   Headers: {dict(response.headers)}")
+                logger.debug(f"   Content-Type: {response.headers.get('content-type', 'N/A')}")
 
-            response.raise_for_status()
-            result = response.json()
-            if not isinstance(result, dict):
-                raise APIError("API response was not a dictionary")
-            return result
-        except requests.exceptions.HTTPError as e:
+                response.raise_for_status()
+                result = response.json()
+                if not isinstance(result, dict):
+                    raise APIError("API response was not a dictionary")
+                return result
+        except httpx.HTTPStatusError as e:
             # Enhanced error logging
             logger.error(f"❌ HTTP Error {e.response.status_code}:")
             logger.error(f"   Response text: {e.response.text}")
@@ -254,9 +251,9 @@ class APIClient:
             except (ValueError, KeyError):
                 pass
             raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
-        except requests.exceptions.Timeout as e:
+        except httpx.TimeoutException as e:
             raise TimeoutError(f"Request timed out: {e}")
-        except requests.exceptions.RequestException as e:
+        except httpx.RequestError as e:
             raise APIError(f"Request failed: {e}")
 
     def stream_get(
@@ -264,13 +261,15 @@ class APIClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         timeout: Optional[int] = None,
-    ) -> requests.Response:
+    ) -> httpx.Response:
         url = self._build_url(endpoint)
         try:
-            response = self.session.request("GET", url, params=params, stream=True, timeout=timeout)
+            # Note: httpx uses stream() context manager for streaming responses
+            # But we'll return the response directly for the caller to handle streaming
+            response = self.client.request("GET", url, params=params, timeout=timeout)
             response.raise_for_status()
             return response
-        except requests.exceptions.HTTPError as e:
+        except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
                 raise UnauthorizedError(
                     "API key unauthorized. "
@@ -290,9 +289,9 @@ class APIClient:
             except (ValueError, KeyError):
                 pass
             raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
-        except requests.exceptions.Timeout as e:
+        except httpx.TimeoutException as e:
             raise TimeoutError(f"Request timed out: {e}")
-        except requests.exceptions.RequestException as e:
+        except httpx.RequestError as e:
             raise APIError(f"Request failed: {e}")
 
     def __str__(self) -> str:

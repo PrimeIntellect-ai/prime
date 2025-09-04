@@ -415,10 +415,6 @@ def create(
             )
             raise typer.Exit(1)
 
-        # Use team_id from parameter or fallback to config
-        if team_id is None:
-            team_id = config.team_id
-
         base_client = APIClient()
         availability_client = AvailabilityClient(base_client)
         pods_client = PodsClient(base_client)

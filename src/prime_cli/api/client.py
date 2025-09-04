@@ -392,6 +392,108 @@ class AsyncAPIClient:
         """Make an async DELETE request to the API"""
         return await self.request("DELETE", endpoint)
 
+    async def multipart_post(
+        self,
+        endpoint: str,
+        files: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Send an async multipart form POST request (for file uploads)"""
+        url = self._build_url(endpoint)
+        
+
+        try:
+            # For multipart requests, we need to let httpx set the Content-Type automatically
+            temp_headers = {"Accept": "application/json"}
+            if self.api_key:
+                temp_headers["Authorization"] = f"Bearer {self.api_key}"
+
+            # Create a temporary async client without the default Content-Type header
+            async with httpx.AsyncClient(headers=temp_headers, follow_redirects=True) as temp_client:
+                response = await temp_client.request(
+                    "POST",
+                    url,
+                    files=files,
+                    data=data,
+                    timeout=timeout,
+                )
+
+                response.raise_for_status()
+                result = response.json()
+                if not isinstance(result, dict):
+                    raise APIError("API response was not a dictionary")
+                return result
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                raise UnauthorizedError(
+                    "API key unauthorized. "
+                    "Please check that your API key has the correct permissions, "
+                    "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
+                    "or run 'prime login' to configure a new API key."
+                )
+            if e.response.status_code == 402:
+                raise PaymentRequiredError(
+                    "Payment required. Please check your billing status at "
+                    "https://app.primeintellect.ai/dashboard/billing"
+                )
+            try:
+                error_response = e.response.json()
+                if isinstance(error_response, dict) and "detail" in error_response:
+                    raise APIError(f"HTTP {e.response.status_code}: {error_response['detail']}")
+            except (ValueError, KeyError):
+                pass
+            raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
+        except httpx.TimeoutException as e:
+            raise TimeoutError(f"Request timed out: {e}")
+        except httpx.RequestError as e:
+            raise APIError(f"Request failed: {e}")
+
+    async def stream_get(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+    ) -> httpx.Response:
+        """Make an async streaming GET request"""
+        url = self._build_url(endpoint)
+        try:
+            response = await self.client.request("GET", url, params=params, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                raise UnauthorizedError(
+                    "API key unauthorized. "
+                    "Please check that your API key has the correct permissions, "
+                    "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
+                    "or run 'prime login' to configure a new API key."
+                )
+            if e.response.status_code == 402:
+                raise PaymentRequiredError(
+                    "Payment required. Please check your billing status at "
+                    "https://app.primeintellect.ai/dashboard/billing"
+                )
+            try:
+                error_response = e.response.json()
+                if isinstance(error_response, dict) and "detail" in error_response:
+                    raise APIError(f"HTTP {e.response.status_code}: {error_response['detail']}")
+            except (ValueError, KeyError):
+                pass
+            raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
+        except httpx.TimeoutException as e:
+            raise TimeoutError(f"Request timed out: {e}")
+        except httpx.RequestError as e:
+            raise APIError(f"Request failed: {e}")
+
+    def _build_url(self, endpoint: str) -> str:
+        """Build the full URL for an endpoint"""
+        if not endpoint.startswith("/"):
+            endpoint = f"/api/v1/{endpoint}"
+        else:
+            endpoint = f"/api/v1{endpoint}"
+        return f"{self.base_url}{endpoint}"
+
     async def aclose(self) -> None:
         """Close the async client"""
         await self.client.aclose()

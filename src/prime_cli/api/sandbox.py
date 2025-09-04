@@ -853,3 +853,219 @@ class AsyncSandboxClient:
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Async context manager exit"""
         await self.aclose()
+
+    async def upload_file(
+        self,
+        sandbox_id: str,
+        dest_path: str,
+        file_path: str,
+        strip_components: int = 0,
+        working_dir: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ) -> SandboxUploadResponse:
+        """Upload a tar archive file directly to the sandbox (async low-level method).
+        
+        This is the async version of the low-level upload method that expects a tar archive file.
+        Most users should use `upload_path()` instead, which handles tar creation automatically.
+        """
+        import aiofiles
+        
+        # Prepare form data
+        form_data: Dict[str, Any] = {
+            "dest_path": dest_path,
+            "compressed": "false",
+            "strip_components": str(strip_components),
+        }
+        if working_dir:
+            form_data["working_dir"] = working_dir
+        
+        # Read file asynchronously
+        async with aiofiles.open(file_path, "rb") as file_handle:
+            file_content = await file_handle.read()
+        
+        # Prepare file data with appropriate content type
+        content_type = "application/x-tar"
+        files_data = {"file": (os.path.basename(file_path), file_content, content_type)}
+        
+        raw_response = await self.client.multipart_post(
+            f"/sandbox/{sandbox_id}/upload",
+            files=files_data,
+            data=form_data,
+            timeout=timeout,
+        )
+        
+        return SandboxUploadResponse(
+            success=raw_response.get("success", True),
+            message=raw_response.get("message", "Upload completed successfully"),
+            filesUploaded=raw_response.get("filesUploaded"),
+            bytesUploaded=raw_response.get("bytesUploaded"),
+            destPath=dest_path,
+        )
+
+    async def download_stream(
+        self,
+        sandbox_id: str,
+        src_path: str,
+        working_dir: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ) -> SandboxDownloadStreamResponse:
+        """Download a file/directory as a tar archive stream (async low-level method).
+        
+        This is the async version of the low-level download method that returns a raw tar archive stream.
+        Most users should use `download_path()` instead, which handles tar extraction automatically.
+        """
+        params: Dict[str, Any] = {"src_path": src_path, "compress": "false"}
+        if working_dir:
+            params["working_dir"] = working_dir
+        
+        stream_response = await self.client.stream_get(
+            f"/sandbox/{sandbox_id}/download", params=params, timeout=timeout
+        )
+        
+        return SandboxDownloadStreamResponse(
+            stream=stream_response,
+            srcPath=src_path,
+            contentType=stream_response.headers.get("content-type"),
+            contentLength=int(stream_response.headers.get("content-length", 0)) or None,
+        )
+
+    async def upload_path(
+        self,
+        sandbox_id: str,
+        local_path: str,
+        sandbox_path: str,
+        working_dir: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ) -> SandboxUploadResponse:
+        """Upload a local file or directory to a sandbox (async high-level method).
+        
+        This is the async version of the recommended method for uploading files and directories.
+        It automatically handles tar archive creation and cleanup.
+        """
+        import asyncio
+        import aiofiles
+        
+        abs_path = os.path.abspath(local_path)
+        if not os.path.exists(abs_path):
+            raise FileNotFoundError(f"Path does not exist: {local_path}")
+        
+        # Create tar archive for all uploads (files and directories)
+        temp_file_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".tar") as tmp:
+                temp_file_path = tmp.name
+            
+            # Run tar creation in executor to avoid blocking
+            def create_tar():
+                with tarfile.open(temp_file_path, mode="w:") as tf:
+                    if os.path.isfile(local_path):
+                        # For single files, add with just the filename
+                        tf.add(local_path, arcname=os.path.basename(sandbox_path))
+                    else:
+                        # For directories, add the entire directory
+                        base_name = os.path.basename(local_path.rstrip("/"))
+                        tf.add(local_path, arcname=base_name)
+            
+            await asyncio.get_event_loop().run_in_executor(None, create_tar)
+            
+            # Upload the archive
+            result = await self.upload_file(
+                sandbox_id,
+                sandbox_path,
+                temp_file_path,
+                working_dir=working_dir,
+                timeout=timeout,
+            )
+            
+            return result
+            
+        finally:
+            # Clean up temporary file
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.unlink(temp_file_path)
+                except Exception:
+                    pass
+
+    async def download_path(
+        self,
+        sandbox_id: str,
+        sandbox_path: str,
+        local_path: str,
+        working_dir: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ) -> None:
+        """Download a file or directory from a sandbox to local path (async high-level method).
+        
+        This is the async version of the recommended method for downloading files and directories.
+        It automatically handles tar stream extraction and file saving.
+        """
+        import asyncio
+        import aiofiles
+        
+        # Download from sandbox
+        response = await self.download_stream(
+            sandbox_id, sandbox_path, working_dir=working_dir, timeout=timeout
+        )
+        
+        if response.content_length == 0:
+            raise Exception("No data received from sandbox. The source path may not exist.")
+        
+        # Save stream to temp file first
+        temp_file_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".tar") as tmp_file:
+                temp_file_path = tmp_file.name
+            
+            # Write stream content asynchronously
+            async with aiofiles.open(temp_file_path, "wb") as async_file:
+                total_bytes = 0
+                async for chunk in response.stream.aiter_content(chunk_size=1024 * 64):
+                    if chunk:
+                        await async_file.write(chunk)
+                        total_bytes += len(chunk)
+            
+            # Extract the archive - run in executor to avoid blocking
+            def extract_tar():
+                with tarfile.open(temp_file_path, mode="r:") as tf:
+                    members = list(tf.getmembers())
+                    
+                    if not members:
+                        raise Exception("Tar archive is empty")
+                    
+                    # Determine if this is a single file or directory
+                    is_single_file = len(members) == 1 and members[0].isfile()
+                    
+                    # Ensure destination directory exists
+                    dst_abs = os.path.abspath(local_path)
+                    if is_single_file:
+                        # For single files, ensure parent directory exists
+                        os.makedirs(os.path.dirname(dst_abs), exist_ok=True)
+                        # Extract single file
+                        for member in members:
+                            if member.isfile():
+                                extract_file = tf.extractfile(member)
+                                if extract_file is not None:
+                                    with open(dst_abs, "wb") as f:
+                                        f.write(extract_file.read())
+                                    break
+                    else:
+                        # For directories, ensure the directory itself exists
+                        os.makedirs(dst_abs, exist_ok=True)
+                        # Extract all members
+                        for member in members:
+                            # Strip first component if it exists
+                            if "/" in member.name:
+                                new_name = "/".join(member.name.split("/")[1:])
+                                member.name = new_name
+                            tf.extract(member, path=dst_abs)
+            
+            await asyncio.get_event_loop().run_in_executor(None, extract_tar)
+            
+        finally:
+            # Clean up temporary file
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.unlink(temp_file_path)
+                except Exception:
+                    pass

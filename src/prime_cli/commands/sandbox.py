@@ -23,6 +23,8 @@ from ..utils import (
     validate_output_format,
     expand_home_in_path,
     parse_cp_arg,
+    format_sandbox_for_list,
+    format_sandbox_for_details,
 )
 from ..utils.display import SANDBOX_STATUS_COLORS
 
@@ -79,7 +81,7 @@ def list_sandboxes_cmd(
             # Output as JSON with timestamp (for automation)
             sandboxes_data = []
             for sandbox in sorted_sandboxes:
-                sandbox_data = _format_sandbox_for_list(sandbox)
+                sandbox_data = format_sandbox_for_list(sandbox)
                 # For JSON, use timestamp instead of age
                 json_sandbox = {
                     "id": sandbox_data["id"],
@@ -102,7 +104,7 @@ def list_sandboxes_cmd(
         else:
             # Output as table using shared formatting
             for sandbox in sorted_sandboxes:
-                sandbox_data = _format_sandbox_for_list(sandbox)
+                sandbox_data = format_sandbox_for_list(sandbox)
 
                 color = status_color(sandbox_data["status"], SANDBOX_STATUS_COLORS)
 
@@ -147,11 +149,11 @@ def get(
 
         if output == "json":
             # Output as JSON using shared formatting
-            sandbox_data = _format_sandbox_for_details(sandbox)
+            sandbox_data = format_sandbox_for_details(sandbox)
             output_data_as_json(sandbox_data, console)
         else:
             # Output as table using shared formatting
-            sandbox_data = _format_sandbox_for_details(sandbox)
+            sandbox_data = format_sandbox_for_details(sandbox)
 
             table = Table(title=f"Sandbox Details: {sandbox_id}")
             table.add_column("Property", style="cyan")

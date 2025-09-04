@@ -16,12 +16,7 @@ from prime_cli.api.client import APIClient, AsyncAPIClient, TimeoutError
 from ..utils.debug import debug_log, debug_log_ascii, debug_log_hex
 
 
-# Security and safety constants
-# These can be overridden via environment variables to match backend config
-SANDBOX_UPLOAD_MAX_MB = int(os.environ.get("SANDBOX_UPLOAD_MAX_MB", "5120"))  # Default 5GB in MB
-
-# Convert to bytes for internal use
-MAX_UPLOAD_SIZE = SANDBOX_UPLOAD_MAX_MB * 1024 * 1024
+# Security constants
 
 
 def is_safe_path(basedir: str, path: str, follow_symlinks: bool = True) -> bool:
@@ -538,7 +533,7 @@ class AsyncSandboxClient:
         if not os.path.exists(abs_path):
             raise FileNotFoundError(f"Path does not exist: {local_path}")
         
-        # Check file/directory size for user warning
+        # Warn users about large uploads (backend will enforce actual limits)
         def get_path_size(path: str) -> int:
             """Get total size of file or directory in bytes."""
             if os.path.isfile(path):
@@ -554,17 +549,10 @@ class AsyncSandboxClient:
         # Get size in executor to avoid blocking
         size = await asyncio.get_event_loop().run_in_executor(None, get_path_size, abs_path)
         
-        # Warn for large uploads
-        if size > MAX_UPLOAD_SIZE:
-            size_gb = size / (1024 * 1024 * 1024)
-            max_gb = MAX_UPLOAD_SIZE / (1024 * 1024 * 1024)
-            raise ValueError(
-                f"Path size ({size_gb:.2f}GB) exceeds maximum allowed size ({max_gb:.2f}GB). "
-                f"Set SANDBOX_UPLOAD_MAX_MB environment variable to increase limit."
-            )
-        elif size > 1024 * 1024 * 1024:  # Warn for files over 1GB
-            size_gb = size / (1024 * 1024 * 1024)
-            debug_log(f"Warning: Uploading large file/directory ({size_gb:.2f}GB). This may take a while.")
+        # Just warn for large uploads - backend will handle the actual limits
+        if size > 100 * 1024 * 1024:  # Warn for files over 100MB
+            size_mb = size / (1024 * 1024)
+            debug_log(f"Warning: Uploading {size_mb:.1f}MB. Backend may reject if over configured limit.")
         
         # Create tar archive for all uploads (files and directories)
         temp_file_path = None

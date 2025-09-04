@@ -1,7 +1,8 @@
 import json
 import random
 import string
-from typing import List, Optional
+import time
+from typing import Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
@@ -9,121 +10,41 @@ from rich.table import Table
 from rich.text import Text
 
 from ..api.client import APIClient, APIError
-from ..api.sandbox import CreateSandboxRequest, SandboxClient
+from ..api.sandbox import CreateSandboxRequest, Sandbox, SandboxClient
 from ..config import Config
 from ..utils.debug import debug_log, set_debug_enabled
-from .utils import (
-    _expand_home_in_path,
-    _parse_cp_arg,
+from ..utils import (
+    build_table,
+    confirm_or_skip,
+    obfuscate_env_vars,
+    output_data_as_json,
+    sort_by_created,
+    status_color,
+    validate_output_format,
+    expand_home_in_path,
+    parse_cp_arg,
 )
+from ..utils.display import SANDBOX_STATUS_COLORS
 
 app = typer.Typer(help="Manage code sandboxes")
 console = Console()
 config = Config()
 
 
-def _handle_local_to_sandbox(
-    sandbox_client: SandboxClient,
-    source_path: str,
-    sandbox_id: str,
-    destination_path: str,
-    working_dir: Optional[str],
-) -> None:
-    """Handle copying from local to sandbox."""
-    import logging
-
-    logger = logging.getLogger(__name__)
-
-    logger.debug("🔄 Local to Sandbox Copy Debug:")
-    logger.debug(f"   Source path: {source_path}")
-    logger.debug(f"   Sandbox ID: {sandbox_id}")
-    logger.debug(f"   Destination path: {destination_path}")
-    logger.debug(f"   Working dir: {working_dir}")
-
-    console.print(
-        f"[blue]Uploading {source_path} to sandbox {sandbox_id}:{destination_path}...[/blue]"
-    )
-
-    try:
-        with console.status("[bold blue]Uploading...", spinner="dots"):
-            logger.debug("📤 Calling sandbox_client.upload_path...")
-            result = sandbox_client.upload_path(
-                sandbox_id,
-                source_path,
-                destination_path,
-                working_dir=working_dir,
-            )
-            logger.debug(f"✅ upload_path result: {result}")
-
-        # Success output
-        console.print(f"[green]Upload completed[/green] {result.message}")
-        if result.files_uploaded:
-            console.print(f"Files uploaded: {result.files_uploaded}")
-        if result.bytes_uploaded:
-            console.print(f"Bytes uploaded: {result.bytes_uploaded}")
-
-    except Exception as e:
-        logger.error(f"❌ Upload failed with exception: {e}")
-        logger.error(f"   Exception type: {type(e)}")
-        console.print(f"[red]Upload failed:[/red] {e}")
-        raise
-
-
-def _handle_sandbox_to_local(
-    sandbox_client: SandboxClient,
-    sandbox_id: str,
-    source_path: str,
-    destination_path: str,
-    working_dir: Optional[str],
-) -> None:
-    """Handle copying from sandbox to local."""
-    debug_log(
-        f"_handle_sandbox_to_local called with sandbox_id={sandbox_id}, "
-        f"source_path={source_path}, destination_path={destination_path}"
-    )
-
-    console.print(
-        f"[blue]Downloading from sandbox {sandbox_id}:{source_path} to {destination_path}...[/blue]"
-    )
-
-    try:
-        debug_log("About to call sandbox_client.download_path")
-        with console.status("[bold blue]Downloading...", spinner="dots"):
-            sandbox_client.download_path(
-                sandbox_id,
-                source_path,
-                destination_path,
-                working_dir=working_dir,
-            )
-
-        console.print(f"[green]Download completed to {destination_path}[/green]")
-
-    except Exception as e:
-        debug_log(f"Exception caught in _handle_sandbox_to_local: {e}")
-        console.print(f"[red]Download failed:[/red] {e}")
-        raise
-
-
-def _obfuscate_env_vars(env_vars: dict) -> dict:
-    """Obfuscate environment variable values for display"""
-    obfuscated = {}
-    for key, value in env_vars.items():
-        if len(value) <= 3:
-            obfuscated[key] = "*" * len(value)
-        else:
-            obfuscated[key] = value[:2] + "*" * (len(value) - 4) + value[-2:]
-    return obfuscated
-
-
 @app.command("list")
 def list_sandboxes_cmd(
-    team_id: Optional[str] = typer.Option(None, help="Filter by team ID"),
+    team_id: Optional[str] = typer.Option(
+        None, help="Filter by team ID (uses config team_id if not specified)"
+    ),
     status: Optional[str] = typer.Option(None, help="Filter by status"),
     page: int = typer.Option(1, help="Page number"),
     per_page: int = typer.Option(50, help="Items per page"),
     all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List your sandboxes (excludes terminated by default)"""
+    validate_output_format(output, console)
+
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
@@ -139,49 +60,68 @@ def list_sandboxes_cmd(
             exclude_terminated=exclude_terminated,
         )
 
-        table = Table(
-            title=f"Code Sandboxes (Total: {sandbox_list.total})",
-            show_lines=True,
+        table = build_table(
+            f"Code Sandboxes (Total: {sandbox_list.total})",
+            [
+                ("ID", "cyan"),
+                ("Name", "blue"),
+                ("Image", "green"),
+                ("Status", "yellow"),
+                ("Resources", "magenta"),
+                ("Age", "blue"),
+            ],
         )
-        table.add_column("ID", style="cyan", no_wrap=True)
-        table.add_column("Name", style="blue")
-        table.add_column("Image", style="green")
-        table.add_column("Status", style="yellow")
-        table.add_column("Resources", style="magenta")
-        table.add_column("Created", style="blue")
 
-        for sandbox in sandbox_list.sandboxes:
-            status_color = {
-                "PENDING": "yellow",
-                "PROVISIONING": "yellow",
-                "RUNNING": "green",
-                "STOPPED": "blue",
-                "ERROR": "red",
-                "TERMINATED": "red",
-            }.get(sandbox.status, "white")
+        # Sort sandboxes by created_at (oldest first)
+        sorted_sandboxes = sort_by_created(sandbox_list.sandboxes)
 
-            created_at = sandbox.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        if output == "json":
+            # Output as JSON with timestamp (for automation)
+            sandboxes_data = []
+            for sandbox in sorted_sandboxes:
+                sandbox_data = _format_sandbox_for_list(sandbox)
+                # For JSON, use timestamp instead of age
+                json_sandbox = {
+                    "id": sandbox_data["id"],
+                    "name": sandbox_data["name"],
+                    "image": sandbox_data["image"],
+                    "status": sandbox_data["status"],
+                    "resources": sandbox_data["resources"],
+                    "created_at": sandbox_data["created_at"],
+                }
+                sandboxes_data.append(json_sandbox)
 
-            resources = f"{sandbox.cpu_cores}CPU/{sandbox.memory_gb}GB"
-            if sandbox.gpu_count > 0:
-                resources += f"/{sandbox.gpu_count}GPU"
+            output_data = {
+                "sandboxes": sandboxes_data,
+                "total": sandbox_list.total,
+                "page": sandbox_list.page,
+                "per_page": sandbox_list.per_page,
+                "has_next": sandbox_list.has_next,
+            }
+            output_data_as_json(output_data, console)
+        else:
+            # Output as table using shared formatting
+            for sandbox in sorted_sandboxes:
+                sandbox_data = _format_sandbox_for_list(sandbox)
 
-            table.add_row(
-                sandbox.id,
-                sandbox.name,
-                sandbox.docker_image,
-                Text(sandbox.status, style=status_color),
-                resources,
-                created_at,
-            )
+                color = status_color(sandbox_data["status"], SANDBOX_STATUS_COLORS)
 
-        console.print(table)
+                table.add_row(
+                    sandbox_data["id"],
+                    sandbox_data["name"],
+                    sandbox_data["image"],
+                    Text(sandbox_data["status"], style=color),
+                    sandbox_data["resources"],
+                    sandbox_data["age"],
+                )
 
-        if sandbox_list.has_next:
-            console.print(
-                f"\n[yellow]Showing page {page} of results. "
-                f"Use --page {page + 1} to see more.[/yellow]"
-            )
+            console.print(table)
+
+            if sandbox_list.has_next:
+                console.print(
+                    f"\n[yellow]Showing page {page} of results. "
+                    f"Use --page {page + 1} to see more.[/yellow]"
+                )
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
@@ -192,59 +132,64 @@ def list_sandboxes_cmd(
 
 
 @app.command()
-def get(sandbox_id: str) -> None:
+def get(
+    sandbox_id: str,
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
     """Get detailed information about a specific sandbox"""
+    validate_output_format(output, console)
+
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
         sandbox = sandbox_client.get(sandbox_id)
 
-        table = Table(title=f"Sandbox Details: {sandbox_id}")
-        table.add_column("Property", style="cyan")
-        table.add_column("Value", style="white")
+        if output == "json":
+            # Output as JSON using shared formatting
+            sandbox_data = _format_sandbox_for_details(sandbox)
+            output_data_as_json(sandbox_data, console)
+        else:
+            # Output as table using shared formatting
+            sandbox_data = _format_sandbox_for_details(sandbox)
 
-        table.add_row("ID", sandbox.id)
-        table.add_row("Name", sandbox.name)
-        table.add_row("Docker Image", sandbox.docker_image)
-        table.add_row("Start Command", sandbox.start_command or "N/A")
+            table = Table(title=f"Sandbox Details: {sandbox_id}")
+            table.add_column("Property", style="cyan")
+            table.add_column("Value", style="white")
 
-        status_color = {
-            "PENDING": "yellow",
-            "PROVISIONING": "yellow",
-            "RUNNING": "green",
-            "STOPPED": "blue",
-            "ERROR": "red",
-            "TERMINATED": "red",
-        }.get(sandbox.status, "white")
-        table.add_row("Status", Text(sandbox.status, style=status_color))
+            table.add_row("ID", sandbox_data["id"])
+            table.add_row("Name", sandbox_data["name"])
+            table.add_row("Docker Image", sandbox_data["docker_image"])
+            table.add_row("Start Command", sandbox_data["start_command"] or "N/A")
 
-        table.add_row("CPU Cores", str(sandbox.cpu_cores))
-        table.add_row("Memory (GB)", str(sandbox.memory_gb))
-        table.add_row("Disk Size (GB)", str(sandbox.disk_size_gb))
-        table.add_row("Disk Mount Path", sandbox.disk_mount_path)
-        table.add_row("GPU Count", str(sandbox.gpu_count))
-        table.add_row("Timeout (minutes)", str(sandbox.timeout_minutes))
+            sandbox_status_color = status_color(sandbox_data["status"], SANDBOX_STATUS_COLORS)
+            table.add_row("Status", Text(sandbox_data["status"], style=sandbox_status_color))
 
-        table.add_row("Created", sandbox.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
-        if sandbox.started_at:
-            table.add_row("Started", sandbox.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
-        if sandbox.terminated_at:
-            table.add_row("Terminated", sandbox.terminated_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
+            table.add_row("CPU Cores", str(sandbox_data["cpu_cores"]))
+            table.add_row("Memory (GB)", str(sandbox_data["memory_gb"]))
+            table.add_row("Disk Size (GB)", str(sandbox_data["disk_size_gb"]))
+            table.add_row("Disk Mount Path", sandbox_data["disk_mount_path"])
+            table.add_row("GPU Count", str(sandbox_data["gpu_count"]))
+            table.add_row("Timeout (minutes)", str(sandbox_data["timeout_minutes"]))
 
-        table.add_row("User ID", sandbox.user_id or "N/A")
-        table.add_row("Team ID", sandbox.team_id or "Personal")
+            table.add_row("Created", sandbox_data["created_at"])
+            if "started_at" in sandbox_data:
+                table.add_row("Started", sandbox_data["started_at"])
+            if "terminated_at" in sandbox_data:
+                table.add_row("Terminated", sandbox_data["terminated_at"])
 
-        if sandbox.environment_vars:
-            obfuscated_env = _obfuscate_env_vars(sandbox.environment_vars)
-            env_vars = json.dumps(obfuscated_env, indent=2)
-            table.add_row("Environment Variables", env_vars)
+            table.add_row("User ID", sandbox_data["user_id"] or "N/A")
+            table.add_row("Team ID", sandbox_data["team_id"] or "Personal")
 
-        if sandbox.advanced_configs:
-            advanced_configs = json.dumps(sandbox.advanced_configs.model_dump(), indent=2)
-            table.add_row("Advanced Configs", advanced_configs)
+            if "environment_vars" in sandbox_data:
+                env_vars = json.dumps(sandbox_data["environment_vars"], indent=2)
+                table.add_row("Environment Variables", env_vars)
 
-        console.print(table)
+            if "advanced_configs" in sandbox_data:
+                advanced_configs = json.dumps(sandbox_data["advanced_configs"], indent=2)
+                table.add_row("Advanced Configs", advanced_configs)
+
+            console.print(table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
@@ -260,17 +205,22 @@ def create(
     name: Optional[str] = typer.Option(
         None, help="Name for the sandbox (auto-generated if not provided)"
     ),
-    start_command: Optional[str] = typer.Option(None, help="Command to run in the container"),
+    start_command: Optional[str] = typer.Option(
+        "tail -f /dev/null", help="Command to run in the container"
+    ),
     cpu_cores: int = typer.Option(1, help="Number of CPU cores"),
     memory_gb: int = typer.Option(2, help="Memory in GB"),
     disk_size_gb: int = typer.Option(10, help="Disk size in GB"),
     gpu_count: int = typer.Option(0, help="Number of GPUs"),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
-    team_id: Optional[str] = typer.Option(None, help="Team ID (optional)"),
+    team_id: Optional[str] = typer.Option(
+        None, help="Team ID (uses config team_id if not specified)"
+    ),
     env: Optional[List[str]] = typer.Option(
         None,
         help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
     ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Create a new sandbox"""
     try:
@@ -301,14 +251,6 @@ def create(
             suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
             name = f"{clean_image}-{suffix}"
 
-        # Get team ID from config if not provided
-        if not team_id:
-            team_id = config.team_id
-
-        # Ensure empty string is converted to None
-        if team_id == "":
-            team_id = None
-
         request = CreateSandboxRequest(
             name=name,
             docker_image=docker_image,
@@ -333,10 +275,10 @@ def create(
         console.print(f"Timeout: {timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
         if env_vars:
-            obfuscated_env = _obfuscate_env_vars(env_vars)
+            obfuscated_env = obfuscate_env_vars(env_vars)
             console.print(f"Environment Variables: {obfuscated_env}")
 
-        if typer.confirm("\nDo you want to create this sandbox?", default=True):
+        if confirm_or_skip("\nDo you want to create this sandbox?", yes, default=True):
             with console.status("[bold blue]Creating sandbox...", spinner="dots"):
                 sandbox = sandbox_client.create(request)
 
@@ -357,13 +299,16 @@ def create(
 
 
 @app.command()
-def delete(sandbox_id: str) -> None:
+def delete(
+    sandbox_id: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
     """Delete a sandbox"""
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        if not typer.confirm(f"Are you sure you want to delete sandbox {sandbox_id}?"):
+        if not confirm_or_skip(f"Are you sure you want to delete sandbox {sandbox_id}?", yes):
             console.print("Delete cancelled")
             raise typer.Exit(0)
 
@@ -461,13 +406,20 @@ def run(
         if working_dir:
             console.print(f"[bold blue]Working directory:[/bold blue] {working_dir}")
         if env_vars:
-            obfuscated_env = _obfuscate_env_vars(env_vars)
+            obfuscated_env = obfuscate_env_vars(env_vars)
             console.print(f"[bold blue]Environment:[/bold blue] {obfuscated_env}")
+
+        # Start timing
+        start_time = time.perf_counter()
 
         with console.status("[bold blue]Running command...", spinner="dots"):
             result = sandbox_client.execute_command(
                 sandbox_id, command_str, working_dir, env_vars if env_vars else None
             )
+
+        # End timing
+        end_time = time.perf_counter()
+        execution_time_ms = (end_time - start_time) * 1000
 
         # Display output
         if result.stdout:
@@ -477,6 +429,8 @@ def run(
         if result.stderr:
             console.print("\n[bold red]stderr:[/bold red]")
             console.print(result.stderr)
+
+        console.print(f"\n[dim]Execution time: {execution_time_ms:.1f}ms[/dim]")
 
         if result.exit_code != 0:
             console.print(f"\n[bold yellow]Exit code:[/bold yellow] {result.exit_code}")
@@ -518,8 +472,8 @@ def cp(
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        src_sid, src_path = _parse_cp_arg(source)
-        dst_sid, dst_path = _parse_cp_arg(destination)
+        src_sid, src_path = parse_cp_arg(source)
+        dst_sid, dst_path = parse_cp_arg(destination)
         debug_log(
             f"Parsed args: src_sid={src_sid}, src_path={src_path}, "
             f"dst_sid={dst_sid}, dst_path={dst_path}"
@@ -527,9 +481,9 @@ def cp(
 
         # Expand $HOME in sandbox paths for user convenience
         if src_sid is not None:
-            src_path = _expand_home_in_path(src_path)
+            src_path = expand_home_in_path(src_path)
         if dst_sid is not None:
-            dst_path = _expand_home_in_path(dst_path)
+            dst_path = expand_home_in_path(dst_path)
 
         if (src_sid is None) == (dst_sid is None):
             console.print("[red]One side must be a sandbox, the other must be local.[/red]")

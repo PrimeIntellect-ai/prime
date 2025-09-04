@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 import requests
 from pydantic import BaseModel, ConfigDict, Field
 
-from prime_cli.api.client import APIClient, TimeoutError
+from prime_cli.api.client import APIClient, AsyncAPIClient, TimeoutError
 
 from ..utils.debug import debug_log, debug_log_ascii, debug_log_hex
 
@@ -172,6 +172,10 @@ class SandboxClient:
 
     def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
+        # Auto-populate team_id from config if not specified
+        if request.team_id is None:
+            request.team_id = self.client.config.team_id
+
         response = self.client.request(
             "POST", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
         )
@@ -186,6 +190,10 @@ class SandboxClient:
         exclude_terminated: Optional[bool] = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
+        # Auto-populate team_id from config if not specified
+        if team_id is None:
+            team_id = self.client.config.team_id
+
         params: Dict[str, Any] = {"page": page, "per_page": per_page}
         if team_id:
             params["team_id"] = team_id
@@ -251,15 +259,16 @@ class SandboxClient:
             raise CommandTimeoutError(sandbox_id, command, timeout or 0)
 
     def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
-        for _ in range(max_attempts):
+        for attempt in range(max_attempts):
             sandbox = self.get(sandbox_id)
             if sandbox.status == "RUNNING":
-                # Give it a few extra seconds to be ready for commands
-                time.sleep(10)
                 return
             elif sandbox.status in ["ERROR", "TERMINATED"]:
                 raise SandboxNotRunningError(sandbox_id, sandbox.status)
-            time.sleep(2)
+
+            # Aggressive polling for first 5 attempts (5 seconds), then back off
+            sleep_time = 1 if attempt < 5 else 2
+            time.sleep(sleep_time)
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
 
     def upload_file(
@@ -570,3 +579,125 @@ class SandboxClient:
                     os.unlink(temp_file_path)
                 except Exception:
                     pass
+
+class AsyncSandboxClient:
+    """Async client for sandbox API operations"""
+
+    def __init__(self, api_key: Optional[str] = None):
+        self.client = AsyncAPIClient(api_key=api_key)
+
+    async def create(self, request: CreateSandboxRequest) -> Sandbox:
+        """Create a new sandbox"""
+        # Auto-populate team_id from config if not specified
+        if request.team_id is None:
+            request.team_id = self.client.config.team_id
+
+        response = await self.client.request(
+            "POST", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
+        )
+        return Sandbox(**response)
+
+    async def list(
+        self,
+        team_id: Optional[str] = None,
+        status: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 50,
+        exclude_terminated: Optional[bool] = None,
+    ) -> SandboxListResponse:
+        """List sandboxes"""
+        # Auto-populate team_id from config if not specified
+        if team_id is None:
+            team_id = self.client.config.team_id
+
+        params: Dict[str, Any] = {"page": page, "per_page": per_page}
+        if team_id:
+            params["team_id"] = team_id
+        if status:
+            params["status"] = status
+        if exclude_terminated is not None:
+            params["is_active"] = exclude_terminated
+
+        response = await self.client.request("GET", "/sandbox", params=params)
+        return SandboxListResponse(**response)
+
+    async def get(self, sandbox_id: str) -> Sandbox:
+        """Get a specific sandbox"""
+        response = await self.client.request("GET", f"/sandbox/{sandbox_id}")
+        return Sandbox(**response)
+
+    async def delete(self, sandbox_id: str) -> Dict[str, Any]:
+        """Delete a sandbox"""
+        response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
+        return response
+
+    async def get_logs(self, sandbox_id: str) -> str:
+        """Get sandbox logs"""
+        response = await self.client.request("GET", f"/sandbox/{sandbox_id}/logs")
+        logs_response = SandboxLogsResponse(**response)
+        return logs_response.logs
+
+    async def update_status(self, sandbox_id: str) -> Sandbox:
+        """Update sandbox status from Kubernetes"""
+        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/status")
+        return Sandbox(**response)
+
+    async def execute_command(
+        self,
+        sandbox_id: str,
+        command: str,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        timeout: Optional[int] = None,
+    ) -> CommandResponse:
+        """Execute a command in a sandbox
+
+        Args:
+            sandbox_id: ID of the sandbox to execute the command in
+            command: Command to execute
+            working_dir: Working directory for the command
+            env: Environment variables for the command
+            timeout: Timeout in seconds for the command execution
+
+        Raises:
+            CommandTimeoutError: If the command execution times out
+        """
+        request = CommandRequest(command=command, working_dir=working_dir, env=env)
+        try:
+            response = await self.client.request(
+                "POST",
+                f"/sandbox/{sandbox_id}/command",
+                json=request.model_dump(by_alias=False, exclude_none=True),
+                timeout=timeout,
+            )
+            return CommandResponse(**response)
+        except TimeoutError:
+            raise CommandTimeoutError(sandbox_id, command, timeout or 0)
+
+    async def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
+        """Wait for sandbox to be running (async version)"""
+        import asyncio
+
+        for attempt in range(max_attempts):
+            sandbox = await self.get(sandbox_id)
+            if sandbox.status == "RUNNING":
+                return
+            elif sandbox.status in ["ERROR", "TERMINATED"]:
+                raise SandboxNotRunningError(sandbox_id, sandbox.status)
+
+            # Aggressive polling for first 5 attempts (5 seconds), then back off
+            sleep_time = 1 if attempt < 5 else 2
+            await asyncio.sleep(sleep_time)
+        raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
+
+    async def aclose(self) -> None:
+        """Close the async client"""
+        await self.client.aclose()
+
+    async def __aenter__(self) -> "AsyncSandboxClient":
+        """Async context manager entry"""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager exit"""
+        await self.aclose()

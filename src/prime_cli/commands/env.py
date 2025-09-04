@@ -9,15 +9,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-import requests
+import httpx
 import toml
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from ..api.client import APIClient, APIError
+from ..utils import output_data_as_json, validate_output_format
 
-app = typer.Typer(help="Manage verifier environments")
+app = typer.Typer(help="Manage verifiers environments")
 console = Console()
 
 # Constants
@@ -121,13 +122,16 @@ def list_cmd(
     limit: int = typer.Option(
         DEFAULT_LIST_LIMIT, "--limit", "-l", help="Number of environments to show"
     ),
-    offset: int = typer.Option(0, "--offset", "-o", help="Number of environments to skip"),
+    offset: int = typer.Option(0, "--offset", help="Number of environments to skip"),
     owner: Optional[str] = typer.Option(None, "--owner", help="Filter by owner name"),
     visibility: Optional[str] = typer.Option(
         None, "--visibility", help="Filter by visibility (PUBLIC/PRIVATE)"
     ),
+    output: str = typer.Option("table", "--output", help="Output format: table or json"),
 ) -> None:
-    """List available verifier environments"""
+    """List available verifiers environments"""
+    validate_output_format(output, console)
+
     try:
         client = APIClient(require_auth=False)
 
@@ -147,28 +151,58 @@ def list_cmd(
         total = result.get("total_count", result.get("total", 0))
 
         if not environments:
-            console.print("No environments found.", style="yellow")
+            if output == "json":
+                output_data_as_json(
+                    {"environments": [], "total": 0, "offset": offset, "limit": limit}, console
+                )
+            else:
+                console.print("No environments found.", style="yellow")
             return
 
-        table = Table(title=f"Verifier Environments (Total: {total})")
-        table.add_column("Environment", style="cyan")
-        table.add_column("Description", style="green")
-        table.add_column("Visibility", style="magenta")
+        if output == "json":
+            # Format environments for JSON output
+            env_data = []
+            for env in environments:
+                owner_name = env["owner"]["name"]
+                env_name = env["name"]
+                env_data.append(
+                    {
+                        "environment": f"{owner_name}/{env_name}",
+                        "description": env.get("description", ""),
+                        "visibility": env.get("visibility", ""),
+                    }
+                )
 
-        for env in environments:
-            owner_name = env["owner"]["name"]
-            env_name = env["name"]
-            env_id = f"{owner_name}/{env_name}"
-            description = env.get("description", "")
-            visibility = env.get("visibility", "")
-            table.add_row(env_id, description, visibility)
+            output_data = {
+                "environments": env_data,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+            }
+            output_data_as_json(output_data, console)
+        else:
+            # Table output
+            table = Table(title=f"Environments (Total: {total})")
+            table.add_column("Environment", style="cyan")
+            table.add_column("Description", style="green")
+            table.add_column("Visibility", style="magenta")
 
-        console.print(table)
+            for env in environments:
+                owner_name = env["owner"]["name"]
+                env_name = env["name"]
+                env_id = f"{owner_name}/{env_name}"
+                description = env.get("description", "")
+                visibility = env.get("visibility", "")
+                table.add_row(env_id, description, visibility)
 
-        remaining = total - (offset + len(environments))
-        if remaining > 0:
-            next_offset = offset + limit
-            console.print(f"\n[dim]Use --offset {next_offset} to see the next environments.[/dim]")
+            console.print(table)
+
+            remaining = total - (offset + len(environments))
+            if remaining > 0:
+                next_offset = offset + limit
+                console.print(
+                    f"\n[dim]Use --offset {next_offset} to see the next environments.[/dim]"
+                )
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -184,7 +218,12 @@ def push(
     name: Optional[str] = typer.Option(
         None, "--name", "-n", help="Override environment name (defaults to pyproject.toml name)"
     ),
-    team: Optional[str] = typer.Option(None, "--team", "-t", help="Team slug for team ownership"),
+    team: Optional[str] = typer.Option(
+        None,
+        "--team",
+        "-t",
+        help="Team slug for team ownership (uses config team_id if not provided)",
+    ),
     visibility: str = typer.Option(
         "PUBLIC", "--visibility", "-v", help="Environment visibility (PUBLIC/PRIVATE)"
     ),
@@ -280,6 +319,8 @@ def push(
             resolve_data = {"name": env_name, "visibility": visibility}
             if team:
                 resolve_data["team_slug"] = team
+            elif client.config.team_id:
+                resolve_data["team_id"] = client.config.team_id
 
             try:
                 response = client.post("/environmentshub/resolve", json=resolve_data)
@@ -363,13 +404,13 @@ def push(
             if wheel_upload_url:
                 try:
                     with open(wheel_path, "rb") as f:
-                        upload_response = requests.put(
+                        upload_response = httpx.put(
                             wheel_upload_url,
-                            data=f.read(),
+                            content=f.read(),
                             headers={"Content-Type": "application/octet-stream"},
                         )
                         upload_response.raise_for_status()
-                except requests.RequestException as e:
+                except httpx.RequestError as e:
                     console.print(f"[red]Failed to upload wheel: {e}[/red]")
                     raise typer.Exit(1)
                 except IOError as e:
@@ -448,13 +489,13 @@ def push(
 
                     try:
                         with open(tmp.name, "rb") as f:
-                            upload_response = requests.put(
+                            upload_response = httpx.put(
                                 source_upload_url,
-                                data=f.read(),
+                                content=f.read(),
                                 headers={"Content-Type": "application/octet-stream"},
                             )
                             upload_response.raise_for_status()
-                    except requests.RequestException as e:
+                    except httpx.RequestError as e:
                         console.print(f"[red]Failed to upload source archive: {e}[/red]")
                         raise typer.Exit(1)
                     except IOError as e:
@@ -524,7 +565,7 @@ def init(
         False, "--rewrite-readme", help="Overwrite README.md with template if it already exists"
     ),
 ) -> None:
-    """Initialize a new verifier environment from template"""
+    """Initialize a new verifiers environment from template"""
     try:
         # this import is slow, so we do it inside the command
         from verifiers.scripts.init import init_environment
@@ -587,7 +628,7 @@ def pull(
         if target:
             target_dir = Path(target)
         else:
-            target_dir = Path.cwd() / f"{name}-{version}"
+            target_dir = Path.cwd() / f"{owner}-{name}-{version}"
 
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -609,17 +650,15 @@ def pull(
                         headers = {}
                         if client.api_key:
                             headers["Authorization"] = f"Bearer {client.api_key}"
-                        resp = requests.get(download_url, stream=True, headers=headers)
+                        with httpx.stream("GET", download_url, headers=headers) as resp:
+                            resp.raise_for_status()
+                            with open(tmp.name, "wb") as f:
+                                for chunk in resp.iter_bytes(chunk_size=8192):
+                                    f.write(chunk)
                     else:
                         console.print(f"[red]Error: Invalid download URL: {download_url}[/red]")
                         raise typer.Exit(1)
-
-                    resp.raise_for_status()
-
-                    with open(tmp.name, "wb") as f:
-                        for chunk in resp.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                except requests.RequestException as e:
+                except httpx.RequestError as e:
                     console.print(f"[red]Download failed: {e}[/red]")
                     raise typer.Exit(1)
                 except IOError as e:
@@ -770,20 +809,62 @@ def info(
 
         console.print()
 
-        # Display key installation commands if wheel URL is available
-        if wheel_url:
+        # Display key installation commands based on availability
+        simple_index_url = details.get("simple_index_url")
+        if wheel_url or simple_index_url:
             normalized_name = normalize_package_name(name)
 
             console.print("[bold yellow]Install (choose one)[/bold yellow]")
             console.print(f"  [green]$[/green] prime env install {owner}/{name}@{target_version}")
-            console.print(f"  [green]$[/green] uv pip install {wheel_url}")
-            console.print(f"  [green]$[/green] uv add {normalized_name}@{wheel_url}")
-            console.print(f"  [green]$[/green] pip install {wheel_url}")
+
+            # Use simple index if available, otherwise fall back to wheel URL
+            if simple_index_url:
+                # For versioned installs, show package name with version specification
+                if target_version and target_version != "latest":
+                    console.print(
+                        f"  [green]$[/green] uv pip install {normalized_name}=={target_version} "
+                        f"--extra-index-url {simple_index_url}"
+                    )
+                    console.print(
+                        f"  [green]$[/green] uv add {normalized_name}=={target_version} "
+                        f"--index {simple_index_url}"
+                    )
+                    console.print(
+                        f"  [green]$[/green] pip install {normalized_name}=={target_version} "
+                        f"--extra-index-url {simple_index_url}"
+                    )
+                else:
+                    console.print(
+                        f"  [green]$[/green] uv pip install {normalized_name} "
+                        f"--extra-index-url {simple_index_url}"
+                    )
+                    console.print(
+                        f"  [green]$[/green] uv add {normalized_name} --index {simple_index_url}"
+                    )
+                    console.print(
+                        f"  [green]$[/green] pip install {normalized_name} "
+                        f"--extra-index-url {simple_index_url}"
+                    )
+            elif wheel_url:
+                console.print(f"  [green]$[/green] uv pip install {wheel_url}")
+                console.print(f"  [green]$[/green] uv add {normalized_name}@{wheel_url}")
+                console.print(f"  [green]$[/green] pip install {wheel_url}")
 
             console.print()
             console.print("[bold yellow]Usage[/bold yellow]")
             console.print("  [blue]>>>[/blue] from verifiers import load_environment")
             console.print(f"  [blue]>>>[/blue] env = load_environment('{name}')")
+        elif details.get("visibility") == "PRIVATE":
+            console.print("[bold yellow]Install (private environment)[/bold yellow]")
+            console.print(f"  [green]$[/green] prime env pull {owner}/{name}@{target_version}")
+            console.print(
+                "  [dim]Note: Direct UV/pip install not available for private environments[/dim]"
+            )
+
+            console.print()
+            console.print("[bold yellow]After pulling[/bold yellow]")
+            console.print("  [green]$[/green] cd <target_directory>")
+            console.print("  [green]$[/green] uv pip install -e .")
         else:
             console.print("[yellow]No wheel available for this version[/yellow]")
 
@@ -894,7 +975,7 @@ def install(
         help="Package manager to use (uv or pip)",
     ),
 ) -> None:
-    """Install a verifier environment
+    """Install a verifiers environment
 
     Examples:
         prime env install owner/environment
@@ -929,10 +1010,26 @@ def install(
             console.print(f"[red]Failed to get environment details: {e}[/red]")
             raise typer.Exit(1)
 
-        # Process wheel URL
+        # Get both simple index URL and wheel URL
+        simple_index_url = details.get("simple_index_url")
         wheel_url = process_wheel_url(details.get("wheel_url"))
-        if not wheel_url:
-            console.print("[red]Error: No wheel file available for this environment.[/red]")
+
+        # Check if this is a private environment
+        if not simple_index_url and not wheel_url and details.get("visibility") == "PRIVATE":
+            console.print(
+                "[yellow]Private environment detected. Using authenticated download.[/yellow]"
+            )
+            console.print(
+                "[red]Direct installation not available for private environments.[/red]\n"
+                "Please use one of these alternatives:\n"
+                "  1. Use 'prime env pull' to download and install locally\n"
+                "  2. Make the environment public to enable direct installation"
+            )
+            raise typer.Exit(1)
+        elif not simple_index_url and not wheel_url:
+            console.print(
+                "[red]Error: No installation method available for this environment.[/red]"
+            )
             console.print(
                 "Use 'prime env info' to see available options or 'pull' to download source."
             )
@@ -940,11 +1037,57 @@ def install(
 
         console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
 
-        # Generate and execute install command
-        try:
-            cmd_parts = get_install_command(with_tool, wheel_url)
-        except ValueError as e:
-            console.print(f"[red]Error: {e}[/red]")
+        # Generate install command preferring simple index over wheel URL
+        normalized_name = normalize_package_name(name)
+
+        if simple_index_url:
+            # Prefer simple index approach
+            if with_tool == "uv":
+                if target_version and target_version != "latest":
+                    cmd_parts = [
+                        "uv",
+                        "pip",
+                        "install",
+                        f"{normalized_name}=={target_version}",
+                        "--extra-index-url",
+                        simple_index_url,
+                    ]
+                else:
+                    cmd_parts = [
+                        "uv",
+                        "pip",
+                        "install",
+                        normalized_name,
+                        "--extra-index-url",
+                        simple_index_url,
+                    ]
+            else:  # pip
+                if target_version and target_version != "latest":
+                    cmd_parts = [
+                        "pip",
+                        "install",
+                        f"{normalized_name}=={target_version}",
+                        "--extra-index-url",
+                        simple_index_url,
+                    ]
+                else:
+                    cmd_parts = [
+                        "pip",
+                        "install",
+                        normalized_name,
+                        "--extra-index-url",
+                        simple_index_url,
+                    ]
+        elif wheel_url:
+            # Fall back to wheel URL if simple index not available
+            try:
+                cmd_parts = get_install_command(with_tool, wheel_url)
+            except ValueError as e:
+                console.print(f"[red]Error: {e}[/red]")
+                raise typer.Exit(1)
+        else:
+            # Should not reach here due to earlier checks, but just in case
+            console.print("[red]Error: No installation method available.[/red]")
             raise typer.Exit(1)
 
         # Check if tool is installed

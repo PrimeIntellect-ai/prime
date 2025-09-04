@@ -2,6 +2,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -72,9 +73,10 @@ class Config:
         self._save_config(self.config)
 
     @property
-    def team_id(self) -> str:
+    def team_id(self) -> Optional[str]:
         """Get team ID from config file or environment"""
-        return self.config.get("team_id", "") or os.getenv("PRIME_TEAM_ID", "")
+        team_id = self.config.get("team_id", "") or os.getenv("PRIME_TEAM_ID", "")
+        return team_id if team_id else None
 
     def set_team_id(self, value: str) -> None:
         """Set team ID in config file"""

@@ -1,6 +1,6 @@
 from typing import Any, Dict, Iterable, Optional
 
-import requests
+import httpx
 
 from ..config import Config
 from ..utils.debug import debug_log
@@ -31,8 +31,11 @@ class TimeoutError(APIError):
 
 
 class APIClient:
-    def __init__(self, api_key: Optional[str] = None, require_auth: bool = True):
-        debug_log("APIClient constructor called")
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        require_auth: bool = True,
+    ):
         # Load config
         self.config = Config()
 
@@ -45,11 +48,11 @@ class APIClient:
 
         # Setup client
         self.base_url = self.config.base_url
-        self.session = requests.Session()
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        self.session.headers.update(headers)
+
+        self.client = httpx.Client(headers=headers, follow_redirects=True)
 
     def request(
         self,
@@ -69,14 +72,14 @@ class APIClient:
         url = f"{self.base_url}{endpoint}"
 
         try:
-            response = self.session.request(method, url, params=params, json=json, timeout=timeout)
+            response = self.client.request(method, url, params=params, json=json, timeout=timeout)
             response.raise_for_status()
 
             result = response.json()
             if not isinstance(result, dict):
                 raise APIError("API response was not a dictionary")
             return result
-        except requests.exceptions.HTTPError as e:
+        except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
                 raise UnauthorizedError(
                     "API key unauthorized. "
@@ -99,9 +102,9 @@ class APIClient:
                 pass
 
             raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
-        except requests.exceptions.Timeout as e:
+        except httpx.TimeoutException as e:
             raise TimeoutError(f"Request timed out: {e}")
-        except requests.exceptions.RequestException as e:
+        except httpx.RequestError as e:
             raise APIError(f"Request failed: {e}")
 
     def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -295,3 +298,113 @@ class APIClient:
     def __str__(self) -> str:
         """For debugging"""
         return f"APIClient(base_url={self.base_url})"
+
+
+class AsyncAPIClient:
+    """Async version of APIClient using httpx.AsyncClient"""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        require_auth: bool = True,
+    ):
+        # Load config
+        self.config = Config()
+
+        # Use provided API key or fall back to config
+        self.api_key = api_key or self.config.api_key
+        if require_auth and not self.api_key:
+            raise APIError(
+                "No API key configured. Use command 'prime login' to configure your API key.",
+            )
+
+        # Setup client
+        self.base_url = self.config.base_url
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        self.client = httpx.AsyncClient(headers=headers, follow_redirects=True)
+
+    async def request(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        json: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Make an async request to the API"""
+        # Ensure endpoint starts with /api/v1/
+        if not endpoint.startswith("/"):
+            endpoint = f"/api/v1/{endpoint}"
+        else:
+            endpoint = f"/api/v1{endpoint}"
+
+        url = f"{self.base_url}{endpoint}"
+
+        try:
+            response = await self.client.request(
+                method, url, params=params, json=json, timeout=timeout
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            if not isinstance(result, dict):
+                raise APIError("API response was not a dictionary")
+            return result
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                raise UnauthorizedError(
+                    "API key unauthorized. ",
+                    "Please check that your API key has the correct permissions, "
+                    "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
+                    "or run 'prime login' to configure a new API key.",
+                )
+            if e.response.status_code == 402:
+                raise PaymentRequiredError(
+                    "Payment required. Please check your billing status at "
+                    "https://app.primeintellect.ai/dashboard/billing"
+                )
+
+            # For other HTTP errors, try to extract the error message from the response
+            try:
+                error_response = e.response.json()
+                if isinstance(error_response, dict) and "detail" in error_response:
+                    raise APIError(f"HTTP {e.response.status_code}: {error_response['detail']}")
+            except (ValueError, KeyError):
+                pass
+
+            raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
+        except httpx.TimeoutException as e:
+            raise TimeoutError(f"Request timed out: {e}")
+        except httpx.RequestError as e:
+            raise APIError(f"Request failed: {e}")
+
+    async def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Make an async GET request to the API"""
+        return await self.request("GET", endpoint, params=params)
+
+    async def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Make an async POST request to the API"""
+        return await self.request("POST", endpoint, json=json)
+
+    async def delete(self, endpoint: str) -> Dict[str, Any]:
+        """Make an async DELETE request to the API"""
+        return await self.request("DELETE", endpoint)
+
+    async def aclose(self) -> None:
+        """Close the async client"""
+        await self.client.aclose()
+
+    async def __aenter__(self) -> "AsyncAPIClient":
+        """Async context manager entry"""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager exit"""
+        await self.aclose()
+
+    def __str__(self) -> str:
+        """For debugging"""
+        return f"AsyncAPIClient(base_url={self.base_url})"

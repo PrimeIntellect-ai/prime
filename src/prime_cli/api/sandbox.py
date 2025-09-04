@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tarfile
 import tempfile
@@ -6,6 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+import aiofiles
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -373,8 +375,6 @@ class AsyncSandboxClient:
 
     async def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
         """Wait for sandbox to be running (async version)"""
-        import asyncio
-
         for attempt in range(max_attempts):
             sandbox = await self.get(sandbox_id)
             if sandbox.status == "RUNNING":
@@ -413,8 +413,6 @@ class AsyncSandboxClient:
         This is the async version of the low-level upload method that expects a tar archive file.
         Most users should use `upload_path()` instead, which handles tar creation automatically.
         """
-        import aiofiles
-        
         # Prepare form data
         form_data: Dict[str, Any] = {
             "dest_path": dest_path,
@@ -487,9 +485,6 @@ class AsyncSandboxClient:
         This is the async version of the recommended method for uploading files and directories.
         It automatically handles tar archive creation and cleanup.
         """
-        import asyncio
-        import aiofiles
-        
         abs_path = os.path.abspath(local_path)
         if not os.path.exists(abs_path):
             raise FileNotFoundError(f"Path does not exist: {local_path}")
@@ -545,9 +540,6 @@ class AsyncSandboxClient:
         This is the async version of the recommended method for downloading files and directories.
         It automatically handles tar stream extraction and file saving.
         """
-        import asyncio
-        import aiofiles
-        
         # Download from sandbox
         response = await self.download_stream(
             sandbox_id, sandbox_path, working_dir=working_dir, timeout=timeout

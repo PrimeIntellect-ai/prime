@@ -4,8 +4,11 @@ Simple Sandbox API Demo - shows auth, basic usage, and file operations using asy
 """
 
 import asyncio
+import glob
 import os
+import shutil
 import tempfile
+import traceback
 
 from prime_cli.api.client import APIClient, APIError
 from prime_cli.api.sandbox import CreateSandboxRequest, SandboxClient, AsyncSandboxClient
@@ -200,8 +203,6 @@ async def main() -> None:
 
         # Clean up local files
         print("\n🧹 Cleaning up local test files...")
-        import shutil
-        import glob
         
         # Clean up test files
         for pattern in ["/tmp/test_file_*.txt", "/tmp/downloaded_file_*.txt", 
@@ -246,8 +247,6 @@ async def main() -> None:
         print("💡 Make sure you're logged in: run 'prime login' first")
     except Exception as e:
         print(f"❌ Error: {e}")
-        import traceback
-
         traceback.print_exc()
 
 

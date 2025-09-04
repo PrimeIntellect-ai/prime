@@ -1,3 +1,4 @@
+import asyncio
 import json
 import random
 import string
@@ -10,7 +11,7 @@ from rich.table import Table
 from rich.text import Text
 
 from ..api.client import APIClient, APIError
-from ..api.sandbox import CreateSandboxRequest, Sandbox, SandboxClient
+from ..api.sandbox import CreateSandboxRequest, Sandbox, SandboxClient, AsyncSandboxClient
 from ..config import Config
 from ..utils.debug import debug_log, set_debug_enabled
 from ..utils import (
@@ -446,6 +447,67 @@ def run(
         raise typer.Exit(1)
 
 
+async def async_upload_to_sandbox(
+    sandbox_id: str,
+    source_path: str, 
+    destination_path: str,
+    working_dir: Optional[str],
+    console: Console,
+) -> None:
+    """Async helper for uploading to sandbox."""
+    console.print(
+        f"[blue]Uploading {source_path} to sandbox {sandbox_id}:{destination_path}...[/blue]"
+    )
+    
+    async with AsyncSandboxClient() as async_client:
+        try:
+            with console.status("[bold blue]Uploading...", spinner="dots"):
+                result = await async_client.upload_path(
+                    sandbox_id,
+                    source_path,
+                    destination_path,
+                    working_dir=working_dir,
+                )
+            
+            # Success output
+            console.print(f"[green]Upload completed[/green] {result.message}")
+            if result.files_uploaded:
+                console.print(f"Files uploaded: {result.files_uploaded}")
+            if result.bytes_uploaded:
+                console.print(f"Bytes uploaded: {result.bytes_uploaded}")
+        except Exception as e:
+            console.print(f"[red]Upload failed:[/red] {e}")
+            raise
+
+
+async def async_download_from_sandbox(
+    sandbox_id: str,
+    source_path: str,
+    destination_path: str,
+    working_dir: Optional[str],
+    console: Console,
+) -> None:
+    """Async helper for downloading from sandbox."""
+    console.print(
+        f"[blue]Downloading from sandbox {sandbox_id}:{source_path} to {destination_path}...[/blue]"
+    )
+    
+    async with AsyncSandboxClient() as async_client:
+        try:
+            with console.status("[bold blue]Downloading...", spinner="dots"):
+                await async_client.download_path(
+                    sandbox_id,
+                    source_path,
+                    destination_path,
+                    working_dir=working_dir,
+                )
+            
+            console.print(f"[green]Download completed to {destination_path}[/green]")
+        except Exception as e:
+            console.print(f"[red]Download failed:[/red] {e}")
+            raise
+
+
 @app.command("cp")
 def cp(
     ctx: typer.Context,
@@ -471,8 +533,6 @@ def cp(
         set_debug_enabled(debug_enabled)
 
         debug_log(f"cp command called with source={source}, destination={destination}")
-        base_client = APIClient()
-        sandbox_client = SandboxClient(base_client)
 
         src_sid, src_path = parse_cp_arg(source)
         dst_sid, dst_path = parse_cp_arg(destination)
@@ -493,12 +553,12 @@ def cp(
 
         # Local -> Sandbox
         if src_sid is None and dst_sid is not None:
-            sandbox_client.handle_local_to_sandbox_copy(src_path, dst_sid, dst_path, working_dir, console)
+            asyncio.run(async_upload_to_sandbox(dst_sid, src_path, dst_path, working_dir, console))
             return
 
         # Sandbox -> Local
         if src_sid is not None and dst_sid is None:
-            sandbox_client.handle_sandbox_to_local_copy(src_sid, src_path, dst_path, working_dir, console)
+            asyncio.run(async_download_from_sandbox(src_sid, src_path, dst_path, working_dir, console))
             return
 
         console.print("[red]Unsupported copy direction[/red]")

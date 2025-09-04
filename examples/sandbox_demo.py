@@ -81,62 +81,146 @@ async def main() -> None:
         result = sandbox_client.execute_command(sandbox.id, "env | grep SANDBOX")
         print(f"Sandbox environment variables:\n{result.stdout}")
 
-        # 5. File Operations Demo (using async client)
+        # 5. File Operations Demo - Showcasing Async Concurrency
         print("\n" + "=" * 50)
-        print("FILE OPERATIONS DEMO (ASYNC)")
+        print("CONCURRENT FILE OPERATIONS DEMO (ASYNC)")
         print("=" * 50)
 
-        # Create a test file locally
-        test_content = "Hello from local machine!\nThis is a test file for upload/download demo.\n"
-        local_file_path = create_test_file(test_content, "test_upload.txt")
-        print(f"\n📁 Created local test file: {local_file_path}")
-        print(f"📄 Content: {repr(test_content)}")
+        # Create multiple test files locally
+        test_files = []
+        for i in range(5):
+            content = f"Test file {i+1} content\nThis demonstrates concurrent async operations.\n"
+            file_path = create_test_file(content, f"test_file_{i+1}.txt")
+            test_files.append((file_path, f"/tmp/uploaded_file_{i+1}.txt"))
+            print(f"📁 Created local test file {i+1}: {file_path}")
 
-        # Use async client for file operations
+        # Use async client for concurrent operations
         async with AsyncSandboxClient() as async_client:
-            # Upload file to sandbox
-            print("\n📤 Uploading file to sandbox (async)...")
-            upload_response = await async_client.upload_path(
-                sandbox_id=sandbox.id, local_path=local_file_path, sandbox_path="/tmp/test_upload.txt"
-            )
-            print(f"✅ Upload successful: {upload_response.message}")
-            print(f"   Files uploaded: {upload_response.files_uploaded}")
-            print(f"   Bytes uploaded: {upload_response.bytes_uploaded}")
+            # CONCURRENT UPLOADS - Upload all files at once
+            print("\n📤 Uploading 5 files concurrently...")
+            start_time = asyncio.get_event_loop().time()
+            
+            upload_tasks = [
+                async_client.upload_path(
+                    sandbox_id=sandbox.id,
+                    local_path=local_path,
+                    sandbox_path=sandbox_path
+                )
+                for local_path, sandbox_path in test_files
+            ]
+            
+            # Run all uploads concurrently
+            upload_results = await asyncio.gather(*upload_tasks)
+            
+            upload_time = asyncio.get_event_loop().time() - start_time
+            print(f"✅ All uploads completed in {upload_time:.2f} seconds")
+            for i, result in enumerate(upload_results):
+                print(f"   File {i+1}: {result.bytes_uploaded} bytes uploaded")
 
-            # Verify file exists in sandbox
-            print("\n🔍 Verifying file in sandbox...")
-            result = sandbox_client.execute_command(sandbox.id, "ls -la /tmp/test_upload.txt")
-            print(f"File listing: {result.stdout.strip()}")
+            # Create multiple files in sandbox for download demo
+            print("\n📝 Creating files in sandbox for download demo...")
+            for i in range(5):
+                content = f"Sandbox file {i+1}\nCreated for concurrent download demo.\n"
+                sandbox_client.execute_command(
+                    sandbox.id, 
+                    f"echo '{content}' > /tmp/sandbox_file_{i+1}.txt"
+                )
 
-            result = sandbox_client.execute_command(sandbox.id, "cat /tmp/test_upload.txt")
-            print(f"File content: {result.stdout.strip()}")
+            # CONCURRENT DOWNLOADS - Download all files at once
+            print("\n📥 Downloading 5 files concurrently...")
+            start_time = asyncio.get_event_loop().time()
+            
+            download_tasks = [
+                async_client.download_path(
+                    sandbox_id=sandbox.id,
+                    sandbox_path=f"/tmp/sandbox_file_{i+1}.txt",
+                    local_path=f"/tmp/downloaded_file_{i+1}.txt"
+                )
+                for i in range(5)
+            ]
+            
+            # Run all downloads concurrently
+            await asyncio.gather(*download_tasks)
+            
+            download_time = asyncio.get_event_loop().time() - start_time
+            print(f"✅ All downloads completed in {download_time:.2f} seconds")
 
-            # Create a file in the sandbox
-            print("\n📝 Creating file in sandbox...")
-            sandbox_content = "Hello from sandbox!\nThis file was created inside the sandbox.\n"
-            result = sandbox_client.execute_command(
-                sandbox.id, f"echo '{sandbox_content}' > /tmp/sandbox_created.txt"
-            )
-            print(f"File creation result: {result.stdout.strip()}")
+            # MIXED OPERATIONS - Upload and download different files concurrently
+            print("\n🔄 Running mixed upload/download operations concurrently...")
+            start_time = asyncio.get_event_loop().time()
+            
+            mixed_tasks = []
+            
+            # Add some uploads
+            for i in range(3):
+                content = f"Mixed operation upload {i+1}\n"
+                file_path = create_test_file(content, f"mixed_upload_{i+1}.txt")
+                mixed_tasks.append(
+                    async_client.upload_path(
+                        sandbox_id=sandbox.id,
+                        local_path=file_path,
+                        sandbox_path=f"/tmp/mixed_upload_{i+1}.txt"
+                    )
+                )
+            
+            # Add some downloads
+            for i in range(3):
+                mixed_tasks.append(
+                    async_client.download_path(
+                        sandbox_id=sandbox.id,
+                        sandbox_path=f"/tmp/sandbox_file_{i+1}.txt",
+                        local_path=f"/tmp/mixed_download_{i+1}.txt"
+                    )
+                )
+            
+            # Run all mixed operations concurrently
+            mixed_results = await asyncio.gather(*mixed_tasks, return_exceptions=True)
+            
+            mixed_time = asyncio.get_event_loop().time() - start_time
+            print(f"✅ Mixed operations completed in {mixed_time:.2f} seconds")
+            
+            # Check for any errors
+            for i, result in enumerate(mixed_results):
+                if isinstance(result, Exception):
+                    print(f"   Operation {i+1} failed: {result}")
+                elif hasattr(result, 'bytes_uploaded'):
+                    print(f"   Upload {i+1}: Success")
+                else:
+                    print(f"   Download {i-2}: Success")
 
-            # Download file from sandbox
-            print("\n📥 Downloading file from sandbox (async)...")
-            download_path = "/tmp/downloaded_sandbox_file.txt"
-            await async_client.download_path(
-                sandbox_id=sandbox.id, sandbox_path="/tmp/sandbox_created.txt", local_path=download_path
-            )
-            print(f"✅ Downloaded to: {download_path}")
-
-        # Verify downloaded content
-        with open(download_path, "r") as f:
+        # Verify one of the downloaded files
+        with open("/tmp/downloaded_file_1.txt", "r") as f:
             downloaded_content = f.read()
-        print(f"📄 Downloaded content: {repr(downloaded_content)}")
+        print(f"\n📄 Sample downloaded content: {repr(downloaded_content)}")
+
+        # Performance comparison note
+        print("\n💡 Performance Note:")
+        print("   Sequential operations would take ~5x longer than concurrent operations.")
+        print("   This demo showcases the power of async I/O for parallel file transfers.")
 
         # Clean up local files
-        print("\n🧹 Cleaning up local files...")
-        os.unlink(local_file_path)
-        os.unlink(download_path)
-        os.rmdir(os.path.dirname(local_file_path))
+        print("\n🧹 Cleaning up local test files...")
+        import shutil
+        import glob
+        
+        # Clean up test files
+        for pattern in ["/tmp/test_file_*.txt", "/tmp/downloaded_file_*.txt", 
+                       "/tmp/mixed_*.txt", "/tmp/uploaded_file_*.txt"]:
+            for file in glob.glob(pattern):
+                try:
+                    os.unlink(file)
+                except:
+                    pass
+        
+        # Clean up temp directories
+        for local_path, _ in test_files:
+            try:
+                parent_dir = os.path.dirname(local_path)
+                if os.path.exists(parent_dir) and parent_dir.startswith("/tmp/"):
+                    shutil.rmtree(parent_dir)
+            except:
+                pass
+        
         print("✅ Local files cleaned up")
 
         # 6. List all sandboxes

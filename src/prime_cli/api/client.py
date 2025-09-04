@@ -51,7 +51,7 @@ class APIClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        self.client = httpx.Client(headers=headers)
+        self.client = httpx.Client(headers=headers, follow_redirects=True)
 
     def request(
         self,
@@ -147,7 +147,7 @@ class AsyncAPIClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        self.client = httpx.AsyncClient(headers=headers)
+        self.client = httpx.AsyncClient(headers=headers, follow_redirects=True)
 
     async def request(
         self,

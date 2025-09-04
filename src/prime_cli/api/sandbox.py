@@ -5,7 +5,7 @@ import tempfile
 import time
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import aiofiles
 import httpx
@@ -74,7 +74,7 @@ class SandboxStatus(str, Enum):
 class SandboxNotRunningError(RuntimeError):
     """Raised when an operation requires a RUNNING sandbox but it is not running."""
 
-    def __init__(self, sandbox_id: str, status: Optional[str] = None):
+    def __init__(self, sandbox_id: str, status: str | None = None):
         msg = f"Sandbox {sandbox_id} is not running" + (f" (status={status})" if status else ".")
         super().__init__(msg)
 
@@ -101,7 +101,7 @@ class Sandbox(BaseModel):
     id: str
     name: str
     docker_image: str = Field(..., alias="dockerImage")
-    start_command: Optional[str] = Field(None, alias="startCommand")
+    start_command: str | None = Field(None, alias="startCommand")
     cpu_cores: int = Field(..., alias="cpuCores")
     memory_gb: int = Field(..., alias="memoryGB")
     disk_size_gb: int = Field(..., alias="diskSizeGB")
@@ -109,15 +109,15 @@ class Sandbox(BaseModel):
     gpu_count: int = Field(..., alias="gpuCount")
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
-    environment_vars: Optional[Dict[str, Any]] = Field(None, alias="environmentVars")
-    advanced_configs: Optional[AdvancedConfigs] = Field(None, alias="advancedConfigs")
+    environment_vars: dict[str, Any] | None = Field(None, alias="environmentVars")
+    advanced_configs: AdvancedConfigs | None = Field(None, alias="advancedConfigs")
     created_at: datetime = Field(..., alias="createdAt")
     updated_at: datetime = Field(..., alias="updatedAt")
-    started_at: Optional[datetime] = Field(None, alias="startedAt")
-    terminated_at: Optional[datetime] = Field(None, alias="terminatedAt")
-    user_id: Optional[str] = Field(None, alias="userId")
-    team_id: Optional[str] = Field(None, alias="teamId")
-    kubernetes_job_id: Optional[str] = Field(None, alias="kubernetesJobId")
+    started_at: datetime | None = Field(None, alias="startedAt")
+    terminated_at: datetime | None = Field(None, alias="terminatedAt")
+    user_id: str | None = Field(None, alias="userId")
+    team_id: str | None = Field(None, alias="teamId")
+    kubernetes_job_id: str | None = Field(None, alias="kubernetesJobId")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -125,7 +125,7 @@ class Sandbox(BaseModel):
 class SandboxListResponse(BaseModel):
     """Sandbox list response model"""
 
-    sandboxes: List[Sandbox]
+    sandboxes: list[Sandbox]
     total: int
     page: int
     per_page: int = Field(..., alias="perPage")
@@ -145,37 +145,37 @@ class CreateSandboxRequest(BaseModel):
 
     name: str
     docker_image: str
-    start_command: Optional[str] = None
+    start_command: str | None = None
     cpu_cores: int = 1
     memory_gb: int = 2
     disk_size_gb: int = 10
     gpu_count: int = 0
     timeout_minutes: int = 60
-    environment_vars: Optional[Dict[str, str]] = None
-    team_id: Optional[str] = None
-    advanced_configs: Optional[AdvancedConfigs] = None
+    environment_vars: dict[str, str | None] = None
+    team_id: str | None = None
+    advanced_configs: AdvancedConfigs | None = None
 
 
 class UpdateSandboxRequest(BaseModel):
     """Update sandbox request model"""
 
-    name: Optional[str] = None
-    docker_image: Optional[str] = None
-    start_command: Optional[str] = None
-    cpu_cores: Optional[int] = None
-    memory_gb: Optional[int] = None
-    disk_size_gb: Optional[int] = None
-    gpu_count: Optional[int] = None
-    timeout_minutes: Optional[int] = None
-    environment_vars: Optional[Dict[str, str]] = None
+    name: str | None = None
+    docker_image: str | None = None
+    start_command: str | None = None
+    cpu_cores: int | None = None
+    memory_gb: int | None = None
+    disk_size_gb: int | None = None
+    gpu_count: int | None = None
+    timeout_minutes: int | None = None
+    environment_vars: dict[str, str | None] = None
 
 
 class CommandRequest(BaseModel):
     """Execute command request model"""
 
     command: str
-    working_dir: Optional[str] = None
-    env: Optional[Dict[str, str]] = None
+    working_dir: str | None = None
+    env: dict[str, str | None] = None
 
 
 class CommandResponse(BaseModel):
@@ -191,8 +191,8 @@ class SandboxUploadResponse(BaseModel):
 
     success: bool
     message: str
-    files_uploaded: Optional[int] = Field(None, alias="filesUploaded")
-    bytes_uploaded: Optional[int] = Field(None, alias="bytesUploaded")
+    files_uploaded: int | None = Field(None, alias="filesUploaded")
+    bytes_uploaded: int | None = Field(None, alias="bytesUploaded")
     dest_path: str = Field(..., alias="destPath")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -203,8 +203,8 @@ class SandboxDownloadStreamResponse(BaseModel):
 
     stream: httpx.Response
     src_path: str = Field(..., alias="srcPath")
-    content_type: Optional[str] = Field(None, alias="contentType")
-    content_length: Optional[int] = Field(None, alias="contentLength")
+    content_type: str | None = Field(None, alias="contentType")
+    content_length: int | None = Field(None, alias="contentLength")
 
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
 
@@ -212,7 +212,7 @@ class SandboxDownloadStreamResponse(BaseModel):
 class SandboxClient:
     """Client for sandbox API operations"""
 
-    def __init__(self, api_client: APIClient):
+    def __init__(self, api_client: APIClient) -> None:
         debug_log("SandboxClient constructor called")
         self.client = api_client
 
@@ -229,18 +229,18 @@ class SandboxClient:
 
     def list(
         self,
-        team_id: Optional[str] = None,
-        status: Optional[str] = None,
+        team_id: str | None = None,
+        status: str | None = None,
         page: int = 1,
         per_page: int = 50,
-        exclude_terminated: Optional[bool] = None,
+        exclude_terminated: bool | None = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         # Auto-populate team_id from config if not specified
         if team_id is None:
             team_id = self.client.config.team_id
 
-        params: Dict[str, Any] = {"page": page, "per_page": per_page}
+        params: dict[str, Any] = {"page": page, "per_page": per_page}
         if team_id:
             params["team_id"] = team_id
         if status:
@@ -256,7 +256,7 @@ class SandboxClient:
         response = self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox(**response)
 
-    def delete(self, sandbox_id: str) -> Dict[str, Any]:
+    def delete(self, sandbox_id: str) -> dict[str, Any]:
         """Delete a sandbox"""
         response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
@@ -276,9 +276,9 @@ class SandboxClient:
         self,
         sandbox_id: str,
         command: str,
-        working_dir: Optional[str] = None,
-        env: Optional[Dict[str, str]] = None,
-        timeout: Optional[int] = None,
+        working_dir: str | None = None,
+        env: dict[str, str | None] = None,
+        timeout: int | None = None,
     ) -> CommandResponse:
         """Execute a command in a sandbox
 
@@ -326,7 +326,7 @@ class SandboxClient:
 class AsyncSandboxClient:
     """Async client for sandbox API operations"""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None) -> None:
         self.client = AsyncAPIClient(api_key=api_key)
 
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
@@ -342,18 +342,18 @@ class AsyncSandboxClient:
 
     async def list(
         self,
-        team_id: Optional[str] = None,
-        status: Optional[str] = None,
+        team_id: str | None = None,
+        status: str | None = None,
         page: int = 1,
         per_page: int = 50,
-        exclude_terminated: Optional[bool] = None,
+        exclude_terminated: bool | None = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         # Auto-populate team_id from config if not specified
         if team_id is None:
             team_id = self.client.config.team_id
 
-        params: Dict[str, Any] = {"page": page, "per_page": per_page}
+        params: dict[str, Any] = {"page": page, "per_page": per_page}
         if team_id:
             params["team_id"] = team_id
         if status:
@@ -369,7 +369,7 @@ class AsyncSandboxClient:
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox(**response)
 
-    async def delete(self, sandbox_id: str) -> Dict[str, Any]:
+    async def delete(self, sandbox_id: str) -> dict[str, Any]:
         """Delete a sandbox"""
         response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
@@ -389,9 +389,9 @@ class AsyncSandboxClient:
         self,
         sandbox_id: str,
         command: str,
-        working_dir: Optional[str] = None,
-        env: Optional[Dict[str, str]] = None,
-        timeout: Optional[int] = None,
+        working_dir: str | None = None,
+        env: dict[str, str | None] = None,
+        timeout: int | None = None,
     ) -> CommandResponse:
         """Execute a command in a sandbox
 
@@ -449,8 +449,8 @@ class AsyncSandboxClient:
         dest_path: str,
         file_path: str,
         strip_components: int = 0,
-        working_dir: Optional[str] = None,
-        timeout: Optional[int] = None,
+        working_dir: str | None = None,
+        timeout: int | None = None,
     ) -> SandboxUploadResponse:
         """Upload a tar archive file directly to the sandbox (async low-level method).
         
@@ -458,7 +458,7 @@ class AsyncSandboxClient:
         Most users should use `upload_path()` instead, which handles tar creation automatically.
         """
         # Prepare form data
-        form_data: Dict[str, Any] = {
+        form_data: dict[str, Any] = {
             "dest_path": dest_path,
             "compressed": "false",
             "strip_components": str(strip_components),
@@ -493,15 +493,15 @@ class AsyncSandboxClient:
         self,
         sandbox_id: str,
         src_path: str,
-        working_dir: Optional[str] = None,
-        timeout: Optional[int] = None,
+        working_dir: str | None = None,
+        timeout: int | None = None,
     ) -> SandboxDownloadStreamResponse:
         """Download a file/directory as a tar archive stream (async low-level method).
         
         This is the async version of the low-level download method that returns a raw tar archive stream.
         Most users should use `download_path()` instead, which handles tar extraction automatically.
         """
-        params: Dict[str, Any] = {"src_path": src_path, "compress": "false"}
+        params: dict[str, Any] = {"src_path": src_path, "compress": "false"}
         if working_dir:
             params["working_dir"] = working_dir
         
@@ -521,8 +521,8 @@ class AsyncSandboxClient:
         sandbox_id: str,
         local_path: str,
         sandbox_path: str,
-        working_dir: Optional[str] = None,
-        timeout: Optional[int] = None,
+        working_dir: str | None = None,
+        timeout: int | None = None,
     ) -> SandboxUploadResponse:
         """Upload a local file or directory to a sandbox (async high-level method).
         
@@ -597,8 +597,8 @@ class AsyncSandboxClient:
         sandbox_id: str,
         sandbox_path: str,
         local_path: str,
-        working_dir: Optional[str] = None,
-        timeout: Optional[int] = None,
+        working_dir: str | None = None,
+        timeout: int | None = None,
     ) -> None:
         """Download a file or directory from a sandbox to local path (async high-level method).
         

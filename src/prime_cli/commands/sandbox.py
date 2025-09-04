@@ -3,7 +3,7 @@ import json
 import random
 import string
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -36,10 +36,10 @@ config = Config()
 
 @app.command("list")
 def list_sandboxes_cmd(
-    team_id: Optional[str] = typer.Option(
+    team_id: str | None = typer.Option(
         None, help="Filter by team ID (uses config team_id if not specified)"
     ),
-    status: Optional[str] = typer.Option(None, help="Filter by status"),
+    status: str | None = typer.Option(None, help="Filter by status"),
     page: int = typer.Option(1, help="Page number"),
     per_page: int = typer.Option(50, help="Items per page"),
     all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
@@ -205,10 +205,10 @@ def get(
 @app.command()
 def create(
     docker_image: str = typer.Argument(..., help="Docker image to run"),
-    name: Optional[str] = typer.Option(
+    name: str | None = typer.Option(
         None, help="Name for the sandbox (auto-generated if not provided)"
     ),
-    start_command: Optional[str] = typer.Option(
+    start_command: str | None = typer.Option(
         "tail -f /dev/null", help="Command to run in the container"
     ),
     cpu_cores: int = typer.Option(1, help="Number of CPU cores"),
@@ -216,10 +216,10 @@ def create(
     disk_size_gb: int = typer.Option(10, help="Disk size in GB"),
     gpu_count: int = typer.Option(0, help="Number of GPUs"),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
-    team_id: Optional[str] = typer.Option(
+    team_id: str | None = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
     ),
-    env: Optional[List[str]] = typer.Option(
+    env: list[str | None] = typer.Option(
         None,
         help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
     ),
@@ -376,11 +376,11 @@ def status(sandbox_id: str) -> None:
 @app.command()
 def run(
     sandbox_id: str,
-    command: List[str] = typer.Argument(..., help="Command to execute"),
-    working_dir: Optional[str] = typer.Option(
+    command: list[str] = typer.Argument(..., help="Command to execute"),
+    working_dir: str | None = typer.Option(
         None, "-w", "--working-dir", help="Working directory"
     ),
-    env: Optional[List[str]] = typer.Option(
+    env: list[str | None] = typer.Option(
         None,
         "-e",
         "--env",
@@ -451,7 +451,7 @@ async def async_upload_to_sandbox(
     sandbox_id: str,
     source_path: str, 
     destination_path: str,
-    working_dir: Optional[str],
+    working_dir: str | None,
     console: Console,
 ) -> None:
     """Async helper for uploading to sandbox."""
@@ -484,7 +484,7 @@ async def async_download_from_sandbox(
     sandbox_id: str,
     source_path: str,
     destination_path: str,
-    working_dir: Optional[str],
+    working_dir: str | None,
     console: Console,
 ) -> None:
     """Async helper for downloading from sandbox."""
@@ -517,7 +517,7 @@ def cp(
     destination: str = typer.Argument(
         ..., help="Destination path or <sandbox-id>:<path>", show_default=False
     ),
-    working_dir: Optional[str] = typer.Option(
+    working_dir: str | None = typer.Option(
         None, "-w", "--working-dir", help="Sandbox working dir"
     ),
 ) -> None:

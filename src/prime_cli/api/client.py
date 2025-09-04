@@ -1,4 +1,4 @@
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Iterable
 
 import httpx
 
@@ -33,7 +33,7 @@ class TimeoutError(APIError):
 class APIClient:
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         require_auth: bool = True,
     ):
         # Load config
@@ -58,10 +58,10 @@ class APIClient:
         self,
         method: str,
         endpoint: str,
-        params: Optional[Dict[str, Any]] = None,
-        json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        params: dict[str, Any | None] = None,
+        json: dict[str, Any | None] = None,
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
         """Make a request to the API"""
         # Ensure endpoint starts with /api/v1/
         if not endpoint.startswith("/"):
@@ -107,15 +107,15 @@ class APIClient:
         except httpx.RequestError as e:
             raise APIError(f"Request failed: {e}")
 
-    def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def get(self, endpoint: str, params: dict[str, Any | None] = None) -> dict[str, Any]:
         """Make a GET request to the API"""
         return self.request("GET", endpoint, params=params)
 
-    def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def post(self, endpoint: str, json: dict[str, Any | None] = None) -> dict[str, Any]:
         """Make a POST request to the API"""
         return self.request("POST", endpoint, json=json)
 
-    def delete(self, endpoint: str) -> Dict[str, Any]:
+    def delete(self, endpoint: str) -> dict[str, Any]:
         """Make a DELETE request to the API"""
         return self.request("DELETE", endpoint)
 
@@ -129,11 +129,11 @@ class APIClient:
     def stream_post(
         self,
         endpoint: str,
-        params: Optional[Dict[str, Any]] = None,
-        data: Optional[Iterable[bytes]] = None,
-        headers: Optional[Dict[str, str]] = None,
-        timeout: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        params: dict[str, Any | None] = None,
+        data: Iterable[bytes | None] = None,
+        headers: dict[str, str | None] = None,
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
         url = self._build_url(endpoint)
         req_headers = {"Accept": "application/json", "Content-Type": "application/octet-stream"}
         if headers:
@@ -189,7 +189,7 @@ class AsyncAPIClient:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         require_auth: bool = True,
     ):
         # Load config
@@ -214,10 +214,10 @@ class AsyncAPIClient:
         self,
         method: str,
         endpoint: str,
-        params: Optional[Dict[str, Any]] = None,
-        json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        params: dict[str, Any | None] = None,
+        json: dict[str, Any | None] = None,
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
         """Make an async request to the API"""
         # Ensure endpoint starts with /api/v1/
         if not endpoint.startswith("/"):
@@ -265,25 +265,25 @@ class AsyncAPIClient:
         except httpx.RequestError as e:
             raise APIError(f"Request failed: {e}")
 
-    async def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def get(self, endpoint: str, params: dict[str, Any | None] = None) -> dict[str, Any]:
         """Make an async GET request to the API"""
         return await self.request("GET", endpoint, params=params)
 
-    async def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def post(self, endpoint: str, json: dict[str, Any | None] = None) -> dict[str, Any]:
         """Make an async POST request to the API"""
         return await self.request("POST", endpoint, json=json)
 
-    async def delete(self, endpoint: str) -> Dict[str, Any]:
+    async def delete(self, endpoint: str) -> dict[str, Any]:
         """Make an async DELETE request to the API"""
         return await self.request("DELETE", endpoint)
 
     async def multipart_post(
         self,
         endpoint: str,
-        files: Optional[Dict[str, Any]] = None,
-        data: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        files: dict[str, Any | None] = None,
+        data: dict[str, Any | None] = None,
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
         """Send an async multipart form POST request (for file uploads)"""
         url = self._build_url(endpoint)
         
@@ -337,8 +337,8 @@ class AsyncAPIClient:
     async def stream_get(
         self,
         endpoint: str,
-        params: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        params: dict[str, Any | None] = None,
+        timeout: int | None = None,
     ) -> httpx.Response:
         """Make an async streaming GET request"""
         url = self._build_url(endpoint)

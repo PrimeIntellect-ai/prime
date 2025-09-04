@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-import requests
+import httpx
 import toml
 import typer
 from rich.console import Console
@@ -404,13 +404,13 @@ def push(
             if wheel_upload_url:
                 try:
                     with open(wheel_path, "rb") as f:
-                        upload_response = requests.put(
+                        upload_response = httpx.put(
                             wheel_upload_url,
-                            data=f.read(),
+                            content=f.read(),
                             headers={"Content-Type": "application/octet-stream"},
                         )
                         upload_response.raise_for_status()
-                except requests.RequestException as e:
+                except httpx.RequestError as e:
                     console.print(f"[red]Failed to upload wheel: {e}[/red]")
                     raise typer.Exit(1)
                 except IOError as e:
@@ -489,13 +489,13 @@ def push(
 
                     try:
                         with open(tmp.name, "rb") as f:
-                            upload_response = requests.put(
+                            upload_response = httpx.put(
                                 source_upload_url,
-                                data=f.read(),
+                                content=f.read(),
                                 headers={"Content-Type": "application/octet-stream"},
                             )
                             upload_response.raise_for_status()
-                    except requests.RequestException as e:
+                    except httpx.RequestError as e:
                         console.print(f"[red]Failed to upload source archive: {e}[/red]")
                         raise typer.Exit(1)
                     except IOError as e:
@@ -650,17 +650,15 @@ def pull(
                         headers = {}
                         if client.api_key:
                             headers["Authorization"] = f"Bearer {client.api_key}"
-                        resp = requests.get(download_url, stream=True, headers=headers)
+                        with httpx.stream("GET", download_url, headers=headers) as resp:
+                            resp.raise_for_status()
+                            with open(tmp.name, "wb") as f:
+                                for chunk in resp.iter_bytes(chunk_size=8192):
+                                    f.write(chunk)
                     else:
                         console.print(f"[red]Error: Invalid download URL: {download_url}[/red]")
                         raise typer.Exit(1)
-
-                    resp.raise_for_status()
-
-                    with open(tmp.name, "wb") as f:
-                        for chunk in resp.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                except requests.RequestException as e:
+                except httpx.RequestError as e:
                     console.print(f"[red]Download failed: {e}[/red]")
                     raise typer.Exit(1)
                 except IOError as e:

@@ -3,7 +3,7 @@ import time
 import webbrowser
 from typing import Optional
 
-import requests
+import httpx
 import typer
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
@@ -71,7 +71,7 @@ def login() -> None:
         # Generate secure keypair
         private_key, public_pem = generate_ephemeral_keypair()
 
-        response = requests.post(
+        response = httpx.post(
             f"{settings['base_url']}/api/v1/auth_challenge/generate",
             json={
                 "encryptionPublicKey": public_pem,
@@ -118,7 +118,7 @@ def login() -> None:
         challenge_auth_header = f"Bearer {challenge_response['status_auth_token']}"
         while True:
             try:
-                status_response = requests.get(
+                status_response = httpx.get(
                     f"{settings['base_url']}/api/v1/auth_challenge/status",
                     params={"challenge": challenge_response["challenge"]},
                     headers={"Authorization": challenge_auth_header},
@@ -144,7 +144,7 @@ def login() -> None:
                     break
 
                 time.sleep(5)
-            except requests.exceptions.RequestException:
+            except httpx.RequestError:
                 console.print("[red]Failed to connect to server. Retrying...[/red]")
                 time.sleep(5)
                 continue

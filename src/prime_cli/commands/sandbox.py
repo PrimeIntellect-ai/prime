@@ -493,12 +493,12 @@ def cp(
 
         # Local -> Sandbox
         if src_sid is None and dst_sid is not None:
-            _handle_local_to_sandbox(sandbox_client, src_path, dst_sid, dst_path, working_dir)
+            sandbox_client.handle_local_to_sandbox_copy(src_path, dst_sid, dst_path, working_dir, console)
             return
 
         # Sandbox -> Local
         if src_sid is not None and dst_sid is None:
-            _handle_sandbox_to_local(sandbox_client, src_sid, src_path, dst_path, working_dir)
+            sandbox_client.handle_sandbox_to_local_copy(src_sid, src_path, dst_path, working_dir, console)
             return
 
         console.print("[red]Unsupported copy direction[/red]")

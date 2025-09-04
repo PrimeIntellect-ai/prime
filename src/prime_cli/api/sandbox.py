@@ -485,6 +485,88 @@ class SandboxClient:
                 except Exception:
                     pass
 
+    def handle_local_to_sandbox_copy(
+        self,
+        source_path: str,
+        sandbox_id: str,
+        destination_path: str,
+        working_dir: Optional[str],
+        console: Any,
+    ) -> None:
+        """Handle copying from local to sandbox with console output."""
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        logger.debug("🔄 Local to Sandbox Copy Debug:")
+        logger.debug(f"   Source path: {source_path}")
+        logger.debug(f"   Sandbox ID: {sandbox_id}")
+        logger.debug(f"   Destination path: {destination_path}")
+        logger.debug(f"   Working dir: {working_dir}")
+
+        console.print(
+            f"[blue]Uploading {source_path} to sandbox {sandbox_id}:{destination_path}...[/blue]"
+        )
+
+        try:
+            with console.status("[bold blue]Uploading...", spinner="dots"):
+                logger.debug("📤 Calling upload_path...")
+                result = self.upload_path(
+                    sandbox_id,
+                    source_path,
+                    destination_path,
+                    working_dir=working_dir,
+                )
+                logger.debug(f"✅ upload_path result: {result}")
+
+            # Success output
+            console.print(f"[green]Upload completed[/green] {result.message}")
+            if result.files_uploaded:
+                console.print(f"Files uploaded: {result.files_uploaded}")
+            if result.bytes_uploaded:
+                console.print(f"Bytes uploaded: {result.bytes_uploaded}")
+
+        except Exception as e:
+            logger.error(f"❌ Upload failed with exception: {e}")
+            logger.error(f"   Exception type: {type(e)}")
+            console.print(f"[red]Upload failed:[/red] {e}")
+            raise
+
+    def handle_sandbox_to_local_copy(
+        self,
+        sandbox_id: str,
+        source_path: str,
+        destination_path: str,
+        working_dir: Optional[str],
+        console: Any,
+    ) -> None:
+        """Handle copying from sandbox to local with console output."""
+        debug_log(
+            f"handle_sandbox_to_local_copy called with sandbox_id={sandbox_id}, "
+            f"source_path={source_path}, destination_path={destination_path}"
+        )
+
+        console.print(
+            f"[blue]Downloading from sandbox {sandbox_id}:{source_path} to {destination_path}...[/blue]"
+        )
+
+        try:
+            debug_log("About to call download_path")
+            with console.status("[bold blue]Downloading...", spinner="dots"):
+                self.download_path(
+                    sandbox_id,
+                    source_path,
+                    destination_path,
+                    working_dir=working_dir,
+                )
+
+            console.print(f"[green]Download completed to {destination_path}[/green]")
+
+        except Exception as e:
+            debug_log(f"Exception caught in handle_sandbox_to_local_copy: {e}")
+            console.print(f"[red]Download failed:[/red] {e}")
+            raise
+
     def download_path(
         self,
         sandbox_id: str,

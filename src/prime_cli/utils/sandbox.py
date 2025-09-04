@@ -1,13 +1,8 @@
-from typing import Optional, Tuple, Dict, Any, TYPE_CHECKING
-from rich.console import Console
+from typing import Optional, Tuple, Dict, Any
 
 from prime_cli.utils.formatters import format_resources
 from prime_cli.utils.time_utils import human_age, iso_timestamp
 from prime_cli.utils.formatters import obfuscate_env_vars
-from prime_cli.utils.debug import debug_log
-
-if TYPE_CHECKING:
-    from prime_cli.api.sandbox import Sandbox, SandboxClient
 
 
 def parse_cp_arg(arg: str) -> Tuple[Optional[str], str]:
@@ -33,90 +28,7 @@ def expand_home_in_path(path: str) -> str:
         return expanded_path
     return path
 
-def handle_local_to_sandbox(
-    sandbox_client: "SandboxClient",
-    source_path: str,
-    sandbox_id: str,
-    destination_path: str,
-    working_dir: Optional[str],
-    console: Console,
-) -> None:
-    """Handle copying from local to sandbox."""
-    import logging
-
-    logger = logging.getLogger(__name__)
-
-    logger.debug("🔄 Local to Sandbox Copy Debug:")
-    logger.debug(f"   Source path: {source_path}")
-    logger.debug(f"   Sandbox ID: {sandbox_id}")
-    logger.debug(f"   Destination path: {destination_path}")
-    logger.debug(f"   Working dir: {working_dir}")
-
-    console.print(
-        f"[blue]Uploading {source_path} to sandbox {sandbox_id}:{destination_path}...[/blue]"
-    )
-
-    try:
-        with console.status("[bold blue]Uploading...", spinner="dots"):
-            logger.debug("📤 Calling sandbox_client.upload_path...")
-            result = sandbox_client.upload_path(
-                sandbox_id,
-                source_path,
-                destination_path,
-                working_dir=working_dir,
-            )
-            logger.debug(f"✅ upload_path result: {result}")
-
-        # Success output
-        console.print(f"[green]Upload completed[/green] {result.message}")
-        if result.files_uploaded:
-            console.print(f"Files uploaded: {result.files_uploaded}")
-        if result.bytes_uploaded:
-            console.print(f"Bytes uploaded: {result.bytes_uploaded}")
-
-    except Exception as e:
-        logger.error(f"❌ Upload failed with exception: {e}")
-        logger.error(f"   Exception type: {type(e)}")
-        console.print(f"[red]Upload failed:[/red] {e}")
-        raise
-
-
-def handle_sandbox_to_local(
-    sandbox_client: "SandboxClient",
-    sandbox_id: str,
-    source_path: str,
-    destination_path: str,
-    working_dir: Optional[str],
-    console: Console,
-) -> None:
-    """Handle copying from sandbox to local."""
-    debug_log(
-        f"_handle_sandbox_to_local called with sandbox_id={sandbox_id}, "
-        f"source_path={source_path}, destination_path={destination_path}"
-    )
-
-    console.print(
-        f"[blue]Downloading from sandbox {sandbox_id}:{source_path} to {destination_path}...[/blue]"
-    )
-
-    try:
-        debug_log("About to call sandbox_client.download_path")
-        with console.status("[bold blue]Downloading...", spinner="dots"):
-            sandbox_client.download_path(
-                sandbox_id,
-                source_path,
-                destination_path,
-                working_dir=working_dir,
-            )
-
-        console.print(f"[green]Download completed to {destination_path}[/green]")
-
-    except Exception as e:
-        debug_log(f"Exception caught in _handle_sandbox_to_local: {e}")
-        console.print(f"[red]Download failed:[/red] {e}")
-        raise
-
-def format_sandbox_for_list(sandbox: "Sandbox") -> Dict[str, Any]:
+def format_sandbox_for_list(sandbox: Any) -> Dict[str, Any]:
     """Format sandbox data for list display (both table and JSON)"""
     return {
         "id": sandbox.id,
@@ -129,7 +41,7 @@ def format_sandbox_for_list(sandbox: "Sandbox") -> Dict[str, Any]:
     }
 
 
-def format_sandbox_for_details(sandbox: "Sandbox") -> Dict[str, Any]:
+def format_sandbox_for_details(sandbox: Any) -> Dict[str, Any]:
     """Format sandbox data for details display (both table and JSON)"""
     data: Dict[str, Any] = {
         "id": sandbox.id,

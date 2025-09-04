@@ -616,7 +616,9 @@ class AsyncSandboxClient:
             raise Exception("No data received from sandbox. The source path may not exist.")
         
         # Just warn for large downloads, don't block them
-        if response.content_length and response.content_length > 1024 * 1024 * 1024:  # Warn for downloads over 1GB
+        if (
+            response.content_length and response.content_length > 1024 * 1024 * 1024
+        ):  # Warn for downloads over 1GB
             size_gb = response.content_length / (1024 * 1024 * 1024)
             debug_log(f"Downloading large file ({size_gb:.2f}GB). This may take a while.")
         
@@ -650,14 +652,19 @@ class AsyncSandboxClient:
                     for member in members:
                         # For single file extraction, validate against parent directory
                         # For directory extraction, validate against destination directory
-                        validation_base = os.path.dirname(dst_abs) if len(members) == 1 and members[0].isfile() else dst_abs
+                        validation_base = (
+                            os.path.dirname(dst_abs)
+                            if len(members) == 1 and members[0].isfile()
+                            else dst_abs
+                        )
                         
                         if not validate_tar_member(member, validation_base):
                             unsafe_members.append(member.name)
                     
                     if unsafe_members:
                         raise Exception(
-                            f"Tar archive contains unsafe paths that could escape the destination directory: {unsafe_members[:5]}"
+                            f"Tar archive contains unsafe paths that could escape the "
+                            f"destination directory: {unsafe_members[:5]}"
                             + (" and more..." if len(unsafe_members) > 5 else "")
                         )
                     
@@ -687,7 +694,6 @@ class AsyncSandboxClient:
                                 member.name = new_name
                             
                             # Final safety check before extraction
-                            target = os.path.join(dst_abs, member.name)
                             if is_safe_path(dst_abs, member.name):
                                 tf.extract(member, path=dst_abs)
             

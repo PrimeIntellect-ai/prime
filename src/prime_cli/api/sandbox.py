@@ -16,6 +16,52 @@ from prime_cli.api.client import APIClient, AsyncAPIClient, TimeoutError
 from ..utils.debug import debug_log, debug_log_ascii, debug_log_hex
 
 
+# Security and safety constants
+MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024  # 5GB max file size
+MAX_TAR_SIZE = 10 * 1024 * 1024 * 1024  # 10GB max tar archive size
+
+
+def is_safe_path(basedir: str, path: str, follow_symlinks: bool = True) -> bool:
+    """Check if a path is safe (doesn't escape the base directory).
+    
+    This prevents path traversal attacks like ../../etc/passwd
+    """
+    if follow_symlinks:
+        resolved = os.path.realpath(os.path.join(basedir, path))
+    else:
+        resolved = os.path.abspath(os.path.join(basedir, path))
+    return resolved.startswith(os.path.realpath(basedir))
+
+
+def validate_tar_member(member: tarfile.TarInfo, dest_path: str) -> bool:
+    """Validate a tar member is safe to extract.
+    
+    Checks for:
+    - Path traversal attempts
+    - Absolute paths
+    - Symlinks pointing outside destination
+    """
+    # Check for absolute paths
+    if member.name.startswith('/'):
+        return False
+    
+    # Check for path traversal
+    if '..' in member.name or member.name.startswith('~'):
+        return False
+    
+    # Validate the destination path
+    target_path = os.path.join(dest_path, member.name)
+    if not is_safe_path(dest_path, member.name):
+        return False
+    
+    # Check symlink targets
+    if member.issym() or member.islnk():
+        if not is_safe_path(dest_path, member.linkname):
+            return False
+    
+    return True
+
+
 class SandboxStatus(str, Enum):
     """Sandbox status enum"""
 
@@ -489,6 +535,33 @@ class AsyncSandboxClient:
         if not os.path.exists(abs_path):
             raise FileNotFoundError(f"Path does not exist: {local_path}")
         
+        # Check file/directory size for user warning
+        def get_path_size(path: str) -> int:
+            """Get total size of file or directory in bytes."""
+            if os.path.isfile(path):
+                return os.path.getsize(path)
+            total = 0
+            for dirpath, dirnames, filenames in os.walk(path):
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    if os.path.exists(fp):
+                        total += os.path.getsize(fp)
+            return total
+        
+        # Get size in executor to avoid blocking
+        size = await asyncio.get_event_loop().run_in_executor(None, get_path_size, abs_path)
+        
+        # Warn for large uploads
+        if size > MAX_FILE_SIZE:
+            size_gb = size / (1024 * 1024 * 1024)
+            raise ValueError(
+                f"Path size ({size_gb:.2f}GB) exceeds maximum allowed size ({MAX_FILE_SIZE / (1024 * 1024 * 1024)}GB). "
+                "Please upload smaller files or use a different method."
+            )
+        elif size > 1024 * 1024 * 1024:  # Warn for files over 1GB
+            size_gb = size / (1024 * 1024 * 1024)
+            debug_log(f"Warning: Uploading large file/directory ({size_gb:.2f}GB). This may take a while.")
+        
         # Create tar archive for all uploads (files and directories)
         temp_file_path = None
         try:
@@ -548,6 +621,17 @@ class AsyncSandboxClient:
         if response.content_length == 0:
             raise Exception("No data received from sandbox. The source path may not exist.")
         
+        # Check download size
+        if response.content_length and response.content_length > MAX_TAR_SIZE:
+            size_gb = response.content_length / (1024 * 1024 * 1024)
+            raise ValueError(
+                f"Download size ({size_gb:.2f}GB) exceeds maximum allowed size ({MAX_TAR_SIZE / (1024 * 1024 * 1024)}GB). "
+                "Please download smaller files or use a different method."
+            )
+        elif response.content_length and response.content_length > 1024 * 1024 * 1024:  # Warn for downloads over 1GB
+            size_gb = response.content_length / (1024 * 1024 * 1024)
+            debug_log(f"Warning: Downloading large file ({size_gb:.2f}GB). This may take a while.")
+        
         # Save stream to temp file first
         temp_file_path = None
         try:
@@ -570,32 +654,54 @@ class AsyncSandboxClient:
                     if not members:
                         raise Exception("Tar archive is empty")
                     
+                    # Ensure destination directory exists
+                    dst_abs = os.path.abspath(local_path)
+                    
+                    # Validate all members for security before extraction
+                    unsafe_members = []
+                    for member in members:
+                        # For single file extraction, validate against parent directory
+                        # For directory extraction, validate against destination directory
+                        validation_base = os.path.dirname(dst_abs) if len(members) == 1 and members[0].isfile() else dst_abs
+                        
+                        if not validate_tar_member(member, validation_base):
+                            unsafe_members.append(member.name)
+                    
+                    if unsafe_members:
+                        raise Exception(
+                            f"Tar archive contains unsafe paths that could escape the destination directory: {unsafe_members[:5]}"
+                            + (" and more..." if len(unsafe_members) > 5 else "")
+                        )
+                    
                     # Determine if this is a single file or directory
                     is_single_file = len(members) == 1 and members[0].isfile()
                     
-                    # Ensure destination directory exists
-                    dst_abs = os.path.abspath(local_path)
                     if is_single_file:
                         # For single files, ensure parent directory exists
                         os.makedirs(os.path.dirname(dst_abs), exist_ok=True)
-                        # Extract single file
-                        for member in members:
-                            if member.isfile():
-                                extract_file = tf.extractfile(member)
-                                if extract_file is not None:
-                                    with open(dst_abs, "wb") as f:
-                                        f.write(extract_file.read())
-                                    break
+                        # Extract single file safely
+                        member = members[0]
+                        extract_file = tf.extractfile(member)
+                        if extract_file is not None:
+                            with open(dst_abs, "wb") as f:
+                                f.write(extract_file.read())
                     else:
                         # For directories, ensure the directory itself exists
                         os.makedirs(dst_abs, exist_ok=True)
-                        # Extract all members
+                        # Extract all members safely
                         for member in members:
-                            # Strip first component if it exists
+                            # Strip first component if it exists (common in tar archives)
                             if "/" in member.name:
                                 new_name = "/".join(member.name.split("/")[1:])
+                                # Re-validate the new name
+                                if not is_safe_path(dst_abs, new_name):
+                                    continue  # Skip unsafe members
                                 member.name = new_name
-                            tf.extract(member, path=dst_abs)
+                            
+                            # Final safety check before extraction
+                            target = os.path.join(dst_abs, member.name)
+                            if is_safe_path(dst_abs, member.name):
+                                tf.extract(member, path=dst_abs)
             
             await asyncio.get_event_loop().run_in_executor(None, extract_tar)
             

@@ -149,6 +149,10 @@ class PodsClient:
 
     def create(self, pod_config: dict) -> Pod:
         """Create a new pod"""
+        # Auto-populate team_id from config if not specified
+        if not pod_config.get("team") and self.client.config.team_id:
+            pod_config["team"] = {"teamId": self.client.config.team_id}
+
         try:
             response = self.client.request("POST", "/pods", json=pod_config)
             return Pod(**response)

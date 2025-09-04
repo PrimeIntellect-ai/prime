@@ -19,11 +19,9 @@ from ..utils.debug import debug_log, debug_log_ascii, debug_log_hex
 # Security and safety constants
 # These can be overridden via environment variables to match backend config
 SANDBOX_UPLOAD_MAX_MB = int(os.environ.get("SANDBOX_UPLOAD_MAX_MB", "5120"))  # Default 5GB in MB
-SANDBOX_DOWNLOAD_MAX_MB = int(os.environ.get("SANDBOX_DOWNLOAD_MAX_MB", "10240"))  # Default 10GB in MB
 
 # Convert to bytes for internal use
 MAX_UPLOAD_SIZE = SANDBOX_UPLOAD_MAX_MB * 1024 * 1024
-MAX_DOWNLOAD_SIZE = SANDBOX_DOWNLOAD_MAX_MB * 1024 * 1024
 
 
 def is_safe_path(basedir: str, path: str, follow_symlinks: bool = True) -> bool:
@@ -627,17 +625,10 @@ class AsyncSandboxClient:
         if response.content_length == 0:
             raise Exception("No data received from sandbox. The source path may not exist.")
         
-        # Check download size
-        if response.content_length and response.content_length > MAX_DOWNLOAD_SIZE:
+        # Just warn for large downloads, don't block them
+        if response.content_length and response.content_length > 1024 * 1024 * 1024:  # Warn for downloads over 1GB
             size_gb = response.content_length / (1024 * 1024 * 1024)
-            max_gb = MAX_DOWNLOAD_SIZE / (1024 * 1024 * 1024)
-            raise ValueError(
-                f"Download size ({size_gb:.2f}GB) exceeds maximum allowed size ({max_gb:.2f}GB). "
-                f"Set SANDBOX_DOWNLOAD_MAX_MB environment variable to increase limit."
-            )
-        elif response.content_length and response.content_length > 1024 * 1024 * 1024:  # Warn for downloads over 1GB
-            size_gb = response.content_length / (1024 * 1024 * 1024)
-            debug_log(f"Warning: Downloading large file ({size_gb:.2f}GB). This may take a while.")
+            debug_log(f"Downloading large file ({size_gb:.2f}GB). This may take a while.")
         
         # Save stream to temp file first
         temp_file_path = None

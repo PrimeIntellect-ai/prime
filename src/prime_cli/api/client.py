@@ -203,7 +203,7 @@ class AsyncAPIClient:
             )
 
         # Setup client
-        self.base_url = self.config.base_url
+        self.base_url = self.config.base_url.strip()
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"

@@ -1,254 +1,271 @@
 #!/usr/bin/env python3
 """
-Simple Sandbox API Demo - shows auth, basic usage, and file operations using async client
+Prime CLI Async Sandbox Demo - Showcases high-performance concurrent file operations
+Demonstrates the async improvements implemented in Prime CLI v0.3.23+
+
+Key Features Demonstrated:
+- AsyncSandboxClient with proper async/await patterns
+- Concurrent file uploads using asyncio.gather()
+- Concurrent file downloads using asyncio.gather()
+- Mixed concurrent operations (upload + download simultaneously)
+- Proper resource management with async context managers
+- Error handling in concurrent operations
+- Performance comparison: sequential vs concurrent operations
 """
 
 import asyncio
-import glob
 import os
-import shutil
 import tempfile
-import traceback
+import time
+from pathlib import Path
 
 from prime_cli.api.client import APIClient, APIError
 from prime_cli.api.sandbox import CreateSandboxRequest, SandboxClient, AsyncSandboxClient
 
 
-def create_test_file(content: str, filename: str) -> str:
-    """Create a temporary test file with given content"""
+def create_test_files(count: int = 5) -> list[str]:
+    """Create multiple test files for concurrent operations demo"""
     temp_dir = tempfile.mkdtemp()
-    file_path = os.path.join(temp_dir, filename)
+    files = []
+    
+    for i in range(count):
+        file_path = os.path.join(temp_dir, f"test_file_{i}.txt")
+        with open(file_path, "w") as f:
+            f.write(f"🚀 Prime CLI Async Demo - File {i}\n")
+            f.write(f"Demonstrating concurrent file operations\n")
+            f.write(f"File size: {200 + i * 50} characters\n")
+            f.write(f"Content: {'=' * (200 + i * 50)}\n")
+        files.append(file_path)
+    
+    print(f"📁 Created {count} test files in {temp_dir}")
+    return files
 
-    with open(file_path, "w") as f:
-        f.write(content)
 
-    return file_path
+async def demo_sequential_operations(async_client: AsyncSandboxClient, sandbox_id: str, test_files: list[str]) -> float:
+    """Demonstrate sequential file operations (old way)"""
+    print("\n📊 Testing Sequential Operations (Old Way)...")
+    
+    start_time = time.time()
+    
+    # Sequential uploads
+    for i, file_path in enumerate(test_files[:3]):
+        await async_client.upload_path(
+            sandbox_id, 
+            file_path, 
+            f"/workspace/sequential_{i}.txt"
+        )
+        print(f"  ✅ Uploaded file {i}")
+    
+    # Sequential downloads
+    for i in range(3):
+        await async_client.download_path(
+            sandbox_id,
+            f"/workspace/sequential_{i}.txt",
+            f"/tmp/downloaded_sequential_{i}.txt"
+        )
+        print(f"  ✅ Downloaded file {i}")
+    
+    end_time = time.time()
+    duration = end_time - start_time
+    print(f"⏱️  Sequential operations completed in {duration:.2f} seconds")
+    
+    return duration
+
+
+async def demo_concurrent_operations(async_client: AsyncSandboxClient, sandbox_id: str, test_files: list[str]) -> float:
+    """Demonstrate concurrent file operations (NEW async way)"""
+    print("\n🚀 Testing Concurrent Operations (NEW Async Way)...")
+    
+    start_time = time.time()
+    
+    # Concurrent uploads using asyncio.gather()
+    print("  🔄 Starting concurrent uploads...")
+    upload_tasks = [
+        async_client.upload_path(
+            sandbox_id, 
+            file_path, 
+            f"/workspace/concurrent_{i}.txt"
+        )
+        for i, file_path in enumerate(test_files[:3])
+    ]
+    await asyncio.gather(*upload_tasks)
+    print("  ✅ All uploads completed concurrently!")
+    
+    # Concurrent downloads using asyncio.gather()
+    print("  🔄 Starting concurrent downloads...")
+    download_tasks = [
+        async_client.download_path(
+            sandbox_id,
+            f"/workspace/concurrent_{i}.txt",
+            f"/tmp/downloaded_concurrent_{i}.txt"
+        )
+        for i in range(3)
+    ]
+    await asyncio.gather(*download_tasks)
+    print("  ✅ All downloads completed concurrently!")
+    
+    end_time = time.time()
+    duration = end_time - start_time
+    print(f"⚡ Concurrent operations completed in {duration:.2f} seconds")
+    
+    return duration
+
+
+async def demo_mixed_concurrent_operations(async_client: AsyncSandboxClient, sandbox_id: str, test_files: list[str]) -> None:
+    """Demonstrate mixed upload/download operations running simultaneously"""
+    print("\n🔀 Testing Mixed Concurrent Operations...")
+    
+    start_time = time.time()
+    
+    # Mix of uploads and downloads running at the same time
+    mixed_tasks = []
+    
+    # Add upload tasks
+    for i in range(2):
+        if i < len(test_files):
+            mixed_tasks.append(
+                async_client.upload_path(
+                    sandbox_id,
+                    test_files[i],
+                    f"/workspace/mixed_upload_{i}.txt"
+                )
+            )
+    
+    # Add download tasks (from previously uploaded files)
+    for i in range(2):
+        mixed_tasks.append(
+            async_client.download_path(
+                sandbox_id,
+                f"/workspace/concurrent_{i}.txt",
+                f"/tmp/mixed_download_{i}.txt"
+            )
+        )
+    
+    # Run all operations concurrently
+    print(f"  🔄 Running {len(mixed_tasks)} mixed operations concurrently...")
+    await asyncio.gather(*mixed_tasks)
+    
+    end_time = time.time()
+    duration = end_time - start_time
+    print(f"  ✅ Mixed operations completed in {duration:.2f} seconds")
+
+
+async def demo_error_handling(async_client: AsyncSandboxClient, sandbox_id: str) -> None:
+    """Demonstrate error handling in concurrent operations"""
+    print("\n🛡️  Testing Error Handling in Concurrent Operations...")
+    
+    # Mix of valid and invalid operations
+    mixed_tasks = [
+        # Valid upload
+        async_client.upload_path(sandbox_id, __file__, "/workspace/valid_demo.py"),
+        # Invalid download (file doesn't exist)
+        async_client.download_path(sandbox_id, "/workspace/nonexistent.txt", "/tmp/invalid.txt"),
+        # Another valid upload
+        async_client.upload_path(sandbox_id, __file__, "/workspace/valid_demo2.py"),
+    ]
+    
+    try:
+        results = await asyncio.gather(*mixed_tasks, return_exceptions=True)
+        
+        successes = sum(1 for r in results if not isinstance(r, Exception))
+        failures = sum(1 for r in results if isinstance(r, Exception))
+        
+        print(f"  ✅ Successful operations: {successes}")
+        print(f"  ❌ Failed operations: {failures}")
+        print("  🎯 Error handling working correctly - failures don't crash other operations!")
+        
+    except Exception as e:
+        print(f"  ❌ Unexpected error: {e}")
 
 
 async def main() -> None:
-    """Simple sandbox demo with file operations using async client"""
+    """Prime CLI Async Demo - showcases the power of concurrent file operations"""
+    print("🚀 Prime CLI Async Sandbox Demo")
+    print("=" * 50)
+    
     try:
-        # 1. Authentication - uses API key from config or environment
-        # Run 'prime login' first to set up your API key
-        client = APIClient()  # Automatically loads API key from ~/.prime/config.json
-        sandbox_client = SandboxClient(client)
-
-        # 2. Create a sandbox
+        # 1. Setup - Authentication and sandbox creation
+        print("🔑 Setting up authentication...")
+        print("   Run 'prime login' first to configure your API key")
+        client = APIClient()  # Loads API key from config
+        sandbox_client = SandboxClient(client)  # For sync operations
+        
+        print("📦 Creating demo sandbox...")
         request = CreateSandboxRequest(
-            name="demo-sandbox",
-            docker_image="python:3.11-slim",
-            start_command="tail -f /dev/null",  # Keep container running indefinitely
+            name=f"async-demo-{int(time.time())}",
+            docker_image="python:3.11-slim",  # Use known working image
             cpu_cores=1,
-            memory_gb=2,
-            timeout_minutes=120,  # 2 hours to avoid timeout during demo
+            memory_gb=2,  # Standard memory
+            timeout_minutes=60,  # Standard timeout
         )
-
-        print("Creating sandbox...")
+        
         sandbox = sandbox_client.create(request)
-        print(f"✅ Created: {sandbox.name} ({sandbox.id})")
-
-        # 3. Wait for sandbox to be running
-        print("\nWaiting for sandbox to be running...")
+        print(f"✅ Created sandbox: {sandbox.name} ({sandbox.id})")
+        
+        print("⏳ Waiting for sandbox to be ready...")
         sandbox_client.wait_for_creation(sandbox.id, max_attempts=60)
-        print("✅ Sandbox is running!")
-
-        # 4. Execute commands in the sandbox
-        print("\nExecuting commands...")
-
-        # Test basic commands that definitely work
-        result = sandbox_client.execute_command(sandbox.id, "whoami")
-        print(f"Current user: {result.stdout.strip()}")
-
-        result = sandbox_client.execute_command(sandbox.id, "pwd")
-        print(f"Working directory: {result.stdout.strip()}")
-
-        result = sandbox_client.execute_command(sandbox.id, "python --version")
-        print(f"Python version: {result.stdout.strip()}")
-
-        # List files in working directory
-        result = sandbox_client.execute_command(sandbox.id, "ls -la")
-        print(f"Files in working directory:\n{result.stdout}")
-
-        # Test inline Python execution (no file creation needed)
-        result = sandbox_client.execute_command(
-            sandbox.id, "python -c 'print(\"Hello from sandbox!\")'"
-        )
-        print(f"Python hello: {result.stdout.strip()}")
-
-        result = sandbox_client.execute_command(
-            sandbox.id, "python -c 'print(f\"2 + 2 = {2 + 2}\")'"
-        )
-        print(f"Math result: {result.stdout.strip()}")
-
-        # Check environment
-        result = sandbox_client.execute_command(sandbox.id, "env | grep SANDBOX")
-        print(f"Sandbox environment variables:\n{result.stdout}")
-
-        # 5. File Operations Demo - Showcasing Async Concurrency
-        print("\n" + "=" * 50)
-        print("CONCURRENT FILE OPERATIONS DEMO (ASYNC)")
-        print("=" * 50)
-
-        # Create multiple test files locally
-        test_files = []
-        for i in range(5):
-            content = f"Test file {i+1} content\nThis demonstrates concurrent async operations.\n"
-            file_path = create_test_file(content, f"test_file_{i+1}.txt")
-            test_files.append((file_path, f"/tmp/uploaded_file_{i+1}.txt"))
-            print(f"📁 Created local test file {i+1}: {file_path}")
-
-        # Use async client for concurrent operations
+        print("✅ Sandbox is ready!")
+        
+        # 2. Prepare test data
+        test_files = create_test_files(5)
+        
+        # 3. Demonstrate async operations with AsyncSandboxClient
         async with AsyncSandboxClient() as async_client:
-            # CONCURRENT UPLOADS - Upload all files at once
-            print("\n📤 Uploading 5 files concurrently...")
-            start_time = asyncio.get_event_loop().time()
+            print(f"\n💫 Using AsyncSandboxClient for high-performance operations")
             
-            upload_tasks = [
-                async_client.upload_path(
-                    sandbox_id=sandbox.id,
-                    local_path=local_path,
-                    sandbox_path=sandbox_path
-                )
-                for local_path, sandbox_path in test_files
-            ]
+            # Sequential vs Concurrent comparison
+            sequential_time = await demo_sequential_operations(async_client, sandbox.id, test_files)
+            concurrent_time = await demo_concurrent_operations(async_client, sandbox.id, test_files)
             
-            # Run all uploads concurrently
-            upload_results = await asyncio.gather(*upload_tasks)
+            # Calculate performance improvement
+            improvement = (sequential_time - concurrent_time) / sequential_time * 100
+            print(f"\n📈 Performance Improvement: {improvement:.1f}% faster with async!")
+            print(f"   Sequential: {sequential_time:.2f}s")
+            print(f"   Concurrent: {concurrent_time:.2f}s")
             
-            upload_time = asyncio.get_event_loop().time() - start_time
-            print(f"✅ All uploads completed in {upload_time:.2f} seconds")
-            for i, result in enumerate(upload_results):
-                print(f"   File {i+1}: {result.bytes_uploaded} bytes uploaded")
-
-            # Create multiple files in sandbox for download demo
-            print("\n📝 Creating files in sandbox for download demo...")
-            for i in range(5):
-                content = f"Sandbox file {i+1}\nCreated for concurrent download demo.\n"
-                sandbox_client.execute_command(
-                    sandbox.id, 
-                    f"echo '{content}' > /tmp/sandbox_file_{i+1}.txt"
-                )
-
-            # CONCURRENT DOWNLOADS - Download all files at once
-            print("\n📥 Downloading 5 files concurrently...")
-            start_time = asyncio.get_event_loop().time()
-            
-            download_tasks = [
-                async_client.download_path(
-                    sandbox_id=sandbox.id,
-                    sandbox_path=f"/tmp/sandbox_file_{i+1}.txt",
-                    local_path=f"/tmp/downloaded_file_{i+1}.txt"
-                )
-                for i in range(5)
-            ]
-            
-            # Run all downloads concurrently
-            await asyncio.gather(*download_tasks)
-            
-            download_time = asyncio.get_event_loop().time() - start_time
-            print(f"✅ All downloads completed in {download_time:.2f} seconds")
-
-            # MIXED OPERATIONS - Upload and download different files concurrently
-            print("\n🔄 Running mixed upload/download operations concurrently...")
-            start_time = asyncio.get_event_loop().time()
-            
-            mixed_tasks = []
-            
-            # Add some uploads
-            for i in range(3):
-                content = f"Mixed operation upload {i+1}\n"
-                file_path = create_test_file(content, f"mixed_upload_{i+1}.txt")
-                mixed_tasks.append(
-                    async_client.upload_path(
-                        sandbox_id=sandbox.id,
-                        local_path=file_path,
-                        sandbox_path=f"/tmp/mixed_upload_{i+1}.txt"
-                    )
-                )
-            
-            # Add some downloads
-            for i in range(3):
-                mixed_tasks.append(
-                    async_client.download_path(
-                        sandbox_id=sandbox.id,
-                        sandbox_path=f"/tmp/sandbox_file_{i+1}.txt",
-                        local_path=f"/tmp/mixed_download_{i+1}.txt"
-                    )
-                )
-            
-            # Run all mixed operations concurrently
-            mixed_results = await asyncio.gather(*mixed_tasks, return_exceptions=True)
-            
-            mixed_time = asyncio.get_event_loop().time() - start_time
-            print(f"✅ Mixed operations completed in {mixed_time:.2f} seconds")
-            
-            # Check for any errors
-            for i, result in enumerate(mixed_results):
-                if isinstance(result, Exception):
-                    print(f"   Operation {i+1} failed: {result}")
-                elif hasattr(result, 'bytes_uploaded'):
-                    print(f"   Upload {i+1}: Success")
-                else:
-                    print(f"   Download {i-2}: Success")
-
-        # Verify one of the downloaded files
-        with open("/tmp/downloaded_file_1.txt", "r") as f:
-            downloaded_content = f.read()
-        print(f"\n📄 Sample downloaded content: {repr(downloaded_content)}")
-
-        # Performance comparison note
-        print("\n💡 Performance Note:")
-        print("   Sequential operations would take ~5x longer than concurrent operations.")
-        print("   This demo showcases the power of async I/O for parallel file transfers.")
-
-        # Clean up local files
-        print("\n🧹 Cleaning up local test files...")
+            # Advanced async patterns
+            await demo_mixed_concurrent_operations(async_client, sandbox.id, test_files)
+            await demo_error_handling(async_client, sandbox.id)
         
-        # Clean up test files
-        for pattern in ["/tmp/test_file_*.txt", "/tmp/downloaded_file_*.txt", 
-                       "/tmp/mixed_*.txt", "/tmp/uploaded_file_*.txt"]:
-            for file in glob.glob(pattern):
-                try:
-                    os.unlink(file)
-                except:
-                    pass
+        # 4. Cleanup
+        print("\n🧹 Cleaning up...")
         
-        # Clean up temp directories
-        for local_path, _ in test_files:
+        # Clean up local test files
+        for file_path in test_files:
             try:
-                parent_dir = os.path.dirname(local_path)
-                if os.path.exists(parent_dir) and parent_dir.startswith("/tmp/"):
-                    shutil.rmtree(parent_dir)
+                os.unlink(file_path)
             except:
                 pass
         
-        print("✅ Local files cleaned up")
-
-        # 6. List all sandboxes
-        print("\nYour sandboxes:")
-        sandbox_list = sandbox_client.list()
-        for sb in sandbox_list.sandboxes:
-            print(f"  {sb.name}: {sb.status}")
-
-        # 7. Get logs
-        print(f"\nLogs for {sandbox.name}:")
-        logs = sandbox_client.get_logs(sandbox.id)
-        print(logs)
-
-        # 8. Clean up
-        print(f"\n🗑️  Deleting {sandbox.name}...")
+        # Clean up downloaded files
+        import glob
+        for pattern in ["/tmp/downloaded_*.txt", "/tmp/mixed_*.txt", "/tmp/invalid.txt"]:
+            for file_path in glob.glob(pattern):
+                try:
+                    os.unlink(file_path)
+                except:
+                    pass
+        
+        # Delete the sandbox we created
         sandbox_client.delete(sandbox.id)
-        print("✅ Deleted")
-
-        print("\n🎉 Sandbox demo with file operations completed successfully!")
-
+        print(f"✅ Deleted sandbox: {sandbox.id}")
+        
+        print("\n🎉 Demo completed successfully!")
+        print("\nKey Takeaways:")
+        print("• AsyncSandboxClient provides significant performance improvements")
+        print("• asyncio.gather() enables true concurrent file operations")
+        print("• Proper error handling prevents failures from affecting other operations")
+        print("• Async context managers ensure proper resource cleanup")
+        print("• Prime CLI now supports high-performance file transfer workflows!")
+        
     except APIError as e:
         print(f"❌ API Error: {e}")
-        print("💡 Make sure you're logged in: run 'prime login' first")
     except Exception as e:
         print(f"❌ Error: {e}")
+        import traceback
         traceback.print_exc()
 
 
 if __name__ == "__main__":
+    # Run the async demo
     asyncio.run(main())

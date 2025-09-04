@@ -627,7 +627,7 @@ class AsyncSandboxClient:
             # Write stream content asynchronously
             async with aiofiles.open(temp_file_path, "wb") as async_file:
                 total_bytes = 0
-                async for chunk in response.stream.aiter_content(chunk_size=1024 * 64):
+                async for chunk in response.stream.aiter_bytes(chunk_size=1024 * 64):
                     if chunk:
                         await async_file.write(chunk)
                         total_bytes += len(chunk)

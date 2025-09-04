@@ -3,7 +3,7 @@ import json
 import random
 import string
 import time
-from typing import Any
+from typing import Any, List, Optional
 
 import typer
 from rich.console import Console
@@ -219,7 +219,7 @@ def create(
     team_id: str | None = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
     ),
-    env: list[str | None] = typer.Option(
+    env: Optional[List[str]] = typer.Option(
         None,
         help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
     ),
@@ -263,7 +263,7 @@ def create(
             disk_size_gb=disk_size_gb,
             gpu_count=gpu_count,
             timeout_minutes=timeout_minutes,
-            environment_vars=env_vars if env_vars else None,
+            environment_vars=env_vars if env_vars else {},
             team_id=team_id,
         )
 
@@ -376,11 +376,11 @@ def status(sandbox_id: str) -> None:
 @app.command()
 def run(
     sandbox_id: str,
-    command: list[str] = typer.Argument(..., help="Command to execute"),
+    command: List[str] = typer.Argument(..., help="Command to execute"),
     working_dir: str | None = typer.Option(
         None, "-w", "--working-dir", help="Working directory"
     ),
-    env: list[str | None] = typer.Option(
+    env: Optional[List[str]] = typer.Option(
         None,
         "-e",
         "--env",
@@ -417,7 +417,7 @@ def run(
 
         with console.status("[bold blue]Running command...", spinner="dots"):
             result = sandbox_client.execute_command(
-                sandbox_id, command_str, working_dir, env_vars if env_vars else None
+                sandbox_id, command_str, working_dir, env_vars if env_vars else {}
             )
 
         # End timing

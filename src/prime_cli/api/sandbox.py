@@ -149,7 +149,7 @@ class CreateSandboxRequest(BaseModel):
     disk_size_gb: int = 10
     gpu_count: int = 0
     timeout_minutes: int = 60
-    environment_vars: dict[str, str | None] = None
+    environment_vars: dict[str, str | None] | None = None
     team_id: str | None = None
     advanced_configs: AdvancedConfigs | None = None
 
@@ -165,7 +165,7 @@ class UpdateSandboxRequest(BaseModel):
     disk_size_gb: int | None = None
     gpu_count: int | None = None
     timeout_minutes: int | None = None
-    environment_vars: dict[str, str | None] = None
+    environment_vars: dict[str, str | None] | None = None
 
 
 class CommandRequest(BaseModel):
@@ -173,7 +173,7 @@ class CommandRequest(BaseModel):
 
     command: str
     working_dir: str | None = None
-    env: dict[str, str | None] = None
+    env: dict[str, str | None] | None = None
 
 
 class CommandResponse(BaseModel):
@@ -275,7 +275,7 @@ class SandboxClient:
         sandbox_id: str,
         command: str,
         working_dir: str | None = None,
-        env: dict[str, str | None] = None,
+        env: dict[str, str | None] | None = None,
         timeout: int | None = None,
     ) -> CommandResponse:
         """Execute a command in a sandbox
@@ -388,7 +388,7 @@ class AsyncSandboxClient:
         sandbox_id: str,
         command: str,
         working_dir: str | None = None,
-        env: dict[str, str | None] = None,
+        env: dict[str, str | None] | None = None,
         timeout: int | None = None,
     ) -> CommandResponse:
         """Execute a command in a sandbox
@@ -470,7 +470,7 @@ class AsyncSandboxClient:
         
         # Prepare file data with appropriate content type
         content_type = "application/x-tar"
-        files_data = {"file": (os.path.basename(file_path), file_content, content_type)}
+        files_data: dict[str, Any] = {"file": (os.path.basename(file_path), file_content, content_type)}
         
         raw_response = await self.client.multipart_post(
             f"/sandbox/{sandbox_id}/upload",
@@ -563,7 +563,7 @@ class AsyncSandboxClient:
                 temp_file_path = tmp.name
             
             # Run tar creation in executor to avoid blocking
-            def create_tar():
+            def create_tar() -> None:
                 with tarfile.open(temp_file_path, mode="w:") as tf:
                     if os.path.isfile(local_path):
                         # For single files, add with just the filename
@@ -637,7 +637,7 @@ class AsyncSandboxClient:
                         total_bytes += len(chunk)
             
             # Extract the archive - run in executor to avoid blocking
-            def extract_tar():
+            def extract_tar() -> None:
                 with tarfile.open(temp_file_path, mode="r:") as tf:
                     members = list(tf.getmembers())
                     

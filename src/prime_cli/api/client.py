@@ -57,8 +57,8 @@ class APIClient:
         self,
         method: str,
         endpoint: str,
-        params: dict[str, Any | None] = None,
-        json: dict[str, Any | None] = None,
+        params: dict[str, Any | None] | None = None,
+        json: dict[str, Any | None] | None = None,
         timeout: int | None = None,
     ) -> dict[str, Any]:
         """Make a request to the API"""
@@ -106,11 +106,11 @@ class APIClient:
         except httpx.RequestError as e:
             raise APIError(f"Request failed: {e}")
 
-    def get(self, endpoint: str, params: dict[str, Any | None] = None) -> dict[str, Any]:
+    def get(self, endpoint: str, params: dict[str, Any | None] | None = None) -> dict[str, Any]:
         """Make a GET request to the API"""
         return self.request("GET", endpoint, params=params)
 
-    def post(self, endpoint: str, json: dict[str, Any | None] = None) -> dict[str, Any]:
+    def post(self, endpoint: str, json: dict[str, Any | None] | None = None) -> dict[str, Any]:
         """Make a POST request to the API"""
         return self.request("POST", endpoint, json=json)
 
@@ -128,15 +128,17 @@ class APIClient:
     def stream_post(
         self,
         endpoint: str,
-        params: dict[str, Any | None] = None,
-        data: Iterable[bytes | None] = None,
-        headers: dict[str, str | None] = None,
+        params: dict[str, Any | None] | None = None,
+        data: Iterable[bytes | None] | None = None,
+        headers: dict[str, str | None] | None = None,
         timeout: int | None = None,
     ) -> dict[str, Any]:
         url = self._build_url(endpoint)
         req_headers = {"Accept": "application/json", "Content-Type": "application/octet-stream"}
         if headers:
-            req_headers.update(headers)
+            for key, value in headers.items():
+                if value is not None:
+                    req_headers[key] = value
         try:
             response = self.client.request(
                 "POST",
@@ -213,8 +215,8 @@ class AsyncAPIClient:
         self,
         method: str,
         endpoint: str,
-        params: dict[str, Any | None] = None,
-        json: dict[str, Any | None] = None,
+        params: dict[str, Any | None] | None = None,
+        json: dict[str, Any | None] | None = None,
         timeout: int | None = None,
     ) -> dict[str, Any]:
         """Make an async request to the API"""
@@ -264,11 +266,11 @@ class AsyncAPIClient:
         except httpx.RequestError as e:
             raise APIError(f"Request failed: {e}")
 
-    async def get(self, endpoint: str, params: dict[str, Any | None] = None) -> dict[str, Any]:
+    async def get(self, endpoint: str, params: dict[str, Any | None] | None = None) -> dict[str, Any]:
         """Make an async GET request to the API"""
         return await self.request("GET", endpoint, params=params)
 
-    async def post(self, endpoint: str, json: dict[str, Any | None] = None) -> dict[str, Any]:
+    async def post(self, endpoint: str, json: dict[str, Any | None] | None = None) -> dict[str, Any]:
         """Make an async POST request to the API"""
         return await self.request("POST", endpoint, json=json)
 
@@ -279,8 +281,8 @@ class AsyncAPIClient:
     async def multipart_post(
         self,
         endpoint: str,
-        files: dict[str, Any | None] = None,
-        data: dict[str, Any | None] = None,
+        files: dict[str, Any | None] | None = None,
+        data: dict[str, Any | None] | None = None,
         timeout: int | None = None,
     ) -> dict[str, Any]:
         """Send an async multipart form POST request (for file uploads)"""
@@ -338,7 +340,7 @@ class AsyncAPIClient:
     async def stream_get(
         self,
         endpoint: str,
-        params: dict[str, Any | None] = None,
+        params: dict[str, Any | None] | None = None,
         timeout: int | None = None,
     ) -> httpx.Response:
         """Make an async streaming GET request"""

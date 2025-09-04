@@ -1,5 +1,5 @@
 import json
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -118,7 +118,7 @@ class PodsClient:
     def list(self, offset: int = 0, limit: int = 100) -> PodList:
         """List all pods"""
         try:
-            params = {"offset": offset, "limit": limit}
+            params: dict[str, Any] = {"offset": offset, "limit": limit}
             response = self.client.get("/pods", params=params)
             return PodList(**response)
         except Exception as e:
@@ -129,7 +129,7 @@ class PodsClient:
     def get_status(self, pod_ids: List[str]) -> List[PodStatus]:
         """Get status for specified pods"""
         try:
-            params = {"pod_ids": pod_ids}
+            params: dict[str, Any] = {"pod_ids": pod_ids}
             response = self.client.get("/pods/status", params=params)
             return [PodStatus(**status) for status in response.get("data", [])]
         except Exception as e:

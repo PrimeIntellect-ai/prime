@@ -91,3 +91,8 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = "toml"
 ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "types-aiofiles>=24.1.0.20250822",
+]

@@ -417,7 +417,7 @@ def run(
 
         with console.status("[bold blue]Running command...", spinner="dots"):
             result = sandbox_client.execute_command(
-                sandbox_id, command_str, working_dir, env_vars if env_vars else {}
+                sandbox_id, command_str, working_dir, dict(env_vars) if env_vars else None
             )
 
         # End timing

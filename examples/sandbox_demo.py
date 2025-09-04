@@ -17,10 +17,9 @@ import asyncio
 import os
 import tempfile
 import time
-from pathlib import Path
 
 from prime_cli.api.client import APIClient, APIError
-from prime_cli.api.sandbox import CreateSandboxRequest, SandboxClient, AsyncSandboxClient
+from prime_cli.api.sandbox import AsyncSandboxClient, CreateSandboxRequest, SandboxClient
 
 
 def create_test_files(count: int = 5) -> list[str]:
@@ -32,7 +31,7 @@ def create_test_files(count: int = 5) -> list[str]:
         file_path = os.path.join(temp_dir, f"test_file_{i}.txt")
         with open(file_path, "w") as f:
             f.write(f"🚀 Prime CLI Async Demo - File {i}\n")
-            f.write(f"Demonstrating concurrent file operations\n")
+            f.write("Demonstrating concurrent file operations\n")
             f.write(f"File size: {200 + i * 50} characters\n")
             f.write(f"Content: {'=' * (200 + i * 50)}\n")
         files.append(file_path)
@@ -41,7 +40,9 @@ def create_test_files(count: int = 5) -> list[str]:
     return files
 
 
-async def demo_sequential_operations(async_client: AsyncSandboxClient, sandbox_id: str, test_files: list[str]) -> float:
+async def demo_sequential_operations(
+    async_client: AsyncSandboxClient, sandbox_id: str, test_files: list[str]
+) -> float:
     """Demonstrate sequential file operations (old way)"""
     print("\n📊 Testing Sequential Operations (Old Way)...")
     
@@ -72,7 +73,9 @@ async def demo_sequential_operations(async_client: AsyncSandboxClient, sandbox_i
     return duration
 
 
-async def demo_concurrent_operations(async_client: AsyncSandboxClient, sandbox_id: str, test_files: list[str]) -> float:
+async def demo_concurrent_operations(
+    async_client: AsyncSandboxClient, sandbox_id: str, test_files: list[str]
+) -> float:
     """Demonstrate concurrent file operations (NEW async way)"""
     print("\n🚀 Testing Concurrent Operations (NEW Async Way)...")
     
@@ -111,7 +114,9 @@ async def demo_concurrent_operations(async_client: AsyncSandboxClient, sandbox_i
     return duration
 
 
-async def demo_mixed_concurrent_operations(async_client: AsyncSandboxClient, sandbox_id: str, test_files: list[str]) -> None:
+async def demo_mixed_concurrent_operations(
+    async_client: AsyncSandboxClient, sandbox_id: str, test_files: list[str]
+) -> None:
     """Demonstrate mixed upload/download operations running simultaneously"""
     print("\n🔀 Testing Mixed Concurrent Operations...")
     
@@ -211,7 +216,7 @@ async def main() -> None:
         
         # 3. Demonstrate async operations with AsyncSandboxClient
         async with AsyncSandboxClient() as async_client:
-            print(f"\n💫 Using AsyncSandboxClient for high-performance operations")
+            print("\n💫 Using AsyncSandboxClient for high-performance operations")
             
             # Sequential vs Concurrent comparison
             sequential_time = await demo_sequential_operations(async_client, sandbox.id, test_files)
@@ -234,7 +239,7 @@ async def main() -> None:
         for file_path in test_files:
             try:
                 os.unlink(file_path)
-            except:
+            except OSError:
                 pass
         
         # Clean up downloaded files
@@ -243,7 +248,7 @@ async def main() -> None:
             for file_path in glob.glob(pattern):
                 try:
                     os.unlink(file_path)
-                except:
+                except OSError:
                     pass
         
         # Delete the sandbox we created

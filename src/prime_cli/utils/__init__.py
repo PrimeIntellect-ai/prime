@@ -4,8 +4,13 @@
 from .display import build_table, output_data_as_json, status_color, validate_output_format
 from .formatters import format_ip_display, format_price, format_resources, obfuscate_env_vars
 from .prompt import confirm_or_skip
+from .sandbox import (
+    expand_home_in_path,
+    format_sandbox_for_details,
+    format_sandbox_for_list,
+    parse_cp_arg,
+)
 from .time_utils import human_age, iso_timestamp, sort_by_created
-from .sandbox import expand_home_in_path, parse_cp_arg, format_sandbox_for_list, format_sandbox_for_details
 
 __all__ = [
     "output_data_as_json",

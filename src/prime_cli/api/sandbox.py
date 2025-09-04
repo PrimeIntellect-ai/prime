@@ -13,8 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from prime_cli.api.client import APIClient, AsyncAPIClient, TimeoutError
 
-from ..utils.debug import debug_log, debug_log_ascii, debug_log_hex
-
+from ..utils.debug import debug_log
 
 # Security constants
 
@@ -48,7 +47,6 @@ def validate_tar_member(member: tarfile.TarInfo, dest_path: str) -> bool:
         return False
     
     # Validate the destination path
-    target_path = os.path.join(dest_path, member.name)
     if not is_safe_path(dest_path, member.name):
         return False
     
@@ -498,7 +496,8 @@ class AsyncSandboxClient:
     ) -> SandboxDownloadStreamResponse:
         """Download a file/directory as a tar archive stream (async low-level method).
         
-        This is the async version of the low-level download method that returns a raw tar archive stream.
+        This is the async version of the low-level download method that returns a raw tar 
+        archive stream.
         Most users should use `download_path()` instead, which handles tar extraction automatically.
         """
         params: dict[str, Any] = {"src_path": src_path, "compress": "false"}
@@ -552,7 +551,10 @@ class AsyncSandboxClient:
         # Just warn for large uploads - backend will handle the actual limits
         if size > 100 * 1024 * 1024:  # Warn for files over 100MB
             size_mb = size / (1024 * 1024)
-            debug_log(f"Warning: Uploading {size_mb:.1f}MB. Backend may reject if over configured limit.")
+            debug_log(
+                f"Warning: Uploading {size_mb:.1f}MB. "
+                f"Backend may reject if over configured limit."
+            )
         
         # Create tar archive for all uploads (files and directories)
         temp_file_path = None

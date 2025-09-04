@@ -1,8 +1,7 @@
-from typing import Optional, Tuple, Dict, Any
+from typing import Any, Dict, Optional, Tuple
 
-from prime_cli.utils.formatters import format_resources
+from prime_cli.utils.formatters import format_resources, obfuscate_env_vars
 from prime_cli.utils.time_utils import human_age, iso_timestamp
-from prime_cli.utils.formatters import obfuscate_env_vars
 
 
 def parse_cp_arg(arg: str) -> Tuple[Optional[str], str]:

@@ -6,9 +6,9 @@ Tests the asyncio.gather() concurrent operations we implemented
 
 import asyncio
 import os
+import sys
 import tempfile
 import time
-import sys
 from pathlib import Path
 
 # Add the src directory to Python path so we can import prime_cli
@@ -228,7 +228,7 @@ class AsyncTestSuite:
         for file_path in self.test_files:
             try:
                 os.unlink(file_path)
-            except:
+            except OSError:
                 pass
         
         # Clean up downloaded files
@@ -237,7 +237,7 @@ class AsyncTestSuite:
             for file_path in glob.glob(pattern):
                 try:
                     os.unlink(file_path)
-                except:
+                except OSError:
                     pass
 
     async def run_all_tests(self):

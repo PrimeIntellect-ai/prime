@@ -3,7 +3,7 @@ import json
 import random
 import string
 import time
-from typing import Any, List, Optional
+from typing import List, Optional
 
 import typer
 from rich.console import Console
@@ -11,22 +11,22 @@ from rich.table import Table
 from rich.text import Text
 
 from ..api.client import APIClient, APIError
-from ..api.sandbox import CreateSandboxRequest, Sandbox, SandboxClient, AsyncSandboxClient
+from ..api.sandbox import AsyncSandboxClient, CreateSandboxRequest, SandboxClient
 from ..config import Config
-from ..utils.debug import debug_log, set_debug_enabled
 from ..utils import (
     build_table,
     confirm_or_skip,
+    expand_home_in_path,
+    format_sandbox_for_details,
+    format_sandbox_for_list,
     obfuscate_env_vars,
     output_data_as_json,
+    parse_cp_arg,
     sort_by_created,
     status_color,
     validate_output_format,
-    expand_home_in_path,
-    parse_cp_arg,
-    format_sandbox_for_list,
-    format_sandbox_for_details,
 )
+from ..utils.debug import debug_log, set_debug_enabled
 from ..utils.display import SANDBOX_STATUS_COLORS
 
 app = typer.Typer(help="Manage code sandboxes")

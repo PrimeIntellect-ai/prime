@@ -3,7 +3,6 @@ from typing import Any, Iterable
 import httpx
 
 from ..config import Config
-from ..utils.debug import debug_log
 
 
 class APIError(Exception):
@@ -295,7 +294,9 @@ class AsyncAPIClient:
                 temp_headers["Authorization"] = f"Bearer {self.api_key}"
 
             # Create a temporary async client without the default Content-Type header
-            async with httpx.AsyncClient(headers=temp_headers, follow_redirects=True) as temp_client:
+            async with httpx.AsyncClient(
+                headers=temp_headers, follow_redirects=True
+            ) as temp_client:
                 response = await temp_client.request(
                     "POST",
                     url,

@@ -558,8 +558,8 @@ def upload_file(
         file_size = os.path.getsize(local_file)
         filename = os.path.basename(local_file)
 
-        # If remote_path ends with '/' or doesn't have an extension, treat as directory
-        if remote_path.endswith("/") or ("." not in os.path.basename(remote_path)):
+        # If remote_path ends with '/', treat as directory
+        if remote_path.endswith("/"):
             remote_path = remote_path.rstrip("/") + "/" + filename
 
         base_client = APIClient()

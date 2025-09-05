@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 
 class ConfigModel(BaseModel):
     api_key: str = ""
-    team_id: str = ""
+    team_id: str | None = None
     base_url: str = "https://api.primeintellect.ai"
     frontend_url: str = "https://app.primeintellect.ai"
     ssh_key_path: str = str(Path.home() / ".ssh" / "id_rsa")
@@ -38,7 +38,7 @@ class Config:
             self._save_config(
                 ConfigModel(
                     api_key="",
-                    team_id="",
+                    team_id=None,
                     base_url=self.DEFAULT_BASE_URL,
                     frontend_url=self.DEFAULT_FRONTEND_URL,
                     ssh_key_path=self.DEFAULT_SSH_KEY_PATH,
@@ -72,12 +72,12 @@ class Config:
     @property
     def team_id(self) -> Optional[str]:
         """Get team ID from config file or environment"""
-        team_id = self.config.get("team_id", "") or os.getenv("PRIME_TEAM_ID", "")
+        team_id = self.config.get("team_id", None) or os.getenv("PRIME_TEAM_ID", None)
         return team_id if team_id else None
 
-    def set_team_id(self, value: str) -> None:
+    def set_team_id(self, value: str | None) -> None:
         """Set team ID in config file"""
-        self.config["team_id"] = value
+        self.config["team_id"] = value if value else None
         self._save_config(self.config)
 
     @property
@@ -172,7 +172,7 @@ class Config:
             # Built-in production environment
             self.set_base_url(self.DEFAULT_BASE_URL)
             self.set_frontend_url(self.DEFAULT_FRONTEND_URL)
-            self.set_team_id("")  # Production defaults to personal account
+            self.set_team_id(None)  # Production defaults to personal account
             self.set_current_environment("production")
             return True
 
@@ -188,7 +188,7 @@ class Config:
                 if "api_key" in env_config:
                     self.set_api_key(env_config["api_key"])
                 # Set team_id from environment, defaulting to empty string
-                self.set_team_id(env_config.get("team_id", ""))
+                self.set_team_id(env_config.get("team_id", None))
                 self.set_base_url(env_config.get("base_url", self.DEFAULT_BASE_URL))
                 self.set_frontend_url(env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL))
                 self.set_current_environment(name)

@@ -853,7 +853,7 @@ wheels = [
 
 [[package]]
 name = "prime"
-version = "0.3.22"
+version = "0.3.23"
 source = { editable = "." }
 dependencies = [
     { name = "build" },

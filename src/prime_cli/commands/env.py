@@ -256,14 +256,23 @@ def push(
             console.print(f"[red]Failed to parse pyproject.toml: {e}[/red]")
             raise typer.Exit(1)
 
-        env_file = None
-        for file in env_path.glob("*.py"):
-            if file.name.startswith("vf_") or file.name == f"{env_name.replace('-', '_')}.py":
-                env_file = file
-                break
+        # Find any Python file in the environment
+        has_env_file = False
+        py_files = list(env_path.glob("*.py"))
 
-        if not env_file:
-            console.print("[red]Error: No environment Python file found (should be vf_*.py)[/red]")
+        if py_files:
+            has_env_file = True
+        else:
+            # Check for package structure with __init__.py
+            for subdir in env_path.iterdir():
+                if subdir.is_dir():
+                    init_file = subdir / "__init__.py"
+                    if init_file.exists():
+                        has_env_file = True
+                        break
+
+        if not has_env_file:
+            console.print("[red]Error: No environment Python file found[/red]")
             raise typer.Exit(1)
 
         console.print(f"Building environment package at {env_path}...")

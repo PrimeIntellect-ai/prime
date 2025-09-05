@@ -107,7 +107,7 @@ def set_team_id(
 def remove_team_id() -> None:
     """Remove team ID to use personal account"""
     config = Config()
-    config.set_team_id("")
+    config.set_team_id(None)
     console.print("[green]Team ID removed. Using personal account.[/green]")
 
 
@@ -233,7 +233,7 @@ def reset(
     if yes or typer.confirm("Are you sure you want to reset all settings?"):
         config = Config()
         config.set_api_key("")
-        config.set_team_id("")
+        config.set_team_id(None)
         config.set_base_url(Config.DEFAULT_BASE_URL)
         config.set_frontend_url(Config.DEFAULT_FRONTEND_URL)
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)

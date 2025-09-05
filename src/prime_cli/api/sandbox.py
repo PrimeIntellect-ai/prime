@@ -329,15 +329,22 @@ class SandboxClient:
         params = {"file_path": file_path}
 
         try:
-            response = self.client.client.get(url, params=params, timeout=300.0)
-            response.raise_for_status()
+            headers = {}
+            if self.client.api_key:
+                headers["Authorization"] = f"Bearer {self.client.api_key}"
 
-            dir_path = os.path.dirname(local_file_path)
-            if dir_path:
-                os.makedirs(dir_path, exist_ok=True)
+            with httpx.Client(
+                headers=headers, follow_redirects=True, timeout=300.0
+            ) as download_client:
+                response = download_client.get(url, params=params)
+                response.raise_for_status()
 
-            with open(local_file_path, "wb") as f:
-                f.write(response.content)
+                dir_path = os.path.dirname(local_file_path)
+                if dir_path:
+                    os.makedirs(dir_path, exist_ok=True)
+
+                with open(local_file_path, "wb") as f:
+                    f.write(response.content)
         except httpx.HTTPStatusError as e:
             error_details = f"HTTP {e.response.status_code}: {e.response.text}"
             raise APIError(f"Download failed: {error_details}")

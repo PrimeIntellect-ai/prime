@@ -1,11 +1,13 @@
+import os
 import time
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from prime_cli.api.client import APIClient, AsyncAPIClient, TimeoutError
+from prime_cli.api.client import APIClient, APIError, AsyncAPIClient, TimeoutError
 
 
 class SandboxStatus(str, Enum):
@@ -285,23 +287,19 @@ class SandboxClient:
         Returns:
             FileUploadResponse with upload details
         """
-        import os
-
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
         filename = os.path.basename(local_file_path)
 
-        endpoint = f"/api/v1/sandbox/{sandbox_id}/upload"
-        url = f"{self.client.base_url}{endpoint}"
+        endpoint = f"/sandbox/{sandbox_id}/upload"
+        url = f"{self.client.base_url}/api/v1{endpoint}"
         params = {"file_path": file_path}
 
         with open(local_file_path, "rb") as f:
             files = {"file": (filename, f, "application/octet-stream")}
 
             try:
-                import httpx
-
                 headers = {}
                 if self.client.api_key:
                     headers["Authorization"] = f"Bearer {self.client.api_key}"
@@ -313,13 +311,9 @@ class SandboxClient:
                     response.raise_for_status()
                     return FileUploadResponse(**response.json())
             except httpx.HTTPStatusError as e:
-                from prime_cli.api.client import APIError
-
                 error_details = f"HTTP {e.response.status_code}: {e.response.text}"
                 raise APIError(f"Upload failed: {error_details}")
             except Exception as e:
-                from prime_cli.api.client import APIError
-
                 raise APIError(f"Upload failed: {str(e)}")
 
     def download_file(self, sandbox_id: str, file_path: str, local_file_path: str) -> None:
@@ -330,23 +324,24 @@ class SandboxClient:
             file_path: Path to the file in the sandbox
             local_file_path: Path where to save the downloaded file locally
         """
-        import os
-
-        endpoint = f"/api/v1/sandbox/{sandbox_id}/download"
-        url = f"{self.client.base_url}{endpoint}"
+        endpoint = f"/sandbox/{sandbox_id}/download"
+        url = f"{self.client.base_url}/api/v1{endpoint}"
         params = {"file_path": file_path}
 
         try:
             response = self.client.client.get(url, params=params, timeout=300.0)
             response.raise_for_status()
 
-            os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+            dir_path = os.path.dirname(local_file_path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
 
             with open(local_file_path, "wb") as f:
                 f.write(response.content)
+        except httpx.HTTPStatusError as e:
+            error_details = f"HTTP {e.response.status_code}: {e.response.text}"
+            raise APIError(f"Download failed: {error_details}")
         except Exception as e:
-            from prime_cli.api.client import APIError
-
             raise APIError(f"Download failed: {str(e)}")
 
 
@@ -481,23 +476,19 @@ class AsyncSandboxClient:
         Returns:
             FileUploadResponse with upload details
         """
-        import os
-
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
         filename = os.path.basename(local_file_path)
 
-        endpoint = f"/api/v1/sandbox/{sandbox_id}/upload"
-        url = f"{self.client.base_url}{endpoint}"
+        endpoint = f"/sandbox/{sandbox_id}/upload"
+        url = f"{self.client.base_url}/api/v1{endpoint}"
         params = {"file_path": file_path}
 
         with open(local_file_path, "rb") as f:
             files = {"file": (filename, f, "application/octet-stream")}
 
             try:
-                import httpx
-
                 headers = {}
                 if self.client.api_key:
                     headers["Authorization"] = f"Bearer {self.client.api_key}"
@@ -509,13 +500,9 @@ class AsyncSandboxClient:
                     response.raise_for_status()
                     return FileUploadResponse(**response.json())
             except httpx.HTTPStatusError as e:
-                from prime_cli.api.client import APIError
-
                 error_details = f"HTTP {e.response.status_code}: {e.response.text}"
                 raise APIError(f"Upload failed: {error_details}")
             except Exception as e:
-                from prime_cli.api.client import APIError
-
                 raise APIError(f"Upload failed: {str(e)}")
 
     async def download_file(self, sandbox_id: str, file_path: str, local_file_path: str) -> None:
@@ -526,29 +513,33 @@ class AsyncSandboxClient:
             file_path: Path to the file in the sandbox
             local_file_path: Path where to save the downloaded file locally
         """
-        import os
-
-        endpoint = f"/api/v1/sandbox/{sandbox_id}/download"
-        url = f"{self.client.base_url}{endpoint}"
+        endpoint = f"/sandbox/{sandbox_id}/download"
+        url = f"{self.client.base_url}/api/v1{endpoint}"
         params = {"file_path": file_path}
-
-        import httpx
 
         headers = {}
         if self.client.api_key:
             headers["Authorization"] = f"Bearer {self.client.api_key}"
 
-        async with httpx.AsyncClient(
-            headers=headers, follow_redirects=True, timeout=300.0
-        ) as download_client:
-            response = await download_client.get(url, params=params)
-            response.raise_for_status()
-            content = response.content
+        try:
+            async with httpx.AsyncClient(
+                headers=headers, follow_redirects=True, timeout=300.0
+            ) as download_client:
+                response = await download_client.get(url, params=params)
+                response.raise_for_status()
+                content = response.content
 
-        os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+            dir_path = os.path.dirname(local_file_path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
 
-        with open(local_file_path, "wb") as f:
-            f.write(content)
+            with open(local_file_path, "wb") as f:
+                f.write(content)
+        except httpx.HTTPStatusError as e:
+            error_details = f"HTTP {e.response.status_code}: {e.response.text}"
+            raise APIError(f"Download failed: {error_details}")
+        except Exception as e:
+            raise APIError(f"Download failed: {str(e)}")
 
     async def aclose(self) -> None:
         """Close the async client"""

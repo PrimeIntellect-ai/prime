@@ -257,21 +257,21 @@ def push(
             raise typer.Exit(1)
 
         # Find any Python file in the environment
-        env_file = None
+        has_env_file = False
         py_files = list(env_path.glob("*.py"))
 
         if py_files:
-            env_file = py_files[0]  # Just use the first Python file found
+            has_env_file = True
         else:
             # Check for package structure with __init__.py
             for subdir in env_path.iterdir():
                 if subdir.is_dir():
                     init_file = subdir / "__init__.py"
                     if init_file.exists():
-                        env_file = init_file
+                        has_env_file = True
                         break
 
-        if not env_file:
+        if not has_env_file:
             console.print("[red]Error: No environment Python file found[/red]")
             raise typer.Exit(1)
 

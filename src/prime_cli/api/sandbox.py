@@ -134,6 +134,29 @@ class CommandResponse(BaseModel):
     exit_code: int
 
 
+class FileUploadResponse(BaseModel):
+    """File upload response model"""
+
+    success: bool
+    path: str
+    size: int
+    timestamp: datetime
+
+
+class BulkDeleteSandboxRequest(BaseModel):
+    """Bulk delete sandboxes request model"""
+
+    sandbox_ids: List[str]
+
+
+class BulkDeleteSandboxResponse(BaseModel):
+    """Bulk delete sandboxes response model"""
+
+    succeeded: List[str]
+    failed: List[Dict[str, str]]
+    message: str
+
+
 class SandboxClient:
     """Client for sandbox API operations"""
 
@@ -184,6 +207,14 @@ class SandboxClient:
         """Delete a sandbox"""
         response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
+
+    def bulk_delete(self, sandbox_ids: List[str]) -> BulkDeleteSandboxResponse:
+        """Bulk delete multiple sandboxes"""
+        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids)
+        response = self.client.request(
+            "DELETE", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
+        )
+        return BulkDeleteSandboxResponse(**response)
 
     def get_logs(self, sandbox_id: str) -> str:
         """Get sandbox logs"""
@@ -241,6 +272,83 @@ class SandboxClient:
             time.sleep(sleep_time)
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
 
+    def upload_file(
+        self, sandbox_id: str, file_path: str, local_file_path: str
+    ) -> FileUploadResponse:
+        """Upload a file to a sandbox
+
+        Args:
+            sandbox_id: ID of the sandbox to upload to
+            file_path: Path where the file should be stored in the sandbox
+            local_file_path: Path to the local file to upload
+
+        Returns:
+            FileUploadResponse with upload details
+        """
+        import os
+
+        if not os.path.exists(local_file_path):
+            raise FileNotFoundError(f"Local file not found: {local_file_path}")
+
+        filename = os.path.basename(local_file_path)
+
+        endpoint = f"/api/v1/sandbox/{sandbox_id}/upload"
+        url = f"{self.client.base_url}{endpoint}"
+        params = {"file_path": file_path}
+
+        with open(local_file_path, "rb") as f:
+            files = {"file": (filename, f, "application/octet-stream")}
+
+            try:
+                import httpx
+
+                headers = {}
+                if self.client.api_key:
+                    headers["Authorization"] = f"Bearer {self.client.api_key}"
+
+                with httpx.Client(
+                    headers=headers, follow_redirects=True, timeout=300.0
+                ) as upload_client:
+                    response = upload_client.post(url, files=files, params=params)
+                    response.raise_for_status()
+                    return FileUploadResponse(**response.json())
+            except httpx.HTTPStatusError as e:
+                from prime_cli.api.client import APIError
+
+                error_details = f"HTTP {e.response.status_code}: {e.response.text}"
+                raise APIError(f"Upload failed: {error_details}")
+            except Exception as e:
+                from prime_cli.api.client import APIError
+
+                raise APIError(f"Upload failed: {str(e)}")
+
+    def download_file(self, sandbox_id: str, file_path: str, local_file_path: str) -> None:
+        """Download a file from a sandbox
+
+        Args:
+            sandbox_id: ID of the sandbox to download from
+            file_path: Path to the file in the sandbox
+            local_file_path: Path where to save the downloaded file locally
+        """
+        import os
+
+        endpoint = f"/api/v1/sandbox/{sandbox_id}/download"
+        url = f"{self.client.base_url}{endpoint}"
+        params = {"file_path": file_path}
+
+        try:
+            response = self.client.client.get(url, params=params, timeout=300.0)
+            response.raise_for_status()
+
+            os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+
+            with open(local_file_path, "wb") as f:
+                f.write(response.content)
+        except Exception as e:
+            from prime_cli.api.client import APIError
+
+            raise APIError(f"Download failed: {str(e)}")
+
 
 class AsyncSandboxClient:
     """Async client for sandbox API operations"""
@@ -292,6 +400,14 @@ class AsyncSandboxClient:
         """Delete a sandbox"""
         response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
+
+    async def bulk_delete(self, sandbox_ids: List[str]) -> BulkDeleteSandboxResponse:
+        """Bulk delete multiple sandboxes"""
+        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids)
+        response = await self.client.request(
+            "DELETE", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
+        )
+        return BulkDeleteSandboxResponse(**response)
 
     async def get_logs(self, sandbox_id: str) -> str:
         """Get sandbox logs"""
@@ -351,6 +467,88 @@ class AsyncSandboxClient:
             sleep_time = 1 if attempt < 5 else 2
             await asyncio.sleep(sleep_time)
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
+
+    async def upload_file(
+        self, sandbox_id: str, file_path: str, local_file_path: str
+    ) -> FileUploadResponse:
+        """Upload a file to a sandbox (async)
+
+        Args:
+            sandbox_id: ID of the sandbox to upload to
+            file_path: Path where the file should be stored in the sandbox
+            local_file_path: Path to the local file to upload
+
+        Returns:
+            FileUploadResponse with upload details
+        """
+        import os
+
+        if not os.path.exists(local_file_path):
+            raise FileNotFoundError(f"Local file not found: {local_file_path}")
+
+        filename = os.path.basename(local_file_path)
+
+        endpoint = f"/api/v1/sandbox/{sandbox_id}/upload"
+        url = f"{self.client.base_url}{endpoint}"
+        params = {"file_path": file_path}
+
+        with open(local_file_path, "rb") as f:
+            files = {"file": (filename, f, "application/octet-stream")}
+
+            try:
+                import httpx
+
+                headers = {}
+                if self.client.api_key:
+                    headers["Authorization"] = f"Bearer {self.client.api_key}"
+
+                async with httpx.AsyncClient(
+                    headers=headers, follow_redirects=True, timeout=300.0
+                ) as upload_client:
+                    response = await upload_client.post(url, files=files, params=params)
+                    response.raise_for_status()
+                    return FileUploadResponse(**response.json())
+            except httpx.HTTPStatusError as e:
+                from prime_cli.api.client import APIError
+
+                error_details = f"HTTP {e.response.status_code}: {e.response.text}"
+                raise APIError(f"Upload failed: {error_details}")
+            except Exception as e:
+                from prime_cli.api.client import APIError
+
+                raise APIError(f"Upload failed: {str(e)}")
+
+    async def download_file(self, sandbox_id: str, file_path: str, local_file_path: str) -> None:
+        """Download a file from a sandbox (async)
+
+        Args:
+            sandbox_id: ID of the sandbox to download from
+            file_path: Path to the file in the sandbox
+            local_file_path: Path where to save the downloaded file locally
+        """
+        import os
+
+        endpoint = f"/api/v1/sandbox/{sandbox_id}/download"
+        url = f"{self.client.base_url}{endpoint}"
+        params = {"file_path": file_path}
+
+        import httpx
+
+        headers = {}
+        if self.client.api_key:
+            headers["Authorization"] = f"Bearer {self.client.api_key}"
+
+        async with httpx.AsyncClient(
+            headers=headers, follow_redirects=True, timeout=300.0
+        ) as download_client:
+            response = await download_client.get(url, params=params)
+            response.raise_for_status()
+            content = response.content
+
+        os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+
+        with open(local_file_path, "wb") as f:
+            f.write(content)
 
     async def aclose(self) -> None:
         """Close the async client"""

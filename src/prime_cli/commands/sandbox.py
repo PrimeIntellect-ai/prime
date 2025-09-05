@@ -10,7 +10,7 @@ from rich.table import Table
 from rich.text import Text
 
 from ..api.client import APIClient, APIError
-from ..api.sandbox import CreateSandboxRequest, Sandbox, SandboxClient
+from ..api.sandbox import BulkDeleteSandboxResponse, CreateSandboxRequest, Sandbox, SandboxClient
 from ..config import Config
 from ..utils import (
     build_table,
@@ -344,22 +344,73 @@ def create(
 
 @app.command()
 def delete(
-    sandbox_id: str,
+    sandbox_ids: List[str] = typer.Argument(
+        ..., help="Sandbox ID(s) to delete (space or comma-separated)"
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Delete a sandbox"""
+    """Delete one or more sandboxes"""
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        if not confirm_or_skip(f"Are you sure you want to delete sandbox {sandbox_id}?", yes):
-            console.print("Delete cancelled")
-            raise typer.Exit(0)
+        # Handle comma-separated IDs by splitting them
+        parsed_ids = []
+        for id_string in sandbox_ids:
+            # Split by comma and strip whitespace
+            if "," in id_string:
+                parsed_ids.extend([id.strip() for id in id_string.split(",") if id.strip()])
+            else:
+                parsed_ids.append(id_string.strip())
 
-        with console.status("[bold blue]Deleting sandbox...", spinner="dots"):
-            sandbox_client.delete(sandbox_id)
+        # Remove any empty strings and duplicates while preserving order
+        cleaned_ids = []
+        seen = set()
+        for id in parsed_ids:
+            if id and id not in seen:
+                cleaned_ids.append(id)
+                seen.add(id)
 
-        console.print(f"[green]Successfully deleted sandbox {sandbox_id}[/green]")
+        sandbox_ids = cleaned_ids
+
+        # Handle single vs multiple sandbox IDs
+        if len(sandbox_ids) == 1:
+            # Single sandbox deletion
+            sandbox_id = sandbox_ids[0]
+            if not confirm_or_skip(f"Are you sure you want to delete sandbox {sandbox_id}?", yes):
+                console.print("Delete cancelled")
+                raise typer.Exit(0)
+
+            with console.status("[bold blue]Deleting sandbox...", spinner="dots"):
+                sandbox_client.delete(sandbox_id)
+
+            console.print(f"[green]Successfully deleted sandbox {sandbox_id}[/green]")
+
+        else:
+            # Bulk sandbox deletion
+            if not confirm_or_skip(
+                f"Are you sure you want to delete {len(sandbox_ids)} sandbox(es)?", yes
+            ):
+                console.print("Bulk delete cancelled")
+                raise typer.Exit(0)
+
+            with console.status("[bold blue]Deleting sandboxes...", spinner="dots"):
+                result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(sandbox_ids)
+
+            # Display results
+            console.print(f"\n[green]{result.message}[/green]")
+
+            if result.succeeded:
+                console.print("\n[bold green]Successfully deleted:[/bold green]")
+                for sandbox_id in result.succeeded:
+                    console.print(f"  ✓ {sandbox_id}")
+
+            if result.failed:
+                console.print("\n[bold red]Failed to delete:[/bold red]")
+                for failure in result.failed:
+                    sandbox_id = failure.get("sandbox_id", "unknown")
+                    error = failure.get("error", "unknown error")
+                    console.print(f"  ✗ {sandbox_id}: {error}")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
@@ -482,6 +533,107 @@ def run(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        raise typer.Exit(1)
+
+
+@app.command("upload")
+def upload_file(
+    sandbox_id: str = typer.Argument(..., help="Sandbox ID to upload file to"),
+    local_file: str = typer.Argument(..., help="Path to local file to upload"),
+    remote_path: str = typer.Argument(..., help="Path where file should be stored in sandbox"),
+) -> None:
+    """Upload a file to a sandbox"""
+    import os
+
+    try:
+        # Check if local file exists
+        if not os.path.exists(local_file):
+            console.print(f"[red]Error:[/red] Local file not found: {local_file}")
+            raise typer.Exit(1)
+
+        # Get file size for display
+        file_size = os.path.getsize(local_file)
+        filename = os.path.basename(local_file)
+
+        # If remote_path ends with '/' or doesn't have an extension, treat as directory
+        if remote_path.endswith("/") or ("." not in os.path.basename(remote_path)):
+            remote_path = remote_path.rstrip("/") + "/" + filename
+
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        console.print(f"[bold blue]Uploading file:[/bold blue] {filename}")
+        console.print(f"[bold blue]From:[/bold blue] {local_file}")
+        console.print(f"[bold blue]To:[/bold blue] {remote_path}")
+        console.print(f"[bold blue]Size:[/bold blue] {file_size:,} bytes")
+
+        with console.status("[bold blue]Uploading...", spinner="dots"):
+            response = sandbox_client.upload_file(
+                sandbox_id=sandbox_id, file_path=remote_path, local_file_path=local_file
+            )
+
+        console.print("[green]✓[/green] File uploaded successfully!")
+        console.print(f"[bold green]Remote path:[/bold green] {response.path}")
+        console.print(f"[bold green]Size:[/bold green] {response.size:,} bytes")
+        console.print(f"[bold green]Timestamp:[/bold green] {response.timestamp}")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        raise typer.Exit(1)
+
+
+@app.command("download")
+def download_file(
+    sandbox_id: str = typer.Argument(..., help="Sandbox ID to download file from"),
+    remote_path: str = typer.Argument(..., help="Path to file in sandbox"),
+    local_file: str = typer.Argument(..., help="Path where file should be saved locally"),
+) -> None:
+    """Download a file from a sandbox"""
+    import os
+
+    try:
+        # Check if local directory exists
+        local_dir = os.path.dirname(local_file)
+        if local_dir and not os.path.exists(local_dir):
+            console.print(f"[yellow]Warning:[/yellow] Creating directory: {local_dir}")
+            os.makedirs(local_dir, exist_ok=True)
+
+        # Check if local file already exists
+        if os.path.exists(local_file):
+            if not typer.confirm(f"File {local_file} already exists. Overwrite?"):
+                console.print("Download cancelled.")
+                raise typer.Exit(0)
+
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        console.print(f"[bold blue]Downloading file from sandbox:[/bold blue] {sandbox_id}")
+        console.print(f"[bold blue]From:[/bold blue] {remote_path}")
+        console.print(f"[bold blue]To:[/bold blue] {local_file}")
+
+        with console.status("[bold blue]Downloading...", spinner="dots"):
+            sandbox_client.download_file(
+                sandbox_id=sandbox_id, file_path=remote_path, local_file_path=local_file
+            )
+
+        # Get downloaded file size for display
+        file_size = os.path.getsize(local_file) if os.path.exists(local_file) else 0
+
+        console.print("[green]✓[/green] File downloaded successfully!")
+        console.print(f"[bold green]Local path:[/bold green] {local_file}")
+        console.print(f"[bold green]Size:[/bold green] {file_size:,} bytes")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except FileNotFoundError as e:
+        console.print(f"[red]File not found:[/red] {str(e)}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")

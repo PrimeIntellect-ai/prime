@@ -399,6 +399,71 @@ class AsyncSandboxClient:
 
     def __init__(self, api_key: Optional[str] = None):
         self.client = AsyncAPIClient(api_key=api_key)
+        self._cache_file = self.client.config.config_dir / "sandbox_auth_cache.json"
+        self._auth_cache = self._load_cache()
+
+    def _load_cache(self) -> Dict[str, Any]:
+        """Load auth cache from file and clean expired entries"""
+        try:
+            if self._cache_file.exists():
+                with open(self._cache_file, "r") as f:
+                    cache = json.load(f)
+                # Clean expired entries
+                cleaned_cache = {}
+                for sandbox_id, auth_info in cache.items():
+                    try:
+                        expires_at = datetime.fromisoformat(
+                            auth_info["expires_at"].replace("Z", "+00:00")
+                        )
+                        if datetime.now(expires_at.tzinfo) < expires_at:
+                            cleaned_cache[sandbox_id] = auth_info
+                    except Exception:
+                        pass  # Skip invalid entries
+
+                # Save cleaned cache if it changed
+                if len(cleaned_cache) != len(cache):
+                    self._auth_cache = cleaned_cache
+                    self._save_cache()
+
+                return cleaned_cache
+        except Exception:
+            pass
+        return {}
+
+    def _save_cache(self) -> None:
+        """Save auth cache to file"""
+        try:
+            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._cache_file, "w") as f:
+                json.dump(self._auth_cache, f)
+        except Exception:
+            pass
+
+    def clear_auth_cache(self) -> None:
+        """Clear all cached auth tokens"""
+        self._auth_cache = {}
+        try:
+            if self._cache_file.exists():
+                self._cache_file.unlink()
+        except Exception:
+            pass
+
+    async def _get_auth(self, sandbox_id: str) -> Dict[str, Any]:
+        """Get or refresh JWT token for sandbox (async)"""
+        if sandbox_id not in self._auth_cache:
+            response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+            self._auth_cache[sandbox_id] = response
+            self._save_cache()
+
+        auth_info = self._auth_cache[sandbox_id]
+        expires_at = datetime.fromisoformat(auth_info["expires_at"].replace("Z", "+00:00"))
+        if datetime.now(expires_at.tzinfo) >= expires_at:
+            # Refresh token
+            del self._auth_cache[sandbox_id]
+            self._save_cache()
+            return await self._get_auth(sandbox_id)
+
+        return auth_info  # type: ignore[no-any-return]
 
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
@@ -485,11 +550,11 @@ class AsyncSandboxClient:
             CommandTimeoutError: If the command execution times out
         """
         # Get auth for direct gateway access
-        auth_response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+        auth = await self._get_auth(sandbox_id)
 
-        gateway_url = auth_response["gateway_url"].rstrip("/")
-        url = f"{gateway_url}/{auth_response['user_ns']}/{auth_response['job_id']}/exec"
-        headers = {"Authorization": f"Bearer {auth_response['token']}"}
+        gateway_url = auth["gateway_url"].rstrip("/")
+        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
         payload = {
             "command": command,
             "working_dir": working_dir,
@@ -542,11 +607,11 @@ class AsyncSandboxClient:
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
         # Get auth for direct gateway access
-        auth_response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+        auth = await self._get_auth(sandbox_id)
 
-        gateway_url = auth_response["gateway_url"].rstrip("/")
-        url = f"{gateway_url}/{auth_response['user_ns']}/{auth_response['job_id']}/upload"
-        headers = {"Authorization": f"Bearer {auth_response['token']}"}
+        gateway_url = auth["gateway_url"].rstrip("/")
+        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
         with open(local_file_path, "rb") as f:
@@ -574,11 +639,11 @@ class AsyncSandboxClient:
             local_file_path: Path where to save the downloaded file locally
         """
         # Get auth for direct gateway access
-        auth_response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+        auth = await self._get_auth(sandbox_id)
 
-        gateway_url = auth_response["gateway_url"].rstrip("/")
-        url = f"{gateway_url}/{auth_response['user_ns']}/{auth_response['job_id']}/download"
-        headers = {"Authorization": f"Bearer {auth_response['token']}"}
+        gateway_url = auth["gateway_url"].rstrip("/")
+        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/download"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
         try:

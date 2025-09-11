@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -160,13 +160,13 @@ class BulkDeleteSandboxResponse(BaseModel):
     message: str
 
 
-class SandboxClient:
-    """Client for sandbox API operations"""
+class SandboxAuthCache:
+    """Shared auth cache management for sandbox clients"""
 
-    def __init__(self, api_client: APIClient):
-        self.client = api_client
-        self._cache_file = self.client.config.config_dir / "sandbox_auth_cache.json"
+    def __init__(self, cache_file_path: Any, client: Any) -> None:
+        self._cache_file = cache_file_path
         self._auth_cache = self._load_cache()
+        self.client = client
 
     def _load_cache(self) -> Dict[str, Any]:
         """Load auth cache from file and clean expired entries"""
@@ -174,19 +174,19 @@ class SandboxClient:
             if self._cache_file.exists():
                 with open(self._cache_file, "r") as f:
                     cache = json.load(f)
-                # Clean expired entries
                 cleaned_cache = {}
                 for sandbox_id, auth_info in cache.items():
                     try:
-                        expires_at = datetime.fromisoformat(
-                            auth_info["expires_at"].replace("Z", "+00:00")
-                        )
-                        if datetime.now(expires_at.tzinfo) < expires_at:
+                        expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
+                        expires_at = datetime.fromisoformat(expires_at_str)
+                        if expires_at.tzinfo is None:
+                            expires_at = expires_at.replace(tzinfo=timezone.utc)
+                        now = datetime.now(timezone.utc)
+                        if now < expires_at:
                             cleaned_cache[sandbox_id] = auth_info
                     except Exception:
-                        pass  # Skip invalid entries
+                        pass
 
-                # Save cleaned cache if it changed
                 if len(cleaned_cache) != len(cache):
                     self._auth_cache = cleaned_cache
                     self._save_cache()
@@ -205,7 +205,48 @@ class SandboxClient:
         except Exception:
             pass
 
-    def clear_auth_cache(self) -> None:
+    def _check_cached_auth(self, sandbox_id: str) -> Optional[Dict[str, Any]]:
+        """Check if cached auth info exists and is valid"""
+        if sandbox_id in self._auth_cache:
+            auth_info = self._auth_cache[sandbox_id]
+            expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
+            expires_at = datetime.fromisoformat(expires_at_str)
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) < expires_at:
+                return dict(auth_info)
+            else:
+                del self._auth_cache[sandbox_id]
+                self._save_cache()
+        return None
+
+    def get_or_refresh(self, sandbox_id: str) -> Dict[str, Any]:
+        """Get cached auth info or fetch new token if expired/missing"""
+        cached_auth = self._check_cached_auth(sandbox_id)
+        if cached_auth:
+            return cached_auth
+
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+        self.set(sandbox_id, response)
+        self._save_cache()
+        return dict(response)
+
+    async def get_or_refresh_async(self, sandbox_id: str) -> Dict[str, Any]:
+        """Get cached auth info or fetch new token if expired/missing (async)"""
+        cached_auth = self._check_cached_auth(sandbox_id)
+        if cached_auth:
+            return cached_auth
+        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+        self.set(sandbox_id, response)
+        self._save_cache()
+        return dict(response)
+
+    def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
+        """Cache auth info"""
+        self._auth_cache[sandbox_id] = auth_info
+        self._save_cache()
+
+    def clear(self) -> None:
         """Clear all cached auth tokens"""
         self._auth_cache = {}
         try:
@@ -214,22 +255,19 @@ class SandboxClient:
         except Exception:
             pass
 
-    def _get_auth(self, sandbox_id: str) -> Dict[str, Any]:
-        """Get or refresh JWT token for sandbox"""
-        if sandbox_id not in self._auth_cache:
-            response = self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
-            self._auth_cache[sandbox_id] = response
-            self._save_cache()
 
-        auth_info = self._auth_cache[sandbox_id]
-        expires_at = datetime.fromisoformat(auth_info["expires_at"].replace("Z", "+00:00"))
-        if datetime.now(expires_at.tzinfo) >= expires_at:
-            # Refresh token
-            del self._auth_cache[sandbox_id]
-            self._save_cache()
-            return self._get_auth(sandbox_id)
+class SandboxClient:
+    """Client for sandbox API operations"""
 
-        return auth_info  # type: ignore[no-any-return]
+    def __init__(self, api_client: APIClient):
+        self.client = api_client
+        self._auth_cache = SandboxAuthCache(
+            self.client.config.config_dir / "sandbox_auth_cache.json", self.client
+        )
+
+    def clear_auth_cache(self) -> None:
+        """Clear all cached auth tokens"""
+        self._auth_cache.clear()
 
     def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
@@ -304,8 +342,7 @@ class SandboxClient:
         timeout: Optional[int] = None,
     ) -> CommandResponse:
         """Execute command directly via gateway"""
-        auth = self._get_auth(sandbox_id)
-
+        auth = self._auth_cache.get_or_refresh(sandbox_id)
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
         headers = {"Authorization": f"Bearer {auth['token']}"}
@@ -348,7 +385,7 @@ class SandboxClient:
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
-        auth = self._get_auth(sandbox_id)
+        auth = self._auth_cache.get_or_refresh(sandbox_id)
 
         url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
         headers = {"Authorization": f"Bearer {auth['token']}"}
@@ -370,7 +407,7 @@ class SandboxClient:
 
     def download_file(self, sandbox_id: str, file_path: str, local_file_path: str) -> None:
         """Download file directly via gateway"""
-        auth = self._get_auth(sandbox_id)
+        auth = self._auth_cache.get_or_refresh(sandbox_id)
 
         url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/download"
         headers = {"Authorization": f"Bearer {auth['token']}"}
@@ -399,71 +436,13 @@ class AsyncSandboxClient:
 
     def __init__(self, api_key: Optional[str] = None):
         self.client = AsyncAPIClient(api_key=api_key)
-        self._cache_file = self.client.config.config_dir / "sandbox_auth_cache.json"
-        self._auth_cache = self._load_cache()
-
-    def _load_cache(self) -> Dict[str, Any]:
-        """Load auth cache from file and clean expired entries"""
-        try:
-            if self._cache_file.exists():
-                with open(self._cache_file, "r") as f:
-                    cache = json.load(f)
-                # Clean expired entries
-                cleaned_cache = {}
-                for sandbox_id, auth_info in cache.items():
-                    try:
-                        expires_at = datetime.fromisoformat(
-                            auth_info["expires_at"].replace("Z", "+00:00")
-                        )
-                        if datetime.now(expires_at.tzinfo) < expires_at:
-                            cleaned_cache[sandbox_id] = auth_info
-                    except Exception:
-                        pass  # Skip invalid entries
-
-                # Save cleaned cache if it changed
-                if len(cleaned_cache) != len(cache):
-                    self._auth_cache = cleaned_cache
-                    self._save_cache()
-
-                return cleaned_cache
-        except Exception:
-            pass
-        return {}
-
-    def _save_cache(self) -> None:
-        """Save auth cache to file"""
-        try:
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._cache_file, "w") as f:
-                json.dump(self._auth_cache, f)
-        except Exception:
-            pass
+        self._auth_cache = SandboxAuthCache(
+            self.client.config.config_dir / "sandbox_auth_cache.json", self.client
+        )
 
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
-        self._auth_cache = {}
-        try:
-            if self._cache_file.exists():
-                self._cache_file.unlink()
-        except Exception:
-            pass
-
-    async def _get_auth(self, sandbox_id: str) -> Dict[str, Any]:
-        """Get or refresh JWT token for sandbox (async)"""
-        if sandbox_id not in self._auth_cache:
-            response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
-            self._auth_cache[sandbox_id] = response
-            self._save_cache()
-
-        auth_info = self._auth_cache[sandbox_id]
-        expires_at = datetime.fromisoformat(auth_info["expires_at"].replace("Z", "+00:00"))
-        if datetime.now(expires_at.tzinfo) >= expires_at:
-            # Refresh token
-            del self._auth_cache[sandbox_id]
-            self._save_cache()
-            return await self._get_auth(sandbox_id)
-
-        return auth_info  # type: ignore[no-any-return]
+        self._auth_cache.clear()
 
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
@@ -550,7 +529,7 @@ class AsyncSandboxClient:
             CommandTimeoutError: If the command execution times out
         """
         # Get auth for direct gateway access
-        auth = await self._get_auth(sandbox_id)
+        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
 
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
@@ -607,7 +586,7 @@ class AsyncSandboxClient:
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
         # Get auth for direct gateway access
-        auth = await self._get_auth(sandbox_id)
+        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
 
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
@@ -639,7 +618,7 @@ class AsyncSandboxClient:
             local_file_path: Path where to save the downloaded file locally
         """
         # Get auth for direct gateway access
-        auth = await self._get_auth(sandbox_id)
+        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
 
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/download"

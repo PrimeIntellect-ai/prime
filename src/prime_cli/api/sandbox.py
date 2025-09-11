@@ -175,14 +175,13 @@ class SandboxClient:
                 with open(self._cache_file, "r") as f:
                     cache = json.load(f)
                 # Clean expired entries
-                now = datetime.now()
                 cleaned_cache = {}
                 for sandbox_id, auth_info in cache.items():
                     try:
                         expires_at = datetime.fromisoformat(
                             auth_info["expires_at"].replace("Z", "+00:00")
                         )
-                        if now < expires_at:
+                        if datetime.now(expires_at.tzinfo) < expires_at:
                             cleaned_cache[sandbox_id] = auth_info
                     except Exception:
                         pass  # Skip invalid entries

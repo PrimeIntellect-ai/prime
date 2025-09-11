@@ -157,8 +157,8 @@ async def main() -> None:
         rate_per_sec = total_successful / duration
         rate_per_min = rate_per_sec * 60
         print(f"  Rate: {rate_per_sec:.1f} req/s ({rate_per_min:.0f} req/min)")
-        print(f"  Avg latency: {avg_exec_time*1000:.1f}ms")
-        print(f"  Success rate: {total_successful/total_commands*100:.1f}%")
+        print(f"  Avg latency: {avg_exec_time * 1000:.1f}ms")
+        print(f"  Success rate: {total_successful / total_commands * 100:.1f}%")
 
         # Cleanup
         print("\nCleaning up...")

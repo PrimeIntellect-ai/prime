@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 
 class ConfigModel(BaseModel):
     api_key: str = ""
-    team_id: str = ""
+    team_id: str | None = None
     base_url: str = "https://api.primeintellect.ai"
     frontend_url: str = "https://app.primeintellect.ai"
     ssh_key_path: str = str(Path.home() / ".ssh" / "id_rsa")

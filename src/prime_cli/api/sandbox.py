@@ -1,13 +1,14 @@
+import json
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from prime_cli.api.client import APIClient, APIError, AsyncAPIClient, TimeoutError
+from prime_cli.api.client import APIClient, APIError, AsyncAPIClient
 
 
 class SandboxStatus(str, Enum):
@@ -98,7 +99,7 @@ class CreateSandboxRequest(BaseModel):
     start_command: Optional[str] = None
     cpu_cores: int = 1
     memory_gb: int = 2
-    disk_size_gb: int = 10
+    disk_size_gb: int = 5
     gpu_count: int = 0
     timeout_minutes: int = 60
     environment_vars: Optional[Dict[str, str]] = None
@@ -159,11 +160,138 @@ class BulkDeleteSandboxResponse(BaseModel):
     message: str
 
 
+class SandboxAuthCache:
+    """Shared auth cache management for sandbox clients"""
+
+    def __init__(self, cache_file_path: Any, client: Any) -> None:
+        self._cache_file = cache_file_path
+        self._auth_cache = self._load_cache()
+        self.client = client
+
+    def _load_cache(self) -> Dict[str, Any]:
+        """Load auth cache from file and clean expired entries"""
+        try:
+            if self._cache_file.exists():
+                with open(self._cache_file, "r") as f:
+                    cache = json.load(f)
+                cleaned_cache = {}
+                for sandbox_id, auth_info in cache.items():
+                    try:
+                        expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
+                        expires_at = datetime.fromisoformat(expires_at_str)
+                        if expires_at.tzinfo is None:
+                            expires_at = expires_at.replace(tzinfo=timezone.utc)
+                        now = datetime.now(timezone.utc)
+                        if now < expires_at:
+                            cleaned_cache[sandbox_id] = auth_info
+                    except Exception:
+                        pass
+
+                if len(cleaned_cache) != len(cache):
+                    self._auth_cache = cleaned_cache
+                    self._save_cache()
+
+                return cleaned_cache
+        except Exception:
+            pass
+        return {}
+
+    def _save_cache(self) -> None:
+        """Save auth cache to file"""
+        try:
+            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._cache_file, "w") as f:
+                json.dump(self._auth_cache, f)
+        except Exception:
+            pass
+
+    def _check_cached_auth(self, sandbox_id: str) -> Optional[Dict[str, Any]]:
+        """Check if cached auth info exists and is valid"""
+        if sandbox_id in self._auth_cache:
+            auth_info = self._auth_cache[sandbox_id]
+            expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
+            expires_at = datetime.fromisoformat(expires_at_str)
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) < expires_at:
+                return dict(auth_info)
+            else:
+                del self._auth_cache[sandbox_id]
+                self._save_cache()
+        return None
+
+    def get_or_refresh(self, sandbox_id: str) -> Dict[str, Any]:
+        """Get cached auth info or fetch new token if expired/missing"""
+        cached_auth = self._check_cached_auth(sandbox_id)
+        if cached_auth:
+            return cached_auth
+
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+        self.set(sandbox_id, response)
+        self._save_cache()
+        return dict(response)
+
+    async def get_or_refresh_async(self, sandbox_id: str) -> Dict[str, Any]:
+        """Get cached auth info or fetch new token if expired/missing (async)"""
+        cached_auth = self._check_cached_auth(sandbox_id)
+        if cached_auth:
+            return cached_auth
+        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+        self.set(sandbox_id, response)
+        self._save_cache()
+        return dict(response)
+
+    def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
+        """Cache auth info"""
+        self._auth_cache[sandbox_id] = auth_info
+        self._save_cache()
+
+    def clear(self) -> None:
+        """Clear all cached auth tokens"""
+        self._auth_cache = {}
+        try:
+            if self._cache_file.exists():
+                self._cache_file.unlink()
+        except Exception:
+            pass
+
+
+def _check_sandbox_statuses(
+    sandboxes: List[Sandbox], target_ids: set
+) -> tuple[int, List[tuple], Dict[str, str]]:
+    """Helper function to check sandbox statuses
+
+    Returns:
+        tuple of (running_count, failed_sandboxes, final_statuses)
+    """
+    running_count = 0
+    failed_sandboxes = []
+    final_statuses = {}
+
+    for sandbox in sandboxes:
+        if sandbox.id in target_ids:
+            if sandbox.status == "RUNNING":
+                running_count += 1
+                final_statuses[sandbox.id] = sandbox.status
+            elif sandbox.status in ["ERROR", "TERMINATED"]:
+                failed_sandboxes.append((sandbox.id, sandbox.status))
+                final_statuses[sandbox.id] = sandbox.status
+
+    return running_count, failed_sandboxes, final_statuses
+
+
 class SandboxClient:
     """Client for sandbox API operations"""
 
     def __init__(self, api_client: APIClient):
         self.client = api_client
+        self._auth_cache = SandboxAuthCache(
+            self.client.config.config_dir / "sandbox_auth_cache.json", self.client
+        )
+
+    def clear_auth_cache(self) -> None:
+        """Clear all cached auth tokens"""
+        self._auth_cache.clear()
 
     def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
@@ -219,7 +347,7 @@ class SandboxClient:
         return BulkDeleteSandboxResponse(**response)
 
     def get_logs(self, sandbox_id: str) -> str:
-        """Get sandbox logs"""
+        """Get sandbox logs via backend"""
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/logs")
         logs_response = SandboxLogsResponse(**response)
         return logs_response.logs
@@ -237,29 +365,29 @@ class SandboxClient:
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
     ) -> CommandResponse:
-        """Execute a command in a sandbox
+        """Execute command directly via gateway"""
+        auth = self._auth_cache.get_or_refresh(sandbox_id)
+        gateway_url = auth["gateway_url"].rstrip("/")
+        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        payload = {
+            "command": command,
+            "working_dir": working_dir,
+            "env": env or {},
+            "sandbox_id": sandbox_id,
+        }
 
-        Args:
-            sandbox_id: ID of the sandbox to execute the command in
-            command: Command to execute
-            working_dir: Working directory for the command
-            env: Environment variables for the command
-            timeout: Timeout in seconds for the command execution
-
-        Raises:
-            CommandTimeoutError: If the command execution times out
-        """
-        request = CommandRequest(command=command, working_dir=working_dir, env=env)
         try:
-            response = self.client.request(
-                "POST",
-                f"/sandbox/{sandbox_id}/command",
-                json=request.model_dump(by_alias=False, exclude_none=True),
-                timeout=timeout,
-            )
-            return CommandResponse(**response)
-        except TimeoutError:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                return CommandResponse(**response.json())
+        except httpx.TimeoutException:
             raise CommandTimeoutError(sandbox_id, command, timeout or 0)
+        except httpx.HTTPStatusError as e:
+            raise APIError(f"HTTP {e.response.status_code}: {e.response.text}")
+        except Exception as e:
+            raise APIError(f"Request failed: {str(e)}")
 
     def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
         for attempt in range(max_attempts):
@@ -274,40 +402,93 @@ class SandboxClient:
             time.sleep(sleep_time)
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
 
+    def bulk_wait_for_creation(
+        self, sandbox_ids: List[str], max_attempts: int = 60
+    ) -> Dict[str, str]:
+        """Wait for multiple sandboxes to be running using list endpoint to avoid rate limits
+
+        Args:
+            sandbox_ids: List of sandbox IDs to wait for
+            max_attempts: Maximum number of polling attempts
+
+        Returns:
+            Dict mapping sandbox_id to final status
+
+        Raises:
+            RuntimeError: If any sandboxes fail or timeout
+        """
+        sandbox_id_set = set(sandbox_ids)
+        final_statuses = {}
+
+        for attempt in range(max_attempts):
+            # Get all sandboxes with pagination
+            total_running = 0
+            all_failed = []
+            page = 1
+
+            while True:
+                try:
+                    list_response = self.list(per_page=100, page=page)
+                except Exception as e:
+                    if "429" in str(e) or "Too Many Requests" in str(e):
+                        # Rate limited, wait with exponential backoff
+                        wait_time = min(2**attempt, 60)  # Cap at 60 seconds
+                        time.sleep(wait_time)
+                        continue
+                    raise
+
+                # Check status of our sandboxes on this page
+                running_count, failed_sandboxes, page_statuses = _check_sandbox_statuses(
+                    list_response.sandboxes, sandbox_id_set
+                )
+
+                total_running += running_count
+                all_failed.extend(failed_sandboxes)
+                final_statuses.update(page_statuses)
+
+                # If we found all our sandboxes or no more pages, break
+                if len(final_statuses) == len(sandbox_ids) or not list_response.has_next:
+                    break
+
+                page += 1
+
+            if all_failed:
+                raise RuntimeError(f"Sandboxes failed: {all_failed}")
+
+            if total_running == len(sandbox_ids):
+                # All sandboxes are running
+                return final_statuses
+
+            # Aggressive polling for first 5 attempts, then back off
+            sleep_time = 1 if attempt < 5 else 2
+            time.sleep(sleep_time)
+
+        # Timeout - mark remaining as timeout
+        for sandbox_id in sandbox_id_set:
+            if sandbox_id not in final_statuses:
+                final_statuses[sandbox_id] = "TIMEOUT"
+
+        raise RuntimeError(f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}")
+
     def upload_file(
         self, sandbox_id: str, file_path: str, local_file_path: str
     ) -> FileUploadResponse:
-        """Upload a file to a sandbox
-
-        Args:
-            sandbox_id: ID of the sandbox to upload to
-            file_path: Path where the file should be stored in the sandbox
-            local_file_path: Path to the local file to upload
-
-        Returns:
-            FileUploadResponse with upload details
-        """
+        """Upload file directly via gateway"""
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
-        filename = os.path.basename(local_file_path)
+        auth = self._auth_cache.get_or_refresh(sandbox_id)
 
-        endpoint = f"/sandbox/{sandbox_id}/upload"
-        url = f"{self.client.base_url}/api/v1{endpoint}"
-        params = {"file_path": file_path}
+        url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
 
         with open(local_file_path, "rb") as f:
-            files = {"file": (filename, f, "application/octet-stream")}
+            files = {"file": (os.path.basename(local_file_path), f)}
+            params = {"path": file_path, "sandbox_id": sandbox_id}
 
             try:
-                headers = {}
-                if self.client.api_key:
-                    headers["Authorization"] = f"Bearer {self.client.api_key}"
-
-                with httpx.Client(
-                    headers=headers, follow_redirects=True, timeout=300.0
-                ) as upload_client:
-                    response = upload_client.post(url, files=files, params=params)
+                with httpx.Client(timeout=300.0) as client:
+                    response = client.post(url, files=files, params=params, headers=headers)
                     response.raise_for_status()
                     return FileUploadResponse(**response.json())
             except httpx.HTTPStatusError as e:
@@ -317,26 +498,16 @@ class SandboxClient:
                 raise APIError(f"Upload failed: {str(e)}")
 
     def download_file(self, sandbox_id: str, file_path: str, local_file_path: str) -> None:
-        """Download a file from a sandbox
+        """Download file directly via gateway"""
+        auth = self._auth_cache.get_or_refresh(sandbox_id)
 
-        Args:
-            sandbox_id: ID of the sandbox to download from
-            file_path: Path to the file in the sandbox
-            local_file_path: Path where to save the downloaded file locally
-        """
-        endpoint = f"/sandbox/{sandbox_id}/download"
-        url = f"{self.client.base_url}/api/v1{endpoint}"
-        params = {"file_path": file_path}
+        url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/download"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        params = {"path": file_path, "sandbox_id": sandbox_id}
 
         try:
-            headers = {}
-            if self.client.api_key:
-                headers["Authorization"] = f"Bearer {self.client.api_key}"
-
-            with httpx.Client(
-                headers=headers, follow_redirects=True, timeout=300.0
-            ) as download_client:
-                response = download_client.get(url, params=params)
+            with httpx.Client(timeout=300.0) as client:
+                response = client.get(url, params=params, headers=headers)
                 response.raise_for_status()
 
                 dir_path = os.path.dirname(local_file_path)
@@ -357,6 +528,13 @@ class AsyncSandboxClient:
 
     def __init__(self, api_key: Optional[str] = None):
         self.client = AsyncAPIClient(api_key=api_key)
+        self._auth_cache = SandboxAuthCache(
+            self.client.config.config_dir / "sandbox_auth_cache.json", self.client
+        )
+
+    def clear_auth_cache(self) -> None:
+        """Clear all cached auth tokens"""
+        self._auth_cache.clear()
 
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
@@ -430,7 +608,7 @@ class AsyncSandboxClient:
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
     ) -> CommandResponse:
-        """Execute a command in a sandbox
+        """Execute command directly via gateway (async)
 
         Args:
             sandbox_id: ID of the sandbox to execute the command in
@@ -442,17 +620,30 @@ class AsyncSandboxClient:
         Raises:
             CommandTimeoutError: If the command execution times out
         """
-        request = CommandRequest(command=command, working_dir=working_dir, env=env)
+        # Get auth for direct gateway access
+        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
+
+        gateway_url = auth["gateway_url"].rstrip("/")
+        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        payload = {
+            "command": command,
+            "working_dir": working_dir,
+            "env": env or {},
+            "sandbox_id": sandbox_id,
+        }
+
         try:
-            response = await self.client.request(
-                "POST",
-                f"/sandbox/{sandbox_id}/command",
-                json=request.model_dump(by_alias=False, exclude_none=True),
-                timeout=timeout,
-            )
-            return CommandResponse(**response)
-        except TimeoutError:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                return CommandResponse(**response.json())
+        except httpx.TimeoutException:
             raise CommandTimeoutError(sandbox_id, command, timeout or 0)
+        except httpx.HTTPStatusError as e:
+            raise APIError(f"HTTP {e.response.status_code}: {e.response.text}")
+        except Exception as e:
+            raise APIError(f"Request failed: {str(e)}")
 
     async def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
         """Wait for sandbox to be running (async version)"""
@@ -470,10 +661,80 @@ class AsyncSandboxClient:
             await asyncio.sleep(sleep_time)
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
 
+    async def bulk_wait_for_creation(
+        self, sandbox_ids: List[str], max_attempts: int = 60
+    ) -> Dict[str, str]:
+        """Wait for multiple sandboxes to be running using list endpoint to avoid rate limits
+
+        Args:
+            sandbox_ids: List of sandbox IDs to wait for
+            max_attempts: Maximum number of polling attempts
+
+        Returns:
+            Dict mapping sandbox_id to final status
+
+        Raises:
+            RuntimeError: If any sandboxes fail or timeout
+        """
+        import asyncio
+
+        sandbox_id_set = set(sandbox_ids)
+        final_statuses = {}
+
+        for attempt in range(max_attempts):
+            # Get all sandboxes with pagination
+            total_running = 0
+            all_failed = []
+            page = 1
+
+            while True:
+                try:
+                    list_response = await self.list(per_page=100, page=page)
+                except Exception as e:
+                    if "429" in str(e) or "Too Many Requests" in str(e):
+                        # Rate limited, wait with exponential backoff
+                        wait_time = min(2**attempt, 60)  # Cap at 60 seconds
+                        await asyncio.sleep(wait_time)
+                        continue
+                    raise
+
+                # Check status of our sandboxes on this page
+                running_count, failed_sandboxes, page_statuses = _check_sandbox_statuses(
+                    list_response.sandboxes, sandbox_id_set
+                )
+
+                total_running += running_count
+                all_failed.extend(failed_sandboxes)
+                final_statuses.update(page_statuses)
+
+                # If we found all our sandboxes or no more pages, break
+                if len(final_statuses) == len(sandbox_ids) or not list_response.has_next:
+                    break
+
+                page += 1
+
+            if all_failed:
+                raise RuntimeError(f"Sandboxes failed: {all_failed}")
+
+            if total_running == len(sandbox_ids):
+                # All sandboxes are running
+                return final_statuses
+
+            # Aggressive polling for first 5 attempts, then back off
+            sleep_time = 1 if attempt < 5 else 2
+            await asyncio.sleep(sleep_time)
+
+        # Timeout - mark remaining as timeout
+        for sandbox_id in sandbox_id_set:
+            if sandbox_id not in final_statuses:
+                final_statuses[sandbox_id] = "TIMEOUT"
+
+        raise RuntimeError(f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}")
+
     async def upload_file(
         self, sandbox_id: str, file_path: str, local_file_path: str
     ) -> FileUploadResponse:
-        """Upload a file to a sandbox (async)
+        """Upload a file to a sandbox via gateway (async)
 
         Args:
             sandbox_id: ID of the sandbox to upload to
@@ -486,24 +747,22 @@ class AsyncSandboxClient:
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
-        filename = os.path.basename(local_file_path)
+        # Get auth for direct gateway access
+        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
 
-        endpoint = f"/sandbox/{sandbox_id}/upload"
-        url = f"{self.client.base_url}/api/v1{endpoint}"
-        params = {"file_path": file_path}
+        gateway_url = auth["gateway_url"].rstrip("/")
+        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        params = {"path": file_path, "sandbox_id": sandbox_id}
 
         with open(local_file_path, "rb") as f:
-            files = {"file": (filename, f, "application/octet-stream")}
+            files = {"file": (os.path.basename(local_file_path), f)}
 
             try:
-                headers = {}
-                if self.client.api_key:
-                    headers["Authorization"] = f"Bearer {self.client.api_key}"
-
-                async with httpx.AsyncClient(
-                    headers=headers, follow_redirects=True, timeout=300.0
-                ) as upload_client:
-                    response = await upload_client.post(url, files=files, params=params)
+                async with httpx.AsyncClient(timeout=300.0) as upload_client:
+                    response = await upload_client.post(
+                        url, files=files, params=params, headers=headers
+                    )
                     response.raise_for_status()
                     return FileUploadResponse(**response.json())
             except httpx.HTTPStatusError as e:
@@ -513,26 +772,24 @@ class AsyncSandboxClient:
                 raise APIError(f"Upload failed: {str(e)}")
 
     async def download_file(self, sandbox_id: str, file_path: str, local_file_path: str) -> None:
-        """Download a file from a sandbox (async)
+        """Download a file from a sandbox via gateway (async)
 
         Args:
             sandbox_id: ID of the sandbox to download from
             file_path: Path to the file in the sandbox
             local_file_path: Path where to save the downloaded file locally
         """
-        endpoint = f"/sandbox/{sandbox_id}/download"
-        url = f"{self.client.base_url}/api/v1{endpoint}"
-        params = {"file_path": file_path}
+        # Get auth for direct gateway access
+        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
 
-        headers = {}
-        if self.client.api_key:
-            headers["Authorization"] = f"Bearer {self.client.api_key}"
+        gateway_url = auth["gateway_url"].rstrip("/")
+        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/download"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        params = {"path": file_path, "sandbox_id": sandbox_id}
 
         try:
-            async with httpx.AsyncClient(
-                headers=headers, follow_redirects=True, timeout=300.0
-            ) as download_client:
-                response = await download_client.get(url, params=params)
+            async with httpx.AsyncClient(timeout=300.0) as download_client:
+                response = await download_client.get(url, params=params, headers=headers)
                 response.raise_for_status()
                 content = response.content
 

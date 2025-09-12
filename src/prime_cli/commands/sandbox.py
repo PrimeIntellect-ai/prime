@@ -28,6 +28,8 @@ from ..utils.display import SANDBOX_STATUS_COLORS
 
 app = typer.Typer(help="Manage code sandboxes")
 console = Console()
+
+
 config = Config()
 
 
@@ -638,3 +640,19 @@ def download_file(
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         raise typer.Exit(1)
+
+
+@app.command("reset-cache")
+def reset_cache(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Reset sandbox authentication cache"""
+    if yes or typer.confirm("Are you sure you want to clear the sandbox auth cache?"):
+        try:
+            client = APIClient()
+            sandbox_client = SandboxClient(client)
+            sandbox_client.clear_auth_cache()
+            console.print("[green]Sandbox authentication cache cleared successfully![/green]")
+        except Exception as e:
+            console.print(f"[red]Error clearing cache: {e}[/red]")
+            raise typer.Exit(1)

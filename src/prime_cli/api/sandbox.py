@@ -99,7 +99,7 @@ class CreateSandboxRequest(BaseModel):
     start_command: Optional[str] = None
     cpu_cores: int = 1
     memory_gb: int = 2
-    disk_size_gb: int = 10
+    disk_size_gb: int = 5
     gpu_count: int = 0
     timeout_minutes: int = 60
     environment_vars: Optional[Dict[str, str]] = None
@@ -256,6 +256,30 @@ class SandboxAuthCache:
             pass
 
 
+def _check_sandbox_statuses(
+    sandboxes: List[Sandbox], target_ids: set
+) -> tuple[int, List[tuple], Dict[str, str]]:
+    """Helper function to check sandbox statuses
+
+    Returns:
+        tuple of (running_count, failed_sandboxes, final_statuses)
+    """
+    running_count = 0
+    failed_sandboxes = []
+    final_statuses = {}
+
+    for sandbox in sandboxes:
+        if sandbox.id in target_ids:
+            if sandbox.status == "RUNNING":
+                running_count += 1
+                final_statuses[sandbox.id] = sandbox.status
+            elif sandbox.status in ["ERROR", "TERMINATED"]:
+                failed_sandboxes.append((sandbox.id, sandbox.status))
+                final_statuses[sandbox.id] = sandbox.status
+
+    return running_count, failed_sandboxes, final_statuses
+
+
 class SandboxClient:
     """Client for sandbox API operations"""
 
@@ -377,6 +401,74 @@ class SandboxClient:
             sleep_time = 1 if attempt < 5 else 2
             time.sleep(sleep_time)
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
+
+    def bulk_wait_for_creation(
+        self, sandbox_ids: List[str], max_attempts: int = 60
+    ) -> Dict[str, str]:
+        """Wait for multiple sandboxes to be running using list endpoint to avoid rate limits
+
+        Args:
+            sandbox_ids: List of sandbox IDs to wait for
+            max_attempts: Maximum number of polling attempts
+
+        Returns:
+            Dict mapping sandbox_id to final status
+
+        Raises:
+            RuntimeError: If any sandboxes fail or timeout
+        """
+        sandbox_id_set = set(sandbox_ids)
+        final_statuses = {}
+
+        for attempt in range(max_attempts):
+            # Get all sandboxes with pagination
+            total_running = 0
+            all_failed = []
+            page = 1
+
+            while True:
+                try:
+                    list_response = self.list(per_page=100, page=page)
+                except Exception as e:
+                    if "429" in str(e) or "Too Many Requests" in str(e):
+                        # Rate limited, wait with exponential backoff
+                        wait_time = min(2**attempt, 60)  # Cap at 60 seconds
+                        time.sleep(wait_time)
+                        continue
+                    raise
+
+                # Check status of our sandboxes on this page
+                running_count, failed_sandboxes, page_statuses = _check_sandbox_statuses(
+                    list_response.sandboxes, sandbox_id_set
+                )
+
+                total_running += running_count
+                all_failed.extend(failed_sandboxes)
+                final_statuses.update(page_statuses)
+
+                # If we found all our sandboxes or no more pages, break
+                if len(final_statuses) == len(sandbox_ids) or not list_response.has_next:
+                    break
+
+                page += 1
+
+            if all_failed:
+                raise RuntimeError(f"Sandboxes failed: {all_failed}")
+
+            if total_running == len(sandbox_ids):
+                # All sandboxes are running
+                return final_statuses
+
+            # Aggressive polling for first 5 attempts, then back off
+            sleep_time = 1 if attempt < 5 else 2
+            time.sleep(sleep_time)
+
+        # Timeout - mark remaining as timeout
+        for sandbox_id in sandbox_id_set:
+            if sandbox_id not in final_statuses:
+                final_statuses[sandbox_id] = "TIMEOUT"
+
+        raise RuntimeError(f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}")
 
     def upload_file(
         self, sandbox_id: str, file_path: str, local_file_path: str
@@ -568,6 +660,76 @@ class AsyncSandboxClient:
             sleep_time = 1 if attempt < 5 else 2
             await asyncio.sleep(sleep_time)
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
+
+    async def bulk_wait_for_creation(
+        self, sandbox_ids: List[str], max_attempts: int = 60
+    ) -> Dict[str, str]:
+        """Wait for multiple sandboxes to be running using list endpoint to avoid rate limits
+
+        Args:
+            sandbox_ids: List of sandbox IDs to wait for
+            max_attempts: Maximum number of polling attempts
+
+        Returns:
+            Dict mapping sandbox_id to final status
+
+        Raises:
+            RuntimeError: If any sandboxes fail or timeout
+        """
+        import asyncio
+
+        sandbox_id_set = set(sandbox_ids)
+        final_statuses = {}
+
+        for attempt in range(max_attempts):
+            # Get all sandboxes with pagination
+            total_running = 0
+            all_failed = []
+            page = 1
+
+            while True:
+                try:
+                    list_response = await self.list(per_page=100, page=page)
+                except Exception as e:
+                    if "429" in str(e) or "Too Many Requests" in str(e):
+                        # Rate limited, wait with exponential backoff
+                        wait_time = min(2**attempt, 60)  # Cap at 60 seconds
+                        await asyncio.sleep(wait_time)
+                        continue
+                    raise
+
+                # Check status of our sandboxes on this page
+                running_count, failed_sandboxes, page_statuses = _check_sandbox_statuses(
+                    list_response.sandboxes, sandbox_id_set
+                )
+
+                total_running += running_count
+                all_failed.extend(failed_sandboxes)
+                final_statuses.update(page_statuses)
+
+                # If we found all our sandboxes or no more pages, break
+                if len(final_statuses) == len(sandbox_ids) or not list_response.has_next:
+                    break
+
+                page += 1
+
+            if all_failed:
+                raise RuntimeError(f"Sandboxes failed: {all_failed}")
+
+            if total_running == len(sandbox_ids):
+                # All sandboxes are running
+                return final_statuses
+
+            # Aggressive polling for first 5 attempts, then back off
+            sleep_time = 1 if attempt < 5 else 2
+            await asyncio.sleep(sleep_time)
+
+        # Timeout - mark remaining as timeout
+        for sandbox_id in sandbox_id_set:
+            if sandbox_id not in final_statuses:
+                final_statuses[sandbox_id] = "TIMEOUT"
+
+        raise RuntimeError(f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}")
 
     async def upload_file(
         self, sandbox_id: str, file_path: str, local_file_path: str

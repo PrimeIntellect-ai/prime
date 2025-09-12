@@ -32,6 +32,8 @@ async def execute_commands(
                 if success:
                     successful += 1
                     execution_times.append(exec_time)
+            elif isinstance(result, Exception):
+                print(f"Error in sandbox {sandbox_id}: {result}")
 
     return successful, execution_times
 
@@ -59,14 +61,15 @@ async def execute_single(
             response.raise_for_status()
             pbar.update(1)
             return True, time.time() - start
-        except Exception:
+        except Exception as e:
+            print(f"Error executing command '{command}' on sandbox {sandbox_id}: {e}")
             pbar.update(1)
             return False, 0
 
 
 async def main() -> None:
     async with AsyncSandboxClient() as client:
-        num_sandboxes = 10
+        num_sandboxes = 50
         commands_per_sandbox = 1000
         total_commands = num_sandboxes * commands_per_sandbox
 
@@ -94,10 +97,10 @@ async def main() -> None:
         sandboxes = await asyncio.gather(*create_tasks)
         print(f"Created {len(sandboxes)} sandboxes\n")
 
-        # Wait for sandboxes
+        # Wait for sandboxes using bulk wait function
         print("Waiting for sandboxes...")
-        wait_tasks = [client.wait_for_creation(s.id) for s in sandboxes]
-        await asyncio.gather(*wait_tasks)
+        sandbox_ids = [s.id for s in sandboxes]
+        await client.bulk_wait_for_creation(sandbox_ids)
         print("Sandboxes ready\n")
 
         # Get auth for all sandboxes

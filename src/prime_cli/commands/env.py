@@ -1132,7 +1132,7 @@ def execute_uninstall_command(cmd: List[str], env_name: str, tool: str) -> None:
         tool: Tool name for display
 
     Raises:
-        typer.Exit: If installation fails
+        typer.Exit: If uninstall fails
     """
 
     console.print(f"\n[cyan]Uninstalling {env_name} with {tool}...[/cyan]")

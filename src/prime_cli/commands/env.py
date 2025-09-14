@@ -1123,6 +1123,114 @@ def install(
         raise typer.Exit(1)
 
 
+def execute_uninstall_command(cmd: List[str], env_name: str, tool: str) -> None:
+    """Execute the uninstall command with proper output handling.
+
+    Args:
+        cmd: Command to execute
+        env_name: Environment name for display
+        tool: Tool name for display
+
+    Raises:
+        typer.Exit: If installation fails
+    """
+
+    console.print(f"\n[cyan]Uninstalling {env_name} with {tool}...[/cyan]")
+    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+        )
+
+        # Stream output line by line
+        while True:
+            output = process.stdout.readline() if process.stdout else ""
+            if output == "" and process.poll() is not None:
+                break
+            if output:
+                console.print(output.rstrip())
+
+        return_code = process.poll()
+        if return_code != 0:
+            console.print(f"[red]Environment uninstall failed with exit code {return_code}[/red]")
+            raise typer.Exit(1)
+
+        console.print(f"\n[green]✓ Successfully uninstalled {env_name}[/green]")
+
+    except FileNotFoundError:
+        console.print(f"[red]Failed to run command. Is {cmd[0]} installed?[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Uninstall failed: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def uninstall(
+    env_name: str = typer.Argument(..., help="Environment name to uninstall"),
+    with_tool: str = typer.Option(
+        "uv",
+        "--with",
+        help="Package manager to use (uv or pip)",
+    ),
+) -> None:
+    """Uninstall a verifiers environment
+
+    Examples:
+        prime env uninstall environment
+        prime env uninstall environment --with pip
+    """
+    try:
+        # Validate package manager
+        if with_tool not in ["uv", "pip"]:
+            console.print(
+                f"[red]Error: Unsupported package manager '{with_tool}'. Use 'uv' or 'pip'.[/red]"
+            )
+            raise typer.Exit(1)
+
+        # Ignore owner if given
+        if "/" in env_name:
+            _, env_name = env_name.split("/", 1)
+
+        normalized_name = normalize_package_name(env_name)
+
+        # Generate uninstall command
+        if with_tool == "uv":
+            cmd_parts = [
+                "uv",
+                "pip",
+                "uninstall",
+                normalized_name,
+            ]
+        else:  # pip
+            cmd_parts = [
+                "pip",
+                "uninstall",
+                normalized_name,
+            ]
+
+        # Check if tool is installed
+        if not shutil.which(cmd_parts[0]):
+            console.print(f"[red]Error: {cmd_parts[0]} is not installed.[/red]")
+            raise typer.Exit(1)
+
+        # Execute installation
+        execute_uninstall_command(cmd_parts, env_name, with_tool)
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Installation cancelled by user[/yellow]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        raise typer.Exit(1)
+
+
 version_app = typer.Typer(help="Manage environment versions")
 app.add_typer(version_app, name="version")
 
@@ -1220,7 +1328,7 @@ def delete_version(
     content_hash: str = typer.Argument(..., help="Content hash of the version to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
 ) -> None:
-    """Delete a specific version of an environment using its content hash"""
+    """Delete a specific environment version from the environments hub using its content hash"""
     try:
         # Validate that we have a proper content hash (basic validation)
         if len(content_hash) < 8:
@@ -1235,8 +1343,8 @@ def delete_version(
         if not force:
             try:
                 confirm_msg = (
-                    f"Are you sure you want to permanently delete version "
-                    f"with content hash '{content_hash}' from '{env_id}'?"
+                    f"Are you sure you want to permanently delete version with content "
+                    f"hash '{content_hash}' from '{env_id}' on the environments hub?"
                 )
                 confirm = typer.confirm(confirm_msg)
                 if not confirm:
@@ -1285,13 +1393,13 @@ def delete(
     env_id: str = typer.Argument(..., help="Environment ID to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
 ) -> None:
-    """Delete an entire environment"""
+    """Delete an entire environment from the environments hub"""
     try:
         if not force:
             try:
                 delete_msg = (
-                    f"Are you sure you want to permanently delete entire "
-                    f"environment '{env_id}' and ALL its versions?"
+                    f"Are you sure you want to permanently delete entire environment "
+                    f"'{env_id}' and ALL its versions from the environments hub?"
                 )
                 confirm = typer.confirm(delete_msg)
                 if not confirm:

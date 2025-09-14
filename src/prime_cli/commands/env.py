@@ -1220,11 +1220,11 @@ def uninstall(
             console.print(f"[red]Error: {cmd_parts[0]} is not installed.[/red]")
             raise typer.Exit(1)
 
-        # Execute installation
+        # Execute uninstall
         execute_uninstall_command(cmd_parts, env_name, with_tool)
 
     except KeyboardInterrupt:
-        console.print("\n[yellow]Installation cancelled by user[/yellow]")
+        console.print("\n[yellow]Uninstall cancelled by user[/yellow]")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")

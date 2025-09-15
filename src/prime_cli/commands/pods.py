@@ -210,22 +210,21 @@ def list(
 
                     console.print(table)
 
-                # Update hash after displaying
+                    if not watch:
+                        console.print(
+                            "\n[blue]Use 'prime pods status <pod-id>' to "
+                            "see detailed information about a specific pod[/blue]"
+                        )
+
+                        # If there are more pods, show a message
+                        if pods_list.total_count > offset + limit:
+                            remaining = pods_list.total_count - (offset + limit)
+                            console.print(
+                                f"\n[yellow]Showing {limit} of {pods_list.total_count} pods. "
+                                f"Use --offset {offset + limit} to see the next "
+                                f"{min(limit, remaining)} pods.[/yellow]"
+                            )
             if not watch:
-                console.print(
-                    "\n[blue]Use 'prime pods status <pod-id>' to "
-                    "see detailed information about a specific pod[/blue]"
-                )
-
-                # If there are more pods, show a message
-                if pods_list.total_count > offset + limit:
-                    remaining = pods_list.total_count - (offset + limit)
-                    console.print(
-                        f"\n[yellow]Showing {limit} of {pods_list.total_count} pods. "
-                        f"Use --offset {offset + limit} to see the next "
-                        f"{min(limit, remaining)} pods.[/yellow]"
-                    )
-
                 break
             else:
                 # Only print the message when we're not repeating due to unchanged data

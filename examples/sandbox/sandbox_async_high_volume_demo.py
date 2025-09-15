@@ -69,8 +69,8 @@ async def execute_single(
 
 async def main() -> None:
     async with AsyncSandboxClient() as client:
-        num_sandboxes = 50
-        commands_per_sandbox = 1000
+        num_sandboxes = 250
+        commands_per_sandbox = 250
         total_commands = num_sandboxes * commands_per_sandbox
 
         print(f"Sandboxes: {num_sandboxes}")

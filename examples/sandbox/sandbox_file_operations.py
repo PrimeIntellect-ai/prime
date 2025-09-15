@@ -11,6 +11,7 @@ Usage:
 import asyncio
 import os
 import tempfile
+from pathlib import Path
 
 from prime_cli.api.sandbox import (
     AsyncSandboxClient,
@@ -41,13 +42,17 @@ async def main() -> None:
         print(f"Sandbox created: {sandbox.id}")
 
         # Wait for sandbox to be running
-        print("⏳ Waiting for sandbox to be running...")
+        print("Waiting for sandbox to be running...")
         await client.wait_for_creation(sandbox.id)
         print("Sandbox is running!")
 
-        # Create a temporary file to upload
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as temp_file:
-            temp_file.write(
+        # Create a temporary directory for our work
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            # Create a temporary file to upload
+            temp_file_path = temp_path / "test_script.py"
+            temp_file_path.write_text(
                 """#!/usr/bin/env python3
 # This is a test Python script uploaded to the sandbox
 
@@ -67,16 +72,14 @@ if __name__ == "__main__":
     print(result)
 """
             )
-            temp_file_path = temp_file.name
 
-        try:
-            print("📤 Uploading file to sandbox...")
+            print("Uploading file to sandbox...")
 
             # Upload the file to the sandbox
             upload_response = await client.upload_file(
                 sandbox_id=sandbox.id,
                 file_path="/sandbox-workspace/test_script.py",
-                local_file_path=temp_file_path,
+                local_file_path=str(temp_file_path),
             )
             print("File uploaded successfully!")
             print(f"   Path: {upload_response.path}")
@@ -84,7 +87,7 @@ if __name__ == "__main__":
             print(f"   Timestamp: {upload_response.timestamp}")
 
             # Make the script executable and run it
-            print("🔧 Making script executable and running it...")
+            print("Making script executable and running it...")
 
             # Execute commands to make it executable and run
             chmod_result = await client.execute_command(
@@ -96,14 +99,14 @@ if __name__ == "__main__":
             run_result = await client.execute_command(
                 sandbox.id, "cd /sandbox-workspace && python test_script.py"
             )
-            print("📋 Script output:")
+            print("Script output:")
             print(f"   stdout: {run_result.stdout}")
             if run_result.stderr:
                 print(f"   stderr: {run_result.stderr}")
             print(f"   exit_code: {run_result.exit_code}")
 
             # Download the file that was created inside the sandbox
-            print("📥 Downloading file created in sandbox...")
+            print("Downloading file created in sandbox...")
 
             with tempfile.NamedTemporaryFile(
                 mode="w+", suffix=".txt", delete=False
@@ -136,15 +139,70 @@ if __name__ == "__main__":
             # List files in the workspace to verify upload
             print("Listing files in sandbox workspace...")
             ls_result = await client.execute_command(sandbox.id, "ls -la /sandbox-workspace/")
-            print("📋 Workspace contents:")
+            print("Workspace contents:")
             print(ls_result.stdout)
 
-        finally:
-            # Clean up temporary file
-            os.unlink(temp_file_path)
+            # Demo folder upload using the new upload_folder method
+            print("\nTesting folder upload with upload_folder method...")
+
+            # Create a test directory
+            test_dir = temp_path / "test_folder"
+            test_dir.mkdir()
+            (test_dir / "file1.txt").write_text("Content of file 1")
+            (test_dir / "file2.txt").write_text("Content of file 2")
+            (test_dir / "subdir").mkdir()
+            (test_dir / "subdir" / "nested.txt").write_text("Nested file content")
+
+            # Upload folder using the new method
+            await client.upload_folder(
+                sandbox_id=sandbox.id,
+                local_folder_path=str(test_dir),
+                remote_path="/sandbox-workspace",
+            )
+
+            # Verify folder upload
+            ls_result = await client.execute_command(
+                sandbox.id, "find /sandbox-workspace/test_folder -type f | sort"
+            )
+            print("Uploaded folder contents:")
+            print(ls_result.stdout)
+
+            # Demo folder download using the new download_folder method
+            print("\nTesting folder download with download_folder method...")
+
+            # Create some content in sandbox
+            await client.execute_command(
+                sandbox.id,
+                """
+                mkdir -p /tmp/download_test/{subdir1,subdir2} &&
+                echo 'File A' > /tmp/download_test/fileA.txt &&
+                echo 'File B' > /tmp/download_test/subdir1/fileB.txt &&
+                echo 'File C' > /tmp/download_test/subdir2/fileC.txt
+                """,
+            )
+
+            # Download folder using the new method
+            download_folder_path = temp_path / "downloaded_folder"
+            await client.download_folder(
+                sandbox_id=sandbox.id,
+                remote_folder_path="/tmp/download_test",
+                local_path=str(download_folder_path),
+            )
+
+            # Verify download
+            print("Downloaded folder structure:")
+            for root, dirs, files in os.walk(download_folder_path):
+                level = root.replace(str(download_folder_path), "").count(os.sep)
+                indent = "  " * level
+                print(f"{indent}{os.path.basename(root)}/")
+                subindent = "  " * (level + 1)
+                for file in files:
+                    file_path = Path(root) / file
+                    content = file_path.read_text().strip()
+                    print(f"{subindent}{file}: {content}")
 
         # Clean up the sandbox
-        print("🧹 Cleaning up sandbox...")
+        print("Cleaning up sandbox...")
         await client.delete(sandbox.id)
         print("Sandbox cleaned up!")
 
@@ -163,7 +221,7 @@ def sync_example() -> None:
     from prime_cli.api.client import APIClient
     from prime_cli.api.sandbox import SandboxClient
 
-    print("\n🔄 Running synchronous example...")
+    print("\nRunning synchronous example...")
 
     # Initialize sync client
     api_client = APIClient()
@@ -207,6 +265,41 @@ def sync_example() -> None:
             cat_result = client.execute_command(sandbox.id, "cat /sandbox-workspace/sync_test.txt")
             print(f"File content in sandbox: {cat_result.stdout}")
 
+            # Demo sync folder operations
+            print("\nTesting sync folder operations...")
+
+            # Create a test folder with some files
+            with tempfile.TemporaryDirectory() as sync_temp_dir:
+                sync_temp_path = Path(sync_temp_dir)
+                sync_folder = sync_temp_path / "sync_folder"
+                sync_folder.mkdir()
+                (sync_folder / "sync_file1.txt").write_text("Sync folder file 1")
+                (sync_folder / "sync_file2.txt").write_text("Sync folder file 2")
+
+                # Upload folder using sync method
+                client.upload_folder(
+                    sandbox_id=sandbox.id, local_folder_path=str(sync_folder), remote_path="/tmp"
+                )
+                print("Sync folder uploaded")
+
+                # Verify upload
+                ls_result = client.execute_command(sandbox.id, "ls -la /tmp/sync_folder/")
+                print(f"Sync folder contents: {ls_result.stdout}")
+
+                # Download folder using sync method
+                download_sync_folder = sync_temp_path / "downloaded_sync"
+                client.download_folder(
+                    sandbox_id=sandbox.id,
+                    remote_folder_path="/tmp/sync_folder",
+                    local_path=str(download_sync_folder),
+                )
+                print("Sync folder downloaded")
+
+                # Verify download
+                if (download_sync_folder / "sync_folder" / "sync_file1.txt").exists():
+                    content = (download_sync_folder / "sync_folder" / "sync_file1.txt").read_text()
+                    print(f"Downloaded sync file content: {content}")
+
         finally:
             os.unlink(temp_file_path)
 
@@ -238,4 +331,4 @@ if __name__ == "__main__":
     # Run sync example
     sync_example()
 
-    print("\n✨ Demo completed!")
+    print("\nDemo completed!")

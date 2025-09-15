@@ -1,8 +1,11 @@
 import json
+import os
 import random
 import string
+import tarfile
+import tempfile
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import typer
 from rich.console import Console
@@ -548,8 +551,6 @@ def upload_file(
     remote_path: str = typer.Argument(..., help="Path where file should be stored in sandbox"),
 ) -> None:
     """Upload a file to a sandbox"""
-    import os
-
     try:
         # Check if local file exists
         if not os.path.exists(local_file):
@@ -597,8 +598,6 @@ def download_file(
     local_file: str = typer.Argument(..., help="Path where file should be saved locally"),
 ) -> None:
     """Download a file from a sandbox"""
-    import os
-
     try:
         # Check if local directory exists
         local_dir = os.path.dirname(local_file)
@@ -636,6 +635,201 @@ def download_file(
         raise typer.Exit(1)
     except FileNotFoundError as e:
         console.print(f"[red]File not found:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        raise typer.Exit(1)
+
+
+@app.command("cp")
+def cp(
+    source: str = typer.Argument(..., help="Source path (local or sandbox:path)"),
+    destination: str = typer.Argument(..., help="Destination path (local or sandbox:path)"),
+    recursive: bool = typer.Option(False, "-r", "--recursive", help="Copy directories recursively"),
+) -> None:
+    """Copy files between local and sandbox environments
+
+    Examples:
+        prime sandbox cp local.txt sandbox_id:/remote/path.txt
+        prime sandbox cp sandbox_id:/remote/file.txt local.txt
+        prime sandbox cp -r local_dir sandbox_id:/remote/dir
+    """
+
+    def parse_path(path: str) -> Tuple[Optional[str], str]:
+        """Parse a path to determine if it's a sandbox path or local path.
+        Returns (sandbox_id, path) where sandbox_id is None for local paths."""
+        if ":" in path and not (len(path) > 1 and path[1] == ":"):  # Not Windows drive
+            parts = path.split(":", 1)
+            if len(parts) == 2:
+                return parts[0], parts[1]
+        return None, path
+
+    try:
+        src_sandbox_id, src_path = parse_path(source)
+        dst_sandbox_id, dst_path = parse_path(destination)
+
+        # Validate that exactly one side is a sandbox path
+        if (src_sandbox_id is None) == (dst_sandbox_id is None):
+            console.print(
+                "[red]Error:[/red] Exactly one of source or destination must be a sandbox path "
+                "(format: sandbox_id:path)"
+            )
+            raise typer.Exit(1)
+
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        if src_sandbox_id:
+            # Download from sandbox to local
+            sandbox_id = src_sandbox_id
+
+            if recursive:
+                # Check if source is a directory
+                result = sandbox_client.execute_command(
+                    sandbox_id, f"test -d {src_path} && echo 'directory' || echo 'file'"
+                )
+                is_directory = result.stdout.strip() == "directory"
+
+                if is_directory:
+                    console.print(
+                        f"[bold blue]Downloading directory:[/bold blue] "
+                        f"{src_sandbox_id}:{src_path} → {dst_path}"
+                    )
+
+                    # Create tar archive in sandbox
+                    tar_path = f"/tmp/download_{os.urandom(8).hex()}.tar"
+                    tar_cmd = f"tar -cf {tar_path} -C $(dirname {src_path}) $(basename {src_path})"
+
+                    with console.status(
+                        "[bold blue]Creating archive in sandbox...", spinner="dots"
+                    ):
+                        result = sandbox_client.execute_command(sandbox_id, tar_cmd)
+                        if result.exit_code != 0:
+                            console.print(f"[red]Failed to create archive:[/red] {result.stderr}")
+                            raise typer.Exit(1)
+
+                    # Download tar file
+                    with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp_tar:
+                        tmp_tar_path = tmp_tar.name
+
+                    try:
+                        with console.status("[bold blue]Downloading archive...", spinner="dots"):
+                            sandbox_client.download_file(sandbox_id, tar_path, tmp_tar_path)
+
+                        # Extract locally
+                        with console.status("[bold blue]Extracting files...", spinner="dots"):
+                            os.makedirs(dst_path, exist_ok=True)
+                            with tarfile.open(tmp_tar_path, "r") as tar:
+                                tar.extractall(dst_path)
+
+                        console.print("[green]✓[/green] Directory downloaded successfully!")
+
+                        # Cleanup sandbox tar
+                        sandbox_client.execute_command(sandbox_id, f"rm -f {tar_path}")
+                    finally:
+                        # Cleanup local tar
+                        if os.path.exists(tmp_tar_path):
+                            os.unlink(tmp_tar_path)
+                else:
+                    # Single file download
+                    console.print(
+                        f"[bold blue]Downloading file:[/bold blue] "
+                        f"{src_sandbox_id}:{src_path} → {dst_path}"
+                    )
+                    with console.status("[bold blue]Downloading...", spinner="dots"):
+                        sandbox_client.download_file(sandbox_id, src_path, dst_path)
+                    console.print("[green]✓[/green] File downloaded successfully!")
+            else:
+                # Single file download (non-recursive)
+                console.print(
+                    f"[bold blue]Downloading file:[/bold blue] "
+                    f"{src_sandbox_id}:{src_path} → {dst_path}"
+                )
+                with console.status("[bold blue]Downloading...", spinner="dots"):
+                    sandbox_client.download_file(sandbox_id, src_path, dst_path)
+                console.print("[green]✓[/green] File downloaded successfully!")
+
+        else:
+            # Upload from local to sandbox
+            if dst_sandbox_id is None:
+                console.print("[red]Error:[/red] Invalid destination sandbox ID")
+                raise typer.Exit(1)
+            sandbox_id = dst_sandbox_id
+
+            if not os.path.exists(src_path):
+                console.print(f"[red]Error:[/red] Source path not found: {src_path}")
+                raise typer.Exit(1)
+
+            if recursive and os.path.isdir(src_path):
+                console.print(
+                    f"[bold blue]Uploading directory:[/bold blue] "
+                    f"{src_path} → {dst_sandbox_id}:{dst_path}"
+                )
+
+                # Create tar archive locally
+                with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp_tar:
+                    tmp_tar_path = tmp_tar.name
+
+                try:
+                    # Create tar archive
+                    with console.status("[bold blue]Creating archive...", spinner="dots"):
+                        with tarfile.open(tmp_tar_path, "w") as tar:
+                            tar.add(src_path, arcname=os.path.basename(src_path))
+
+                    # Upload tar file to sandbox
+                    tar_remote_path = f"/tmp/upload_{os.urandom(8).hex()}.tar"
+                    with console.status("[bold blue]Uploading archive...", spinner="dots"):
+                        sandbox_client.upload_file(sandbox_id, tar_remote_path, tmp_tar_path)
+
+                    # Extract in sandbox
+                    extract_cmd = f"mkdir -p {dst_path} && tar -xf {tar_remote_path} -C {dst_path}"
+                    with console.status(
+                        "[bold blue]Extracting files in sandbox...", spinner="dots"
+                    ):
+                        result = sandbox_client.execute_command(sandbox_id, extract_cmd)
+                        if result.exit_code != 0:
+                            console.print(f"[red]Failed to extract archive:[/red] {result.stderr}")
+                            raise typer.Exit(1)
+
+                    # Cleanup sandbox tar
+                    sandbox_client.execute_command(sandbox_id, f"rm -f {tar_remote_path}")
+
+                    console.print("[green]✓[/green] Directory uploaded successfully!")
+                finally:
+                    # Cleanup local tar
+                    if os.path.exists(tmp_tar_path):
+                        os.unlink(tmp_tar_path)
+            else:
+                # Single file upload
+                if os.path.isdir(src_path):
+                    console.print(
+                        "[red]Error:[/red] Source is a directory. "
+                        "Use -r/--recursive flag to copy directories."
+                    )
+                    raise typer.Exit(1)
+
+                console.print(
+                    f"[bold blue]Uploading file:[/bold blue] "
+                    f"{src_path} → {dst_sandbox_id}:{dst_path}"
+                )
+
+                # Check if destination is a directory and append filename if needed
+                if dst_path.endswith("/"):
+                    dst_path = dst_path + os.path.basename(src_path)
+                else:
+                    # Check if destination path is a directory on the remote sandbox
+                    result = sandbox_client.execute_command(
+                        sandbox_id, f"test -d {dst_path} && echo 'directory' || echo 'file'"
+                    )
+                    if result.stdout.strip() == "directory":
+                        dst_path = dst_path + "/" + os.path.basename(src_path)
+
+                with console.status("[bold blue]Uploading...", spinner="dots"):
+                    sandbox_client.upload_file(sandbox_id, dst_path, src_path)
+                console.print("[green]✓[/green] File uploaded successfully!")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")

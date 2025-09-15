@@ -1,8 +1,11 @@
 import json
 import os
+import tarfile
+import tempfile
 import time
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -522,6 +525,98 @@ class SandboxClient:
         except Exception as e:
             raise APIError(f"Download failed: {str(e)}")
 
+    def upload_folder(self, sandbox_id: str, local_folder_path: str, remote_path: str) -> None:
+        """Upload an entire folder to a sandbox using tar archiving
+
+        Args:
+            sandbox_id: ID of the sandbox to upload to
+            local_folder_path: Path to the local folder to upload
+            remote_path: Path where the folder should be extracted in the sandbox
+        """
+        local_folder = Path(local_folder_path)
+        if not local_folder.exists() or not local_folder.is_dir():
+            raise ValueError(
+                f"Local folder does not exist or is not a directory: {local_folder_path}"
+            )
+
+        # Create a temporary tar archive
+        with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp_tar:
+            tmp_tar_path = tmp_tar.name
+
+        try:
+            # Create tar archive of the folder
+            with tarfile.open(tmp_tar_path, "w") as tar:
+                tar.add(local_folder, arcname=local_folder.name)
+
+            # Upload tar file to sandbox
+            tar_remote = f"/tmp/upload_{os.urandom(4).hex()}.tar"
+            self.upload_file(sandbox_id, tar_remote, tmp_tar_path)
+
+            # Extract tar in sandbox
+            extract_cmd = f"mkdir -p {remote_path} && tar -xf {tar_remote} -C {remote_path}"
+            result = self.execute_command(sandbox_id, extract_cmd)
+
+            if result.exit_code != 0:
+                raise RuntimeError(f"Failed to extract archive: {result.stderr}")
+
+            # Clean up tar file in sandbox
+            self.execute_command(sandbox_id, f"rm -f {tar_remote}")
+
+        finally:
+            # Clean up local tar file
+            if os.path.exists(tmp_tar_path):
+                os.unlink(tmp_tar_path)
+
+    def download_folder(self, sandbox_id: str, remote_folder_path: str, local_path: str) -> None:
+        """Download an entire folder from a sandbox using tar archiving
+
+        Args:
+            sandbox_id: ID of the sandbox to download from
+            remote_folder_path: Path to the folder in the sandbox
+            local_path: Path where the folder should be saved locally
+        """
+        # Check if remote path exists and is a directory
+        result = self.execute_command(
+            sandbox_id, f"test -d {remote_folder_path} && echo 'exists' || echo 'not found'"
+        )
+
+        if result.stdout.strip() != "exists":
+            raise ValueError(f"Remote folder does not exist: {remote_folder_path}")
+
+        # Create tar archive in sandbox
+        tar_path = f"/tmp/download_{os.urandom(4).hex()}.tar"
+        tar_cmd = (
+            f"tar -cf {tar_path} -C $(dirname {remote_folder_path}) "
+            f"$(basename {remote_folder_path})"
+        )
+
+        result = self.execute_command(sandbox_id, tar_cmd)
+
+        if result.exit_code != 0:
+            raise RuntimeError(f"Failed to create archive: {result.stderr}")
+
+        # Download tar file
+        with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp_tar:
+            tmp_tar_path = tmp_tar.name
+
+        try:
+            self.download_file(sandbox_id, tar_path, tmp_tar_path)
+
+            # Extract locally
+            local_dir = Path(local_path)
+            local_dir.mkdir(parents=True, exist_ok=True)
+
+            with tarfile.open(tmp_tar_path, "r") as tar:
+                tar.extractall(local_dir)
+
+            # Clean up tar file in sandbox
+            self.execute_command(sandbox_id, f"rm -f {tar_path}")
+
+        finally:
+            # Clean up local tar file
+            if os.path.exists(tmp_tar_path):
+                os.unlink(tmp_tar_path)
+
 
 class AsyncSandboxClient:
     """Async client for sandbox API operations"""
@@ -804,6 +899,102 @@ class AsyncSandboxClient:
             raise APIError(f"Download failed: {error_details}")
         except Exception as e:
             raise APIError(f"Download failed: {str(e)}")
+
+    async def upload_folder(
+        self, sandbox_id: str, local_folder_path: str, remote_path: str
+    ) -> None:
+        """Upload an entire folder to a sandbox using tar archiving (async)
+
+        Args:
+            sandbox_id: ID of the sandbox to upload to
+            local_folder_path: Path to the local folder to upload
+            remote_path: Path where the folder should be extracted in the sandbox
+        """
+        local_folder = Path(local_folder_path)
+        if not local_folder.exists() or not local_folder.is_dir():
+            raise ValueError(
+                f"Local folder does not exist or is not a directory: {local_folder_path}"
+            )
+
+        # Create a temporary tar archive
+        with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp_tar:
+            tmp_tar_path = tmp_tar.name
+
+        try:
+            # Create tar archive of the folder
+            with tarfile.open(tmp_tar_path, "w") as tar:
+                tar.add(local_folder, arcname=local_folder.name)
+
+            # Upload tar file to sandbox
+            tar_remote = f"/tmp/upload_{os.urandom(4).hex()}.tar"
+            await self.upload_file(sandbox_id, tar_remote, tmp_tar_path)
+
+            # Extract tar in sandbox
+            extract_cmd = f"mkdir -p {remote_path} && tar -xf {tar_remote} -C {remote_path}"
+            result = await self.execute_command(sandbox_id, extract_cmd)
+
+            if result.exit_code != 0:
+                raise RuntimeError(f"Failed to extract archive: {result.stderr}")
+
+            # Clean up tar file in sandbox
+            await self.execute_command(sandbox_id, f"rm -f {tar_remote}")
+
+        finally:
+            # Clean up local tar file
+            if os.path.exists(tmp_tar_path):
+                os.unlink(tmp_tar_path)
+
+    async def download_folder(
+        self, sandbox_id: str, remote_folder_path: str, local_path: str
+    ) -> None:
+        """Download an entire folder from a sandbox using tar archiving (async)
+
+        Args:
+            sandbox_id: ID of the sandbox to download from
+            remote_folder_path: Path to the folder in the sandbox
+            local_path: Path where the folder should be saved locally
+        """
+        # Check if remote path exists and is a directory
+        result = await self.execute_command(
+            sandbox_id, f"test -d {remote_folder_path} && echo 'exists' || echo 'not found'"
+        )
+
+        if result.stdout.strip() != "exists":
+            raise ValueError(f"Remote folder does not exist: {remote_folder_path}")
+
+        # Create tar archive in sandbox
+        tar_path = f"/tmp/download_{os.urandom(4).hex()}.tar"
+        tar_cmd = (
+            f"tar -cf {tar_path} -C $(dirname {remote_folder_path}) "
+            f"$(basename {remote_folder_path})"
+        )
+
+        result = await self.execute_command(sandbox_id, tar_cmd)
+
+        if result.exit_code != 0:
+            raise RuntimeError(f"Failed to create archive: {result.stderr}")
+
+        # Download tar file
+        with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp_tar:
+            tmp_tar_path = tmp_tar.name
+
+        try:
+            await self.download_file(sandbox_id, tar_path, tmp_tar_path)
+
+            # Extract locally
+            local_dir = Path(local_path)
+            local_dir.mkdir(parents=True, exist_ok=True)
+
+            with tarfile.open(tmp_tar_path, "r") as tar:
+                tar.extractall(local_dir)
+
+            # Clean up tar file in sandbox
+            await self.execute_command(sandbox_id, f"rm -f {tar_path}")
+
+        finally:
+            # Clean up local tar file
+            if os.path.exists(tmp_tar_path):
+                os.unlink(tmp_tar_path)
 
     async def aclose(self) -> None:
         """Close the async client"""

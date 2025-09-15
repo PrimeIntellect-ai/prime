@@ -346,37 +346,69 @@ def create(
 
 @app.command()
 def delete(
-    sandbox_ids: List[str] = typer.Argument(
-        ..., help="Sandbox ID(s) to delete (space or comma-separated)"
+    sandbox_ids: Optional[List[str]] = typer.Argument(
+        None, help="Sandbox ID(s) to delete (space or comma-separated)"
     ),
+    all: bool = typer.Option(False, "--all", help="Delete all sandboxes"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Delete one or more sandboxes"""
+    """Delete one or more sandboxes, or all sandboxes with --all"""
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        # Handle comma-separated IDs by splitting them
-        parsed_ids = []
-        for id_string in sandbox_ids:
-            # Split by comma and strip whitespace
-            if "," in id_string:
-                parsed_ids.extend([id.strip() for id in id_string.split(",") if id.strip()])
-            else:
-                parsed_ids.append(id_string.strip())
+        # Validate arguments
+        if all and sandbox_ids:
+            console.print("[red]Error:[/red] Cannot specify both sandbox IDs and --all flag")
+            raise typer.Exit(1)
 
-        # Remove any empty strings and duplicates while preserving order
-        cleaned_ids = []
-        seen = set()
-        for id in parsed_ids:
-            if id and id not in seen:
-                cleaned_ids.append(id)
-                seen.add(id)
+        if not all and not sandbox_ids:
+            console.print("[red]Error:[/red] Must specify either sandbox IDs or --all flag")
+            raise typer.Exit(1)
 
-        sandbox_ids = cleaned_ids
+        if all:
+            # Get all sandboxes to delete
+            with console.status("[bold blue]Fetching all sandboxes...", spinner="dots"):
+                all_sandboxes = []
+                page = 1
+                while True:
+                    list_response = sandbox_client.list(
+                        per_page=100, page=page, exclude_terminated=False
+                    )
+                    all_sandboxes.extend(list_response.sandboxes)
+                    if not list_response.has_next:
+                        break
+                    page += 1
+
+                # Filter out already terminated sandboxes
+                active_sandboxes = [s for s in all_sandboxes if s.status != "TERMINATED"]
+                sandbox_ids = [s.id for s in active_sandboxes]
+
+                if not sandbox_ids:
+                    console.print("[yellow]No sandboxes to delete[/yellow]")
+                    raise typer.Exit(0)
+        else:
+            # Handle comma-separated IDs by splitting them
+            parsed_ids = []
+            for id_string in sandbox_ids or []:
+                # Split by comma and strip whitespace
+                if "," in id_string:
+                    parsed_ids.extend([id.strip() for id in id_string.split(",") if id.strip()])
+                else:
+                    parsed_ids.append(id_string.strip())
+
+            # Remove any empty strings and duplicates while preserving order
+            cleaned_ids = []
+            seen = set()
+            for id in parsed_ids:
+                if id and id not in seen:
+                    cleaned_ids.append(id)
+                    seen.add(id)
+
+            sandbox_ids = cleaned_ids
 
         # Handle single vs multiple sandbox IDs
-        if len(sandbox_ids) == 1:
+        if len(sandbox_ids) == 1 and not all:
             # Single sandbox deletion
             sandbox_id = sandbox_ids[0]
             if not confirm_or_skip(f"Are you sure you want to delete sandbox {sandbox_id}?", yes):
@@ -390,10 +422,20 @@ def delete(
 
         else:
             # Bulk sandbox deletion
-            if not confirm_or_skip(
-                f"Are you sure you want to delete {len(sandbox_ids)} sandbox(es)?", yes
-            ):
-                console.print("Bulk delete cancelled")
+            if all:
+                confirmation_msg = (
+                    f"Are you sure you want to delete ALL {len(sandbox_ids)} "
+                    f"sandbox(es)? This action cannot be undone."
+                )
+                cancel_msg = "Delete all cancelled"
+            else:
+                confirmation_msg = (
+                    f"Are you sure you want to delete {len(sandbox_ids)} sandbox(es)?"
+                )
+                cancel_msg = "Bulk delete cancelled"
+
+            if not confirm_or_skip(confirmation_msg, yes):
+                console.print(cancel_msg)
                 raise typer.Exit(0)
 
             with console.status("[bold blue]Deleting sandboxes...", spinner="dots"):

@@ -438,20 +438,46 @@ def delete(
                 console.print(cancel_msg)
                 raise typer.Exit(0)
 
+            # Batch the deletion into chunks of 100 to respect API limits
+            batch_size = 100
+            all_succeeded = []
+            all_failed = []
+
             with console.status("[bold blue]Deleting sandboxes...", spinner="dots"):
-                result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(sandbox_ids)
+                for i in range(0, len(sandbox_ids), batch_size):
+                    batch = sandbox_ids[i : i + batch_size]
+                    batch_num = (i // batch_size) + 1
+                    total_batches = (len(sandbox_ids) + batch_size - 1) // batch_size
 
-            # Display results
-            console.print(f"\n[green]{result.message}[/green]")
+                    console.print(
+                        f"[dim]Processing batch {batch_num}/{total_batches} "
+                        f"({len(batch)} sandboxes)...[/dim]"
+                    )
 
-            if result.succeeded:
-                console.print("\n[bold green]Successfully deleted:[/bold green]")
-                for sandbox_id in result.succeeded:
+                    result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(batch)
+
+                    if result.succeeded:
+                        all_succeeded.extend(result.succeeded)
+                    if result.failed:
+                        all_failed.extend(result.failed)
+
+            # Display combined results
+            total_processed = len(all_succeeded) + len(all_failed)
+            console.print(f"\n[green]Processed {total_processed} sandbox(es)[/green]")
+
+            if all_succeeded:
+                console.print(
+                    f"\n[bold green]Successfully deleted {len(all_succeeded)} "
+                    f"sandbox(es):[/bold green]"
+                )
+                for sandbox_id in all_succeeded:
                     console.print(f"  ✓ {sandbox_id}")
 
-            if result.failed:
-                console.print("\n[bold red]Failed to delete:[/bold red]")
-                for failure in result.failed:
+            if all_failed:
+                console.print(
+                    f"\n[bold red]Failed to delete {len(all_failed)} " f"sandbox(es):[/bold red]"
+                )
+                for failure in all_failed:
                     sandbox_id = failure.get("sandbox_id", "unknown")
                     error = failure.get("error", "unknown error")
                     console.print(f"  ✗ {sandbox_id}: {error}")

@@ -475,7 +475,7 @@ def delete(
 
             if all_failed:
                 console.print(
-                    f"\n[bold red]Failed to delete {len(all_failed)} " f"sandbox(es):[/bold red]"
+                    f"\n[bold red]Failed to delete {len(all_failed)} sandbox(es):[/bold red]"
                 )
                 for failure in all_failed:
                     sandbox_id = failure.get("sandbox_id", "unknown")

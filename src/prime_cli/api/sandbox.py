@@ -657,8 +657,7 @@ class SandboxClient:
         parent_dir = osp.dirname(remote_folder_path)
         base_name = osp.basename(remote_folder_path)
         tar_cmd = (
-            f"tar -cf {shlex.quote(tar_path)} -C {shlex.quote(parent_dir)} "
-            f"{shlex.quote(base_name)}"
+            f"tar -cf {shlex.quote(tar_path)} -C {shlex.quote(parent_dir)} {shlex.quote(base_name)}"
         )
 
         result = self.execute_command(sandbox_id, tar_cmd)
@@ -1057,8 +1056,7 @@ class AsyncSandboxClient:
         parent_dir = osp.dirname(remote_folder_path)
         base_name = osp.basename(remote_folder_path)
         tar_cmd = (
-            f"tar -cf {shlex.quote(tar_path)} -C {shlex.quote(parent_dir)} "
-            f"{shlex.quote(base_name)}"
+            f"tar -cf {shlex.quote(tar_path)} -C {shlex.quote(parent_dir)} {shlex.quote(base_name)}"
         )
 
         result = await self.execute_command(sandbox_id, tar_cmd)

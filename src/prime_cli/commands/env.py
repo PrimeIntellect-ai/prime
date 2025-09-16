@@ -627,13 +627,20 @@ def init(
 
 @app.command()
 def pull(
-    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
+    env_id: str = typer.Argument(..., help="Environment ID (owner/name or owner/name@version)"),
     target: Optional[str] = typer.Option(None, "--target", "-t", help="Target directory"),
     version: str = typer.Option("latest", "--version", "-v", help="Version to pull"),
 ) -> None:
     """Pull environment for local inspection"""
     try:
         client = APIClient(require_auth=False)
+
+        # Parse version from env_id if present (e.g., owner/name@version)
+        if "@" in env_id:
+            env_id_base, id_version = env_id.rsplit("@", 1)
+            # Use the version from the env_id, overriding the --version flag
+            version = id_version
+            env_id = env_id_base
 
         parts = env_id.split("/")
         if len(parts) != 2:

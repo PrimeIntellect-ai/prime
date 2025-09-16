@@ -98,25 +98,14 @@ jobs:
           source .venv/bin/activate
           python -m build
 
-      # Get release notes
-      - name: Get release notes
-        if: steps.check_tag.outputs.exists != 'true'
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          echo "# Release v$VERSION" > release_notes.md
-          if [ -f CHANGELOG.md ]; then
-            echo "" >> release_notes.md
-            sed -n "/## \[${VERSION}\]/,/## \[/p" CHANGELOG.md | sed '$d' >> release_notes.md || true
-          fi
-
       # Create GitHub Release
       - name: Create GitHub Release
         if: steps.check_tag.outputs.exists != 'true'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ steps.version.outputs.version }}
-          body_path: release_notes.md
           files: dist/*
+          generate_release_notes: true
 
       # Publish to PyPI
       - name: Publish to PyPI

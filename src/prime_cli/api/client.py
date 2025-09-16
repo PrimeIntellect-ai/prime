@@ -51,7 +51,6 @@ class APIClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        # Set a reasonable default timeout of 30 seconds for API calls
         self.client = httpx.Client(
             headers=headers, follow_redirects=True, timeout=httpx.Timeout(30.0, connect=10.0)
         )
@@ -150,7 +149,6 @@ class AsyncAPIClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        # Set a reasonable default timeout of 30 seconds for API calls
         self.client = httpx.AsyncClient(
             headers=headers, follow_redirects=True, timeout=httpx.Timeout(30.0, connect=10.0)
         )

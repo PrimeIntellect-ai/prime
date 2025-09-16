@@ -289,6 +289,14 @@ class SandboxClient:
             self.client.config.config_dir / "sandbox_auth_cache.json", self.client
         )
 
+    def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
+        """Test if a sandbox is reachable by executing a simple echo command"""
+        try:
+            self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
+            return True
+        except Exception:
+            return False
+
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
         self._auth_cache.clear()
@@ -395,14 +403,8 @@ class SandboxClient:
         for attempt in range(max_attempts):
             sandbox = self.get(sandbox_id)
             if sandbox.status == "RUNNING":
-                # Verify sandbox is actually reachable with a test command
-                try:
-                    self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=10)
+                if self._is_sandbox_reachable(sandbox_id):
                     return
-                except Exception:
-                    # Sandbox claims to be running but isn't reachable yet
-                    # Continue polling
-                    pass
             elif sandbox.status in ["ERROR", "TERMINATED"]:
                 raise SandboxNotRunningError(sandbox_id, sandbox.status)
 
@@ -465,16 +467,11 @@ class SandboxClient:
                 raise RuntimeError(f"Sandboxes failed: {all_failed}")
 
             if total_running == len(sandbox_ids):
-                # All sandboxes report as running, verify they're reachable
                 all_reachable = True
                 for sandbox_id in sandbox_ids:
                     if final_statuses.get(sandbox_id) == "RUNNING":
-                        try:
-                            self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=10)
-                        except Exception:
-                            # Sandbox not actually reachable yet
+                        if not self._is_sandbox_reachable(sandbox_id):
                             all_reachable = False
-                            # Remove from final_statuses so we continue polling
                             final_statuses.pop(sandbox_id, None)
 
                 if all_reachable:
@@ -552,6 +549,14 @@ class AsyncSandboxClient:
         self._auth_cache = SandboxAuthCache(
             self.client.config.config_dir / "sandbox_auth_cache.json", self.client
         )
+
+    async def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
+        """Test if a sandbox is reachable by executing a simple echo command"""
+        try:
+            await self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
+            return True
+        except Exception:
+            return False
 
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
@@ -675,14 +680,8 @@ class AsyncSandboxClient:
         for attempt in range(max_attempts):
             sandbox = await self.get(sandbox_id)
             if sandbox.status == "RUNNING":
-                # Verify sandbox is actually reachable with a test command
-                try:
-                    await self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=10)
+                if await self._is_sandbox_reachable(sandbox_id):
                     return
-                except Exception:
-                    # Sandbox claims to be running but isn't reachable yet
-                    # Continue polling
-                    pass
             elif sandbox.status in ["ERROR", "TERMINATED"]:
                 raise SandboxNotRunningError(sandbox_id, sandbox.status)
 
@@ -747,18 +746,11 @@ class AsyncSandboxClient:
                 raise RuntimeError(f"Sandboxes failed: {all_failed}")
 
             if total_running == len(sandbox_ids):
-                # All sandboxes report as running, verify they're reachable
                 all_reachable = True
                 for sandbox_id in sandbox_ids:
                     if final_statuses.get(sandbox_id) == "RUNNING":
-                        try:
-                            await self.execute_command(
-                                sandbox_id, "echo 'sandbox ready'", timeout=10
-                            )
-                        except Exception:
-                            # Sandbox not actually reachable yet
+                        if not await self._is_sandbox_reachable(sandbox_id):
                             all_reachable = False
-                            # Remove from final_statuses so we continue polling
                             final_statuses.pop(sandbox_id, None)
 
                 if all_reachable:

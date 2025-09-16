@@ -1,4 +1,5 @@
 import hashlib
+import re
 import shutil
 import subprocess
 import sys
@@ -227,6 +228,9 @@ def push(
     visibility: str = typer.Option(
         "PUBLIC", "--visibility", "-v", help="Environment visibility (PUBLIC/PRIVATE)"
     ),
+    auto_bump: bool = typer.Option(
+        False, "--auto-bump", help="Automatically bump patch version before push"
+    ),
 ) -> None:
     """Push environment to registry"""
 
@@ -249,6 +253,28 @@ def push(
                     "[red]Error: No name found in pyproject.toml and no --name provided[/red]"
                 )
                 raise typer.Exit(1)
+
+            # Auto-bump version if requested
+            if auto_bump:
+                current_version = project_info.get("version")
+                if not current_version:
+                    console.print(
+                        "[red]Error: No version found in pyproject.toml for auto-bump[/red]"
+                    )
+                    raise typer.Exit(1)
+
+                new_version = bump_version(current_version)
+                console.print(f"Auto-bumping version: {current_version} → {new_version}")
+
+                try:
+                    update_pyproject_version(pyproject_path, new_version)
+                    # Reload pyproject.toml with new version
+                    pyproject_data = toml.load(pyproject_path)
+                    project_info = pyproject_data.get("project", {})
+                    console.print("[green]✓ Updated version in pyproject.toml[/green]")
+                except Exception as e:
+                    console.print(f"[red]Failed to update version in pyproject.toml: {e}[/red]")
+                    raise typer.Exit(1)
 
             console.print(f"Environment name: {env_name}")
 
@@ -760,6 +786,35 @@ def is_valid_url(url: str) -> bool:
 def normalize_package_name(name: str) -> str:
     """Normalize package name according to Python packaging standards."""
     return name.replace("-", "_").lower()
+
+
+def bump_version(version: str) -> str:
+    """Bump patch version (e.g., 1.2.3 -> 1.2.4)."""
+    parts = version.split(".")
+    if len(parts) >= 3:
+        parts[2] = str(int(parts[2]) + 1)
+        return ".".join(parts)
+    elif len(parts) == 2:
+        return f"{version}.1"
+    else:
+        return f"{version}.0.1"
+
+
+def update_pyproject_version(pyproject_path: Path, new_version: str) -> None:
+    """Update version in pyproject.toml file."""
+    with open(pyproject_path, "r") as f:
+        content = f.read()
+
+    # Replace version line
+    updated_content = re.sub(
+        r'^version\s*=\s*["\'][^"\']*["\']',
+        f'version = "{new_version}"',
+        content,
+        flags=re.MULTILINE,
+    )
+
+    with open(pyproject_path, "w") as f:
+        f.write(updated_content)
 
 
 def get_install_command(tool: str, wheel_url: str) -> List[str]:

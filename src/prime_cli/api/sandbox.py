@@ -651,9 +651,14 @@ class SandboxClient:
 
         # Create tar archive in sandbox
         tar_path = f"/tmp/download_{os.urandom(4).hex()}.tar"
+        # Use Python's os.path functions to safely extract directory and basename
+        import os.path as osp
+
+        parent_dir = osp.dirname(remote_folder_path)
+        base_name = osp.basename(remote_folder_path)
         tar_cmd = (
-            f"tar -cf {shlex.quote(tar_path)} -C $(dirname {shlex.quote(remote_folder_path)}) "
-            f"$(basename {shlex.quote(remote_folder_path)})"
+            f"tar -cf {shlex.quote(tar_path)} -C {shlex.quote(parent_dir)} "
+            f"{shlex.quote(base_name)}"
         )
 
         result = self.execute_command(sandbox_id, tar_cmd)
@@ -1046,9 +1051,14 @@ class AsyncSandboxClient:
 
         # Create tar archive in sandbox
         tar_path = f"/tmp/download_{os.urandom(4).hex()}.tar"
+        # Use Python's os.path functions to safely extract directory and basename
+        import os.path as osp
+
+        parent_dir = osp.dirname(remote_folder_path)
+        base_name = osp.basename(remote_folder_path)
         tar_cmd = (
-            f"tar -cf {shlex.quote(tar_path)} -C $(dirname {shlex.quote(remote_folder_path)}) "
-            f"$(basename {shlex.quote(remote_folder_path)})"
+            f"tar -cf {shlex.quote(tar_path)} -C {shlex.quote(parent_dir)} "
+            f"{shlex.quote(base_name)}"
         )
 
         result = await self.execute_command(sandbox_id, tar_cmd)

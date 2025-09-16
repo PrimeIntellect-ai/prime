@@ -826,10 +826,15 @@ def cp(
 
                     # Create tar archive in sandbox
                     tar_path = f"/tmp/download_{os.urandom(8).hex()}.tar"
+                    # Use Python's os.path functions to safely extract directory and basename
+                    import os.path as osp
+
+                    parent_dir = osp.dirname(src_path)
+                    base_name = osp.basename(src_path)
                     tar_cmd = (
                         f"tar -cf {shlex.quote(tar_path)} "
-                        f"-C $(dirname {shlex.quote(src_path)}) "
-                        f"$(basename {shlex.quote(src_path)})"
+                        f"-C {shlex.quote(parent_dir)} "
+                        f"{shlex.quote(base_name)}"
                     )
 
                     with console.status(

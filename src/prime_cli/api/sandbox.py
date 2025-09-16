@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import tarfile
 import tempfile
 import time
@@ -12,6 +13,55 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from prime_cli.api.client import APIClient, APIError, AsyncAPIClient
+
+
+def _validate_path(path: str, param_name: str) -> None:
+    """Validate path parameter to prevent injection attacks.
+
+    Args:
+        path: The path to validate
+        param_name: Parameter name for error messages
+
+    Raises:
+        ValueError: If path contains dangerous patterns
+    """
+    if not path or not isinstance(path, str):
+        raise ValueError(f"{param_name} must be a non-empty string")
+
+    # Check for null bytes (can terminate commands early)
+    if "\x00" in path:
+        raise ValueError(f"{param_name} contains null bytes")
+
+    # Check for command injection patterns
+    dangerous_patterns = [";", "&&", "||", "|", "`", "$(", "\n", "\r", "$(", "${", "<(", ">"]
+
+    for pattern in dangerous_patterns:
+        if pattern in path:
+            raise ValueError(f"{param_name} contains dangerous pattern: {pattern}")
+
+    # Path should not start with '-' to prevent flag injection
+    if path.startswith("-"):
+        raise ValueError(f"{param_name} cannot start with '-'")
+
+
+def _validate_sandbox_id(sandbox_id: str) -> None:
+    """Validate sandbox ID format.
+
+    Args:
+        sandbox_id: The sandbox ID to validate
+
+    Raises:
+        ValueError: If sandbox ID format is invalid
+    """
+    if not sandbox_id or not isinstance(sandbox_id, str):
+        raise ValueError("sandbox_id must be a non-empty string")
+
+    # Basic format validation - sandbox IDs should be alphanumeric with some allowed chars
+    if not sandbox_id.replace("-", "").replace("_", "").isalnum():
+        raise ValueError("sandbox_id contains invalid characters")
+
+    if len(sandbox_id) < 3 or len(sandbox_id) > 100:
+        raise ValueError("sandbox_id length is invalid")
 
 
 class SandboxStatus(str, Enum):
@@ -477,6 +527,9 @@ class SandboxClient:
         self, sandbox_id: str, file_path: str, local_file_path: str
     ) -> FileUploadResponse:
         """Upload file directly via gateway"""
+        _validate_sandbox_id(sandbox_id)
+        _validate_path(file_path, "file_path")
+
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
@@ -502,6 +555,9 @@ class SandboxClient:
 
     def download_file(self, sandbox_id: str, file_path: str, local_file_path: str) -> None:
         """Download file directly via gateway"""
+        _validate_sandbox_id(sandbox_id)
+        _validate_path(file_path, "file_path")
+
         auth = self._auth_cache.get_or_refresh(sandbox_id)
 
         url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/download"
@@ -533,6 +589,9 @@ class SandboxClient:
             local_folder_path: Path to the local folder to upload
             remote_path: Path where the folder should be extracted in the sandbox
         """
+        _validate_sandbox_id(sandbox_id)
+        _validate_path(remote_path, "remote_path")
+
         local_folder = Path(local_folder_path)
         if not local_folder.exists() or not local_folder.is_dir():
             raise ValueError(
@@ -553,14 +612,17 @@ class SandboxClient:
             self.upload_file(sandbox_id, tar_remote, tmp_tar_path)
 
             # Extract tar in sandbox
-            extract_cmd = f"mkdir -p {remote_path} && tar -xf {tar_remote} -C {remote_path}"
+            extract_cmd = (
+                f"mkdir -p {shlex.quote(remote_path)} && "
+                f"tar -xf {shlex.quote(tar_remote)} -C {shlex.quote(remote_path)}"
+            )
             result = self.execute_command(sandbox_id, extract_cmd)
 
             if result.exit_code != 0:
                 raise RuntimeError(f"Failed to extract archive: {result.stderr}")
 
             # Clean up tar file in sandbox
-            self.execute_command(sandbox_id, f"rm -f {tar_remote}")
+            self.execute_command(sandbox_id, f"rm -f {shlex.quote(tar_remote)}")
 
         finally:
             # Clean up local tar file
@@ -575,9 +637,13 @@ class SandboxClient:
             remote_folder_path: Path to the folder in the sandbox
             local_path: Path where the folder should be saved locally
         """
+        _validate_sandbox_id(sandbox_id)
+        _validate_path(remote_folder_path, "remote_folder_path")
+
         # Check if remote path exists and is a directory
         result = self.execute_command(
-            sandbox_id, f"test -d {remote_folder_path} && echo 'exists' || echo 'not found'"
+            sandbox_id,
+            f"test -d {shlex.quote(remote_folder_path)} && echo 'exists' || echo 'not found'",
         )
 
         if result.stdout.strip() != "exists":
@@ -586,8 +652,8 @@ class SandboxClient:
         # Create tar archive in sandbox
         tar_path = f"/tmp/download_{os.urandom(4).hex()}.tar"
         tar_cmd = (
-            f"tar -cf {tar_path} -C $(dirname {remote_folder_path}) "
-            f"$(basename {remote_folder_path})"
+            f"tar -cf {shlex.quote(tar_path)} -C $(dirname {shlex.quote(remote_folder_path)}) "
+            f"$(basename {shlex.quote(remote_folder_path)})"
         )
 
         result = self.execute_command(sandbox_id, tar_cmd)
@@ -610,7 +676,7 @@ class SandboxClient:
                 tar.extractall(local_dir)
 
             # Clean up tar file in sandbox
-            self.execute_command(sandbox_id, f"rm -f {tar_path}")
+            self.execute_command(sandbox_id, f"rm -f {shlex.quote(tar_path)}")
 
         finally:
             # Clean up local tar file
@@ -839,6 +905,9 @@ class AsyncSandboxClient:
         Returns:
             FileUploadResponse with upload details
         """
+        _validate_sandbox_id(sandbox_id)
+        _validate_path(file_path, "file_path")
+
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
@@ -874,6 +943,9 @@ class AsyncSandboxClient:
             file_path: Path to the file in the sandbox
             local_file_path: Path where to save the downloaded file locally
         """
+        _validate_sandbox_id(sandbox_id)
+        _validate_path(file_path, "file_path")
+
         # Get auth for direct gateway access
         auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
 
@@ -910,6 +982,9 @@ class AsyncSandboxClient:
             local_folder_path: Path to the local folder to upload
             remote_path: Path where the folder should be extracted in the sandbox
         """
+        _validate_sandbox_id(sandbox_id)
+        _validate_path(remote_path, "remote_path")
+
         local_folder = Path(local_folder_path)
         if not local_folder.exists() or not local_folder.is_dir():
             raise ValueError(
@@ -930,14 +1005,17 @@ class AsyncSandboxClient:
             await self.upload_file(sandbox_id, tar_remote, tmp_tar_path)
 
             # Extract tar in sandbox
-            extract_cmd = f"mkdir -p {remote_path} && tar -xf {tar_remote} -C {remote_path}"
+            extract_cmd = (
+                f"mkdir -p {shlex.quote(remote_path)} && "
+                f"tar -xf {shlex.quote(tar_remote)} -C {shlex.quote(remote_path)}"
+            )
             result = await self.execute_command(sandbox_id, extract_cmd)
 
             if result.exit_code != 0:
                 raise RuntimeError(f"Failed to extract archive: {result.stderr}")
 
             # Clean up tar file in sandbox
-            await self.execute_command(sandbox_id, f"rm -f {tar_remote}")
+            await self.execute_command(sandbox_id, f"rm -f {shlex.quote(tar_remote)}")
 
         finally:
             # Clean up local tar file
@@ -954,9 +1032,13 @@ class AsyncSandboxClient:
             remote_folder_path: Path to the folder in the sandbox
             local_path: Path where the folder should be saved locally
         """
+        _validate_sandbox_id(sandbox_id)
+        _validate_path(remote_folder_path, "remote_folder_path")
+
         # Check if remote path exists and is a directory
         result = await self.execute_command(
-            sandbox_id, f"test -d {remote_folder_path} && echo 'exists' || echo 'not found'"
+            sandbox_id,
+            f"test -d {shlex.quote(remote_folder_path)} && echo 'exists' || echo 'not found'",
         )
 
         if result.stdout.strip() != "exists":
@@ -965,8 +1047,8 @@ class AsyncSandboxClient:
         # Create tar archive in sandbox
         tar_path = f"/tmp/download_{os.urandom(4).hex()}.tar"
         tar_cmd = (
-            f"tar -cf {tar_path} -C $(dirname {remote_folder_path}) "
-            f"$(basename {remote_folder_path})"
+            f"tar -cf {shlex.quote(tar_path)} -C $(dirname {shlex.quote(remote_folder_path)}) "
+            f"$(basename {shlex.quote(remote_folder_path)})"
         )
 
         result = await self.execute_command(sandbox_id, tar_cmd)
@@ -989,7 +1071,7 @@ class AsyncSandboxClient:
                 tar.extractall(local_dir)
 
             # Clean up tar file in sandbox
-            await self.execute_command(sandbox_id, f"rm -f {tar_path}")
+            await self.execute_command(sandbox_id, f"rm -f {shlex.quote(tar_path)}")
 
         finally:
             # Clean up local tar file

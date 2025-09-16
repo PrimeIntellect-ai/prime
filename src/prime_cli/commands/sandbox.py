@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import shlex
 import string
 import tarfile
 import tempfile
@@ -28,6 +29,56 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.display import SANDBOX_STATUS_COLORS
+
+
+def _validate_path(path: str, param_name: str) -> None:
+    """Validate path parameter to prevent injection attacks.
+
+    Args:
+        path: The path to validate
+        param_name: Parameter name for error messages
+
+    Raises:
+        ValueError: If path contains dangerous patterns
+    """
+    if not path or not isinstance(path, str):
+        raise ValueError(f"{param_name} must be a non-empty string")
+
+    # Check for null bytes (can terminate commands early)
+    if "\x00" in path:
+        raise ValueError(f"{param_name} contains null bytes")
+
+    # Check for command injection patterns
+    dangerous_patterns = [";", "&&", "||", "|", "`", "$(", "\n", "\r", "$(", "${", "<(", ">"]
+
+    for pattern in dangerous_patterns:
+        if pattern in path:
+            raise ValueError(f"{param_name} contains dangerous pattern: {pattern}")
+
+    # Path should not start with '-' to prevent flag injection
+    if path.startswith("-"):
+        raise ValueError(f"{param_name} cannot start with '-'")
+
+
+def _validate_sandbox_id(sandbox_id: str) -> None:
+    """Validate sandbox ID format.
+
+    Args:
+        sandbox_id: The sandbox ID to validate
+
+    Raises:
+        ValueError: If sandbox ID format is invalid
+    """
+    if not sandbox_id or not isinstance(sandbox_id, str):
+        raise ValueError("sandbox_id must be a non-empty string")
+
+    # Basic format validation - sandbox IDs should be alphanumeric with some allowed chars
+    if not sandbox_id.replace("-", "").replace("_", "").isalnum():
+        raise ValueError("sandbox_id contains invalid characters")
+
+    if len(sandbox_id) < 3 or len(sandbox_id) > 100:
+        raise ValueError("sandbox_id length is invalid")
+
 
 app = typer.Typer(help="Manage code sandboxes")
 console = Console()
@@ -744,6 +795,14 @@ def cp(
             )
             raise typer.Exit(1)
 
+        # Validate sandbox IDs and paths
+        if src_sandbox_id:
+            _validate_sandbox_id(src_sandbox_id)
+            _validate_path(src_path, "source_path")
+        if dst_sandbox_id:
+            _validate_sandbox_id(dst_sandbox_id)
+            _validate_path(dst_path, "destination_path")
+
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
@@ -754,7 +813,8 @@ def cp(
             if recursive:
                 # Check if source is a directory
                 result = sandbox_client.execute_command(
-                    sandbox_id, f"test -d {src_path} && echo 'directory' || echo 'file'"
+                    sandbox_id,
+                    f"test -d {shlex.quote(src_path)} && echo 'directory' || echo 'file'",
                 )
                 is_directory = result.stdout.strip() == "directory"
 
@@ -766,7 +826,11 @@ def cp(
 
                     # Create tar archive in sandbox
                     tar_path = f"/tmp/download_{os.urandom(8).hex()}.tar"
-                    tar_cmd = f"tar -cf {tar_path} -C $(dirname {src_path}) $(basename {src_path})"
+                    tar_cmd = (
+                        f"tar -cf {shlex.quote(tar_path)} "
+                        f"-C $(dirname {shlex.quote(src_path)}) "
+                        f"$(basename {shlex.quote(src_path)})"
+                    )
 
                     with console.status(
                         "[bold blue]Creating archive in sandbox...", spinner="dots"
@@ -793,7 +857,7 @@ def cp(
                         console.print("[green]✓[/green] Directory downloaded successfully!")
 
                         # Cleanup sandbox tar
-                        sandbox_client.execute_command(sandbox_id, f"rm -f {tar_path}")
+                        sandbox_client.execute_command(sandbox_id, f"rm -f {shlex.quote(tar_path)}")
                     finally:
                         # Cleanup local tar
                         if os.path.exists(tmp_tar_path):
@@ -850,7 +914,10 @@ def cp(
                         sandbox_client.upload_file(sandbox_id, tar_remote_path, tmp_tar_path)
 
                     # Extract in sandbox
-                    extract_cmd = f"mkdir -p {dst_path} && tar -xf {tar_remote_path} -C {dst_path}"
+                    extract_cmd = (
+                        f"mkdir -p {shlex.quote(dst_path)} && "
+                        f"tar -xf {shlex.quote(tar_remote_path)} -C {shlex.quote(dst_path)}"
+                    )
                     with console.status(
                         "[bold blue]Extracting files in sandbox...", spinner="dots"
                     ):
@@ -860,7 +927,9 @@ def cp(
                             raise typer.Exit(1)
 
                     # Cleanup sandbox tar
-                    sandbox_client.execute_command(sandbox_id, f"rm -f {tar_remote_path}")
+                    sandbox_client.execute_command(
+                        sandbox_id, f"rm -f {shlex.quote(tar_remote_path)}"
+                    )
 
                     console.print("[green]✓[/green] Directory uploaded successfully!")
                 finally:
@@ -887,7 +956,8 @@ def cp(
                 else:
                     # Check if destination path is a directory on the remote sandbox
                     result = sandbox_client.execute_command(
-                        sandbox_id, f"test -d {dst_path} && echo 'directory' || echo 'file'"
+                        sandbox_id,
+                        f"test -d {shlex.quote(dst_path)} && echo 'directory' || echo 'file'",
                     )
                     if result.stdout.strip() == "directory":
                         dst_path = dst_path + "/" + os.path.basename(src_path)

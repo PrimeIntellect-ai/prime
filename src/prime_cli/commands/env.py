@@ -792,8 +792,22 @@ def bump_version(version: str) -> str:
     """Bump patch version (e.g., 1.2.3 -> 1.2.4)."""
     parts = version.split(".")
     if len(parts) >= 3:
-        parts[2] = str(int(parts[2]) + 1)
-        return ".".join(parts)
+        # Handle pre-release versions (e.g., 1.2.3-alpha -> 1.2.4)
+        patch_part = parts[2]
+        if "-" in patch_part:
+            patch_num = patch_part.split("-")[0]
+        elif "+" in patch_part:
+            patch_num = patch_part.split("+")[0]
+        else:
+            patch_num = patch_part
+
+        try:
+            new_patch = str(int(patch_num) + 1)
+            parts[2] = new_patch
+            return ".".join(parts)
+        except ValueError:
+            # If patch is non-numeric, append .1
+            return f"{version}.1"
     elif len(parts) == 2:
         return f"{version}.1"
     else:
@@ -805,13 +819,17 @@ def update_pyproject_version(pyproject_path: Path, new_version: str) -> None:
     with open(pyproject_path, "r") as f:
         content = f.read()
 
-    # Replace version line
+    # Find and replace version line (handles indentation)
     updated_content = re.sub(
-        r'^version\s*=\s*["\'][^"\']*["\']',
-        f'version = "{new_version}"',
+        r'(\s*)version\s*=\s*["\'][^"\']*["\']',
+        rf'\1version = "{new_version}"',
         content,
         flags=re.MULTILINE,
     )
+
+    # Verify the replacement worked
+    if updated_content == content:
+        raise ValueError("Version line not found or updated in pyproject.toml")
 
     with open(pyproject_path, "w") as f:
         f.write(updated_content)

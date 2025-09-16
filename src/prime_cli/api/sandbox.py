@@ -377,13 +377,15 @@ class SandboxClient:
             "sandbox_id": sandbox_id,
         }
 
+        effective_timeout = timeout if timeout is not None else 300
+
         try:
-            with httpx.Client(timeout=timeout) as client:
+            with httpx.Client(timeout=effective_timeout) as client:
                 response = client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
                 return CommandResponse(**response.json())
         except httpx.TimeoutException:
-            raise CommandTimeoutError(sandbox_id, command, timeout or 0)
+            raise CommandTimeoutError(sandbox_id, command, effective_timeout)
         except httpx.HTTPStatusError as e:
             raise APIError(f"HTTP {e.response.status_code}: {e.response.text}")
         except Exception as e:
@@ -393,7 +395,14 @@ class SandboxClient:
         for attempt in range(max_attempts):
             sandbox = self.get(sandbox_id)
             if sandbox.status == "RUNNING":
-                return
+                # Verify sandbox is actually reachable with a test command
+                try:
+                    self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=10)
+                    return
+                except Exception:
+                    # Sandbox claims to be running but isn't reachable yet
+                    # Continue polling
+                    pass
             elif sandbox.status in ["ERROR", "TERMINATED"]:
                 raise SandboxNotRunningError(sandbox_id, sandbox.status)
 
@@ -456,8 +465,20 @@ class SandboxClient:
                 raise RuntimeError(f"Sandboxes failed: {all_failed}")
 
             if total_running == len(sandbox_ids):
-                # All sandboxes are running
-                return final_statuses
+                # All sandboxes report as running, verify they're reachable
+                all_reachable = True
+                for sandbox_id in sandbox_ids:
+                    if final_statuses.get(sandbox_id) == "RUNNING":
+                        try:
+                            self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=10)
+                        except Exception:
+                            # Sandbox not actually reachable yet
+                            all_reachable = False
+                            # Remove from final_statuses so we continue polling
+                            final_statuses.pop(sandbox_id, None)
+
+                if all_reachable:
+                    return final_statuses
 
             # Aggressive polling for first 5 attempts, then back off
             sleep_time = 1 if attempt < 5 else 2
@@ -633,13 +654,15 @@ class AsyncSandboxClient:
             "sandbox_id": sandbox_id,
         }
 
+        effective_timeout = timeout if timeout is not None else 300
+
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=effective_timeout) as client:
                 response = await client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
                 return CommandResponse(**response.json())
         except httpx.TimeoutException:
-            raise CommandTimeoutError(sandbox_id, command, timeout or 0)
+            raise CommandTimeoutError(sandbox_id, command, effective_timeout)
         except httpx.HTTPStatusError as e:
             raise APIError(f"HTTP {e.response.status_code}: {e.response.text}")
         except Exception as e:
@@ -652,7 +675,14 @@ class AsyncSandboxClient:
         for attempt in range(max_attempts):
             sandbox = await self.get(sandbox_id)
             if sandbox.status == "RUNNING":
-                return
+                # Verify sandbox is actually reachable with a test command
+                try:
+                    await self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=10)
+                    return
+                except Exception:
+                    # Sandbox claims to be running but isn't reachable yet
+                    # Continue polling
+                    pass
             elif sandbox.status in ["ERROR", "TERMINATED"]:
                 raise SandboxNotRunningError(sandbox_id, sandbox.status)
 
@@ -717,8 +747,22 @@ class AsyncSandboxClient:
                 raise RuntimeError(f"Sandboxes failed: {all_failed}")
 
             if total_running == len(sandbox_ids):
-                # All sandboxes are running
-                return final_statuses
+                # All sandboxes report as running, verify they're reachable
+                all_reachable = True
+                for sandbox_id in sandbox_ids:
+                    if final_statuses.get(sandbox_id) == "RUNNING":
+                        try:
+                            await self.execute_command(
+                                sandbox_id, "echo 'sandbox ready'", timeout=10
+                            )
+                        except Exception:
+                            # Sandbox not actually reachable yet
+                            all_reachable = False
+                            # Remove from final_statuses so we continue polling
+                            final_statuses.pop(sandbox_id, None)
+
+                if all_reachable:
+                    return final_statuses
 
             # Aggressive polling for first 5 attempts, then back off
             sleep_time = 1 if attempt < 5 else 2

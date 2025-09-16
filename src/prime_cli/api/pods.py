@@ -6,6 +6,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from prime_cli.api.client import APIClient, APIError
 
 
+def clean_connection_fields(v: Any) -> Any:
+    """Shared validator to clean connection fields (ssh_connection, ip).
+
+    Removes empty list wrappers around None values.
+    """
+    if v == [None]:
+        return None
+    if isinstance(v, list) and len(v) == 1 and v[0] is None:
+        return None
+    return v
+
+
 class PortMapping(BaseModel):
     internal: str
     external: str
@@ -29,12 +41,8 @@ class PodStatus(BaseModel):
 
     @field_validator("ssh_connection", "ip", mode="before")
     @classmethod
-    def clean_connection_fields(cls, v: Any) -> Any:
-        if v == [None]:
-            return None
-        if isinstance(v, list) and len(v) == 1 and v[0] is None:
-            return None
-        return v
+    def validate_connection_fields(cls, v: Any) -> Any:
+        return clean_connection_fields(v)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -90,12 +98,8 @@ class Pod(BaseModel):
 
     @field_validator("ssh_connection", "ip", mode="before")
     @classmethod
-    def clean_connection_fields(cls, v: Any) -> Any:
-        if v == [None]:
-            return None
-        if isinstance(v, list) and len(v) == 1 and v[0] is None:
-            return None
-        return v
+    def validate_connection_fields(cls, v: Any) -> Any:
+        return clean_connection_fields(v)
 
     model_config = ConfigDict(populate_by_name=True)
 

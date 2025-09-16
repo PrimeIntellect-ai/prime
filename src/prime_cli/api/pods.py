@@ -1,9 +1,21 @@
 import json
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from prime_cli.api.client import APIClient, APIError
+
+
+def clean_connection_fields(v: Any) -> Any:
+    """Shared validator to clean connection fields (ssh_connection, ip).
+
+    Removes empty list wrappers around None values.
+    """
+    if v == [None]:
+        return None
+    if isinstance(v, list) and len(v) == 1 and v[0] is None:
+        return None
+    return v
 
 
 class PortMapping(BaseModel):
@@ -26,6 +38,11 @@ class PodStatus(BaseModel):
     ip: Optional[Union[str, List[str]]]
     installation_failure: Optional[str] = Field(None, alias="installationFailure")
     installation_progress: Optional[int] = Field(None, alias="installationProgress")
+
+    @field_validator("ssh_connection", "ip", mode="before")
+    @classmethod
+    def validate_connection_fields(cls, v: Any) -> Any:
+        return clean_connection_fields(v)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -78,6 +95,11 @@ class Pod(BaseModel):
     custom_template_id: Optional[str] = Field(None, alias="customTemplateId")
     is_spot: Optional[bool] = Field(None, alias="isSpot")
     auto_restart: Optional[bool] = Field(None, alias="autoRestart")
+
+    @field_validator("ssh_connection", "ip", mode="before")
+    @classmethod
+    def validate_connection_fields(cls, v: Any) -> Any:
+        return clean_connection_fields(v)
 
     model_config = ConfigDict(populate_by_name=True)
 

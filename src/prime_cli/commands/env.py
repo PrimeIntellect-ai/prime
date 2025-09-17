@@ -559,13 +559,20 @@ def push(
                     Path(temp_file_path).unlink()
 
             if finalize_response.get("success"):
-                console.print(
-                    f"\n[green]✓ Successfully pushed {owner_info['name']}/{env_name}[/green]"
-                )
+                owner_name = owner_info["name"]
+                console.print(f"\n[green]✓ Successfully pushed {owner_name}/{env_name}[/green]")
                 console.print(f"Wheel: {wheel_path.name}")
                 console.print(f"SHA256: {wheel_sha256}")
+
+                # Show Hub page link for the environment
+                frontend_url = client.config.frontend_url.rstrip("/")
+                hub_url = f"{frontend_url}/dashboard/environments/{owner_name}/{env_name}"
+                console.print("\n[cyan]View on Environments Hub:[/cyan]")
+                console.print(f"  [link={hub_url}]{hub_url}[/link]")
+
+                # Show install command
                 console.print("\n[cyan]Install with:[/cyan]")
-                console.print(f"  prime env install {owner_info['name']}/{env_name}")
+                console.print(f"  prime env install {owner_name}/{env_name}")
             else:
                 console.print(f"[red]Error finalizing: {finalize_response.get('message')}[/red]")
                 raise typer.Exit(1)

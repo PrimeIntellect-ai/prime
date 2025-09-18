@@ -700,7 +700,9 @@ def pull(
                         headers = {}
                         if client.api_key:
                             headers["Authorization"] = f"Bearer {client.api_key}"
-                        with httpx.stream("GET", download_url, headers=headers) as resp:
+                        with httpx.stream(
+                            "GET", download_url, headers=headers, timeout=60.0
+                        ) as resp:
                             resp.raise_for_status()
                             with open(tmp.name, "wb") as f:
                                 for chunk in resp.iter_bytes(chunk_size=8192):

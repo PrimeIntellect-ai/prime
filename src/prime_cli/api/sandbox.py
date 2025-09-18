@@ -66,6 +66,7 @@ class Sandbox(BaseModel):
     updated_at: datetime = Field(..., alias="updatedAt")
     started_at: Optional[datetime] = Field(None, alias="startedAt")
     terminated_at: Optional[datetime] = Field(None, alias="terminatedAt")
+    exit_code: Optional[int] = Field(None, alias="exitCode")
     user_id: Optional[str] = Field(None, alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
     kubernetes_job_id: Optional[str] = Field(None, alias="kubernetesJobId")

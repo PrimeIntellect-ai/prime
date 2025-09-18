@@ -49,7 +49,7 @@ SANDBOX_STATUS_COLORS = {
     "RUNNING": "green",
     "STOPPED": "blue",
     "ERROR": "red",
-    "TERMINATED": "red",
+    "TERMINATED": "white",
 }
 
 POD_STATUS_COLORS = {

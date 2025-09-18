@@ -69,6 +69,8 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         data["started_at"] = iso_timestamp(sandbox.started_at)
     if sandbox.terminated_at:
         data["terminated_at"] = iso_timestamp(sandbox.terminated_at)
+    if sandbox.exit_code is not None:
+        data["exit_code"] = sandbox.exit_code
     if sandbox.environment_vars:
         data["environment_vars"] = obfuscate_env_vars(sandbox.environment_vars)
     if sandbox.advanced_configs:
@@ -223,6 +225,8 @@ def get(
                 table.add_row("Started", sandbox_data["started_at"])
             if "terminated_at" in sandbox_data:
                 table.add_row("Terminated", sandbox_data["terminated_at"])
+            if "exit_code" in sandbox_data:
+                table.add_row("Exit Code", str(sandbox_data["exit_code"]))
 
             table.add_row("User ID", sandbox_data["user_id"] or "N/A")
             table.add_row("Team ID", sandbox_data["team_id"] or "Personal")

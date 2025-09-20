@@ -311,7 +311,7 @@ class SandboxClient:
         response = self.client.request(
             "POST", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
         )
-        return Sandbox(**response)
+        return Sandbox.model_validate(response)
 
     def list(
         self,
@@ -335,12 +335,12 @@ class SandboxClient:
             params["is_active"] = exclude_terminated
 
         response = self.client.request("GET", "/sandbox", params=params)
-        return SandboxListResponse(**response)
+        return SandboxListResponse.model_validate(response)
 
     def get(self, sandbox_id: str) -> Sandbox:
         """Get a specific sandbox"""
         response = self.client.request("GET", f"/sandbox/{sandbox_id}")
-        return Sandbox(**response)
+        return Sandbox.model_validate(response)
 
     def delete(self, sandbox_id: str) -> Dict[str, Any]:
         """Delete a sandbox"""
@@ -353,18 +353,18 @@ class SandboxClient:
         response = self.client.request(
             "DELETE", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
         )
-        return BulkDeleteSandboxResponse(**response)
+        return BulkDeleteSandboxResponse.model_validate(response)
 
     def get_logs(self, sandbox_id: str) -> str:
         """Get sandbox logs via backend"""
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/logs")
-        logs_response = SandboxLogsResponse(**response)
+        logs_response = SandboxLogsResponse.model_validate(response)
         return logs_response.logs
 
     def update_status(self, sandbox_id: str) -> Sandbox:
         """Update sandbox status from Kubernetes"""
         response = self.client.request("POST", f"/sandbox/{sandbox_id}/status")
-        return Sandbox(**response)
+        return Sandbox.model_validate(response)
 
     def execute_command(
         self,
@@ -392,7 +392,7 @@ class SandboxClient:
             with httpx.Client(timeout=effective_timeout) as client:
                 response = client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
-                return CommandResponse(**response.json())
+                return CommandResponse.model_validate(response.json())
         except httpx.TimeoutException:
             raise CommandTimeoutError(sandbox_id, command, effective_timeout)
         except httpx.HTTPStatusError as e:
@@ -509,7 +509,7 @@ class SandboxClient:
                 with httpx.Client(timeout=300.0) as client:
                     response = client.post(url, files=files, params=params, headers=headers)
                     response.raise_for_status()
-                    return FileUploadResponse(**response.json())
+                    return FileUploadResponse.model_validate(response.json())
             except httpx.HTTPStatusError as e:
                 error_details = f"HTTP {e.response.status_code}: {e.response.text}"
                 raise APIError(f"Upload failed: {error_details}")
@@ -572,7 +572,7 @@ class AsyncSandboxClient:
         response = await self.client.request(
             "POST", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
         )
-        return Sandbox(**response)
+        return Sandbox.model_validate(response)
 
     async def list(
         self,
@@ -596,12 +596,12 @@ class AsyncSandboxClient:
             params["is_active"] = exclude_terminated
 
         response = await self.client.request("GET", "/sandbox", params=params)
-        return SandboxListResponse(**response)
+        return SandboxListResponse.model_validate(response)
 
     async def get(self, sandbox_id: str) -> Sandbox:
         """Get a specific sandbox"""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}")
-        return Sandbox(**response)
+        return Sandbox.model_validate(response)
 
     async def delete(self, sandbox_id: str) -> Dict[str, Any]:
         """Delete a sandbox"""
@@ -614,18 +614,18 @@ class AsyncSandboxClient:
         response = await self.client.request(
             "DELETE", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
         )
-        return BulkDeleteSandboxResponse(**response)
+        return BulkDeleteSandboxResponse.model_validate(response)
 
     async def get_logs(self, sandbox_id: str) -> str:
         """Get sandbox logs"""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/logs")
-        logs_response = SandboxLogsResponse(**response)
+        logs_response = SandboxLogsResponse.model_validate(response)
         return logs_response.logs
 
     async def update_status(self, sandbox_id: str) -> Sandbox:
         """Update sandbox status from Kubernetes"""
         response = await self.client.request("POST", f"/sandbox/{sandbox_id}/status")
-        return Sandbox(**response)
+        return Sandbox.model_validate(response)
 
     async def execute_command(
         self,
@@ -666,7 +666,7 @@ class AsyncSandboxClient:
             async with httpx.AsyncClient(timeout=effective_timeout) as client:
                 response = await client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
-                return CommandResponse(**response.json())
+                return CommandResponse.model_validate(response.json())
         except httpx.TimeoutException:
             raise CommandTimeoutError(sandbox_id, command, effective_timeout)
         except httpx.HTTPStatusError as e:
@@ -801,7 +801,7 @@ class AsyncSandboxClient:
                         url, files=files, params=params, headers=headers
                     )
                     response.raise_for_status()
-                    return FileUploadResponse(**response.json())
+                    return FileUploadResponse.model_validate(response.json())
             except httpx.HTTPStatusError as e:
                 error_details = f"HTTP {e.response.status_code}: {e.response.text}"
                 raise APIError(f"Upload failed: {error_details}")

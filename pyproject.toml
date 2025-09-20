@@ -43,10 +43,10 @@ prime = "prime_cli.main:run"
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
-    "ruff>=0.1.8",      
-    "mypy>=1.8.0",
+    "ruff>=0.13.1",
+    "ty>=0.0.0a6",
     "types-toml>=0.10.0",
-    "pre-commit>=3.5.0"    
+    "pre-commit>=3.5.0"
 ]
 
 [build-system]
@@ -71,22 +71,3 @@ extend-select = [
     "I",   # isort (import sorting)
 ]
 
-[tool.mypy]
-python_version = "3.11"
-disallow_untyped_defs = true
-check_untyped_defs = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_return_any = true
-warn_unreachable = true 
-[[tool.mypy.overrides]]
-module = "pytest"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "verifiers.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "toml"
-ignore_missing_imports = true

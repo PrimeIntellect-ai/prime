@@ -112,13 +112,13 @@ class AvailabilityClient:
         combined: Dict[str, List[GPUAvailability]] = {}
         for gpu_type, gpus in single_response.items():
             if gpu_type is not None:
-                combined[gpu_type] = [GPUAvailability(**gpu) for gpu in gpus]
+                combined[gpu_type] = [GPUAvailability.model_validate(gpu) for gpu in gpus]
 
         for gpu_type, gpus in cluster_response.items():
             if gpu_type is not None:
                 if gpu_type in combined:
-                    combined[gpu_type].extend([GPUAvailability(**gpu) for gpu in gpus])
+                    combined[gpu_type].extend([GPUAvailability.model_validate(gpu) for gpu in gpus])
                 else:
-                    combined[gpu_type] = [GPUAvailability(**gpu) for gpu in gpus]
+                    combined[gpu_type] = [GPUAvailability.model_validate(gpu) for gpu in gpus]
 
         return combined

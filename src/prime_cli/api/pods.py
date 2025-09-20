@@ -142,7 +142,7 @@ class PodsClient:
         try:
             params = {"offset": offset, "limit": limit}
             response = self.client.get("/pods", params=params)
-            return PodList(**response)
+            return PodList.model_validate(response)
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to list pods: {e.response.text}")
@@ -153,7 +153,7 @@ class PodsClient:
         try:
             params = {"pod_ids": pod_ids}
             response = self.client.get("/pods/status", params=params)
-            return [PodStatus(**status) for status in response.get("data", [])]
+            return [PodStatus.model_validate(status) for status in response.get("data", [])]
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to get pod status: {e.response.text}")
@@ -163,7 +163,7 @@ class PodsClient:
         """Get details of a specific pod"""
         try:
             response = self.client.get(f"/pods/{pod_id}")
-            return Pod(**response)
+            return Pod.model_validate(response)
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to get pod details: {e.response.text}")
@@ -177,10 +177,10 @@ class PodsClient:
 
         try:
             response = self.client.request("POST", "/pods", json=pod_config)
-            return Pod(**response)
+            return Pod.model_validate(response)
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                error_text = e.response.text
+                error_text = str(e.response.text)
                 error_json = json.loads(error_text)
                 if "detail" in error_json:
                     error_text = error_json["detail"]

@@ -59,12 +59,21 @@ async def main() -> None:
             # 4. Execute commands in parallel across sandboxes
             print("\nExecuting commands in parallel...")
 
-            commands = [
-                (sandboxes[0].id, "python --version"),
-                (sandboxes[1].id, "node --version"),
-                (sandboxes[0].id, "python -c 'print(\"Hello from Python sandbox!\")'"),
-                (sandboxes[1].id, "echo 'Hello from Node sandbox!'"),
-            ]
+            commands = []
+            if len(sandboxes) >= 1:
+                commands.extend(
+                    [
+                        (sandboxes[0].id, "python --version"),
+                        (sandboxes[0].id, "python -c 'print(\"Hello from Python sandbox!\")'"),
+                    ]
+                )
+            if len(sandboxes) >= 2:
+                commands.extend(
+                    [
+                        (sandboxes[1].id, "node --version"),
+                        (sandboxes[1].id, "echo 'Hello from Node sandbox!'"),
+                    ]
+                )
 
             # Execute all commands concurrently
             results = await asyncio.gather(

@@ -25,7 +25,7 @@ jobs:
         if: github.event_name == 'push'
         id: auto_version
         run: |
-          VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/prime_cli/__init__.py)
+          VERSION=$(python3 -c "import sys; sys.path.insert(0, 'src'); from prime_cli import __version__; print(__version__)")
           if [ -z "$VERSION" ]; then
             echo "Error: Unable to parse __version__" >&2
             exit 1

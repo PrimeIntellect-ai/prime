@@ -1,4 +1,5 @@
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -20,12 +21,91 @@ from ..api.client import APIClient, APIError
 from ..utils import output_data_as_json, validate_output_format
 
 app = typer.Typer(help="Manage verifiers environments")
-console = Console()
+
+# Force interactive mode for known terminal environments
+force_interactive = bool(
+    os.environ.get("TERM")
+    or os.environ.get("TMUX")
+    or os.environ.get("SSH_TTY")
+    or os.environ.get("VSCODE_TERM_PROFILE")
+)
+console = Console(force_terminal=force_interactive if force_interactive else None)
 
 # Constants
 MAX_FILES_TO_SHOW = 10
 DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
+
+
+def download_with_progress(
+    url: str, output_file: str, description: str, headers: dict | None = None
+) -> None:
+    """Download a file with a progress indicator."""
+    import sys
+
+    with httpx.stream("GET", url, headers=headers or {}, timeout=120.0) as resp:
+        resp.raise_for_status()
+
+        total_header = resp.headers.get("Content-Length")
+        total_bytes = int(total_header) if total_header and total_header.isdigit() else None
+
+        with open(output_file, "wb") as f:
+            if total_bytes:
+                # Show size info
+                size_mb = total_bytes / (1024 * 1024)
+                console.print(f"{description} [dim]({size_mb:.1f} MB)[/dim]")
+
+                # Download with progress bar using sys.stdout for immediate flush
+                downloaded = 0
+
+                for chunk in resp.iter_bytes(chunk_size=8192):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    # Calculate progress
+                    progress = downloaded / total_bytes
+                    bar_length = 30
+                    filled = int(bar_length * progress)
+                    bar = "█" * filled + "░" * (bar_length - filled)
+                    pct = int(progress * 100)
+                    downloaded_mb = downloaded / (1024 * 1024)
+
+                    # Write progress directly to stdout with immediate flush
+                    sys.stdout.write(
+                        f"\r  [{bar}] {pct:3d}% ({downloaded_mb:.1f}/{size_mb:.1f} MB)"
+                    )
+                    sys.stdout.flush()
+
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                console.print("[green]✓[/green] Download complete")
+            else:
+                # No content length, just show message
+                console.print(f"{description}...")
+                for chunk in resp.iter_bytes(chunk_size=8192):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                console.print("[green]✓[/green] Download complete")
+
+
+def upload_with_progress(
+    url: str, content: bytes, description: str, headers: dict | None = None, timeout: float = 300.0
+) -> httpx.Response:
+    """Upload content with a progress indicator."""
+    total_bytes = len(content)
+    size_mb = total_bytes / (1024 * 1024)
+
+    # Show upload info
+    console.print(f"{description} [dim]({size_mb:.1f} MB)[/dim]")
+    console.print("[dim]Processing on server...[/dim]", end="")
+
+    response = httpx.put(url, content=content, headers=headers or {}, timeout=timeout)
+
+    console.print("\r[green]✓[/green] Upload complete              ")
+    return response
 
 
 def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
@@ -276,7 +356,9 @@ def push(
                     console.print(f"[red]Failed to update version in pyproject.toml: {e}[/red]")
                     raise typer.Exit(1)
 
-            console.print(f"Environment name: {env_name}")
+            # Only show environment name if user overrode it
+            if name:
+                console.print(f"[dim]Using environment name: {env_name}[/dim]")
 
         except Exception as e:
             console.print(f"[red]Failed to parse pyproject.toml: {e}[/red]")
@@ -301,15 +383,12 @@ def push(
             console.print("[red]Error: No environment Python file found[/red]")
             raise typer.Exit(1)
 
-        console.print(f"Building environment package at {env_path}...")
+        console.print(f"\n[cyan]Building {env_name}...[/cyan]")
 
         # Clean dist directory to ensure fresh build
         dist_dir = env_path / "dist"
         if dist_dir.exists():
-            console.print("[dim]Cleaning existing dist directory...[/dim]")
             shutil.rmtree(dist_dir)
-
-        console.print("Building wheel distribution...")
 
         try:
             if shutil.which("uv"):
@@ -343,14 +422,12 @@ def push(
 
         wheel_path = wheels[0]
         wheel_size = wheel_path.stat().st_size
-        console.print(f"[green]✓ Built {wheel_path.name} ({wheel_size:,} bytes)[/green]")
-
-        console.print("\nUploading to Prime Intellect Hub...")
+        console.print(f"[green]✓ Built package[/green] [dim]({wheel_size:,} bytes)[/dim]")
 
         try:
             client = APIClient()
 
-            console.print("Resolving environment...")
+            console.print("\n[cyan]Uploading to Prime Intellect Hub...[/cyan]")
             resolve_data = {"name": env_name, "visibility": visibility}
             if team:
                 resolve_data["team_slug"] = team
@@ -368,20 +445,15 @@ def push(
                 env_id = resolve_response["id"]
                 owner_info = resolve_response["owner"]
 
-                if resolve_response["created"]:
+                if not resolve_response["created"]:
                     console.print(
-                        f"[green]✓ Created environment: {owner_info['name']}/{env_name}[/green]"
-                    )
-                else:
-                    console.print(
-                        f"[green]✓ Found existing environment: "
-                        f"{owner_info['name']}/{env_name}[/green]"
+                        f"[dim]Found existing environment: {owner_info['name']}/{env_name}[/dim]"
                     )
             except APIError as e:
                 console.print(f"[red]Failed to resolve environment: {e}[/red]")
                 raise typer.Exit(1)
 
-            console.print("Uploading wheel ...")
+            # Remove this line - progress bar is enough
 
             try:
                 with open(wheel_path, "rb") as f:
@@ -439,12 +511,16 @@ def push(
             if wheel_upload_url:
                 try:
                     with open(wheel_path, "rb") as f:
-                        upload_response = httpx.put(
-                            wheel_upload_url,
-                            content=f.read(),
-                            headers={"Content-Type": "application/octet-stream"},
-                        )
-                        upload_response.raise_for_status()
+                        wheel_content = f.read()
+
+                    description = f"Uploading {wheel_path.name}"
+                    upload_response = upload_with_progress(
+                        wheel_upload_url,
+                        wheel_content,
+                        description,
+                        headers={"Content-Type": "application/octet-stream"},
+                    )
+                    upload_response.raise_for_status()
                 except httpx.RequestError as e:
                     console.print(f"[red]Failed to upload wheel: {e}[/red]")
                     raise typer.Exit(1)
@@ -458,7 +534,7 @@ def push(
                     console.print(f"[red]Failed to finalize wheel upload: {e}[/red]")
                     raise typer.Exit(1)
 
-            console.print("Creating source archive...")
+            # Creating source archive silently
             temp_file_path = None
             try:
                 with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
@@ -524,13 +600,17 @@ def push(
 
                     try:
                         with open(tmp.name, "rb") as f:
-                            upload_response = httpx.put(
-                                source_upload_url,
-                                content=f.read(),
-                                headers={"Content-Type": "application/octet-stream"},
-                                timeout=300.0,
-                            )
-                            upload_response.raise_for_status()
+                            source_content = f.read()
+
+                        description = f"Uploading {unique_source_name}"
+                        upload_response = upload_with_progress(
+                            source_upload_url,
+                            source_content,
+                            description,
+                            headers={"Content-Type": "application/octet-stream"},
+                            timeout=300.0,
+                        )
+                        upload_response.raise_for_status()
                     except httpx.RequestError as e:
                         console.print(f"[red]Failed to upload source archive: {e}[/red]")
                         raise typer.Exit(1)
@@ -561,18 +641,12 @@ def push(
             if finalize_response.get("success"):
                 owner_name = owner_info["name"]
                 console.print(f"\n[green]✓ Successfully pushed {owner_name}/{env_name}[/green]")
-                console.print(f"Wheel: {wheel_path.name}")
-                console.print(f"SHA256: {wheel_sha256}")
 
                 # Show Hub page link for the environment
                 frontend_url = client.config.frontend_url.rstrip("/")
                 hub_url = f"{frontend_url}/dashboard/environments/{owner_name}/{env_name}"
-                console.print("\n[cyan]View on Environments Hub:[/cyan]")
-                console.print(f"  [link={hub_url}]{hub_url}[/link]")
-
-                # Show install command
-                console.print("\n[cyan]Install with:[/cyan]")
-                console.print(f"  prime env install {owner_name}/{env_name}")
+                console.print(f"\n[dim]View:[/dim] [link={hub_url}]{hub_url}[/link]")
+                console.print(f"[dim]Install:[/dim] prime env install {owner_name}/{env_name}")
             else:
                 console.print(f"[red]Error finalizing: {finalize_response.get('message')}[/red]")
                 raise typer.Exit(1)
@@ -656,7 +730,7 @@ def pull(
 
         owner, name = parts
 
-        console.print(f"Pulling {env_id}@{version}...")
+        console.print(f"\n[cyan]Pulling {env_id}@{version}...[/cyan]")
 
         try:
             response = client.get(f"/environmentshub/{owner}/{name}/@{version}")
@@ -689,7 +763,7 @@ def pull(
             console.print(f"[red]Error creating directory: {e}[/red]")
             raise typer.Exit(1)
 
-        console.print(f"Downloading to {target_dir}...")
+        console.print(f"[dim]Target: {target_dir}[/dim]")
 
         temp_file_path = None
         try:
@@ -700,13 +774,9 @@ def pull(
                         headers = {}
                         if client.api_key:
                             headers["Authorization"] = f"Bearer {client.api_key}"
-                        with httpx.stream(
-                            "GET", download_url, headers=headers, timeout=60.0
-                        ) as resp:
-                            resp.raise_for_status()
-                            with open(tmp.name, "wb") as f:
-                                for chunk in resp.iter_bytes(chunk_size=8192):
-                                    f.write(chunk)
+
+                        description = f"Downloading {owner}/{name}@{version}"
+                        download_with_progress(download_url, tmp.name, description, headers)
                     else:
                         console.print(f"[red]Error: Invalid download URL: {download_url}[/red]")
                         raise typer.Exit(1)
@@ -734,19 +804,17 @@ def pull(
             if temp_file_path and Path(temp_file_path).exists():
                 Path(temp_file_path).unlink()
 
-        console.print(f"[green]✓ Environment pulled to {target_dir}[/green]")
+        console.print(f"\n[green]✓ Successfully pulled to {target_dir}[/green]")
 
         try:
             extracted_files = list(target_dir.iterdir())
-            if extracted_files:
-                console.print("\nExtracted files:")
-                for file in extracted_files[:MAX_FILES_TO_SHOW]:
-                    console.print(f"  - {file.name}")
-                if len(extracted_files) > MAX_FILES_TO_SHOW:
-                    remaining = len(extracted_files) - MAX_FILES_TO_SHOW
-                    console.print(f"  ... and {remaining} more files")
-        except OSError as e:
-            console.print(f"[yellow]Warning: Could not list extracted files: {e}[/yellow]")
+            file_count = len(extracted_files)
+            if file_count > 0:
+                console.print(
+                    f"[dim]{file_count} file{'s' if file_count != 1 else ''} extracted[/dim]"
+                )
+        except OSError:
+            pass  # Silently skip if we can't list files
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -1027,8 +1095,7 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
     Raises:
         typer.Exit: If installation fails
     """
-    console.print(f"\n[cyan]Installing {env_id}@{version} with {tool}...[/cyan]")
-    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
+    console.print(f"[dim]Using {tool}: {' '.join(cmd)}[/dim]")
 
     try:
         process = subprocess.Popen(
@@ -1100,7 +1167,7 @@ def install(
 
         owner, name = env_id.split("/")
 
-        console.print(f"Resolving {env_id}@{target_version}...")
+        console.print(f"\n[cyan]Installing {env_id}@{target_version}...[/cyan]")
 
         # Fetch environment details
         try:
@@ -1134,7 +1201,7 @@ def install(
             )
             raise typer.Exit(1)
 
-        console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
+        # Remove this - we already said we're installing
 
         # Generate install command preferring simple index over wheel URL
         normalized_name = normalize_package_name(name)
@@ -1198,9 +1265,10 @@ def install(
         execute_install_command(cmd_parts, env_id, target_version, with_tool)
 
         # Display usage instructions
-        console.print("\n[dim]Use in Python:[/dim]")
-        console.print("  from verifiers import load_environment")
-        console.print(f"  env = load_environment('{name}')")
+        console.print(
+            f"\n[dim]Usage:[/dim] from verifiers import load_environment; "
+            f"env = load_environment('{name}')"
+        )
 
     except APIError as e:
         console.print(f"[red]API Error: {e}[/red]")
@@ -1225,8 +1293,8 @@ def execute_uninstall_command(cmd: List[str], env_name: str, tool: str) -> None:
         typer.Exit: If uninstall fails
     """
 
-    console.print(f"\n[cyan]Uninstalling {env_name} with {tool}...[/cyan]")
-    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
+    console.print(f"\n[cyan]Uninstalling {env_name}...[/cyan]")
+    console.print(f"[dim]Using {tool}: {' '.join(cmd)}[/dim]")
 
     try:
         process = subprocess.Popen(

@@ -20,12 +20,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Get version from pyproject.toml on push
-      - name: Get version from pyproject.toml
+      # Get version from package source on push
+      - name: Get version from src/prime_cli/__init__.py
         if: github.event_name == 'push'
         id: auto_version
         run: |
-          VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
+          VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/prime_cli/__init__.py)
+          if [ -z "$VERSION" ]; then
+            echo "Error: Unable to parse __version__" >&2
+            exit 1
+          fi
           echo "VERSION=$VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 

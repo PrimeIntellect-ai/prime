@@ -17,6 +17,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ..api.client import APIClient, APIError
+from ..config import Config
 from ..utils import output_data_as_json, validate_output_format
 
 app = typer.Typer(help="Manage verifiers environments")
@@ -1514,4 +1515,89 @@ def delete(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command(
+    "eval",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def eval_env(
+    ctx: typer.Context,
+    environment: str = typer.Argument(
+        ...,
+        help="Installed Verifiers environment name (e.g. 'math-python')",
+    ),
+    model: str = typer.Option(
+        ...,
+        "--model",
+        "-m",
+        help=(
+            "Model to use (e.g. 'qwen/qwen3-max', see 'prime inference models' "
+            "for available models)"
+        ),
+    ),
+
+) -> None:
+    """
+    Run verifiers' vf-eval with Prime Inference
+
+    Example:
+        prime env eval meow -m qwen/qwen3-max -n 2 -r 3 -t 1024 -T 0.7
+
+    Notes:
+      • We add:  -b <Prime Inference base URL>  -k <Prime API Key>
+      • All extra args are forwarded unchanged to vf-eval.
+      • We try 'vf-eval' first, then fall back to 'uv run vf-eval'.
+    """
+    config = Config()
+    api_key = config.api_key
+    inference_url = config.inference_url.rstrip("/") + "/api/v1"
+
+    if not api_key:
+        console.print(
+            "[red]No API key configured.[/red] "
+            "Run [bold]prime login[/bold] or [bold]prime config set-api-key[/bold]."
+        )
+        raise typer.Exit(1)
+    if not inference_url:
+        console.print(
+            "[red]Inference URL not configured.[/red] "
+            "Check [bold]prime config view[/bold]."
+        )
+        raise typer.Exit(1)
+
+    cmd = ["uv", "run", "vf-eval", environment]
+
+    # Extra user args (unknown options) from Typer/Click
+    user_args = list(ctx.args)
+
+    def _has_flag(names: tuple[str, ...]) -> bool:
+        for a in user_args:
+            for n in names:
+                if a == n or (n.startswith("--") and a.startswith(n + "=")):
+                    return True
+        return False
+
+    # Inject base URL and API key unless caller provided their own
+    if not _has_flag(("-b", "--base-url")):
+        cmd += ["-b", inference_url]
+    if not _has_flag(("-k", "--api-key")):
+        cmd += ["-k", api_key]
+
+    # Always pass the selected model (since it's a required option)
+    cmd += ["-m", model]
+
+    # Forward everything else untouched
+    cmd += user_args
+
+    # Execute; stream output directly
+    try:
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            raise typer.Exit(result.returncode)
+    except KeyboardInterrupt:
+        raise typer.Exit(130)
+    except FileNotFoundError:
+        console.print("[red]Failed to start vf-eval process.[/red]")
         raise typer.Exit(1)

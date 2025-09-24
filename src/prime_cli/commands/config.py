@@ -43,6 +43,9 @@ def view() -> None:
     # Show frontend URL
     table.add_row("Frontend URL", settings["frontend_url"])
 
+    # Show inference URL
+    table.add_row("Inference URL", settings["inference_url"])
+
     # Show SSH key path
     table.add_row("SSH Key Path", settings["ssh_key_path"])
 
@@ -155,6 +158,29 @@ def set_frontend_url(
     config = Config()
     config.set_frontend_url(url)
     console.print(f"[green]Frontend URL set to: {url}[/green]")
+
+
+@app.command()
+def set_inference_url(
+    url: Optional[str] = typer.Argument(
+        None,
+        help="Inference URL for Prime Inference API. If not provided, you'll be prompted.",
+    ),
+) -> None:
+    """Set the inference URL (prompts if not provided)"""
+    if not url:
+        config = Config()
+        url = typer.prompt(
+            "Enter the inference URL for Prime Inference API",
+            default=config.inference_url,
+        )
+        if not url:
+            console.print("[red]Inference URL is required[/red]")
+            return
+
+    config = Config()
+    config.set_inference_url(url)
+    console.print(f"[green]Inference URL set to: {url}[/green]")
 
 
 # Helper functions (not commands)

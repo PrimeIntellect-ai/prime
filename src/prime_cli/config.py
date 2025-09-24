@@ -12,6 +12,7 @@ class ConfigModel(BaseModel):
     team_id: str | None = None
     base_url: str = "https://api.primeintellect.ai"
     frontend_url: str = "https://app.primeintellect.ai"
+    inference_url: str = "https://inference.pinference.ai"
     ssh_key_path: str = str(Path.home() / ".ssh" / "id_rsa")
     current_environment: str = "production"
 
@@ -21,6 +22,7 @@ class ConfigModel(BaseModel):
 class Config:
     DEFAULT_BASE_URL: str = "https://api.primeintellect.ai"
     DEFAULT_FRONTEND_URL: str = "https://app.primeintellect.ai"
+    DEFAULT_INFERENCE_URL: str = "https://inference.pinference.ai"
     DEFAULT_SSH_KEY_PATH: str = str(Path.home() / ".ssh" / "id_rsa")
 
     def __init__(self) -> None:
@@ -41,6 +43,7 @@ class Config:
                     team_id=None,
                     base_url=self.DEFAULT_BASE_URL,
                     frontend_url=self.DEFAULT_FRONTEND_URL,
+                    inference_url=self.DEFAULT_INFERENCE_URL,
                     ssh_key_path=self.DEFAULT_SSH_KEY_PATH,
                     current_environment="production",
                 ).model_dump()
@@ -107,6 +110,20 @@ class Config:
         self._save_config(self.config)
 
     @property
+    def inference_url(self) -> str:
+        """Get inference URL from config"""
+        inference_url: str = self.config.get("inference_url", self.DEFAULT_INFERENCE_URL)
+        return inference_url
+
+    def set_inference_url(self, value: str) -> None:
+        """Set frontend URL in config file"""
+        value = value.rstrip("/")
+        if value.endswith("/api/v1"):
+            value = value[:-7]
+        self.config["inference_url"] = value
+        self._save_config(self.config)
+
+    @property
     def ssh_key_path(self) -> str:
         """Get SSH private key path from config file or environment"""
         return self.config.get("ssh_key_path", self.DEFAULT_SSH_KEY_PATH) or os.getenv(
@@ -147,6 +164,7 @@ class Config:
             "team_id": self.team_id,
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
+            "inference_url": self.inference_url,
             "ssh_key_path": self.ssh_key_path,
             "current_environment": self.current_environment,
         }
@@ -163,6 +181,7 @@ class Config:
             "team_id": self.team_id,
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
+            "inference_url": self.inference_url,
         }
         env_file.write_text(json.dumps(env_config, indent=2))
 
@@ -172,6 +191,7 @@ class Config:
             # Built-in production environment
             self.set_base_url(self.DEFAULT_BASE_URL)
             self.set_frontend_url(self.DEFAULT_FRONTEND_URL)
+            self.set_inference_url(self.DEFAULT_INFERENCE_URL)
             self.set_team_id(None)  # Production defaults to personal account
             self.set_current_environment("production")
             return True
@@ -191,6 +211,7 @@ class Config:
                 self.set_team_id(env_config.get("team_id", None))
                 self.set_base_url(env_config.get("base_url", self.DEFAULT_BASE_URL))
                 self.set_frontend_url(env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL))
+                self.set_inference_url(env_config.get("inference_url", self.DEFAULT_INFERENCE_URL))
                 self.set_current_environment(name)
                 return True
         except ValueError:
@@ -211,6 +232,7 @@ class Config:
                         "team_id": self.team_id,
                         "base_url": self.base_url,
                         "frontend_url": self.frontend_url,
+                        "inference_url": self.inference_url,
                     }
                     env_file.write_text(json.dumps(env_config, indent=2))
             except ValueError:

@@ -8,6 +8,7 @@ from .commands.env import app as env_app
 from .commands.login import app as login_app
 from .commands.pods import app as pods_app
 from .commands.sandbox import app as sandbox_app
+from .commands.inference import app as inference_app
 
 __version__ = version("prime")
 
@@ -19,6 +20,7 @@ app.add_typer(pods_app, name="pods")
 app.add_typer(sandbox_app, name="sandbox")
 app.add_typer(login_app, name="login")
 app.add_typer(env_app, name="env")
+app.add_typer(inference_app, name="inference")
 
 
 @app.callback(invoke_without_command=True)

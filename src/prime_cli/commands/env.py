@@ -1548,7 +1548,6 @@ def eval_env(
     Notes:
       • We add:  -b <Prime Inference base URL>  -k <Prime API Key>
       • All extra args are forwarded unchanged to vf-eval.
-      • We try 'vf-eval' first, then fall back to 'uv run vf-eval'.
     """
     config = Config()
     api_key = config.api_key

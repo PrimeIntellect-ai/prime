@@ -9,7 +9,10 @@ from rich.table import Table
 from ..api.inference import InferenceAPIError, InferenceClient
 from ..utils import output_data_as_json, validate_output_format
 
-app = typer.Typer(help="Run model inference")
+app = typer.Typer(
+    help="Run and manage Prime Inference\n\n"
+    "Use `prime env eval` for environment evals with Prime Inference."
+)
 console = Console()
 
 
@@ -51,16 +54,12 @@ def list_models(
             console.print("[yellow]No models returned.[/yellow]")
             return
 
-        table = Table(title="Prime Inference Models")
+        table = Table(title="Prime Inference Available Models")
         table.add_column("id", style="cyan")
-        # TODO: skip owned_by for now
-        # table.add_column("owned_by", style="green")
         table.add_column("created", style="magenta")
 
         for m in models:
             mid = str(m.get("id", ""))
-            # TODO: skip owned_by for now
-            # owned_by = str(m.get("owned_by", m.get("owner", "")) or "")
             created = _fmt_created(str(m.get("created", "")))
             table.add_row(mid, created)
 

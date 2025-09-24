@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1526,14 +1527,14 @@ def eval_env(
     ctx: typer.Context,
     environment: str = typer.Argument(
         ...,
-        help="Installed Verifiers environment name (e.g. 'math-python')",
+        help="Installed Verifiers environment name (e.g. 'wordle')",
     ),
     model: str = typer.Option(
-        ...,
+        "meta-llama/llama-3.1-70b-instruct",
         "--model",
         "-m",
         help=(
-            "Model to use (e.g. 'qwen/qwen3-max', see 'prime inference models' "
+            "Model to use (e.g. 'meta-llama/llama-3.1-70b-instruct', see 'prime inference models' "
             "for available models)"
         ),
     ),
@@ -1543,15 +1544,13 @@ def eval_env(
     Run verifiers' vf-eval with Prime Inference
 
     Example:
-        prime env eval meow -m qwen/qwen3-max -n 2 -r 3 -t 1024 -T 0.7
-
-    Notes:
-      • We add:  -b <Prime Inference base URL>  -k <Prime API Key>
-      • All extra args are forwarded unchanged to vf-eval.
+       prime env eval meow -m qwen/qwen3-max -n 2 -r 3 -t 1024 -T 0.7
+       All extra args are forwarded unchanged to vf-eval.
     """
     config = Config()
+
     api_key = config.api_key
-    inference_url = config.inference_url.rstrip("/") + "/api/v1"
+    inference_base_url = (config.inference_url or "").strip()
 
     if not api_key:
         console.print(
@@ -1559,12 +1558,19 @@ def eval_env(
             "Run [bold]prime login[/bold] or [bold]prime config set-api-key[/bold]."
         )
         raise typer.Exit(1)
-    if not inference_url:
+    if not inference_base_url:
         console.print(
             "[red]Inference URL not configured.[/red] "
             "Check [bold]prime config view[/bold]."
         )
         raise typer.Exit(1)
+
+    # Append /api/v1 only if not already present
+    inference_base_url_no_slash = inference_base_url.rstrip("/")
+    if inference_base_url_no_slash.endswith("/api/v1"):
+        inference_url = inference_base_url_no_slash
+    else:
+        inference_url = inference_base_url_no_slash + "/api/v1"
 
     cmd = ["uv", "run", "vf-eval", environment]
 
@@ -1581,18 +1587,21 @@ def eval_env(
     # Inject base URL and API key unless caller provided their own
     if not _has_flag(("-b", "--base-url")):
         cmd += ["-b", inference_url]
-    if not _has_flag(("-k", "--api-key")):
-        cmd += ["-k", api_key]
 
     # Always pass the selected model (since it's a required option)
     cmd += ["-m", model]
+
+    # Set PRIME_API_KEY for the child process
+    env = os.environ.copy()
+    env["PRIME_API_KEY"] = api_key
+    cmd += ["-k", "PRIME_API_KEY"]
 
     # Forward everything else untouched
     cmd += user_args
 
     # Execute; stream output directly
     try:
-        result = subprocess.run(cmd)
+        result = subprocess.run(cmd, env=env)
         if result.returncode != 0:
             raise typer.Exit(result.returncode)
     except KeyboardInterrupt:

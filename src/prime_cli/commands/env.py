@@ -1591,9 +1591,11 @@ def eval_env(
     # Always pass the selected model (since it's a required option)
     cmd += ["-m", model]
 
+    # Environment modificaiton may be necessary for passing in API key
+    env = os.environ.copy()
+
     # Set PRIME_API_KEY if user did not provider api key var
     if not _has_flag(("-k", "--api-key-var")):
-        env = os.environ.copy()
         env["PRIME_API_KEY"] = api_key
         cmd += ["-k", "PRIME_API_KEY"]
 

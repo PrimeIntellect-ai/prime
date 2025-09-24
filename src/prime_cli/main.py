@@ -5,10 +5,10 @@ import typer
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
 from .commands.env import app as env_app
+from .commands.inference import app as inference_app
 from .commands.login import app as login_app
 from .commands.pods import app as pods_app
 from .commands.sandbox import app as sandbox_app
-from .commands.inference import app as inference_app
 
 __version__ = version("prime")
 

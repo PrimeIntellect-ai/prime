@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, Iterable, Iterator, Optional
 
 import httpx
+
 from ..config import Config
 
 
@@ -43,7 +44,10 @@ class InferenceClient:
         if self.team_id:
             headers["X-Prime-Team-ID"] = self.team_id
 
-        self._client = httpx.Client(headers=headers, timeout=httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=60.0))
+        self._client = httpx.Client(
+            headers=headers,
+            timeout=httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=60.0),
+        )
 
     def list_models(self) -> Dict[str, Any]:
         url = f"{self.inference_url}/api/v1/models"
@@ -51,7 +55,9 @@ class InferenceClient:
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise InferenceAPIError(f"GET {url} failed: {e.response.status_code} {e.response.text}") from e
+            raise InferenceAPIError(
+                f"GET {url} failed: {e.response.status_code} {e.response.text}"
+            ) from e
         return resp.json()
 
     def chat_completion(

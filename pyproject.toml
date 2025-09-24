@@ -1,6 +1,6 @@
 [project]
 name = "prime"
-version = "0.3.34"
+dynamic = ["version"]
 description = "Prime Intellect CLI + SDK"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -56,6 +56,9 @@ build-backend = "hatchling.build"
 [tool.hatch.metadata]
 allow-direct-references = true
 
+[tool.hatch.version]
+path = "src/prime_cli/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/prime_cli"]
 
@@ -70,4 +73,3 @@ extend-select = [
     "F",   # pyflakes
     "I",   # isort (import sorting)
 ]
-

@@ -1,3 +1,4 @@
-"""Prime Intellect CLI"""
+"""Prime Intellect CLI."""
 
-__version__ = "0.1.0"
+# The version is the single source of truth for packaging metadata.
+__version__ = "0.3.34"

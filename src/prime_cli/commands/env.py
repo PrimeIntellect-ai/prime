@@ -1591,10 +1591,11 @@ def eval_env(
     # Always pass the selected model (since it's a required option)
     cmd += ["-m", model]
 
-    # Set PRIME_API_KEY for the child process
-    env = os.environ.copy()
-    env["PRIME_API_KEY"] = api_key
-    cmd += ["-k", "PRIME_API_KEY"]
+    # Set PRIME_API_KEY if user did not provider api key var
+    if not _has_flag(("-k", "--api-key-var")):
+        env = os.environ.copy()
+        env["PRIME_API_KEY"] = api_key
+        cmd += ["-k", "PRIME_API_KEY"]
 
     # Forward everything else untouched
     cmd += user_args

@@ -60,6 +60,29 @@ class InferenceClient:
             ) from e
         return resp.json()
 
+    def retrieve_model(self, model_id: str) -> Dict[str, Any]:
+        """
+        GET /api/v1/models/{model_id}
+        Fast-fail helper to verify a model exists/ is available before running an eval.
+        Raises InferenceAPIError with a clear message on 4xx/5xx.
+        """
+        url = f"{self.inference_url}/api/v1/models/{model_id}"
+        resp = self._client.get(url)
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            # Treat common "unknown model" responses as a dedicated error
+            if status in (400, 404, 422):
+                raise InferenceAPIError(
+                    f"Model '{model_id}' not found or unavailable "
+                    f"(GET {url} → {status})."
+                ) from e
+            raise InferenceAPIError(
+                f"GET {url} failed: {status} {e.response.text}"
+            ) from e
+        return resp.json()
+
     def chat_completion(
         self, payload: Dict[str, Any], stream: bool = False
     ) -> Dict[str, Any] | Iterable[Dict[str, Any]]:

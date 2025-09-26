@@ -18,6 +18,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ..api.client import APIClient, APIError
+from ..api.inference import InferenceAPIError, InferenceClient
 from ..config import Config
 from ..utils import output_data_as_json, validate_output_format
 
@@ -1562,6 +1563,17 @@ def eval_env(
         console.print(
             "[red]Inference URL not configured.[/red] "
             "Check [bold]prime config view[/bold]."
+        )
+        raise typer.Exit(1)
+
+    # Fast fail if the model doesn't exist
+    client = InferenceClient()
+    try:
+        client.retrieve_model(model)
+    except InferenceAPIError as e:
+        console.print(
+            f"[red]Invalid model:[/red] {e} \n\n"
+            f"[b]Use 'prime inference models' to see available models.[/b]"
         )
         raise typer.Exit(1)
 

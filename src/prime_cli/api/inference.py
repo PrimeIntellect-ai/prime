@@ -16,6 +16,7 @@ class InferenceClient:
     """
     Minimal client for the OpenAI-compatible Prime Inference API:
       - GET /v1/models
+      - GET /v1/models/{model_id}
       - POST /v1/chat/completions
     """
 
@@ -57,6 +58,24 @@ class InferenceClient:
         except httpx.HTTPStatusError as e:
             raise InferenceAPIError(
                 f"GET {url} failed: {e.response.status_code} {e.response.text}"
+            ) from e
+        return resp.json()
+
+    def retrieve_model(self, model_id: str) -> Dict[str, Any]:
+        url = f"{self.inference_url}/api/v1/models/{model_id}"
+        resp = self._client.get(url)
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            # Treat common "unknown model" responses as a dedicated error
+            if status in (400, 404, 422):
+                raise InferenceAPIError(
+                    f"Model '{model_id}' not found or unavailable "
+                    f"(GET {url} → {status})."
+                ) from e
+            raise InferenceAPIError(
+                f"GET {url} failed: {status} {e.response.text}"
             ) from e
         return resp.json()
 

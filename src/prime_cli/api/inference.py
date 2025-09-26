@@ -16,6 +16,7 @@ class InferenceClient:
     """
     Minimal client for the OpenAI-compatible Prime Inference API:
       - GET /v1/models
+      - GET /v1/models/{model_id}
       - POST /v1/chat/completions
     """
 
@@ -61,11 +62,6 @@ class InferenceClient:
         return resp.json()
 
     def retrieve_model(self, model_id: str) -> Dict[str, Any]:
-        """
-        GET /api/v1/models/{model_id}
-        Fast-fail helper to verify a model exists/ is available before running an eval.
-        Raises InferenceAPIError with a clear message on 4xx/5xx.
-        """
         url = f"{self.inference_url}/api/v1/models/{model_id}"
         resp = self._client.get(url)
         try:

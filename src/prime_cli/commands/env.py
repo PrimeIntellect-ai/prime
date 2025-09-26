@@ -1571,7 +1571,10 @@ def eval_env(
     try:
         client.retrieve_model(model)
     except InferenceAPIError as e:
-        console.print(f"[red]Invalid model:[/red] {e}")
+        console.print(
+            f"[red]Invalid model:[/red] {e} \n\n"
+            f"[b]Use 'prime inference models' to see available models.[/b]"
+        )
         raise typer.Exit(1)
 
     # Append /api/v1 only if not already present

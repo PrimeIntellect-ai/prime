@@ -50,6 +50,7 @@ SANDBOX_STATUS_COLORS = {
     "STOPPED": "blue",
     "ERROR": "red",
     "TERMINATED": "white",
+    "TIMEOUT": "white",
 }
 
 POD_STATUS_COLORS = {

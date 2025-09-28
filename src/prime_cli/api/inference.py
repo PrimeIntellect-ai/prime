@@ -35,7 +35,7 @@ class InferenceClient:
                 "No API key. Run `prime config set-api-key` or set PRIME_API_KEY."
             )
 
-        self.team_id = team_id or self.config.team_id
+        self.team_id = team_id if team_id is not None else self.config.team_id
         self.inference_url = (inference_url or self.config.inference_url).rstrip("/")
 
         headers = {

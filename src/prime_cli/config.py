@@ -129,7 +129,7 @@ class Config:
         return self.config.get("inference_url", self.DEFAULT_INFERENCE_URL).rstrip("/")
 
     def set_inference_url(self, value: str) -> None:
-        """Set frontend URL in config file"""
+        """Set inference URL in config file"""
         value = value.rstrip("/")
         self.config["inference_url"] = value
         self._save_config(self.config)

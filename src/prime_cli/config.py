@@ -120,8 +120,6 @@ class Config:
     def set_inference_url(self, value: str) -> None:
         """Set frontend URL in config file"""
         value = value.rstrip("/")
-        if value.endswith("/api/v1"):
-            value = value[:-7]
         self.config["inference_url"] = value
         self._save_config(self.config)
 

@@ -32,6 +32,11 @@ class Config:
         self._ensure_config_dir()
         self._load_config()
 
+    @staticmethod
+    def _strip_api_v1(url: str) -> str:
+        # make base_url consistent even if user passed a /api/v1 variant
+        return url.rstrip("/").removesuffix("/api/v1")
+
     def _ensure_config_dir(self) -> None:
         """Create config directory if it doesn't exist"""
         self.config_dir.mkdir(exist_ok=True)
@@ -64,8 +69,8 @@ class Config:
 
     @property
     def api_key(self) -> str:
-        """Get API key from config file or environment"""
-        return self.config.get("api_key", "") or os.getenv("PRIME_API_KEY", "")
+        """Get API key with precedence: env > file > empty."""
+        return os.getenv("PRIME_API_KEY") or self.config.get("api_key", "")
 
     def set_api_key(self, value: str) -> None:
         """Set API key in config file"""
@@ -74,9 +79,11 @@ class Config:
 
     @property
     def team_id(self) -> Optional[str]:
-        """Get team ID from config file or environment"""
-        team_id = self.config.get("team_id", None) or os.getenv("PRIME_TEAM_ID", None)
-        return team_id if team_id else None
+        """Get team ID with precedence: env > file > None."""
+        team_id = os.getenv("PRIME_TEAM_ID")
+        if team_id is not None:
+            return team_id
+        return self.config.get("team_id") or None
 
     def set_team_id(self, value: str | None) -> None:
         """Set team ID in config file"""
@@ -85,9 +92,11 @@ class Config:
 
     @property
     def base_url(self) -> str:
-        """Get API base URL from config"""
-        base_url: str = self.config.get("base_url", self.DEFAULT_BASE_URL)
-        return base_url
+        """Get API base URL with precedence: env > file > default."""
+        env_val = os.getenv("PRIME_API_BASE_URL") or os.getenv("PRIME_BASE_URL")
+        if env_val:
+            return self._strip_api_v1(env_val)
+        return self._strip_api_v1(self.config.get("base_url", self.DEFAULT_BASE_URL))
 
     def set_base_url(self, value: str) -> None:
         """Set API base URL in config file"""
@@ -99,9 +108,11 @@ class Config:
 
     @property
     def frontend_url(self) -> str:
-        """Get frontend URL from config"""
-        frontend_url: str = self.config.get("frontend_url", self.DEFAULT_FRONTEND_URL)
-        return frontend_url
+        """Get frontend URL with precedence: env > file > default."""
+        env_val = os.getenv("PRIME_FRONTEND_URL")
+        if env_val:
+            return env_val.rstrip("/")
+        return (self.config.get("frontend_url", self.DEFAULT_FRONTEND_URL)).rstrip("/")
 
     def set_frontend_url(self, value: str) -> None:
         """Set frontend URL in config file"""
@@ -111,11 +122,11 @@ class Config:
 
     @property
     def inference_url(self) -> str:
-        """Get inference URL from config"""
-        inference_url: str = self.config.get(
-            "inference_url", self.DEFAULT_INFERENCE_URL
-        ).rstrip("/")
-        return inference_url
+        """Get inference URL with precedence: env > file > default."""
+        env_val = os.getenv("PRIME_INFERENCE_URL")
+        if env_val:
+            return env_val.rstrip("/")
+        return self.config.get("inference_url", self.DEFAULT_INFERENCE_URL).rstrip("/")
 
     def set_inference_url(self, value: str) -> None:
         """Set frontend URL in config file"""
@@ -125,10 +136,11 @@ class Config:
 
     @property
     def ssh_key_path(self) -> str:
-        """Get SSH private key path from config file or environment"""
-        return self.config.get("ssh_key_path", self.DEFAULT_SSH_KEY_PATH) or os.getenv(
-            "PRIME_SSH_KEY_PATH", self.DEFAULT_SSH_KEY_PATH
-        )
+        """Get SSH private key path with precedence: env > file > default."""
+        env_val = os.getenv("PRIME_SSH_KEY_PATH")
+        if env_val:
+            return str(Path(env_val).expanduser())
+        return self.config.get("ssh_key_path", self.DEFAULT_SSH_KEY_PATH)
 
     def set_ssh_key_path(self, value: str) -> None:
         """Set SSH private key path in config file"""

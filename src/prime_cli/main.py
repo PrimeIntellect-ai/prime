@@ -12,7 +12,7 @@ from .commands.sandbox import app as sandbox_app
 
 __version__ = version("prime")
 
-app = typer.Typer(name="prime", help=f"Prime Intellect CLI (v{__version__})")
+app = typer.Typer(name="prime", help=f"Prime Intellect CLI (v{__version__})", no_args_is_help=True)
 
 app.add_typer(availability_app, name="availability")
 app.add_typer(config_app, name="config")
@@ -32,8 +32,6 @@ def callback(
     if version_flag:
         typer.echo(f"Prime CLI version: {__version__}")
         raise typer.Exit()
-    if ctx.invoked_subcommand is None:
-        ctx.get_help()
 
 
 def run() -> None:

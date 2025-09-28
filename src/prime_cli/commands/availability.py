@@ -11,7 +11,7 @@ from ..helper.short_id import generate_short_id
 from ..utils import output_data_as_json, status_color, validate_output_format
 from ..utils.display import STOCK_STATUS_COLORS
 
-app = typer.Typer(help="Check GPU availability and pricing")
+app = typer.Typer(help="Check GPU availability and pricing", no_args_is_help=True)
 console = Console()
 
 

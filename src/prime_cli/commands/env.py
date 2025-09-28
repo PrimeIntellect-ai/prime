@@ -22,7 +22,7 @@ from ..api.inference import InferenceAPIError, InferenceClient
 from ..config import Config
 from ..utils import output_data_as_json, validate_output_format
 
-app = typer.Typer(help="Manage verifiers environments")
+app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
 console = Console()
 
 # Constants
@@ -601,7 +601,7 @@ def push(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def init(
     name: str = typer.Argument(..., help="Name of the new environment"),
     path: str = typer.Option(
@@ -635,7 +635,7 @@ def init(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def pull(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name or owner/name@version)"),
     target: Optional[str] = typer.Option(None, "--target", "-t", help="Target directory"),
@@ -864,7 +864,7 @@ def get_install_command(tool: str, wheel_url: str) -> List[str]:
         raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def info(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     version: str = typer.Option("latest", "--version", "-v", help="Version to show"),
@@ -1068,7 +1068,7 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def install(
     env_id: str = typer.Argument(..., help="Environment ID to install (owner/name)"),
     with_tool: str = typer.Option(
@@ -1264,7 +1264,7 @@ def execute_uninstall_command(cmd: List[str], env_name: str, tool: str) -> None:
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def uninstall(
     env_name: str = typer.Argument(..., help="Environment name to uninstall"),
     with_tool: str = typer.Option(
@@ -1324,11 +1324,11 @@ def uninstall(
         raise typer.Exit(1)
 
 
-version_app = typer.Typer(help="Manage environment versions")
+version_app = typer.Typer(help="Manage environment versions", no_args_is_help=True)
 app.add_typer(version_app, name="version")
 
 
-@version_app.command("list")
+@version_app.command("list", no_args_is_help=True)
 def list_versions(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     full_hashes: bool = typer.Option(
@@ -1415,7 +1415,7 @@ def list_versions(
         raise typer.Exit(1)
 
 
-@version_app.command("delete")
+@version_app.command("delete", no_args_is_help=True)
 def delete_version(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     content_hash: str = typer.Argument(..., help="Content hash of the version to delete"),
@@ -1481,7 +1481,7 @@ def delete_version(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def delete(
     env_id: str = typer.Argument(..., help="Environment ID to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
@@ -1522,6 +1522,7 @@ def delete(
 
 @app.command(
     "eval",
+    no_args_is_help=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def eval_env(
@@ -1550,15 +1551,14 @@ def eval_env(
         32, "--max-concurrent", "-c", help="Max concurrent requests"
     ),
     max_tokens: Optional[int] = typer.Option(
-        None, "--max-tokens", "-t",
-        help="Max tokens to generate (unset → model default)"
+        None, "--max-tokens", "-t", help="Max tokens to generate (unset → model default)"
     ),
-    temperature: Optional[float] = typer.Option(
-        None, "--temperature", "-T", help="Temperature"
-    ),
+    temperature: Optional[float] = typer.Option(None, "--temperature", "-T", help="Temperature"),
     sampling_args: Optional[str] = typer.Option(
-        None, "--sampling-args", "-S",
-        help='Sampling args as JSON, e.g. \'{"enable_thinking": false, "max_tokens": 256}\''
+        None,
+        "--sampling-args",
+        "-S",
+        help='Sampling args as JSON, e.g. \'{"enable_thinking": false, "max_tokens": 256}\'',
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
     save_dataset: bool = typer.Option(False, "--save-dataset", "-s", help="Save dataset to disk"),
@@ -1567,29 +1567,24 @@ def eval_env(
         None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
     ),
     env_args: Optional[str] = typer.Option(
-        None, "--env-args", "-a",
-        help='Environment args as JSON, e.g. \'{"key":"value"}\''
+        None, "--env-args", "-a", help='Environment args as JSON, e.g. \'{"key":"value"}\''
     ),
     api_key_var: Optional[str] = typer.Option(
-        None, "--api-key-var", "-k",
-        help="override api key variable instead of using PRIME_API_KEY"
+        None, "--api-key-var", "-k", help="override api key variable instead of using PRIME_API_KEY"
     ),
     api_base_url: Optional[str] = typer.Option(
-        None, "--api-base-url", "-b",
+        None,
+        "--api-base-url",
+        "-b",
         help=(
             "override api base url variable instead of using prime inference url, "
             "should end in '/v1'"
-        )
+        ),
     ),
 ) -> None:
     """
-<<<<<<< HEAD
     Run verifiers' vf-eval with Prime Inference (closed beta)
     (This feature in currently in closed beta and requires prime inference permissions.)
-=======
-    Run verifiers' vf-eval with Prime Inference (beta)
-    (This feature in currently in beta and requires prime inference permissions.)
->>>>>>> e80e94d (infernece url fixes)
 
     Example:
        prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7

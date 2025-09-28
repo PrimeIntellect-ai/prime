@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -26,7 +27,7 @@ from ..utils import (
 )
 from ..utils.display import SANDBOX_STATUS_COLORS
 
-app = typer.Typer(help="Manage code sandboxes")
+app = typer.Typer(help="Manage code sandboxes", no_args_is_help=True)
 console = Console()
 
 
@@ -175,11 +176,12 @@ def list_sandboxes_cmd(
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def get(
     sandbox_id: str,
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
@@ -245,11 +247,12 @@ def get(
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def create(
     docker_image: str = typer.Argument(..., help="Docker image to run"),
     name: Optional[str] = typer.Option(
@@ -344,11 +347,12 @@ def create(
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def delete(
     sandbox_ids: Optional[List[str]] = typer.Argument(
         None, help="Sandbox ID(s) to delete (space or comma-separated)"
@@ -490,11 +494,12 @@ def delete(
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def logs(sandbox_id: str) -> None:
     """Get logs from a sandbox"""
     try:
@@ -506,19 +511,20 @@ def logs(sandbox_id: str) -> None:
 
         if logs:
             console.print(f"\n[bold]Logs for sandbox {sandbox_id}:[/bold]")
-            console.print(logs)
+            console.print(f"{escape(logs)}")
         else:
             console.print(f"[yellow]No logs available for sandbox {sandbox_id}[/yellow]")
 
     except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def status(sandbox_id: str) -> None:
     """Update and get the current status of a sandbox from Kubernetes"""
     try:
@@ -535,11 +541,12 @@ def status(sandbox_id: str) -> None:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def run(
     sandbox_id: str,
     command: List[str] = typer.Argument(..., help="Command to execute"),
@@ -609,11 +616,12 @@ def run(
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
 
-@app.command("upload")
+@app.command("upload", no_args_is_help=True)
 def upload_file(
     sandbox_id: str = typer.Argument(..., help="Sandbox ID to upload file to"),
     local_file: str = typer.Argument(..., help="Path to local file to upload"),
@@ -658,11 +666,12 @@ def upload_file(
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
 
-@app.command("download")
+@app.command("download", no_args_is_help=True)
 def download_file(
     sandbox_id: str = typer.Argument(..., help="Sandbox ID to download file from"),
     remote_path: str = typer.Argument(..., help="Path to file in sandbox"),
@@ -710,7 +719,8 @@ def download_file(
         console.print(f"[red]File not found:[/red] {str(e)}")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
 

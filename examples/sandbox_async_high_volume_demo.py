@@ -100,7 +100,7 @@ async def main() -> None:
         # Wait for sandboxes using bulk wait function
         print("Waiting for sandboxes...")
         sandbox_ids = [s.id for s in sandboxes]
-        await client.bulk_wait_for_creation(sandbox_ids, max_attempts=180)
+        await client.bulk_wait_for_creation(sandbox_ids)
         print("Sandboxes ready\n")
 
         # Get auth for all sandboxes

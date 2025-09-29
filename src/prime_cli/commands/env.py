@@ -1583,8 +1583,13 @@ def eval_env(
     ),
 ) -> None:
     """
+<<<<<<< HEAD
     Run verifiers' vf-eval with Prime Inference (closed beta)
     (This feature in currently in closed beta and requires prime inference permissions.)
+=======
+    Run verifiers' vf-eval with Prime Inference (beta)
+    (This feature in currently in beta and requires prime inference permissions.)
+>>>>>>> e80e94d (infernece url fixes)
 
     Example:
        prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7

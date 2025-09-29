@@ -25,6 +25,16 @@ def _fmt_created(val: str) -> str:
     except Exception:
         return val or ""
 
+def _fmt_price(x) -> str:
+    """Format USD per 1M tokens (mtok) for display."""
+    if x is None:
+        return ""
+    try:
+        f = float(x)
+        return f"${f:.6f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(x)
+
 
 @app.command("models")
 def list_models(
@@ -54,14 +64,25 @@ def list_models(
             console.print("[yellow]No models returned.[/yellow]")
             return
 
-        table = Table(title="Prime Inference Available Models")
+        table = Table(title="Prime Inference — Models")
         table.add_column("id", style="cyan")
         table.add_column("created", style="magenta")
+        table.add_column("input $/1M tok", style="green", justify="right")
+        table.add_column("output $/1M tok", style="green", justify="right")
 
         for m in models:
             mid = str(m.get("id", ""))
             created = _fmt_created(str(m.get("created", "")))
-            table.add_row(mid, created)
+            pricing = m.get("pricing") or {}
+            pin = pricing.get("input_usd_per_mtok")
+            pout = pricing.get("output_usd_per_mtok")
+
+            table.add_row(
+                mid,
+                created,
+                _fmt_price(pin),
+                _fmt_price(pout),
+            )
 
         console.print(table)
 

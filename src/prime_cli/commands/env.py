@@ -1539,13 +1539,55 @@ def eval_env(
             "for available models)"
         ),
     ),
-
+    # --- vf-eval options ---
+    num_examples: Optional[int] = typer.Option(
+        5, "--num-examples", "-n", help="Number of examples"
+    ),
+    rollouts_per_example: Optional[int] = typer.Option(
+        3, "--rollouts-per-example", "-r", help="Rollouts per example"
+    ),
+    max_concurrent: Optional[int] = typer.Option(
+        32, "--max-concurrent", "-c", help="Max concurrent requests"
+    ),
+    max_tokens: Optional[int] = typer.Option(
+        None, "--max-tokens", "-t",
+        help="Max tokens to generate (unset → model default)"
+    ),
+    temperature: Optional[float] = typer.Option(
+        None, "--temperature", "-T", help="Temperature"
+    ),
+    sampling_args: Optional[str] = typer.Option(
+        None, "--sampling-args", "-S",
+        help='Sampling args as JSON, e.g. \'{"enable_thinking": false, "max_tokens": 256}\''
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    save_dataset: bool = typer.Option(False, "--save-dataset", "-s", help="Save dataset to disk"),
+    save_to_hf_hub: bool = typer.Option(False, "--save-to-hf-hub", "-H", help="Save to HF Hub"),
+    hf_hub_dataset_name: Optional[str] = typer.Option(
+        None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
+    ),
+    env_args: Optional[str] = typer.Option(
+        None, "--env-args", "-a",
+        help='Environment args as JSON, e.g. \'{"key":"value"}\''
+    ),
+    api_key_var: Optional[str] = typer.Option(
+        None, "--api-key-var", "-k",
+        help="override api key variable instead of using PRIME_API_KEY"
+    ),
+    api_base_url: Optional[str] = typer.Option(
+        None, "--api-base-url", "-b",
+        help=(
+            "override api base url variable instead of using prime inference url, "
+            "should end in '/v1'"
+        )
+    ),
 ) -> None:
     """
-    Run verifiers' vf-eval with Prime Inference
+    Run verifiers' vf-eval with Prime Inference (beta)
+    (This feature in currently in beta and requires prime inference permissions.)
 
     Example:
-       prime env eval meow -m qwen/qwen3-max -n 2 -r 3 -t 1024 -T 0.7
+       prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7
        All extra args are forwarded unchanged to vf-eval.
     """
     config = Config()
@@ -1577,42 +1619,51 @@ def eval_env(
         )
         raise typer.Exit(1)
 
-    # Append /api/v1 only if not already present
-    inference_base_url_no_slash = inference_base_url.rstrip("/")
-    if inference_base_url_no_slash.endswith("/api/v1"):
-        inference_url = inference_base_url_no_slash
-    else:
-        inference_url = inference_base_url_no_slash + "/api/v1"
+    # Choose base from --api-base-url (if given) or config
+    chosen_base = (api_base_url or inference_base_url).rstrip("/")
+    inference_url = chosen_base
 
     cmd = ["uv", "run", "vf-eval", environment]
 
-    # Extra user args (unknown options) from Typer/Click
-    user_args = list(ctx.args)
+    # Add chosen inference url
+    cmd += ["-b", inference_url]
 
-    def _has_flag(names: tuple[str, ...]) -> bool:
-        for a in user_args:
-            for n in names:
-                if a == n or (n.startswith("--") and a.startswith(n + "=")):
-                    return True
-        return False
-
-    # Inject base URL and API key unless caller provided their own
-    if not _has_flag(("-b", "--base-url")):
-        cmd += ["-b", inference_url]
-
-    # Always pass the selected model (since it's a required option)
+    # Always pass the selected model (required option)
     cmd += ["-m", model]
 
-    # Environment modificaiton may be necessary for passing in API key
+    # Environment modification may be necessary for passing in API key
     env = os.environ.copy()
 
-    # Set PRIME_API_KEY if user did not provider api key var
-    if not _has_flag(("-k", "--api-key-var")):
+    # API key var: respect --api-key-var if provided to this command, else inject PRIME_API_KEY
+    if api_key_var:
+        cmd += ["-k", api_key_var]
+    else:
         env["PRIME_API_KEY"] = api_key
         cmd += ["-k", "PRIME_API_KEY"]
 
-    # Forward everything else untouched
-    cmd += user_args
+    # Forward vf-eval options if provided here
+    if env_args:
+        cmd += ["-a", env_args]
+    if num_examples is not None:
+        cmd += ["-n", str(num_examples)]
+    if rollouts_per_example is not None:
+        cmd += ["-r", str(rollouts_per_example)]
+    if max_concurrent is not None:
+        cmd += ["-c", str(max_concurrent)]
+    if max_tokens is not None:
+        cmd += ["-t", str(max_tokens)]
+    if temperature is not None:
+        cmd += ["-T", str(temperature)]
+    if sampling_args:
+        cmd += ["-S", sampling_args]
+    if verbose:
+        cmd += ["-v"]
+    if save_dataset:
+        cmd += ["-s"]
+    if save_to_hf_hub:
+        cmd += ["-H"]
+    if hf_hub_dataset_name:
+        cmd += ["-D", hf_hub_dataset_name]
 
     # Execute; stream output directly
     try:

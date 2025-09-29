@@ -24,11 +24,11 @@ class InferenceClient:
         self,
         api_key: Optional[str] = None,
         team_id: Optional[str] = None,
+        inference_url: Optional[str] = None,
     ) -> None:
         # Load config
         self.config = Config()
 
-        self.inference_url = self.config.inference_url
         self.api_key = api_key or self.config.api_key
         if not self.api_key:
             raise InferenceAPIError(
@@ -36,6 +36,7 @@ class InferenceClient:
             )
 
         self.team_id = team_id if team_id is not None else self.config.team_id
+        self.inference_url = (inference_url or self.config.inference_url).rstrip("/")
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -51,7 +52,7 @@ class InferenceClient:
         )
 
     def list_models(self) -> Dict[str, Any]:
-        url = f"{self.inference_url}/api/v1/models"
+        url = f"{self.inference_url}/models"
         resp = self._client.get(url)
         try:
             resp.raise_for_status()
@@ -62,7 +63,7 @@ class InferenceClient:
         return resp.json()
 
     def retrieve_model(self, model_id: str) -> Dict[str, Any]:
-        url = f"{self.inference_url}/api/v1/models/{model_id}"
+        url = f"{self.inference_url}/models/{model_id}"
         resp = self._client.get(url)
         try:
             resp.raise_for_status()
@@ -82,7 +83,7 @@ class InferenceClient:
     def chat_completion(
         self, payload: Dict[str, Any], stream: bool = False
     ) -> Dict[str, Any] | Iterable[Dict[str, Any]]:
-        url = f"{self.inference_url}/api/v1/chat/completions"
+        url = f"{self.inference_url}/chat/completions"
 
         if not stream:
             resp = self._client.post(url, json=payload)

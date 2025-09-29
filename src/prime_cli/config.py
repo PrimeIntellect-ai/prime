@@ -12,7 +12,7 @@ class ConfigModel(BaseModel):
     team_id: str | None = None
     base_url: str = "https://api.primeintellect.ai"
     frontend_url: str = "https://app.primeintellect.ai"
-    inference_url: str = "https://inference.pinference.ai"
+    inference_url: str = "https://api.pinference.ai/api/v1"
     ssh_key_path: str = str(Path.home() / ".ssh" / "id_rsa")
     current_environment: str = "production"
 
@@ -22,7 +22,7 @@ class ConfigModel(BaseModel):
 class Config:
     DEFAULT_BASE_URL: str = "https://api.primeintellect.ai"
     DEFAULT_FRONTEND_URL: str = "https://app.primeintellect.ai"
-    DEFAULT_INFERENCE_URL: str = "https://inference.pinference.ai"
+    DEFAULT_INFERENCE_URL: str = "https://api.pinference.ai/api/v1"
     DEFAULT_SSH_KEY_PATH: str = str(Path.home() / ".ssh" / "id_rsa")
 
     def __init__(self) -> None:
@@ -112,14 +112,14 @@ class Config:
     @property
     def inference_url(self) -> str:
         """Get inference URL from config"""
-        inference_url: str = self.config.get("inference_url", self.DEFAULT_INFERENCE_URL)
+        inference_url: str = self.config.get(
+            "inference_url", self.DEFAULT_INFERENCE_URL
+        ).rstrip("/")
         return inference_url
 
     def set_inference_url(self, value: str) -> None:
         """Set frontend URL in config file"""
         value = value.rstrip("/")
-        if value.endswith("/api/v1"):
-            value = value[:-7]
         self.config["inference_url"] = value
         self._save_config(self.config)
 

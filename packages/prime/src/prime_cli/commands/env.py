@@ -1749,6 +1749,10 @@ def eval_env(
     if hf_hub_dataset_name:
         cmd += ["-D", hf_hub_dataset_name]
 
+    # If a team is configured, pass it to vf-eval via header
+    if config.team_id:
+        cmd += ["--header", f"X-Prime-Team-ID: {config.team_id}"]
+
     # Execute; stream output directly
     try:
         result = subprocess.run(cmd, env=env)

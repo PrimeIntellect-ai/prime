@@ -385,7 +385,9 @@ def delete(
                     page += 1
 
                 # Filter out already terminated sandboxes
-                active_sandboxes = [s for s in all_sandboxes if s.status != "TERMINATED"]
+                active_sandboxes = [
+                    s for s in all_sandboxes if s.status not in {"TERMINATED", "TIMEOUT"}
+                ]
                 sandbox_ids = [s.id for s in active_sandboxes]
 
                 if not sandbox_ids:

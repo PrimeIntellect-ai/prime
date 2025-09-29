@@ -20,6 +20,7 @@ class SandboxStatus(str, Enum):
     STOPPED = "STOPPED"
     ERROR = "ERROR"
     TERMINATED = "TERMINATED"
+    TIMEOUT = "TIMEOUT"
 
 
 class SandboxNotRunningError(RuntimeError):
@@ -274,7 +275,7 @@ def _check_sandbox_statuses(
             if sandbox.status == "RUNNING":
                 running_count += 1
                 final_statuses[sandbox.id] = sandbox.status
-            elif sandbox.status in ["ERROR", "TERMINATED"]:
+            elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
                 failed_sandboxes.append((sandbox.id, sandbox.status))
                 final_statuses[sandbox.id] = sandbox.status
 
@@ -406,7 +407,7 @@ class SandboxClient:
             if sandbox.status == "RUNNING":
                 if self._is_sandbox_reachable(sandbox_id):
                     return
-            elif sandbox.status in ["ERROR", "TERMINATED"]:
+            elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
                 raise SandboxNotRunningError(sandbox_id, sandbox.status)
 
             # Aggressive polling for first 5 attempts (5 seconds), then back off
@@ -683,7 +684,7 @@ class AsyncSandboxClient:
             if sandbox.status == "RUNNING":
                 if await self._is_sandbox_reachable(sandbox_id):
                     return
-            elif sandbox.status in ["ERROR", "TERMINATED"]:
+            elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
                 raise SandboxNotRunningError(sandbox_id, sandbox.status)
 
             # Aggressive polling for first 5 attempts (5 seconds), then back off

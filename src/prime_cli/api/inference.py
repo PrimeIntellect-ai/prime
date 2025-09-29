@@ -72,12 +72,9 @@ class InferenceClient:
             # Treat common "unknown model" responses as a dedicated error
             if status in (400, 404, 422):
                 raise InferenceAPIError(
-                    f"Model '{model_id}' not found or unavailable "
-                    f"(GET {url} → {status})."
+                    f"Model '{model_id}' not found or unavailable (GET {url} → {status})."
                 ) from e
-            raise InferenceAPIError(
-                f"GET {url} failed: {status} {e.response.text}"
-            ) from e
+            raise InferenceAPIError(f"GET {url} failed: {status} {e.response.text}") from e
         return resp.json()
 
     def chat_completion(

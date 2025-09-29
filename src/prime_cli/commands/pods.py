@@ -27,7 +27,7 @@ from ..utils import (
 )
 from ..utils.display import POD_STATUS_COLORS
 
-app = typer.Typer(help="Manage compute pods")
+app = typer.Typer(help="Manage compute pods", no_args_is_help=True)
 console = Console()
 config = Config()
 
@@ -253,7 +253,7 @@ def list(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def status(
     pod_id: str,
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
@@ -755,7 +755,7 @@ def create(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def terminate(
     pod_id: str,
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
@@ -786,8 +786,8 @@ def terminate(
         raise typer.Exit(1)
 
 
-@app.command(name="connect")
-@app.command(name="ssh")
+@app.command(name="connect", no_args_is_help=True)
+@app.command(name="ssh", no_args_is_help=True)
 def connect(pod_id: str) -> None:
     """SSH / connect to a pod using configured SSH key"""
     try:

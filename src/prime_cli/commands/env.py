@@ -1583,8 +1583,8 @@ def eval_env(
     ),
 ) -> None:
     """
-    Run verifiers' vf-eval with Prime Inference (beta)
-    (This feature in currently in beta and requires prime inference permissions.)
+    Run verifiers' vf-eval with Prime Inference (closed beta)
+    (This feature in currently in closed beta and requires prime inference permissions.)
 
     Example:
        prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7
@@ -1601,27 +1601,33 @@ def eval_env(
             "Run [bold]prime login[/bold] or [bold]prime config set-api-key[/bold]."
         )
         raise typer.Exit(1)
-    if not inference_base_url:
-        console.print(
-            "[red]Inference URL not configured.[/red] "
-            "Check [bold]prime config view[/bold]."
-        )
-        raise typer.Exit(1)
-
-    # Fast fail if the model doesn't exist
-    client = InferenceClient()
-    try:
-        client.retrieve_model(model)
-    except InferenceAPIError as e:
-        console.print(
-            f"[red]Invalid model:[/red] {e} \n\n"
-            f"[b]Use 'prime inference models' to see available models.[/b]"
-        )
-        raise typer.Exit(1)
 
     # Choose base from --api-base-url (if given) or config
-    chosen_base = (api_base_url or inference_base_url).rstrip("/")
+    if api_base_url:
+        chosen_base = api_base_url.rstrip("/")
+    else:
+        if not inference_base_url:
+            console.print(
+                "[red]Inference URL not configured.[/red] "
+                "Check [bold]prime config view[/bold]."
+            )
+            raise typer.Exit(1)
+        chosen_base = inference_base_url.rstrip("/")
+
     inference_url = chosen_base
+
+    # Fast fail if the model doesn't exist (only for Prime Inference, not custom URLs)
+    # Check if using Prime Inference URL (either from config or explicitly provided)
+    if chosen_base == inference_base_url:
+        client = InferenceClient()
+        try:
+            client.retrieve_model(model)
+        except InferenceAPIError as e:
+            console.print(
+                f"[red]Invalid model:[/red] {e} \n\n"
+                f"[b]Use 'prime inference models' to see available models.[/b]"
+            )
+            raise typer.Exit(1)
 
     cmd = ["uv", "run", "vf-eval", environment]
 

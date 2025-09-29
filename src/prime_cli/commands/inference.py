@@ -10,8 +10,8 @@ from ..api.inference import InferenceAPIError, InferenceClient
 from ..utils import output_data_as_json, validate_output_format
 
 app = typer.Typer(
-    help="Run and manage Prime Inference (in beta, requires prime inference permissions)\n\n"
-    "Use `prime env eval (beta)` for environment evals with Prime Inference."
+    help="Run and manage Prime Inference (in closed beta, requires prime inference permissions)\n\n"
+    "Use `prime env eval (closed beta)` for environment evals with Prime Inference."
 )
 console = Console()
 

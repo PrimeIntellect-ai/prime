@@ -1,6 +1,7 @@
 import hashlib
 import os
 import re
+from textwrap import dedent
 import shutil
 import subprocess
 import sys
@@ -234,6 +235,14 @@ def push(
     auto_bump: bool = typer.Option(
         False, "--auto-bump", help="Automatically bump patch version before push"
     ),
+    add_entry_point: bool = typer.Option(
+        False, "--add-entry-point",
+        help="If missing, automatically add [project.entry-points.verifiers] '<owner>/<name>'"
+    ),
+    entry_point_target: Optional[str] = typer.Option(
+        None, "--entry-point-target", "-e",
+        help="MODULE[:ATTR] to register when auto-adding entry point (default ATTR=load_environment)"
+    ),
 ) -> None:
     """Push environment to registry"""
 
@@ -284,6 +293,42 @@ def push(
         except Exception as e:
             console.print(f"[red]Failed to parse pyproject.toml: {e}[/red]")
             raise typer.Exit(1)
+
+        # --- Resolve first (to learn the owner/org for the EP key) ---
+        try:
+            client = APIClient()
+
+            console.print("Resolving environment...")
+            resolve_data = {"name": env_name, "visibility": visibility}
+            if team:
+                resolve_data["team_slug"] = team
+            elif client.config.team_id:
+                resolve_data["team_id"] = client.config.team_id
+
+            response = client.post("/environmentshub/resolve", json=resolve_data)
+            resolve_response = response.get("data", response)
+
+            env_id = resolve_response["id"]
+            owner_info = resolve_response["owner"]
+            owner_name = owner_info["name"]
+
+            if resolve_response.get("created"):
+                console.print(f"[green]✓ Created environment: {owner_name}/{env_name}[/green]")
+            else:
+                console.print(f"[green]✓ Found existing environment: {owner_name}/{env_name}[/green]")
+        except APIError as e:
+            console.print(f"[red]Failed to resolve environment: {e}[/red]")
+            raise typer.Exit(1)
+        except Exception as e:
+            console.print(f"[red]Resolve failed: {e}[/red]")
+            raise typer.Exit(1)
+
+        # --- Ensure the exact-match entry point exists (or add it) ---
+        _ensure_verifiers_entry_point(
+            pyproject_path=pyproject_path, owner=owner_name, env_name=env_name,
+            env_path=env_path, project_info=project_info,
+            add_if_missing=add_entry_point, explicit_target=entry_point_target
+        )
 
         # Find any Python file in the environment
         has_env_file = False
@@ -350,40 +395,11 @@ def push(
 
         console.print("\nUploading to Prime Intellect Hub...")
 
+        # already resolved above: have `client`, `env_id`, `owner_info`
+        # (owner name needed for hub link at the end)
+        owner_name = owner_info["name"]
+
         try:
-            client = APIClient()
-
-            console.print("Resolving environment...")
-            resolve_data = {"name": env_name, "visibility": visibility}
-            if team:
-                resolve_data["team_slug"] = team
-            elif client.config.team_id:
-                resolve_data["team_id"] = client.config.team_id
-
-            try:
-                response = client.post("/environmentshub/resolve", json=resolve_data)
-
-                if "data" in response:
-                    resolve_response = response["data"]
-                else:
-                    resolve_response = response
-
-                env_id = resolve_response["id"]
-                owner_info = resolve_response["owner"]
-
-                if resolve_response["created"]:
-                    console.print(
-                        f"[green]✓ Created environment: {owner_info['name']}/{env_name}[/green]"
-                    )
-                else:
-                    console.print(
-                        f"[green]✓ Found existing environment: "
-                        f"{owner_info['name']}/{env_name}[/green]"
-                    )
-            except APIError as e:
-                console.print(f"[red]Failed to resolve environment: {e}[/red]")
-                raise typer.Exit(1)
-
             console.print("Uploading wheel ...")
 
             try:
@@ -562,7 +578,6 @@ def push(
                     Path(temp_file_path).unlink()
 
             if finalize_response.get("success"):
-                owner_name = owner_info["name"]
                 console.print(f"\n[green]✓ Successfully pushed {owner_name}/{env_name}[/green]")
                 console.print(f"Wheel: {wheel_path.name}")
                 console.print(f"SHA256: {wheel_sha256}")
@@ -852,6 +867,106 @@ def update_pyproject_version(pyproject_path: Path, new_version: str) -> None:
 
     with open(pyproject_path, "w") as f:
         f.write(updated_content)
+
+
+def _guess_entry_point_target(env_path: Path, project_name: str) -> Optional[str]:
+    """
+    Guess a sensible MODULE[:ATTR] when auto-adding an entry point.
+    - Prefer a package dir matching normalized project name.
+    - Fall back to a module file matching normalized project name.
+    - If exactly one package dir exists, use it.
+    Default ATTR is 'load_environment'.
+    """
+    mod = normalize_package_name(project_name)
+    if (env_path / mod / "__init__.py").exists():
+        return f"{mod}:load_environment"
+    if (env_path / f"{mod}.py").exists():
+        return f"{mod}:load_environment"
+    pkgs = [d.name for d in env_path.iterdir() if d.is_dir() and (d / "__init__.py").exists()]
+    if len(pkgs) == 1:
+        return f"{pkgs[0]}:load_environment"
+    return None
+
+
+def _ensure_verifiers_entry_point(
+    *,
+    pyproject_path: Path,
+    owner: str,
+    env_name: str,
+    env_path: Path,
+    project_info: Dict[str, Any],
+    add_if_missing: bool,
+    explicit_target: Optional[str],
+) -> str:
+    """
+    Ensure [project.entry-points.verifiers] has an exact-match key '<owner>/<env_name>'.
+    Returns the target string (MODULE:ATTR). Exits with error if missing and not added.
+    Enforces that this is the ONLY entry point defined.
+    """
+    data = toml.load(pyproject_path)
+    proj = data.setdefault("project", {})
+    ep = proj.setdefault("entry-points", {})
+    ver = ep.setdefault("verifiers", {})
+
+    ep_key = f"{owner}/{env_name}"
+
+    # Check if there are multiple entry points or wrong entry point
+    if ver:
+        if ep_key in ver and len(ver) == 1:
+            # Perfect - only the correct entry point exists
+            return ver[ep_key]
+        elif ep_key in ver and len(ver) > 1:
+            # Has the correct one but also others
+            other_keys = [k for k in ver.keys() if k != ep_key]
+            msg = dedent(
+                f"""
+                Multiple entry points found under [project.entry-points.verifiers].
+                Only '{ep_key}' is allowed when pushing to this environment.
+                Found extra entry points: {', '.join(other_keys)}
+                Please remove the extra entry points from pyproject.toml.
+                """
+            ).strip()
+            console.print(f"[red]{msg}[/red]")
+            raise typer.Exit(1)
+        else:
+            # Has wrong entry point(s), missing the correct one
+            wrong_keys = list(ver.keys())
+            msg = dedent(
+                f"""
+                Wrong entry point(s) found under [project.entry-points.verifiers].
+                Expected only '{ep_key}', but found: {', '.join(wrong_keys)}
+                Please remove the incorrect entry points and add the correct one.
+                """
+            ).strip()
+            console.print(f"[red]{msg}[/red]")
+            raise typer.Exit(1)
+
+    # Missing — either fail or auto-add
+    if not add_if_missing:
+        example = f'"{ep_key}" = "your_module:load_environment"'
+        msg = dedent(
+            f"""
+            Missing entry point for '{ep_key}' under [project.entry-points.verifiers].
+            Add a line like:
+              {example}
+            Or re-run with --add-entry-point (optionally with --entry-point-target MODULE[:ATTR]).
+            """
+        ).strip()
+        console.print(f"[red]{msg}[/red]")
+        raise typer.Exit(1)
+
+    target = explicit_target or _guess_entry_point_target(env_path, project_info.get("name", env_name))
+    if target and ":" not in target:
+        target = f"{target}:load_environment"
+    if not target:
+        console.print("[red]Could not infer entry point target. Supply --entry-point-target MODULE[:ATTR].[/red]")
+        raise typer.Exit(1)
+
+    ver[ep_key] = target
+    with open(pyproject_path, "w", encoding="utf-8") as f:
+        toml.dump(data, f)
+    console.print(f"[green]✓ Added entry point:[/green] [project.entry-points.verifiers] \"{ep_key}\" = \"{target}\"")
+    return target
 
 
 def get_install_command(tool: str, wheel_url: str) -> List[str]:

@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 import typer
@@ -6,7 +7,7 @@ from rich.table import Table
 
 from ..config import Config
 
-app = typer.Typer(help="Configure the CLI")
+app = typer.Typer(help="Configure the CLI", no_args_is_help=True)
 console = Console()
 
 
@@ -20,14 +21,16 @@ def view() -> None:
     table.add_column("Setting", style="cyan")
     table.add_column("Value", style="green")
 
+    def _env_set(*names: str) -> bool:
+        return any(os.getenv(n) and os.getenv(n).strip() for n in names)
+
     # Show current environment
     table.add_row("Current Environment", settings["current_environment"])
 
     api_key = settings["api_key"]
     if api_key:
         masked_key = f"{api_key[:6]}...{api_key[-4:]}" if len(api_key) > 10 else "***"
-        config_key = config.config.get("api_key", "")
-        if not config_key:
+        if _env_set("PRIME_API_KEY"):
             masked_key += " (from env var)"
     else:
         masked_key = "Not set"
@@ -35,16 +38,34 @@ def view() -> None:
 
     # Show Team ID
     team_id = settings["team_id"]
-    table.add_row("Team ID", team_id or "Personal Account")
+    team_label = team_id or "Personal Account"
+    if team_id and _env_set("PRIME_TEAM_ID"):
+        team_label += " (from env var)"
+    table.add_row("Team ID", team_label)
 
     # Show base URL
-    table.add_row("Base URL", settings["base_url"])
+    base_label = settings["base_url"]
+    if _env_set("PRIME_API_BASE_URL", "PRIME_BASE_URL"):
+        base_label += " (from env var)"
+    table.add_row("Base URL", base_label)
 
     # Show frontend URL
-    table.add_row("Frontend URL", settings["frontend_url"])
+    front_label = settings["frontend_url"]
+    if _env_set("PRIME_FRONTEND_URL"):
+        front_label += " (from env var)"
+    table.add_row("Frontend URL", front_label)
+
+    # Show inference URL
+    inf_label = settings["inference_url"]
+    if _env_set("PRIME_INFERENCE_URL"):
+        inf_label += " (from env var)"
+    table.add_row("Inference URL", inf_label)
 
     # Show SSH key path
-    table.add_row("SSH Key Path", settings["ssh_key_path"])
+    ssh_label = settings["ssh_key_path"]
+    if _env_set("PRIME_SSH_KEY_PATH"):
+        ssh_label += " (from env var)"
+    table.add_row("SSH Key Path", ssh_label)
 
     console.print(table)
 
@@ -157,6 +178,29 @@ def set_frontend_url(
     console.print(f"[green]Frontend URL set to: {url}[/green]")
 
 
+@app.command()
+def set_inference_url(
+    url: Optional[str] = typer.Argument(
+        None,
+        help="Inference URL for Prime Inference API. If not provided, you'll be prompted.",
+    ),
+) -> None:
+    """Set the inference URL (prompts if not provided)"""
+    if not url:
+        config = Config()
+        url = typer.prompt(
+            "Enter the inference URL for Prime Inference API",
+            default=config.inference_url,
+        )
+        if not url:
+            console.print("[red]Inference URL is required[/red]")
+            return
+
+    config = Config()
+    config.set_inference_url(url)
+    console.print(f"[green]Inference URL set to: {url}[/green]")
+
+
 # Helper functions (not commands)
 def _set_environment(
     env: str,
@@ -212,7 +256,7 @@ def _list_environments() -> None:
     console.print(table)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def set_ssh_key_path(
     path: str = typer.Argument(
         ...,
@@ -242,7 +286,7 @@ def reset(
 
 
 # Environment commands
-@app.command(name="use")
+@app.command(name="use", no_args_is_help=True)
 def use_environment(
     env: str = typer.Argument(
         ..., help="Environment name: 'production' or a custom saved environment"
@@ -252,7 +296,7 @@ def use_environment(
     _set_environment(env)
 
 
-@app.command(name="save")
+@app.command(name="save", no_args_is_help=True)
 def save_env(name: str = typer.Argument(..., help="Name for the environment")) -> None:
     """Save current config as environment (including API key)"""
     _save_environment(name)

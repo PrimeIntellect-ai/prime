@@ -1,4 +1,5 @@
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -17,9 +18,11 @@ from rich.console import Console
 from rich.table import Table
 
 from ..api.client import APIClient, APIError
+from ..api.inference import InferenceAPIError, InferenceClient
+from ..config import Config
 from ..utils import output_data_as_json, validate_output_format
 
-app = typer.Typer(help="Manage verifiers environments")
+app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
 console = Console()
 
 # Constants
@@ -598,7 +601,7 @@ def push(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def init(
     name: str = typer.Argument(..., help="Name of the new environment"),
     path: str = typer.Option(
@@ -632,7 +635,7 @@ def init(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def pull(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name or owner/name@version)"),
     target: Optional[str] = typer.Option(None, "--target", "-t", help="Target directory"),
@@ -861,7 +864,7 @@ def get_install_command(tool: str, wheel_url: str) -> List[str]:
         raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def info(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     version: str = typer.Option("latest", "--version", "-v", help="Version to show"),
@@ -1065,7 +1068,7 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def install(
     env_id: str = typer.Argument(..., help="Environment ID to install (owner/name)"),
     with_tool: str = typer.Option(
@@ -1261,7 +1264,7 @@ def execute_uninstall_command(cmd: List[str], env_name: str, tool: str) -> None:
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def uninstall(
     env_name: str = typer.Argument(..., help="Environment name to uninstall"),
     with_tool: str = typer.Option(
@@ -1321,11 +1324,11 @@ def uninstall(
         raise typer.Exit(1)
 
 
-version_app = typer.Typer(help="Manage environment versions")
+version_app = typer.Typer(help="Manage environment versions", no_args_is_help=True)
 app.add_typer(version_app, name="version")
 
 
-@version_app.command("list")
+@version_app.command("list", no_args_is_help=True)
 def list_versions(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     full_hashes: bool = typer.Option(
@@ -1412,7 +1415,7 @@ def list_versions(
         raise typer.Exit(1)
 
 
-@version_app.command("delete")
+@version_app.command("delete", no_args_is_help=True)
 def delete_version(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     content_hash: str = typer.Argument(..., help="Content hash of the version to delete"),
@@ -1478,7 +1481,7 @@ def delete_version(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def delete(
     env_id: str = typer.Argument(..., help="Environment ID to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
@@ -1514,4 +1517,167 @@ def delete(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command(
+    "eval",
+    no_args_is_help=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def eval_env(
+    ctx: typer.Context,
+    environment: str = typer.Argument(
+        ...,
+        help="Installed Verifiers environment name (e.g. 'wordle')",
+    ),
+    model: str = typer.Option(
+        "meta-llama/llama-3.1-70b-instruct",
+        "--model",
+        "-m",
+        help=(
+            "Model to use (e.g. 'meta-llama/llama-3.1-70b-instruct', see 'prime inference models' "
+            "for available models)"
+        ),
+    ),
+    # --- vf-eval options ---
+    num_examples: Optional[int] = typer.Option(
+        5, "--num-examples", "-n", help="Number of examples"
+    ),
+    rollouts_per_example: Optional[int] = typer.Option(
+        3, "--rollouts-per-example", "-r", help="Rollouts per example"
+    ),
+    max_concurrent: Optional[int] = typer.Option(
+        32, "--max-concurrent", "-c", help="Max concurrent requests"
+    ),
+    max_tokens: Optional[int] = typer.Option(
+        None, "--max-tokens", "-t", help="Max tokens to generate (unset → model default)"
+    ),
+    temperature: Optional[float] = typer.Option(None, "--temperature", "-T", help="Temperature"),
+    sampling_args: Optional[str] = typer.Option(
+        None,
+        "--sampling-args",
+        "-S",
+        help='Sampling args as JSON, e.g. \'{"enable_thinking": false, "max_tokens": 256}\'',
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    save_dataset: bool = typer.Option(False, "--save-dataset", "-s", help="Save dataset to disk"),
+    save_to_hf_hub: bool = typer.Option(False, "--save-to-hf-hub", "-H", help="Save to HF Hub"),
+    hf_hub_dataset_name: Optional[str] = typer.Option(
+        None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
+    ),
+    env_args: Optional[str] = typer.Option(
+        None, "--env-args", "-a", help='Environment args as JSON, e.g. \'{"key":"value"}\''
+    ),
+    api_key_var: Optional[str] = typer.Option(
+        None, "--api-key-var", "-k", help="override api key variable instead of using PRIME_API_KEY"
+    ),
+    api_base_url: Optional[str] = typer.Option(
+        None,
+        "--api-base-url",
+        "-b",
+        help=(
+            "override api base url variable instead of using prime inference url, "
+            "should end in '/v1'"
+        ),
+    ),
+) -> None:
+    """
+    Run verifiers' vf-eval with Prime Inference (closed beta)
+    (This feature in currently in closed beta and requires prime inference permissions.)
+
+    Example:
+       prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7
+       All extra args are forwarded unchanged to vf-eval.
+    """
+    config = Config()
+
+    api_key = config.api_key
+    inference_base_url = (config.inference_url or "").strip()
+
+    if not api_key:
+        console.print(
+            "[red]No API key configured.[/red] "
+            "Run [bold]prime login[/bold] or [bold]prime config set-api-key[/bold]."
+        )
+        raise typer.Exit(1)
+
+    # Choose base from --api-base-url (if given) or config
+    if api_base_url:
+        chosen_base = api_base_url.rstrip("/")
+    else:
+        if not inference_base_url:
+            console.print(
+                "[red]Inference URL not configured.[/red] "
+                "Check [bold]prime config view[/bold]."
+            )
+            raise typer.Exit(1)
+        chosen_base = inference_base_url.rstrip("/")
+
+    inference_url = chosen_base
+
+    # Fast fail if the model doesn't exist (only for Prime Inference, not custom URLs)
+    # Check if using Prime Inference URL (either from config or explicitly provided)
+    if chosen_base == inference_base_url:
+        client = InferenceClient()
+        try:
+            client.retrieve_model(model)
+        except InferenceAPIError as e:
+            console.print(
+                f"[red]Invalid model:[/red] {e} \n\n"
+                f"[b]Use 'prime inference models' to see available models.[/b]"
+            )
+            raise typer.Exit(1)
+
+    cmd = ["uv", "run", "vf-eval", environment]
+
+    # Add chosen inference url
+    cmd += ["-b", inference_url]
+
+    # Always pass the selected model (required option)
+    cmd += ["-m", model]
+
+    # Environment modification may be necessary for passing in API key
+    env = os.environ.copy()
+
+    # API key var: respect --api-key-var if provided to this command, else inject PRIME_API_KEY
+    if api_key_var:
+        cmd += ["-k", api_key_var]
+    else:
+        env["PRIME_API_KEY"] = api_key
+        cmd += ["-k", "PRIME_API_KEY"]
+
+    # Forward vf-eval options if provided here
+    if env_args:
+        cmd += ["-a", env_args]
+    if num_examples is not None:
+        cmd += ["-n", str(num_examples)]
+    if rollouts_per_example is not None:
+        cmd += ["-r", str(rollouts_per_example)]
+    if max_concurrent is not None:
+        cmd += ["-c", str(max_concurrent)]
+    if max_tokens is not None:
+        cmd += ["-t", str(max_tokens)]
+    if temperature is not None:
+        cmd += ["-T", str(temperature)]
+    if sampling_args:
+        cmd += ["-S", sampling_args]
+    if verbose:
+        cmd += ["-v"]
+    if save_dataset:
+        cmd += ["-s"]
+    if save_to_hf_hub:
+        cmd += ["-H"]
+    if hf_hub_dataset_name:
+        cmd += ["-D", hf_hub_dataset_name]
+
+    # Execute; stream output directly
+    try:
+        result = subprocess.run(cmd, env=env)
+        if result.returncode != 0:
+            raise typer.Exit(result.returncode)
+    except KeyboardInterrupt:
+        raise typer.Exit(130)
+    except FileNotFoundError:
+        console.print("[red]Failed to start vf-eval process.[/red]")
         raise typer.Exit(1)

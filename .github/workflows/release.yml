@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: write
     steps:
       - uses: actions/checkout@v3
         with:
@@ -120,3 +121,26 @@ jobs:
         run: |
           source .venv/bin/activate
           twine upload dist/*
+
+      # Publish Docker image with the newly released CLI
+      - name: Log in to GitHub Container Registry
+        if: steps.check_tag.outputs.exists != 'true'
+        env:
+          CR_PAT: ${{ github.token }}
+        run: echo "$CR_PAT" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push Docker image
+        if: steps.check_tag.outputs.exists != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          IMAGE_PATH=$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/$IMAGE_PATH"
+          docker build --build-arg PRIME_VERSION="$VERSION" \
+            -t "$IMAGE:$VERSION" \
+            -t "$IMAGE:v$VERSION" \
+            -t "$IMAGE:latest" .
+          docker push "$IMAGE:$VERSION"
+          docker push "$IMAGE:v$VERSION"
+          docker push "$IMAGE:latest"

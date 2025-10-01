@@ -9,9 +9,6 @@ on:
   pull_request:
     branches: [ "main", "develop" ]
 
-permissions:
-  contents: read
-
 jobs:
   lint-format:
     runs-on: ubuntu-latest

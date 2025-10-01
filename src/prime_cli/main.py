@@ -9,6 +9,8 @@ from .commands.inference import app as inference_app
 from .commands.login import app as login_app
 from .commands.pods import app as pods_app
 from .commands.sandbox import app as sandbox_app
+from .commands.teams import app as teams_app
+from .commands.whoami import app as whoami_app
 
 __version__ = version("prime")
 
@@ -21,6 +23,8 @@ app.add_typer(sandbox_app, name="sandbox")
 app.add_typer(login_app, name="login")
 app.add_typer(env_app, name="env")
 app.add_typer(inference_app, name="inference")
+app.add_typer(whoami_app, name="whoami")
+app.add_typer(teams_app, name="teams")
 
 
 @app.callback(invoke_without_command=True)

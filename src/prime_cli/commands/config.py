@@ -43,6 +43,13 @@ def view() -> None:
         team_label += " (from env var)"
     table.add_row("Team ID", team_label)
 
+    # Show User ID
+    user_id = settings.get("user_id")
+    user_label = user_id or "Not set"
+    if user_id and _env_set("PRIME_USER_ID"):
+        user_label += " (from env var)"
+    table.add_row("User ID", user_label)
+
     # Show base URL
     base_label = settings["base_url"]
     if _env_set("PRIME_API_BASE_URL", "PRIME_BASE_URL"):
@@ -130,6 +137,37 @@ def remove_team_id() -> None:
     config = Config()
     config.set_team_id(None)
     console.print("[green]Team ID removed. Using personal account.[/green]")
+
+
+@app.command()
+def set_user_id(
+    user_id: Optional[str] = typer.Argument(
+        None,
+        help="Your Prime Intellect user ID. Leave empty to clear.",
+    ),
+) -> None:
+    """Set your user ID for scoping operations (e.g., sandbox delete)."""
+    if user_id is None:
+        # Interactive mode with prompt
+        user_id = typer.prompt(
+            "Enter your Prime Intellect user ID (leave empty to clear)",
+            default="",
+        )
+
+    config = Config()
+    config.set_user_id(user_id)
+    if user_id:
+        console.print(f"[green]User ID '{user_id}' configured successfully![/green]")
+    else:
+        console.print("[green]User ID cleared.[/green]")
+
+
+@app.command()
+def remove_user_id() -> None:
+    """Remove user ID from config"""
+    config = Config()
+    config.set_user_id(None)
+    console.print("[green]User ID removed.[/green]")
 
 
 @app.command()

@@ -561,6 +561,12 @@ def run(
         "--env",
         help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
     ),
+    timeout: Optional[int] = typer.Option(
+        None,
+        "-t",
+        "--timeout",
+        help="Request timeout in seconds (default 300)",
+    ),
 ) -> None:
     """Execute a command in a sandbox"""
     try:
@@ -586,13 +592,19 @@ def run(
         if env_vars:
             obfuscated_env = obfuscate_env_vars(env_vars)
             console.print(f"[bold blue]Environment:[/bold blue] {obfuscated_env}")
+        if timeout is not None:
+            console.print(f"[bold blue]Timeout:[/bold blue] {timeout}s")
 
         # Start timing
         start_time = time.perf_counter()
 
         with console.status("[bold blue]Running command...", spinner="dots"):
             result = sandbox_client.execute_command(
-                sandbox_id, command_str, working_dir, env_vars if env_vars else None
+                sandbox_id,
+                command_str,
+                working_dir=working_dir,
+                env=env_vars if env_vars else None,
+                timeout=timeout,
             )
 
         # End timing

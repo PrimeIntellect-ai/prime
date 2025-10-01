@@ -10,6 +10,9 @@ from typer.testing import CliRunner
 
 @pytest.fixture
 def mock_api_client(monkeypatch: pytest.MonkeyPatch) -> APIClient:
+    # Set the environment variable
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+
     # Get the absolute path to the test data file
     test_dir = os.path.dirname(os.path.abspath(__file__))
     data_file = os.path.join(test_dir, "data", "availability_response.json")

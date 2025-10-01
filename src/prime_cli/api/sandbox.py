@@ -362,11 +362,6 @@ class SandboxClient:
         logs_response = SandboxLogsResponse.model_validate(response)
         return logs_response.logs
 
-    def update_status(self, sandbox_id: str) -> Sandbox:
-        """Update sandbox status from Kubernetes"""
-        response = self.client.request("POST", f"/sandbox/{sandbox_id}/status")
-        return Sandbox.model_validate(response)
-
     def execute_command(
         self,
         sandbox_id: str,
@@ -622,11 +617,6 @@ class AsyncSandboxClient:
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/logs")
         logs_response = SandboxLogsResponse.model_validate(response)
         return logs_response.logs
-
-    async def update_status(self, sandbox_id: str) -> Sandbox:
-        """Update sandbox status from Kubernetes"""
-        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/status")
-        return Sandbox.model_validate(response)
 
     async def execute_command(
         self,

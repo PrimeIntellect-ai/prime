@@ -9,11 +9,13 @@ The `sandbox_demo.py` script demonstrates both programmatic and CLI usage of the
 ### Running the Demo
 
 1. **Interactive Demo** (recommended for first-time users):
+
    ```bash
    python examples/sandbox_demo.py
    ```
 
 2. **Programmatic Demo Only**:
+
    ```bash
    python examples/sandbox_demo.py --programmatic
    ```
@@ -32,6 +34,7 @@ The `sandbox_demo.py` script demonstrates both programmatic and CLI usage of the
 ### What the Demo Shows
 
 **Programmatic Usage:**
+
 - Creating sandboxes with custom configurations
 - Listing and filtering sandboxes
 - Getting detailed sandbox information
@@ -41,6 +44,7 @@ The `sandbox_demo.py` script demonstrates both programmatic and CLI usage of the
 - Error handling
 
 **CLI Usage Examples:**
+
 - All available sandbox commands
 - Common parameter combinations
 - Environment variable handling
@@ -95,14 +99,12 @@ prime sandbox delete SANDBOX_ID
 
 # Get logs
 prime sandbox logs SANDBOX_ID
-
-# Update status from Kubernetes
-prime sandbox status SANDBOX_ID
 ```
 
 ## Error Handling
 
 Both programmatic and CLI usage include proper error handling for:
+
 - API authentication errors
 - Network connectivity issues
 - Invalid parameters

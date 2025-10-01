@@ -527,28 +527,6 @@ def logs(sandbox_id: str) -> None:
 
 
 @app.command(no_args_is_help=True)
-def status(sandbox_id: str) -> None:
-    """Update and get the current status of a sandbox from Kubernetes"""
-    try:
-        base_client = APIClient()
-        sandbox_client = SandboxClient(base_client)
-
-        with console.status("[bold blue]Updating status from Kubernetes...", spinner="dots"):
-            sandbox = sandbox_client.update_status(sandbox_id)
-
-        console.print(f"[green]Status updated for sandbox {sandbox.id}[/green]")
-        console.print(f"Current status: [bold]{sandbox.status}[/bold]")
-
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
-        raise typer.Exit(1)
-
-
-@app.command(no_args_is_help=True)
 def run(
     sandbox_id: str,
     command: List[str] = typer.Argument(..., help="Command to execute"),

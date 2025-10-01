@@ -6,7 +6,7 @@ FROM python:3.11-slim AS runtime
 
 ARG PRIME_VERSION
 ENV PRIME_VERSION=${PRIME_VERSION}
-ENV PATH="/root/.local/bin:${PATH}"
+ENV PATH="/root/.local/bin:/root/.cargo/bin:${PATH}"
 
 # Install runtime dependencies and uv
 RUN apt-get update \

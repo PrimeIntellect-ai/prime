@@ -8,19 +8,23 @@ ARG PRIME_VERSION
 ENV PRIME_VERSION=${PRIME_VERSION}
 ENV PATH="/root/.local/bin:/root/.cargo/bin:${PATH}"
 
-# Install runtime dependencies and uv
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl bash \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        bash \
+        git \
+        build-essential \
+        gcc \
+        pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Copy in the built wheel from the release workflow and install it
 COPY dist/ /tmp/dist/
 RUN pip install --no-cache-dir /tmp/dist/*.whl \
     && rm -rf /tmp/dist
 
-# Basic sanity check so the build fails if the CLI is not installed correctly
 RUN prime --version
 
 WORKDIR /workspace

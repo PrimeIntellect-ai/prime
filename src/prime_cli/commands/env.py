@@ -381,8 +381,87 @@ def push(
                         f"{owner_info['name']}/{env_name}[/green]"
                     )
             except APIError as e:
-                console.print(f"[red]Failed to resolve environment: {e}[/red]")
-                raise typer.Exit(1)
+                # Handle missing username (slug) by prompting user to set it and retrying
+                err_msg = str(e)
+                if "missing a username" in err_msg.lower():
+                    console.print(
+                        "[yellow]Your user profile is missing a username.[/yellow] "
+                        "You must choose a username to publish environments."
+                    )
+                    console.print(
+                        "[dim]Note: This username can only be chosen once and will be public.[/dim]"
+                    )
+
+                    while True:
+                        try:
+                            chosen = (
+                                typer.prompt(
+                                    "Enter your desired username",
+                                )
+                                .strip()
+                                .lower()
+                            )
+                        except typer.Abort:
+                            console.print("[red]Cancelled by user[/red]")
+                            raise typer.Exit(1)
+
+                        if not chosen:
+                            console.print("[red]Username cannot be empty[/red]")
+                            continue
+
+                        if not re.match(r"^[a-z0-9-]{3,30}$", chosen):
+                            console.print(
+                                "[red]Invalid username.[/red] "
+                                "Use 3-30 chars with lowercase letters, numbers, and '-' only."
+                            )
+                            continue
+
+                        try:
+                            client.patch("/user/slug", json={"slug": chosen})
+                            console.print(f"[green]✓ Username set to {chosen}[/green]")
+                            break
+                        except APIError as se:
+                            se_msg = str(se)
+                            if "409" in se_msg or "already taken" in se_msg.lower():
+                                console.print(
+                                    "[red]That username is already taken.[/red] "
+                                    "Please choose another."
+                                )
+                                continue
+                            else:
+                                console.print(f"[red]Failed to set username: {se}[/red]")
+                                raise typer.Exit(1)
+
+                    # Retry resolve after setting username
+                    try:
+                        response = client.post("/environmentshub/resolve", json=resolve_data)
+
+                        if "data" in response:
+                            resolve_response = response["data"]
+                        else:
+                            resolve_response = response
+
+                        env_id = resolve_response["id"]
+                        owner_info = resolve_response["owner"]
+
+                        if resolve_response["created"]:
+                            console.print(
+                                f"[green]✓ Created environment: {owner_info['name']}/"
+                                f"{env_name}[/green]"
+                            )
+                        else:
+                            console.print(
+                                f"[green]✓ Found existing environment: "
+                                f"{owner_info['name']}/{env_name}[/green]"
+                            )
+                    except APIError as e2:
+                        console.print(
+                            f"[red]Failed to resolve environment after setting username: {e2}[/red]"
+                        )
+                        raise typer.Exit(1)
+                else:
+                    console.print(f"[red]Failed to resolve environment: {e}[/red]")
+                    raise typer.Exit(1)
 
             console.print("Uploading wheel ...")
 
@@ -1608,8 +1687,7 @@ def eval_env(
     else:
         if not inference_base_url:
             console.print(
-                "[red]Inference URL not configured.[/red] "
-                "Check [bold]prime config view[/bold]."
+                "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
             )
             raise typer.Exit(1)
         chosen_base = inference_base_url.rstrip("/")

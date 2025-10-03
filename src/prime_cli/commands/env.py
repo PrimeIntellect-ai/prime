@@ -417,7 +417,7 @@ def push(
                             continue
 
                         try:
-                            client.patch("/users/slug", json={"slug": chosen})
+                            client.patch("/user/slug", json={"slug": chosen})
                             console.print(f"[green]✓ Username set to {chosen}[/green]")
                             break
                         except APIError as se:

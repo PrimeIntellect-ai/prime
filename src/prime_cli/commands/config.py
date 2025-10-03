@@ -5,6 +5,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from ..api.client import APIClient, APIError
 from ..config import Config
 
 app = typer.Typer(help="Configure the CLI", no_args_is_help=True)
@@ -99,6 +100,20 @@ def set_api_key(
 
     if api_key:
         masked_key = f"{api_key[:6]}***{api_key[-4:]}" if len(api_key) > 10 else "***"
+
+        # Try to fetch user id like in login flow
+        try:
+            client = APIClient(api_key=api_key)
+            whoami_resp = client.get("/user/whoami")
+            data = whoami_resp.get("data") if isinstance(whoami_resp, dict) else None
+            if isinstance(data, dict):
+                user_id = data.get("id")
+                if user_id:
+                    config.set_user_id(user_id)
+                    config.update_current_environment_file()
+        except (APIError, Exception):
+            pass
+
         console.print(f"[green]API key {masked_key} configured successfully![/green]")
         console.print("[blue]You can verify your API key with 'prime config view'[/blue]")
         console.print(
@@ -137,37 +152,6 @@ def remove_team_id() -> None:
     config = Config()
     config.set_team_id(None)
     console.print("[green]Team ID removed. Using personal account.[/green]")
-
-
-@app.command()
-def set_user_id(
-    user_id: Optional[str] = typer.Argument(
-        None,
-        help="Your Prime Intellect user ID. Leave empty to clear.",
-    ),
-) -> None:
-    """Set your user ID for scoping operations (e.g., sandbox delete)."""
-    if user_id is None:
-        # Interactive mode with prompt
-        user_id = typer.prompt(
-            "Enter your Prime Intellect user ID (leave empty to clear)",
-            default="",
-        )
-
-    config = Config()
-    config.set_user_id(user_id)
-    if user_id:
-        console.print(f"[green]User ID '{user_id}' configured successfully![/green]")
-    else:
-        console.print("[green]User ID cleared.[/green]")
-
-
-@app.command()
-def remove_user_id() -> None:
-    """Remove user ID from config"""
-    config = Config()
-    config.set_user_id(None)
-    console.print("[green]User ID removed.[/green]")
 
 
 @app.command()

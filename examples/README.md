@@ -2,6 +2,47 @@
 
 This directory contains example scripts and demos for using the Prime CLI.
 
+## Evals Example
+
+The `eval_example.json` file demonstrates the format for pushing evaluation results to the Prime Hub.
+
+### Pushing Evals
+
+1. **Push from JSON file**:
+   ```bash
+   prime evals push examples/eval_example.json
+   ```
+
+2. **Push using CLI options**:
+   ```bash
+   prime evals push --name my-eval --model llama-3-70b --dataset mmlu --metrics '{"accuracy": 0.85}'
+   ```
+
+3. **List all evals**:
+   ```bash
+   prime evals list
+   ```
+
+4. **Get specific eval**:
+   ```bash
+   prime evals get <eval_id>
+   ```
+
+5. **Delete an eval**:
+   ```bash
+   prime evals delete <eval_id>
+   ```
+
+### Eval Data Format
+
+The JSON file should contain:
+- `eval_name`: Name of your evaluation (required)
+- `model_name`: Model being evaluated (required)
+- `dataset`: Dataset used for evaluation (required)
+- `metrics`: Dictionary of metric names and values (required)
+- `metadata`: Additional metadata (optional)
+- `results`: Detailed per-sample results (optional)
+
 ## Sandbox Demo
 
 The `sandbox_demo.py` script demonstrates both programmatic and CLI usage of the sandbox functionality.

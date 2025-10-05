@@ -1,0 +1,75 @@
+{
+  "eval_name": "example-mmlu-evaluation-2",
+  "model_name": "llama-3-70b",
+  "dataset": "mmlu",
+  "metrics": {
+    "accuracy": 0.85,
+    "f1_score": 0.83,
+    "precision": 0.86,
+    "recall": 0.81,
+    "avg@1": 0.85,
+    "num_samples": 2
+  },
+  "metadata": {
+    "version": "1.0",
+    "timestamp": "2025-10-03T12:00:00Z",
+    "environment": "production",
+    "num_examples": 2,
+    "rollouts_per_example": 1,
+    "checkpoint_step": 0,
+    "step": 0,
+    "temperature": 0.7,
+    "max_tokens": 2048
+  },
+  "results": [
+    {
+      "example_id": 0,
+      "reward": 1.0,
+      "task": "mmlu",
+      "answer": "Paris",
+      "prompt": [
+        {
+          "role": "user",
+          "content": "What is the capital of France?",
+          "tool_calls": [],
+          "tool_call_id": ""
+        }
+      ],
+      "completion": [
+        {
+          "role": "assistant",
+          "content": "Paris",
+          "tool_calls": [],
+          "tool_call_id": ""
+        }
+      ],
+      "score": 1.0,
+      "correct": true
+    },
+    {
+      "example_id": 1,
+      "reward": 1.0,
+      "task": "mmlu",
+      "answer": "4",
+      "prompt": [
+        {
+          "role": "user",
+          "content": "What is 2 + 2?",
+          "tool_calls": [],
+          "tool_call_id": ""
+        }
+      ],
+      "completion": [
+        {
+          "role": "assistant",
+          "content": "4",
+          "tool_calls": [],
+          "tool_call_id": ""
+        }
+      ],
+      "score": 1.0,
+      "correct": true
+    }
+  ]
+}
+

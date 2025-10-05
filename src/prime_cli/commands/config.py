@@ -5,6 +5,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from ..api.client import APIClient, APIError
 from ..config import Config
 
 app = typer.Typer(help="Configure the CLI", no_args_is_help=True)
@@ -42,6 +43,13 @@ def view() -> None:
     if team_id and _env_set("PRIME_TEAM_ID"):
         team_label += " (from env var)"
     table.add_row("Team ID", team_label)
+
+    # Show User ID
+    user_id = settings.get("user_id")
+    user_label = user_id or "Not set"
+    if user_id and _env_set("PRIME_USER_ID"):
+        user_label += " (from env var)"
+    table.add_row("User ID", user_label)
 
     # Show base URL
     base_label = settings["base_url"]
@@ -92,6 +100,20 @@ def set_api_key(
 
     if api_key:
         masked_key = f"{api_key[:6]}***{api_key[-4:]}" if len(api_key) > 10 else "***"
+
+        # Try to fetch user id like in login flow
+        try:
+            client = APIClient(api_key=api_key)
+            whoami_resp = client.get("/user/whoami")
+            data = whoami_resp.get("data") if isinstance(whoami_resp, dict) else None
+            if isinstance(data, dict):
+                user_id = data.get("id")
+                if user_id:
+                    config.set_user_id(user_id)
+                    config.update_current_environment_file()
+        except (APIError, Exception):
+            pass
+
         console.print(f"[green]API key {masked_key} configured successfully![/green]")
         console.print("[blue]You can verify your API key with 'prime config view'[/blue]")
         console.print(

@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 class ConfigModel(BaseModel):
     api_key: str = ""
     team_id: str | None = None
+    user_id: str | None = None
     base_url: str = "https://api.primeintellect.ai"
     frontend_url: str = "https://app.primeintellect.ai"
     inference_url: str = "https://api.pinference.ai/api/v1"
@@ -46,6 +47,7 @@ class Config:
                 ConfigModel(
                     api_key="",
                     team_id=None,
+                    user_id=None,
                     base_url=self.DEFAULT_BASE_URL,
                     frontend_url=self.DEFAULT_FRONTEND_URL,
                     inference_url=self.DEFAULT_INFERENCE_URL,
@@ -88,6 +90,19 @@ class Config:
     def set_team_id(self, value: str | None) -> None:
         """Set team ID in config file"""
         self.config["team_id"] = value if value else None
+        self._save_config(self.config)
+
+    @property
+    def user_id(self) -> Optional[str]:
+        """Get user ID with precedence: env > file > None."""
+        user_id = os.getenv("PRIME_USER_ID")
+        if user_id is not None:
+            return user_id
+        return self.config.get("user_id") or None
+
+    def set_user_id(self, value: str | None) -> None:
+        """Set user ID in config file"""
+        self.config["user_id"] = value if value else None
         self._save_config(self.config)
 
     @property
@@ -174,6 +189,7 @@ class Config:
         return {
             "api_key": self.api_key,
             "team_id": self.team_id,
+            "user_id": self.user_id,
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
             "inference_url": self.inference_url,
@@ -191,6 +207,7 @@ class Config:
         env_config = {
             "api_key": self.api_key,
             "team_id": self.team_id,
+            "user_id": self.user_id,
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
             "inference_url": self.inference_url,
@@ -221,6 +238,8 @@ class Config:
                     self.set_api_key(env_config["api_key"])
                 # Set team_id from environment, defaulting to empty string
                 self.set_team_id(env_config.get("team_id", None))
+                # Set user_id from environment
+                self.set_user_id(env_config.get("user_id", None))
                 self.set_base_url(env_config.get("base_url", self.DEFAULT_BASE_URL))
                 self.set_frontend_url(env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL))
                 self.set_inference_url(env_config.get("inference_url", self.DEFAULT_INFERENCE_URL))
@@ -242,6 +261,7 @@ class Config:
                     env_config = {
                         "api_key": self.api_key,
                         "team_id": self.team_id,
+                        "user_id": self.user_id,
                         "base_url": self.base_url,
                         "frontend_url": self.frontend_url,
                         "inference_url": self.inference_url,

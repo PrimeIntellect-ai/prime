@@ -9,6 +9,12 @@ class EvalsAPIError(Exception):
     pass
 
 
+class EnvironmentNotFoundError(EvalsAPIError):
+    """Raised when an environment is not found in the hub."""
+
+    pass
+
+
 class EvalsClient:
     """
     Client for the Prime Evals API.
@@ -89,3 +95,59 @@ class EvalsClient:
                 raise EvalsAPIError(f"Eval '{eval_id}' not found (DELETE {url} → {status}).") from e
             raise EvalsAPIError(f"DELETE {url} failed: {status} {e.response.text}") from e
         return resp.json()
+
+    def check_environment_exists(self, env_id: str, version: str = "latest") -> bool:
+        if "/" in env_id:
+            owner, name = env_id.split("/", 1)
+            url = f"{self.config.base_url}/api/v1/environmentshub/{owner}/{name}/@{version}"
+
+            try:
+                resp = self._client.get(url)
+                resp.raise_for_status()
+                return True
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                if status in (404, 422):
+                    return False
+
+                raise EvalsAPIError(
+                    f"Error checking environment '{env_id}': {status} {e.response.text}"
+                ) from e
+            except httpx.RequestError as e:
+                raise EvalsAPIError(
+                    f"Request failed while checking environment '{env_id}': {e}"
+                ) from e
+        else:
+            name = env_id
+
+            url = f"{self.config.base_url}/api/v1/environmentshub/"
+            params = {
+                "include_teams": True,
+                "limit": 100,
+            }
+
+            try:
+                resp = self._client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+
+                environments = data.get("data", data.get("environments", []))
+
+                for env in environments:
+                    env_name = env.get("name", "")
+                    if env_name == name:
+                        return True
+
+                return False
+
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                if status in (404, 422):
+                    return False
+                raise EvalsAPIError(
+                    f"Error checking environment '{env_id}': {status} {e.response.text}"
+                ) from e
+            except httpx.RequestError as e:
+                raise EvalsAPIError(
+                    f"Request failed while checking environment '{env_id}': {e}"
+                ) from e

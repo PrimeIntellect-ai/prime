@@ -116,6 +116,10 @@ class APIClient:
         """Make a POST request to the API"""
         return self.request("POST", endpoint, json=json)
 
+    def patch(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Make a PATCH request to the API"""
+        return self.request("PATCH", endpoint, json=json)
+
     def delete(self, endpoint: str) -> Dict[str, Any]:
         """Make a DELETE request to the API"""
         return self.request("DELETE", endpoint)
@@ -215,6 +219,10 @@ class AsyncAPIClient:
     async def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Make an async POST request to the API"""
         return await self.request("POST", endpoint, json=json)
+
+    async def patch(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Make an async PATCH request to the API"""
+        return await self.request("PATCH", endpoint, json=json)
 
     async def delete(self, endpoint: str) -> Dict[str, Any]:
         """Make an async DELETE request to the API"""

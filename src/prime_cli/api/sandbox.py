@@ -98,7 +98,7 @@ class CreateSandboxRequest(BaseModel):
 
     name: str
     docker_image: str
-    start_command: Optional[str] = None
+    start_command: Optional[str] = "tail -f /dev/null"
     cpu_cores: int = 1
     memory_gb: int = 2
     disk_size_gb: int = 5

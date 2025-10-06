@@ -388,10 +388,15 @@ def delete(
                         break
                     page += 1
 
-                # Filter out already terminated sandboxes
-                active_sandboxes = [
-                    s for s in all_sandboxes if s.status not in {"TERMINATED", "TIMEOUT"}
-                ]
+                # Filter to current user if configured, and exclude already terminated sandboxes
+                current_user_id = config.user_id
+                active_sandboxes = []
+                for s in all_sandboxes:
+                    if s.status in {"TERMINATED", "TIMEOUT"}:
+                        continue
+                    if current_user_id and s.user_id and s.user_id != current_user_id:
+                        continue
+                    active_sandboxes.append(s)
                 sandbox_ids = [s.id for s in active_sandboxes]
 
                 if not sandbox_ids:

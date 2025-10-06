@@ -16,6 +16,9 @@ jobs:
     permissions:
       contents: write
       packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_created: ${{ steps.release_status.outputs.created }}
     steps:
       - uses: actions/checkout@v3
         with:
@@ -103,6 +106,13 @@ jobs:
           source .venv/bin/activate
           python -m build
 
+      - name: Upload build artifacts
+        if: steps.check_tag.outputs.exists != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
       # Create GitHub Release
       - name: Create GitHub Release
         if: steps.check_tag.outputs.exists != 'true'
@@ -122,25 +132,63 @@ jobs:
           source .venv/bin/activate
           twine upload dist/*
 
-      # Publish Docker image with the newly released CLI
+      - name: Set release status
+        id: release_status
+        run: |
+          if [ "${{ steps.check_tag.outputs.exists }}" = "true" ]; then
+            echo "created=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  docker-images:
+    needs: tag-and-release
+    if: needs.tag-and-release.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
       - name: Log in to GitHub Container Registry
-        if: steps.check_tag.outputs.exists != 'true'
         env:
           CR_PAT: ${{ github.token }}
         run: echo "$CR_PAT" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Build and push Docker image
-        if: steps.check_tag.outputs.exists != 'true'
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.tag-and-release.outputs.version }}
+          PYTHON_VERSION: ${{ matrix.python-version }}
           REPOSITORY: ${{ github.repository }}
         run: |
           IMAGE_PATH=$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/$IMAGE_PATH"
+          PY_TAG="py${PYTHON_VERSION}"
           docker build --build-arg PRIME_VERSION="$VERSION" \
-            -t "$IMAGE:$VERSION" \
-            -t "$IMAGE:v$VERSION" \
-            -t "$IMAGE:latest" .
-          docker push "$IMAGE:$VERSION"
-          docker push "$IMAGE:v$VERSION"
-          docker push "$IMAGE:latest"
+            --build-arg PYTHON_VERSION="$PYTHON_VERSION" \
+            -t "$IMAGE:$VERSION-$PY_TAG" \
+            -t "$IMAGE:v$VERSION-$PY_TAG" \
+            -t "$IMAGE:$PY_TAG" .
+          docker push "$IMAGE:$VERSION-$PY_TAG"
+          docker push "$IMAGE:v$VERSION-$PY_TAG"
+          docker push "$IMAGE:$PY_TAG"
+          if [ "$PYTHON_VERSION" = "3.11" ]; then
+            docker tag "$IMAGE:$VERSION-$PY_TAG" "$IMAGE:$VERSION"
+            docker tag "$IMAGE:$VERSION-$PY_TAG" "$IMAGE:v$VERSION"
+            docker tag "$IMAGE:$VERSION-$PY_TAG" "$IMAGE:latest"
+            docker push "$IMAGE:$VERSION"
+            docker push "$IMAGE:v$VERSION"
+            docker push "$IMAGE:latest"
+          fi

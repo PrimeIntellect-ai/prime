@@ -2,7 +2,9 @@
 # This image packages the released Prime CLI together with uv so it can be used in
 # automation scenarios.
 
-FROM python:3.11-slim AS runtime
+ARG PYTHON_VERSION=3.11
+
+FROM python:${PYTHON_VERSION}-slim AS runtime
 
 ARG PRIME_VERSION
 ENV PRIME_VERSION=${PRIME_VERSION}

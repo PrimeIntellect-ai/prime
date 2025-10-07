@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -17,7 +17,7 @@ class EnvironmentNotFoundError(EvalsAPIError):
 
 class EvalsClient:
     """
-    Client for the Prime Evals API.
+    Client for the Prime Evals API
     """
 
     def __init__(
@@ -46,35 +46,41 @@ class EvalsClient:
             timeout=httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=60.0),
         )
 
-    def list_evals(self) -> Dict[str, Any]:
-        url = f"{self.config.base_url}/api/v1/evals/runs"
-        resp = self._client.get(url)
+    def create_evaluation(
+        self,
+        name: str,
+        environment_ids: Optional[List[str]] = None,
+        suite_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        version_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+        dataset: Optional[str] = None,
+        framework: Optional[str] = None,
+        task_type: Optional[str] = None,
+        description: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        url = f"{self.config.base_url}/api/v1/evaluations"
+        payload = {
+            "name": name,
+            "environment_ids": environment_ids,
+            "suite_id": suite_id,
+            "run_id": run_id,
+            "version_id": version_id,
+            "model_name": model_name,
+            "dataset": dataset,
+            "framework": framework,
+            "task_type": task_type,
+            "description": description,
+            "tags": tags or [],
+            "metadata": metadata,
+            "metrics": metrics,
+        }
+        payload = {k: v for k, v in payload.items() if v is not None or k in ["tags"]}
 
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise EvalsAPIError(
-                f"GET {url} failed: {e.response.status_code} {e.response.text}"
-            ) from e
-        return resp.json()
-
-    def get_eval(self, eval_id: str) -> Dict[str, Any]:
-        url = f"{self.config.base_url}/api/v1/evals/runs/{eval_id}"
-        resp = self._client.get(url)
-
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            status = e.response.status_code
-            if status in (400, 404, 422):
-                raise EvalsAPIError(f"Eval '{eval_id}' not found (GET {url} → {status}).") from e
-            raise EvalsAPIError(f"GET {url} failed: {status} {e.response.text}") from e
-        return resp.json()
-
-    def push_eval(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.config.base_url}/api/v1/evals/push"
         resp = self._client.post(url, json=payload)
-
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -83,17 +89,83 @@ class EvalsClient:
             ) from e
         return resp.json()
 
-    def delete_eval(self, eval_id: str) -> Dict[str, Any]:
-        url = f"{self.config.base_url}/api/v1/evals/runs/{eval_id}"
-        resp = self._client.delete(url)
+    def push_samples(self, evaluation_id: str, samples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        url = f"{self.config.base_url}/api/v1/evaluations/{evaluation_id}/samples"
+        payload = {"samples": samples}
+
+        resp = self._client.post(url, json=payload)
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise EvalsAPIError(
+                f"POST {url} failed: {e.response.status_code} {e.response.text}"
+            ) from e
+        return resp.json()
+
+    def finalize_evaluation(
+        self, evaluation_id: str, metrics: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        url = f"{self.config.base_url}/api/v1/evaluations/{evaluation_id}/finalize"
+        payload = {"metrics": metrics} if metrics else {}
+
+        resp = self._client.post(url, json=payload)
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise EvalsAPIError(
+                f"POST {url} failed: {e.response.status_code} {e.response.text}"
+            ) from e
+        return resp.json()
+
+    def list_evaluations(
+        self,
+        environment_id: Optional[str] = None,
+        suite_id: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        url = f"{self.config.base_url}/api/v1/evaluations"
+        params = {"skip": skip, "limit": limit}
+        if environment_id:
+            params["environment_id"] = environment_id
+        if suite_id:
+            params["suite_id"] = suite_id
+
+        resp = self._client.get(url, params=params)
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise EvalsAPIError(
+                f"GET {url} failed: {e.response.status_code} {e.response.text}"
+            ) from e
+        return resp.json()
+
+    def get_evaluation(self, evaluation_id: str) -> Dict[str, Any]:
+        url = f"{self.config.base_url}/api/v1/evaluations/{evaluation_id}"
+        resp = self._client.get(url)
 
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
             if status in (400, 404, 422):
-                raise EvalsAPIError(f"Eval '{eval_id}' not found (DELETE {url} → {status}).") from e
-            raise EvalsAPIError(f"DELETE {url} failed: {status} {e.response.text}") from e
+                raise EvalsAPIError(
+                    f"Evaluation '{evaluation_id}' not found (GET {url} → {status})."
+                ) from e
+            raise EvalsAPIError(f"GET {url} failed: {status} {e.response.text}") from e
+        return resp.json()
+
+    def get_samples(self, evaluation_id: str, page: int = 1, limit: int = 100) -> Dict[str, Any]:
+        url = f"{self.config.base_url}/api/v1/evaluations/{evaluation_id}/samples"
+        params = {"page": page, "limit": limit}
+
+        resp = self._client.get(url, params=params)
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise EvalsAPIError(
+                f"GET {url} failed: {e.response.status_code} {e.response.text}"
+            ) from e
         return resp.json()
 
     def check_environment_exists(self, env_id: str, version: str = "latest") -> bool:

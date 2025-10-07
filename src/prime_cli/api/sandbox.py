@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import time
 from datetime import datetime, timezone
@@ -643,9 +644,6 @@ class SandboxClient:
                         f"/sandbox/{self.sandbox_id}/expose/{self.tunnel._exposure_id}",
                     )
                 except Exception as e:
-                    # Log but don't raise during cleanup
-                    import logging
-
                     logging.error(f"Failed to unexpose port: {e}")
 
     def forward(self, sandbox_id: str, port: int, name: Optional[str] = None) -> ForwardContext:
@@ -1024,9 +1022,6 @@ class AsyncSandboxClient:
                         f"/sandbox/{self.sandbox_id}/expose/{self.tunnel._exposure_id}",
                     )
                 except Exception as e:
-                    # Log but don't raise during cleanup
-                    import logging
-
                     logging.error(f"Failed to unexpose port: {e}")
 
     def forward(

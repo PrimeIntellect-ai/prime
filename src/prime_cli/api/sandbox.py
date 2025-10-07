@@ -63,6 +63,7 @@ class Sandbox(BaseModel):
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
     environment_vars: Optional[Dict[str, Any]] = Field(None, alias="environmentVars")
     advanced_configs: Optional[AdvancedConfigs] = Field(None, alias="advancedConfigs")
+    labels: List[str] = Field(default_factory=list)
     created_at: datetime = Field(..., alias="createdAt")
     updated_at: datetime = Field(..., alias="updatedAt")
     started_at: Optional[datetime] = Field(None, alias="startedAt")
@@ -105,6 +106,7 @@ class CreateSandboxRequest(BaseModel):
     gpu_count: int = 0
     timeout_minutes: int = 60
     environment_vars: Optional[Dict[str, str]] = None
+    labels: List[str] = Field(default_factory=list)
     team_id: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
 
@@ -151,7 +153,8 @@ class FileUploadResponse(BaseModel):
 class BulkDeleteSandboxRequest(BaseModel):
     """Bulk delete sandboxes request model"""
 
-    sandbox_ids: List[str]
+    sandbox_ids: Optional[List[str]] = None
+    labels: Optional[List[str]] = None
 
 
 class BulkDeleteSandboxResponse(BaseModel):
@@ -318,6 +321,7 @@ class SandboxClient:
         self,
         team_id: Optional[str] = None,
         status: Optional[str] = None,
+        labels: Optional[List[str]] = None,
         page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
@@ -332,6 +336,8 @@ class SandboxClient:
             params["team_id"] = team_id
         if status:
             params["status"] = status
+        if labels:
+            params["labels"] = labels
         if exclude_terminated is not None:
             params["is_active"] = exclude_terminated
 
@@ -348,9 +354,13 @@ class SandboxClient:
         response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
 
-    def bulk_delete(self, sandbox_ids: List[str]) -> BulkDeleteSandboxResponse:
-        """Bulk delete multiple sandboxes"""
-        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids)
+    def bulk_delete(
+        self,
+        sandbox_ids: Optional[List[str]] = None,
+        labels: Optional[List[str]] = None,
+    ) -> BulkDeleteSandboxResponse:
+        """Bulk delete multiple sandboxes by IDs or labels (must specify one, not both)"""
+        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids, labels=labels)
         response = self.client.request(
             "DELETE", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
         )
@@ -574,6 +584,7 @@ class AsyncSandboxClient:
         self,
         team_id: Optional[str] = None,
         status: Optional[str] = None,
+        labels: Optional[List[str]] = None,
         page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
@@ -588,6 +599,8 @@ class AsyncSandboxClient:
             params["team_id"] = team_id
         if status:
             params["status"] = status
+        if labels:
+            params["labels"] = labels
         if exclude_terminated is not None:
             params["is_active"] = exclude_terminated
 
@@ -604,9 +617,13 @@ class AsyncSandboxClient:
         response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
 
-    async def bulk_delete(self, sandbox_ids: List[str]) -> BulkDeleteSandboxResponse:
-        """Bulk delete multiple sandboxes"""
-        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids)
+    async def bulk_delete(
+        self,
+        sandbox_ids: Optional[List[str]] = None,
+        labels: Optional[List[str]] = None,
+    ) -> BulkDeleteSandboxResponse:
+        """Bulk delete multiple sandboxes by IDs or labels (must specify one, not both)"""
+        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids, labels=labels)
         response = await self.client.request(
             "DELETE", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
         )

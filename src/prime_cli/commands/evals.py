@@ -11,8 +11,9 @@ from ..api.evals import EvalsAPIError, EvalsClient
 from ..utils import output_data_as_json, validate_output_format
 
 app = typer.Typer(
-    help="Manage Prime Evals",
+    help="Manage Prime Evals [BETA]",
     no_args_is_help=True,
+    hidden=True,
 )
 console = Console()
 
@@ -57,44 +58,61 @@ def list_evals(
     """List evaluations."""
     validate_output_format(output, console)
 
-    client = EvalsClient()
-    data = client.list_evaluations(
-        environment_id=environment_id,
-        suite_id=suite_id,
-        skip=skip,
-        limit=limit,
-    )
-
-    if output == "json":
-        output_data_as_json(data, console)
-        return
-
-    evals = data.get("evaluations", [])
-
-    if not evals:
-        console.print("[yellow]No evaluations found.[/yellow]")
-        return
-
-    table = Table(title="Evaluations")
-    table.add_column("ID", style="cyan")
-    table.add_column("Name", style="green")
-    table.add_column("Type", style="blue")
-    table.add_column("Model", style="magenta")
-    table.add_column("Status", style="yellow")
-    table.add_column("Samples", style="white")
-
-    for e in evals:
-        table.add_row(
-            str(e.get("evaluation_id", ""))[:8],
-            str(e.get("name", "")),
-            str(e.get("eval_type", "")),
-            str(e.get("model_name", "")),
-            str(e.get("status", "")),
-            str(e.get("total_samples", 0)),
+    try:
+        client = EvalsClient()
+        data = client.list_evaluations(
+            environment_id=environment_id,
+            suite_id=suite_id,
+            skip=skip,
+            limit=limit,
         )
 
-    console.print(table)
-    console.print(f"[dim]Total: {data.get('total', 0)} | Showing {skip}-{skip + len(evals)}[/dim]")
+        if output == "json":
+            output_data_as_json(data, console)
+            return
+
+        evals = data.get("evaluations", [])
+
+        if not evals:
+            console.print("[yellow]No evaluations found.[/yellow]")
+            return
+
+        table = Table(title="Evaluations")
+        table.add_column("ID", style="cyan")
+        table.add_column("Name", style="green")
+        table.add_column("Type", style="blue")
+        table.add_column("Model", style="magenta")
+        table.add_column("Status", style="yellow")
+        table.add_column("Samples", style="white")
+
+        for e in evals:
+            eval_id = str(e.get("evaluation_id", e.get("id", "")))
+            table.add_row(
+                eval_id[:8] if eval_id else "",
+                str(e.get("name", ""))[:40],
+                str(e.get("eval_type", ""))[:20],
+                str(e.get("model_name", ""))[:30],
+                str(e.get("status", "")),
+                str(e.get("total_samples", 0)),
+            )
+
+        console.print(table)
+        if len(evals) > 0:
+            start = skip + 1
+            end = skip + len(evals)
+            console.print(f"[dim]Total: {data.get('total', 0)} | Showing {start}-{end}[/dim]")
+        else:
+            console.print(f"[dim]Total: {data.get('total', 0)}[/dim]")
+
+    except EvalsAPIError as e:
+        console.print(f"[red]API Error:[/red] {e}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        console.print(
+            "[yellow]Response may contain invalid data. Try --output json to see raw response.[/yellow]"
+        )
+        raise typer.Exit(1)
 
 
 @app.command("get")
@@ -108,9 +126,16 @@ def get_eval(
         console.print("[red]Error:[/red] output must be 'json' or 'pretty'")
         raise typer.Exit(1)
 
-    client = EvalsClient()
-    data = client.get_evaluation(eval_id)
-    format_output(data, output)
+    try:
+        client = EvalsClient()
+        data = client.get_evaluation(eval_id)
+        format_output(data, output)
+    except EvalsAPIError as e:
+        console.print(f"[red]API Error:[/red] {e}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
 
 @app.command("samples")
@@ -126,6 +151,13 @@ def get_samples(
         console.print("[red]Error:[/red] output must be 'json' or 'pretty'")
         raise typer.Exit(1)
 
-    client = EvalsClient()
-    data = client.get_samples(eval_id, page=page, limit=limit)
-    format_output(data, output)
+    try:
+        client = EvalsClient()
+        data = client.get_samples(eval_id, page=page, limit=limit)
+        format_output(data, output)
+    except EvalsAPIError as e:
+        console.print(f"[red]API Error:[/red] {e}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)

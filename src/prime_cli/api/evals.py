@@ -62,7 +62,7 @@ class EvalsClient:
         metadata: Optional[Dict[str, Any]] = None,
         metrics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        url = f"{self.config.base_url}/api/v1/evaluations"
+        url = f"{self.config.base_url}/api/v1/evaluations/"
         payload = {
             "name": name,
             "environment_ids": environment_ids,
@@ -124,7 +124,7 @@ class EvalsClient:
         skip: int = 0,
         limit: int = 50,
     ) -> Dict[str, Any]:
-        url = f"{self.config.base_url}/api/v1/evaluations"
+        url = f"{self.config.base_url}/api/v1/evaluations/"
         params = {"skip": skip, "limit": limit}
         if environment_id:
             params["environment_id"] = environment_id

@@ -1439,7 +1439,7 @@ wheels = [
 
 [[package]]
 name = "prime"
-version = "0.3.45"
+version = "0.3.46"
 source = { editable = "." }
 dependencies = [
     { name = "build" },
@@ -1475,7 +1475,7 @@ requires-dist = [
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.0a6" },
     { name = "typer", specifier = ">=0.9.0" },
     { name = "types-toml", marker = "extra == 'dev'", specifier = ">=0.10.0" },
-    { name = "verifiers", specifier = ">=0.1.5.dev1" },
+    { name = "verifiers", specifier = ">=0.1.5" },
 ]
 provides-extras = ["dev"]
 
@@ -2353,7 +2353,7 @@ wheels = [
 
 [[package]]
 name = "verifiers"
-version = "0.1.5.dev1"
+version = "0.1.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "datasets" },
@@ -2366,9 +2366,9 @@ dependencies = [
     { name = "rich" },
     { name = "textual" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/80/42/08ac5de0ff50fdd3e55be40b4164fecf201fe727da781e5330588c7270b9/verifiers-0.1.5.dev1.tar.gz", hash = "sha256:54dc12c16894266b4d0267ef74d705443bb13c322d2eb80b22737bd8a6cb69e5", size = 120594, upload-time = "2025-09-30T09:04:47.653Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/89/13/46d07ea2608150913f20d4400e2b7388b6ec414c3cc95e74bcfbcec7517f/verifiers-0.1.5.tar.gz", hash = "sha256:6a301b7bdaf12ef1d0fea0f265a4a144f8e27df5e9dcfc3efa7ff55befa24799", size = 121807, upload-time = "2025-10-08T22:49:23.466Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/af/86/39c2aa2438cd83e1a01e3f68faed09590a9a654c8e707166191bba6ba61e/verifiers-0.1.5.dev1-py3-none-any.whl", hash = "sha256:2b80841ec375a69fccbd8ab03964fbba0ec3adf98c8f9a6f01adc1c922b5950c", size = 110447, upload-time = "2025-09-30T09:04:46.567Z" },
+    { url = "https://files.pythonhosted.org/packages/16/8c/3e9c40d05a59a8e2c420af9e46c2235443d73c00270773941b175dff3f5e/verifiers-0.1.5-py3-none-any.whl", hash = "sha256:ae17e6d810eb823e27e4c9972e796d7066c492ba18e6a0301b4198c0b6868678", size = 111719, upload-time = "2025-10-08T22:49:21.977Z" },
 ]
 
 [[package]]

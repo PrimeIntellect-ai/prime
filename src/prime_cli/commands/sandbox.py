@@ -42,6 +42,8 @@ def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
         "image": sandbox.docker_image,
         "status": sandbox.status,
         "resources": format_resources(sandbox.cpu_cores, sandbox.memory_gb, sandbox.gpu_count),
+        "labels": ", ".join(sandbox.labels) if sandbox.labels else "-",  # For table output
+        "labels_list": sandbox.labels,  # For JSON output
         "created_at": iso_timestamp(sandbox.created_at),  # For JSON output
         "age": human_age(sandbox.created_at),  # For table output
     }
@@ -61,6 +63,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "disk_mount_path": sandbox.disk_mount_path,
         "gpu_count": sandbox.gpu_count,
         "timeout_minutes": sandbox.timeout_minutes,
+        "labels": sandbox.labels,
         "created_at": iso_timestamp(sandbox.created_at),
         "user_id": sandbox.user_id,
         "team_id": sandbox.team_id,
@@ -86,6 +89,12 @@ def list_sandboxes_cmd(
         None, help="Filter by team ID (uses config team_id if not specified)"
     ),
     status: Optional[str] = typer.Option(None, help="Filter by status"),
+    labels: Optional[List[str]] = typer.Option(
+        None,
+        "--label",
+        "-l",
+        help="Filter by labels (can specify multiple, sandboxes must have ALL)",
+    ),
     page: int = typer.Option(1, help="Page number"),
     per_page: int = typer.Option(50, help="Items per page"),
     all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
@@ -104,6 +113,7 @@ def list_sandboxes_cmd(
         sandbox_list = sandbox_client.list(
             team_id=team_id,
             status=status,
+            labels=labels,
             page=page,
             per_page=per_page,
             exclude_terminated=exclude_terminated,
@@ -117,6 +127,7 @@ def list_sandboxes_cmd(
                 ("Image", "green"),
                 ("Status", "yellow"),
                 ("Resources", "magenta"),
+                ("Labels", "white"),
                 ("Age", "blue"),
             ],
         )
@@ -136,6 +147,7 @@ def list_sandboxes_cmd(
                     "image": sandbox_data["image"],
                     "status": sandbox_data["status"],
                     "resources": sandbox_data["resources"],
+                    "labels": sandbox_data["labels_list"],
                     "created_at": sandbox_data["created_at"],
                 }
                 sandboxes_data.append(json_sandbox)
@@ -161,6 +173,7 @@ def list_sandboxes_cmd(
                     sandbox_data["image"],
                     Text(sandbox_data["status"], style=color),
                     sandbox_data["resources"],
+                    sandbox_data["labels"],
                     sandbox_data["age"],
                 )
 
@@ -222,6 +235,10 @@ def get(
             table.add_row("GPU Count", str(sandbox_data["gpu_count"]))
             table.add_row("Timeout (minutes)", str(sandbox_data["timeout_minutes"]))
 
+            # Show labels
+            labels_display = ", ".join(sandbox_data["labels"]) if sandbox_data["labels"] else "None"
+            table.add_row("Labels", labels_display)
+
             table.add_row("Created", sandbox_data["created_at"])
             if "started_at" in sandbox_data:
                 table.add_row("Started", sandbox_data["started_at"])
@@ -273,6 +290,12 @@ def create(
         None,
         help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
     ),
+    labels: Optional[List[str]] = typer.Option(
+        None,
+        "--label",
+        "-l",
+        help="Labels/tags for the sandbox. Can be specified multiple times.",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Create a new sandbox"""
@@ -314,6 +337,7 @@ def create(
             gpu_count=gpu_count,
             timeout_minutes=timeout_minutes,
             environment_vars=env_vars if env_vars else None,
+            labels=labels if labels else [],
             team_id=team_id,
         )
 
@@ -327,6 +351,8 @@ def create(
             console.print(f"GPUs: {gpu_count}")
         console.print(f"Timeout: {timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
+        if labels:
+            console.print(f"Labels: {', '.join(labels)}")
         if env_vars:
             obfuscated_env = obfuscate_env_vars(env_vars)
             console.print(f"Environment Variables: {obfuscated_env}")
@@ -358,20 +384,27 @@ def delete(
         None, help="Sandbox ID(s) to delete (space or comma-separated)"
     ),
     all: bool = typer.Option(False, "--all", help="Delete all sandboxes"),
+    labels: Optional[List[str]] = typer.Option(
+        None, "--label", "-l", help="Delete all sandboxes with ALL these labels"
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Delete one or more sandboxes, or all sandboxes with --all"""
+    """Delete one or more sandboxes by ID, by label, or all sandboxes with --all"""
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
         # Validate arguments
-        if all and sandbox_ids:
-            console.print("[red]Error:[/red] Cannot specify both sandbox IDs and --all flag")
+        if sum([bool(all), bool(sandbox_ids), bool(labels)]) > 1:
+            console.print(
+                "[red]Error:[/red] Cannot specify more than one of: sandbox IDs, --all, or --label"
+            )
             raise typer.Exit(1)
 
-        if not all and not sandbox_ids:
-            console.print("[red]Error:[/red] Must specify either sandbox IDs or --all flag")
+        if not all and not sandbox_ids and not labels:
+            console.print(
+                "[red]Error:[/red] Must specify either sandbox IDs, --all flag, or --label"
+            )
             raise typer.Exit(1)
 
         if all:
@@ -422,8 +455,31 @@ def delete(
 
             sandbox_ids = cleaned_ids
 
+        # Handle deletion by labels
+        if labels:
+            labels_str = ", ".join(labels)
+            confirmation_msg = (
+                f"Are you sure you want to delete ALL sandboxes with labels: {labels_str}? "
+                f"This action cannot be undone."
+            )
+
+            if not confirm_or_skip(confirmation_msg, yes):
+                console.print("Delete cancelled")
+                raise typer.Exit(0)
+
+            with console.status("[bold blue]Deleting sandboxes by labels...", spinner="dots"):
+                result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(labels=labels)
+
+            console.print(f"\n[green]{result.message}[/green]")
+            if result.succeeded:
+                console.print(
+                    f"\n[bold green]Deleted {len(result.succeeded)} sandbox(es):[/bold green]"
+                )
+                for sandbox_id in result.succeeded:
+                    console.print(f"  ✓ {sandbox_id}")
+
         # Handle single vs multiple sandbox IDs
-        if len(sandbox_ids) == 1 and not all:
+        elif len(sandbox_ids) == 1 and not all:
             # Single sandbox deletion
             sandbox_id = sandbox_ids[0]
             if not confirm_or_skip(f"Are you sure you want to delete sandbox {sandbox_id}?", yes):
@@ -469,7 +525,9 @@ def delete(
                         f"({len(batch)} sandboxes)...[/dim]"
                     )
 
-                    result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(batch)
+                    result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(
+                        sandbox_ids=batch
+                    )
 
                     if result.succeeded:
                         all_succeeded.extend(result.succeeded)

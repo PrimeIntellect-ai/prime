@@ -621,7 +621,8 @@ def init(
         console.print(f"[green]✓ Created environment template in {created_path}/[/green]")
         console.print("\nNext steps:")
         console.print(f"  cd {created_path}")
-        console.print("  # Edit the environment file to implement your verifier")
+        filename = f"{name}.py".replace("-", "_")
+        console.print(f"  # Edit the {filename} file to implement your environment")
         console.print("  prime env push")
 
     except FileNotFoundError as e:
@@ -1608,8 +1609,7 @@ def eval_env(
     else:
         if not inference_base_url:
             console.print(
-                "[red]Inference URL not configured.[/red] "
-                "Check [bold]prime config view[/bold]."
+                "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
             )
             raise typer.Exit(1)
         chosen_base = inference_base_url.rstrip("/")

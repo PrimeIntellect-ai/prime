@@ -14,7 +14,12 @@ from .commands.whoami import app as whoami_app
 
 __version__ = version("prime")
 
-app = typer.Typer(name="prime", help=f"Prime Intellect CLI (v{__version__})", no_args_is_help=True)
+app = typer.Typer(
+    name="prime",
+    help=f"Prime Intellect CLI (v{__version__})",
+    no_args_is_help=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 
 app.add_typer(availability_app, name="availability")
 app.add_typer(config_app, name="config")

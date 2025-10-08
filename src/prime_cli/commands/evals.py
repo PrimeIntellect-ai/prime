@@ -11,9 +11,8 @@ from ..api.evals import EvalsAPIError, EvalsClient
 from ..utils import output_data_as_json, validate_output_format
 
 app = typer.Typer(
-    help="Manage Prime Evals [BETA]",
+    help="Run and manage Prime Evals (in closed beta, requires prime eval permissions)",
     no_args_is_help=True,
-    hidden=True,
 )
 console = Console()
 

@@ -1,21 +1,19 @@
 {
-  "eval_name": "example-mmlu-evaluation-2",
-  "model_name": "llama-3-70b",
-  "dataset": "mmlu",
+  "eval_name": "gsm8k-gpt4o-baseline",
+  "model_name": "gpt-4o-mini",
+  "dataset": "gsm8k",
   "metrics": {
-    "accuracy": 0.85,
-    "f1_score": 0.83,
-    "precision": 0.86,
-    "recall": 0.81,
-    "avg@1": 0.85,
-    "num_samples": 2
+    "avg_reward": 0.87,
+    "avg_format_reward": 0.95,
+    "avg_correctness": 0.82,
+    "success_rate": 0.87
   },
   "metadata": {
     "version": "1.0",
-    "timestamp": "2025-10-03T12:00:00Z",
-    "environment": "production",
-    "num_examples": 2,
-    "rollouts_per_example": 1,
+    "timestamp": "2025-10-07T12:00:00Z",
+    "environment": "verifiers",
+    "num_examples": 10,
+    "rollouts_per_example": 3,
     "checkpoint_step": 0,
     "step": 0,
     "temperature": 0.7,
@@ -25,50 +23,54 @@
     {
       "example_id": 0,
       "reward": 1.0,
-      "task": "mmlu",
-      "answer": "Paris",
+      "task": "gsm8k",
+      "answer": "18",
       "prompt": [
         {
+          "role": "system",
+          "content": "Solve the math problem and put your final answer in \\boxed{}."
+        },
+        {
           "role": "user",
-          "content": "What is the capital of France?",
-          "tool_calls": [],
-          "tool_call_id": ""
+          "content": "Janet's ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?"
         }
       ],
       "completion": [
         {
           "role": "assistant",
-          "content": "Paris",
-          "tool_calls": [],
-          "tool_call_id": ""
+          "content": "Let me solve this step by step.\n\nJanet's ducks lay 16 eggs per day.\nShe eats 3 eggs for breakfast.\nShe uses 4 eggs for muffins.\nSo she uses 3 + 4 = 7 eggs total.\n\nThe remainder is 16 - 7 = 9 eggs.\nShe sells each egg for $2.\nSo she makes 9 × $2 = $18.\n\nThe answer is \\boxed{18}."
         }
       ],
       "score": 1.0,
-      "correct": true
+      "correct": true,
+      "format_reward": 1.0,
+      "correctness": 1.0
     },
     {
       "example_id": 1,
       "reward": 1.0,
-      "task": "mmlu",
-      "answer": "4",
+      "task": "gsm8k",
+      "answer": "3",
       "prompt": [
         {
+          "role": "system",
+          "content": "Solve the math problem and put your final answer in \\boxed{}."
+        },
+        {
           "role": "user",
-          "content": "What is 2 + 2?",
-          "tool_calls": [],
-          "tool_call_id": ""
+          "content": "A robe takes 2 bolts of blue fiber and half that much white fiber. How many bolts in total does it take?"
         }
       ],
       "completion": [
         {
           "role": "assistant",
-          "content": "4",
-          "tool_calls": [],
-          "tool_call_id": ""
+          "content": "The robe takes 2 bolts of blue fiber.\nIt takes half that much white fiber, so 2/2 = 1 bolt of white fiber.\nTotal: 2 + 1 = 3 bolts.\n\n\\boxed{3}"
         }
       ],
       "score": 1.0,
-      "correct": true
+      "correct": true,
+      "format_reward": 1.0,
+      "correctness": 1.0
     }
   ]
 }

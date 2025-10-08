@@ -1439,6 +1439,7 @@ wheels = [
 
 [[package]]
 name = "prime"
+version = "0.3.44"
 source = { editable = "." }
 dependencies = [
     { name = "build" },

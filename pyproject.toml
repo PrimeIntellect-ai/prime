@@ -1,6 +1,6 @@
 [project]
 name = "prime"
-version = "0.3.44"
+version = "0.3.45"
 description = "Prime Intellect CLI + SDK"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ dependencies = [
     "typer>=0.9.0",
     "httpx>=0.25.0",
     "rich>=13.3.1",
-    "pydantic>=2.0.0,<2.12",
+    "pydantic>=2.0.0",
     "cryptography>=41.0.0",
     "verifiers>=0.1.5.dev1",
     "build>=1.0.0",

@@ -1439,7 +1439,7 @@ wheels = [
 
 [[package]]
 name = "prime"
-version = "0.3.44"
+version = "0.3.45"
 source = { editable = "." }
 dependencies = [
     { name = "build" },
@@ -1467,7 +1467,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=41.0.0" },
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.5.0" },
-    { name = "pydantic", specifier = ">=2.0.0,<2.12" },
+    { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "rich", specifier = ">=13.3.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.13.1" },

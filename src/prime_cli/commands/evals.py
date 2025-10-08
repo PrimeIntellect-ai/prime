@@ -207,6 +207,10 @@ def push_eval(
         )
 
         eval_id = create_response.get("evaluation_id") or create_response.get("id")
+        if not eval_id:
+            console.print("[red]Error:[/red] Failed to get evaluation ID from response")
+            raise typer.Exit(1)
+
         console.print(f"[green]✅ Created evaluation:[/green] {eval_id}")
         console.print()
 

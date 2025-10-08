@@ -23,7 +23,7 @@ def view() -> None:
     table.add_column("Value", style="green")
 
     def _env_set(*names: str) -> bool:
-        return any(os.getenv(n) and os.getenv(n).strip() for n in names)
+        return any((val := os.getenv(n)) and val.strip() for n in names)
 
     # Show current environment
     table.add_row("Current Environment", settings["current_environment"])

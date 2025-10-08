@@ -13,24 +13,19 @@ The `eval_example.json` file demonstrates the format for pushing evaluation resu
    prime evals push examples/eval_example.json
    ```
 
-2. **Push using CLI options**:
-   ```bash
-   prime evals push --name my-eval --model llama-3-70b --dataset mmlu --metrics '{"accuracy": 0.85}'
-   ```
-
-3. **List all evals**:
+2. **List all evals**:
    ```bash
    prime evals list
    ```
 
-4. **Get specific eval**:
+3. **Get specific eval**:
    ```bash
    prime evals get <eval_id>
    ```
 
-5. **Delete an eval**:
+4. **View eval samples**:
    ```bash
-   prime evals delete <eval_id>
+   prime evals samples <eval_id>
    ```
 
 ### Eval Data Format

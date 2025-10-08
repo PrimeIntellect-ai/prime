@@ -109,7 +109,8 @@ def list_evals(
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         console.print(
-            "[yellow]Response may contain invalid data. Try --output json to see raw response.[/yellow]"
+            "[yellow]Response may contain invalid data. "
+            "Try --output json to see raw response.[/yellow]"
         )
         raise typer.Exit(1)
 

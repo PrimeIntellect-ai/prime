@@ -26,11 +26,17 @@ Command line interface and SDKs for managing Prime Intellect GPU resources, sand
 ## Quick Start
 
 ```bash
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
 # Install prime
 uv tool install prime
 
 # Authenticate
 prime login
+
+# Browse verified environments
+prime env list
 
 # List available GPU resources
 prime availability list
@@ -47,11 +53,22 @@ prime availability list
 
 ## Installation
 
+### Using uv (recommended)
+
+First, install uv if you haven't already:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then install prime:
+
 ```bash
 uv tool install prime
 ```
 
-Or with pip:
+### Using pip
+
 ```bash
 pip install prime
 ```
@@ -94,6 +111,25 @@ prime config view
 ```
 
 **Security Note**: When using non-interactive mode, the API key may be visible in your shell history. For enhanced security, use interactive mode or environment variables.
+
+### Environments Hub
+
+Access hundreds of verified environments on our community hub with deep integrations with sandboxes, training, and evaluation stack.
+
+```bash
+# Browse available environments
+prime env list
+
+# View environment details
+prime env info <environment-name>
+
+# Install an environment locally
+prime env install <environment-name>
+
+# Create and push your own environment
+prime env init my-environment
+prime env push my-environment
+```
 
 ### GPU Resources
 

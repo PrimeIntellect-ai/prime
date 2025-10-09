@@ -3,11 +3,11 @@ from functools import wraps
 from typing import Optional
 
 import typer
+from prime_evals import EvalsAPIError, EvalsClient
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
 
-from ..api.evals import EvalsAPIError, EvalsClient
 from ..utils import output_data_as_json, validate_output_format
 
 app = typer.Typer(

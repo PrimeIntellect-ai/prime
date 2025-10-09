@@ -444,8 +444,6 @@ class SandboxClient:
 
         Usage:
             with sandbox_client.forward(sandbox_id, 8000) as fwd:
-                print(fwd.url)  # Access the exposed URL
-                print(fwd.tls_socket)  # Access the TLS socket
                 # ... start your server on port 8000 ...
 
         Args:
@@ -784,8 +782,6 @@ class AsyncSandboxClient:
 
         Usage:
             async with async_sandbox_client.forward(sandbox_id, 8000) as fwd:
-                print(fwd.url)  # Access the exposed URL
-                print(fwd.tls_socket)  # Access the TLS socket
                 # ... start your server on port 8000 ...
 
         Args:

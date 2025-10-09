@@ -78,7 +78,7 @@ Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect
 ### Basic Usage
 
 ```bash
-# Browse verified environments
+# Browse environments on the hub
 prime env list
 
 # List available GPUs
@@ -98,7 +98,7 @@ prime sandbox create --image python:3.11
 
 ### Environments Hub
 
-Access hundreds of verified environments on our community hub with deep integrations with sandboxes, training, and evaluation stack.
+Access hundreds of RL environments on our community hub with deep integrations with sandboxes, training, and evaluation stack.
 
 ```bash
 # Browse available environments

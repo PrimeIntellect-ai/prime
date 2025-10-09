@@ -23,6 +23,8 @@ sed '/\[tool\.uv\.sources\]/,/prime-core = { workspace = true }/d' pyproject.tom
 sed 's|"../prime-core/src/prime_core"|"src/prime_core"|' pyproject.toml > pyproject.toml.tmp && mv pyproject.toml.tmp pyproject.toml
 
 echo "Building wheel..."
-uv build --wheel
+uv build --wheel --out-dir dist
 
 echo "Build complete!"
+echo "Built files:"
+ls -la dist/

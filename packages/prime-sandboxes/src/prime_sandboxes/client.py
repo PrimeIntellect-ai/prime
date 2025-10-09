@@ -23,10 +23,14 @@ class PaymentRequiredError(APIError):
     pass
 
 
-class TimeoutError(APIError):
+class APITimeoutError(APIError):
     """Raised when API request times out"""
 
     pass
+
+
+# Deprecated: Use APITimeoutError instead
+TimeoutError = APITimeoutError
 
 
 class APIClient:
@@ -83,10 +87,10 @@ class APIClient:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
                 raise UnauthorizedError(
-                    "API key unauthorized. ",
+                    "API key unauthorized. "
                     "Please check that your API key has the correct permissions, "
                     "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
-                    "or run 'prime login' to configure a new API key.",
+                    "or run 'prime login' to configure a new API key."
                 )
             if e.response.status_code == 402:
                 raise PaymentRequiredError(
@@ -104,7 +108,7 @@ class APIClient:
 
             raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
         except httpx.TimeoutException as e:
-            raise TimeoutError(f"Request timed out: {e}")
+            raise APITimeoutError(f"Request timed out: {e}")
         except httpx.RequestError as e:
             raise APIError(f"Request failed: {e}")
 
@@ -187,10 +191,10 @@ class AsyncAPIClient:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
                 raise UnauthorizedError(
-                    "API key unauthorized. ",
+                    "API key unauthorized. "
                     "Please check that your API key has the correct permissions, "
                     "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
-                    "or run 'prime login' to configure a new API key.",
+                    "or run 'prime login' to configure a new API key."
                 )
             if e.response.status_code == 402:
                 raise PaymentRequiredError(
@@ -208,7 +212,7 @@ class AsyncAPIClient:
 
             raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
         except httpx.TimeoutException as e:
-            raise TimeoutError(f"Request timed out: {e}")
+            raise APITimeoutError(f"Request timed out: {e}")
         except httpx.RequestError as e:
             raise APIError(f"Request failed: {e}")
 

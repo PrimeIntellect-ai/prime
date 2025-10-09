@@ -5,7 +5,10 @@ class SandboxNotRunningError(RuntimeError):
     """Raised when an operation requires a RUNNING sandbox but it is not running."""
 
     def __init__(self, sandbox_id: str, status: str | None = None):
-        msg = f"Sandbox {sandbox_id} is not running" + (f" (status={status})" if status else ".")
+        if status:
+            msg = f"Sandbox {sandbox_id} is not running (status={status})"
+        else:
+            msg = f"Sandbox {sandbox_id} is not running"
         super().__init__(msg)
 
 

@@ -7,9 +7,10 @@ Includes HTTP client, authentication, and full sandbox lifecycle management.
 from .client import (
     APIClient,
     APIError,
+    APITimeoutError,
     AsyncAPIClient,
     PaymentRequiredError,
-    TimeoutError,
+    TimeoutError,  # Deprecated alias for APITimeoutError
     UnauthorizedError,
 )
 from .config import Config
@@ -55,7 +56,8 @@ __all__ = [
     "APIError",
     "UnauthorizedError",
     "PaymentRequiredError",
-    "TimeoutError",
+    "APITimeoutError",
+    "TimeoutError",  # Deprecated alias
     "SandboxNotRunningError",
     "CommandTimeoutError",
 ]

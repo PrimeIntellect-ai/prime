@@ -1,0 +1,201 @@
+name: Release prime
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'packages/prime/**'
+      - 'packages/prime-core/**'  # Changes to core affect prime
+      - '.github/workflows/release-prime.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to create release from (e.g. v1.2.3)'
+        required: false
+        type: string
+
+jobs:
+  tag-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_created: ${{ steps.release_status.outputs.created }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      # Get version from package source on push
+      - name: Get version from packages/prime/src/prime_cli/__init__.py
+        if: github.event_name == 'push'
+        id: auto_version
+        run: |
+          VERSION=$(grep -E "^__version__[[:space:]]*=" packages/prime/src/prime_cli/__init__.py | head -n1 | sed -E "s/^__version__[[:space:]]*=[[:space:]]*['\"]([^'\"]+)['\"].*/\1/")
+          if [ -z "$VERSION" ]; then
+            echo "Error: Unable to parse __version__" >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      # Get version from manual input
+      - name: Get version from input
+        if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+        id: manual_version
+        run: |
+          VERSION=${{ inputs.tag }}
+          VERSION=${VERSION#v}
+          echo "VERSION=$VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      # Combine versions and verify
+      - name: Set final version
+        id: version
+        run: |
+          VERSION="${{ steps.auto_version.outputs.version || steps.manual_version.outputs.version }}"
+          if [ -z "$VERSION" ]; then
+            echo "Error: No version found"
+            exit 1
+          fi
+          echo "VERSION=$VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      # Check if tag exists
+      - name: Check for existing tag
+        id: check_tag
+        run: |
+          if git tag -l "v${{ steps.version.outputs.version }}" | grep -q .; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag v${{ steps.version.outputs.version }} already exists. Skipping release."
+            exit 0
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Create new tag if it doesn't exist
+      - name: Create tag
+        if: steps.check_tag.outputs.exists != 'true'
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      # Setup Python for build
+      - name: Set up Python
+        if: steps.check_tag.outputs.exists != 'true'
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      # Install uv and build tools
+      - name: Install uv
+        if: steps.check_tag.outputs.exists != 'true'
+        uses: astral-sh/setup-uv@v3
+        
+      # Build package
+      - name: Build package
+        if: steps.check_tag.outputs.exists != 'true'
+        working-directory: packages/prime
+        run: |
+          # Use build script to bundle prime-core and remove it from dependencies
+          chmod +x build_for_pypi.sh
+          ./build_for_pypi.sh
+
+          # Install twine for publishing
+          uv venv
+          source .venv/bin/activate
+          uv pip install twine
+
+      - name: Upload build artifacts
+        if: steps.check_tag.outputs.exists != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: packages/prime/dist/*
+
+      # Create GitHub Release
+      - name: Create GitHub Release
+        if: steps.check_tag.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          files: packages/prime/dist/*
+          generate_release_notes: true
+
+      # Publish to PyPI
+      - name: Publish to PyPI
+        if: steps.check_tag.outputs.exists != 'true'
+        working-directory: packages/prime
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          source .venv/bin/activate
+          twine upload dist/*
+
+      - name: Set release status
+        id: release_status
+        run: |
+          if [ "${{ steps.check_tag.outputs.exists }}" = "true" ]; then
+            echo "created=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  docker-images:
+    needs: tag-and-release
+    if: needs.tag-and-release.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: packages/prime/dist
+
+      - name: Log in to GitHub Container Registry
+        env:
+          CR_PAT: ${{ github.token }}
+        run: echo "$CR_PAT" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push Docker image
+        env:
+          VERSION: ${{ needs.tag-and-release.outputs.version }}
+          PYTHON_VERSION: ${{ matrix.python-version }}
+          REPOSITORY: ${{ github.repository }}
+        working-directory: packages/prime
+        run: |
+          IMAGE_PATH=$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/$IMAGE_PATH"
+          PY_TAG="py${PYTHON_VERSION}"
+          docker build --build-arg PRIME_VERSION="$VERSION" \
+            --build-arg PYTHON_VERSION="$PYTHON_VERSION" \
+            -t "$IMAGE:$VERSION-$PY_TAG" \
+            -t "$IMAGE:v$VERSION-$PY_TAG" \
+            -t "$IMAGE:$PY_TAG" .
+          docker push "$IMAGE:$VERSION-$PY_TAG"
+          docker push "$IMAGE:v$VERSION-$PY_TAG"
+          docker push "$IMAGE:$PY_TAG"
+          if [ "$PYTHON_VERSION" = "3.11" ]; then
+            docker tag "$IMAGE:$VERSION-$PY_TAG" "$IMAGE:$VERSION"
+            docker tag "$IMAGE:$VERSION-$PY_TAG" "$IMAGE:v$VERSION"
+            docker tag "$IMAGE:$VERSION-$PY_TAG" "$IMAGE:latest"
+            docker push "$IMAGE:$VERSION"
+            docker push "$IMAGE:v$VERSION"
+            docker push "$IMAGE:latest"
+          fi

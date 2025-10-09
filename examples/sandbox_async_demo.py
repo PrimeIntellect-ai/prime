@@ -5,8 +5,8 @@ Async Sandbox API Demo - shows the improved async developer experience
 
 import asyncio
 
-from prime_cli.api.client import APIError
-from prime_cli.api.sandbox import AsyncSandboxClient, CreateSandboxRequest
+from prime_core import APIError
+from prime_sandboxes import AsyncSandboxClient, CreateSandboxRequest
 
 
 async def main() -> None:
@@ -64,7 +64,10 @@ async def main() -> None:
                 commands.extend(
                     [
                         (sandboxes[0].id, "python --version"),
-                        (sandboxes[0].id, "python -c 'print(\"Hello from Python sandbox!\")'"),
+                        (
+                            sandboxes[0].id,
+                            "python -c 'print(\"Hello from Python sandbox!\")'",
+                        ),
                     ]
                 )
             if len(sandboxes) >= 2:
@@ -104,7 +107,9 @@ async def main() -> None:
 
             # 7. Clean up all sandboxes concurrently
             print(f"\nDeleting {len(sandboxes)} sandboxes concurrently...")
-            await asyncio.gather(*[sandbox_client.delete(sandbox.id) for sandbox in sandboxes])
+            await asyncio.gather(
+                *[sandbox_client.delete(sandbox.id) for sandbox in sandboxes]
+            )
             print("✅ All sandboxes deleted!")
 
     except APIError as e:

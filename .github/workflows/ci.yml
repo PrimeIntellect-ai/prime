@@ -18,15 +18,18 @@ jobs:
     - name: Run Ruff
       uses: chartboost/ruff-action@v1
 
-  type-check:
+  test-sandboxes:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set up Python
+    - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v6
       with:
-        python-version: '3.11'
+        python-version: ${{ matrix.python-version }}
 
     - name: Install uv
       uses: astral-sh/setup-uv@v4
@@ -34,12 +37,14 @@ jobs:
         version: "latest"
 
     - name: Install dependencies
+      working-directory: packages/prime-sandboxes
       run: uv sync --all-extras
 
-    - name: Run ty type checker
-      run: uv run ty check .
+    - name: Run tests
+      working-directory: packages/prime-sandboxes
+      run: uv run pytest tests/ -v
 
-  test:
+  test-prime:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -58,7 +63,32 @@ jobs:
         version: "latest"
 
     - name: Install dependencies
+      working-directory: packages/prime
       run: uv sync --all-extras
 
     - name: Run tests with pytest
+      working-directory: packages/prime
       run: uv run pytest tests/ -v
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.11'
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        version: "latest"
+
+    - name: Install dependencies
+      working-directory: packages/prime
+      run: uv sync --all-extras
+
+    - name: Run ty type checker
+      working-directory: packages/prime
+      run: uv run ty check src/

@@ -4,12 +4,16 @@ import asyncio
 import time
 
 import httpx
-from prime_cli.api.sandbox import AsyncSandboxClient, CreateSandboxRequest
+from prime_sandboxes import AsyncSandboxClient, CreateSandboxRequest
 from tqdm.asyncio import tqdm
 
 
 async def execute_commands(
-    sandbox_id: str, commands: list[str], auth: dict, pbar: tqdm, semaphore: asyncio.Semaphore
+    sandbox_id: str,
+    commands: list[str],
+    auth: dict,
+    pbar: tqdm,
+    semaphore: asyncio.Semaphore,
 ) -> tuple[int, list[float]]:
     gateway_url = auth["gateway_url"].rstrip("/")
     url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
@@ -21,7 +25,9 @@ async def execute_commands(
     async with httpx.AsyncClient(timeout=30.0) as http_client:
         tasks = []
         for command in commands:
-            task = execute_single(http_client, url, headers, command, sandbox_id, pbar, semaphore)
+            task = execute_single(
+                http_client, url, headers, command, sandbox_id, pbar, semaphore
+            )
             tasks.append(task)
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -107,7 +113,9 @@ async def main() -> None:
         print("Authenticating...")
         auth_tasks = []
         for sandbox in sandboxes:
-            auth_tasks.append(client.client.request("POST", f"/sandbox/{sandbox.id}/auth"))
+            auth_tasks.append(
+                client.client.request("POST", f"/sandbox/{sandbox.id}/auth")
+            )
         auth_responses = await asyncio.gather(*auth_tasks)
         auth_map = {sandboxes[i].id: auth_responses[i] for i in range(len(sandboxes))}
 
@@ -152,7 +160,9 @@ async def main() -> None:
         for _, exec_times in results:
             all_exec_times.extend(exec_times)
 
-        avg_exec_time = sum(all_exec_times) / len(all_exec_times) if all_exec_times else 0
+        avg_exec_time = (
+            sum(all_exec_times) / len(all_exec_times) if all_exec_times else 0
+        )
 
         print("\nResults:")
         print(f"  Successful: {total_successful}/{total_commands}")

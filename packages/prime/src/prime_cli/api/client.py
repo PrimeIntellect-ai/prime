@@ -1,6 +1,5 @@
-"""Prime Intellect API clients."""
+"""API client - re-exports from prime_core for backwards compatibility."""
 
-# Re-export from prime_core for backwards compatibility
 from prime_core import (
     APIClient,
     APIError,

@@ -78,29 +78,44 @@ Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect
 ### Basic Usage
 
 ```bash
+# Browse verified environments
+prime env list
+
 # List available GPUs
 prime availability list
 
-# Filter by GPU type
-prime availability list --gpu H100
-
 # Create a GPU pod
 prime pods create --gpu A100 --count 1
-
-# List your pods
-prime pods list
 
 # SSH into a pod
 prime pods ssh <pod-id>
 
 # Create a sandbox
 prime sandbox create --image python:3.11
-
-# Terminate resources
-prime pods terminate <pod-id>
 ```
 
 ## Features
+
+### Environments Hub
+
+Access hundreds of verified environments on our community hub with deep integrations with sandboxes, training, and evaluation stack.
+
+```bash
+# Browse available environments
+prime env list
+
+# View environment details
+prime env info <environment-name>
+
+# Install an environment locally
+prime env install <environment-name>
+
+# Create and push your own environment
+prime env init my-environment
+prime env push my-environment
+```
+
+Environments provide pre-configured setups for machine learning, data science, and development workflows, tested and verified by the Prime Intellect community.
 
 ### GPU Pod Management
 
@@ -143,26 +158,6 @@ prime sandbox download <sandbox-id> /remote/file.txt ./local/
 
 # Clean up
 prime sandbox delete <sandbox-id>
-```
-
-### Environment Management
-
-Save and switch between different configurations:
-
-```bash
-# Save current configuration as an environment
-prime config save production
-
-# Create development environment
-prime config set-base-url https://dev-api.primeintellect.ai
-prime config save development
-
-# Switch between environments
-prime config use production
-prime config use development
-
-# List environments
-prime config envs
 ```
 
 ### Team Management
@@ -276,41 +271,6 @@ prime pods create --gpu H100 --count 8 --name ml-training
 # SSH and start training
 prime pods ssh <pod-id>
 ```
-
-### Remote Development
-
-```bash
-# Create a sandbox with your preferred environment
-prime sandbox create --image pytorch/pytorch:2.0.0-cuda11.7-cudnn8-runtime
-
-# Upload your code
-prime sandbox upload <sandbox-id> ./project /workspace/
-
-# Execute
-prime sandbox exec <sandbox-id> "cd /workspace && python train.py"
-```
-
-### CI/CD Integration
-
-```bash
-# Use environment variables in CI
-export PRIME_API_KEY="${PRIME_API_KEY_SECRET}"
-
-# Create temporary sandbox for tests
-SANDBOX_ID=$(prime sandbox create --image python:3.11 --format json | jq -r '.id')
-
-# Run tests
-prime sandbox exec $SANDBOX_ID "pytest /app/tests"
-
-# Cleanup
-prime sandbox delete $SANDBOX_ID
-```
-
-## Requirements
-
-- Python 3.10 or higher
-- Linux, macOS, or Windows (WSL)
-
 ## Support & Resources
 
 - **Documentation**: [github.com/PrimeIntellect-ai/prime-cli](https://github.com/PrimeIntellect-ai/prime-cli)
@@ -326,7 +286,3 @@ prime sandbox delete $SANDBOX_ID
 ## License
 
 MIT License - see [LICENSE](https://github.com/PrimeIntellect-ai/prime-cli/blob/main/LICENSE) file for details.
-
----
-
-Built with ❤️ by [Prime Intellect](https://primeintellect.ai)

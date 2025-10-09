@@ -4,7 +4,7 @@ This directory contains example scripts and demos for using the Prime CLI.
 
 ## Evals Example
 
-The `eval_example.json` file demonstrates the format for pushing evaluation results to the Prime Hub.
+The `eval_example.json` file demonstrates the format for pushing evaluation results to the Environment Hub.
 
 ### Pushing Evals
 

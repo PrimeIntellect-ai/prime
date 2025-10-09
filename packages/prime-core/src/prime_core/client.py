@@ -56,7 +56,9 @@ class APIClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         self.client = httpx.Client(
-            headers=headers, follow_redirects=True, timeout=httpx.Timeout(30.0, connect=10.0)
+            headers=headers,
+            follow_redirects=True,
+            timeout=httpx.Timeout(30.0, connect=10.0),
         )
 
     def request(
@@ -77,7 +79,9 @@ class APIClient:
         url = f"{self.base_url}{endpoint}"
 
         try:
-            response = self.client.request(method, url, params=params, json=json, timeout=timeout)
+            response = self.client.request(
+                method, url, params=params, json=json, timeout=timeout
+            )
             response.raise_for_status()
 
             result = response.json()
@@ -102,25 +106,35 @@ class APIClient:
             try:
                 error_response = e.response.json()
                 if isinstance(error_response, dict) and "detail" in error_response:
-                    raise APIError(f"HTTP {e.response.status_code}: {error_response['detail']}")
+                    raise APIError(
+                        f"HTTP {e.response.status_code}: {error_response['detail']}"
+                    )
             except (ValueError, KeyError):
                 pass
 
-            raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
+            raise APIError(
+                f"HTTP {e.response.status_code}: {e.response.text or str(e)}"
+            )
         except httpx.TimeoutException as e:
             raise APITimeoutError(f"Request timed out: {e}")
         except httpx.RequestError as e:
             raise APIError(f"Request failed: {e}")
 
-    def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def get(
+        self, endpoint: str, params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Make a GET request to the API"""
         return self.request("GET", endpoint, params=params)
 
-    def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def post(
+        self, endpoint: str, json: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Make a POST request to the API"""
         return self.request("POST", endpoint, json=json)
 
-    def patch(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def patch(
+        self, endpoint: str, json: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Make a PATCH request to the API"""
         return self.request("PATCH", endpoint, json=json)
 
@@ -158,7 +172,9 @@ class AsyncAPIClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         self.client = httpx.AsyncClient(
-            headers=headers, follow_redirects=True, timeout=httpx.Timeout(30.0, connect=10.0)
+            headers=headers,
+            follow_redirects=True,
+            timeout=httpx.Timeout(30.0, connect=10.0),
         )
 
     async def request(
@@ -206,25 +222,35 @@ class AsyncAPIClient:
             try:
                 error_response = e.response.json()
                 if isinstance(error_response, dict) and "detail" in error_response:
-                    raise APIError(f"HTTP {e.response.status_code}: {error_response['detail']}")
+                    raise APIError(
+                        f"HTTP {e.response.status_code}: {error_response['detail']}"
+                    )
             except (ValueError, KeyError):
                 pass
 
-            raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}")
+            raise APIError(
+                f"HTTP {e.response.status_code}: {e.response.text or str(e)}"
+            )
         except httpx.TimeoutException as e:
             raise APITimeoutError(f"Request timed out: {e}")
         except httpx.RequestError as e:
             raise APIError(f"Request failed: {e}")
 
-    async def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def get(
+        self, endpoint: str, params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Make an async GET request to the API"""
         return await self.request("GET", endpoint, params=params)
 
-    async def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def post(
+        self, endpoint: str, json: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Make an async POST request to the API"""
         return await self.request("POST", endpoint, json=json)
 
-    async def patch(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def patch(
+        self, endpoint: str, json: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Make an async PATCH request to the API"""
         return await self.request("PATCH", endpoint, json=json)
 

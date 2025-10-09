@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
+from prime_core import APIClient, APIError, AsyncAPIClient
 
-from .client import APIClient, APIError, AsyncAPIClient
 from .exceptions import CommandTimeoutError, SandboxNotRunningError
 from .models import (
     BulkDeleteSandboxRequest,

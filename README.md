@@ -92,12 +92,29 @@ prime sandbox exec <id> "python --version"
 ```
 prime-cli/
 ├── packages/
+│   ├── prime-core/          # Shared HTTP client & config (internal, not published)
 │   ├── prime-sandboxes/     # Standalone sandboxes SDK
 │   └── prime/               # Full CLI + all SDKs
 ├── examples/                # Example scripts
 ├── .github/workflows/       # CI/CD
+├── pyproject.toml          # uv workspace configuration
 └── README.md               # This file
 ```
+
+### Package Architecture
+
+- **`prime-core`** - Internal package containing shared `APIClient` and `Config` code
+  - Single source of truth during development
+  - Used via uv workspace (not published to PyPI)
+  - Both `prime-sandboxes` and `prime` reference it locally
+
+- **`prime-sandboxes`** - Published standalone SDK
+  - Depends on `prime-core` during development
+  - Published with bundled core functionality
+
+- **`prime`** - Published CLI + full SDK
+  - Depends on both `prime-core` and `prime-sandboxes`
+  - Published with bundled core functionality
 
 ## 📚 Documentation
 
@@ -107,25 +124,111 @@ prime-cli/
 
 ## 🤝 Contributing
 
-Contributions welcome! This is a monorepo with independent packages.
+Contributions welcome! This is a monorepo with independent packages managed via uv workspace.
 
-**Development setup:**
+### Quick Start for Development
 
 ```bash
-# Clone repository
+# 1. Clone and install
 git clone https://github.com/PrimeIntellect-ai/prime-cli
 cd prime-cli
+uv sync
 
-# Install prime-sandboxes package
+# 2. You're ready! Run examples:
+uv run python examples/sandbox_demo.py
+
+# 3. Use the CLI:
+uv run prime --help
+
+# 4. Run tests:
+uv run pytest packages/prime-sandboxes/tests
+```
+
+That's it! All packages are installed in editable mode. Edit any code and changes are immediately available.
+
+### Development Setup Options
+
+**Option 1: Root-level development (recommended)**
+
+Work on all packages with a unified environment:
+
+```bash
+# Install all packages + dev dependencies at root
+uv sync --all-extras
+
+# Now you can work on any package - they all share prime-core
+# Run tests for specific packages:
+uv run pytest packages/prime-sandboxes/tests
+uv run pytest packages/prime/tests
+
+# Run examples
+uv run python examples/sandbox_demo.py
+
+# Use the CLI directly
+uv run prime --help
+```
+
+**Option 2: Package-specific development**
+
+Work on individual packages independently:
+
+```bash
+# For prime-sandboxes
 cd packages/prime-sandboxes
 uv sync --all-extras
 uv run pytest
 
-# Install prime package
+# For prime CLI
 cd packages/prime
 uv sync --all-extras
 uv run pytest
+uv run prime --help
 ```
+
+### Virtual Environment Management
+
+- **Root venv** (`uv sync` at root): Includes all packages (prime-core, prime-sandboxes, prime) in one environment. Best for general development and cross-package work.
+
+- **Package venvs** (`uv sync` in package dir): Each package gets its own venv with only its dependencies. Best for isolated testing and package-specific work.
+
+- **Switching contexts**: Just `cd` to the directory you want and run `uv run <command>`. uv automatically uses the correct venv.
+
+### Running Examples Locally
+
+```bash
+# From root (using root venv)
+uv run python examples/sandbox_demo.py
+
+# From sandboxes package (using package venv)
+cd packages/prime-sandboxes
+uv run python ../../examples/sandbox_demo.py
+```
+
+### Building for PyPI
+
+When building packages for publication to PyPI, use the provided build scripts that handle bundling `prime-core`:
+
+```bash
+# Build prime-sandboxes for PyPI
+cd packages/prime-sandboxes
+./build_for_pypi.sh
+
+# Build prime for PyPI
+cd packages/prime
+./build_for_pypi.sh
+```
+
+**How it works:**
+- **Development**: Workspace uses `prime-core` as shared dependency (single source of truth)
+- **Distribution**: Build scripts bundle `prime-core` code into wheels using hatchling's `force-include`
+- **Result**: Published packages are self-contained with no `prime-core` dependency
+
+The build scripts:
+1. Temporarily remove `prime-core` from dependencies
+2. Build wheel with `uv build` (hatchling auto-bundles code via `force-include`)
+3. Restore original `pyproject.toml`
+
+This approach follows industry standards (similar to NumPy, SciPy) and is fully uv-aligned.
 
 ## 📄 License
 

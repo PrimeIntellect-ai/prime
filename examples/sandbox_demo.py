@@ -9,17 +9,12 @@ Works with both:
 
 - prime (full CLI + SDK):
     pip install prime
-    from prime_cli.api.client import APIClient
-    from prime_cli.api.sandbox import SandboxClient, CreateSandboxRequest
+    from prime import APIClient, SandboxClient, CreateSandboxRequest
 """
 
-# Using prime package (full CLI + SDK)
-from prime_cli.api.client import APIClient, APIError
-from prime_cli.api.sandbox import CreateSandboxRequest, SandboxClient
-
-# Alternative: Using prime-sandboxes (lightweight SDK, same API)
-# from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest
-# from prime_sandboxes.client import APIError
+# Using the modern package structure (works with both prime and prime-sandboxes)
+from prime_core import APIClient, APIError
+from prime_sandboxes import CreateSandboxRequest, SandboxClient
 
 
 def main() -> None:

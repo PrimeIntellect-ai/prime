@@ -8,28 +8,23 @@ The `sandbox_demo.py` script demonstrates both programmatic and CLI usage of the
 
 ### Running the Demo
 
-1. **Interactive Demo** (recommended for first-time users):
+From the repository root:
 
-   ```bash
-   python examples/sandbox_demo.py
-   ```
+```bash
+# Run the basic demo
+uv run python examples/sandbox_demo.py
 
-2. **Programmatic Demo Only**:
+# Run async demo
+uv run python examples/sandbox_async_demo.py
 
-   ```bash
-   python examples/sandbox_demo.py --programmatic
-   ```
-
-3. **CLI Examples Only**:
-   ```bash
-   python examples/sandbox_demo.py --cli
-   ```
+# Run high-volume async demo
+uv run python examples/sandbox_async_high_volume_demo.py
+```
 
 ### Prerequisites
 
-- Prime CLI installed and configured
-- Valid API key (run `prime login` first)
-- Python environment with prime-cli package available
+- Repository cloned and set up: `uv sync`
+- Valid API key (run `uv run prime login` first)
 
 ### What the Demo Shows
 
@@ -54,8 +49,8 @@ The `sandbox_demo.py` script demonstrates both programmatic and CLI usage of the
 ### Creating Sandboxes Programmatically
 
 ```python
-from prime_cli.api.client import APIClient
-from prime_cli.api.sandbox import SandboxClient, CreateSandboxRequest
+from prime_core import APIClient
+from prime_sandboxes import SandboxClient, CreateSandboxRequest
 
 # Initialize client
 client = APIClient()

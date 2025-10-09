@@ -4,8 +4,7 @@ import json
 from typing import Any, Dict, Iterable, Iterator, Optional
 
 import httpx
-
-from ..config import Config
+from prime_core import Config
 
 
 class InferenceAPIError(Exception):

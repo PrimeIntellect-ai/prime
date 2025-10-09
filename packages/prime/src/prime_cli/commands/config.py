@@ -2,11 +2,9 @@ import os
 from typing import Optional
 
 import typer
+from prime_core import APIClient, APIError, Config
 from rich.console import Console
 from rich.table import Table
-
-from ..api.client import APIClient, APIError
-from ..config import Config
 
 app = typer.Typer(help="Configure the CLI", no_args_is_help=True)
 console = Console()
@@ -23,7 +21,7 @@ def view() -> None:
     table.add_column("Value", style="green")
 
     def _env_set(*names: str) -> bool:
-        return any(os.getenv(n) and os.getenv(n).strip() for n in names)
+        return any((val := os.getenv(n)) and val.strip() for n in names)
 
     # Show current environment
     table.add_row("Current Environment", settings["current_environment"])

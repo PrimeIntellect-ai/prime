@@ -5,6 +5,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 import typer
+from prime_core import APIError, Config
 from prime_sandboxes import (
     APIClient,
     BulkDeleteSandboxResponse,
@@ -17,8 +18,6 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
-from ..api.client import APIError
-from ..config import Config
 from ..utils import (
     build_table,
     confirm_or_skip,

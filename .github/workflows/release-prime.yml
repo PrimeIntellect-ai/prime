@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - 'packages/prime/**'
+      - 'packages/prime-core/**'  # Changes to core affect prime
       - '.github/workflows/release-prime.yml'
   workflow_dispatch:
     inputs:
@@ -96,21 +97,19 @@ jobs:
         if: steps.check_tag.outputs.exists != 'true'
         uses: astral-sh/setup-uv@v3
         
-      - name: Create virtual environment and install build tools
-        if: steps.check_tag.outputs.exists != 'true'
-        working-directory: packages/prime
-        run: |
-          uv venv
-          source .venv/bin/activate
-          uv pip install build twine
-
       # Build package
       - name: Build package
         if: steps.check_tag.outputs.exists != 'true'
         working-directory: packages/prime
         run: |
+          # Use build script to bundle prime-core and remove it from dependencies
+          chmod +x build_for_pypi.sh
+          ./build_for_pypi.sh
+
+          # Install twine for publishing
+          uv venv
           source .venv/bin/activate
-          python -m build
+          uv pip install twine
 
       - name: Upload build artifacts
         if: steps.check_tag.outputs.exists != 'true'

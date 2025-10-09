@@ -1,6 +1,7 @@
 """Prime Intellect CLI."""
 
 # Re-export sandbox functionality from prime-sandboxes
+from prime_core import APIClient, APIError, APITimeoutError, AsyncAPIClient, Config
 from prime_sandboxes import (
     AsyncSandboxClient,
     CommandRequest,
@@ -13,9 +14,6 @@ from prime_sandboxes import (
     SandboxStatus,
     UpdateSandboxRequest,
 )
-
-from .api.client import APIClient, APIError, APITimeoutError, AsyncAPIClient
-from .config import Config
 
 __version__ = "0.4.0"
 

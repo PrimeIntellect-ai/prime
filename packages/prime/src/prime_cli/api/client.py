@@ -5,7 +5,6 @@ from prime_core import (
     APIError,
     APITimeoutError,
     AsyncAPIClient,
-    Config,
     PaymentRequiredError,
     UnauthorizedError,
 )
@@ -15,7 +14,6 @@ __all__ = [
     "APIError",
     "APITimeoutError",
     "AsyncAPIClient",
-    "Config",
     "PaymentRequiredError",
     "UnauthorizedError",
 ]

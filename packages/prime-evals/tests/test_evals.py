@@ -122,17 +122,8 @@ def test_sample_model_with_metadata():
     assert sample.metadata == {"batch": 1}
 
 
-def test_evals_client_initialization_without_api_key():
-    """Test EvalsClient initialization fails without API key"""
-    # This test assumes no API key is available in environment or config
-    # In a real test, you'd mock the Config class
-    pass  # Skip for now as it requires proper mocking
-
-
 def test_evals_client_context_manager():
     """Test EvalsClient can be used as context manager"""
-    # This test requires mocking or a test API key
-    # For now, just test the structure
     try:
         # This will fail without API key, but we're testing the interface
         client = EvalsClient.__new__(EvalsClient)

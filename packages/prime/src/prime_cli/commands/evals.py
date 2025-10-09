@@ -3,6 +3,7 @@ from functools import wraps
 from typing import Optional
 
 import typer
+from prime_core import APIClient
 from prime_evals import EvalsAPIError, EvalsClient
 from rich.console import Console
 from rich.syntax import Syntax
@@ -38,7 +39,7 @@ def format_output(data: dict, output: str) -> None:
     """Format and print output based on the output format."""
     if output == "json":
         output_data_as_json(data, console)
-    else:  # pretty
+    else:
         syntax = Syntax(json.dumps(data, indent=2), "json", theme="monokai")
         console.print(syntax)
 
@@ -58,7 +59,8 @@ def list_evals(
     validate_output_format(output, console)
 
     try:
-        client = EvalsClient()
+        api_client = APIClient()
+        client = EvalsClient(api_client)
         data = client.list_evaluations(
             environment_id=environment_id,
             suite_id=suite_id,
@@ -87,7 +89,7 @@ def list_evals(
         for e in evals:
             eval_id = str(e.get("evaluation_id", e.get("id", "")))
             table.add_row(
-                eval_id[:8] if eval_id else "",
+                eval_id if eval_id else "",
                 str(e.get("name", ""))[:40],
                 str(e.get("eval_type", ""))[:20],
                 str(e.get("model_name", ""))[:30],
@@ -127,7 +129,8 @@ def get_eval(
         raise typer.Exit(1)
 
     try:
-        client = EvalsClient()
+        api_client = APIClient()
+        client = EvalsClient(api_client)
         data = client.get_evaluation(eval_id)
         format_output(data, output)
     except EvalsAPIError as e:
@@ -152,7 +155,8 @@ def get_samples(
         raise typer.Exit(1)
 
     try:
-        client = EvalsClient()
+        api_client = APIClient()
+        client = EvalsClient(api_client)
         data = client.get_samples(eval_id, page=page, limit=limit)
         format_output(data, output)
     except EvalsAPIError as e:
@@ -192,7 +196,8 @@ def push_eval(
         console.print(f"[dim]   Results: {len(eval_data.get('results', []))} samples[/dim]")
         console.print()
 
-        client = EvalsClient()
+        api_client = APIClient()
+        client = EvalsClient(api_client)
 
         console.print("[blue]📤 Creating evaluation...[/blue]")
         create_response = client.create_evaluation(

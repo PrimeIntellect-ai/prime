@@ -11,6 +11,7 @@ resolution-markers = [
 members = [
     "prime",
     "prime-core",
+    "prime-evals",
     "prime-sandboxes",
 ]
 
@@ -1603,6 +1604,32 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
 ]
+
+[[package]]
+name = "prime-evals"
+version = "0.1.0"
+source = { editable = "packages/prime-evals" }
+dependencies = [
+    { name = "httpx" },
+    { name = "prime-core" },
+    { name = "pydantic" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.25.0" },
+    { name = "prime-core", editable = "packages/prime-core" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.13.1" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "prime-sandboxes"

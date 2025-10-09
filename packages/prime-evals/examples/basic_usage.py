@@ -35,7 +35,7 @@ def main():
         },
     )
 
-    eval_id = eval_response.get("evaluation_id") or eval_response.get("id")
+    eval_id = eval_response.get("evaluation_id")
     print(f"✓ Created evaluation: {eval_id}\n")
 
     print("Pushing samples...")

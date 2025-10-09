@@ -1,8 +1,12 @@
-name: Tag and Release
+name: Release prime
+
 on:
   push:
     branches:
       - main
+    paths:
+      - 'packages/prime/**'
+      - '.github/workflows/release-prime.yml'
   workflow_dispatch:
     inputs:
       tag:
@@ -25,11 +29,11 @@ jobs:
           fetch-depth: 0
 
       # Get version from package source on push
-      - name: Get version from src/prime_cli/__init__.py
+      - name: Get version from packages/prime/src/prime_cli/__init__.py
         if: github.event_name == 'push'
         id: auto_version
         run: |
-          VERSION=$(grep -E "^__version__[[:space:]]*=" src/prime_cli/__init__.py | head -n1 | sed -E "s/^__version__[[:space:]]*=[[:space:]]*['\"]([^'\"]+)['\"].*/\1/")
+          VERSION=$(grep -E "^__version__[[:space:]]*=" packages/prime/src/prime_cli/__init__.py | head -n1 | sed -E "s/^__version__[[:space:]]*=[[:space:]]*['\"]([^'\"]+)['\"].*/\1/")
           if [ -z "$VERSION" ]; then
             echo "Error: Unable to parse __version__" >&2
             exit 1
@@ -94,6 +98,7 @@ jobs:
         
       - name: Create virtual environment and install build tools
         if: steps.check_tag.outputs.exists != 'true'
+        working-directory: packages/prime
         run: |
           uv venv
           source .venv/bin/activate
@@ -102,6 +107,7 @@ jobs:
       # Build package
       - name: Build package
         if: steps.check_tag.outputs.exists != 'true'
+        working-directory: packages/prime
         run: |
           source .venv/bin/activate
           python -m build
@@ -111,7 +117,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dist
-          path: dist/*
+          path: packages/prime/dist/*
 
       # Create GitHub Release
       - name: Create GitHub Release
@@ -119,12 +125,13 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ steps.version.outputs.version }}
-          files: dist/*
+          files: packages/prime/dist/*
           generate_release_notes: true
 
       # Publish to PyPI
       - name: Publish to PyPI
         if: steps.check_tag.outputs.exists != 'true'
+        working-directory: packages/prime
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
@@ -160,7 +167,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: dist
-          path: dist
+          path: packages/prime/dist
 
       - name: Log in to GitHub Container Registry
         env:
@@ -172,6 +179,7 @@ jobs:
           VERSION: ${{ needs.tag-and-release.outputs.version }}
           PYTHON_VERSION: ${{ matrix.python-version }}
           REPOSITORY: ${{ github.repository }}
+        working-directory: packages/prime
         run: |
           IMAGE_PATH=$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/$IMAGE_PATH"

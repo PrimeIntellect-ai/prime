@@ -26,6 +26,7 @@ def _fmt_created(val: str) -> str:
     except Exception:
         return val or ""
 
+
 def _fmt_price(x) -> str:
     """Format USD per 1M tokens (mtok) for display."""
     if x is None:

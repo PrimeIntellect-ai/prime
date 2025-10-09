@@ -1439,12 +1439,13 @@ wheels = [
 
 [[package]]
 name = "prime"
-version = "0.3.46"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "build" },
     { name = "cryptography" },
     { name = "httpx" },
+    { name = "prime-sandboxes" },
     { name = "pydantic" },
     { name = "rich" },
     { name = "toml" },
@@ -1467,6 +1468,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=41.0.0" },
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.5.0" },
+    { name = "prime-sandboxes", specifier = ">=0.1.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "rich", specifier = ">=13.3.1" },
@@ -1478,6 +1480,19 @@ requires-dist = [
     { name = "verifiers", specifier = ">=0.1.5" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "prime-sandboxes"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4d/bb/f7c8b0f3dd73651b456a6e2dbb6b7154c19aa7ed699b1faacd88dd82b9fa/prime_sandboxes-0.1.0.tar.gz", hash = "sha256:99d7c0a799aba8685a9583446886eb258a579be2b741066708a9afab6737212e", size = 34581, upload-time = "2025-10-09T01:06:50.71Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e7/6b/bfaa9d100a398c227e6af790452fd818f210a2f070e62391e7648da77009/prime_sandboxes-0.1.0-py3-none-any.whl", hash = "sha256:67a408d2bc4f96d73f8266f01582ab402d566b96ad941f031d4c37bf95753767", size = 14798, upload-time = "2025-10-09T01:06:49.403Z" },
+]
 
 [[package]]
 name = "propcache"

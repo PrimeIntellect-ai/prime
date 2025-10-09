@@ -1,27 +1,28 @@
 #!/bin/bash
-# Build script for creating PyPI-ready wheels
-# This script bundles prime-core code and removes it from dependencies
-
 set -e
 
-echo "🔨 Building prime for PyPI..."
+cleanup() {
+    rm -rf src/prime_core
+    if [ -f pyproject.toml.backup ]; then
+        mv pyproject.toml.backup pyproject.toml
+    fi
+}
 
-# Store original pyproject.toml
+trap cleanup EXIT
+
+echo "Building prime for PyPI..."
+
 cp pyproject.toml pyproject.toml.backup
 
-# Remove prime-core from dependencies (keep prime-sandboxes as-is)
+echo "Copying prime-core into source tree..."
+rm -rf src/prime_core
+cp -r ../prime-core/src/prime_core src/prime_core
+
 sed '/^    "prime-core",/d' pyproject.toml > pyproject.toml.tmp && mv pyproject.toml.tmp pyproject.toml
-
-# Remove the entire [tool.uv.sources] section (not needed for build, causes issues)
 sed '/^\[tool\.uv\.sources\]/,/^$/d' pyproject.toml > pyproject.toml.tmp && mv pyproject.toml.tmp pyproject.toml
+sed 's|"../prime-core/src/prime_core"|"src/prime_core"|' pyproject.toml > pyproject.toml.tmp && mv pyproject.toml.tmp pyproject.toml
 
-echo "📦 Building wheel (prime-core code will be bundled via force-include)..."
-uv build
+echo "Building wheel..."
+uv build --wheel
 
-# Restore original pyproject.toml
-mv pyproject.toml.backup pyproject.toml
-
-echo "✅ Build complete! Wheel in dist/ includes bundled prime-core code"
-echo "   Users installing from PyPI will get:"
-echo "   - prime (with bundled prime-core)"
-echo "   - prime-sandboxes from PyPI (as dependency)"
+echo "Build complete!"

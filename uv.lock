@@ -18,6 +18,7 @@ members = [
 dev = [
     { name = "pytest", specifier = ">=7.0.0" },
     { name = "ruff", specifier = ">=0.13.1" },
+    { name = "ty", specifier = ">=0.0.1a21" },
 ]
 
 [[package]]

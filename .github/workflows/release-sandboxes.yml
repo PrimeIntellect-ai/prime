@@ -72,15 +72,6 @@ jobs:
           git tag -a "$TAG" -m "Release $TAG"
           git push origin "$TAG"
 
-      - name: Create GitHub Release
-        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: prime-sandboxes-v${{ steps.version.outputs.version }}
-          name: prime-sandboxes v${{ steps.version.outputs.version }}
-          files: packages/prime-sandboxes/dist/*
-          generate_release_notes: true
-
       - name: Publish to PyPI
         if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
         working-directory: packages/prime-sandboxes

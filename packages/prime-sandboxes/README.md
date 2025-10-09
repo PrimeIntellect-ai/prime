@@ -14,6 +14,11 @@ Lightweight Python SDK for managing Prime Intellect sandboxes - secure remote co
 ## Installation
 
 ```bash
+uv pip install prime-sandboxes
+```
+
+Or with pip:
+```bash
 pip install prime-sandboxes
 ```
 

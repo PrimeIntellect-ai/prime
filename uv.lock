@@ -1550,7 +1550,7 @@ wheels = [
 
 [[package]]
 name = "prime"
-version = "0.4.1"
+version = "0.4.2"
 source = { editable = "packages/prime" }
 dependencies = [
     { name = "build" },
@@ -1572,11 +1572,6 @@ dev = [
     { name = "types-toml" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "ty" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "build", specifier = ">=1.0.0" },
@@ -1594,9 +1589,6 @@ requires-dist = [
     { name = "verifiers", specifier = ">=0.1.5" },
 ]
 provides-extras = ["dev"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "ty", specifier = ">=0.0.1a21" }]
 
 [[package]]
 name = "prime-core"

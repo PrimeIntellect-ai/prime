@@ -1,7 +1,5 @@
-"""Prime Intellect API clients."""
+"""API client - re-exports from prime_core for backwards compatibility."""
 
-# Import submodules to make them available as attributes
-# Re-export from prime_core for backwards compatibility
 from prime_core import (
     APIClient,
     APIError,
@@ -11,8 +9,6 @@ from prime_core import (
     UnauthorizedError,
 )
 
-from . import availability, client, inference, pods
-
 __all__ = [
     "APIClient",
     "APIError",
@@ -20,8 +16,4 @@ __all__ = [
     "AsyncAPIClient",
     "PaymentRequiredError",
     "UnauthorizedError",
-    "availability",
-    "client",
-    "inference",
-    "pods",
 ]

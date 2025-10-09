@@ -10,7 +10,6 @@ from prime_sandboxes import (
     APIClient,
     BulkDeleteSandboxResponse,
     CreateSandboxRequest,
-    ExposePortRequest,
     Sandbox,
     SandboxClient,
 )
@@ -804,26 +803,20 @@ def expose_port(
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        request = ExposePortRequest(port=port, name=name, protocol=protocol)
-
         with console.status("[bold blue]Exposing port...", spinner="dots"):
-            response = sandbox_client.client.request(
-                "POST",
-                f"/sandbox/{sandbox_id}/expose",
-                json=request.model_dump(by_alias=False, exclude_none=True),
-            )
+            exposed = sandbox_client.expose(sandbox_id, port, name, protocol)
 
         if output == "json":
-            output_data_as_json(response, console)
+            output_data_as_json(exposed.model_dump(), console)
         else:
             console.print("[green]✓[/green] Port exposed successfully!")
-            console.print(f"[bold green]Exposure ID:[/bold green] {response['exposure_id']}")
-            console.print(f"[bold green]Port:[/bold green] {response['port']}")
-            if response.get("name"):
-                console.print(f"[bold green]Name:[/bold green] {response['name']}")
-            console.print(f"[bold green]Protocol:[/bold green] {response['protocol']}")
-            console.print(f"[bold green]URL:[/bold green] {response['url']}")
-            console.print(f"[bold green]TLS Socket:[/bold green] {response['tls_socket']}")
+            console.print(f"[bold green]Exposure ID:[/bold green] {exposed.exposure_id}")
+            console.print(f"[bold green]Port:[/bold green] {exposed.port}")
+            if exposed.name:
+                console.print(f"[bold green]Name:[/bold green] {exposed.name}")
+            console.print(f"[bold green]Protocol:[/bold green] {exposed.protocol}")
+            console.print(f"[bold green]URL:[/bold green] {exposed.url}")
+            console.print(f"[bold green]TLS Socket:[/bold green] {exposed.tls_socket}")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
@@ -852,7 +845,7 @@ def unexpose_port(
         sandbox_client = SandboxClient(base_client)
 
         with console.status("[bold blue]Unexposing port...", spinner="dots"):
-            sandbox_client.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
+            sandbox_client.unexpose(sandbox_id, exposure_id)
 
         console.print(f"[green]✓ Successfully unexposed {exposure_id}[/green]")
 

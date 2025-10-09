@@ -1,7 +1,6 @@
 """Sandbox client implementations."""
 
 import json
-import logging
 import os
 import time
 from datetime import datetime, timezone
@@ -391,70 +390,25 @@ class SandboxClient:
         except Exception as e:
             raise APIError(f"Download failed: {str(e)}")
 
-    class ForwardContext:
-        """Context manager for port forwarding"""
+    def expose(
+        self,
+        sandbox_id: str,
+        port: int,
+        name: Optional[str] = None,
+        protocol: str = "TCP",
+    ) -> ExposedPort:
+        """Expose a port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name, protocol=protocol)
+        response = self.client.request(
+            "POST",
+            f"/sandbox/{sandbox_id}/expose",
+            json=request.model_dump(by_alias=False, exclude_none=True),
+        )
+        return ExposedPort.model_validate(response)
 
-        def __init__(
-            self,
-            sandbox_client: "SandboxClient",
-            sandbox_id: str,
-            port: int,
-            name: Optional[str] = None,
-        ):
-            self.sandbox_client = sandbox_client
-            self.sandbox_id = sandbox_id
-            self.port = port
-            self.name = name
-            self.url: Optional[str] = None
-            self.tls_socket: Optional[str] = None
-            self._exposure_id: Optional[str] = None
-
-        def __enter__(self) -> "SandboxClient.ForwardContext":
-            """Expose the port and return self"""
-            request = ExposePortRequest(port=self.port, name=self.name)
-            response = self.sandbox_client.client.request(
-                "POST",
-                f"/sandbox/{self.sandbox_id}/expose",
-                json=request.model_dump(by_alias=False, exclude_none=True),
-            )
-            exposed_port = ExposedPort.model_validate(response)
-
-            self.url = exposed_port.url
-            self.tls_socket = exposed_port.tls_socket
-            self._exposure_id = exposed_port.exposure_id
-            return self
-
-        def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-            """Unexpose the port"""
-            if self._exposure_id:
-                try:
-                    self.sandbox_client.client.request(
-                        "DELETE",
-                        f"/sandbox/{self.sandbox_id}/expose/{self._exposure_id}",
-                    )
-                except Exception as e:
-                    logging.error(f"Failed to unexpose port: {e}")
-
-        def __repr__(self) -> str:
-            return f"ForwardContext(url={self.url!r}, port={self.port})"
-
-    def forward(self, sandbox_id: str, port: int, name: Optional[str] = None) -> ForwardContext:
-        """
-        Create a context manager for port forwarding.
-
-        Usage:
-            with sandbox_client.forward(sandbox_id, 8000) as fwd:
-                # ... start your server on port 8000 ...
-
-        Args:
-            sandbox_id: The sandbox ID
-            port: Port to expose
-            name: Optional human-readable name for the exposure
-
-        Returns:
-            ForwardContext that exposes url and tls_socket attributes
-        """
-        return self.ForwardContext(self, sandbox_id, port, name)
+    def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
+        """Unexpose a port from a sandbox."""
+        self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
 
     def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
         """List all exposed ports for a sandbox"""
@@ -727,72 +681,25 @@ class AsyncSandboxClient:
         """Async context manager exit"""
         await self.aclose()
 
-    class AsyncForwardContext:
-        """Async context manager for port forwarding"""
+    async def expose(
+        self,
+        sandbox_id: str,
+        port: int,
+        name: Optional[str] = None,
+        protocol: str = "TCP",
+    ) -> ExposedPort:
+        """Expose a port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name, protocol=protocol)
+        response = await self.client.request(
+            "POST",
+            f"/sandbox/{sandbox_id}/expose",
+            json=request.model_dump(by_alias=False, exclude_none=True),
+        )
+        return ExposedPort.model_validate(response)
 
-        def __init__(
-            self,
-            sandbox_client: "AsyncSandboxClient",
-            sandbox_id: str,
-            port: int,
-            name: Optional[str] = None,
-        ):
-            self.sandbox_client = sandbox_client
-            self.sandbox_id = sandbox_id
-            self.port = port
-            self.name = name
-            self.url: Optional[str] = None
-            self.tls_socket: Optional[str] = None
-            self._exposure_id: Optional[str] = None
-
-        async def __aenter__(self) -> "AsyncSandboxClient.AsyncForwardContext":
-            """Expose the port and return self"""
-            request = ExposePortRequest(port=self.port, name=self.name)
-            response = await self.sandbox_client.client.request(
-                "POST",
-                f"/sandbox/{self.sandbox_id}/expose",
-                json=request.model_dump(by_alias=False, exclude_none=True),
-            )
-            exposed_port = ExposedPort.model_validate(response)
-
-            self.url = exposed_port.url
-            self.tls_socket = exposed_port.tls_socket
-            self._exposure_id = exposed_port.exposure_id
-            return self
-
-        async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-            """Unexpose the port"""
-            if self._exposure_id:
-                try:
-                    await self.sandbox_client.client.request(
-                        "DELETE",
-                        f"/sandbox/{self.sandbox_id}/expose/{self._exposure_id}",
-                    )
-                except Exception as e:
-                    logging.error(f"Failed to unexpose port: {e}")
-
-        def __repr__(self) -> str:
-            return f"AsyncForwardContext(url={self.url!r}, port={self.port})"
-
-    def forward(
-        self, sandbox_id: str, port: int, name: Optional[str] = None
-    ) -> AsyncForwardContext:
-        """
-        Create an async context manager for port forwarding.
-
-        Usage:
-            async with async_sandbox_client.forward(sandbox_id, 8000) as fwd:
-                # ... start your server on port 8000 ...
-
-        Args:
-            sandbox_id: The sandbox ID
-            port: Port to expose
-            name: Optional human-readable name for the exposure
-
-        Returns:
-            AsyncForwardContext that exposes url and tls_socket attributes
-        """
-        return self.AsyncForwardContext(self, sandbox_id, port, name)
+    async def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
+        """Unexpose a port from a sandbox."""
+        await self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
 
     async def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
         """List all exposed ports for a sandbox"""

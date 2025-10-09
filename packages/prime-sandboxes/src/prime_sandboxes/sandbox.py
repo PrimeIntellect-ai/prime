@@ -395,7 +395,7 @@ class SandboxClient:
         sandbox_id: str,
         port: int,
         name: Optional[str] = None,
-        protocol: str = "TCP",
+        protocol: str = "HTTP",
     ) -> ExposedPort:
         """Expose a port from a sandbox."""
         request = ExposePortRequest(port=port, name=name, protocol=protocol)
@@ -686,7 +686,7 @@ class AsyncSandboxClient:
         sandbox_id: str,
         port: int,
         name: Optional[str] = None,
-        protocol: str = "TCP",
+        protocol: str = "HTTP",
     ) -> ExposedPort:
         """Expose a port from a sandbox."""
         request = ExposePortRequest(port=port, name=name, protocol=protocol)

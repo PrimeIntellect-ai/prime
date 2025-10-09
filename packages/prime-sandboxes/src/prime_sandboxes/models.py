@@ -150,7 +150,7 @@ class ExposePortRequest(BaseModel):
 
     port: int
     name: Optional[str] = None
-    protocol: str = "TCP"
+    protocol: str = "HTTP"
 
 
 class ExposedPort(BaseModel):

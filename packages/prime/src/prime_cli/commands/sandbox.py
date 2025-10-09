@@ -793,7 +793,7 @@ def expose_port(
     sandbox_id: str = typer.Argument(..., help="Sandbox ID to expose port from"),
     port: int = typer.Argument(..., help="Port number to expose"),
     name: Optional[str] = typer.Option(None, help="Optional name for the exposed port"),
-    protocol: str = typer.Option("TCP", help="Protocol (TCP, UDP, HTTP, etc.)"),
+    protocol: str = typer.Option("HTTP", help="Protocol (HTTP, HTTPS, etc.)"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Expose a port from a sandbox"""

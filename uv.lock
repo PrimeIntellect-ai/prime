@@ -18,6 +18,7 @@ members = [
 dev = [
     { name = "pytest", specifier = ">=7.0.0" },
     { name = "ruff", specifier = ">=0.13.1" },
+    { name = "ty", specifier = ">=0.0.1a21" },
 ]
 
 [[package]]
@@ -1571,6 +1572,11 @@ dev = [
     { name = "types-toml" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "ty" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "build", specifier = ">=1.0.0" },
@@ -1588,6 +1594,9 @@ requires-dist = [
     { name = "verifiers", specifier = ">=0.1.5" },
 ]
 provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ty", specifier = ">=0.0.1a21" }]
 
 [[package]]
 name = "prime-core"

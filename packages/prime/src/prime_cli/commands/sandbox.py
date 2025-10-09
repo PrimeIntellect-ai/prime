@@ -5,14 +5,19 @@ import time
 from typing import Any, Dict, List, Optional
 
 import typer
+from prime_core import APIError, Config
+from prime_sandboxes import (
+    APIClient,
+    BulkDeleteSandboxResponse,
+    CreateSandboxRequest,
+    Sandbox,
+    SandboxClient,
+)
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
-from ..api.client import APIClient, APIError
-from ..api.sandbox import BulkDeleteSandboxResponse, CreateSandboxRequest, Sandbox, SandboxClient
-from ..config import Config
 from ..utils import (
     build_table,
     confirm_or_skip,

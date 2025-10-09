@@ -3,8 +3,8 @@ import os
 from typing import Any, Dict
 
 import pytest
-from prime_cli.api.client import APIClient
 from prime_cli.main import app
+from prime_core import APIClient
 from typer.testing import CliRunner
 
 
@@ -23,9 +23,7 @@ def mock_api_client(monkeypatch: pytest.MonkeyPatch) -> APIClient:
     # Create a mock client that returns the test data
     mock_client = APIClient("dummy_url")
     # Patch the APIClient class itself, not just an instance
-    monkeypatch.setattr(
-        "prime_cli.api.client.APIClient.get", lambda *args, **kwargs: api_response_json
-    )
+    monkeypatch.setattr("prime_core.APIClient.get", lambda *args, **kwargs: api_response_json)
     return mock_client
 
 

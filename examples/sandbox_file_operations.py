@@ -12,11 +12,11 @@ import asyncio
 import os
 import tempfile
 
-from prime_cli.api.sandbox import (
+from prime_sandboxes import (
     AsyncSandboxClient,
     CreateSandboxRequest,
 )
-from prime_cli.config import Config
+from prime_core import Config
 
 
 async def main() -> None:
@@ -46,7 +46,9 @@ async def main() -> None:
         print("Sandbox is running!")
 
         # Create a temporary file to upload
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as temp_file:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False
+        ) as temp_file:
             temp_file.write(
                 """#!/usr/bin/env python3
 # This is a test Python script uploaded to the sandbox
@@ -135,7 +137,9 @@ if __name__ == "__main__":
 
             # List files in the workspace to verify upload
             print("Listing files in sandbox workspace...")
-            ls_result = await client.execute_command(sandbox.id, "ls -la /sandbox-workspace/")
+            ls_result = await client.execute_command(
+                sandbox.id, "ls -la /sandbox-workspace/"
+            )
             print("📋 Workspace contents:")
             print(ls_result.stdout)
 
@@ -160,8 +164,8 @@ if __name__ == "__main__":
 
 def sync_example() -> None:
     """Example using synchronous client"""
-    from prime_cli.api.client import APIClient
-    from prime_cli.api.sandbox import SandboxClient
+    from prime_core import APIClient
+    from prime_sandboxes import SandboxClient
 
     print("\n🔄 Running synchronous example...")
 
@@ -188,7 +192,9 @@ def sync_example() -> None:
         print("Sync sandbox is running!")
 
         # Create a simple text file
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as temp_file:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False
+        ) as temp_file:
             temp_file.write(
                 "Hello from sync client!\nThis demonstrates synchronous file operations."
             )
@@ -204,7 +210,9 @@ def sync_example() -> None:
             print(f"Sync upload successful: {upload_response.path}")
 
             # Verify file exists
-            cat_result = client.execute_command(sandbox.id, "cat /sandbox-workspace/sync_test.txt")
+            cat_result = client.execute_command(
+                sandbox.id, "cat /sandbox-workspace/sync_test.txt"
+            )
             print(f"File content in sandbox: {cat_result.stdout}")
 
         finally:

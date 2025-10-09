@@ -44,7 +44,7 @@ jobs:
       working-directory: packages/prime-sandboxes
       run: uv run pytest tests/ -v
 
-  test:
+  test-prime:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -63,9 +63,11 @@ jobs:
         version: "latest"
 
     - name: Install dependencies
+      working-directory: packages/prime
       run: uv sync --all-extras
 
     - name: Run tests with pytest
+      working-directory: packages/prime
       run: uv run pytest tests/ -v
 
   type-check:
@@ -84,7 +86,9 @@ jobs:
         version: "latest"
 
     - name: Install dependencies
+      working-directory: packages/prime
       run: uv sync --all-extras
 
     - name: Run ty type checker
+      working-directory: packages/prime
       run: uv run ty check src/

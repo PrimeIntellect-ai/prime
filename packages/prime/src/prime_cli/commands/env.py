@@ -14,12 +14,11 @@ from urllib.parse import urlparse
 import httpx
 import toml
 import typer
+from prime_core import APIClient, APIError, Config
 from rich.console import Console
 from rich.table import Table
 
-from ..api.client import APIClient, APIError
 from ..api.inference import InferenceAPIError, InferenceClient
-from ..config import Config
 from ..utils import output_data_as_json, validate_output_format
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)

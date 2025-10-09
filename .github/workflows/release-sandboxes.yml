@@ -5,6 +5,7 @@ on:
     branches: [ "main" ]
     paths:
       - 'packages/prime-sandboxes/**'
+      - 'packages/prime-core/**'  # Changes to core affect sandboxes
       - '.github/workflows/release-sandboxes.yml'
   workflow_dispatch:
     inputs:
@@ -58,10 +59,14 @@ jobs:
         if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
         working-directory: packages/prime-sandboxes
         run: |
+          # Use build script to bundle prime-core and remove it from dependencies
+          chmod +x build_for_pypi.sh
+          ./build_for_pypi.sh
+
+          # Install twine for publishing
           uv venv
           source .venv/bin/activate
-          uv pip install build twine
-          python -m build
+          uv pip install twine
 
       - name: Create tag
         if: steps.check_tag.outputs.exists != 'true'

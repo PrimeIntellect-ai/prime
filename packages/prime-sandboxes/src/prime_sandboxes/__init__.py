@@ -4,16 +4,16 @@ A standalone SDK for managing remote code execution environments (sandboxes).
 Includes HTTP client, authentication, and full sandbox lifecycle management.
 """
 
-from .client import (
+from prime_core import (
     APIClient,
     APIError,
     APITimeoutError,
     AsyncAPIClient,
+    Config,
     PaymentRequiredError,
-    TimeoutError,  # Deprecated alias for APITimeoutError
     UnauthorizedError,
 )
-from .config import Config
+
 from .exceptions import CommandTimeoutError, SandboxNotRunningError
 from .models import (
     AdvancedConfigs,
@@ -31,6 +31,9 @@ from .models import (
 from .sandbox import AsyncSandboxClient, SandboxClient
 
 __version__ = "0.1.0"
+
+# Deprecated alias for backward compatibility
+TimeoutError = APITimeoutError
 
 __all__ = [
     # Core HTTP Client & Config

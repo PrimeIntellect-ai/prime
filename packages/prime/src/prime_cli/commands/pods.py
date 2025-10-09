@@ -7,14 +7,13 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import typer
+from prime_core import APIClient, APIError, Config
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 from ..api.availability import AvailabilityClient, GPUAvailability
-from ..api.client import APIClient, APIError
 from ..api.pods import Pod, PodsClient, PodStatus
-from ..config import Config
 from ..helper.short_id import generate_short_id
 from ..utils import (
     confirm_or_skip,

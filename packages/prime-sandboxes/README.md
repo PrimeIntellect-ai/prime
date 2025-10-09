@@ -4,12 +4,12 @@ Lightweight Python SDK for managing Prime Intellect sandboxes - secure remote co
 
 ## Features
 
-- ✅ **Synchronous and async clients** - Use with sync or async/await code
-- ✅ **Full sandbox lifecycle** - Create, list, execute commands, upload/download files, delete
-- ✅ **Type-safe** - Full type hints and Pydantic models
-- ✅ **Authentication caching** - Automatic token management
-- ✅ **Bulk operations** - Create and manage multiple sandboxes efficiently
-- ✅ **No CLI dependencies** - Pure SDK, ~50KB installed
+- **Synchronous and async clients** - Use with sync or async/await code
+- **Full sandbox lifecycle** - Create, list, execute commands, upload/download files, delete
+- **Type-safe** - Full type hints and Pydantic models
+- **Authentication caching** - Automatic token management
+- **Bulk operations** - Create and manage multiple sandboxes efficiently
+- **No CLI dependencies** - Pure SDK, ~50KB installed
 
 ## Installation
 

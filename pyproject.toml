@@ -1,76 +1,8 @@
-[project]
-name = "prime"
-version = "0.3.46"
-description = "Prime Intellect CLI + SDK"
-readme = "README.md"
-requires-python = ">=3.10"
-license = "MIT"
-authors = [
-    { name = "Prime Intellect", email = "contact@primeintellect.ai" }
-]
-dependencies = [
-    "typer>=0.9.0",
-    "httpx>=0.25.0",
-    "rich>=13.3.1",
-    "pydantic>=2.0.0",
-    "cryptography>=41.0.0",
-    "verifiers>=0.1.5",
-    "build>=1.0.0",
-    "toml>=0.10.0",
-]
-keywords = ["cli", "gpu", "cloud", "compute"]
-classifiers = [
-    "Development Status :: 4 - Beta",
-    "Environment :: Console",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Software Development :: Libraries :: Python Modules"
-]
+[tool.uv.workspace]
+members = ["packages/*"]
 
-[project.urls]
-Homepage = "https://github.com/PrimeIntellect-ai/prime-cli"
-Documentation = "https://github.com/PrimeIntellect-ai/prime-cli#readme"
-Repository = "https://github.com/PrimeIntellect-ai/prime-cli.git"
-Changelog = "https://github.com/PrimeIntellect-ai/prime-cli/blob/main/CHANGELOG.md"
-
-[project.scripts]
-prime = "prime_cli.main:run"
-
-[project.optional-dependencies]
-dev = [
+[tool.uv]
+dev-dependencies = [
     "pytest>=7.0.0",
     "ruff>=0.13.1",
-    "ty>=0.0.0a6",
-    "types-toml>=0.10.0",
-    "pre-commit>=3.5.0"
-]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.metadata]
-allow-direct-references = true
-
-[tool.hatch.version]
-path = "src/prime_cli/__init__.py"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/prime_cli"]
-
-[tool.ruff]
-src = ["."]
-line-length = 100 
-target-version = "py311"
-
-[tool.ruff.lint]
-extend-select = [
-    "E",   # pycodestyle errors
-    "F",   # pyflakes
-    "I",   # isort (import sorting)
 ]

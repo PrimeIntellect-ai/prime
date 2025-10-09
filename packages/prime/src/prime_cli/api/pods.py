@@ -1,9 +1,8 @@
 import json
 from typing import Any, List, Optional, Union
 
+from prime_core import APIClient, APIError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-from prime_cli.api.client import APIClient, APIError
 
 
 def clean_connection_fields(v: Any) -> Any:

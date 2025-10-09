@@ -24,6 +24,7 @@ class Evaluation(BaseModel):
     dataset: Optional[str] = None
     framework: Optional[str] = None
     task_type: Optional[str] = Field(None, alias="taskType")
+    eval_type: Optional[str] = Field(None, alias="evalType")
     description: Optional[str] = None
     status: Optional[str] = None
     environment_ids: Optional[List[str]] = Field(None, alias="environmentIds")

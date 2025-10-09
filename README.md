@@ -26,6 +26,9 @@ Command line interface and SDKs for managing Prime Intellect GPU resources, sand
 ## Quick Start
 
 ```bash
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
 # Install prime
 uv tool install prime
 
@@ -47,11 +50,22 @@ prime availability list
 
 ## Installation
 
+### Using uv (recommended)
+
+First, install uv if you haven't already:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then install prime:
+
 ```bash
 uv tool install prime
 ```
 
-Or with pip:
+### Using pip
+
 ```bash
 pip install prime
 ```

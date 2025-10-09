@@ -2,7 +2,35 @@
 
 Monorepo for Prime Intellect's Python packages: CLI tools and SDKs for managing GPU compute resources, sandboxes, and inference.
 
-## 📦 Packages
+## Packages
+
+### [`prime`](./packages/prime/)
+[![PyPI](https://img.shields.io/pypi/v/prime)](https://pypi.org/project/prime/)
+
+**Command-line tool + SDK for managing GPU infrastructure on Prime Intellect.**
+
+**Main Features:**
+- **Authentication** - Secure login and API key management
+- **GPU Pods** - Deploy, manage, and SSH into GPU instances
+- **Sandboxes** - Remote code execution environments
+- **Inference** - OpenAI-compatible chat completions
+- **Availability** - Browse available GPU types and configurations
+
+```bash
+uv tool install prime
+
+# Get started
+prime login
+prime availability list --gpu H100
+prime pods create --gpu A100 --count 2
+prime sandbox create --image python:3.11
+```
+
+**Use this for the complete Prime Intellect experience** - full CLI + Python SDK.
+
+[→ Full Documentation](./packages/prime/)
+
+---
 
 ### [`prime-sandboxes`](./packages/prime-sandboxes/)
 [![PyPI](https://img.shields.io/pypi/v/prime-sandboxes)](https://pypi.org/project/prime-sandboxes/)
@@ -26,28 +54,29 @@ sandbox = SandboxClient(client)
 
 ---
 
-### [`prime`](./packages/prime/)
-[![PyPI](https://img.shields.io/pypi/v/prime)](https://pypi.org/project/prime/)
+## Quick Start
 
-**Full-featured CLI + SDK with pods, sandboxes, inference, and availability APIs.**
+### For CLI Users
 
 ```bash
+# Install
 uv tool install prime
-```
 
-```bash
+# Authenticate
 prime login
-prime availability list
+
+# Browse available GPUs
+prime availability list --gpu H100
+
+# Deploy a GPU pod
+prime pods create --gpu A100 --count 1
+
+# Create a remote sandbox
 prime sandbox create --image python:3.11
+
+# Run inference
+prime inference chat "Explain quantum computing"
 ```
-
-**Use this for the complete experience** - CLI commands + all SDKs.
-
-[→ Full Documentation](./packages/prime/)
-
----
-
-## 🚀 Quick Start
 
 ### For Sandbox SDK Users
 
@@ -72,29 +101,14 @@ result = sandbox_client.execute_command(sandbox.id, "python --version")
 print(result.stdout)
 ```
 
-### For CLI Users
-
-```bash
-# Install full CLI
-uv tool install prime
-
-# Authenticate
-prime login
-
-# Manage resources
-prime availability list --gpu H100
-prime sandbox create --image python:3.11 --name my-sandbox
-prime sandbox exec <id> "python --version"
-```
-
-## 🏗️ Repository Structure
+## Repository Structure
 
 ```
 prime-cli/
 ├── packages/
-│   ├── prime-core/          # Shared HTTP client & config (internal, not published)
+│   ├── prime/               # Full CLI + all SDKs
 │   ├── prime-sandboxes/     # Standalone sandboxes SDK
-│   └── prime/               # Full CLI + all SDKs
+│   └── prime-core/          # Shared HTTP client & config (internal, not published)
 ├── examples/                # Example scripts
 ├── .github/workflows/       # CI/CD
 ├── pyproject.toml          # uv workspace configuration
@@ -103,26 +117,26 @@ prime-cli/
 
 ### Package Architecture
 
-- **`prime-core`** - Internal package containing shared `APIClient` and `Config` code
-  - Single source of truth during development
-  - Used via uv workspace (not published to PyPI)
-  - Both `prime-sandboxes` and `prime` reference it locally
+- **`prime`** - Published CLI + full SDK
+  - Depends on both `prime-core` and `prime-sandboxes`
+  - Published with bundled core functionality
 
 - **`prime-sandboxes`** - Published standalone SDK
   - Depends on `prime-core` during development
   - Published with bundled core functionality
 
-- **`prime`** - Published CLI + full SDK
-  - Depends on both `prime-core` and `prime-sandboxes`
-  - Published with bundled core functionality
+- **`prime-core`** - Internal package containing shared `APIClient` and `Config` code
+  - Single source of truth during development
+  - Used via uv workspace (not published to PyPI)
+  - Both `prime-sandboxes` and `prime` reference it locally
 
-## 📚 Documentation
+## Documentation
 
-- [prime-sandboxes SDK Docs](./packages/prime-sandboxes/README.md)
 - [prime CLI Docs](./packages/prime/README.md)
+- [prime-sandboxes SDK Docs](./packages/prime-sandboxes/README.md)
 - [Examples](./examples/)
 
-## 🤝 Contributing
+## Contributing
 
 Contributions welcome! This is a monorepo with independent packages managed via uv workspace.
 
@@ -230,11 +244,11 @@ The build scripts:
 
 This approach follows industry standards (similar to NumPy, SciPy) and is fully uv-aligned.
 
-## 📄 License
+## License
 
 MIT License - see [LICENSE](./LICENSE) file for details.
 
-## 🔗 Links
+## Links
 
 - [Website](https://primeintellect.ai)
 - [Dashboard](https://app.primeintellect.ai)

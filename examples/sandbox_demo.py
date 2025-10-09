@@ -1,10 +1,25 @@
 #!/usr/bin/env python3
 """
 Simple Sandbox API Demo - shows auth and basic usage
+
+Works with both:
+- prime-sandboxes (lightweight SDK):
+    pip install prime-sandboxes
+    from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest
+
+- prime (full CLI + SDK):
+    pip install prime
+    from prime_cli.api.client import APIClient
+    from prime_cli.api.sandbox import SandboxClient, CreateSandboxRequest
 """
 
+# Using prime package (full CLI + SDK)
 from prime_cli.api.client import APIClient, APIError
 from prime_cli.api.sandbox import CreateSandboxRequest, SandboxClient
+
+# Alternative: Using prime-sandboxes (lightweight SDK, same API)
+# from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest
+# from prime_sandboxes.client import APIError
 
 
 def main() -> None:

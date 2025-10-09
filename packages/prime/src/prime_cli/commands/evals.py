@@ -189,7 +189,7 @@ def push_eval(
         with open(config_file, "r") as f:
             eval_data = json.load(f)
 
-        console.print(f"[blue]📖 Loaded eval data from:[/blue] {config_file}")
+        console.print(f"[blue]✓ Loaded eval data from:[/blue] {config_file}")
         console.print(f"[dim]   Name: {eval_data.get('eval_name', 'N/A')}[/dim]")
         console.print(f"[dim]   Model: {eval_data.get('model_name', 'N/A')}[/dim]")
         console.print(f"[dim]   Dataset: {eval_data.get('dataset', 'N/A')}[/dim]")
@@ -199,7 +199,7 @@ def push_eval(
         api_client = APIClient()
         client = EvalsClient(api_client)
 
-        console.print("[blue]📤 Creating evaluation...[/blue]")
+        console.print("[blue]Creating evaluation...[/blue]")
         create_response = client.create_evaluation(
             name=eval_data["eval_name"],
             model_name=eval_data.get("model_name"),
@@ -216,21 +216,21 @@ def push_eval(
             console.print("[red]Error:[/red] Failed to get evaluation ID from response")
             raise typer.Exit(1)
 
-        console.print(f"[green]✅ Created evaluation:[/green] {eval_id}")
+        console.print(f"[green]✓ Created evaluation:[/green] {eval_id}")
         console.print()
 
         if "results" in eval_data and eval_data["results"]:
-            console.print(f"[blue]📤 Pushing {len(eval_data['results'])} samples...[/blue]")
+            console.print(f"[blue]Pushing {len(eval_data['results'])} samples...[/blue]")
             client.push_samples(eval_id, eval_data["results"])
-            console.print("[green]✅ Samples pushed successfully[/green]")
+            console.print("[green]✓ Samples pushed successfully[/green]")
             console.print()
 
-        console.print("[blue]🏁 Finalizing evaluation...[/blue]")
+        console.print("[blue]Finalizing evaluation...[/blue]")
         finalize_response = client.finalize_evaluation(eval_id, metrics=eval_data.get("metrics"))
-        console.print("[green]✅ Evaluation finalized[/green]")
+        console.print("[green]✓ Evaluation finalized[/green]")
         console.print()
 
-        console.print("[green]🎉 Success[/green]")
+        console.print("[green]✓ Success[/green]")
         console.print(f"[blue]Evaluation ID:[/blue] {eval_id}")
         console.print()
         console.print("[dim]View your evaluation:[/dim]")

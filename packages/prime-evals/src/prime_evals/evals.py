@@ -2,8 +2,6 @@ from typing import Any, Dict, List, Optional
 
 from prime_core import APIClient, AsyncAPIClient
 
-from .exceptions import EvalsAPIError
-
 
 class EvalsClient:
     """
@@ -97,35 +95,6 @@ class EvalsClient:
             "GET", f"/evaluations/{evaluation_id}/samples", params=params
         )
         return response
-
-    def check_environment_exists(self, env_id: str, version: str = "latest") -> bool:
-        """Check if an environment exists in the hub"""
-        try:
-            if "/" in env_id:
-                owner, name = env_id.split("/", 1)
-                self.client.request("GET", f"/environmentshub/{owner}/{name}/@{version}")
-                return True
-            else:
-                name = env_id
-                params: Dict[str, Any] = {
-                    "include_teams": True,
-                    "limit": 100,
-                }
-                data = self.client.request("GET", "/environmentshub/", params=params)
-                environments = data.get("data", data.get("environments", []))
-
-                for env in environments:
-                    env_name = env.get("name", "")
-                    if env_name == name:
-                        return True
-
-                return False
-        except Exception as e:
-            # If 404 or not found, return False
-            if "404" in str(e) or "not found" in str(e).lower():
-                return False
-            # Re-raise other errors
-            raise EvalsAPIError(f"Error checking environment '{env_id}': {e}") from e
 
 
 class AsyncEvalsClient:
@@ -222,35 +191,6 @@ class AsyncEvalsClient:
             "GET", f"/evaluations/{evaluation_id}/samples", params=params
         )
         return response
-
-    async def check_environment_exists(self, env_id: str, version: str = "latest") -> bool:
-        """Check if an environment exists in the hub"""
-        try:
-            if "/" in env_id:
-                owner, name = env_id.split("/", 1)
-                await self.client.request("GET", f"/environmentshub/{owner}/{name}/@{version}")
-                return True
-            else:
-                name = env_id
-                params: Dict[str, Any] = {
-                    "include_teams": True,
-                    "limit": 100,
-                }
-                data = await self.client.request("GET", "/environmentshub/", params=params)
-                environments = data.get("data", data.get("environments", []))
-
-                for env in environments:
-                    env_name = env.get("name", "")
-                    if env_name == name:
-                        return True
-
-                return False
-        except Exception as e:
-            # If 404 or not found, return False
-            if "404" in str(e) or "not found" in str(e).lower():
-                return False
-            # Re-raise other errors
-            raise EvalsAPIError(f"Error checking environment '{env_id}': {e}") from e
 
     async def aclose(self) -> None:
         """Close the async client"""

@@ -234,7 +234,6 @@ Main client for interacting with the Prime Evals API.
 - `get_evaluation()` - Get evaluation details by ID
 - `list_evaluations()` - List evaluations with optional filters
 - `get_samples()` - Get samples for an evaluation
-- `check_environment_exists()` - Check if an environment exists
 
 ### AsyncEvalsClient
 
@@ -268,29 +267,6 @@ except EvaluationNotFoundError:
 except EvalsAPIError as e:
     print(f"API error: {e}")
 ```
-
-## Environment Validation
-
-```python
-from prime_evals import APIClient, EvalsClient
-
-api_client = APIClient()
-client = EvalsClient(api_client)
-
-# Check if environment exists
-if client.check_environment_exists("gsm8k"):
-    print("Environment exists!")
-else:
-    print("Environment not found")
-
-# Check with version
-if client.check_environment_exists("primeintellect/gsm8k", version="latest"):
-    print("Environment with version exists!")
-```
-
-## Documentation
-
-Full API reference: https://github.com/PrimeIntellect-ai/prime-cli/tree/main/packages/prime-evals
 
 ## Related Packages
 

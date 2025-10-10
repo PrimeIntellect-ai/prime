@@ -13,7 +13,8 @@ from prime_evals import APIClient, EvalsClient
 
 def main():
     """Run the basic evaluation example."""
-    # Initialize client (uses PRIME_API_KEY env var or ~/.prime/config.json)
+    # Initialize client (uses PRIME_API_KEY env var, ~/.prime/config.json,
+    # or pass in directly here as env var)
     api_client = APIClient()
     client = EvalsClient(api_client)
 

@@ -16,10 +16,9 @@ class EvalsClient:
     def create_evaluation(
         self,
         name: str,
-        environment_ids: Optional[List[str]] = None,
+        environments: Optional[List[Dict[str, str]]] = None,
         suite_id: Optional[str] = None,
         run_id: Optional[str] = None,
-        version_id: Optional[str] = None,
         model_name: Optional[str] = None,
         dataset: Optional[str] = None,
         framework: Optional[str] = None,
@@ -31,26 +30,24 @@ class EvalsClient:
     ) -> Dict[str, Any]:
         """Create a new evaluation
 
-        Either run_id or environment_ids must be provided. If run_id is provided,
-        it will be used to link the evaluation to an existing training run.
-        Otherwise, environment_ids must be provided.
+        Either run_id or environments must be provided.
+        Environments should be a list of dicts with 'id' and optional 'version_id'.
+        Example: [{"id": "env-123", "version_id": "v1"}]
 
         Raises:
-            InvalidEvaluationError: If neither run_id nor environment_ids is provided
+            InvalidEvaluationError: If neither run_id nor environments is provided
         """
-        if not run_id and not environment_ids:
+        if not run_id and not environments:
             raise InvalidEvaluationError(
-                "Either 'run_id' or 'environment_id' must be provided when creating an evaluation. "
-                "If you have an environment on the hub, provide environment_id. "
-                "If you're linking to an existing training run, provide run_id."
+                "Either 'run_id' or 'environments' must be provided. "
+                "For environment evals, provide environments=[{'id': 'env-id', 'version_id': 'v1'}]"
             )
 
         payload = {
             "name": name,
-            "environment_ids": environment_ids,
+            "environments": environments,
             "suite_id": suite_id,
             "run_id": run_id,
-            "version_id": version_id,
             "model_name": model_name,
             "dataset": dataset,
             "framework": framework,
@@ -123,10 +120,9 @@ class AsyncEvalsClient:
     async def create_evaluation(
         self,
         name: str,
-        environment_ids: Optional[List[str]] = None,
+        environments: Optional[List[Dict[str, str]]] = None,
         suite_id: Optional[str] = None,
         run_id: Optional[str] = None,
-        version_id: Optional[str] = None,
         model_name: Optional[str] = None,
         dataset: Optional[str] = None,
         framework: Optional[str] = None,
@@ -138,26 +134,24 @@ class AsyncEvalsClient:
     ) -> Dict[str, Any]:
         """Create a new evaluation
 
-        Either run_id or environment_ids must be provided. If run_id is provided,
-        it will be used to link the evaluation to an existing environment run.
-        Otherwise, environment_ids (one or more environment IDs) must be provided.
+        Either run_id or environments must be provided.
+        Environments should be a list of dicts with 'id' and optional 'version_id'.
+        Example: [{"id": "env-123", "version_id": "v1"}]
 
         Raises:
-            InvalidEvaluationError: If neither run_id nor environment_ids is provided
+            InvalidEvaluationError: If neither run_id nor environments is provided
         """
-        if not run_id and not environment_ids:
+        if not run_id and not environments:
             raise InvalidEvaluationError(
-                "Either 'run_id' or 'environment_id' must be provided when creating an evaluation. "
-                "If you have an environment on the hub, provide environment_id. "
-                "If you're linking to an existing training run, provide run_id."
+                "Either 'run_id' or 'environments' must be provided. "
+                "For environment evals, provide environments=[{'id': 'env-id', 'version_id': 'v1'}]"
             )
 
         payload = {
             "name": name,
-            "environment_ids": environment_ids,
+            "environments": environments,
             "suite_id": suite_id,
             "run_id": run_id,
-            "version_id": version_id,
             "model_name": model_name,
             "dataset": dataset,
             "framework": framework,

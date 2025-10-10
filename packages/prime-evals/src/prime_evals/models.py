@@ -44,14 +44,22 @@ class Evaluation(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class EnvironmentReference(BaseModel):
+    """Environment reference with optional version"""
+
+    id: str
+    version_id: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class CreateEvaluationRequest(BaseModel):
     """Create evaluation request model"""
 
     name: str
-    environment_ids: Optional[List[str]] = None
+    environments: Optional[List[Dict[str, str]]] = None
     suite_id: Optional[str] = None
     run_id: Optional[str] = None
-    version_id: Optional[str] = None
     model_name: Optional[str] = None
     dataset: Optional[str] = None
     framework: Optional[str] = None

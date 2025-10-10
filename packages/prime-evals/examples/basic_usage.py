@@ -22,6 +22,7 @@ def main():
 
     eval_response = client.create_evaluation(
         name="gsm8k-example-evaluation",
+        environments=[{"id": "your-environment-id", "version_id": "v1"}],
         model_name="gpt-4o-mini",
         dataset="gsm8k",
         framework="verifiers",

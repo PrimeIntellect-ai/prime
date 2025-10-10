@@ -25,6 +25,7 @@ from .exceptions import (
 from .models import (
     CreateEvaluationRequest,
     Environment,
+    EnvironmentReference,
     Evaluation,
     EvaluationListResponse,
     EvaluationStatus,
@@ -54,6 +55,7 @@ __all__ = [
     "PushSamplesRequest",
     "FinalizeEvaluationRequest",
     "Environment",
+    "EnvironmentReference",
     # Exceptions
     "APIError",
     "UnauthorizedError",

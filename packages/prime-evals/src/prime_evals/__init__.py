@@ -19,6 +19,7 @@ from .exceptions import (
     EnvironmentNotFoundError,
     EvalsAPIError,
     EvaluationNotFoundError,
+    InvalidEvaluationError,
     InvalidSampleError,
 )
 from .models import (
@@ -61,5 +62,6 @@ __all__ = [
     "EvalsAPIError",
     "EnvironmentNotFoundError",
     "EvaluationNotFoundError",
+    "InvalidEvaluationError",
     "InvalidSampleError",
 ]

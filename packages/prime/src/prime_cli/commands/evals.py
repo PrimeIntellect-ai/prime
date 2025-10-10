@@ -1,10 +1,11 @@
 import json
 from functools import wraps
+from pathlib import Path
 from typing import Optional
 
 import typer
 from prime_core import APIClient
-from prime_evals import EvalsAPIError, EvalsClient
+from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
@@ -171,6 +172,23 @@ def get_samples(
 @handle_errors
 def push_eval(
     config_file: str = typer.Argument(..., help="Path to eval config JSON file"),
+    run_id: Optional[str] = typer.Option(
+        None,
+        "--run-id",
+        "-r",
+        help="Link to existing training run id",
+    ),
+    env_hub_id: Optional[str] = typer.Option(
+        None,
+        "--env-hub-id",
+        "-e",
+        help="Environment Hub id",
+    ),
+    env_metadata_path: Optional[str] = typer.Option(
+        None,
+        "--env-metadata",
+        help="Path to .env-metadata.json file (overrides default lookup)",
+    ),
     output: str = typer.Option("pretty", "--output", "-o", help="json|pretty"),
 ) -> None:
     """Push evaluation data from a JSON config file.
@@ -183,6 +201,20 @@ def push_eval(
     - metadata: Dictionary of metadata
     - results: List of result samples
 
+    Either --run-id or --env-hub-id must be provided (or set environment_ids in config):
+    - Use --run-id to link to an existing training run
+    - Use --env-hub-id with a hub environment hub id
+
+    Examples:
+        # Using run ID
+        prime evals push eval.json --run-id abc123
+
+        # Using environment hub ID
+        prime evals push eval.json --env-hub-id my-env-hub-id
+
+        # Explicitly providing metadata file
+        prime evals push eval.json --env-metadata environments/gsm8k/.env-metadata.json
+
     See examples/eval_example.json for a complete example.
     """
     try:
@@ -194,6 +226,42 @@ def push_eval(
         console.print(f"[dim]   Model: {eval_data.get('model_name', 'N/A')}[/dim]")
         console.print(f"[dim]   Dataset: {eval_data.get('dataset', 'N/A')}[/dim]")
         console.print(f"[dim]   Results: {len(eval_data.get('results', []))} samples[/dim]")
+
+        resolved_env_hub_id = None
+        environment_ids = eval_data.get("environment_ids")
+
+        if env_hub_id and not run_id:
+            metadata_path = None
+
+            if env_metadata_path:
+                # Use explicit path if provided
+                metadata_path = Path(env_metadata_path)
+            else:
+                # Try to find .env-metadata.json in default locations
+                env_name = env_hub_id.replace("-", "_")
+                default_path = Path(f"environments/{env_name}/.env-metadata.json")
+                if default_path.exists():
+                    metadata_path = default_path
+
+            if metadata_path and metadata_path.exists():
+                try:
+                    with open(metadata_path) as f:
+                        hub_metadata = json.load(f)
+                        resolved_env_hub_id = hub_metadata.get("environment_id")
+                        if resolved_env_hub_id:
+                            short_id = resolved_env_hub_id[:16]
+                            console.print(
+                                f"[blue]✓ Found environment metadata:[/blue] {short_id}..."
+                            )
+                            environment_ids = [resolved_env_hub_id]
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Could not load {metadata_path}: {e}[/yellow]")
+
+            # If no metadata found, use the provided env_hub_id directly
+            if not resolved_env_hub_id:
+                environment_ids = [env_hub_id]
+                console.print(f"[blue]Using environment hub ID:[/blue] {env_hub_id}")
+
         console.print()
 
         api_client = APIClient()
@@ -202,6 +270,8 @@ def push_eval(
         console.print("[blue]Creating evaluation...[/blue]")
         create_response = client.create_evaluation(
             name=eval_data["eval_name"],
+            environment_ids=environment_ids,
+            run_id=run_id,
             model_name=eval_data.get("model_name"),
             dataset=eval_data.get("dataset"),
             framework=eval_data.get("metadata", {}).get("framework", "verifiers"),
@@ -253,6 +323,14 @@ def push_eval(
         raise typer.Exit(1)
     except json.JSONDecodeError as e:
         console.print(f"[red]Error:[/red] Invalid JSON in config file: {e}")
+        raise typer.Exit(1)
+    except InvalidEvaluationError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        console.print()
+        console.print("[yellow]Tip:[/yellow] Either provide:")
+        console.print("  --run-id <run_id>  (to link to an existing environment run)")
+        console.print("  --env-hub-id <env_id>  (for environment from hub)")
+        console.print("  or set 'environment_ids' in the config file")
         raise typer.Exit(1)
     except KeyError as e:
         console.print(f"[red]Error:[/red] Missing required field in config: {e}")

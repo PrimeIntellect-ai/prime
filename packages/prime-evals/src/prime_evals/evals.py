@@ -2,6 +2,8 @@ from typing import Any, Dict, List, Optional
 
 from prime_core import APIClient, AsyncAPIClient
 
+from .exceptions import InvalidEvaluationError
+
 
 class EvalsClient:
     """
@@ -27,7 +29,22 @@ class EvalsClient:
         metadata: Optional[Dict[str, Any]] = None,
         metrics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Create a new evaluation"""
+        """Create a new evaluation
+
+        Either run_id or environment_ids must be provided. If run_id is provided,
+        it will be used to link the evaluation to an existing training run.
+        Otherwise, environment_ids must be provided.
+
+        Raises:
+            InvalidEvaluationError: If neither run_id nor environment_ids is provided
+        """
+        if not run_id and not environment_ids:
+            raise InvalidEvaluationError(
+                "Either 'run_id' or 'environment_id' must be provided when creating an evaluation. "
+                "If you have an environment on the hub, provide environment_id. "
+                "If you're linking to an existing training run, provide run_id."
+            )
+
         payload = {
             "name": name,
             "environment_ids": environment_ids,
@@ -119,7 +136,22 @@ class AsyncEvalsClient:
         metadata: Optional[Dict[str, Any]] = None,
         metrics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Create a new evaluation"""
+        """Create a new evaluation
+
+        Either run_id or environment_ids must be provided. If run_id is provided,
+        it will be used to link the evaluation to an existing environment run.
+        Otherwise, environment_ids (one or more environment IDs) must be provided.
+
+        Raises:
+            InvalidEvaluationError: If neither run_id nor environment_ids is provided
+        """
+        if not run_id and not environment_ids:
+            raise InvalidEvaluationError(
+                "Either 'run_id' or 'environment_id' must be provided when creating an evaluation. "
+                "If you have an environment on the hub, provide environment_id. "
+                "If you're linking to an existing training run, provide run_id."
+            )
+
         payload = {
             "name": name,
             "environment_ids": environment_ids,

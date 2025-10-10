@@ -23,3 +23,9 @@ class InvalidSampleError(EvalsAPIError):
     """Raised when a sample has invalid data."""
 
     pass
+
+
+class InvalidEvaluationError(EvalsAPIError):
+    """Raised when evaluation configuration is invalid."""
+
+    pass

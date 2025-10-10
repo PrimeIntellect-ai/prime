@@ -1750,25 +1750,21 @@ def eval_env(
     if hf_hub_dataset_name:
         cmd += ["-D", hf_hub_dataset_name]
 
-    # Generate session_id and job_id for end-to-end tracing
+    # Generate job_id for end-to-end tracing of eval runs
     eval_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    session_uuid = str(uuid.uuid4())[:8]
-    session_id = f"eval_{eval_timestamp}_{session_uuid}"
-
-    # Create job_id from environment, model, and timestamp for grouping related eval runs
+    job_uuid = str(uuid.uuid4())[:8]
     sanitized_env = environment.replace("-", "_").replace("/", "_")
     sanitized_model = model.replace("/", "_").replace("-", "_")
-    job_id = f"{sanitized_env}_{sanitized_model}_{eval_timestamp}"
+    job_id = f"{sanitized_env}_{sanitized_model}_{eval_timestamp}_{job_uuid}"
 
-    # Pass tracking headers to vf-eval
-    cmd += ["--header", f"X-PI-Session-Id: {session_id}"]
+    # Pass tracking header to vf-eval
     cmd += ["--header", f"X-PI-Job-Id: {job_id}"]
 
     # If a team is configured, pass it to vf-eval via header
     if config.team_id:
         cmd += ["--header", f"X-Prime-Team-ID: {config.team_id}"]
 
-    console.print(f"[dim]Eval tracking - session_id: {session_id}, job_id: {job_id}[/dim]")
+    console.print(f"[dim]Eval job_id: {job_id}[/dim]")
 
     # Execute; stream output directly
     try:

@@ -1,6 +1,7 @@
 [project]
 name = "prime-sandboxes"
-version = "0.1.0"
+# Version is single-sourced from src/prime_sandboxes/__init__.py via Hatch
+dynamic = ["version"]
 description = "Prime Intellect Sandboxes SDK - Manage remote code execution environments"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -43,6 +44,9 @@ prime-core = { workspace = true }
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/prime_sandboxes/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/prime_sandboxes"]

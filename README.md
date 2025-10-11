@@ -194,6 +194,25 @@ uv run pytest packages/prime-sandboxes/tests
 
 All packages (prime-core, prime-sandboxes, prime) are installed in editable mode. Changes to code are immediately reflected.
 
+### Releasing
+
+This monorepo contains two independently versioned packages: `prime` (CLI + full SDK) and `prime-sandboxes` (lightweight SDK).
+
+Versions are single-sourced from each package's `__init__.py` file:
+- **prime**: `packages/prime/src/prime_cli/__init__.py`
+- **prime-sandboxes**: `packages/prime-sandboxes/src/prime_sandboxes/__init__.py`
+
+#### To release a new version:
+
+1. Update the `__version__` string in the appropriate `__init__.py` file
+2. Commit and push the change
+
+Tagging and publishing to PyPI is handled automatically by CI.
+
+#### Version sync considerations:
+
+When releasing `prime`, consider whether `prime-sandboxes` should also be bumped, as `prime` depends on `prime-sandboxes`. The packages can be released independently or together depending on what changed.
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

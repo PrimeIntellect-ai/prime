@@ -1550,7 +1550,6 @@ wheels = [
 
 [[package]]
 name = "prime"
-version = "0.4.2"
 source = { editable = "packages/prime" }
 dependencies = [
     { name = "build" },
@@ -1607,7 +1606,6 @@ requires-dist = [
 
 [[package]]
 name = "prime-sandboxes"
-version = "0.1.0"
 source = { editable = "packages/prime-sandboxes" }
 dependencies = [
     { name = "httpx" },

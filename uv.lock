@@ -16,6 +16,7 @@ members = [
 
 [manifest.dependency-groups]
 dev = [
+    { name = "pre-commit", specifier = ">=3.5.0" },
     { name = "pytest", specifier = ">=7.0.0" },
     { name = "ruff", specifier = ">=0.13.1" },
     { name = "ty", specifier = ">=0.0.1a21" },
@@ -1564,7 +1565,6 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
-    { name = "pre-commit" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "ty" },
@@ -1575,7 +1575,6 @@ dev = [
 requires-dist = [
     { name = "build", specifier = ">=1.0.0" },
     { name = "cryptography", specifier = ">=41.0.0" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.5.0" },
     { name = "prime-core", editable = "packages/prime-core" },
     { name = "prime-sandboxes", editable = "packages/prime-sandboxes" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },

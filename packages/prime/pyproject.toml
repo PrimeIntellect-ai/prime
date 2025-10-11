@@ -1,6 +1,7 @@
 [project]
 name = "prime"
-version = "0.4.2"
+# Version is single-sourced from src/prime_cli/__init__.py via Hatch
+dynamic = ["version"]
 description = "Prime Intellect CLI + SDK"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1749,9 +1750,21 @@ def eval_env(
     if hf_hub_dataset_name:
         cmd += ["-D", hf_hub_dataset_name]
 
+    # Generate job_id for end-to-end tracing of eval runs
+    eval_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    job_uuid = str(uuid.uuid4())[:8]
+    sanitized_env = environment.replace("-", "_").replace("/", "_")
+    sanitized_model = model.replace("/", "_").replace("-", "_")
+    job_id = f"{sanitized_env}_{sanitized_model}_{eval_timestamp}_{job_uuid}"
+
+    # Pass tracking header to vf-eval
+    cmd += ["--header", f"X-PI-Job-Id: {job_id}"]
+
     # If a team is configured, pass it to vf-eval via header
     if config.team_id:
         cmd += ["--header", f"X-Prime-Team-ID: {config.team_id}"]
+
+    console.print(f"[dim]Eval job_id: {job_id}[/dim]")
 
     # Execute; stream output directly
     try:

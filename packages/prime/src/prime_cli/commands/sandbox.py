@@ -5,10 +5,11 @@ import time
 from typing import Any, Dict, List, Optional
 
 import typer
-from prime_core import APIError, Config
 from prime_sandboxes import (
     APIClient,
+    APIError,
     BulkDeleteSandboxResponse,
+    Config,
     CreateSandboxRequest,
     Sandbox,
     SandboxClient,

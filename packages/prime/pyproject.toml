@@ -4,7 +4,7 @@ name = "prime"
 dynamic = ["version"]
 description = "Prime Intellect CLI + SDK"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 license = "MIT"
 authors = [
     { name = "Prime Intellect", email = "contact@primeintellect.ai" }
@@ -15,7 +15,7 @@ dependencies = [
     "typer>=0.9.0",
     "rich>=13.3.1",
     "cryptography>=41.0.0",
-    "verifiers>=0.1.5",
+    "verifiers>=0.1.5.post0",
     "build>=1.0.0",
     "toml>=0.10.0",
 ]

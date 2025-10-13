@@ -238,16 +238,12 @@ def push_eval(
                     with open(metadata_path) as f:
                         hub_metadata = json.load(f)
                         resolved_env_id = hub_metadata.get("environment_id")
-                        version_id = hub_metadata.get("version_id")
                         if resolved_env_id:
                             short_id = resolved_env_id[:16]
                             console.print(
                                 f"[blue]✓ Found environment metadata:[/blue] {short_id}..."
                             )
-                            env_dict = {"id": resolved_env_id}
-                            if version_id:
-                                env_dict["version_id"] = version_id
-                            environments = [env_dict]
+                            environments = [{"id": resolved_env_id}]
                 except Exception as e:
                     console.print(f"[yellow]Warning: Could not load {metadata_path}: {e}[/yellow]")
 

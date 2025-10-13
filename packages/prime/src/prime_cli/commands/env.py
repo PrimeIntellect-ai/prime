@@ -650,7 +650,6 @@ def push(
                 try:
                     env_metadata = {
                         "environment_id": env_id,
-                        "version_id": version_id,
                         "owner": owner_name,
                         "name": env_name,
                         "pushed_at": datetime.now().isoformat(),

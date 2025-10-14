@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -645,6 +646,25 @@ def push(
                 console.print(f"\n[green]✓ Successfully pushed {owner_name}/{env_name}[/green]")
                 console.print(f"Wheel: {wheel_path.name}")
                 console.print(f"SHA256: {wheel_sha256}")
+
+                # Save environment hub metadata for future reference
+                try:
+                    env_metadata = {
+                        "environment_id": env_id,
+                        "owner": owner_name,
+                        "name": env_name,
+                        "pushed_at": datetime.now().isoformat(),
+                        "wheel_sha256": wheel_sha256,
+                        "visibility": visibility,
+                    }
+                    metadata_path = env_path / ".env-metadata.json"
+                    with open(metadata_path, "w") as f:
+                        json.dump(env_metadata, f, indent=2)
+                    console.print(f"[dim]Saved environment metadata to {metadata_path.name}[/dim]")
+                except Exception as e:
+                    console.print(
+                        f"[yellow]Warning: Could not save environment metadata: {e}[/yellow]"
+                    )
 
                 # Show Hub page link for the environment
                 frontend_url = client.config.frontend_url.rstrip("/")

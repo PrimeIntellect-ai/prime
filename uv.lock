@@ -11,6 +11,7 @@ resolution-markers = [
 members = [
     "prime",
     "prime-core",
+    "prime-evals",
     "prime-sandboxes",
 ]
 
@@ -1336,6 +1337,7 @@ dependencies = [
     { name = "build" },
     { name = "cryptography" },
     { name = "prime-core" },
+    { name = "prime-evals" },
     { name = "prime-sandboxes" },
     { name = "rich" },
     { name = "toml" },
@@ -1358,6 +1360,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=41.0.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.5.0" },
     { name = "prime-core", editable = "packages/prime-core" },
+    { name = "prime-evals", editable = "packages/prime-evals" },
     { name = "prime-sandboxes", editable = "packages/prime-sandboxes" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "rich", specifier = ">=13.3.1" },
@@ -1384,6 +1387,32 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
 ]
+
+[[package]]
+name = "prime-evals"
+version = "0.1.0"
+source = { editable = "packages/prime-evals" }
+dependencies = [
+    { name = "httpx" },
+    { name = "prime-core" },
+    { name = "pydantic" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.25.0" },
+    { name = "prime-core", editable = "packages/prime-core" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.13.1" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "prime-sandboxes"

@@ -34,6 +34,7 @@ from .models import (
     Sample,
     SamplesResponse,
 )
+from .utils import push_verifiers_eval_to_hub
 
 __version__ = "0.1.0"
 
@@ -66,4 +67,6 @@ __all__ = [
     "EvaluationNotFoundError",
     "InvalidEvaluationError",
     "InvalidSampleError",
+    # Utils
+    "push_verifiers_eval_to_hub",
 ]

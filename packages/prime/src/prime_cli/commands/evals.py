@@ -1,16 +1,19 @@
+import asyncio
 import json
 from functools import wraps
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
-from prime_core import APIClient
+from openai import AsyncOpenAI
+from prime_core import APIClient, Config
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
 
 from ..utils import output_data_as_json, validate_output_format
+from ..utils.eval_runner import run_and_push_eval
 
 app = typer.Typer(
     help="Run and manage Prime Evals (in closed beta, requires prime eval permissions)",
@@ -43,6 +46,193 @@ def format_output(data: dict, output: str) -> None:
     else:
         syntax = Syntax(json.dumps(data, indent=2), "json", theme="monokai")
         console.print(syntax)
+
+
+@app.command("run")
+@handle_errors
+def run_eval(
+    environments: List[str] = typer.Argument(..., help="Environment IDs to evaluate"),
+    model: str = typer.Option(
+        "meta-llama/llama-3.1-70b-instruct",
+        "--model",
+        "-m",
+        help="Model to use (e.g. 'meta-llama/llama-3.1-70b-instruct')",
+    ),
+    num_examples: int = typer.Option(
+        5, "--num-examples", "-n", help="Number of examples per environment"
+    ),
+    rollouts_per_example: int = typer.Option(
+        3, "--rollouts-per-example", "-r", help="Rollouts per example"
+    ),
+    max_concurrent: int = typer.Option(
+        32, "--max-concurrent", "-c", help="Max concurrent requests"
+    ),
+    max_tokens: Optional[int] = typer.Option(
+        None, "--max-tokens", "-t", help="Max tokens to generate"
+    ),
+    temperature: Optional[float] = typer.Option(None, "--temperature", "-T", help="Temperature"),
+    sampling_args: Optional[str] = typer.Option(
+        None,
+        "--sampling-args",
+        "-S",
+        help="Sampling args as JSON, e.g. '{\"enable_thinking\": false}'",
+    ),
+    save_to_hub: bool = typer.Option(
+        True, "--save-to-hub/--no-save-to-hub", help="Save results to Environment Hub"
+    ),
+    eval_name: Optional[str] = typer.Option(
+        None, "--eval-name", help="Evaluation name (auto-generated if not provided)"
+    ),
+    env_args: Optional[str] = typer.Option(
+        None, "--env-args", "-a", help='Environment args as JSON, e.g. \'{"key":"value"}\''
+    ),
+    api_base_url: Optional[str] = typer.Option(
+        None,
+        "--api-base-url",
+        "-b",
+        help="Override API base URL (defaults to Prime Inference)",
+    ),
+    env_dir_path: str = typer.Option(
+        "./environments", "--env-dir-path", "-p", help="Path to environments directory"
+    ),
+) -> None:
+    """Run evaluation on one or more environments using Prime Inference.
+
+    Evaluates environments and optionally pushes results to Environment Hub.
+
+    Examples:
+        # Single environment
+        prime evals run gsm8k -n 10 -m meta-llama/llama-3.1-70b-instruct
+
+        # Multiple environments
+        prime evals run gsm8k wordle math500 -n 100 -r 5
+
+        # Without Hub push
+        prime evals run gsm8k --no-push-to-hub
+    """
+    config = Config()
+
+    api_key = config.api_key
+    if not api_key:
+        console.print(
+            "[red]No API key configured.[/red] "
+            "Run [bold]prime login[/bold] or [bold]prime config set-api-key[/bold]."
+        )
+        raise typer.Exit(1)
+
+    if api_base_url:
+        chosen_base = api_base_url.rstrip("/")
+    else:
+        inference_base_url = (config.inference_url or "").strip()
+        if not inference_base_url:
+            console.print(
+                "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
+            )
+            raise typer.Exit(1)
+        chosen_base = inference_base_url.rstrip("/")
+
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=chosen_base,
+    )
+
+    env_args_dict = {}
+    if env_args:
+        try:
+            parsed_args = json.loads(env_args)
+            # If single dict, apply to all envs
+            is_flat_dict = isinstance(parsed_args, dict) and not any(
+                env_id in parsed_args for env_id in environments
+            )
+            if is_flat_dict:
+                env_args_dict = {env_id: parsed_args for env_id in environments}
+            else:
+                env_args_dict = parsed_args
+        except json.JSONDecodeError as e:
+            console.print(f"[red]Invalid JSON in --env-args:[/red] {e}")
+            raise typer.Exit(1)
+
+    merged_sampling_args = {}
+    if sampling_args:
+        try:
+            merged_sampling_args.update(json.loads(sampling_args))
+        except json.JSONDecodeError as e:
+            console.print(f"[red]Invalid JSON in --sampling-args:[/red] {e}")
+            raise typer.Exit(1)
+
+    if max_tokens is not None:
+        merged_sampling_args["max_tokens"] = max_tokens
+    if temperature is not None:
+        merged_sampling_args["temperature"] = temperature
+
+    console.print(f"[blue]Running evaluation on {len(environments)} environment(s)...[/blue]")
+    console.print(f"[dim]Model: {model}[/dim]")
+    console.print(f"[dim]Environments: {', '.join(environments)}[/dim]")
+    console.print()
+
+    try:
+        result = asyncio.run(
+            run_and_push_eval(
+                environments=environments,
+                model=model,
+                client=client,
+                num_examples=num_examples,
+                rollouts_per_example=rollouts_per_example,
+                max_concurrent=max_concurrent,
+                env_args_dict=env_args_dict,
+                sampling_args=merged_sampling_args if merged_sampling_args else None,
+                save_to_hub=save_to_hub,
+                eval_name=eval_name,
+                framework="prime-cli",
+                env_dir_path=env_dir_path,
+            )
+        )
+
+        console.print("[green]✓ Evaluation complete![/green]")
+        console.print()
+
+        table = Table(title="Evaluation Results")
+        table.add_column("Environment", style="cyan")
+        table.add_column("Avg Reward", style="green")
+        table.add_column("Std Reward", style="yellow")
+        table.add_column("Samples", style="white")
+        if save_to_hub:
+            table.add_column("Eval ID", style="magenta")
+
+        for env_id in environments:
+            metrics = result["metrics"][env_id]
+            row = [
+                env_id,
+                f"{metrics['avg_reward']:.3f}",
+                f"{metrics['std_reward']:.3f}",
+                str(metrics["num_samples"]),
+            ]
+            if save_to_hub and env_id in result["eval_ids"]:
+                row.append(result["eval_ids"][env_id][:16] + "...")
+
+            table.add_row(*row)
+
+        console.print(table)
+
+        console.print()
+        for env_id in environments:
+            metrics = result["metrics"][env_id]
+            other_metrics = {
+                k: v for k, v in metrics.items() if k.startswith("avg_") and k != "avg_reward"
+            }
+            if other_metrics:
+                console.print(f"[cyan]{env_id}[/cyan] additional metrics:")
+                for metric_name, value in other_metrics.items():
+                    display_name = metric_name.replace("avg_", "")
+                    console.print(f"  {display_name}: {value:.3f}")
+
+        if save_to_hub:
+            console.print()
+            console.print("[dim]View results: prime evals list[/dim]")
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
 
 @app.command("list")

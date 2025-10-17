@@ -83,6 +83,7 @@ class CreateSandboxRequest(BaseModel):
     labels: List[str] = Field(default_factory=list)
     team_id: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
+    region: Optional[str] = None
 
 
 class UpdateSandboxRequest(BaseModel):
@@ -143,3 +144,9 @@ class BulkDeleteSandboxResponse(BaseModel):
     succeeded: List[str]
     failed: List[Dict[str, str]]
     message: str
+
+
+class SandboxAvailableRegionsResponse(BaseModel):
+    """Available regions response model"""
+
+    regions: List[str]

@@ -292,6 +292,9 @@ def create(
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
     ),
+    region: Optional[str] = typer.Option(
+        None, help="Preferred region for sandbox placement (e.g., us-west, us-east)"
+    ),
     env: Optional[List[str]] = typer.Option(
         None,
         help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
@@ -345,6 +348,7 @@ def create(
             environment_vars=env_vars if env_vars else None,
             labels=labels if labels else [],
             team_id=team_id,
+            region=region,
         )
 
         # Show configuration summary
@@ -357,6 +361,8 @@ def create(
             console.print(f"GPUs: {gpu_count}")
         console.print(f"Timeout: {timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
+        if region:
+            console.print(f"Region: {region}")
         if labels:
             console.print(f"Labels: {', '.join(labels)}")
         if env_vars:
@@ -766,6 +772,43 @@ def download_file(
         raise typer.Exit(1)
     except FileNotFoundError as e:
         console.print(f"[red]File not found:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
+        raise typer.Exit(1)
+
+
+@app.command("regions")
+def regions(
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List available sandbox regions"""
+    validate_output_format(output, console)
+
+    try:
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        with console.status("[bold blue]Fetching available regions...", spinner="dots"):
+            regions_response = sandbox_client.list_regions()
+
+        if output == "json":
+            output_data_as_json({"regions": regions_response.regions}, console)
+        else:
+            if regions_response.regions:
+                table = build_table(
+                    "Available Sandbox Regions",
+                    [("Region", "cyan")],
+                )
+                for region in sorted(regions_response.regions):
+                    table.add_row(region)
+                console.print(table)
+            else:
+                console.print("[yellow]No regions available[/yellow]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")

@@ -17,6 +17,7 @@ from .models import (
     CreateSandboxRequest,
     FileUploadResponse,
     Sandbox,
+    SandboxAvailableRegionsResponse,
     SandboxListResponse,
     SandboxLogsResponse,
 )
@@ -200,6 +201,11 @@ class SandboxClient:
 
         response = self.client.request("GET", "/sandbox", params=params)
         return SandboxListResponse.model_validate(response)
+
+    def list_regions(self) -> SandboxAvailableRegionsResponse:
+        """List available sandbox regions"""
+        response = self.client.request("GET", "/sandbox/regions")
+        return SandboxAvailableRegionsResponse.model_validate(response)
 
     def get(self, sandbox_id: str) -> Sandbox:
         """Get a specific sandbox"""
@@ -444,6 +450,11 @@ class AsyncSandboxClient:
 
         response = await self.client.request("GET", "/sandbox", params=params)
         return SandboxListResponse.model_validate(response)
+
+    async def list_regions(self) -> SandboxAvailableRegionsResponse:
+        """List available sandbox regions"""
+        response = await self.client.request("GET", "/sandbox/regions")
+        return SandboxAvailableRegionsResponse.model_validate(response)
 
     async def get(self, sandbox_id: str) -> Sandbox:
         """Get a specific sandbox"""

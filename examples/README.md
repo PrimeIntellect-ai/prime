@@ -4,39 +4,43 @@ This directory contains example scripts and demos for using the Prime CLI.
 
 ## Evals Example
 
-The `eval_example.json` file demonstrates the format for pushing evaluation results to the Environment Hub.
+Prime CLI supports two formats for pushing evaluation results to the Environment Hub:
+
+1. **JSON Format** (`eval_example.json`): Single JSON file with all evaluation data
+2. **Verifiers Format** (`verifiers_example/`): Directory with `metadata.json` and `results.jsonl`
 
 ### Pushing Evals
 
 1. **Push from JSON file**:
    ```bash
-   prime evals push examples/eval_example.json
+   prime evals push examples/eval_example.json --env-hub-id gsm8k
    ```
 
-2. **List all evals**:
+2. **Push from verifiers format directory**:
+   ```bash
+   prime evals push examples/verifiers_example --env-hub-id gsm8k
+   ```
+
+3. **Push with run ID** (link to existing training run):
+   ```bash
+   prime evals push examples/eval_example.json --run-id abc123
+   ```
+
+4. **List all evals**:
    ```bash
    prime evals list
    ```
 
-3. **Get specific eval**:
+5. **Get specific eval**:
    ```bash
    prime evals get <eval_id>
    ```
 
-4. **View eval samples**:
+6. **View eval samples**:
    ```bash
    prime evals samples <eval_id>
    ```
 
-### Eval Data Format
-
-The JSON file should contain:
-- `eval_name`: Name of your evaluation (required)
-- `model_name`: Model being evaluated (required)
-- `dataset`: Dataset used for evaluation (required)
-- `metrics`: Dictionary of metric names and values (required)
-- `metadata`: Additional metadata (optional)
-- `results`: Detailed per-sample results (optional)
 
 ## Sandbox Demo
 

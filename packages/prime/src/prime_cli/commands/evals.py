@@ -168,10 +168,74 @@ def get_samples(
         raise typer.Exit(1)
 
 
+def _load_verifiers_format(directory: Path) -> dict:
+    """Load evaluation data from verifiers format (metadata.json + results.jsonl)."""
+    metadata_file = directory / "metadata.json"
+    results_file = directory / "results.jsonl"
+
+    if not metadata_file.exists():
+        raise FileNotFoundError(f"metadata.json not found in {directory}")
+    if not results_file.exists():
+        raise FileNotFoundError(f"results.jsonl not found in {directory}")
+
+    with open(metadata_file, "r") as f:
+        metadata = json.load(f)
+
+    results = []
+    with open(results_file, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    results.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    metrics = {}
+    metadata_copy = {}
+    for key, value in metadata.items():
+        if key.startswith("avg_"):
+            metric_name = key[4:]  # Remove 'avg_' prefix
+            metrics[metric_name] = value
+        else:
+            metadata_copy[key] = value
+
+    eval_data = {
+        "eval_name": f"{metadata.get('env', 'unknown')}-{metadata.get('model', 'unknown')}",
+        "model_name": metadata.get("model", "unknown"),
+        "dataset": metadata.get("env", "unknown"),
+        "metrics": metrics,
+        "metadata": metadata_copy,
+        "results": results,
+    }
+
+    return eval_data
+
+
+def _detect_format(path_str: str) -> tuple[str, Path]:
+    """Detect if path is a JSON file or a verifiers directory."""
+    path = Path(path_str)
+
+    if path.is_file():
+        return ("json", path)
+
+    if path.is_dir():
+        metadata_file = path / "metadata.json"
+        results_file = path / "results.jsonl"
+        if metadata_file.exists() and results_file.exists():
+            return ("verifiers", path)
+        else:
+            raise ValueError(f"Directory {path} does not contain required files")
+
+    raise FileNotFoundError(f"Path not found: {path}")
+
+
 @app.command("push")
 @handle_errors
 def push_eval(
-    config_file: str = typer.Argument(..., help="Path to eval config JSON file"),
+    config_path: str = typer.Argument(
+        ..., help="Path to eval config JSON file or directory with metadata.json/results.jsonl"
+    ),
     run_id: Optional[str] = typer.Option(
         None,
         "--run-id",
@@ -191,30 +255,47 @@ def push_eval(
     ),
     output: str = typer.Option("pretty", "--output", "-o", help="json|pretty"),
 ) -> None:
-    """Push evaluation data from a JSON config file.
+    """Push evaluation data from a JSON config file or verifiers format directory.
 
-    The config file should contain:
-    - eval_name: Name of the evaluation
-    - model_name: Model used
-    - dataset: Dataset name
-    - metrics: Dictionary of metrics
-    - metadata: Dictionary of metadata
-    - results: List of result samples
+    Supports two formats:
+
+    1. JSON format (single file):
+       - eval_name: Name of the evaluation
+       - model_name: Model used
+       - dataset: Dataset name
+       - metrics: Dictionary of metrics
+       - metadata: Dictionary of metadata
+       - results: List of result samples
+
+    2. Verifiers format (directory):
+       - metadata.json: Contains env, model, num_examples, rollouts_per_example, avg_* metrics
+       - results.jsonl: JSONL file with result samples (one per line)
 
     Either --run-id or --env-hub-id must be provided:
     - Use --run-id to link to an existing training run
     - Use --env-hub-id with a hub environment ID
 
     Examples:
+        # JSON format
         prime evals push eval.json --run-id abc123
-        prime evals push eval.json --env-hub-id my-env-hub-id
+
+        # Verifiers format
+        prime evals push environments/gsm8k/outputs/evals/gsm8k--gpt-4/abc123 --env-hub-id gsm8k
+
+        # With environment metadata
         prime evals push eval.json --env-metadata environments/gsm8k/.env-metadata.json
     """
     try:
-        with open(config_file, "r") as f:
-            eval_data = json.load(f)
+        format_type, path = _detect_format(config_path)
 
-        console.print(f"[blue]✓ Loaded eval data from:[/blue] {config_file}")
+        if format_type == "json":
+            with open(path, "r") as f:
+                eval_data = json.load(f)
+            console.print(f"[blue]✓ Loaded eval data (JSON format):[/blue] {path}")
+        else:  # verifiers format
+            eval_data = _load_verifiers_format(path)
+            console.print(f"[blue]✓ Loaded eval data (verifiers format):[/blue] {path}")
+
         console.print(f"[dim]   Name: {eval_data.get('eval_name', 'N/A')}[/dim]")
         console.print(f"[dim]   Model: {eval_data.get('model_name', 'N/A')}[/dim]")
         console.print(f"[dim]   Dataset: {eval_data.get('dataset', 'N/A')}[/dim]")
@@ -307,11 +388,11 @@ def push_eval(
                 console,
             )
 
-    except FileNotFoundError:
-        console.print(f"[red]Error:[/red] File not found: {config_file}")
+    except FileNotFoundError as e:
+        console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
     except json.JSONDecodeError as e:
-        console.print(f"[red]Error:[/red] Invalid JSON in config file: {e}")
+        console.print(f"[red]Error:[/red] Invalid JSON: {e}")
         raise typer.Exit(1)
     except InvalidEvaluationError as e:
         console.print(f"[red]Error:[/red] {e}")

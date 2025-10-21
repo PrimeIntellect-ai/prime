@@ -1189,6 +1189,9 @@ def install(
             console.print(f"[red]Error: {with_tool} is not installed.[/red]")
             raise typer.Exit(1)
 
+        # De-dup environment IDs just in case
+        env_ids = list(dict.fromkeys(env_ids))
+
         # Resolving and validating environments
         installable_envs = []
         failed_envs = []

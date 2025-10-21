@@ -1128,44 +1128,33 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
         tool: Tool name for display
 
     Raises:
-        typer.Exit: If installation fails
+        Exception: If installation fails (caller should catch)
     """
     console.print(f"\n[cyan]Installing {env_id}@{version} with {tool}...[/cyan]")
     console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
 
-    try:
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            universal_newlines=True,
-        )
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        universal_newlines=True,
+    )
 
-        # Stream output line by line
-        while True:
-            output = process.stdout.readline() if process.stdout else ""
-            if output == "" and process.poll() is not None:
-                break
-            if output:
-                console.print(output.rstrip())
+    # Stream output line by line
+    while True:
+        output = process.stdout.readline() if process.stdout else ""
+        if output == "" and process.poll() is not None:
+            break
+        if output:
+            console.print(output.rstrip())
 
-        return_code = process.poll()
-        if return_code != 0:
-            console.print(
-                f"[red]Environment installation failed with exit code {return_code}[/red]"
-            )
-            raise typer.Exit(1)
+    return_code = process.poll()
+    if return_code != 0:
+        raise Exception(f"Installation failed with exit code {return_code}")
 
-        console.print(f"\n[green]✓ Successfully installed {env_id}@{version}[/green]")
-
-    except FileNotFoundError:
-        console.print(f"[red]Failed to run command. Is {cmd[0]} installed?[/red]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Installation failed: {e}[/red]")
-        raise typer.Exit(1)
+    console.print(f"\n[green]✓ Successfully installed {env_id}@{version}[/green]")
 
 
 @app.command(no_args_is_help=True)
@@ -1183,6 +1172,7 @@ def install(
         prime env install owner/environment
         prime env install owner/environment@0.2.3
         prime env install owner/environment --with pip
+        prime env install owner/environment1 owner/environment2 owner/environment3
     """
     try:
         client = APIClient(require_auth=False)
@@ -1194,25 +1184,38 @@ def install(
             )
             raise typer.Exit(1)
 
-        # Validate and parse environment ID
+        # Check if tool is installed
+        if not shutil.which(with_tool):
+            console.print(f"[red]Error: {with_tool} is not installed.[/red]")
+            raise typer.Exit(1)
+
+        # Resolving and validating environments
         installable_envs = []
-        for i, env_id in enumerate(env_ids):
+        failed_envs = []
+        skipped_envs = []
+
+        console.print(
+            f"[bold]Resolving {len(env_ids)} "
+            f"environment{'s' if len(env_ids) != 1 else ''}...[/bold]"
+        )
+        for env_id in env_ids:
+            # Validate environment ID format
             try:
                 env_id, target_version = validate_env_id(env_id)
             except ValueError as e:
-                console.print(f"[red]Error: {e}[/red]")
-                raise typer.Exit(1)
+                skipped_envs.append((env_id, f"Invalid format: {e}"))
+                console.print(f"[yellow]⚠ Skipping {env_id}: Invalid format[/yellow]")
+                continue
 
             owner, name = env_id.split("/")
-
-            console.print(f"Resolving {env_id}@{target_version}...")
 
             # Fetch environment details
             try:
                 details = fetch_environment_details(client, owner, name, target_version)
             except APIError as e:
-                console.print(f"[red]Failed to get environment details: {e}[/red]")
-                raise typer.Exit(1)
+                failed_envs.append((f"{env_id}@{target_version}", f"{e}"))
+                console.print(f"[red]✗ Failed to resolve {env_id}@{target_version}: {e}[/red]")
+                continue
 
             # Get both simple index URL and wheel URL
             simple_index_url = details.get("simple_index_url")
@@ -1220,24 +1223,28 @@ def install(
 
             # Check if this is a private environment
             if not simple_index_url and not wheel_url and details.get("visibility") == "PRIVATE":
+                skipped_envs.append((f"{env_id}@{target_version}", "Private"))
                 console.print(
-                    "[yellow]Private environment detected. Using authenticated download.[/yellow]"
+                    f"[yellow]⚠ Skipping {env_id}@{target_version}: Private environment[/yellow]"
                 )
                 console.print(
-                    "[red]Direct installation not available for private environments.[/red]\n"
-                    "Please use one of these alternatives:\n"
-                    "  1. Use 'prime env pull' to download and install locally\n"
-                    "  2. Make the environment public to enable direct installation"
+                    "[dim]  Direct installation not available for private environments.[/dim]\n"
+                    "[dim]  Please use one of these alternatives:[/dim]\n"
+                    "   1. Use 'prime env pull' to download and install locally\n"
+                    "   2. Make the environment public to enable direct installation"
                 )
-                raise typer.Exit(1)
+                continue
             elif not simple_index_url and not wheel_url:
+                skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
                 console.print(
-                    "[red]Error: No installation method available for this environment.[/red]"
+                    f"[yellow]⚠ Skipping {env_id}@{target_version}: "
+                    f"No installation method available[/yellow]"
                 )
                 console.print(
-                    "Use 'prime env info' to see available options or 'pull' to download source."
+                    "[dim]  Use 'prime env info' to see available options "
+                    "or 'pull' to download source.[/dim]"
                 )
-                raise typer.Exit(1)
+                continue
 
             console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
 
@@ -1287,28 +1294,64 @@ def install(
                 try:
                     cmd_parts = get_install_command(with_tool, wheel_url)
                 except ValueError as e:
-                    console.print(f"[red]Error: {e}[/red]")
-                    raise typer.Exit(1)
+                    skipped_envs.append((f"{env_id}@{target_version}", str(e)))
+                    console.print(f"[yellow]⚠ Skipping {env_id}@{target_version}: {e}[/yellow]")
+                    continue
             else:
                 # Should not reach here due to earlier checks, but just in case
-                console.print("[red]Error: No installation method available.[/red]")
-                raise typer.Exit(1)
-
-            # Check if tool is installed
-            if not shutil.which(cmd_parts[0]):
-                console.print(f"[red]Error: {cmd_parts[0]} is not installed.[/red]")
-                raise typer.Exit(1)
+                skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
+                console.print(
+                    f"[yellow]⚠ Skipping {env_id}@{target_version}: No installation method[/yellow]"
+                )
+                continue
 
             installable_envs.append((cmd_parts, env_id, target_version, name))
 
-        # Execute installation
-        for env in installable_envs:
-            execute_install_command(env[0], env[1], env[2], with_tool)
+        if not installable_envs:
+            console.print("[red]Error: Unable to resolve installable environments[/red]")
+            raise typer.Exit(1)
 
-            # Display usage instructions
-            console.print("\n[dim]Use in Python:[/dim]")
-            console.print("  from verifiers import load_environment")
-            console.print(f"  env = load_environment('{env[3]}')")
+        # Install resolved environments
+        installed_envs = []
+        install_failed_envs = []
+
+        console.print(
+            f"\n[bold]Installing {len(installable_envs)} "
+            f"environment{'s' if len(installable_envs) != 1 else ''}...[/bold]"
+        )
+        for cmd_parts, env_id, target_version, name in installable_envs:
+            try:
+                execute_install_command(cmd_parts, env_id, target_version, with_tool)
+                installed_envs.append((env_id, target_version))
+
+                # Display usage instructions
+                console.print("\n[dim]Use in Python:[/dim]")
+                console.print("  from verifiers import load_environment")
+                console.print(f"  env = load_environment('{name}')")
+            except FileNotFoundError:
+                error_msg = f"{cmd_parts[0]} command not found"
+                install_failed_envs.append((f"{env_id}@{target_version}", error_msg))
+                console.print(f"[red]✗ Installation failed: {error_msg}[/red]")
+            except Exception as e:
+                install_failed_envs.append((f"{env_id}@{target_version}", str(e)))
+                console.print(f"[red]✗ Installation failed: {e}[/red]")
+
+        # Display final summary of installed/failed environments
+        if installed_envs:
+            console.print(
+                f"\n[bold]Installed {len(installed_envs)} "
+                f"environment{'s' if len(installed_envs) != 1 else ''}:[/bold]"
+            )
+            for env_id, version in installed_envs:
+                console.print(f"[green]✓ {env_id}@{version}[/green]")
+
+        if install_failed_envs:
+            console.print(
+                f"\n[bold]Failed to install {len(install_failed_envs)} "
+                f"environment{'s' if len(install_failed_envs) != 1 else ''}:[/bold]"
+            )
+            for env_id, reason in install_failed_envs:
+                console.print(f"[red]✗ {env_id} - {reason}")
 
     except APIError as e:
         console.print(f"[red]API Error: {e}[/red]")

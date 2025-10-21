@@ -1661,7 +1661,10 @@ def eval_env(
         help='Sampling args as JSON, e.g. \'{"enable_thinking": false, "max_tokens": 256}\'',
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
-    save_dataset: bool = typer.Option(False, "--save-dataset", "-s", help="Save dataset to disk"),
+    save_results: bool = typer.Option(True, "--save-results", "-s", help="Save results to disk"),
+    save_every: int = typer.Option(
+        1, "--save-every", "-f", help="Save dataset every n rollouts"
+    ),
     save_to_hf_hub: bool = typer.Option(False, "--save-to-hf-hub", "-H", help="Save to HF Hub"),
     hf_hub_dataset_name: Optional[str] = typer.Option(
         None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
@@ -1683,8 +1686,7 @@ def eval_env(
     ),
 ) -> None:
     """
-    Run verifiers' vf-eval with Prime Inference (closed beta)
-    (This feature in currently in closed beta and requires prime inference permissions.)
+    Run verifiers' vf-eval with Prime Inference
 
     Example:
        prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7
@@ -1763,8 +1765,10 @@ def eval_env(
         cmd += ["-S", sampling_args]
     if verbose:
         cmd += ["-v"]
-    if save_dataset:
+    if save_results:
         cmd += ["-s"]
+    if save_every is not None:
+        cmd += ["-f", str(save_every)]
     if save_to_hf_hub:
         cmd += ["-H"]
     if hf_hub_dataset_name:

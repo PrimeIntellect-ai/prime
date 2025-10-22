@@ -842,8 +842,6 @@ def history(
             limit=limit, 
         )
 
-        # Debug: Show raw API response
-
         if output == "json":
             # Output as JSON
             history_data = []
@@ -865,6 +863,7 @@ def history(
             )
             table.add_column("ID", style="cyan", no_wrap=True)
             table.add_column("Name", style="blue")
+            table.add_column("Team", style="blue")
             table.add_column("GPU", style="green")
             table.add_column("Created", style="blue")
             table.add_column("Terminated", style="blue")
@@ -877,6 +876,7 @@ def history(
                 table.add_row(
                     item_data["id"],
                     item_data["name"] or "N/A",
+                    item_data["team_id"] or "N/A",
                     item_data["gpu"],
                     item_data["created_at"],
                     item_data["terminated_at"] or "N/A",

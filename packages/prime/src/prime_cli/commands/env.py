@@ -1663,7 +1663,6 @@ def eval_env(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
     save_results: bool = typer.Option(True, "--save-results", "-s", help="Save results to disk"),
-    save_every: int = typer.Option(1, "--save-every", "-f", help="Save dataset every n rollouts"),
     save_to_hf_hub: bool = typer.Option(False, "--save-to-hf-hub", "-H", help="Save to HF Hub"),
     hf_hub_dataset_name: Optional[str] = typer.Option(
         None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
@@ -1769,8 +1768,6 @@ def eval_env(
         cmd += ["-v"]
     if save_results:
         cmd += ["-s"]
-    if save_every is not None:
-        cmd += ["-f", str(save_every)]
     if save_to_hf_hub:
         cmd += ["-H"]
     if hf_hub_dataset_name:

@@ -13,7 +13,7 @@ from rich.table import Table
 from rich.text import Text
 
 from ..api.availability import AvailabilityClient, GPUAvailability
-from ..api.pods import Pod, PodsClient, PodStatus
+from ..api.pods import HistoryObj, Pod, PodsClient, PodStatus
 from ..helper.short_id import generate_short_id
 from ..utils import (
     confirm_or_skip,
@@ -773,6 +773,126 @@ def terminate(
             pods_client.delete(pod_id)
 
         console.print(f"[green]Successfully terminated pod {pod_id}[/green]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {str(e)}")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1)
+
+
+def _format_history_for_display(history_item: HistoryObj) -> Dict[str, Any]:
+    """Format history item for display (both table and JSON)"""
+    created_at = datetime.fromisoformat(history_item.created_at.replace("Z", "+00:00"))
+    created_timestamp = iso_timestamp(created_at)
+    
+    terminated_at = None
+    terminated_timestamp = None
+    if history_item.terminated_at:
+        terminated_at = datetime.fromisoformat(history_item.terminated_at.replace("Z", "+00:00"))
+        terminated_timestamp = iso_timestamp(terminated_at)
+    
+    # Calculate duration if both dates exist
+    duration = None
+    if created_at and terminated_at:
+        duration_delta = terminated_at - created_at
+        hours = duration_delta.total_seconds() / 3600
+        if hours < 1:
+            duration = f"{int(duration_delta.total_seconds() / 60)}m"
+        elif hours < 24:
+            duration = f"{hours:.1f}h"
+        else:
+            days = hours / 24
+            duration = f"{days:.1f}d"
+
+    return {
+        "id": history_item.id,
+        "name": history_item.name,
+        "provider": history_item.provider_type,
+        "gpu": f"{history_item.gpu_name} x{history_item.count}",
+        "created_at": created_timestamp,
+        "terminated_at": terminated_timestamp,
+        "duration": duration,
+        "price_per_hour": history_item.price_hr,
+        "total_cost": history_item.total_billed_price,
+        "team_id": history_item.team_id,
+    }
+
+
+@app.command()
+def history(
+    limit: int = typer.Option(100, help="Maximum number of history items to list"),
+    offset: int = typer.Option(0, help="Number of history items to skip"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List your pods history (terminated pods)"""
+    validate_output_format(output, console)
+
+    try:
+        # Create API clients
+        base_client = APIClient()
+        pods_client = PodsClient(base_client)
+
+        history_list = pods_client.history(
+            offset=offset, 
+            limit=limit, 
+        )
+
+        if output == "json":
+            # Output as JSON
+            history_data = []
+            for item in history_list.data:
+                history_data.append(_format_history_for_display(item))
+
+            output_data = {
+                "history": history_data,
+                "total_count": history_list.total_count,
+                "offset": offset,
+                "limit": limit,
+            }
+            output_data_as_json(output_data, console)
+        else:
+            # Create display table
+            table = Table(
+                title=f"Pods History (Total: {history_list.total_count})",
+                show_lines=True,
+            )
+            table.add_column("ID", style="cyan", no_wrap=True)
+            table.add_column("Name", style="blue")
+            table.add_column("Team", style="blue")
+            table.add_column("GPU", style="green")
+            table.add_column("Created", style="blue")
+            table.add_column("Terminated", style="blue")
+            table.add_column("Duration", style="yellow")
+
+            # Add rows for each history item
+            for item in history_list.data:
+                item_data = _format_history_for_display(item)
+
+                table.add_row(
+                    item_data["id"],
+                    item_data["name"] or "N/A",
+                    item_data["team_id"] or "N/A",
+                    item_data["gpu"],
+                    item_data["created_at"],
+                    item_data["terminated_at"] or "N/A",
+                    item_data["duration"] or "N/A",
+                )
+
+            console.print(table)
+
+            # If there are more items, show a message
+            if history_list.total_count > offset + limit:
+                remaining = history_list.total_count - (offset + limit)
+                console.print(
+                    f"\n[yellow]Showing {limit} of {history_list.total_count} history items. "
+                    f"Use --offset {offset + limit} to see the next "
+                    f"{min(limit, remaining)} items.[/yellow]"
+                )
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

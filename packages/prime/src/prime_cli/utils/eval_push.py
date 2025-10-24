@@ -71,7 +71,7 @@ def push_eval_results_to_hub(
 
     console.print(f"[dim]Loaded {len(results_samples)} samples[/dim]")
 
-    env_metadata_path = Path("./environments") / env_name / ".env-metadata.json"
+    env_metadata_path = Path("./environments") / module_name / ".env-metadata.json"
     resolved_env_slug = None
 
     if env_metadata_path.exists():

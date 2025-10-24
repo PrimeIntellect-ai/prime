@@ -32,11 +32,11 @@ def push_eval_results_to_hub(
     console.print("\n[blue]Pushing evaluation results to hub...[/blue]")
 
     # Step 1: Find the output directory
-    env_name = env_name.replace("-", "_")
+    module_name = env_name.replace("-", "_")
     model_name = model.replace("/", "--")
     env_model_str = f"{env_name}--{model_name}"
 
-    local_env_dir = Path("./environments") / env_name
+    local_env_dir = Path("./environments") / module_name
     if local_env_dir.exists():
         base_evals_dir = local_env_dir / "outputs" / "evals" / env_model_str
     else:
@@ -71,7 +71,7 @@ def push_eval_results_to_hub(
 
     console.print(f"[dim]Loaded {len(results_samples)} samples[/dim]")
 
-    env_metadata_path = Path("./environments") / env_name / ".env-metadata.json"
+    env_metadata_path = Path("./environments") / module_name / ".env-metadata.json"
     resolved_env_slug = None
 
     if env_metadata_path.exists():
@@ -116,7 +116,6 @@ def push_eval_results_to_hub(
         task_type=metadata.get("task_type"),
         metadata=eval_metadata,
         metrics=metrics,
-        tags=[],
     )
 
     eval_id = create_response.get("evaluation_id")

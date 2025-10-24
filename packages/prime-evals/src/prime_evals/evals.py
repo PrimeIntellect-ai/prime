@@ -32,13 +32,7 @@ class EvalsClient:
                 resolve_data["team_id"] = self.client.config.team_id
 
             response = self.client.post("/environmentshub/resolve", json=resolve_data)
-
-            if "data" in response:
-                resolve_response = response["data"]
-            else:
-                resolve_response = response
-
-            return resolve_response["id"]
+            return response["data"]["id"]
 
         except APIError as e:
             raise EvalsAPIError(
@@ -175,13 +169,7 @@ class AsyncEvalsClient:
                 resolve_data["team_id"] = self.client.config.team_id
 
             response = await self.client.post("/environmentshub/resolve", json=resolve_data)
-
-            if "data" in response:
-                resolve_response = response["data"]
-            else:
-                resolve_response = response
-
-            return resolve_response["id"]
+            return response["data"]["id"]
 
         except APIError as e:
             raise EvalsAPIError(

@@ -26,7 +26,7 @@ class EvalsClient:
             env_name = env_name.split("/", 1)[1]
 
         try:
-            resolve_data: Dict[str, Any] = {"name": env_name, "visibility": "PUBLIC"}
+            resolve_data: Dict[str, Any] = {"name": env_name}
 
             if self.client.config.team_id:
                 resolve_data["team_id"] = self.client.config.team_id
@@ -163,7 +163,7 @@ class AsyncEvalsClient:
             env_name = env_name.split("/", 1)[1]
 
         try:
-            resolve_data: Dict[str, Any] = {"name": env_name, "visibility": "PUBLIC"}
+            resolve_data: Dict[str, Any] = {"name": env_name}
 
             if self.client.config.team_id:
                 resolve_data["team_id"] = self.client.config.team_id

@@ -15,7 +15,7 @@ from prime_sandboxes import (
     UpdateSandboxRequest,
 )
 
-__version__ = "0.4.4"
+__version__ = "0.4.8"
 
 __all__ = [
     "APIClient",

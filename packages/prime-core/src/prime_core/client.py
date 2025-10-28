@@ -44,10 +44,9 @@ class APIClient:
 
         # Use provided API key or fall back to config
         self.api_key = api_key or self.config.api_key
-        if require_auth and not self.api_key:
-            raise APIError(
-                "No API key configured. Use command 'prime login' to configure your API key.",
-            )
+
+        # Store require_auth for lazy validation on request
+        self.require_auth = require_auth
 
         # Setup client
         self.base_url = self.config.base_url
@@ -61,6 +60,12 @@ class APIClient:
             timeout=httpx.Timeout(30.0, connect=10.0),
         )
 
+    def _check_auth_required(self) -> None:
+        if self.require_auth and not self.api_key:
+            raise APIError(
+                "No API key configured. Use command 'prime login' to configure your API key.",
+            )
+
     def request(
         self,
         method: str,
@@ -70,6 +75,8 @@ class APIClient:
         timeout: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Make a request to the API"""
+        self._check_auth_required()
+
         # Ensure endpoint starts with /api/v1/
         if not endpoint.startswith("/"):
             endpoint = f"/api/v1/{endpoint}"
@@ -160,10 +167,9 @@ class AsyncAPIClient:
 
         # Use provided API key or fall back to config
         self.api_key = api_key or self.config.api_key
-        if require_auth and not self.api_key:
-            raise APIError(
-                "No API key configured. Use command 'prime login' to configure your API key.",
-            )
+
+        # Store require_auth for lazy validation on request
+        self.require_auth = require_auth
 
         # Setup client
         self.base_url = self.config.base_url
@@ -177,6 +183,12 @@ class AsyncAPIClient:
             timeout=httpx.Timeout(30.0, connect=10.0),
         )
 
+    def _check_auth_required(self) -> None:
+        if self.require_auth and not self.api_key:
+            raise APIError(
+                "No API key configured. Use command 'prime login' to configure your API key.",
+            )
+
     async def request(
         self,
         method: str,
@@ -186,6 +198,8 @@ class AsyncAPIClient:
         timeout: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Make an async request to the API"""
+        self._check_auth_required()
+
         # Ensure endpoint starts with /api/v1/
         if not endpoint.startswith("/"):
             endpoint = f"/api/v1/{endpoint}"

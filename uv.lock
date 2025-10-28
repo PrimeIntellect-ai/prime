@@ -448,7 +448,7 @@ name = "exceptiongroup"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0b/9f/a65090624ecf468cdca03533906e7c69ed7588582240cfe7cc9e770b50eb/exceptiongroup-1.3.0.tar.gz", hash = "sha256:b241f5885f560bc56a59ee63ca4c6a8bfa46ae4ad651af316d4e81817bb9fd88", size = 29749, upload-time = "2025-05-10T17:42:51.123Z" }
 wheels = [
@@ -682,7 +682,7 @@ name = "importlib-metadata"
 version = "8.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zipp" },
+    { name = "zipp", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/76/66/650a33bd90f786193e4de4b3ad86ea60b53c89b669a5c7be931fac31cdb0/importlib_metadata-8.7.0.tar.gz", hash = "sha256:d13b81ad223b890aa16c5471f2ac3056cf76c5f10f82d6f9292f0b415f389000", size = 56641, upload-time = "2025-04-27T15:29:01.736Z" }
 wheels = [
@@ -1369,7 +1369,7 @@ requires-dist = [
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.0a6" },
     { name = "typer", specifier = ">=0.9.0" },
     { name = "types-toml", marker = "extra == 'dev'", specifier = ">=0.10.0" },
-    { name = "verifiers", specifier = ">=0.1.5.post0" },
+    { name = "verifiers", specifier = ">=0.1.6" },
 ]
 provides-extras = ["dev"]
 
@@ -1390,7 +1390,7 @@ requires-dist = [
 
 [[package]]
 name = "prime-evals"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "packages/prime-evals" }
 dependencies = [
     { name = "httpx" },
@@ -2258,7 +2258,7 @@ wheels = [
 
 [[package]]
 name = "verifiers"
-version = "0.1.5.post0"
+version = "0.1.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "datasets" },
@@ -2272,9 +2272,9 @@ dependencies = [
     { name = "rich" },
     { name = "textual" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/cf/98/240e5a7ce91f774564c45dc4518a98c92808eccb2ba761725697a3788ec1/verifiers-0.1.5.post0.tar.gz", hash = "sha256:d4b4b4739fe2c4ea3f52fec013c526e232192dff1dae1f68fb89e98e293ed88d", size = 121848, upload-time = "2025-10-09T21:18:25.77Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2e/47/d2e916c7009faca66466a4ffcd9f07f87b54215c0b82bdc2fc9a3bd04471/verifiers-0.1.6.tar.gz", hash = "sha256:1ee2f3eae39d894da2e67822c586f2314d6a9e840032b5e2dfe34ef4f614b1c6", size = 124961, upload-time = "2025-10-21T01:06:32.239Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/22/30/e27d2d47ec20184f12cf684b77defafa891bfcd5737ba2a2e03031d89deb/verifiers-0.1.5.post0-py3-none-any.whl", hash = "sha256:5ffc59380115c4d1a360a6722d2e1f40e327c1fe314f82997d6f34f1e948f4c1", size = 111816, upload-time = "2025-10-09T21:18:24.753Z" },
+    { url = "https://files.pythonhosted.org/packages/26/3e/6115fcb03ee63316d4f1e866758aad135ecdc3392c35981635f46526687b/verifiers-0.1.6-py3-none-any.whl", hash = "sha256:e07203a78a95d877461affd242e2a29786fac8676c683bcfa69d307ba81abaa7", size = 115453, upload-time = "2025-10-21T01:06:30.717Z" },
 ]
 
 [[package]]

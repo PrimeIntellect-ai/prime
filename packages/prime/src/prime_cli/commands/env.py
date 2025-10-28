@@ -22,6 +22,7 @@ from rich.table import Table
 
 from ..api.inference import InferenceAPIError, InferenceClient
 from ..utils import output_data_as_json, validate_output_format
+from ..utils.eval_push import push_eval_results_to_hub
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
 console = Console()
@@ -1661,7 +1662,8 @@ def eval_env(
         help='Sampling args as JSON, e.g. \'{"enable_thinking": false, "max_tokens": 256}\'',
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
-    save_dataset: bool = typer.Option(False, "--save-dataset", "-s", help="Save dataset to disk"),
+    save_results: bool = typer.Option(True, "--save-results", "-s", help="Save results to disk"),
+    save_every: int = typer.Option(1, "--save-every", "-f", help="Save dataset every n rollouts"),
     save_to_hf_hub: bool = typer.Option(False, "--save-to-hf-hub", "-H", help="Save to HF Hub"),
     hf_hub_dataset_name: Optional[str] = typer.Option(
         None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
@@ -1681,10 +1683,12 @@ def eval_env(
             "should end in '/v1'"
         ),
     ),
+    push_to_hub: bool = typer.Option(
+        False, "--push-to-hub", "-P", help="Push results to Prime Evals Hub"
+    ),
 ) -> None:
     """
-    Run verifiers' vf-eval with Prime Inference (closed beta)
-    (This feature in currently in closed beta and requires prime inference permissions.)
+    Run verifiers' vf-eval with Prime Inference
 
     Example:
        prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7
@@ -1763,8 +1767,10 @@ def eval_env(
         cmd += ["-S", sampling_args]
     if verbose:
         cmd += ["-v"]
-    if save_dataset:
+    if save_results:
         cmd += ["-s"]
+    if save_every is not None:
+        cmd += ["-f", str(save_every)]
     if save_to_hf_hub:
         cmd += ["-H"]
     if hf_hub_dataset_name:
@@ -1796,3 +1802,16 @@ def eval_env(
     except FileNotFoundError:
         console.print("[red]Failed to start vf-eval process.[/red]")
         raise typer.Exit(1)
+
+    # Push to hub if requested and eval succeeded
+    if push_to_hub:
+        try:
+            push_eval_results_to_hub(
+                env_name=environment,
+                model=model,
+                job_id=job_id,
+            )
+        except Exception as e:
+            console.print(f"[red]Failed to push results to hub:[/red] {e}")
+            console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
+            raise typer.Exit(1)

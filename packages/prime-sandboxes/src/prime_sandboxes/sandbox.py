@@ -18,6 +18,7 @@ from .models import (
     FileUploadResponse,
     Sandbox,
     SandboxAvailableRegionsResponse,
+    SandboxGPUAvailabilityResponse,
     SandboxListResponse,
     SandboxLogsResponse,
 )
@@ -206,6 +207,14 @@ class SandboxClient:
         """List available sandbox regions"""
         response = self.client.request("GET", "/sandbox/regions")
         return SandboxAvailableRegionsResponse.model_validate(response)
+
+    def get_availability(self, region: Optional[str] = None) -> SandboxGPUAvailabilityResponse:
+        """Get aggregated GPU availability by type and region"""
+        params: Dict[str, Any] = {}
+        if region:
+            params["region"] = region
+        response = self.client.request("GET", "/sandbox/availability", params=params)
+        return SandboxGPUAvailabilityResponse.model_validate(response)
 
     def get(self, sandbox_id: str) -> Sandbox:
         """Get a specific sandbox"""
@@ -455,6 +464,16 @@ class AsyncSandboxClient:
         """List available sandbox regions"""
         response = await self.client.request("GET", "/sandbox/regions")
         return SandboxAvailableRegionsResponse.model_validate(response)
+
+    async def get_availability(
+        self, region: Optional[str] = None
+    ) -> SandboxGPUAvailabilityResponse:
+        """Get aggregated GPU availability by type and region (async)"""
+        params: Dict[str, Any] = {}
+        if region:
+            params["region"] = region
+        response = await self.client.request("GET", "/sandbox/availability", params=params)
+        return SandboxGPUAvailabilityResponse.model_validate(response)
 
     async def get(self, sandbox_id: str) -> Sandbox:
         """Get a specific sandbox"""

@@ -288,6 +288,11 @@ def create(
     memory_gb: int = typer.Option(2, help="Memory in GB"),
     disk_size_gb: int = typer.Option(10, help="Disk size in GB"),
     gpu_count: int = typer.Option(0, help="Number of GPUs"),
+    gpu_type: Optional[str] = typer.Option(
+        None,
+        "--gpu-type",
+        help="Short GPU type key (e.g., h100, a100, l40s). Required when --gpu-count > 0",
+    ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
@@ -336,6 +341,19 @@ def create(
             suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
             name = f"{clean_image}-{suffix}"
 
+        # Validate GPU type
+        if gpu_count > 0:
+            if not gpu_type:
+                console.print("[red]gpu-type is required when gpu-count > 0[/red]")
+                raise typer.Exit(1)
+            norm = gpu_type.strip().lower()
+            if not all(ch.isalnum() for ch in norm):
+                console.print(
+                    "[red]gpu-type must be lowercase alphanumeric (e.g., h100, a100, l40s)[/red]"
+                )
+                raise typer.Exit(1)
+            gpu_type = norm
+
         request = CreateSandboxRequest(
             name=name,
             docker_image=docker_image,
@@ -344,6 +362,7 @@ def create(
             memory_gb=memory_gb,
             disk_size_gb=disk_size_gb,
             gpu_count=gpu_count,
+            gpu_type=gpu_type,
             timeout_minutes=timeout_minutes,
             environment_vars=env_vars if env_vars else None,
             labels=labels if labels else [],
@@ -358,7 +377,7 @@ def create(
         console.print(f"Start Command: {start_command or 'N/A'}")
         console.print(f"Resources: {cpu_cores} CPU, {memory_gb}GB RAM, {disk_size_gb}GB disk")
         if gpu_count > 0:
-            console.print(f"GPUs: {gpu_count}")
+            console.print(f"GPUs: {gpu_count} ({gpu_type})")
         console.print(f"Timeout: {timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
         if region:
@@ -380,6 +399,61 @@ def create(
         else:
             console.print("\nSandbox creation cancelled")
             raise typer.Exit(0)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
+        raise typer.Exit(1)
+
+
+@app.command("gpus")
+def gpus(
+    region: Optional[str] = typer.Option(
+        None, help="Filter availability by region (e.g., us-central1)"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Show available GPU types and counts by region (live capacity)."""
+    validate_output_format(output, console)
+
+    try:
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        with console.status("[bold blue]Fetching sandbox GPU availability...", spinner="dots"):
+            response = sandbox_client.get_availability(region=region)
+
+        availability = response.availability
+
+        if output == "json":
+            output_data_as_json({"availability": availability}, console)
+            return
+
+        # Table output
+        table = build_table(
+            "Sandbox GPU Availability",
+            [("GPU Type", "cyan"), ("Region", "blue"), ("Available", "green")],
+        )
+
+        # Flatten for display
+        rows: List[tuple[str, str, int]] = []
+        for gpu, entries in availability.items():
+            for entry in entries:
+                rows.append((gpu, entry.region, entry.available))
+
+        # Sort by gpu then region
+        rows.sort(key=lambda r: (r[0], r[1]))
+
+        for gpu, reg, qty in rows:
+            table.add_row(gpu, reg, str(qty))
+
+        if not rows:
+            console.print("[yellow]No availability reported[/yellow]")
+        else:
+            console.print(table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

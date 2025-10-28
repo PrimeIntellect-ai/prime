@@ -22,6 +22,7 @@ from rich.table import Table
 
 from ..api.inference import InferenceAPIError, InferenceClient
 from ..utils import output_data_as_json, validate_output_format
+from ..utils.eval_push import push_eval_results_to_hub
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
 console = Console()
@@ -1662,9 +1663,7 @@ def eval_env(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
     save_results: bool = typer.Option(True, "--save-results", "-s", help="Save results to disk"),
-    save_every: int = typer.Option(
-        1, "--save-every", "-f", help="Save dataset every n rollouts"
-    ),
+    save_every: int = typer.Option(1, "--save-every", "-f", help="Save dataset every n rollouts"),
     save_to_hf_hub: bool = typer.Option(False, "--save-to-hf-hub", "-H", help="Save to HF Hub"),
     hf_hub_dataset_name: Optional[str] = typer.Option(
         None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
@@ -1683,6 +1682,9 @@ def eval_env(
             "override api base url variable instead of using prime inference url, "
             "should end in '/v1'"
         ),
+    ),
+    push_to_hub: bool = typer.Option(
+        False, "--push-to-hub", "-P", help="Push results to Prime Evals Hub"
     ),
 ) -> None:
     """
@@ -1800,3 +1802,16 @@ def eval_env(
     except FileNotFoundError:
         console.print("[red]Failed to start vf-eval process.[/red]")
         raise typer.Exit(1)
+
+    # Push to hub if requested and eval succeeded
+    if push_to_hub:
+        try:
+            push_eval_results_to_hub(
+                env_name=environment,
+                model=model,
+                job_id=job_id,
+            )
+        except Exception as e:
+            console.print(f"[red]Failed to push results to hub:[/red] {e}")
+            console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
+            raise typer.Exit(1)

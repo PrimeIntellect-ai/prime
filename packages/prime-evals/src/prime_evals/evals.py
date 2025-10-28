@@ -1,8 +1,10 @@
+import asyncio
+import re
 from typing import Any, Dict, List, Optional
 
-from prime_core import APIClient, AsyncAPIClient
+from prime_core import APIClient, APIError, AsyncAPIClient
 
-from .exceptions import InvalidEvaluationError
+from .exceptions import EvalsAPIError, InvalidEvaluationError
 
 
 class EvalsClient:
@@ -12,6 +14,31 @@ class EvalsClient:
 
     def __init__(self, api_client: APIClient) -> None:
         self.client = api_client
+
+    def _resolve_environment_id(self, env_name: str) -> str:
+        """
+        Resolve environment ID to owner/name format.
+
+        Raises:
+            EvalsAPIError: If the environment does not exist (404)
+        """
+        if re.match(r"^[^/]+/[^/]+$", env_name):
+            env_name = env_name.split("/", 1)[1]
+
+        try:
+            resolve_data: Dict[str, Any] = {"name": env_name}
+
+            if self.client.config.team_id:
+                resolve_data["team_id"] = self.client.config.team_id
+
+            response = self.client.post("/environmentshub/resolve", json=resolve_data)
+            return response["data"]["id"]
+
+        except APIError as e:
+            raise EvalsAPIError(
+                f"Environment '{env_name}' does not exist in the hub. "
+                f"Please push the environment first with: prime env push {env_name}"
+            ) from e
 
     def create_evaluation(
         self,
@@ -32,7 +59,8 @@ class EvalsClient:
 
         Either run_id or environments must be provided.
         Environments should be a list of dicts with 'id' and optional 'version_id'.
-        Example: [{"id": "env-123", "version_id": "v1"}]
+
+        Example: [{"id": "simpleqa", "version_id": "v1"}]
 
         Raises:
             InvalidEvaluationError: If neither run_id nor environments is provided
@@ -43,9 +71,16 @@ class EvalsClient:
                 "For environment evals, provide environments=[{'id': 'env-id', 'version_id': 'v1'}]"
             )
 
+        resolved_environments = None
+        if environments:
+            resolved_environments = [
+                {**env, "id": self._resolve_environment_id(env["id"])} if "id" in env else env
+                for env in environments
+            ]
+
         payload = {
             "name": name,
-            "environments": environments,
+            "environments": resolved_environments,
             "suite_id": suite_id,
             "run_id": run_id,
             "model_name": model_name,
@@ -117,6 +152,31 @@ class AsyncEvalsClient:
     def __init__(self, api_key: Optional[str] = None) -> None:
         self.client = AsyncAPIClient(api_key=api_key)
 
+    async def _resolve_environment_id(self, env_name: str) -> str:
+        """
+        Resolve environment ID to owner/name format.
+
+        Raises:
+            EvalsAPIError: If the environment does not exist (404)
+        """
+        if re.match(r"^[^/]+/[^/]+$", env_name):
+            env_name = env_name.split("/", 1)[1]
+
+        try:
+            resolve_data: Dict[str, Any] = {"name": env_name}
+
+            if self.client.config.team_id:
+                resolve_data["team_id"] = self.client.config.team_id
+
+            response = await self.client.post("/environmentshub/resolve", json=resolve_data)
+            return response["data"]["id"]
+
+        except APIError as e:
+            raise EvalsAPIError(
+                f"Environment '{env_name}' does not exist in the hub. "
+                f"Please push the environment first with: prime env push {env_name}"
+            ) from e
+
     async def create_evaluation(
         self,
         name: str,
@@ -136,7 +196,8 @@ class AsyncEvalsClient:
 
         Either run_id or environments must be provided.
         Environments should be a list of dicts with 'id' and optional 'version_id'.
-        Example: [{"id": "env-123", "version_id": "v1"}]
+
+        Example: [{"id": "simpleqa", "version_id": "v1"}]
 
         Raises:
             InvalidEvaluationError: If neither run_id nor environments is provided
@@ -147,9 +208,22 @@ class AsyncEvalsClient:
                 "For environment evals, provide environments=[{'id': 'env-id', 'version_id': 'v1'}]"
             )
 
+        resolved_environments = None
+        if environments:
+
+            async def resolve_env(env: Dict[str, str]) -> Dict[str, str]:
+                resolved_env = env.copy()
+                if "id" in resolved_env:
+                    resolved_env["id"] = await self._resolve_environment_id(resolved_env["id"])
+                return resolved_env
+
+            resolved_environments = await asyncio.gather(
+                *[resolve_env(env) for env in environments]
+            )
+
         payload = {
             "name": name,
-            "environments": environments,
+            "environments": resolved_environments,
             "suite_id": suite_id,
             "run_id": run_id,
             "model_name": model_name,

@@ -1,4 +1,5 @@
 import json
+import re
 from functools import wraps
 from pathlib import Path
 from typing import Optional
@@ -13,7 +14,7 @@ from rich.table import Table
 from ..utils import output_data_as_json, validate_output_format
 
 app = typer.Typer(
-    help="Run and manage Prime Evals (in closed beta, requires prime eval permissions)",
+    help="Run and manage Prime Evals (in beta, requires prime eval permissions)",
     no_args_is_help=True,
 )
 console = Console()
@@ -193,9 +194,11 @@ def _load_verifiers_format(directory: Path) -> dict:
 
     metrics = {}
     metadata_copy = {}
+    avg_pattern = re.compile(r"^avg_(.+)$")
     for key, value in metadata.items():
-        if key.startswith("avg_"):
-            metric_name = key[4:]  # Remove 'avg_' prefix
+        match = avg_pattern.match(key)
+        if match:
+            metric_name = match.group(1)
             metrics[metric_name] = value
         else:
             metadata_copy[key] = value
@@ -203,7 +206,7 @@ def _load_verifiers_format(directory: Path) -> dict:
     eval_data = {
         "eval_name": f"{metadata.get('env', 'unknown')}-{metadata.get('model', 'unknown')}",
         "model_name": metadata.get("model", "unknown"),
-        "dataset": metadata.get("env", "unknown"),
+        "env": metadata.get("env"),
         "metrics": metrics,
         "metadata": metadata_copy,
         "results": results,
@@ -242,16 +245,11 @@ def push_eval(
         "-r",
         help="Link to existing training run id",
     ),
-    env_hub_id: Optional[str] = typer.Option(
+    env_name: Optional[str] = typer.Option(
         None,
-        "--env-hub-id",
+        "--env-name",
         "-e",
-        help="Environment Hub id",
-    ),
-    env_metadata_path: Optional[str] = typer.Option(
-        None,
-        "--env-metadata",
-        help="Path to .env-metadata.json file (overrides default lookup)",
+        help="Environment name from hub (e.g., 'gsm8k')",
     ),
     output: str = typer.Option("pretty", "--output", "-o", help="json|pretty"),
 ) -> None:
@@ -271,19 +269,20 @@ def push_eval(
        - metadata.json: Contains env, model, num_examples, rollouts_per_example, avg_* metrics
        - results.jsonl: JSONL file with result samples (one per line)
 
-    Either --run-id or --env-hub-id must be provided:
+    Either --run-id or --env-name must be provided (unless auto-detected):
     - Use --run-id to link to an existing training run
-    - Use --env-hub-id with a hub environment ID
+    - Use --env-name to specify the environment name from the hub (e.g., 'gsm8k')
+    - For verifiers format, env name is auto-detected from metadata.json if not provided
 
     Examples:
-        # JSON format
+        # JSON format with run ID
         prime evals push eval.json --run-id abc123
 
-        # Verifiers format
-        prime evals push environments/gsm8k/outputs/evals/gsm8k--gpt-4/abc123 --env-hub-id gsm8k
+        # Verifiers format (auto-detects env from metadata.json)
+        prime evals push outputs/evals/gsm8k--gpt-4/abc123
 
-        # With environment metadata
-        prime evals push eval.json --env-metadata environments/gsm8k/.env-metadata.json
+        # Verifiers format with explicit env name (overrides metadata)
+        prime evals push outputs/evals/gsm8k--gpt-4/abc123 --env-name gsm8k
     """
     try:
         format_type, path = _detect_format(config_path)
@@ -292,7 +291,7 @@ def push_eval(
             with open(path, "r") as f:
                 eval_data = json.load(f)
             console.print(f"[blue]✓ Loaded eval data (JSON format):[/blue] {path}")
-        else:  # verifiers format
+        else:
             eval_data = _load_verifiers_format(path)
             console.print(f"[blue]✓ Loaded eval data (verifiers format):[/blue] {path}")
 
@@ -301,36 +300,18 @@ def push_eval(
         console.print(f"[dim]   Dataset: {eval_data.get('dataset', 'N/A')}[/dim]")
         console.print(f"[dim]   Results: {len(eval_data.get('results', []))} samples[/dim]")
 
+        # Auto-detect env_name from verifiers format if not provided
+        detected_env = eval_data.get("env")
+        if not env_name and detected_env and not run_id:
+            env_name = detected_env
+            console.print(f"[blue]Auto-detected environment:[/blue] {env_name}")
+
+        # Build environments list
         environments = None
-
-        if env_hub_id and not run_id:
-            metadata_path = None
-
-            if env_metadata_path:
-                metadata_path = Path(env_metadata_path)
-            else:
-                env_name = env_hub_id.replace("-", "_")
-                default_path = Path(f"environments/{env_name}/.env-metadata.json")
-                if default_path.exists():
-                    metadata_path = default_path
-
-            if metadata_path and metadata_path.exists():
-                try:
-                    with open(metadata_path) as f:
-                        hub_metadata = json.load(f)
-                        resolved_env_id = hub_metadata.get("environment_id")
-                        if resolved_env_id:
-                            short_id = resolved_env_id[:16]
-                            console.print(
-                                f"[blue]✓ Found environment metadata:[/blue] {short_id}..."
-                            )
-                            environments = [{"id": resolved_env_id}]
-                except Exception as e:
-                    console.print(f"[yellow]Warning: Could not load {metadata_path}: {e}[/yellow]")
-
-            if not environments:
-                environments = [{"id": env_hub_id}]
-                console.print(f"[blue]Using environment hub ID:[/blue] {env_hub_id}")
+        if env_name and not run_id:
+            environments = [{"id": env_name}]
+            if not detected_env:  # Only show if not auto-detected (to avoid duplicate message)
+                console.print(f"[blue]Using environment:[/blue] {env_name}")
 
         console.print()
 
@@ -397,9 +378,10 @@ def push_eval(
     except InvalidEvaluationError as e:
         console.print(f"[red]Error:[/red] {e}")
         console.print()
-        console.print("[yellow]Tip:[/yellow] Either provide:")
-        console.print("  --run-id <run_id>  (to link to an existing run)")
-        console.print("  --env-hub-id <env_id>  (for environment from hub)")
+        console.print("[yellow]Tip:[/yellow] You must provide one of:")
+        console.print("  --run-id <run_id>        (to link to an existing training run)")
+        console.print("  --env-name <env_name>    (environment name from hub, e.g., 'gsm8k')")
+        console.print("  [or use verifiers format with 'env' in metadata.json for auto-detection]")
         raise typer.Exit(1)
     except KeyError as e:
         console.print(f"[red]Error:[/red] Missing required field in config: {e}")

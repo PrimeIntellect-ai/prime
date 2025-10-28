@@ -1,6 +1,6 @@
 [project]
 name = "prime-evals"
-version = "0.1.1"
+version = "0.1.2"
 description = "Prime Intellect Evals SDK - Push and manage evaluations"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -9,7 +9,7 @@ authors = [
     { name = "Prime Intellect", email = "contact@primeintellect.ai" }
 ]
 dependencies = [
-    "prime-core",
+    "prime-core>=0.1.1",
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
 ]

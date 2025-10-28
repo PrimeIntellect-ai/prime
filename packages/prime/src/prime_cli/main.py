@@ -31,7 +31,7 @@ app.add_typer(env_app, name="env")
 app.add_typer(inference_app, name="inference")
 app.add_typer(whoami_app, name="whoami")
 app.add_typer(teams_app, name="teams")
-app.add_typer(evals_app, name="evals")
+app.add_typer(evals_app, name="eval")
 
 
 @app.callback(invoke_without_command=True)

@@ -4,41 +4,52 @@ This directory contains example scripts and demos for using the Prime CLI.
 
 ## Evals Example
 
-Prime CLI supports two formats for pushing evaluation results to the Environment Hub:
+Prime CLI supports two modes for pushing evaluation results:
 
-1. **JSON Format** (`eval_example.json`): Single JSON file with all evaluation data
-2. **Verifiers Format** (`verifiers_example/`): Directory with `metadata.json` and `results.jsonl`
+2. **Verifiers Format**: Directory with `metadata.json` and `results.jsonl`
+1. **JSON Format**: Single JSON file with all evaluation data
 
 ### Pushing Evals
 
-1. **Push from JSON file**:
+1. **Push from current directory** (if it contains metadata.json/results.jsonl):
    ```bash
-   prime evals push examples/eval_example.json --env-hub-id gsm8k
+   cd outputs/evals/gsm8k--gpt-4/abc123
+   prime eval push
    ```
 
-2. **Push from verifiers format directory**:
+2. **Auto-discover and push all** (from root with outputs/evals/):
    ```bash
-   prime evals push examples/verifiers_example --env-hub-id gsm8k
+   prime eval push
    ```
 
-3. **Push with run ID** (link to existing training run):
+3. **Push specific directory**:
    ```bash
-   prime evals push examples/eval_example.json --run-id abc123
+   prime eval push examples/verifiers_example
    ```
 
-4. **List all evals**:
+4. **Push from JSON file with environment**:
    ```bash
-   prime evals list
+   prime eval push examples/eval_example.json --env gsm8k
    ```
 
-5. **Get specific eval**:
+5. **Push with run ID** (link to existing training run):
    ```bash
-   prime evals get <eval_id>
+   prime eval push examples/eval_example.json --run-id abc123
    ```
 
-6. **View eval samples**:
+6. **List all evals**:
    ```bash
-   prime evals samples <eval_id>
+   prime eval list
+   ```
+
+7. **Get specific eval**:
+   ```bash
+   prime eval get <eval_id>
+   ```
+
+8. **View eval samples**:
+   ```bash
+   prime eval samples <eval_id>
    ```
 
 

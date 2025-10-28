@@ -1,6 +1,6 @@
 [project]
 name = "prime-core"
-version = "0.1.0"
+version = "0.1.1"
 description = "Prime Intellect Core - Shared HTTP client and configuration (internal package)"
 requires-python = ">=3.10"
 dependencies = [

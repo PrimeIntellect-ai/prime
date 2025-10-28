@@ -35,7 +35,7 @@ from .models import (
     SamplesResponse,
 )
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     # Core HTTP Client & Config

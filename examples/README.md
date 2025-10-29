@@ -4,39 +4,54 @@ This directory contains example scripts and demos for using the Prime CLI.
 
 ## Evals Example
 
-The `eval_example.json` file demonstrates the format for pushing evaluation results to the Environment Hub.
+Prime CLI supports two modes for pushing evaluation results:
+
+2. **Verifiers Format**: Directory with `metadata.json` and `results.jsonl`
+1. **JSON Format**: Single JSON file with all evaluation data
 
 ### Pushing Evals
 
-1. **Push from JSON file**:
+1. **Push from current directory** (if it contains metadata.json/results.jsonl):
    ```bash
-   prime evals push examples/eval_example.json
+   cd outputs/evals/gsm8k--gpt-4/abc123
+   prime eval push
    ```
 
-2. **List all evals**:
+2. **Auto-discover and push all** (from root with outputs/evals/):
    ```bash
-   prime evals list
+   prime eval push
    ```
 
-3. **Get specific eval**:
+3. **Push specific directory**:
    ```bash
-   prime evals get <eval_id>
+   prime eval push examples/verifiers_example
    ```
 
-4. **View eval samples**:
+4. **Push from JSON file with environment**:
    ```bash
-   prime evals samples <eval_id>
+   prime eval push examples/eval_example.json --env gsm8k
    ```
 
-### Eval Data Format
+5. **Push with run ID** (link to existing training run):
+   ```bash
+   prime eval push examples/eval_example.json --run-id abc123
+   ```
 
-The JSON file should contain:
-- `eval_name`: Name of your evaluation (required)
-- `model_name`: Model being evaluated (required)
-- `dataset`: Dataset used for evaluation (required)
-- `metrics`: Dictionary of metric names and values (required)
-- `metadata`: Additional metadata (optional)
-- `results`: Detailed per-sample results (optional)
+6. **List all evals**:
+   ```bash
+   prime eval list
+   ```
+
+7. **Get specific eval**:
+   ```bash
+   prime eval get <eval_id>
+   ```
+
+8. **View eval samples**:
+   ```bash
+   prime eval samples <eval_id>
+   ```
+
 
 ## Sandbox Demo
 

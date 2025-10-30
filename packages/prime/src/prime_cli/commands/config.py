@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Optional
 
 import typer
@@ -8,6 +9,23 @@ from rich.table import Table
 
 app = typer.Typer(help="Configure the CLI", no_args_is_help=True)
 console = Console()
+
+# Team ID validation pattern: 25 alphanumeric characters
+TEAM_ID_PATTERN = re.compile(r"^[a-zA-Z0-9]{25}$")
+
+
+def validate_team_id(team_id: str) -> bool:
+    """Validate team ID format.
+    
+    Args:
+        team_id: The team ID to validate
+        
+    Returns:
+        True if valid, False otherwise
+    """
+    if not team_id:  # Empty string is valid (means personal account)
+        return True
+    return bool(TEAM_ID_PATTERN.match(team_id))
 
 
 @app.command()
@@ -135,6 +153,14 @@ def set_team_id(
             "Enter your Prime Intellect team ID (leave empty for personal account)",
             default="",
         )
+
+    # Validate team ID format
+    if not validate_team_id(team_id):
+        console.print(
+            "[red]Error: Invalid team ID format. "
+            "Team ID must be exactly 25 alphanumeric characters.[/red]"
+        )
+        raise typer.Exit(code=1)
 
     config = Config()
     config.set_team_id(team_id)

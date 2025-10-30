@@ -5,6 +5,7 @@ import typer
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
 from .commands.env import app as env_app
+from .commands.evals import app as evals_app
 from .commands.inference import app as inference_app
 from .commands.login import app as login_app
 from .commands.pods import app as pods_app
@@ -30,6 +31,7 @@ app.add_typer(env_app, name="env")
 app.add_typer(inference_app, name="inference")
 app.add_typer(whoami_app, name="whoami")
 app.add_typer(teams_app, name="teams")
+app.add_typer(evals_app, name="eval")
 
 
 @app.callback(invoke_without_command=True)

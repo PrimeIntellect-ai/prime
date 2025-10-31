@@ -60,7 +60,7 @@ def list_evals(
     env: Optional[str] = typer.Option(
         None,
         "--env",
-        "--env-id",
+        "--env-name",
         "-e",
         help="Filter by environment (e.g., 'gsm8k' or 'owner/gsm8k')",
     ),
@@ -72,12 +72,8 @@ def list_evals(
         api_client = APIClient()
         client = EvalsClient(api_client)
 
-        environment_id = None
-        if env:
-            environment_id = client._resolve_environment_id(env)
-
         data = client.list_evaluations(
-            environment_id=environment_id,
+            env_name=env,
             skip=skip,
             limit=limit,
         )
@@ -361,6 +357,7 @@ def push_eval(
     ),
     eval_id: Optional[str] = typer.Option(
         None,
+        "--eval",
         "--eval-id",
         help="Push to existing evaluation id",
     ),
@@ -374,10 +371,18 @@ def push_eval(
         prime eval push                                    # Push current dir or auto-discover
         prime eval push outputs/evals/gsm8k--gpt-4/abc123  # Push specific directory
         prime eval push eval.json --run-id abc123          # Push JSON file with run_id
-        prime eval push eval.json --eval-id xyz789         # Push to existing evaluation
+        prime eval push eval.json --eval xyz789            # Push to existing evaluation
         prime eval push --env gsm8k                        # Push with environment
     """
     try:
+        if config_path is None and eval_id:
+            console.print("[red]Error:[/red] Cannot use --eval-id with auto-discovery")
+            console.print()
+            console.print("[yellow]Tip:[/yellow] Specify an explicit path when using --eval-id:")
+            console.print("  prime eval push /path/to/eval/data --eval-id <eval-id>")
+            console.print("  prime eval push outputs/evals/env--model/run-id --eval-id <eval-id>")
+            raise typer.Exit(1)
+
         if config_path is None:
             current_dir = Path(".")
             if _has_verifiers_files(current_dir):
@@ -443,7 +448,7 @@ def push_eval(
         console.print(f"[red]Error:[/red] {e}")
         console.print()
         console.print("[yellow]Tip:[/yellow] You must provide one of:")
-        console.print("  --eval-id <eval_id>  (to update an existing evaluation)")
+        console.print("  --eval <eval_id>     (to update an existing evaluation)")
         console.print("  --run-id <run_id>    (to link to an existing training run)")
         console.print("  --env <env>          (environment name, e.g., 'gsm8k' or 'owner/gsm8k')")
         console.print("  [or use verifiers format with 'env' in metadata.json for auto-detection]")

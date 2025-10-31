@@ -117,15 +117,15 @@ class EvalsClient:
 
     def list_evaluations(
         self,
-        environment_id: Optional[str] = None,
+        env_name: Optional[str] = None,
         suite_id: Optional[str] = None,
         skip: int = 0,
         limit: int = 50,
     ) -> Dict[str, Any]:
         """List evaluations with optional filters"""
         params: Dict[str, Any] = {"skip": skip, "limit": limit}
-        if environment_id:
-            params["environment_id"] = environment_id
+        if env_name:
+            params["environment_name"] = env_name
         if suite_id:
             params["suite_id"] = suite_id
 
@@ -157,11 +157,11 @@ class EvalsClient:
             "framework": framework,
             "task_type": task_type,
             "description": description,
-            "tags": tags,
+            "tags": tags if tags is not None else [],
             "metadata": metadata,
             "metrics": metrics,
         }
-        payload = {k: v for k, v in payload.items() if v is not None}
+        payload = {k: v for k, v in payload.items() if v is not None or k in ["tags"]}
 
         response = self.client.request("PUT", f"/evaluations/{evaluation_id}", json=payload)
         return response
@@ -331,11 +331,11 @@ class AsyncEvalsClient:
             "framework": framework,
             "task_type": task_type,
             "description": description,
-            "tags": tags,
+            "tags": tags if tags is not None else [],
             "metadata": metadata,
             "metrics": metrics,
         }
-        payload = {k: v for k, v in payload.items() if v is not None}
+        payload = {k: v for k, v in payload.items() if v is not None or k in ["tags"]}
 
         response = await self.client.request("PUT", f"/evaluations/{evaluation_id}", json=payload)
         return response

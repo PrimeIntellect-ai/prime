@@ -242,14 +242,16 @@ class SandboxClient:
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
         headers = {"Authorization": f"Bearer {auth['token']}"}
+
+        effective_timeout = timeout if timeout is not None else 300
+
         payload = {
             "command": command,
             "working_dir": working_dir,
             "env": env or {},
             "sandbox_id": sandbox_id,
+            "timeout": effective_timeout,
         }
-
-        effective_timeout = timeout if timeout is not None else 300
 
         try:
             with httpx.Client(timeout=effective_timeout) as client:
@@ -487,14 +489,16 @@ class AsyncSandboxClient:
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
         headers = {"Authorization": f"Bearer {auth['token']}"}
+
+        effective_timeout = timeout if timeout is not None else 300
+
         payload = {
             "command": command,
             "working_dir": working_dir,
             "env": env or {},
             "sandbox_id": sandbox_id,
+            "timeout": effective_timeout,
         }
-
-        effective_timeout = timeout if timeout is not None else 300
 
         try:
             async with httpx.AsyncClient(timeout=effective_timeout) as client:

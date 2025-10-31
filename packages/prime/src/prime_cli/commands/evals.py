@@ -57,6 +57,13 @@ def list_evals(
     output: str = typer.Option("table", "--output", "-o", help="table|json"),
     skip: int = typer.Option(0, "--skip", help="Number of records to skip"),
     limit: int = typer.Option(50, "--limit", help="Maximum number of records to return"),
+    env: Optional[str] = typer.Option(
+        None,
+        "--env",
+        "--env-name",
+        "-e",
+        help="Filter by environment (e.g., 'gsm8k' or 'owner/gsm8k')",
+    ),
 ) -> None:
     """List evaluations."""
     _validate_output_format(output, ["table", "json"])
@@ -64,7 +71,9 @@ def list_evals(
     try:
         api_client = APIClient()
         client = EvalsClient(api_client)
+
         data = client.list_evaluations(
+            env_name=env,
             skip=skip,
             limit=limit,
         )
@@ -160,9 +169,10 @@ def _load_verifiers_format(directory: Path) -> dict:
     with open(directory / "metadata.json") as f:
         metadata = json.load(f)
 
-    if "env" not in metadata or "model" not in metadata:
+    env_field = metadata.get("env_id") or metadata.get("env")
+    if not env_field or "model" not in metadata:
         raise ValueError(
-            f"Missing required 'env' or 'model' field in {directory / 'metadata.json'}"
+            f"Missing required 'env_id' or 'model' field in {directory / 'metadata.json'}"
         )
 
     results = []
@@ -187,9 +197,9 @@ def _load_verifiers_format(directory: Path) -> dict:
             metadata_copy[key] = value
 
     return {
-        "eval_name": f"{metadata['env']}-{metadata['model']}",
+        "eval_name": f"{env_field}-{metadata['model']}",
         "model_name": metadata["model"],
-        "env": metadata["env"],
+        "env": env_field,
         "metrics": metrics,
         "metadata": metadata_copy,
         "results": results,
@@ -232,6 +242,7 @@ def _push_single_eval(
     config_path: str,
     env_id: Optional[str],
     run_id: Optional[str],
+    eval_id: Optional[str],
 ) -> str:
     format_type, path = _detect_format(config_path)
 
@@ -243,12 +254,12 @@ def _push_single_eval(
         eval_data = _load_verifiers_format(path)
         console.print(f"[blue]✓ Loaded eval data (verifiers format):[/blue] {path}")
 
-    detected_env = eval_data.get("env")
-    if not env_id and detected_env and not run_id:
+    detected_env = eval_data.get("env_id") or eval_data.get("env")
+    if not env_id and detected_env and not run_id and not eval_id:
         env_id = detected_env
 
     environments = None
-    if env_id and not run_id:
+    if env_id and not run_id and not eval_id:
         environments = [{"id": env_id}]
 
     console.print()
@@ -256,25 +267,48 @@ def _push_single_eval(
     api_client = APIClient()
     client = EvalsClient(api_client)
 
-    console.print("[blue]Creating evaluation...[/blue]")
-    create_response = client.create_evaluation(
-        name=eval_data["eval_name"],
-        environments=environments,
-        run_id=run_id,
-        model_name=eval_data.get("model_name"),
-        framework=eval_data.get("metadata", {}).get("framework", "verifiers"),
-        task_type=eval_data.get("metadata", {}).get("task_type"),
-        metadata=eval_data.get("metadata"),
-        metrics=eval_data.get("metrics"),
-        tags=eval_data.get("tags", []),
-    )
+    if eval_id:
+        console.print(f"[blue]Checking evaluation:[/blue] {eval_id}")
+        try:
+            client.get_evaluation(eval_id)
+            console.print("[green]✓ Found existing evaluation[/green]")
 
-    eval_id = create_response.get("evaluation_id")
-    if not eval_id:
-        raise ValueError("Failed to get evaluation ID from response")
+            console.print("[blue]Updating evaluation...[/blue]")
+            client.update_evaluation(
+                evaluation_id=eval_id,
+                name=eval_data.get("eval_name"),
+                model_name=eval_data.get("model_name"),
+                framework=eval_data.get("metadata", {}).get("framework", "verifiers"),
+                task_type=eval_data.get("metadata", {}).get("task_type"),
+                metadata=eval_data.get("metadata"),
+                metrics=eval_data.get("metrics"),
+                tags=eval_data.get("tags", []),
+            )
+            console.print(f"[green]✓ Updated evaluation:[/green] {eval_id}")
+        except Exception as e:
+            console.print(f"[red]Error:[/red] Could not update evaluation {eval_id}: {e}")
+            raise
+        console.print()
+    else:
+        console.print("[blue]Creating evaluation...[/blue]")
+        create_response = client.create_evaluation(
+            name=eval_data["eval_name"],
+            environments=environments,
+            run_id=run_id,
+            model_name=eval_data.get("model_name"),
+            framework=eval_data.get("metadata", {}).get("framework", "verifiers"),
+            task_type=eval_data.get("metadata", {}).get("task_type"),
+            metadata=eval_data.get("metadata"),
+            metrics=eval_data.get("metrics"),
+            tags=eval_data.get("tags", []),
+        )
 
-    console.print(f"[green]✓ Created evaluation:[/green] {eval_id}")
-    console.print()
+        eval_id = create_response.get("evaluation_id")
+        if not eval_id:
+            raise ValueError("Failed to get evaluation ID from response")
+
+        console.print(f"[green]✓ Created evaluation:[/green] {eval_id}")
+        console.print()
 
     results = eval_data.get("results", [])
     if results:
@@ -311,14 +345,21 @@ def push_eval(
     env_id: Optional[str] = typer.Option(
         None,
         "--env",
+        "--env-id",
         "-e",
-        help="Environment name (e.g., 'gsm8k' or 'd42me/gsm8k')",
+        help="Environment name (e.g., 'gsm8k' or 'owner/gsm8k')",
     ),
     run_id: Optional[str] = typer.Option(
         None,
         "--run-id",
         "-r",
         help="Link to existing training run id",
+    ),
+    eval_id: Optional[str] = typer.Option(
+        None,
+        "--eval",
+        "--eval-id",
+        help="Push to existing evaluation id",
     ),
     output: str = typer.Option("pretty", "--output", "-o", help="json|pretty"),
 ) -> None:
@@ -329,16 +370,26 @@ def push_eval(
     Examples:
         prime eval push                                    # Push current dir or auto-discover
         prime eval push outputs/evals/gsm8k--gpt-4/abc123  # Push specific directory
-        prime eval push eval.json --run-id abc123          # Push JSON file
+        prime eval push eval.json --run-id abc123          # Push JSON file with run_id
+        prime eval push eval.json --eval xyz789            # Push to existing evaluation
+        prime eval push --env gsm8k                        # Push with environment
     """
     try:
+        if config_path is None and eval_id:
+            console.print("[red]Error:[/red] Cannot use --eval-id with auto-discovery")
+            console.print()
+            console.print("[yellow]Tip:[/yellow] Specify an explicit path when using --eval-id:")
+            console.print("  prime eval push /path/to/eval/data --eval-id <eval-id>")
+            console.print("  prime eval push outputs/evals/env--model/run-id --eval-id <eval-id>")
+            raise typer.Exit(1)
+
         if config_path is None:
             current_dir = Path(".")
             if _has_verifiers_files(current_dir):
-                eval_id = _push_single_eval(".", env_id, run_id)
+                result_eval_id = _push_single_eval(".", env_id, run_id, eval_id)
                 if output == "json":
                     console.print()
-                    output_data_as_json({"evaluation_id": eval_id}, console)
+                    output_data_as_json({"evaluation_id": result_eval_id}, console)
                 return
 
             eval_dirs = _discover_eval_outputs()
@@ -358,8 +409,10 @@ def push_eval(
             results = []
             for eval_dir in eval_dirs:
                 try:
-                    eval_id = _push_single_eval(str(eval_dir), env_id, run_id)
-                    results.append({"path": str(eval_dir), "eval_id": eval_id, "status": "success"})
+                    result_eval_id = _push_single_eval(str(eval_dir), env_id, run_id, eval_id)
+                    results.append(
+                        {"path": str(eval_dir), "eval_id": result_eval_id, "status": "success"}
+                    )
                 except Exception as e:
                     console.print(f"[red]Failed to push {eval_dir}:[/red] {e}")
                     results.append({"path": str(eval_dir), "error": str(e), "status": "failed"})
@@ -379,11 +432,11 @@ def push_eval(
 
             return
 
-        eval_id = _push_single_eval(config_path, env_id, run_id)
+        result_eval_id = _push_single_eval(config_path, env_id, run_id, eval_id)
 
         if output == "json":
             console.print()
-            output_data_as_json({"evaluation_id": eval_id}, console)
+            output_data_as_json({"evaluation_id": result_eval_id}, console)
 
     except FileNotFoundError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -395,8 +448,9 @@ def push_eval(
         console.print(f"[red]Error:[/red] {e}")
         console.print()
         console.print("[yellow]Tip:[/yellow] You must provide one of:")
-        console.print("  --run-id <run_id>  (to link to an existing training run)")
-        console.print("  --env <env>        (environment name, e.g., 'gsm8k' or 'd42me/gsm8k')")
+        console.print("  --eval <eval_id>     (to update an existing evaluation)")
+        console.print("  --run-id <run_id>    (to link to an existing training run)")
+        console.print("  --env <env>          (environment name, e.g., 'gsm8k' or 'owner/gsm8k')")
         console.print("  [or use verifiers format with 'env' in metadata.json for auto-detection]")
         raise typer.Exit(1)
     except KeyError as e:

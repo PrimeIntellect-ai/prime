@@ -117,15 +117,15 @@ class EvalsClient:
 
     def list_evaluations(
         self,
-        environment_id: Optional[str] = None,
+        env_name: Optional[str] = None,
         suite_id: Optional[str] = None,
         skip: int = 0,
         limit: int = 50,
     ) -> Dict[str, Any]:
         """List evaluations with optional filters"""
         params: Dict[str, Any] = {"skip": skip, "limit": limit}
-        if environment_id:
-            params["environment_id"] = environment_id
+        if env_name:
+            params["environment_name"] = env_name
         if suite_id:
             params["suite_id"] = suite_id
 
@@ -135,6 +135,35 @@ class EvalsClient:
     def get_evaluation(self, evaluation_id: str) -> Dict[str, Any]:
         """Get evaluation details by ID"""
         response = self.client.request("GET", f"/evaluations/{evaluation_id}")
+        return response
+
+    def update_evaluation(
+        self,
+        evaluation_id: str,
+        name: Optional[str] = None,
+        model_name: Optional[str] = None,
+        dataset: Optional[str] = None,
+        framework: Optional[str] = None,
+        task_type: Optional[str] = None,
+        description: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "name": name,
+            "model_name": model_name,
+            "dataset": dataset,
+            "framework": framework,
+            "task_type": task_type,
+            "description": description,
+            "tags": tags if tags is not None else [],
+            "metadata": metadata,
+            "metrics": metrics,
+        }
+        payload = {k: v for k, v in payload.items() if v is not None or k in ["tags"]}
+
+        response = self.client.request("PUT", f"/evaluations/{evaluation_id}", json=payload)
         return response
 
     def get_samples(self, evaluation_id: str, page: int = 1, limit: int = 100) -> Dict[str, Any]:
@@ -262,15 +291,15 @@ class AsyncEvalsClient:
 
     async def list_evaluations(
         self,
-        environment_id: Optional[str] = None,
+        env_name: Optional[str] = None,
         suite_id: Optional[str] = None,
         skip: int = 0,
         limit: int = 50,
     ) -> Dict[str, Any]:
         """List evaluations with optional filters"""
         params: Dict[str, Any] = {"skip": skip, "limit": limit}
-        if environment_id:
-            params["environment_id"] = environment_id
+        if env_name:
+            params["environment_name"] = env_name
         if suite_id:
             params["suite_id"] = suite_id
 
@@ -280,6 +309,35 @@ class AsyncEvalsClient:
     async def get_evaluation(self, evaluation_id: str) -> Dict[str, Any]:
         """Get evaluation details by ID"""
         response = await self.client.request("GET", f"/evaluations/{evaluation_id}")
+        return response
+
+    async def update_evaluation(
+        self,
+        evaluation_id: str,
+        name: Optional[str] = None,
+        model_name: Optional[str] = None,
+        dataset: Optional[str] = None,
+        framework: Optional[str] = None,
+        task_type: Optional[str] = None,
+        description: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "name": name,
+            "model_name": model_name,
+            "dataset": dataset,
+            "framework": framework,
+            "task_type": task_type,
+            "description": description,
+            "tags": tags if tags is not None else [],
+            "metadata": metadata,
+            "metrics": metrics,
+        }
+        payload = {k: v for k, v in payload.items() if v is not None or k in ["tags"]}
+
+        response = await self.client.request("PUT", f"/evaluations/{evaluation_id}", json=payload)
         return response
 
     async def get_samples(

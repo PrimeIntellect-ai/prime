@@ -37,6 +37,7 @@ def test_command_timeout():
         assert result.stdout.strip() == "done"
         assert result.stderr.strip() == ""
     finally:
-        print("\nDeleting sandbox...")
-        sandbox_client.delete(sandbox.id)
-        print(f"✓ Deleted sandbox {sandbox.id}")
+        if sandbox and sandbox.id:
+            print("\nDeleting sandbox...")
+            sandbox_client.delete(sandbox.id)
+            print(f"✓ Deleted sandbox {sandbox.id}")

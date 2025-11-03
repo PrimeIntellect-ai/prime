@@ -70,6 +70,18 @@ uv run python examples/sandbox_async_demo.py
 
 # Run high-volume async demo
 uv run python examples/sandbox_async_high_volume_demo.py
+
+# Run file operations demo
+uv run python examples/sandbox_file_operations.py
+
+# Run file upload stress test with error handling (both modes)
+uv run python examples/sandbox_file_handling_stress_test.py
+
+# Run only sequential tests
+uv run python examples/sandbox_file_handling_stress_test.py sequential
+
+# Run only concurrent tests
+uv run python examples/sandbox_file_handling_stress_test.py concurrent
 ```
 
 ### Prerequisites
@@ -94,6 +106,27 @@ uv run python examples/sandbox_async_high_volume_demo.py
 - All available sandbox commands
 - Common parameter combinations
 - Environment variable handling
+
+### File Handling & Error Testing
+
+The `sandbox_file_handling_stress_test.py` demonstrates:
+
+- **File Upload Testing**: Tests uploading files of various sizes (10, 20, 25, 30 MB)
+- **Multiple Test Modes**: Choose between sequential, concurrent, or both modes via command-line argument
+- **Performance Measurement**: Measures upload time and calculates transfer speeds
+- **Concurrency Comparison**: Compares sequential vs concurrent upload performance
+- **Full Error Details**: Shows complete API error information including HTTP status codes and response bodies
+- **Error Type Detection**: Catches and displays specific error types (HTTPStatusError, UnauthorizedError, PaymentRequiredError, APIError)
+- **Disk Space Monitoring**: Checks available disk space before and after uploads
+- **Test Summary**: Provides detailed statistics including success rates and performance metrics
+
+This example is useful for:
+- Testing sandbox file upload limits
+- Identifying performance bottlenecks
+- Validating error handling for large file transfers
+- Debugging API errors with full response details
+- Benchmarking upload speeds (sequential vs concurrent)
+- Testing concurrent upload behavior
 
 ## Sandbox API Reference
 

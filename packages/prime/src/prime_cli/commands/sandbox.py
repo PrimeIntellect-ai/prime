@@ -708,7 +708,7 @@ def run(
     except SandboxNotRunningError as e:
         console.print(f"[red]Sandbox Not Running:[/red] {str(e)}")
         console.print(
-            "[yellow]Tip:[/yellow] Check sandbox status with: prime sandbox get {sandbox_id}"
+            f"[yellow]Tip:[/yellow] Check sandbox status with: prime sandbox get {sandbox_id}"
         )
         raise typer.Exit(1)
     except CommandTimeoutError as e:

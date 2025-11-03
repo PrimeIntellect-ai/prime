@@ -92,8 +92,11 @@ uv run python examples/sandbox_multi_upload_stress_test.py
 # Custom configuration: 5 sandboxes, 15 concurrent uploads
 uv run python examples/sandbox_multi_upload_stress_test.py 5 15
 
-# Heavy load test: 20 sandboxes, 30 concurrent uploads
-uv run python examples/sandbox_multi_upload_stress_test.py 20 30
+# Heavy load test: 100 sandboxes, 50 concurrent uploads
+uv run python examples/sandbox_multi_upload_stress_test.py 100 50
+
+# Extreme stress test: 500 sandboxes, 100 concurrent uploads
+uv run python examples/sandbox_multi_upload_stress_test.py 500 100
 ```
 
 ### Prerequisites

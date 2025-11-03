@@ -30,6 +30,9 @@ Test Patterns (different sandboxes use different patterns):
 Usage:
     python examples/sandbox_multi_upload_stress_test.py [num_sandboxes] [concurrency]
 
+    num_sandboxes: Number of sandboxes to create (1-1000, default: 10)
+    concurrency: Max concurrent uploads (1-500, default: 20)
+
 Examples:
     # Default: 10 sandboxes, 20 concurrent uploads
     python examples/sandbox_multi_upload_stress_test.py
@@ -37,8 +40,11 @@ Examples:
     # Custom: 5 sandboxes, 15 concurrent uploads
     python examples/sandbox_multi_upload_stress_test.py 5 15
 
-    # Heavy load: 20 sandboxes, 30 concurrent uploads
-    python examples/sandbox_multi_upload_stress_test.py 20 30
+    # Heavy load: 100 sandboxes, 50 concurrent uploads
+    python examples/sandbox_multi_upload_stress_test.py 100 50
+
+    # Extreme stress: 500 sandboxes, 100 concurrent uploads
+    python examples/sandbox_multi_upload_stress_test.py 500 100
 """
 
 import asyncio
@@ -773,12 +779,12 @@ if __name__ == "__main__":
             sys.exit(1)
 
     # Validate configuration
-    if num_sandboxes < 1 or num_sandboxes > 100:
-        print("Error: Number of sandboxes must be between 1 and 100")
+    if num_sandboxes < 1 or num_sandboxes > 1000:
+        print("Error: Number of sandboxes must be between 1 and 1000")
         sys.exit(1)
 
-    if max_concurrent < 1 or max_concurrent > 100:
-        print("Error: Concurrency must be between 1 and 100")
+    if max_concurrent < 1 or max_concurrent > 500:
+        print("Error: Concurrency must be between 1 and 500")
         sys.exit(1)
 
     # Check API configuration

@@ -9,10 +9,14 @@ from prime_sandboxes import (
     APIClient,
     APIError,
     BulkDeleteSandboxResponse,
+    CommandTimeoutError,
     Config,
     CreateSandboxRequest,
+    PaymentRequiredError,
     Sandbox,
     SandboxClient,
+    SandboxNotRunningError,
+    UnauthorizedError,
 )
 from rich.console import Console
 from rich.markup import escape
@@ -191,6 +195,14 @@ def list_sandboxes_cmd(
                     f"Use --page {page + 1} to see more.[/yellow]"
                 )
 
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -266,6 +278,14 @@ def get(
 
             console.print(table)
 
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -373,8 +393,16 @@ def create(
             )
         else:
             console.print("\nSandbox creation cancelled")
-            raise typer.Exit(0)
+            return
 
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -420,19 +448,17 @@ def delete(
                 page = 1
                 while True:
                     list_response = sandbox_client.list(
-                        per_page=100, page=page, exclude_terminated=False
+                        per_page=100, page=page, exclude_terminated=True
                     )
                     all_sandboxes.extend(list_response.sandboxes)
                     if not list_response.has_next:
                         break
                     page += 1
 
-                # Filter to current user if configured, and exclude already terminated sandboxes
+                # Filter to current user if configured
                 current_user_id = config.user_id
                 active_sandboxes = []
                 for s in all_sandboxes:
-                    if s.status in {"TERMINATED", "TIMEOUT"}:
-                        continue
                     if current_user_id and s.user_id and s.user_id != current_user_id:
                         continue
                     active_sandboxes.append(s)
@@ -440,7 +466,7 @@ def delete(
 
                 if not sandbox_ids:
                     console.print("[yellow]No sandboxes to delete[/yellow]")
-                    raise typer.Exit(0)
+                    return
         else:
             # Handle comma-separated IDs by splitting them
             parsed_ids = []
@@ -471,7 +497,7 @@ def delete(
 
             if not confirm_or_skip(confirmation_msg, yes):
                 console.print("Delete cancelled")
-                raise typer.Exit(0)
+                return
 
             with console.status("[bold blue]Deleting sandboxes by labels...", spinner="dots"):
                 result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(labels=labels)
@@ -490,7 +516,7 @@ def delete(
             sandbox_id = sandbox_ids[0]
             if not confirm_or_skip(f"Are you sure you want to delete sandbox {sandbox_id}?", yes):
                 console.print("Delete cancelled")
-                raise typer.Exit(0)
+                return
 
             with console.status("[bold blue]Deleting sandbox...", spinner="dots"):
                 sandbox_client.delete(sandbox_id)
@@ -513,7 +539,7 @@ def delete(
 
             if not confirm_or_skip(confirmation_msg, yes):
                 console.print(cancel_msg)
-                raise typer.Exit(0)
+                return
 
             # Batch the deletion into chunks of 100 to respect API limits
             batch_size = 100
@@ -561,6 +587,14 @@ def delete(
                     error = failure.get("error", "unknown error")
                     console.print(f"  ✗ {sandbox_id}: {error}")
 
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -586,6 +620,14 @@ def logs(sandbox_id: str) -> None:
         else:
             console.print(f"[yellow]No logs available for sandbox {sandbox_id}[/yellow]")
 
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
@@ -661,6 +703,23 @@ def run(
             console.print(f"\n[bold yellow]Exit code:[/bold yellow] {result.exit_code}")
             raise typer.Exit(result.exit_code)
 
+    except typer.Exit:
+        raise
+    except SandboxNotRunningError as e:
+        console.print(f"[red]Sandbox Not Running:[/red] {str(e)}")
+        console.print(
+            f"[yellow]Tip:[/yellow] Check sandbox status with: prime sandbox get {sandbox_id}"
+        )
+        raise typer.Exit(1)
+    except CommandTimeoutError as e:
+        console.print(f"[red]Command Timeout:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -711,6 +770,14 @@ def upload_file(
         console.print(f"[bold green]Size:[/bold green] {response.size:,} bytes")
         console.print(f"[bold green]Timestamp:[/bold green] {response.timestamp}")
 
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -740,7 +807,7 @@ def download_file(
         if os.path.exists(local_file):
             if not typer.confirm(f"File {local_file} already exists. Overwrite?"):
                 console.print("Download cancelled.")
-                raise typer.Exit(0)
+                return
 
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
@@ -761,11 +828,19 @@ def download_file(
         console.print(f"[bold green]Local path:[/bold green] {local_file}")
         console.print(f"[bold green]Size:[/bold green] {file_size:,} bytes")
 
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+    except typer.Exit:
+        raise
     except FileNotFoundError as e:
         console.print(f"[red]File not found:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")

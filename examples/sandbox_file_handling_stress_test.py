@@ -7,14 +7,14 @@ with various file sizes. It tests the sandbox's ability to handle different file
 and measures upload times to identify potential issues.
 
 The script supports three test modes:
-1. Sequential uploads - uploads files one at a time
-2. Concurrent uploads - uploads all files simultaneously using asyncio.gather()
+1. Sequential uploads - uploads files one at a time (10, 20, 25, 30 MB)
+2. Concurrent uploads - uploads 15 files of 5MB each simultaneously using asyncio.gather()
 3. Both - runs both sequential and concurrent tests for comparison
 
 This helps identify:
 - Error handling for different file sizes with full API error details
 - Upload performance and speed
-- Behavior under concurrent load
+- Behavior under concurrent load (stress test with 15 simultaneous uploads)
 - Disk space issues
 - HTTP status codes and response bodies from the API
 
@@ -404,7 +404,8 @@ async def main(mode: str = "both") -> None:
     client = AsyncSandboxClient()
 
     # Test configuration: file sizes in MB
-    test_sizes = [10, 20, 25, 30]
+    sequential_test_sizes = [10, 20, 25, 30]
+    concurrent_test_sizes = [5] * 15  # 15 files of 5MB each
 
     try:
         print("Creating a sandbox for file upload testing...")
@@ -434,14 +435,14 @@ async def main(mode: str = "both") -> None:
         # Run tests based on mode
         if mode in ["sequential", "both"]:
             sequential_results, sequential_time = await run_sequential_tests(
-                client, sandbox.id, test_sizes
+                client, sandbox.id, sequential_test_sizes
             )
             await verify_sandbox_disk_space(client, sandbox.id)
             print_test_summary(sequential_results, sequential_time, "Sequential")
 
         if mode in ["concurrent", "both"]:
             concurrent_results = await run_concurrent_tests(
-                client, sandbox.id, test_sizes
+                client, sandbox.id, concurrent_test_sizes
             )
             # Calculate total concurrent time (max of individual durations)
             concurrent_time = (

@@ -111,7 +111,9 @@ uv run python examples/sandbox_file_handling_stress_test.py concurrent
 
 The `sandbox_file_handling_stress_test.py` demonstrates:
 
-- **File Upload Testing**: Tests uploading files of various sizes (10, 20, 25, 30 MB)
+- **File Upload Testing**:
+  - Sequential mode: Tests 10, 20, 25, 30 MB files one at a time
+  - Concurrent mode: Stress tests with 15 simultaneous 5MB file uploads
 - **Multiple Test Modes**: Choose between sequential, concurrent, or both modes via command-line argument
 - **Performance Measurement**: Measures upload time and calculates transfer speeds
 - **Concurrency Comparison**: Compares sequential vs concurrent upload performance
@@ -126,7 +128,7 @@ This example is useful for:
 - Validating error handling for large file transfers
 - Debugging API errors with full response details
 - Benchmarking upload speeds (sequential vs concurrent)
-- Testing concurrent upload behavior
+- Stress testing concurrent upload behavior with 15 simultaneous uploads
 
 ## Sandbox API Reference
 

@@ -285,20 +285,25 @@ class SandboxClient:
     def bulk_wait_for_creation(
         self,
         sandbox_ids: List[str],
-        max_attempts: int = 60,
+        max_attempts: int = 0,
         status_callback: Optional[Callable[[float, Dict[str, int], int], None]] = None,
     ) -> Dict[str, str]:
         """Wait for multiple sandboxes to be running using list endpoint to avoid rate limits
 
         Args:
             sandbox_ids: List of sandbox IDs to wait for
-            max_attempts: Maximum number of polling attempts
+            max_attempts: Maximum number of polling attempts (0 = auto-scale based on sandbox count)
             status_callback: Optional callback function called on each attempt with
                 (elapsed_time, state_counts, attempt)
         """
         sandbox_id_set = set(sandbox_ids)
         final_statuses = {}
         start_time = time.time()
+
+        # Auto-scale timeout based on number of sandboxes if not explicitly set
+        # Formula: base 60 attempts + 1 attempt per 5 sandboxes for reachability checks
+        if max_attempts == 0:
+            max_attempts = 60 + (len(sandbox_ids) // 5)
 
         for attempt in range(max_attempts):
             total_running = 0
@@ -564,14 +569,14 @@ class AsyncSandboxClient:
     async def bulk_wait_for_creation(
         self,
         sandbox_ids: List[str],
-        max_attempts: int = 60,
+        max_attempts: int = 0,
         status_callback: Optional[Callable[[float, Dict[str, int], int], None]] = None,
     ) -> Dict[str, str]:
         """Wait for multiple sandboxes to be running using list endpoint
 
         Args:
             sandbox_ids: List of sandbox IDs to wait for
-            max_attempts: Maximum number of polling attempts
+            max_attempts: Maximum number of polling attempts (0 = auto-scale based on sandbox count)
             status_callback: Optional callback function called on each attempt with
                 (elapsed_time, state_counts, attempt)
         """
@@ -580,6 +585,11 @@ class AsyncSandboxClient:
         sandbox_id_set = set(sandbox_ids)
         final_statuses = {}
         start_time = time.time()
+
+        # Auto-scale timeout based on number of sandboxes if not explicitly set
+        # Formula: base 60 attempts + 1 attempt per 5 sandboxes for reachability checks
+        if max_attempts == 0:
+            max_attempts = 60 + (len(sandbox_ids) // 5)
 
         for attempt in range(max_attempts):
             total_running = 0

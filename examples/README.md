@@ -71,6 +71,9 @@ uv run python examples/sandbox_async_demo.py
 # Run high-volume async demo
 uv run python examples/sandbox_async_high_volume_demo.py
 
+# Run with debug logging to see detailed progress
+LOG_LEVEL=DEBUG uv run python examples/sandbox_async_high_volume_demo.py
+
 # Run file operations demo
 uv run python examples/sandbox_file_operations.py
 

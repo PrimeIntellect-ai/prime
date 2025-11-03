@@ -1,10 +1,11 @@
 """Sandbox client implementations."""
 
 import json
+import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 from prime_core import APIClient, APIError, AsyncAPIClient
@@ -20,6 +21,8 @@ from .models import (
     SandboxListResponse,
     SandboxLogsResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SandboxAuthCache:
@@ -156,7 +159,8 @@ class SandboxClient:
         try:
             self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
             return True
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Sandbox {sandbox_id} is not reachable: {e}")
             return False
 
     def clear_auth_cache(self) -> None:
@@ -266,6 +270,7 @@ class SandboxClient:
     def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
         for attempt in range(max_attempts):
             sandbox = self.get(sandbox_id)
+            logger.debug(f"Sandbox {sandbox_id} status: {sandbox.state}")
             if sandbox.status == "RUNNING":
                 if self._is_sandbox_reachable(sandbox_id):
                     return
@@ -278,11 +283,22 @@ class SandboxClient:
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
 
     def bulk_wait_for_creation(
-        self, sandbox_ids: List[str], max_attempts: int = 60
+        self,
+        sandbox_ids: List[str],
+        max_attempts: int = 60,
+        status_callback: Optional[Callable[[float, Dict[str, int], int], None]] = None,
     ) -> Dict[str, str]:
-        """Wait for multiple sandboxes to be running using list endpoint to avoid rate limits"""
+        """Wait for multiple sandboxes to be running using list endpoint to avoid rate limits
+
+        Args:
+            sandbox_ids: List of sandbox IDs to wait for
+            max_attempts: Maximum number of polling attempts
+            status_callback: Optional callback function called on each attempt with
+                (elapsed_time, state_counts, attempt)
+        """
         sandbox_id_set = set(sandbox_ids)
         final_statuses = {}
+        start_time = time.time()
 
         for attempt in range(max_attempts):
             total_running = 0
@@ -312,18 +328,37 @@ class SandboxClient:
 
                 page += 1
 
+            # Call status callback if provided
+            if status_callback:
+                state_counts: Dict[str, int] = {}
+                for state in final_statuses.values():
+                    state_counts[state] = state_counts.get(state, 0) + 1
+                # Count pending sandboxes
+                pending_count = len(sandbox_ids) - len(final_statuses)
+                if pending_count > 0:
+                    state_counts["pending"] = pending_count
+
+                elapsed_time = time.time() - start_time
+                status_callback(elapsed_time, state_counts, attempt)
+
             if all_failed:
                 raise RuntimeError(f"Sandboxes failed: {all_failed}")
 
             if total_running == len(sandbox_ids):
+                logger.debug(
+                    f"All sandboxes are running: Performing reachability check on "
+                    f"{len(sandbox_ids)} sandboxes"
+                )
                 all_reachable = True
                 for sandbox_id in sandbox_ids:
                     if final_statuses.get(sandbox_id) == "RUNNING":
                         if not self._is_sandbox_reachable(sandbox_id):
+                            logger.debug(f"Sandbox {sandbox_id} is not reachable")
                             all_reachable = False
                             final_statuses.pop(sandbox_id, None)
 
                 if all_reachable:
+                    logger.info(f"All {len(sandbox_ids)} sandboxes are reachable")
                     return final_statuses
 
             sleep_time = 1 if attempt < 5 else 2
@@ -402,7 +437,8 @@ class AsyncSandboxClient:
         try:
             await self.execute_command(sandbox_id, "echo 'sandbox ready'", timeout=timeout)
             return True
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Sandbox {sandbox_id} is not reachable: {e}")
             return False
 
     def clear_auth_cache(self) -> None:
@@ -514,6 +550,7 @@ class AsyncSandboxClient:
 
         for attempt in range(max_attempts):
             sandbox = await self.get(sandbox_id)
+            logger.debug(f"Sandbox {sandbox_id} status: {sandbox.state}")
             if sandbox.status == "RUNNING":
                 if await self._is_sandbox_reachable(sandbox_id):
                     return
@@ -525,13 +562,24 @@ class AsyncSandboxClient:
         raise SandboxNotRunningError(sandbox_id, "Timeout during sandbox creation")
 
     async def bulk_wait_for_creation(
-        self, sandbox_ids: List[str], max_attempts: int = 60
+        self,
+        sandbox_ids: List[str],
+        max_attempts: int = 60,
+        status_callback: Optional[Callable[[float, Dict[str, int], int], None]] = None,
     ) -> Dict[str, str]:
-        """Wait for multiple sandboxes to be running using list endpoint"""
+        """Wait for multiple sandboxes to be running using list endpoint
+
+        Args:
+            sandbox_ids: List of sandbox IDs to wait for
+            max_attempts: Maximum number of polling attempts
+            status_callback: Optional callback function called on each attempt with
+                (elapsed_time, state_counts, attempt)
+        """
         import asyncio
 
         sandbox_id_set = set(sandbox_ids)
         final_statuses = {}
+        start_time = time.time()
 
         for attempt in range(max_attempts):
             total_running = 0
@@ -561,18 +609,60 @@ class AsyncSandboxClient:
 
                 page += 1
 
+            # Call status callback if provided
+            if status_callback:
+                state_counts: Dict[str, int] = {}
+                for state in final_statuses.values():
+                    state_counts[state] = state_counts.get(state, 0) + 1
+                # Count pending sandboxes
+                pending_count = len(sandbox_ids) - len(final_statuses)
+                if pending_count > 0:
+                    state_counts["pending"] = pending_count
+
+                elapsed_time = time.time() - start_time
+                status_callback(elapsed_time, state_counts, attempt)
+
             if all_failed:
                 raise RuntimeError(f"Sandboxes failed: {all_failed}")
 
             if total_running == len(sandbox_ids):
+                logger.debug(
+                    f"All sandboxes are running: Performing reachability check on "
+                    f"{len(sandbox_ids)} sandboxes"
+                )
                 all_reachable = True
-                for sandbox_id in sandbox_ids:
+                unreachable_count = 0
+                reachable_count = 0
+
+                # Determine progress update frequency based on sandbox count
+                progress_interval = max(10, len(sandbox_ids) // 10)
+
+                for i, sandbox_id in enumerate(sandbox_ids):
                     if final_statuses.get(sandbox_id) == "RUNNING":
-                        if not await self._is_sandbox_reachable(sandbox_id):
+                        is_reachable = await self._is_sandbox_reachable(sandbox_id)
+                        if not is_reachable:
+                            unreachable_count += 1
                             all_reachable = False
                             final_statuses.pop(sandbox_id, None)
+                        else:
+                            reachable_count += 1
+
+                    # Progress indicator
+                    if (i + 1) % progress_interval == 0 or (i + 1) == len(sandbox_ids):
+                        logger.debug(
+                            f"Reachability check progress: {i + 1}/{len(sandbox_ids)} "
+                            f"checked | ✓ {reachable_count} reachable, "
+                            f"✗ {unreachable_count} unreachable"
+                        )
+
+                if unreachable_count > 0:
+                    logger.debug(
+                        f"Reachability check complete on attempt {attempt + 1}: "
+                        f"{reachable_count} reachable, {unreachable_count} unreachable"
+                    )
 
                 if all_reachable:
+                    logger.info(f"All {len(sandbox_ids)} sandboxes are reachable")
                     return final_statuses
 
             sleep_time = 1 if attempt < 5 else 2

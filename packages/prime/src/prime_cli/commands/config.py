@@ -10,8 +10,8 @@ from rich.table import Table
 app = typer.Typer(help="Configure the CLI", no_args_is_help=True)
 console = Console()
 
-# Team ID validation pattern: 25 alphanumeric characters
-TEAM_ID_PATTERN = re.compile(r"^[a-zA-Z0-9]{25}$")
+# Team ID validation pattern: CUID (v1)
+TEAM_ID_PATTERN = re.compile(r"^c[a-z0-9]{24}$")
 
 
 def validate_team_id(team_id: str) -> bool:
@@ -158,7 +158,8 @@ def set_team_id(
     if not validate_team_id(team_id):
         console.print(
             "[red]Error: Invalid team ID format. "
-            "Team ID must be exactly 25 alphanumeric characters.[/red]"
+            "Team ID must be a CUID v1 (start with 'c' followed by 24 lowercase "
+            "alphanumeric characters).[/red]"
         )
         raise typer.Exit(code=1)
 

@@ -9,15 +9,20 @@ class TestTeamIdValidation:
         valid_id = "cmf0ohr9s0026ilerf3w68s6n"
         assert validate_team_id(valid_id) is True
 
-    def test_valid_team_id_with_uppercase(self) -> None:
-        """Test that team IDs with uppercase letters are valid."""
-        valid_id = "CMF0OHR9S0026ILERF3W68S6N"
-        assert validate_team_id(valid_id) is True
+    def test_invalid_team_id_with_uppercase(self) -> None:
+        """Test that team IDs with uppercase letters are invalid (CUID v1 is lowercase only)."""
+        invalid_id = "CMF0OHR9S0026ILERF3W68S6N"
+        assert validate_team_id(invalid_id) is False
 
-    def test_valid_team_id_mixed_case(self) -> None:
-        """Test that team IDs with mixed case are valid."""
-        valid_id = "CmF0OhR9s0026IlErF3w68S6n"
-        assert validate_team_id(valid_id) is True
+    def test_invalid_team_id_mixed_case(self) -> None:
+        """Test that team IDs with mixed case are invalid (CUID v1 is lowercase only)."""
+        invalid_id = "CmF0OhR9s0026IlErF3w68S6n"
+        assert validate_team_id(invalid_id) is False
+
+    def test_invalid_team_id_not_starting_with_c(self) -> None:
+        """Test that team IDs not starting with 'c' are invalid (CUID v1 requirement)."""
+        invalid_id = "amf0ohr9s0026ilerf3w68s6n"
+        assert validate_team_id(invalid_id) is False
 
     def test_empty_string_is_valid(self) -> None:
         """Test that empty string is valid (personal account)."""

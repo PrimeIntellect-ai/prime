@@ -6,6 +6,8 @@ from prime_sandboxes import (
 
 
 def test_command_timeout():
+    sandbox = None
+
     try:
         client = APIClient()
         sandbox_client = SandboxClient(client)

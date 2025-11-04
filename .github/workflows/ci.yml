@@ -42,6 +42,9 @@ jobs:
 
     - name: Run tests
       working-directory: packages/prime-sandboxes
+      env:
+        PRIME_API_KEY: ${{ secrets.PRIME_API_KEY }}
+        PRIME_TEAM_ID: ${{ secrets.PRIME_TEAM_ID }}
       run: uv run pytest tests/ -v
 
   test-prime:

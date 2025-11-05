@@ -9,7 +9,12 @@ from typing import Any, Dict, List, Optional
 import httpx
 from prime_core import APIClient, APIError, AsyncAPIClient
 
-from .exceptions import CommandTimeoutError, SandboxNotRunningError
+from .exceptions import (
+    CommandTimeoutError,
+    DownloadTimeoutError,
+    SandboxNotRunningError,
+    UploadTimeoutError,
+)
 from .models import (
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
@@ -336,7 +341,11 @@ class SandboxClient:
         raise RuntimeError(f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}")
 
     def upload_file(
-        self, sandbox_id: str, file_path: str, local_file_path: str
+        self,
+        sandbox_id: str,
+        file_path: str,
+        local_file_path: str,
+        timeout: Optional[int] = None,
     ) -> FileUploadResponse:
         """Upload file directly via gateway"""
         if not os.path.exists(local_file_path):
@@ -347,22 +356,32 @@ class SandboxClient:
         url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
         headers = {"Authorization": f"Bearer {auth['token']}"}
 
+        effective_timeout = timeout if timeout is not None else 300
+
         with open(local_file_path, "rb") as f:
             files = {"file": (os.path.basename(local_file_path), f)}
             params = {"path": file_path, "sandbox_id": sandbox_id}
 
             try:
-                with httpx.Client(timeout=300.0) as client:
+                with httpx.Client(timeout=effective_timeout) as client:
                     response = client.post(url, files=files, params=params, headers=headers)
                     response.raise_for_status()
                     return FileUploadResponse.model_validate(response.json())
+            except httpx.TimeoutException:
+                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
                 error_details = f"HTTP {e.response.status_code}: {e.response.text}"
                 raise APIError(f"Upload failed: {error_details}")
             except Exception as e:
                 raise APIError(f"Upload failed: {str(e)}")
 
-    def download_file(self, sandbox_id: str, file_path: str, local_file_path: str) -> None:
+    def download_file(
+        self,
+        sandbox_id: str,
+        file_path: str,
+        local_file_path: str,
+        timeout: Optional[int] = None,
+    ) -> None:
         """Download file directly via gateway"""
         auth = self._auth_cache.get_or_refresh(sandbox_id)
 
@@ -370,8 +389,10 @@ class SandboxClient:
         headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
+        effective_timeout = timeout if timeout is not None else 300
+
         try:
-            with httpx.Client(timeout=300.0) as client:
+            with httpx.Client(timeout=effective_timeout) as client:
                 response = client.get(url, params=params, headers=headers)
                 response.raise_for_status()
 
@@ -381,6 +402,8 @@ class SandboxClient:
 
                 with open(local_file_path, "wb") as f:
                     f.write(response.content)
+        except httpx.TimeoutException:
+            raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout)
         except httpx.HTTPStatusError as e:
             error_details = f"HTTP {e.response.status_code}: {e.response.text}"
             raise APIError(f"Download failed: {error_details}")
@@ -585,7 +608,11 @@ class AsyncSandboxClient:
         raise RuntimeError(f"Timeout waiting for sandboxes to be ready. Status: {final_statuses}")
 
     async def upload_file(
-        self, sandbox_id: str, file_path: str, local_file_path: str
+        self,
+        sandbox_id: str,
+        file_path: str,
+        local_file_path: str,
+        timeout: Optional[int] = None,
     ) -> FileUploadResponse:
         """Upload a file to a sandbox via gateway (async)"""
         if not os.path.exists(local_file_path):
@@ -598,23 +625,33 @@ class AsyncSandboxClient:
         headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
+        effective_timeout = timeout if timeout is not None else 300
+
         with open(local_file_path, "rb") as f:
             files = {"file": (os.path.basename(local_file_path), f)}
 
             try:
-                async with httpx.AsyncClient(timeout=300.0) as upload_client:
+                async with httpx.AsyncClient(timeout=effective_timeout) as upload_client:
                     response = await upload_client.post(
                         url, files=files, params=params, headers=headers
                     )
                     response.raise_for_status()
                     return FileUploadResponse.model_validate(response.json())
+            except httpx.TimeoutException:
+                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
                 error_details = f"HTTP {e.response.status_code}: {e.response.text}"
                 raise APIError(f"Upload failed: {error_details}")
             except Exception as e:
                 raise APIError(f"Upload failed: {str(e)}")
 
-    async def download_file(self, sandbox_id: str, file_path: str, local_file_path: str) -> None:
+    async def download_file(
+        self,
+        sandbox_id: str,
+        file_path: str,
+        local_file_path: str,
+        timeout: Optional[int] = None,
+    ) -> None:
         """Download a file from a sandbox via gateway (async)"""
         auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
 
@@ -623,8 +660,10 @@ class AsyncSandboxClient:
         headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
+        effective_timeout = timeout if timeout is not None else 300
+
         try:
-            async with httpx.AsyncClient(timeout=300.0) as download_client:
+            async with httpx.AsyncClient(timeout=effective_timeout) as download_client:
                 response = await download_client.get(url, params=params, headers=headers)
                 response.raise_for_status()
                 content = response.content
@@ -635,6 +674,8 @@ class AsyncSandboxClient:
 
             with open(local_file_path, "wb") as f:
                 f.write(content)
+        except httpx.TimeoutException:
+            raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout)
         except httpx.HTTPStatusError as e:
             error_details = f"HTTP {e.response.status_code}: {e.response.text}"
             raise APIError(f"Download failed: {error_details}")

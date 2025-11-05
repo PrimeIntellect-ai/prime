@@ -14,7 +14,12 @@ from prime_core import (
     UnauthorizedError,
 )
 
-from .exceptions import CommandTimeoutError, SandboxNotRunningError
+from .exceptions import (
+    CommandTimeoutError,
+    DownloadTimeoutError,
+    SandboxNotRunningError,
+    UploadTimeoutError,
+)
 from .models import (
     AdvancedConfigs,
     BulkDeleteSandboxRequest,
@@ -63,4 +68,6 @@ __all__ = [
     "TimeoutError",  # Deprecated alias
     "SandboxNotRunningError",
     "CommandTimeoutError",
+    "UploadTimeoutError",
+    "DownloadTimeoutError",
 ]

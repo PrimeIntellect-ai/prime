@@ -148,7 +148,8 @@ class SandboxClient:
     def __init__(self, api_client: APIClient):
         self.client = api_client
         self._auth_cache = SandboxAuthCache(
-            self.client.config.config_dir / "sandbox_auth_cache.json", self.client
+            self.client.config.config_dir / "sandbox_auth_cache.json",
+            self.client,
         )
 
     def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
@@ -170,7 +171,9 @@ class SandboxClient:
             request.team_id = self.client.config.team_id
 
         response = self.client.request(
-            "POST", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
+            "POST",
+            "/sandbox",
+            json=request.model_dump(by_alias=False, exclude_none=True),
         )
         return Sandbox.model_validate(response)
 
@@ -219,7 +222,9 @@ class SandboxClient:
         """Bulk delete multiple sandboxes by IDs or labels (must specify one, not both)"""
         request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids, labels=labels)
         response = self.client.request(
-            "DELETE", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
+            "DELETE",
+            "/sandbox",
+            json=request.model_dump(by_alias=False, exclude_none=True),
         )
         return BulkDeleteSandboxResponse.model_validate(response)
 
@@ -242,18 +247,23 @@ class SandboxClient:
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
         headers = {"Authorization": f"Bearer {auth['token']}"}
+        effective_timeout = timeout if timeout is not None else 300
+
         payload = {
             "command": command,
             "working_dir": working_dir,
             "env": env or {},
             "sandbox_id": sandbox_id,
+            "timeout": effective_timeout,
         }
-
-        effective_timeout = timeout if timeout is not None else 300
 
         try:
             with httpx.Client(timeout=effective_timeout) as client:
-                response = client.post(url, json=payload, headers=headers)
+                response = client.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                )
                 response.raise_for_status()
                 return CommandResponse.model_validate(response.json())
         except httpx.TimeoutException:
@@ -394,7 +404,8 @@ class AsyncSandboxClient:
     def __init__(self, api_key: Optional[str] = None):
         self.client = AsyncAPIClient(api_key=api_key)
         self._auth_cache = SandboxAuthCache(
-            self.client.config.config_dir / "sandbox_auth_cache.json", self.client
+            self.client.config.config_dir / "sandbox_auth_cache.json",
+            self.client,
         )
 
     async def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
@@ -415,7 +426,9 @@ class AsyncSandboxClient:
             request.team_id = self.client.config.team_id
 
         response = await self.client.request(
-            "POST", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
+            "POST",
+            "/sandbox",
+            json=request.model_dump(by_alias=False, exclude_none=True),
         )
         return Sandbox.model_validate(response)
 
@@ -463,7 +476,9 @@ class AsyncSandboxClient:
         """Bulk delete multiple sandboxes by IDs or labels"""
         request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids, labels=labels)
         response = await self.client.request(
-            "DELETE", "/sandbox", json=request.model_dump(by_alias=False, exclude_none=True)
+            "DELETE",
+            "/sandbox",
+            json=request.model_dump(by_alias=False, exclude_none=True),
         )
         return BulkDeleteSandboxResponse.model_validate(response)
 
@@ -487,14 +502,15 @@ class AsyncSandboxClient:
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
         headers = {"Authorization": f"Bearer {auth['token']}"}
+        effective_timeout = timeout if timeout is not None else 300
+
         payload = {
             "command": command,
             "working_dir": working_dir,
             "env": env or {},
             "sandbox_id": sandbox_id,
+            "timeout": effective_timeout,
         }
-
-        effective_timeout = timeout if timeout is not None else 300
 
         try:
             async with httpx.AsyncClient(timeout=effective_timeout) as client:

@@ -651,16 +651,17 @@ class AsyncSandboxClient:
         file_path: str,
         local_file_path: str,
         timeout: Optional[int] = None,
-        chunk_size: int = 8192,
     ) -> FileUploadResponse:
-        """Upload a file to a sandbox via gateway (async with streaming)
+        """Upload a file to a sandbox via gateway (async)
+
+        Uses aiofiles for non-blocking file I/O, then passes content to httpx.
+        File content is loaded into memory, suitable for typical sandbox files.
 
         Args:
             sandbox_id: The sandbox ID
             file_path: Remote path in the sandbox
             local_file_path: Local file path to upload
             timeout: Optional timeout in seconds
-            chunk_size: Size of chunks to read (default 8KB)
         """
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
@@ -674,18 +675,13 @@ class AsyncSandboxClient:
 
         effective_timeout = timeout if timeout is not None else 300
 
-        async def file_stream():
-            """Async generator to stream file content in chunks"""
-            async with aiofiles.open(local_file_path, "rb") as f:
-                while True:
-                    chunk = await f.read(chunk_size)
-                    if not chunk:
-                        break
-                    yield chunk
+        # Read file asynchronously (non-blocking I/O)
+        async with aiofiles.open(local_file_path, "rb") as f:
+            file_content = await f.read()
 
         try:
             gateway_client = self._get_gateway_client()
-            files = {"file": (os.path.basename(local_file_path), file_stream())}
+            files = {"file": (os.path.basename(local_file_path), file_content)}
             response = await gateway_client.post(
                 url, files=files, params=params, headers=headers, timeout=effective_timeout
             )
@@ -728,8 +724,9 @@ class AsyncSandboxClient:
             if dir_path:
                 os.makedirs(dir_path, exist_ok=True)
 
-            with open(local_file_path, "wb") as f:
-                f.write(content)
+            # Write file asynchronously (non-blocking I/O)
+            async with aiofiles.open(local_file_path, "wb") as f:
+                await f.write(content)
         except httpx.TimeoutException:
             raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout)
         except httpx.HTTPStatusError as e:

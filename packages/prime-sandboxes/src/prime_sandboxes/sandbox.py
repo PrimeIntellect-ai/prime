@@ -425,12 +425,27 @@ class SandboxClient:
 class AsyncSandboxClient:
     """Async client for sandbox API operations"""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        max_connections: int = 1000,
+        max_keepalive_connections: int = 200,
+    ):
+        """Initialize async sandbox client
+
+        Args:
+            api_key: Optional API key (reads from config if not provided)
+            max_connections: Maximum number of concurrent connections (default: 1000)
+            max_keepalive_connections: Maximum keep-alive connections (default: 200)
+        """
         self.client = AsyncAPIClient(api_key=api_key)
         self._auth_cache = SandboxAuthCache(
             self.client.config.config_dir / "sandbox_auth_cache.json",
             self.client,
         )
+        # Connection pool configuration
+        self._max_connections = max_connections
+        self._max_keepalive_connections = max_keepalive_connections
         # Shared httpx client for gateway operations (upload/download/execute)
         # Initialized lazily to allow connection pooling and reuse
         self._gateway_client: Optional[httpx.AsyncClient] = None
@@ -445,8 +460,8 @@ class AsyncSandboxClient:
             self._gateway_client = httpx.AsyncClient(
                 timeout=None,  # No default timeout - set per request
                 limits=httpx.Limits(
-                    max_connections=100,  # Support high concurrency
-                    max_keepalive_connections=20,
+                    max_connections=self._max_connections,
+                    max_keepalive_connections=self._max_keepalive_connections,
                 ),
             )
         return self._gateway_client

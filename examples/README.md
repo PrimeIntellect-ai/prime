@@ -153,6 +153,7 @@ request = CreateSandboxRequest(
     gpu_count=0,
     timeout_minutes=60,
     environment_vars={"ENV": "production"},
+    secrets={"API_KEY": "your-secret-key"},
     team_id=None  # Use None for personal account
 )
 
@@ -168,6 +169,9 @@ prime sandbox list [--team_id TEAM] [--status STATUS] [--page N] [--per_page N]
 
 # Create sandbox
 prime sandbox create NAME --docker_image IMAGE [OPTIONS]
+
+# With environment variables and secrets:
+prime sandbox create python:3.11-slim --env KEY=VALUE --secret API_KEY=secret123
 
 # Get sandbox details
 prime sandbox get SANDBOX_ID

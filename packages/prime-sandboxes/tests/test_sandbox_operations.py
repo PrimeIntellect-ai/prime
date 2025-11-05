@@ -60,7 +60,7 @@ def test_get_sandbox(sandbox_client):
         assert retrieved.id == sandbox.id
         assert retrieved.name == "test-get-sandbox"
         assert retrieved.docker_image == "python:3.11-slim"
-        assert retrieved.status in ["PENDING", "RUNNING"]
+        assert retrieved.status in ["PENDING", "PROVISIONING", "RUNNING"]
         print(f"✓ Retrieved sandbox details: status={retrieved.status}")
     finally:
         if sandbox and sandbox.id:
@@ -113,16 +113,16 @@ def test_list_sandboxes(sandbox_client):
                 print(f"Warning: Failed to delete sandbox {sandbox.id}: {e}")
 
 
-def test_list_sandboxes_with_label_filter(sandbox_client):
+def test_list_sandboxes_with_label_filter(sandbox_client, unique_id):
     """Test listing sandboxes filtered by label"""
     sandbox = None
-    test_label = "test-label-filter-unique"
+    test_label = f"test-label-filter-{unique_id}"
 
     try:
         print(f"\nCreating sandbox with label '{test_label}'...")
         sandbox = sandbox_client.create(
             CreateSandboxRequest(
-                name="test-label-filter",
+                name=f"test-label-filter-{unique_id}",
                 docker_image="python:3.11-slim",
                 labels=[test_label],
             )
@@ -220,9 +220,9 @@ def test_bulk_delete_by_ids(sandbox_client):
                 print(f"Warning: Failed to delete {sandbox.id}: {e}")
 
 
-def test_bulk_delete_by_labels(sandbox_client):
+def test_bulk_delete_by_labels(sandbox_client, unique_id):
     """Test bulk deleting sandboxes by labels"""
-    test_label = "test-bulk-delete-label-unique"
+    test_label = f"test-bulk-delete-{unique_id}"
     sandboxes = []
 
     try:
@@ -231,7 +231,7 @@ def test_bulk_delete_by_labels(sandbox_client):
         for i in range(2):
             sandbox = sandbox_client.create(
                 CreateSandboxRequest(
-                    name=f"test-bulk-delete-label-{i}",
+                    name=f"test-bulk-delete-label-{unique_id}-{i}",
                     docker_image="python:3.11-slim",
                     labels=[test_label],
                 )

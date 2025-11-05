@@ -18,8 +18,11 @@ echo "Copying prime-core into source tree..."
 rm -rf src/prime_core
 cp -r ../prime-core/src/prime_core src/prime_core
 
-sed '/prime-core/d' pyproject.toml > pyproject.toml.tmp && mv pyproject.toml.tmp pyproject.toml
-sed '/\[tool\.uv\.sources\]/,/prime-core = { workspace = true }/d' pyproject.toml > pyproject.toml.tmp && mv pyproject.toml.tmp pyproject.toml
+# Remove prime-core from dependencies list only
+sed '/^    "prime-core",$/d' pyproject.toml > pyproject.toml.tmp && mv pyproject.toml.tmp pyproject.toml
+# Remove the [tool.uv.sources] section
+sed '/^\[tool\.uv\.sources\]$/,/^$/d' pyproject.toml > pyproject.toml.tmp && mv pyproject.toml.tmp pyproject.toml
+# Update the force-include path
 sed 's|"../prime-core/src/prime_core"|"src/prime_core"|' pyproject.toml > pyproject.toml.tmp && mv pyproject.toml.tmp pyproject.toml
 
 echo "Building wheel..."

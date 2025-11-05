@@ -35,6 +35,7 @@ Repository = "https://github.com/PrimeIntellect-ai/prime-cli.git"
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
+    "pytest-xdist>=3.0.0",
     "ruff>=0.13.1",
 ]
 
@@ -52,6 +53,12 @@ path = "src/prime_sandboxes/__init__.py"
 packages = ["src/prime_sandboxes"]
 # Bundle prime-core directly at the prime_core import path for PyPI distribution
 force-include = { "../prime-core/src/prime_core" = "prime_core" }
+
+[tool.pytest.ini_options]
+# Run tests in parallel with pytest-xdist
+# Use -n auto to automatically detect CPU count, or specify number of workers
+addopts = "-v"
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100

@@ -1,19 +1,6 @@
 """Tests for sandbox CRUD operations, listing, and bulk operations"""
 
-import pytest
-
-from prime_sandboxes import (
-    APIClient,
-    CreateSandboxRequest,
-    SandboxClient,
-)
-
-
-@pytest.fixture
-def sandbox_client():
-    """Create a sandbox client for tests"""
-    client = APIClient()
-    return SandboxClient(client)
+from prime_sandboxes import CreateSandboxRequest
 
 
 def test_create_sandbox_with_custom_config(sandbox_client):

@@ -5,26 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from prime_sandboxes import (
-    APIClient,
-    CreateSandboxRequest,
-    SandboxClient,
-)
+from prime_sandboxes import CreateSandboxRequest
 
 
-@pytest.fixture
-def sandbox_client():
-    """Create a sandbox client for tests"""
-    client = APIClient()
-    return SandboxClient(client)
-
-
-@pytest.fixture
-def running_sandbox(sandbox_client):
-    """Create and setup a running sandbox for tests"""
+@pytest.fixture(scope="module")
+def shared_sandbox(sandbox_client):
+    """Create a sandbox for this test module"""
     sandbox = None
     try:
-        print("\nCreating sandbox...")
+        print("\n[SETUP] Creating sandbox for file operations tests...")
         sandbox = sandbox_client.create(
             CreateSandboxRequest(
                 name="test-file-ops",
@@ -34,24 +23,20 @@ def running_sandbox(sandbox_client):
                 timeout_minutes=60,
             )
         )
-        print(f"✓ Created: {sandbox.id}")
-
-        print("Waiting for sandbox to be ready...")
+        print(f"[SETUP] Created: {sandbox.id}")
         sandbox_client.wait_for_creation(sandbox.id)
-        print("✓ Sandbox is running!")
-
+        print("[SETUP] Sandbox ready!")
         yield sandbox
     finally:
         if sandbox and sandbox.id:
-            print(f"\nCleaning up sandbox {sandbox.id}...")
             try:
                 sandbox_client.delete(sandbox.id)
-                print(f"✓ Deleted sandbox {sandbox.id}")
+                print(f"[TEARDOWN] Deleted {sandbox.id}")
             except Exception as e:
-                print(f"Warning: Failed to delete sandbox {sandbox.id}: {e}")
+                print(f"[TEARDOWN] Warning: {e}")
 
 
-def test_upload_text_file(sandbox_client, running_sandbox):
+def test_upload_text_file(sandbox_client, shared_sandbox):
     """Test uploading a text file to sandbox"""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
         test_content = "Hello from test!\nLine 2\nLine 3"
@@ -62,21 +47,21 @@ def test_upload_text_file(sandbox_client, running_sandbox):
         # Upload file
         remote_path = "/tmp/test_upload.txt"
         print(f"\nUploading file to {remote_path}...")
-        result = sandbox_client.upload_file(running_sandbox.id, remote_path, local_path)
+        result = sandbox_client.upload_file(shared_sandbox.id, remote_path, local_path)
         print(f"✓ Upload result: {result}")
 
         assert result.success is True
         assert result.path == remote_path
 
         # Verify file exists and has correct content
-        cmd_result = sandbox_client.execute_command(running_sandbox.id, f"cat {remote_path}")
+        cmd_result = sandbox_client.execute_command(shared_sandbox.id, f"cat {remote_path}")
         assert cmd_result.exit_code == 0
         assert cmd_result.stdout.strip() == test_content
     finally:
         Path(local_path).unlink(missing_ok=True)
 
 
-def test_upload_and_download_file(sandbox_client, running_sandbox):
+def test_upload_and_download_file(sandbox_client, shared_sandbox):
     """Test uploading and downloading a file"""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
         test_content = "Upload and download test\nMultiple lines\n123456"
@@ -88,7 +73,7 @@ def test_upload_and_download_file(sandbox_client, running_sandbox):
         # Upload file
         remote_path = "/tmp/test_roundtrip.txt"
         print(f"\nUploading file to {remote_path}...")
-        upload_result = sandbox_client.upload_file(running_sandbox.id, remote_path, upload_path)
+        upload_result = sandbox_client.upload_file(shared_sandbox.id, remote_path, upload_path)
         assert upload_result.success is True
 
         # Download file
@@ -96,7 +81,7 @@ def test_upload_and_download_file(sandbox_client, running_sandbox):
             download_path = f.name
 
         print(f"Downloading file from {remote_path}...")
-        sandbox_client.download_file(running_sandbox.id, remote_path, download_path)
+        sandbox_client.download_file(shared_sandbox.id, remote_path, download_path)
         print("✓ Download complete")
 
         # Verify downloaded content matches uploaded content
@@ -110,7 +95,7 @@ def test_upload_and_download_file(sandbox_client, running_sandbox):
             Path(download_path).unlink(missing_ok=True)
 
 
-def test_upload_binary_file(sandbox_client, running_sandbox):
+def test_upload_binary_file(sandbox_client, shared_sandbox):
     """Test uploading a binary file"""
     with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
         binary_content = bytes(range(256))
@@ -121,18 +106,18 @@ def test_upload_binary_file(sandbox_client, running_sandbox):
         # Upload binary file
         remote_path = "/tmp/test_binary.bin"
         print(f"\nUploading binary file to {remote_path}...")
-        result = sandbox_client.upload_file(running_sandbox.id, remote_path, local_path)
+        result = sandbox_client.upload_file(shared_sandbox.id, remote_path, local_path)
         assert result.success is True
 
         # Verify file exists and size is correct
-        cmd_result = sandbox_client.execute_command(running_sandbox.id, f"wc -c < {remote_path}")
+        cmd_result = sandbox_client.execute_command(shared_sandbox.id, f"wc -c < {remote_path}")
         assert cmd_result.exit_code == 0
         assert int(cmd_result.stdout.strip()) == len(binary_content)
     finally:
         Path(local_path).unlink(missing_ok=True)
 
 
-def test_upload_to_nested_directory(sandbox_client, running_sandbox):
+def test_upload_to_nested_directory(sandbox_client, shared_sandbox):
     """Test uploading a file to a nested directory path"""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
         f.write("Nested directory test")
@@ -144,14 +129,14 @@ def test_upload_to_nested_directory(sandbox_client, running_sandbox):
         print(f"\nUploading file to nested path {remote_path}...")
 
         # First create the directory
-        sandbox_client.execute_command(running_sandbox.id, f"mkdir -p {Path(remote_path).parent}")
+        sandbox_client.execute_command(shared_sandbox.id, f"mkdir -p {Path(remote_path).parent}")
 
-        result = sandbox_client.upload_file(running_sandbox.id, remote_path, local_path)
+        result = sandbox_client.upload_file(shared_sandbox.id, remote_path, local_path)
         assert result.success is True
 
         # Verify file exists
         cmd_result = sandbox_client.execute_command(
-            running_sandbox.id, f"test -f {remote_path} && echo 'exists'"
+            shared_sandbox.id, f"test -f {remote_path} && echo 'exists'"
         )
         assert cmd_result.exit_code == 0
         assert "exists" in cmd_result.stdout
@@ -159,7 +144,7 @@ def test_upload_to_nested_directory(sandbox_client, running_sandbox):
         Path(local_path).unlink(missing_ok=True)
 
 
-def test_upload_multiple_files(sandbox_client, running_sandbox):
+def test_upload_multiple_files(sandbox_client, shared_sandbox):
     """Test uploading multiple files sequentially"""
     files = []
     try:
@@ -175,12 +160,12 @@ def test_upload_multiple_files(sandbox_client, running_sandbox):
             remote_path = f"/tmp/multi_file_{i}.txt"
             remote_paths.append(remote_path)
             print(f"\nUploading file {i} to {remote_path}...")
-            result = sandbox_client.upload_file(running_sandbox.id, remote_path, local_path)
+            result = sandbox_client.upload_file(shared_sandbox.id, remote_path, local_path)
             assert result.success is True
 
         # Verify all files exist
         cmd_result = sandbox_client.execute_command(
-            running_sandbox.id, f"ls -1 {' '.join(remote_paths)}"
+            shared_sandbox.id, f"ls -1 {' '.join(remote_paths)}"
         )
         assert cmd_result.exit_code == 0
         for remote_path in remote_paths:
@@ -190,7 +175,7 @@ def test_upload_multiple_files(sandbox_client, running_sandbox):
             Path(f).unlink(missing_ok=True)
 
 
-def test_download_nonexistent_file(sandbox_client, running_sandbox):
+def test_download_nonexistent_file(sandbox_client, shared_sandbox):
     """Test downloading a file that doesn't exist"""
     from prime_core import APIError
 
@@ -202,13 +187,13 @@ def test_download_nonexistent_file(sandbox_client, running_sandbox):
         print(f"\nAttempting to download nonexistent file {remote_path}...")
 
         with pytest.raises(APIError):
-            sandbox_client.download_file(running_sandbox.id, remote_path, download_path)
+            sandbox_client.download_file(shared_sandbox.id, remote_path, download_path)
         print("✓ Correctly raised APIError for nonexistent file")
     finally:
         Path(download_path).unlink(missing_ok=True)
 
 
-def test_upload_large_file(sandbox_client, running_sandbox):
+def test_upload_large_file(sandbox_client, shared_sandbox):
     """Test uploading a larger file (1MB)"""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
         # Create 1MB file
@@ -219,11 +204,11 @@ def test_upload_large_file(sandbox_client, running_sandbox):
     try:
         remote_path = "/tmp/large_file.txt"
         print(f"\nUploading 1MB file to {remote_path}...")
-        result = sandbox_client.upload_file(running_sandbox.id, remote_path, local_path)
+        result = sandbox_client.upload_file(shared_sandbox.id, remote_path, local_path)
         assert result.success is True
 
         # Verify file size
-        cmd_result = sandbox_client.execute_command(running_sandbox.id, f"wc -c < {remote_path}")
+        cmd_result = sandbox_client.execute_command(shared_sandbox.id, f"wc -c < {remote_path}")
         assert cmd_result.exit_code == 0
         assert int(cmd_result.stdout.strip()) == len(large_content)
         print(f"✓ Verified file size: {len(large_content)} bytes")
@@ -231,7 +216,7 @@ def test_upload_large_file(sandbox_client, running_sandbox):
         Path(local_path).unlink(missing_ok=True)
 
 
-def test_upload_python_script_and_execute(sandbox_client, running_sandbox):
+def test_upload_python_script_and_execute(sandbox_client, shared_sandbox):
     """Test uploading a Python script and executing it"""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
         script_content = """#!/usr/bin/env python3
@@ -245,13 +230,13 @@ print(f"Python version: {sys.version}")
     try:
         remote_path = "/tmp/test_script.py"
         print(f"\nUploading Python script to {remote_path}...")
-        result = sandbox_client.upload_file(running_sandbox.id, remote_path, local_path)
+        result = sandbox_client.upload_file(shared_sandbox.id, remote_path, local_path)
         assert result.success is True
 
         # Make script executable and run it
-        sandbox_client.execute_command(running_sandbox.id, f"chmod +x {remote_path}")
+        sandbox_client.execute_command(shared_sandbox.id, f"chmod +x {remote_path}")
 
-        cmd_result = sandbox_client.execute_command(running_sandbox.id, f"python3 {remote_path}")
+        cmd_result = sandbox_client.execute_command(shared_sandbox.id, f"python3 {remote_path}")
         assert cmd_result.exit_code == 0
         assert "Hello from uploaded script!" in cmd_result.stdout
         assert "Python version:" in cmd_result.stdout

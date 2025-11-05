@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+import aiofiles
 import httpx
 from prime_core import APIClient, APIError, AsyncAPIClient
 
@@ -430,6 +431,25 @@ class AsyncSandboxClient:
             self.client.config.config_dir / "sandbox_auth_cache.json",
             self.client,
         )
+        # Shared httpx client for gateway operations (upload/download/execute)
+        # Initialized lazily to allow connection pooling and reuse
+        self._gateway_client: Optional[httpx.AsyncClient] = None
+
+    def _get_gateway_client(self) -> httpx.AsyncClient:
+        """Get or create the shared gateway client for connection pooling
+
+        Note: Timeout is set per-request, not on the client, to allow
+        different operations to have different timeout values.
+        """
+        if self._gateway_client is None:
+            self._gateway_client = httpx.AsyncClient(
+                timeout=None,  # No default timeout - set per request
+                limits=httpx.Limits(
+                    max_connections=100,  # Support high concurrency
+                    max_keepalive_connections=20,
+                ),
+            )
+        return self._gateway_client
 
     async def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
         """Test if a sandbox is reachable by executing a simple echo command"""
@@ -536,10 +556,12 @@ class AsyncSandboxClient:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=effective_timeout) as client:
-                response = await client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
-                return CommandResponse.model_validate(response.json())
+            gateway_client = self._get_gateway_client()
+            response = await gateway_client.post(
+                url, json=payload, headers=headers, timeout=effective_timeout
+            )
+            response.raise_for_status()
+            return CommandResponse.model_validate(response.json())
         except httpx.TimeoutException:
             raise CommandTimeoutError(sandbox_id, command, effective_timeout)
         except httpx.HTTPStatusError as e:
@@ -629,8 +651,17 @@ class AsyncSandboxClient:
         file_path: str,
         local_file_path: str,
         timeout: Optional[int] = None,
+        chunk_size: int = 8192,
     ) -> FileUploadResponse:
-        """Upload a file to a sandbox via gateway (async)"""
+        """Upload a file to a sandbox via gateway (async with streaming)
+
+        Args:
+            sandbox_id: The sandbox ID
+            file_path: Remote path in the sandbox
+            local_file_path: Local file path to upload
+            timeout: Optional timeout in seconds
+            chunk_size: Size of chunks to read (default 8KB)
+        """
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
@@ -643,23 +674,30 @@ class AsyncSandboxClient:
 
         effective_timeout = timeout if timeout is not None else 300
 
-        with open(local_file_path, "rb") as f:
-            files = {"file": (os.path.basename(local_file_path), f)}
+        async def file_stream():
+            """Async generator to stream file content in chunks"""
+            async with aiofiles.open(local_file_path, "rb") as f:
+                while True:
+                    chunk = await f.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
 
-            try:
-                async with httpx.AsyncClient(timeout=effective_timeout) as upload_client:
-                    response = await upload_client.post(
-                        url, files=files, params=params, headers=headers
-                    )
-                    response.raise_for_status()
-                    return FileUploadResponse.model_validate(response.json())
-            except httpx.TimeoutException:
-                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
-            except httpx.HTTPStatusError as e:
-                error_details = f"HTTP {e.response.status_code}: {e.response.text}"
-                raise APIError(f"Upload failed: {error_details}")
-            except Exception as e:
-                raise APIError(f"Upload failed: {str(e)}")
+        try:
+            gateway_client = self._get_gateway_client()
+            files = {"file": (os.path.basename(local_file_path), file_stream())}
+            response = await gateway_client.post(
+                url, files=files, params=params, headers=headers, timeout=effective_timeout
+            )
+            response.raise_for_status()
+            return FileUploadResponse.model_validate(response.json())
+        except httpx.TimeoutException:
+            raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
+        except httpx.HTTPStatusError as e:
+            error_details = f"HTTP {e.response.status_code}: {e.response.text}"
+            raise APIError(f"Upload failed: {error_details}")
+        except Exception as e:
+            raise APIError(f"Upload failed: {str(e)}")
 
     async def download_file(
         self,
@@ -679,10 +717,12 @@ class AsyncSandboxClient:
         effective_timeout = timeout if timeout is not None else 300
 
         try:
-            async with httpx.AsyncClient(timeout=effective_timeout) as download_client:
-                response = await download_client.get(url, params=params, headers=headers)
-                response.raise_for_status()
-                content = response.content
+            gateway_client = self._get_gateway_client()
+            response = await gateway_client.get(
+                url, params=params, headers=headers, timeout=effective_timeout
+            )
+            response.raise_for_status()
+            content = response.content
 
             dir_path = os.path.dirname(local_file_path)
             if dir_path:
@@ -699,7 +739,9 @@ class AsyncSandboxClient:
             raise APIError(f"Download failed: {str(e)}")
 
     async def aclose(self) -> None:
-        """Close the async client"""
+        """Close the async client and gateway client"""
+        if self._gateway_client is not None:
+            await self._gateway_client.aclose()
         await self.client.aclose()
 
     async def __aenter__(self) -> "AsyncSandboxClient":

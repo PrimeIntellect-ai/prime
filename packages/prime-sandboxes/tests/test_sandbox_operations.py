@@ -60,7 +60,7 @@ def test_get_sandbox(sandbox_client):
         assert retrieved.id == sandbox.id
         assert retrieved.name == "test-get-sandbox"
         assert retrieved.docker_image == "python:3.11-slim"
-        assert retrieved.status in ["PENDING", "RUNNING"]
+        assert retrieved.status in ["PENDING", "PROVISIONING", "RUNNING"]
         print(f"✓ Retrieved sandbox details: status={retrieved.status}")
     finally:
         if sandbox and sandbox.id:

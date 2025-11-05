@@ -210,7 +210,7 @@ def test_download_nonexistent_file(sandbox_client, running_sandbox):
 
 def test_upload_large_file(sandbox_client, running_sandbox):
     """Test uploading a larger file (1MB)"""
-    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
         # Create 1MB file
         large_content = "A" * (1024 * 1024)
         f.write(large_content)

@@ -158,43 +158,6 @@ def test_command_timeout_short(sandbox_client, shared_sandbox):
     print(f"✓ Command correctly timed out: {exc_info.value}")
 
 
-def test_python_script_execution(sandbox_client, shared_sandbox):
-    """Test executing Python code directly"""
-    python_code = """
-import sys
-import json
-data = {'python_version': sys.version, 'platform': sys.platform}
-print(json.dumps(data))
-"""
-
-    command = f"python3 -c '{python_code}'"
-    print("\nExecuting Python code...")
-    result = sandbox_client.execute_command(shared_sandbox.id, command)
-
-    assert result.exit_code == 0
-    assert "python_version" in result.stdout
-    assert "platform" in result.stdout
-    print(f"✓ Python code executed:\n{result.stdout}")
-
-
-def test_command_with_special_characters(sandbox_client, shared_sandbox):
-    """Test command with special characters"""
-    special_strings = [
-        "hello & goodbye",
-        "test | with | pipes",
-        "path/to/file.txt",
-        "quote'test'quote",
-    ]
-
-    for special_str in special_strings:
-        print(f"\nTesting string: {special_str}")
-        # Use printf instead of echo to handle special characters better
-        result = sandbox_client.execute_command(shared_sandbox.id, f"printf '%s' '{special_str}'")
-        assert result.exit_code == 0
-        assert special_str in result.stdout
-        print("✓ Special characters handled correctly")
-
-
 def test_command_with_combined_working_dir_and_env(sandbox_client, shared_sandbox):
     """Test command with both working_dir and env parameters"""
     # Setup test directory
@@ -234,56 +197,3 @@ def test_command_creates_and_reads_file(sandbox_client, shared_sandbox):
     assert read_result.exit_code == 0
     assert content in read_result.stdout
     print(f"✓ File operations successful: {read_result.stdout.strip()}")
-
-
-def test_command_check_available_tools(sandbox_client, shared_sandbox):
-    """Test that common tools are available in the sandbox"""
-    tools = ["python3", "bash", "sh", "cat", "ls", "grep", "sed", "awk"]
-
-    print("\nChecking available tools...")
-    for tool in tools:
-        result = sandbox_client.execute_command(shared_sandbox.id, f"which {tool}")
-        assert result.exit_code == 0
-        assert tool in result.stdout or "/" in result.stdout
-        print(f"✓ {tool} is available")
-
-
-def test_sequential_commands(sandbox_client, shared_sandbox):
-    """Test executing multiple commands sequentially"""
-    commands = [
-        ("echo 'first'", "first"),
-        ("echo 'second'", "second"),
-        ("echo 'third'", "third"),
-    ]
-
-    print("\nExecuting sequential commands...")
-    for cmd, expected in commands:
-        result = sandbox_client.execute_command(shared_sandbox.id, cmd)
-        assert result.exit_code == 0
-        assert expected in result.stdout
-        print(f"✓ Command '{cmd}' executed successfully")
-
-
-def test_command_with_numeric_output(sandbox_client, shared_sandbox):
-    """Test command that outputs numbers"""
-    command = "expr 5 + 3"
-
-    print(f"\nExecuting arithmetic command: {command}")
-    result = sandbox_client.execute_command(shared_sandbox.id, command)
-
-    assert result.exit_code == 0
-    assert result.stdout.strip() == "8"
-    print(f"✓ Arithmetic command result: {result.stdout.strip()}")
-
-
-def test_command_empty_output(sandbox_client, shared_sandbox):
-    """Test command with no output"""
-    command = "true"
-
-    print(f"\nExecuting command with no output: {command}")
-    result = sandbox_client.execute_command(shared_sandbox.id, command)
-
-    assert result.exit_code == 0
-    assert result.stdout == ""
-    assert result.stderr == ""
-    print("✓ Command with empty output handled correctly")

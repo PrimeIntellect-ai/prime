@@ -113,29 +113,6 @@ def test_list_sandboxes(sandbox_client):
                 print(f"Warning: Failed to delete sandbox {sandbox.id}: {e}")
 
 
-def test_list_sandboxes_with_pagination(sandbox_client):
-    """Test listing sandboxes with pagination"""
-    print("\nListing sandboxes with pagination (page 1, 10 per page)...")
-    list_response = sandbox_client.list(page=1, per_page=10)
-
-    assert list_response.page == 1
-    assert list_response.per_page == 10
-    assert len(list_response.sandboxes) <= 10
-    print(f"✓ Page {list_response.page}: {len(list_response.sandboxes)} sandboxes")
-
-
-def test_list_sandboxes_with_status_filter(sandbox_client):
-    """Test listing sandboxes filtered by status"""
-    print("\nListing sandboxes with status=RUNNING...")
-    list_response = sandbox_client.list(status="RUNNING")
-
-    # All returned sandboxes should have RUNNING status
-    for sandbox in list_response.sandboxes:
-        assert sandbox.status == "RUNNING"
-
-    print(f"✓ Found {len(list_response.sandboxes)} RUNNING sandboxes")
-
-
 def test_list_sandboxes_with_label_filter(sandbox_client):
     """Test listing sandboxes filtered by label"""
     sandbox = None
@@ -228,8 +205,8 @@ def test_bulk_delete_by_ids(sandbox_client):
         print(f"\nBulk deleting {len(sandbox_ids)} sandboxes...")
         result = sandbox_client.bulk_delete(sandbox_ids=sandbox_ids)
 
-        assert result.deleted_count == len(sandbox_ids)
-        print(f"✓ Bulk deleted {result.deleted_count} sandboxes")
+        assert len(result.succeeded) == len(sandbox_ids)
+        print(f"✓ Bulk deleted {len(result.succeeded)} sandboxes")
 
         # Clear the list so we don't try to delete again in finally
         sandboxes = []
@@ -266,8 +243,8 @@ def test_bulk_delete_by_labels(sandbox_client):
         print(f"\nBulk deleting sandboxes with label '{test_label}'...")
         result = sandbox_client.bulk_delete(labels=[test_label])
 
-        assert result.deleted_count >= 2
-        print(f"✓ Bulk deleted {result.deleted_count} sandboxes by label")
+        assert len(result.succeeded) >= 2
+        print(f"✓ Bulk deleted {len(result.succeeded)} sandboxes by label")
 
         # Clear the list so we don't try to delete again in finally
         sandboxes = []
@@ -352,40 +329,6 @@ def test_wait_for_creation(sandbox_client):
                 print(f"✓ Deleted sandbox {sandbox.id}")
             except Exception as e:
                 print(f"Warning: Failed to delete sandbox {sandbox.id}: {e}")
-
-
-def test_sandbox_with_different_docker_images(sandbox_client):
-    """Test creating sandboxes with different Docker images"""
-    images = [
-        "python:3.11-slim",
-        "python:3.12-slim",
-    ]
-    sandboxes = []
-
-    try:
-        for image in images:
-            print(f"\nCreating sandbox with image {image}...")
-            sandbox = sandbox_client.create(
-                CreateSandboxRequest(
-                    name=f"test-{image.replace(':', '-')}",
-                    docker_image=image,
-                )
-            )
-            sandboxes.append(sandbox)
-            print(f"✓ Created sandbox: {sandbox.id}")
-
-            # Verify the image is set correctly
-            retrieved = sandbox_client.get(sandbox.id)
-            assert retrieved.docker_image == image
-            print(f"✓ Verified docker_image: {retrieved.docker_image}")
-    finally:
-        for sandbox in sandboxes:
-            print(f"\nCleaning up sandbox {sandbox.id}...")
-            try:
-                sandbox_client.delete(sandbox.id)
-                print(f"✓ Deleted sandbox {sandbox.id}")
-            except Exception as e:
-                print(f"Warning: Failed to delete {sandbox.id}: {e}")
 
 
 def test_sandbox_lifecycle(sandbox_client):

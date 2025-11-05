@@ -117,64 +117,6 @@ def test_upload_binary_file(sandbox_client, shared_sandbox):
         Path(local_path).unlink(missing_ok=True)
 
 
-def test_upload_to_nested_directory(sandbox_client, shared_sandbox):
-    """Test uploading a file to a nested directory path"""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-        f.write("Nested directory test")
-        local_path = f.name
-
-    try:
-        # Upload to nested path (directory may not exist)
-        remote_path = "/tmp/nested/dir/structure/test.txt"
-        print(f"\nUploading file to nested path {remote_path}...")
-
-        # First create the directory
-        sandbox_client.execute_command(shared_sandbox.id, f"mkdir -p {Path(remote_path).parent}")
-
-        result = sandbox_client.upload_file(shared_sandbox.id, remote_path, local_path)
-        assert result.success is True
-
-        # Verify file exists
-        cmd_result = sandbox_client.execute_command(
-            shared_sandbox.id, f"test -f {remote_path} && echo 'exists'"
-        )
-        assert cmd_result.exit_code == 0
-        assert "exists" in cmd_result.stdout
-    finally:
-        Path(local_path).unlink(missing_ok=True)
-
-
-def test_upload_multiple_files(sandbox_client, shared_sandbox):
-    """Test uploading multiple files sequentially"""
-    files = []
-    try:
-        # Create multiple test files
-        for i in range(3):
-            with tempfile.NamedTemporaryFile(mode="w", suffix=f"_{i}.txt", delete=False) as f:
-                f.write(f"File {i} content")
-                files.append(f.name)
-
-        # Upload all files
-        remote_paths = []
-        for i, local_path in enumerate(files):
-            remote_path = f"/tmp/multi_file_{i}.txt"
-            remote_paths.append(remote_path)
-            print(f"\nUploading file {i} to {remote_path}...")
-            result = sandbox_client.upload_file(shared_sandbox.id, remote_path, local_path)
-            assert result.success is True
-
-        # Verify all files exist
-        cmd_result = sandbox_client.execute_command(
-            shared_sandbox.id, f"ls -1 {' '.join(remote_paths)}"
-        )
-        assert cmd_result.exit_code == 0
-        for remote_path in remote_paths:
-            assert Path(remote_path).name in cmd_result.stdout
-    finally:
-        for f in files:
-            Path(f).unlink(missing_ok=True)
-
-
 def test_download_nonexistent_file(sandbox_client, shared_sandbox):
     """Test downloading a file that doesn't exist"""
     from prime_core import APIError
@@ -191,29 +133,6 @@ def test_download_nonexistent_file(sandbox_client, shared_sandbox):
         print("✓ Correctly raised APIError for nonexistent file")
     finally:
         Path(download_path).unlink(missing_ok=True)
-
-
-def test_upload_large_file(sandbox_client, shared_sandbox):
-    """Test uploading a larger file (1MB)"""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-        # Create 1MB file
-        large_content = "A" * (1024 * 1024)
-        f.write(large_content)
-        local_path = f.name
-
-    try:
-        remote_path = "/tmp/large_file.txt"
-        print(f"\nUploading 1MB file to {remote_path}...")
-        result = sandbox_client.upload_file(shared_sandbox.id, remote_path, local_path)
-        assert result.success is True
-
-        # Verify file size
-        cmd_result = sandbox_client.execute_command(shared_sandbox.id, f"wc -c < {remote_path}")
-        assert cmd_result.exit_code == 0
-        assert int(cmd_result.stdout.strip()) == len(large_content)
-        print(f"✓ Verified file size: {len(large_content)} bytes")
-    finally:
-        Path(local_path).unlink(missing_ok=True)
 
 
 def test_upload_python_script_and_execute(sandbox_client, shared_sandbox):

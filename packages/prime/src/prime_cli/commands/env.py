@@ -2079,15 +2079,14 @@ def eval_env(
         console.print("[red]Failed to start vf-eval process.[/red]")
         raise typer.Exit(1)
 
-    # Push to hub if requested and eval succeeded
-    if push_to_hub:
-        try:
-            push_eval_results_to_hub(
-                env_name=environment,
-                model=model,
-                job_id=job_id,
-            )
-        except Exception as e:
-            console.print(f"[red]Failed to push results to hub:[/red] {e}")
-            console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
-            raise typer.Exit(1)
+    # Automatically push to hub after successful eval (push_to_hub flag kept for backward compatibility)
+    try:
+        push_eval_results_to_hub(
+            env_name=environment,
+            model=model,
+            job_id=job_id,
+        )
+    except Exception as e:
+        console.print(f"[red]Failed to push results to hub:[/red] {e}")
+        console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
+        raise typer.Exit(1)

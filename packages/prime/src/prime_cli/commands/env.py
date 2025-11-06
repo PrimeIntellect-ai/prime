@@ -829,7 +829,7 @@ def pull(
         if target:
             target_dir = Path(target)
         else:
-            target_dir = Path.cwd() / f"{owner}-{name}-{version}"
+            target_dir = Path.cwd() / name
 
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -886,6 +886,20 @@ def pull(
                 Path(temp_file_path).unlink()
 
         console.print(f"[green]✓ Environment pulled to {target_dir}[/green]")
+
+        # Create .env-metadata.json for proper resolution
+        try:
+            metadata_path = target_dir / ".env-metadata.json"
+            env_metadata = {
+                "environment_id": details.get("id"),
+                "owner": owner,
+                "name": name,
+            }
+            with open(metadata_path, "w") as f:
+                json.dump(env_metadata, f, indent=2)
+            console.print(f"[dim]Created environment metadata at {metadata_path.name}[/dim]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not create metadata file: {e}[/yellow]")
 
         try:
             extracted_files = list(target_dir.iterdir())

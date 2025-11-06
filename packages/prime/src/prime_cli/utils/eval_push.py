@@ -83,8 +83,15 @@ def push_eval_results_to_hub(
         console.print(f"[blue]✓ Found environment:[/blue] {env_name}")
     else:
         console.print(f"[blue]Using environment name:[/blue] {env_name} (will be resolved)")
+        resolved_env_slug = None
+        resolved_env_id = None
 
-    environments = [{"id": resolved_env_slug or env_name}]
+    if resolved_env_id:
+        environments = [{"id": resolved_env_id}]
+    elif resolved_env_slug:
+        environments = [{"slug": resolved_env_slug}]
+    else:
+        environments = [{"name": env_name}]
     metrics = {k: v for k, v in metadata.items() if k.startswith("avg_")}
 
     eval_metadata = {"framework": "verifiers", "job_id": job_id, **metadata}
@@ -113,6 +120,7 @@ def push_eval_results_to_hub(
         task_type=metadata.get("task_type"),
         metadata=eval_metadata,
         metrics=metrics,
+        is_public=False,  # Private by default - only visible to the user who created it
     )
 
     eval_id = create_response.get("evaluation_id")
@@ -132,8 +140,7 @@ def push_eval_results_to_hub(
 
     console.print("[green]✓ Successfully pushed to hub[/green]")
 
-    if resolved_env_slug:
-        frontend_url = api_client.config.frontend_url
-        eval_url = f"{frontend_url}/dashboard/environments/{resolved_env_slug}/evals/{eval_id}"
-        console.print(f"[blue]View evaluation:[/blue] {eval_url}")
-        console.print()
+    frontend_url = api_client.config.frontend_url
+    eval_url = f"{frontend_url}/dashboard/evaluations/{eval_id}"
+    console.print("\n[green]View at:[/green]")
+    console.print(eval_url)

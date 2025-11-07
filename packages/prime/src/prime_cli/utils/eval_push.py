@@ -31,8 +31,6 @@ def push_eval_results_to_hub(
         model: Model identifier (e.g., "meta-llama/llama-3.1-70b-instruct")
         job_id: Unique job ID for tracking
     """
-    console.print("\n[blue]Pushing evaluation results to hub...[/blue]")
-
     # Step 1: Find the output directory
     module_name = env_name.replace("-", "_")
     model_name = model.replace("/", "--")
@@ -52,7 +50,6 @@ def push_eval_results_to_hub(
         raise FileNotFoundError(f"No evaluation results found in {base_evals_dir}")
 
     output_dir = max(subdirs, key=lambda d: d.stat().st_mtime)
-    console.print(f"[dim]Found results in: {output_dir}[/dim]")
 
     metadata_path = output_dir / "metadata.json"
     results_path = output_dir / "results.jsonl"
@@ -71,20 +68,58 @@ def push_eval_results_to_hub(
             if line.strip():
                 results_samples.append(json.loads(line))
 
-    console.print(f"[dim]Loaded {len(results_samples)} samples[/dim]")
-
-    # Resolve environment slug from metadata if available
-    env_dir = Path("./environments") / module_name
-    hub_metadata = get_environment_metadata(env_dir)
+    # Search for environment metadata in multiple possible locations
+    # 1. ./environments/{module_name} (where eval outputs are typically stored)
+    # 2. ./environments/{env_name} (alternative structure)
+    # 3. ./{env_name} (where prime env pull creates it)
+    # 4. ./{module_name} (alternative structure)
+    # 5. Current directory (if running from inside the environment directory)
+    possible_env_dirs = [
+        Path("./environments") / module_name,
+        Path("./environments") / env_name,
+        Path(".") / env_name,
+        Path(".") / module_name,
+        Path("."),
+    ]
+    
+    hub_metadata = None
+    for env_dir in possible_env_dirs:
+        hub_metadata = get_environment_metadata(env_dir)
+        if hub_metadata:
+            break
+    
     resolved_env_slug = None
+    resolved_env_id = None
 
-    if hub_metadata and hub_metadata.get("owner") and hub_metadata.get("name"):
-        resolved_env_slug = f"{hub_metadata.get('owner')}/{hub_metadata.get('name')}"
-        console.print(f"[blue]✓ Found environment:[/blue] {env_name}")
+    if hub_metadata:
+        try:
+            # Prefer database ID if available (no resolution needed)
+            if hub_metadata.get("environment_id"):
+                resolved_env_id = hub_metadata.get("environment_id")
+                owner = hub_metadata.get("owner")
+                name = hub_metadata.get("name")
+                resolved_env_slug = (
+                    f"{owner}/{name}" if owner and name else None
+                )
+            elif hub_metadata.get("owner") and hub_metadata.get("name"):
+                resolved_env_slug = f"{hub_metadata.get('owner')}/{hub_metadata.get('name')}"
+                resolved_env_id = None
+            else:
+                resolved_env_slug = None
+                resolved_env_id = None
+        except (KeyError, AttributeError) as e:
+            console.print(f"[yellow]Warning: Could not parse environment metadata: {e}[/yellow]")
+            resolved_env_slug = None
+            resolved_env_id = None
     else:
-        console.print(f"[blue]Using environment name:[/blue] {env_name} (will be resolved)")
         resolved_env_slug = None
         resolved_env_id = None
+
+    env_identifier = resolved_env_slug or resolved_env_id
+    console.print(
+        f"\n[blue]Uploading evaluation results, "
+        f"using remote environment: {env_identifier}[/blue]"
+    )
 
     if resolved_env_id:
         environments = [{"id": resolved_env_id}]
@@ -110,7 +145,6 @@ def push_eval_results_to_hub(
     api_client = APIClient()
     evals_client = EvalsClient(api_client)
 
-    console.print("[blue]Creating evaluation...[/blue]")
     create_response = evals_client.create_evaluation(
         name=eval_name,
         environments=environments,
@@ -127,20 +161,14 @@ def push_eval_results_to_hub(
     if not eval_id:
         raise EvalsAPIError("Failed to get evaluation ID from create_evaluation response")
 
-    console.print(f"[green]✓ Created evaluation:[/green] {eval_id}")
-
     if converted_results:
-        console.print(f"[blue]Pushing {len(converted_results)} samples...[/blue]")
         evals_client.push_samples(eval_id, converted_results)
-        console.print("[green]✓ Samples pushed successfully[/green]")
 
-    console.print("[blue]Finalizing evaluation...[/blue]")
     evals_client.finalize_evaluation(eval_id, metrics=metrics)
-    console.print("[green]✓ Evaluation finalized[/green]\n")
 
-    console.print("[green]✓ Successfully pushed to hub[/green]")
+    console.print("[green]✓ Successfully uploaded evaluation results[/green]")
 
     frontend_url = api_client.config.frontend_url
     eval_url = f"{frontend_url}/dashboard/evaluations/{eval_id}"
-    console.print("\n[green]View at:[/green]")
+    console.print("\n[green]View results at:[/green]")
     console.print(eval_url)

@@ -270,10 +270,14 @@ class AsyncEvalsClient:
                 # Check for explicit "slug" or "name" keys first
                 if "slug" in resolved_env:
                     # Owner/name format, resolve to database ID
-                    resolved_env["id"] = await self._resolve_environment_id(resolved_env.pop("slug"))
+                    resolved_env["id"] = await self._resolve_environment_id(
+                        resolved_env.pop("slug")
+                    )
                 elif "name" in resolved_env:
                     # Just a name, resolve to database ID (get-or-create)
-                    resolved_env["id"] = await self._resolve_environment_id(resolved_env.pop("name"))
+                    resolved_env["id"] = await self._resolve_environment_id(
+                        resolved_env.pop("name")
+                    )
                 elif "id" in resolved_env:
                     # "id" key exists - assume it's already a database ID
                     # (eval_push.py will use "slug" or "name" keys for non-db-ids)

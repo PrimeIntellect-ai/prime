@@ -771,7 +771,7 @@ def push(
                             old_metadata_path.unlink()
                         except (OSError, IOError):
                             console.print(
-                                "[yellow]Warning: Could not remove old .env-metadata.json "
+                                "[yellow]Warning: Could not remove old .env-metadata.json[/yellow]"
                             )
                     
                     # Read existing metadata if it exists

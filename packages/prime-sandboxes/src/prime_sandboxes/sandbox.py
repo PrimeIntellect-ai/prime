@@ -405,6 +405,46 @@ class SandboxClient:
             except Exception as e:
                 raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
 
+    def upload_bytes(
+        self,
+        sandbox_id: str,
+        file_path: str,
+        file_bytes: bytes,
+        filename: str,
+        timeout: Optional[int] = None,
+    ) -> FileUploadResponse:
+        """Upload bytes directly to sandbox via gateway without writing to disk
+
+        Args:
+            sandbox_id: The sandbox ID
+            file_path: Remote path in the sandbox where the file will be saved
+            file_bytes: The bytes content to upload
+            filename: Name for the file (used in multipart form)
+            timeout: Optional timeout in seconds
+        """
+        auth = self._auth_cache.get_or_refresh(sandbox_id)
+
+        url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+
+        effective_timeout = timeout if timeout is not None else 300
+
+        files = {"file": (filename, file_bytes)}
+        params = {"path": file_path, "sandbox_id": sandbox_id}
+
+        try:
+            with httpx.Client(timeout=effective_timeout) as client:
+                response = client.post(url, files=files, params=params, headers=headers)
+                response.raise_for_status()
+                return FileUploadResponse.model_validate(response.json())
+        except httpx.TimeoutException:
+            raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
+        except httpx.HTTPStatusError as e:
+            error_details = f"HTTP {e.response.status_code}: {e.response.text}"
+            raise APIError(f"Upload failed: {error_details}")
+        except Exception as e:
+            raise APIError(f"Upload failed: {str(e)}")
+
     def download_file(
         self,
         sandbox_id: str,
@@ -755,6 +795,48 @@ class AsyncSandboxClient:
             raise APIError(f"Upload failed: {e.__class__.__name__} at {method} {u}: {e}") from e
         except Exception as e:
             raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
+
+    async def upload_bytes(
+        self,
+        sandbox_id: str,
+        file_path: str,
+        file_bytes: bytes,
+        filename: str,
+        timeout: Optional[int] = None,
+    ) -> FileUploadResponse:
+        """Upload bytes directly to sandbox via gateway without writing to disk (async)
+
+        Args:
+            sandbox_id: The sandbox ID
+            file_path: Remote path in the sandbox where the file will be saved
+            file_bytes: The bytes content to upload
+            filename: Name for the file (used in multipart form)
+            timeout: Optional timeout in seconds
+        """
+        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
+
+        gateway_url = auth["gateway_url"].rstrip("/")
+        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        params = {"path": file_path, "sandbox_id": sandbox_id}
+
+        effective_timeout = timeout if timeout is not None else 300
+
+        try:
+            gateway_client = self._get_gateway_client()
+            files = {"file": (filename, file_bytes)}
+            response = await gateway_client.post(
+                url, files=files, params=params, headers=headers, timeout=effective_timeout
+            )
+            response.raise_for_status()
+            return FileUploadResponse.model_validate(response.json())
+        except httpx.TimeoutException:
+            raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
+        except httpx.HTTPStatusError as e:
+            error_details = f"HTTP {e.response.status_code}: {e.response.text}"
+            raise APIError(f"Upload failed: {error_details}")
+        except Exception as e:
+            raise APIError(f"Upload failed: {str(e)}")
 
     async def download_file(
         self,

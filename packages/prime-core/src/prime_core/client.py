@@ -217,6 +217,7 @@ class AsyncAPIClient:
             response = await self.client.request(
                 method, url, params=params, json=json, timeout=timeout
             )
+
             response.raise_for_status()
 
             result = response.json()

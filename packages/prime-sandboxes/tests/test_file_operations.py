@@ -162,3 +162,69 @@ print(f"Python version: {sys.version}")
         print(f"✓ Script executed successfully:\n{cmd_result.stdout}")
     finally:
         Path(local_path).unlink(missing_ok=True)
+
+
+def test_upload_bytes(sandbox_client, shared_sandbox):
+    """Test uploading bytes directly without writing to disk first"""
+    # Create test content as bytes
+    test_content = "Hello from bytes!\nLine 2\nLine 3\n🚀"
+    file_bytes = test_content.encode("utf-8")
+
+    remote_path = "/tmp/test_upload_bytes.txt"
+    filename = "test_bytes.txt"
+
+    print(f"\nUploading {len(file_bytes)} bytes to {remote_path}...")
+    result = sandbox_client.upload_bytes(shared_sandbox.id, remote_path, file_bytes, filename)
+    print(f"✓ Upload result: {result}")
+
+    assert result.success is True
+    assert result.path == remote_path
+
+    # Verify file exists and has correct content
+    cmd_result = sandbox_client.execute_command(shared_sandbox.id, f"cat {remote_path}")
+    assert cmd_result.exit_code == 0
+    assert cmd_result.stdout == test_content
+    print("✓ Verified uploaded content matches")
+
+
+def test_upload_bytes_binary(sandbox_client, shared_sandbox):
+    """Test uploading binary data directly"""
+    # Create binary content
+    binary_content = bytes(range(256))
+
+    remote_path = "/tmp/test_upload_binary_bytes.bin"
+    filename = "test_binary.bin"
+
+    print(f"\nUploading {len(binary_content)} binary bytes to {remote_path}...")
+    result = sandbox_client.upload_bytes(shared_sandbox.id, remote_path, binary_content, filename)
+    assert result.success is True
+
+    # Verify file exists and size is correct
+    cmd_result = sandbox_client.execute_command(shared_sandbox.id, f"wc -c < {remote_path}")
+    assert cmd_result.exit_code == 0
+    assert int(cmd_result.stdout.strip()) == len(binary_content)
+    print(f"✓ Verified binary content size: {len(binary_content)} bytes")
+
+
+def test_upload_bytes_json(sandbox_client, shared_sandbox):
+    """Test uploading JSON data from memory"""
+    import json
+
+    # Create JSON data in memory
+    data = {"name": "test", "values": [1, 2, 3, 4, 5], "nested": {"key": "value"}}
+    json_bytes = json.dumps(data, indent=2).encode("utf-8")
+
+    remote_path = "/tmp/test_data.json"
+    filename = "data.json"
+
+    print(f"\nUploading JSON data ({len(json_bytes)} bytes) to {remote_path}...")
+    result = sandbox_client.upload_bytes(shared_sandbox.id, remote_path, json_bytes, filename)
+    assert result.success is True
+
+    # Verify file exists and is valid JSON
+    cmd_result = sandbox_client.execute_command(
+        shared_sandbox.id, f"python3 -c \"import json; print(json.load(open('{remote_path}')))\""
+    )
+    assert cmd_result.exit_code == 0
+    assert "test" in cmd_result.stdout
+    print("✓ Verified JSON data was uploaded and parsed correctly")

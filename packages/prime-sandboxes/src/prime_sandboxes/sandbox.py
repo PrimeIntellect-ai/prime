@@ -272,12 +272,23 @@ class SandboxClient:
                 )
                 response.raise_for_status()
                 return CommandResponse.model_validate(response.json())
-        except httpx.TimeoutException:
-            raise CommandTimeoutError(sandbox_id, command, effective_timeout)
+        except httpx.TimeoutException as e:
+            raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
         except httpx.HTTPStatusError as e:
-            raise APIError(f"HTTP {e.response.status_code}: {e.response.text}")
+            req = getattr(e, "request", None)
+            resp = getattr(e, "response", None)
+            method = getattr(req, "method", "?")
+            u = getattr(req, "url", "?")
+            status = getattr(resp, "status_code", "?")
+            text = getattr(resp, "text", "")
+            raise APIError(f"HTTP {status} {method} {u}: {text}") from e
+        except httpx.RequestError as e:
+            req = getattr(e, "request", None)
+            method = getattr(req, "method", "?")
+            u = getattr(req, "url", "?")
+            raise APIError(f"Request failed: {e.__class__.__name__} at {method} {u}: {e}") from e
         except Exception as e:
-            raise APIError(f"Request failed: {str(e)}")
+            raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
     def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
         for attempt in range(max_attempts):
@@ -378,13 +389,21 @@ class SandboxClient:
                     response = client.post(url, files=files, params=params, headers=headers)
                     response.raise_for_status()
                     return FileUploadResponse.model_validate(response.json())
-            except httpx.TimeoutException:
-                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
+            except httpx.TimeoutException as e:
+                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
-                error_details = f"HTTP {e.response.status_code}: {e.response.text}"
-                raise APIError(f"Upload failed: {error_details}")
+                error_details = (
+                    f"HTTP {e.response.status_code} {e.request.method} "
+                    f"{e.request.url}: {e.response.text}"
+                )
+                raise APIError(f"Upload failed: {error_details}") from e
+            except httpx.RequestError as e:
+                req = getattr(e, "request", None)
+                method = getattr(req, "method", "?")
+                u = getattr(req, "url", "?")
+                raise APIError(f"Upload failed: {e.__class__.__name__} at {method} {u}: {e}") from e
             except Exception as e:
-                raise APIError(f"Upload failed: {str(e)}")
+                raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
 
     def upload_bytes(
         self,
@@ -453,13 +472,21 @@ class SandboxClient:
 
                 with open(local_file_path, "wb") as f:
                     f.write(response.content)
-        except httpx.TimeoutException:
-            raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout)
+        except httpx.TimeoutException as e:
+            raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
         except httpx.HTTPStatusError as e:
-            error_details = f"HTTP {e.response.status_code}: {e.response.text}"
-            raise APIError(f"Download failed: {error_details}")
+            error_details = (
+                f"HTTP {e.response.status_code} {e.request.method} "
+                f"{e.request.url}: {e.response.text}"
+            )
+            raise APIError(f"Download failed: {error_details}") from e
+        except httpx.RequestError as e:
+            req = getattr(e, "request", None)
+            method = getattr(req, "method", "?")
+            u = getattr(req, "url", "?")
+            raise APIError(f"Download failed: {e.__class__.__name__} at {method} {u}: {e}") from e
         except Exception as e:
-            raise APIError(f"Download failed: {str(e)}")
+            raise APIError(f"Download failed: {e.__class__.__name__}: {e}") from e
 
 
 class AsyncSandboxClient:
@@ -617,12 +644,23 @@ class AsyncSandboxClient:
             )
             response.raise_for_status()
             return CommandResponse.model_validate(response.json())
-        except httpx.TimeoutException:
-            raise CommandTimeoutError(sandbox_id, command, effective_timeout)
+        except httpx.TimeoutException as e:
+            raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
         except httpx.HTTPStatusError as e:
-            raise APIError(f"HTTP {e.response.status_code}: {e.response.text}")
+            req = getattr(e, "request", None)
+            resp = getattr(e, "response", None)
+            method = getattr(req, "method", "?")
+            u = getattr(req, "url", "?")
+            status = getattr(resp, "status_code", "?")
+            text = getattr(resp, "text", "")
+            raise APIError(f"HTTP {status} {method} {u}: {text}") from e
+        except httpx.RequestError as e:
+            req = getattr(e, "request", None)
+            method = getattr(req, "method", "?")
+            u = getattr(req, "url", "?")
+            raise APIError(f"Request failed: {e.__class__.__name__} at {method} {u}: {e}") from e
         except Exception as e:
-            raise APIError(f"Request failed: {str(e)}")
+            raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
     async def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
         """Wait for sandbox to be running (async version)"""
@@ -742,13 +780,21 @@ class AsyncSandboxClient:
             )
             response.raise_for_status()
             return FileUploadResponse.model_validate(response.json())
-        except httpx.TimeoutException:
-            raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
+        except httpx.TimeoutException as e:
+            raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
         except httpx.HTTPStatusError as e:
-            error_details = f"HTTP {e.response.status_code}: {e.response.text}"
-            raise APIError(f"Upload failed: {error_details}")
+            error_details = (
+                f"HTTP {e.response.status_code} {e.request.method} "
+                f"{e.request.url}: {e.response.text}"
+            )
+            raise APIError(f"Upload failed: {error_details}") from e
+        except httpx.RequestError as e:
+            req = getattr(e, "request", None)
+            method = getattr(req, "method", "?")
+            u = getattr(req, "url", "?")
+            raise APIError(f"Upload failed: {e.__class__.__name__} at {method} {u}: {e}") from e
         except Exception as e:
-            raise APIError(f"Upload failed: {str(e)}")
+            raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
 
     async def upload_bytes(
         self,
@@ -824,13 +870,21 @@ class AsyncSandboxClient:
             # Write file asynchronously (non-blocking I/O)
             async with aiofiles.open(local_file_path, "wb") as f:
                 await f.write(content)
-        except httpx.TimeoutException:
-            raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout)
+        except httpx.TimeoutException as e:
+            raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
         except httpx.HTTPStatusError as e:
-            error_details = f"HTTP {e.response.status_code}: {e.response.text}"
-            raise APIError(f"Download failed: {error_details}")
+            error_details = (
+                f"HTTP {e.response.status_code} {e.request.method} "
+                f"{e.request.url}: {e.response.text}"
+            )
+            raise APIError(f"Download failed: {error_details}") from e
+        except httpx.RequestError as e:
+            req = getattr(e, "request", None)
+            method = getattr(req, "method", "?")
+            u = getattr(req, "url", "?")
+            raise APIError(f"Download failed: {e.__class__.__name__} at {method} {u}: {e}") from e
         except Exception as e:
-            raise APIError(f"Download failed: {str(e)}")
+            raise APIError(f"Download failed: {e.__class__.__name__}: {e}") from e
 
     async def aclose(self) -> None:
         """Close the async client and gateway client"""

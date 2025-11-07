@@ -38,7 +38,9 @@ DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 
 
-def display_remote_environment_info(env_path: Optional[Path] = None, environment_name: Optional[str] = None) -> None:
+def display_remote_environment_info(
+    env_path: Optional[Path] = None, environment_name: Optional[str] = None
+) -> None:
     """Display the remote environment name if metadata exists.
     
     Checks the provided path (or current directory) for environment metadata
@@ -746,19 +748,22 @@ def push(
                     prime_dir.mkdir(exist_ok=True)
                     metadata_path = prime_dir / ".env-metadata.json"
                     
-                    # Backwards compatibility: Migrate .env-metadata.json from root to .prime/ if it exists
-                    # This handles environments that were pulled/pushed before we moved to .prime/ subfolder
+                    # Backwards compatibility: Migrate .env-metadata.json from root to .prime/
+                    # This handles environments that were pulled/pushed before we moved
+                    # to .prime/ subfolder
                     old_metadata_path = env_path / ".env-metadata.json"
                     if old_metadata_path.exists() and not metadata_path.exists():
                         try:
                             # Move the old file to the new location
                             old_metadata_path.rename(metadata_path)
                             console.print(
-                                f"[dim]Migrated environment metadata from root to .prime/ subfolder[/dim]"
+                                "[dim]Migrated environment metadata from root "
+                                "to .prime/ subfolder[/dim]"
                             )
                         except (OSError, IOError) as e:
                             console.print(
-                                f"[yellow]Warning: Could not migrate old .env-metadata.json file to .prime/ subfolder: {e}[/yellow]"
+                                f"[yellow]Warning: Could not migrate old .env-metadata.json "
+                                f"file to .prime/ subfolder: {e}[/yellow]"
                             )
                     elif old_metadata_path.exists() and metadata_path.exists():
                         # Both exist - prefer the one in .prime/ and remove the old one
@@ -790,9 +795,13 @@ def push(
                         json.dump(env_metadata, f, indent=2)
                     
                     if existing_metadata:
-                        console.print(f"[dim]Updated environment metadata in .prime/.env-metadata.json[/dim]")
+                        console.print(
+                            "[dim]Updated environment metadata in .prime/.env-metadata.json[/dim]"
+                        )
                     else:
-                        console.print(f"[dim]Saved environment metadata to .prime/.env-metadata.json[/dim]")
+                        console.print(
+                            "[dim]Saved environment metadata to .prime/.env-metadata.json[/dim]"
+                        )
                 except Exception as e:
                     console.print(
                         f"[yellow]Warning: Could not save environment metadata: {e}[/yellow]"
@@ -923,7 +932,8 @@ def pull(
                     target_dir = Path.cwd() / f"{name}-{index}"
                     index += 1
                 console.print(
-                    f"[yellow]Directory {base_dir} already exists. Using {target_dir} instead.[/yellow]"
+                    f"[yellow]Directory {base_dir} already exists. "
+                    f"Using {target_dir} instead.[/yellow]"
                 )
 
         try:
@@ -994,13 +1004,14 @@ def pull(
             }
             with open(metadata_path, "w") as f:
                 json.dump(env_metadata, f, indent=2)
-            console.print(f"[dim]Created environment metadata at .prime/.env-metadata.json[/dim]")
+            console.print("[dim]Created environment metadata at .prime/.env-metadata.json[/dim]")
         except Exception as e:
             console.print(f"[yellow]Warning: Could not create metadata file: {e}[/yellow]")
 
         try:
             all_files = list(target_dir.iterdir())
-            # Filter out .prime directory and .env-metadata.json files (created locally, not extracted)
+            # Filter out .prime directory and .env-metadata.json files
+            # (created locally, not extracted)
             extracted_files = [
                 f for f in all_files
                 if f.name != ".prime" and f.name != ".env-metadata.json"

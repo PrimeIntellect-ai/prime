@@ -73,6 +73,15 @@ class SandboxAuthCache:
         except Exception:
             pass
 
+    async def _save_cache_async(self) -> None:
+        """Save auth cache to file (async version)"""
+        try:
+            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
+            async with aiofiles.open(self._cache_file, "w") as f:
+                await f.write(json.dumps(self._auth_cache))
+        except Exception:
+            pass
+
     def _check_cached_auth(self, sandbox_id: str) -> Optional[Dict[str, Any]]:
         """Check if cached auth info exists and is valid"""
         if sandbox_id in self._auth_cache:
@@ -88,6 +97,21 @@ class SandboxAuthCache:
                 self._save_cache()
         return None
 
+    async def _check_cached_auth_async(self, sandbox_id: str) -> Optional[Dict[str, Any]]:
+        """Check if cached auth info exists and is valid (async version)"""
+        if sandbox_id in self._auth_cache:
+            auth_info = self._auth_cache[sandbox_id]
+            expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
+            expires_at = datetime.fromisoformat(expires_at_str)
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) < expires_at:
+                return dict(auth_info)
+            else:
+                del self._auth_cache[sandbox_id]
+                await self._save_cache_async()
+        return None
+
     def get_or_refresh(self, sandbox_id: str) -> Dict[str, Any]:
         """Get cached auth info or fetch new token if expired/missing"""
         cached_auth = self._check_cached_auth(sandbox_id)
@@ -101,12 +125,12 @@ class SandboxAuthCache:
 
     async def get_or_refresh_async(self, sandbox_id: str) -> Dict[str, Any]:
         """Get cached auth info or fetch new token if expired/missing (async)"""
-        cached_auth = self._check_cached_auth(sandbox_id)
+        cached_auth = await self._check_cached_auth_async(sandbox_id)
         if cached_auth:
             return cached_auth
         response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
-        self.set(sandbox_id, response)
-        self._save_cache()
+        self._auth_cache[sandbox_id] = response
+        await self._save_cache_async()
         return dict(response)
 
     def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:

@@ -422,13 +422,21 @@ def delete(
         None, "--label", "-l", help="Delete all sandboxes with ALL these labels"
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    only_mine: bool = typer.Option(
+        True,
+        "--only-mine/--all-users",
+        help="Restrict '--all' deletes to only your sandboxes (default: only yours)",
+        show_default=True,
+    ),
 ) -> None:
-    """Delete one or more sandboxes by ID, by label, or all sandboxes with --all"""
+    """Delete one or more sandboxes by ID, by label, or all sandboxes with --all
+
+    --only-mine controls whether '--all' will restrict to your sandboxes or delete for all users.
+    """
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        # Validate arguments
         if sum([bool(all), bool(sandbox_ids), bool(labels)]) > 1:
             console.print(
                 "[red]Error:[/red] Cannot specify more than one of: sandbox IDs, --all, or --label"
@@ -442,7 +450,6 @@ def delete(
             raise typer.Exit(1)
 
         if all:
-            # Get all sandboxes to delete
             with console.status("[bold blue]Fetching all sandboxes...", spinner="dots"):
                 all_sandboxes = []
                 page = 1
@@ -455,39 +462,37 @@ def delete(
                         break
                     page += 1
 
-                # Filter to current user if configured
-                current_user_id = config.user_id
-                active_sandboxes = []
-                for s in all_sandboxes:
-                    if current_user_id and s.user_id and s.user_id != current_user_id:
-                        continue
-                    active_sandboxes.append(s)
-                sandbox_ids = [s.id for s in active_sandboxes]
+                if only_mine:
+                    current_user_id = config.user_id
+                    sandboxes_to_delete = [
+                        s
+                        for s in all_sandboxes
+                        if (not current_user_id or not s.user_id or s.user_id == current_user_id)
+                    ]
+                else:
+                    sandboxes_to_delete = all_sandboxes
+
+                sandbox_ids = [s.id for s in sandboxes_to_delete]
 
                 if not sandbox_ids:
                     console.print("[yellow]No sandboxes to delete[/yellow]")
                     return
         else:
-            # Handle comma-separated IDs by splitting them
             parsed_ids = []
             for id_string in sandbox_ids or []:
-                # Split by comma and strip whitespace
                 if "," in id_string:
                     parsed_ids.extend([id.strip() for id in id_string.split(",") if id.strip()])
                 else:
                     parsed_ids.append(id_string.strip())
 
-            # Remove any empty strings and duplicates while preserving order
             cleaned_ids = []
             seen = set()
             for id in parsed_ids:
                 if id and id not in seen:
                     cleaned_ids.append(id)
                     seen.add(id)
-
             sandbox_ids = cleaned_ids
 
-        # Handle deletion by labels
         if labels:
             labels_str = ", ".join(labels)
             confirmation_msg = (
@@ -510,9 +515,7 @@ def delete(
                 for sandbox_id in result.succeeded:
                     console.print(f"  ✓ {sandbox_id}")
 
-        # Handle single vs multiple sandbox IDs
         elif len(sandbox_ids) == 1 and not all:
-            # Single sandbox deletion
             sandbox_id = sandbox_ids[0]
             if not confirm_or_skip(f"Are you sure you want to delete sandbox {sandbox_id}?", yes):
                 console.print("Delete cancelled")
@@ -524,7 +527,6 @@ def delete(
             console.print(f"[green]Successfully deleted sandbox {sandbox_id}[/green]")
 
         else:
-            # Bulk sandbox deletion
             if all:
                 confirmation_msg = (
                     f"Are you sure you want to delete ALL {len(sandbox_ids)} "
@@ -541,7 +543,6 @@ def delete(
                 console.print(cancel_msg)
                 return
 
-            # Batch the deletion into chunks of 100 to respect API limits
             batch_size = 100
             all_succeeded = []
             all_failed = []

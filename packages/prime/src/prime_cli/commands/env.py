@@ -767,7 +767,12 @@ def push(
                             )
                     elif old_metadata_path.exists() and metadata_path.exists():
                         # Both exist - prefer the one in .prime/ and remove the old one
-                        old_metadata_path.unlink()
+                        try:
+                            old_metadata_path.unlink()
+                        except (OSError, IOError) as e:
+                            console.print(
+                                f"[yellow]Warning: Could not remove old .env-metadata.json "
+                            )
                     
                     # Read existing metadata if it exists
                     existing_metadata = {}

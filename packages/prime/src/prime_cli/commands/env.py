@@ -913,7 +913,18 @@ def pull(
         if target:
             target_dir = Path(target)
         else:
-            target_dir = Path.cwd() / name
+            # Check if the base directory exists and add index suffix if needed
+            base_dir = Path.cwd() / name
+            target_dir = base_dir
+            if target_dir.exists():
+                # Find the next available directory with index suffix
+                index = 1
+                while target_dir.exists():
+                    target_dir = Path.cwd() / f"{name}-{index}"
+                    index += 1
+                console.print(
+                    f"[yellow]Directory {base_dir} already exists. Using {target_dir} instead.[/yellow]"
+                )
 
         try:
             target_dir.mkdir(parents=True, exist_ok=True)

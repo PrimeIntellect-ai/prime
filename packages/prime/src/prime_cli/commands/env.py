@@ -67,7 +67,7 @@ def display_remote_environment_info(
     if env_metadata and env_metadata.get("owner") and env_metadata.get("name"):
         owner = env_metadata.get("owner")
         env_name = env_metadata.get("name")
-        console.print(f"Using remote environment {owner}/{env_name}\n")
+        console.print(f"[blue]Using remote environment {owner}/{env_name}[/blue]\n")
 
 
 def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:

@@ -999,7 +999,12 @@ def pull(
             console.print(f"[yellow]Warning: Could not create metadata file: {e}[/yellow]")
 
         try:
-            extracted_files = list(target_dir.iterdir())
+            all_files = list(target_dir.iterdir())
+            # Filter out .prime directory and .env-metadata.json files (created locally, not extracted)
+            extracted_files = [
+                f for f in all_files
+                if f.name != ".prime" and f.name != ".env-metadata.json"
+            ]
             if extracted_files:
                 console.print("\nExtracted files:")
                 for file in extracted_files[:MAX_FILES_TO_SHOW]:

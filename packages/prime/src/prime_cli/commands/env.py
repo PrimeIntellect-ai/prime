@@ -23,6 +23,7 @@ from rich.table import Table
 from ..api.inference import InferenceAPIError, InferenceClient
 from ..client import APIClient, APIError
 from ..utils import output_data_as_json, validate_output_format
+from ..utils.env_metadata import get_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
 
@@ -34,6 +35,37 @@ MAX_FILES_TO_SHOW = 10
 DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
+
+
+def display_remote_environment_info(env_path: Optional[Path] = None, environment_name: Optional[str] = None) -> None:
+    """Display the remote environment name if metadata exists.
+    
+    Checks the provided path (or current directory) for environment metadata
+    and displays "Using remote environment {owner}/{name}" if found.
+    
+    If environment_name is provided, also checks ./environments/{module_name} as a fallback.
+    
+    Args:
+        env_path: Path to check for metadata (defaults to current directory)
+        environment_name: Optional environment name to check in ./environments/{module_name}
+    """
+    if env_path is None:
+        env_path = Path.cwd()
+    
+    # Check the provided path first
+    env_metadata = get_environment_metadata(env_path)
+    
+    # If not found and environment_name is provided, check ./environments/{module_name}
+    if not env_metadata and environment_name:
+        current_dir = Path.cwd()
+        module_name = environment_name.replace("-", "_")
+        env_dir = current_dir / "environments" / module_name
+        env_metadata = get_environment_metadata(env_dir)
+    
+    if env_metadata and env_metadata.get("owner") and env_metadata.get("name"):
+        owner = env_metadata.get("owner")
+        env_name = env_metadata.get("name")
+        console.print(f"Using remote environment {owner}/{env_name}\n")
 
 
 def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
@@ -250,6 +282,9 @@ def push(
 
     try:
         env_path = Path(path).resolve()
+
+        # Display remote environment info if metadata exists
+        display_remote_environment_info(env_path)
 
         # Validate basic structure
         pyproject_path = env_path / "pyproject.toml"
@@ -1880,6 +1915,9 @@ def eval_env(
        prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7
        All extra args are forwarded unchanged to vf-eval.
     """
+    # Display remote environment info if metadata exists
+    display_remote_environment_info(environment_name=environment)
+    
     config = Config()
 
     api_key = config.api_key

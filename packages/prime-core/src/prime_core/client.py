@@ -212,6 +212,10 @@ class AsyncAPIClient:
             response = await self.client.request(
                 method, url, params=params, json=json, timeout=timeout
             )
+
+            # Temporary log to verify HTTP version used
+            print(f"[PRIME-CORE] Request to {url} using HTTP/{response.http_version}")
+
             response.raise_for_status()
 
             result = response.json()

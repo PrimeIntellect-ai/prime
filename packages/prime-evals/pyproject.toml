@@ -1,6 +1,6 @@
 [project]
 name = "prime-evals"
-# Version is single-sourced from src/prime_sandboxes/__init__.py via Hatch
+# Version is single-sourced from src/prime_evals/__init__.py via Hatch
 dynamic = ["version"]
 description = "Prime Intellect Evals SDK - Push and manage evaluations"
 readme = "README.md"

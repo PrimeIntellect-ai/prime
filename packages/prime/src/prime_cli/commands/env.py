@@ -37,13 +37,13 @@ DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 
 
-def display_remote_environment_info(
+def display_upstream_environment_info(
     env_path: Optional[Path] = None, environment_name: Optional[str] = None
-) -> None:
-    """Display the remote environment name if metadata exists.
+) -> bool:
+    """Display the upstream environment name if metadata exists.
     
     Checks the provided path (or current directory) for environment metadata
-    and displays "Using remote environment {owner}/{name}" if found.
+    and displays "Using upstream environment {owner}/{name}" if found.
     
     If environment_name is provided, also checks ./environments/{module_name} as a fallback.
     
@@ -67,7 +67,11 @@ def display_remote_environment_info(
     if env_metadata and env_metadata.get("owner") and env_metadata.get("name"):
         owner = env_metadata.get("owner")
         env_name = env_metadata.get("name")
-        console.print(f"[blue]Using remote environment {owner}/{env_name}[/blue]\n")
+        console.print(f"[blue]Using upstream environment {owner}/{env_name}[/blue]\n")
+        return True
+    else:
+        console.print("[blue]No upstream environment found.\n")
+        return False
 
 
 def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
@@ -285,8 +289,8 @@ def push(
     try:
         env_path = Path(path).resolve()
 
-        # Display remote environment info if metadata exists
-        display_remote_environment_info(env_path)
+        # Display upstream environment info if metadata exists
+        display_upstream_environment_info(env_path)
 
         # Validate basic structure
         pyproject_path = env_path / "pyproject.toml"
@@ -1947,8 +1951,8 @@ def eval_env(
        prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7
        All extra args are forwarded unchanged to vf-eval.
     """
-    # Display remote environment info if metadata exists
-    display_remote_environment_info(environment_name=environment)
+    # Display upstream environment info if metadata exists
+    display_upstream_environment_info(environment_name=environment)
     
     config = Config()
 

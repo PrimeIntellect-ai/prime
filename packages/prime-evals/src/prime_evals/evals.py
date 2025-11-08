@@ -54,6 +54,7 @@ class EvalsClient:
         tags: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         metrics: Optional[Dict[str, Any]] = None,
+        is_public: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Create a new evaluation
 
@@ -73,10 +74,22 @@ class EvalsClient:
 
         resolved_environments = None
         if environments:
-            resolved_environments = [
-                {**env, "id": self._resolve_environment_id(env["id"])} if "id" in env else env
-                for env in environments
-            ]
+            resolved_environments = []
+            for env in environments:
+                resolved_env = env.copy()
+                # Handle different identifier types explicitly
+                # Check for explicit "slug" or "name" keys first
+                if "slug" in resolved_env:
+                    # Owner/name format, resolve to database ID
+                    resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("slug"))
+                elif "name" in resolved_env:
+                    # Just a name, resolve to database ID (get-or-create)
+                    resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("name"))
+                elif "id" in resolved_env:
+                    # "id" key exists - assume it's already a database ID
+                    # (eval_push.py will use "slug" or "name" keys for non-db-ids)
+                    pass
+                resolved_environments.append(resolved_env)
 
         payload = {
             "name": name,
@@ -92,6 +105,9 @@ class EvalsClient:
             "metadata": metadata,
             "metrics": metrics,
         }
+        # Only include is_public if it's explicitly set (not None)
+        if is_public is not None:
+            payload["is_public"] = is_public
         payload = {k: v for k, v in payload.items() if v is not None or k in ["tags"]}
 
         response = self.client.request("POST", "/evaluations/", json=payload)
@@ -220,6 +236,7 @@ class AsyncEvalsClient:
         tags: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         metrics: Optional[Dict[str, Any]] = None,
+        is_public: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Create a new evaluation
 
@@ -242,8 +259,22 @@ class AsyncEvalsClient:
 
             async def resolve_env(env: Dict[str, str]) -> Dict[str, str]:
                 resolved_env = env.copy()
-                if "id" in resolved_env:
-                    resolved_env["id"] = await self._resolve_environment_id(resolved_env["id"])
+                # Handle different identifier types explicitly
+                # Check for explicit "slug" or "name" keys first
+                if "slug" in resolved_env:
+                    # Owner/name format, resolve to database ID
+                    resolved_env["id"] = await self._resolve_environment_id(
+                        resolved_env.pop("slug")
+                    )
+                elif "name" in resolved_env:
+                    # Just a name, resolve to database ID (get-or-create)
+                    resolved_env["id"] = await self._resolve_environment_id(
+                        resolved_env.pop("name")
+                    )
+                elif "id" in resolved_env:
+                    # "id" key exists - assume it's already a database ID
+                    # (eval_push.py will use "slug" or "name" keys for non-db-ids)
+                    pass
                 return resolved_env
 
             resolved_environments = await asyncio.gather(
@@ -264,6 +295,9 @@ class AsyncEvalsClient:
             "metadata": metadata,
             "metrics": metrics,
         }
+        # Only include is_public if it's explicitly set (not None)
+        if is_public is not None:
+            payload["is_public"] = is_public
         payload = {k: v for k, v in payload.items() if v is not None or k in ["tags"]}
 
         response = await self.client.request("POST", "/evaluations/", json=payload)

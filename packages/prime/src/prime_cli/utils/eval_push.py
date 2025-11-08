@@ -1,6 +1,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from prime_core import APIClient
 from prime_evals import EvalsAPIError, EvalsClient
@@ -15,6 +16,7 @@ def push_eval_results_to_hub(
     env_name: str,
     model: str,
     job_id: str,
+    env_path: Optional[Path] = None,
 ) -> None:
     """
     Push evaluation results to Prime Evals Hub after vf-eval completes.
@@ -27,9 +29,10 @@ def push_eval_results_to_hub(
     5. Creates evaluation, pushes samples, and finalizes
 
     Args:
-        environment: Environment name (e.g., "simpleqa")
+        env_name: Environment name (e.g., "simpleqa")
         model: Model identifier (e.g., "meta-llama/llama-3.1-70b-instruct")
         job_id: Unique job ID for tracking
+        env_path: Optional path to the environment directory (defaults to current directory)
     """
     # Step 1: Find the output directory
     module_name = env_name.replace("-", "_")
@@ -69,18 +72,22 @@ def push_eval_results_to_hub(
                 results_samples.append(json.loads(line))
 
     # Search for environment metadata in multiple possible locations
-    # 1. ./environments/{module_name} (where eval outputs are typically stored)
-    # 2. ./environments/{env_name} (alternative structure)
-    # 3. ./{env_name} (where prime env pull creates it)
-    # 4. ./{module_name} (alternative structure)
-    # 5. Current directory (if running from inside the environment directory)
-    possible_env_dirs = [
+    # 1. env_path (if provided via --env-path)
+    # 2. ./environments/{module_name} (where eval outputs are typically stored)
+    # 3. ./environments/{env_name} (alternative structure)
+    # 4. ./{env_name} (where prime env pull creates it)
+    # 5. ./{module_name} (alternative structure)
+    # 6. Current directory (if running from inside the environment directory)
+    possible_env_dirs = []
+    if env_path:
+        possible_env_dirs.append(env_path)
+    possible_env_dirs.extend([
         Path("./environments") / module_name,
         Path("./environments") / env_name,
         Path(".") / env_name,
         Path(".") / module_name,
         Path("."),
-    ]
+    ])
     
     hub_metadata = None
     for env_dir in possible_env_dirs:
@@ -115,6 +122,16 @@ def push_eval_results_to_hub(
         resolved_env_slug = None
         resolved_env_id = None
 
+    # Require accurate upstream for evaluation tracking
+    if not resolved_env_slug and not resolved_env_id:
+        console.print(
+            "[yellow]No upstream environment found. Cannot upload evaluation results "
+            "without specific environment identification.\nEnsure .prime/.env-metadata.json "
+            "exists in the environment directory or use --env-path to specify the "
+            "correct path.[/yellow]"
+        )
+        return None
+
     env_identifier = resolved_env_slug or resolved_env_id
     console.print(
         f"\n[blue]Uploading evaluation results, "
@@ -126,7 +143,8 @@ def push_eval_results_to_hub(
     elif resolved_env_slug:
         environments = [{"slug": resolved_env_slug}]
     else:
-        environments = [{"name": env_name}]
+        # This should never happen due to the check above, but keeping for safety
+        raise ValueError("No valid environment identifier found")
     metrics = {k: v for k, v in metadata.items() if k.startswith("avg_")}
 
     eval_metadata = {"framework": "verifiers", "job_id": job_id, **metadata}

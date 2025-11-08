@@ -113,9 +113,11 @@ class EvalsClient:
             "tags": tags or [],
             "metadata": metadata,
             "metrics": metrics,
-            "is_public": is_public,
         }
-        payload = {k: v for k, v in payload.items() if v is not None or k in ["tags", "is_public"]}
+        # Only include is_public if it's explicitly set (not None)
+        if is_public is not None:
+            payload["is_public"] = is_public
+        payload = {k: v for k, v in payload.items() if v is not None or k in ["tags"]}
 
         response = self.client.request("POST", "/evaluations/", json=payload)
         return response
@@ -301,9 +303,11 @@ class AsyncEvalsClient:
             "tags": tags or [],
             "metadata": metadata,
             "metrics": metrics,
-            "is_public": is_public,
         }
-        payload = {k: v for k, v in payload.items() if v is not None or k in ["tags", "is_public"]}
+        # Only include is_public if it's explicitly set (not None)
+        if is_public is not None:
+            payload["is_public"] = is_public
+        payload = {k: v for k, v in payload.items() if v is not None or k in ["tags"]}
 
         response = await self.client.request("POST", "/evaluations/", json=payload)
         return response

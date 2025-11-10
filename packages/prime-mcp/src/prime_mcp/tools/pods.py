@@ -78,6 +78,7 @@ async def create_pod(
             "gpuCount": gpu_count,
             "socket": socket,
             "image": image,
+            "dataCenterId": data_center_id,
         },
         "provider": {"type": provider_type},
     }
@@ -85,8 +86,6 @@ async def create_pod(
     # Add optional pod fields
     if name:
         request_body["pod"]["name"] = name
-    if data_center_id:
-        request_body["pod"]["dataCenterId"] = data_center_id
     if disk_size is not None:
         request_body["pod"]["diskSize"] = disk_size
     if vcpus is not None:

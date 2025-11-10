@@ -18,14 +18,14 @@ async def manage_ssh_keys(
         key_name: Name for the SSH key (required for "add")
         public_key: SSH public key content (required for "add")
         key_id: Key ID (required for "delete" and "set_primary")
-        offset: Number of items to skip (for "list" action, default: 0)
-        limit: Maximum number of items to return (for "list" action, default: 100)
+        offset: Number of items to skip (for "list" action, default: 0, min: 0)
+        limit: Maximum number of items to return (for "list" action, default: 100, min: 0)
 
     Returns:
         SSH key operation result
     """
     if action == "list":
-        params = {"offset": offset, "limit": limit}
+        params = {"offset": max(0, offset), "limit": max(0, limit)}
         response_data = await make_prime_request("GET", "ssh_keys/", params=params)
 
     elif action == "add":

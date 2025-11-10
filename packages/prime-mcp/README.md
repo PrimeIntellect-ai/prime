@@ -64,7 +64,7 @@ from prime_mcp import availability, pods, ssh
 # Check GPU availability
 result = await availability.check_gpu_availability(
     gpu_type="A100_80GB",
-    regions="us-east,us-west",
+    regions=["united_states", "eu_west"],
     security="secure_cloud"
 )
 
@@ -94,19 +94,20 @@ Check GPU availability across different providers.
 
 **Parameters:**
 - `gpu_type` (optional): GPU model (e.g., "A100_80GB", "H100_80GB", "RTX4090_24GB")
-- `regions` (optional): Comma-separated regions to filter
+- `regions` (optional): List of regions to filter. Valid options: `africa`, `asia_south`, `asia_northeast`, `australia`, `canada`, `eu_east`, `eu_north`, `eu_west`, `middle_east`, `south_america`, `united_states`
 - `socket` (optional): Socket type ("PCIe", "SXM2", "SXM3", "SXM4", "SXM5", "SXM6")
 - `security` (optional): Security type ("secure_cloud" or "community_cloud")
+- `gpu_count` (optional): Number of GPUs to filter by
 
 #### `check_cluster_availability`
 Check cluster availability for multi-node deployments.
 
 **Parameters:**
-- `regions` (optional): List of regions to filter
+- `regions` (optional): List of regions to filter. Valid options: `africa`, `asia_south`, `asia_northeast`, `australia`, `canada`, `eu_east`, `eu_north`, `eu_west`, `middle_east`, `south_america`, `united_states`
 - `gpu_count` (optional): Desired number of GPUs
-- `gpu_type` (optional): GPU model
-- `socket` (optional): Socket type
-- `security` (optional): Security type
+- `gpu_type` (optional): GPU model (e.g., "H100_80GB", "A100_80GB", "RTX4090_24GB")
+- `socket` (optional): Socket type ("PCIe", "SXM2", "SXM3", "SXM4", "SXM5", "SXM6")
+- `security` (optional): Security type ("secure_cloud", "community_cloud")
 
 ### Pod Management Tools
 
@@ -169,8 +170,8 @@ Get pods history with sorting and pagination.
 **Parameters:**
 - `limit`: Maximum entries (default: 100)
 - `offset`: Entries to skip (default: 0)
-- `sort_by`: Field to sort by (default: "terminatedAt")
-- `sort_order`: Sort order (default: "desc")
+- `sort_by`: Field to sort by (default: "terminatedAt", options: "terminatedAt", "createdAt")
+- `sort_order`: Sort order (default: "desc", options: "asc", "desc")
 
 #### `delete_pod`
 Delete/terminate a pod.
@@ -318,7 +319,10 @@ Prime MCP builds on `prime-core` for:
 All tools return dictionaries with either the result or an error key:
 
 ```python
-result = await availability.check_gpu_availability(gpu_type="InvalidGPU")
+result = await availability.check_gpu_availability(
+    gpu_type="InvalidGPU",
+    regions=["united_states"]
+)
 
 if "error" in result:
     print(f"Error: {result['error']}")

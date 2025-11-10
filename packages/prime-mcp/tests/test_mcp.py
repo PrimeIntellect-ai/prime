@@ -8,7 +8,7 @@ async def test_check_gpu_availability():
     """Test check_gpu_availability function signature and structure"""
     result = await availability.check_gpu_availability(
         gpu_type="A100_80GB",
-        regions="us-east",
+        regions=["united_states"],
         socket="PCIe",
         security="secure_cloud",
     )
@@ -20,7 +20,7 @@ async def test_check_gpu_availability():
 async def test_check_cluster_availability():
     """Test check_cluster_availability function signature"""
     result = await availability.check_cluster_availability(
-        regions=["us-east", "us-west"],
+        regions=["united_states", "eu_west"],
         gpu_count=4,
         gpu_type="H100_80GB",
         socket="SXM5",
@@ -46,6 +46,24 @@ async def test_get_pods_history():
     )
 
     assert isinstance(result, dict)
+
+
+@pytest.mark.asyncio
+async def test_get_pods_history_sort_validation():
+    """Test get_pods_history with valid sort parameters"""
+    # Test with valid sort_by options
+    result1 = await pods.get_pods_history(sort_by="terminatedAt")
+    assert isinstance(result1, dict)
+
+    result2 = await pods.get_pods_history(sort_by="createdAt")
+    assert isinstance(result2, dict)
+
+    # Test with valid sort_order options
+    result3 = await pods.get_pods_history(sort_order="asc")
+    assert isinstance(result3, dict)
+
+    result4 = await pods.get_pods_history(sort_order="desc")
+    assert isinstance(result4, dict)
 
 
 @pytest.mark.asyncio
@@ -158,24 +176,6 @@ async def test_manage_ssh_keys_invalid_action():
 
     assert "error" in result
     assert "Invalid action" in result["error"]
-
-
-@pytest.mark.asyncio
-async def test_get_pods_history_sort_validation():
-    """Test get_pods_history with valid sort parameters"""
-    # Test with valid sort_by options
-    result1 = await pods.get_pods_history(sort_by="terminatedAt")
-    assert isinstance(result1, dict)
-
-    result2 = await pods.get_pods_history(sort_by="createdAt")
-    assert isinstance(result2, dict)
-
-    # Test with valid sort_order options
-    result3 = await pods.get_pods_history(sort_order="asc")
-    assert isinstance(result3, dict)
-
-    result4 = await pods.get_pods_history(sort_order="desc")
-    assert isinstance(result4, dict)
 
 
 def test_imports():

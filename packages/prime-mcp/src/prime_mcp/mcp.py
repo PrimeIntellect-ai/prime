@@ -8,23 +8,27 @@ mcp = FastMCP("primeintellect")
 @mcp.tool()
 async def check_gpu_availability(
     gpu_type: str | None = None,
-    regions: str | None = None,
+    regions: list[str] | None = None,
     socket: str | None = None,
     security: str | None = None,
+    gpu_count: int | None = None,
 ) -> dict:
     """Check GPU availability across different providers.
 
     Args:
         gpu_type: GPU model (e.g., "A100_80GB", "H100_80GB", "RTX4090_24GB")
-        regions: List of regions to filter (comma-separated string)
+        regions: List of regions to filter (e.g., ["united_states", "eu_west"])
+            Valid options: "africa", "asia_south", "asia_northeast", "australia", "canada",
+            "eu_east", "eu_north", "eu_west", "middle_east", "south_america", "united_states"
         socket: Socket for selected GPU model
             (options: "PCIe", "SXM2", "SXM3", "SXM4", "SXM5", "SXM6")
         security: Security type ("secure_cloud" or "community_cloud")
+        gpu_count: Number of GPUs to filter by
 
     Returns:
         Available GPU instances matching the criteria
     """
-    return await availability.check_gpu_availability(gpu_type, regions, socket, security)
+    return await availability.check_gpu_availability(gpu_type, regions, socket, security, gpu_count)
 
 
 @mcp.tool()
@@ -38,7 +42,9 @@ async def check_cluster_availability(
     """Check cluster availability for multi-node deployments.
 
     Args:
-        regions: List of regions to filter
+        regions: List of regions to filter (e.g., ["united_states", "eu_west"])
+            Valid options: "africa", "asia_south", "asia_northeast", "australia", "canada",
+            "eu_east", "eu_north", "eu_west", "middle_east", "south_america", "united_states"
         gpu_count: Desired number of GPUs
         gpu_type: GPU model (e.g., "H100_80GB", "A100_80GB", "RTX4090_24GB")
         socket: Socket for selected GPU model ("PCIe", "SXM2", "SXM3", "SXM4", "SXM5", "SXM6")
@@ -149,8 +155,8 @@ async def get_pods_history(
     Args:
         limit: Maximum number of entries (default: 100)
         offset: Number of entries to skip (default: 0)
-        sort_by: Field to sort by (default: "terminatedAt")
-        sort_order: Sort order (default: "desc")
+        sort_by: Field to sort by (default: "terminatedAt", options: "terminatedAt", "createdAt")
+        sort_order: Sort order (default: "desc", options: "asc", "desc")
 
     Returns:
         Historical pod data

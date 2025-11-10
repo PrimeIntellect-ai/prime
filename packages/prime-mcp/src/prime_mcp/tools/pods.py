@@ -147,22 +147,12 @@ async def get_pods_history(
     Args:
         limit: Maximum number of history entries to return (default: 100, min: 0)
         offset: Number of entries to skip for pagination (default: 0, min: 0)
-        sort_by: Field to sort by (default: "terminatedAt")
-        sort_order: Sort order (default: "desc")
+        sort_by: Field to sort by (default: "terminatedAt", options: "terminatedAt", "createdAt")
+        sort_order: Sort order (default: "desc", options: "asc", "desc")
 
     Returns:
         Response containing historical pod data
     """
-    # Validate sort_by parameter
-    valid_sort_by = ["terminatedAt", "createdAt"]
-    if sort_by not in valid_sort_by:
-        sort_by = "terminatedAt"
-
-    # Validate sort_order parameter
-    valid_sort_order = ["asc", "desc"]
-    if sort_order not in valid_sort_order:
-        sort_order = "desc"
-
     params = {
         "limit": max(0, limit),
         "offset": max(0, offset),

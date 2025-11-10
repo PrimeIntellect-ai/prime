@@ -180,11 +180,10 @@ async def test_get_pods_history_sort_validation():
 
 def test_imports():
     """Test that all main modules can be imported"""
-    from prime_mcp import PRIME_API_BASE, make_prime_request, mcp
+    from prime_mcp import make_prime_request, mcp
 
     assert mcp is not None
     assert make_prime_request is not None
-    assert PRIME_API_BASE is not None
 
 
 if __name__ == "__main__":

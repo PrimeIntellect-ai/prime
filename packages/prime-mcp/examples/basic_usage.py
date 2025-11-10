@@ -37,12 +37,20 @@ async def main():
         print("   No GPUs available with these criteria")
         return
 
-    for i, option in enumerate(available.get("data", [])[:3]):
-        print(f"   Option {i + 1}:")
-        print(f"     Provider: {option.get('providerType')}")
+    gpu_opts = available.get("RTX4090_24GB", [])
+    spot_opts = [o for o in gpu_opts if o.get("isSpot")]
+    on_demand_opts = [o for o in gpu_opts if not o.get("isSpot")]
+
+    print(f"   Spot instances: {len(spot_opts)} (⚠️ cheaper, can be terminated)")
+    print(f"   On-demand instances: {len(on_demand_opts)} (✓ guaranteed)")
+
+    for i, option in enumerate(gpu_opts[:3]):
+        print(f"\n   Option {i + 1}:")
+        print(f"     Provider: {option.get('provider')}")
         print(f"     GPU: {option.get('gpuType')} x{option.get('gpuCount')}")
-        print(f"     Price: ${option.get('priceHr')}/hr")
-        print(f"     Location: {option.get('location', {}).get('country', 'N/A')}")
+        print(f"     Price: ${option.get('prices', {}).get('onDemand')}/hr")
+        print(f"     Location: {option.get('dataCenter')}")
+        print(f"     Spot: {'Yes ⚠️' if option.get('isSpot') else 'No ✓'}")
         print()
 
     print("2. Listing existing pods...")
@@ -90,24 +98,41 @@ async def main():
     print("5. Pod creation example (commented out):")
     print("   To create a pod, uncomment the following code:\n")
     print("""
-    first_option = available.get("data", [])[0]
+    # IMPORTANT CHOICES:
+    # 1. Choose spot vs on-demand
+    gpu_opts = available.get("RTX4090_24GB", [])
+    on_demand = [o for o in gpu_opts if not o.get("isSpot")]  # Guaranteed
+    # spot = [o for o in gpu_opts if o.get("isSpot")]  # Cheaper but can be terminated
+    
+    # 2. Select instance
+    selected = on_demand[0] if on_demand else gpu_opts[0]
+    
+    # 3. Choose your image!
+    # Options: ubuntu_22_cuda_12, cuda_12_4_pytorch_2_5, prime_rl, etc.
+    # Check selected.get('images') for available images
+    
+    # 4. Ensure SSH key is added (see step 4 above)
+    
     new_pod = await pods.create_pod(
-        cloud_id=first_option.get("cloudId"),
+        cloud_id=selected.get("cloudId"),
         gpu_type="RTX4090_24GB",
-        provider_type=first_option.get("providerType"),
+        provider_type=selected.get("provider"),
+        data_center_id=selected.get("dataCenter"),
         name="example-pod",
         gpu_count=1,
         disk_size=50,
-        image="cuda_12_4_pytorch_2_5"
+        image="cuda_12_4_pytorch_2_5"  # YOUR IMAGE CHOICE
     )
     
     if "error" not in new_pod:
         print(f"   ✓ Created pod: {new_pod.get('id')}")
+        print(f"     Status: {new_pod.get('status')}")
+        print(f"     Spot: {new_pod.get('isSpot')}")
         print(f"     SSH: {new_pod.get('sshConnection')}")
         
         # Monitor status
         status = await pods.get_pods_status(pod_ids=[new_pod.get('id')])
-        print(f"     Status: {status}")
+        print(f"     Installation: {status}")
         
         # When done, delete the pod
         # await pods.delete_pod(new_pod.get('id'))

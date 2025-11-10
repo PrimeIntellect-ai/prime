@@ -23,7 +23,12 @@ async def check_gpu_availability(
         gpu_count: Number of GPUs to filter by
 
     Returns:
-        Available GPU instances matching the criteria
+        Available GPU instances grouped by GPU type. Each instance includes:
+        - 'isSpot': true = cheaper but can be TERMINATED AT ANY TIME
+                   false/null = more expensive but GUARANTEED availability
+        - 'images': list of available images for this instance
+        - 'dataCenter': required for creating pods
+        - 'prices': pricing information
     """
     params = {}
     if regions:

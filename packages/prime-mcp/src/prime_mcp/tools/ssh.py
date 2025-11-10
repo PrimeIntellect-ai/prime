@@ -13,10 +13,14 @@ async def manage_ssh_keys(
 ) -> dict[str, Any]:
     """Manage SSH keys for pod access.
 
+    CRITICAL: User MUST have SSH key added BEFORE creating pods or they can't access them!
+    Always check for existing keys with action="list" before pod creation.
+
     Args:
         action: Action to perform ("list", "add", "delete", "set_primary")
         key_name: Name for the SSH key (required for "add")
         public_key: SSH public key content (required for "add")
+            Get from ~/.ssh/id_rsa.pub or generate: ssh-keygen -t rsa -b 4096
         key_id: Key ID (required for "delete" and "set_primary")
         offset: Number of items to skip (for "list" action, default: 0, min: 0)
         limit: Maximum number of items to return (for "list" action, default: 100, min: 0)

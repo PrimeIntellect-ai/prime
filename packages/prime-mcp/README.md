@@ -73,6 +73,7 @@ pod = await pods.create_pod(
     cloud_id="cloud-123",
     gpu_type="A100_80GB",
     provider_type="runpod",
+    data_center_id="US-CA-2",
     name="my-training-pod",
     gpu_count=1,
     image="cuda_12_1_pytorch_2_4"
@@ -99,6 +100,11 @@ Check GPU availability across different providers.
 - `security` (optional): Security type ("secure_cloud" or "community_cloud")
 - `gpu_count` (optional): Number of GPUs to filter by
 
+**Returns:**
+Each available instance includes an `isSpot` field:
+- **Spot instances** (`isSpot: true`): Significantly cheaper but can be terminated at any time with short notice when capacity is needed
+- **On-demand instances** (`isSpot: false` or `null`): More expensive but guaranteed availability for your workload
+
 #### `check_cluster_availability`
 Check cluster availability for multi-node deployments.
 
@@ -117,7 +123,8 @@ Create a new GPU pod (compute instance).
 **Required Parameters:**
 - `cloud_id`: Cloud provider ID from availability check
 - `gpu_type`: GPU model name
-- `provider_type`: Provider type (e.g., "runpod", "fluidstack", "lambdalabs")
+- `provider_type`: Provider type (e.g., "runpod", "fluidstack", "hyperstack", "datacrunch")
+- `data_center_id`: Data center ID from availability check (get from 'dataCenter' field)
 
 **Optional Parameters:**
 - `name`: Pod name
@@ -129,13 +136,19 @@ Create a new GPU pod (compute instance).
 - `max_price`: Maximum price per hour
 - `image`: Environment image (default: "ubuntu_22_cuda_12")
 - `custom_template_id`: Custom template ID
-- `data_center_id`: Specific data center ID
 - `country`: Country code
 - `security`: Security level
 - `auto_restart`: Auto-restart on failure
 - `jupyter_password`: Jupyter password
 - `env_vars`: Environment variables (dict)
 - `team_id`: Team ID
+
+**Important - Spot vs On-Demand Instances:**
+When selecting from availability results, check the `isSpot` field:
+- ⚠️ **Spot instances** are significantly cheaper but can be terminated at any time
+- ✅ **On-demand instances** cost more but provide guaranteed availability
+- Use spot instances for fault-tolerant workloads that can handle interruptions
+- Use on-demand for critical workloads requiring continuous uptime
 
 **Available Images:**
 - `ubuntu_22_cuda_12`
@@ -208,23 +221,34 @@ async def main():
     )
     
     if available and not available.get("error"):
-        # Get the first available cloud ID
-        first_option = available.get("data", [])[0]
-        cloud_id = first_option.get("cloudId")
+        gpu_options = available.get("A100_80GB", [])
         
-        # Create a pod
-        pod = await pods.create_pod(
-            cloud_id=cloud_id,
-            gpu_type="A100_80GB",
-            provider_type="runpod",
-            name="training-pod",
-            gpu_count=1,
-            disk_size=50,
-            image="cuda_12_4_pytorch_2_5"
-        )
+        # Filter for non-spot instances (guaranteed availability)
+        on_demand_options = [opt for opt in gpu_options if not opt.get("isSpot")]
         
-        print(f"Created pod: {pod.get('id')}")
-        print(f"SSH: {pod.get('sshConnection')}")
+        # Or filter for spot instances (cheaper but can be terminated)
+        # spot_options = [opt for opt in gpu_options if opt.get("isSpot")]
+        
+        if on_demand_options:
+            selected = on_demand_options[0]
+            print(f"Selected: {selected.get('provider')} in {selected.get('dataCenter')}")
+            print(f"Price: ${selected.get('prices', {}).get('onDemand')}/hr")
+            print(f"Spot instance: {selected.get('isSpot')}")
+            
+            # Create a pod with explicit image choice
+            pod = await pods.create_pod(
+                cloud_id=selected.get("cloudId"),
+                gpu_type="A100_80GB",
+                provider_type=selected.get("provider"),
+                data_center_id=selected.get("dataCenter"),
+                name="training-pod",
+                gpu_count=1,
+                disk_size=50,
+                image="cuda_12_4_pytorch_2_5"  # Choose your image!
+            )
+            
+            print(f"Created pod: {pod.get('id')}")
+            print(f"SSH: {pod.get('sshConnection')}")
 
 asyncio.run(main())
 ```
@@ -254,26 +278,44 @@ asyncio.run(main())
 
 ### Manage SSH Keys
 
+**Important:** Add your SSH key before creating pods to enable SSH access!
+
 ```python
 import asyncio
+from pathlib import Path
 from prime_mcp import ssh
 
 async def main():
     # List existing keys
     keys = await ssh.manage_ssh_keys(action="list")
-    print(f"Found {len(keys.get('data', []))} SSH keys")
+    existing_keys = keys.get('data', [])
+    print(f"Found {len(existing_keys)} SSH keys")
     
-    # Add a new key
-    with open("~/.ssh/id_rsa.pub") as f:
-        public_key = f.read()
+    for key in existing_keys:
+        print(f"  - {key.get('name')} (Primary: {key.get('isPrimary', False)})")
     
-    result = await ssh.manage_ssh_keys(
-        action="add",
-        key_name="my-laptop",
-        public_key=public_key
-    )
-    
-    print(f"Added key: {result.get('id')}")
+    # Add a new key if needed
+    ssh_key_path = Path.home() / ".ssh" / "id_rsa.pub"
+    if ssh_key_path.exists():
+        with open(ssh_key_path) as f:
+            public_key = f.read().strip()
+        
+        result = await ssh.manage_ssh_keys(
+            action="add",
+            key_name="my-laptop",
+            public_key=public_key
+        )
+        
+        if "error" not in result:
+            print(f"Added key: {result.get('id')}")
+            
+            # Optionally set as primary
+            # await ssh.manage_ssh_keys(
+            #     action="set_primary",
+            #     key_id=result.get('id')
+            # )
+    else:
+        print("No SSH key found. Generate one with: ssh-keygen -t rsa -b 4096")
 
 asyncio.run(main())
 ```

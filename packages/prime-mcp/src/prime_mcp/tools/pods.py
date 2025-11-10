@@ -7,6 +7,7 @@ async def create_pod(
     cloud_id: str,
     gpu_type: str,
     provider_type: str,
+    data_center_id: str,
     name: Optional[str] = None,
     gpu_count: int = 1,
     socket: str = "PCIe",
@@ -16,7 +17,6 @@ async def create_pod(
     max_price: Optional[float] = None,
     image: str = "ubuntu_22_cuda_12",
     custom_template_id: Optional[str] = None,
-    data_center_id: Optional[str] = None,
     country: Optional[str] = None,
     security: Optional[str] = None,
     auto_restart: Optional[bool] = None,
@@ -26,10 +26,18 @@ async def create_pod(
 ) -> dict[str, Any]:
     """Create a new GPU pod (compute instance).
 
+    IMPORTANT BEFORE CREATING:
+    1. SSH KEYS: User must have SSH key added or they can't access the pod
+    2. SPOT vs ON-DEMAND: Check 'isSpot' field - spot instances are cheaper but can be terminated
+    3. IMAGE: Confirm which image user needs for their workload
+
     Args:
         cloud_id: Required cloud provider ID from availability check
         gpu_type: GPU model name
-        provider_type: Provider type (e.g., "runpod", "fluidstack", etc.)
+        provider_type: Provider type (e.g., "runpod", "fluidstack", "hyperstack", "datacrunch")
+        data_center_id: Required data center ID from availability check. Get this from the
+            'dataCenter' field in availability results. Examples: "CANADA-1", "US-CA-2",
+            "FIN-02", "ICE-01"
         name: Name for the pod (optional)
         gpu_count: Number of GPUs (default: 1, must be > 0)
         socket: GPU socket type (default: "PCIe")
@@ -37,9 +45,8 @@ async def create_pod(
         vcpus: Number of virtual CPUs (must be > 0 if specified)
         memory: Memory in GB (must be > 0 if specified)
         max_price: Maximum price per hour as float
-        image: Environment image (default: "ubuntu_22_cuda_12")
+        image: Environment image - ASK USER which they need! (default: "ubuntu_22_cuda_12")
         custom_template_id: Custom template ID if using custom_template image
-        data_center_id: Specific data center ID (required for some providers)
         country: Country code for filtering
         security: Security level ("secure_cloud", "community_cloud")
         auto_restart: Auto-restart on failure (default: False)

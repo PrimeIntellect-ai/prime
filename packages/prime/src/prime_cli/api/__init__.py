@@ -11,7 +11,7 @@ from prime_core import (
     UnauthorizedError,
 )
 
-from . import availability, client, inference, pods
+from . import availability, client, disks, inference, pods
 
 __all__ = [
     "APIClient",
@@ -22,6 +22,7 @@ __all__ = [
     "UnauthorizedError",
     "availability",
     "client",
+    "disks",
     "inference",
     "pods",
 ]

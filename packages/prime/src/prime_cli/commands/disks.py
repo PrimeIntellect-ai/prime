@@ -46,6 +46,8 @@ def _format_disk_for_list(disk: Disk) -> Dict[str, Any]:
         "created_at": created_timestamp,  # For JSON output
         "age": age,  # For table output
         "price_hr": disk.price_hr,
+        "pods": disk.pods,
+        "clusters": disk.clusters,
     }
 
 
@@ -90,7 +92,7 @@ def list(
     watch: bool = typer.Option(False, "--watch", "-w", help="Watch disks list in real-time"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List your storage disks"""
+    """List your persistent disks"""
     validate_output_format(output, console)
 
     if watch and output == "json":
@@ -150,7 +152,7 @@ def list(
                 else:
                     # Create display table
                     table = Table(
-                        title=f"Storage Disks (Total: {disks_list.total_count})",
+                        title=f"Persistent Disks (Total: {disks_list.total_count})",
                         show_lines=True,
                     )
                     table.add_column("ID", style="cyan", no_wrap=True)
@@ -161,6 +163,8 @@ def list(
                     table.add_column("Location", style="blue")
                     table.add_column("Age", style="blue")
                     table.add_column("Price/hr", style="green")
+                    table.add_column("Pods", style="blue")
+                    table.add_column("Clusters", style="blue")
 
                     # Add rows for each disk using shared formatting
                     for disk in sorted_disks:
@@ -180,6 +184,8 @@ def list(
                             disk_data["location"],
                             disk_data["age"],
                             price_display,
+                            f"{len(disk_data['pods'])}",
+                            f"{len(disk_data['clusters'])}",
                         )
 
                     console.print(table)

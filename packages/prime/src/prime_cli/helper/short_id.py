@@ -18,6 +18,7 @@ def generate_short_id(gpu_config: GPUAvailability) -> str:
     )
     return hashlib.md5(config_str.encode()).hexdigest()[:6]
 
+
 def generate_short_id_disk(disk_config: DiskAvailability) -> str:
     """Generate a short unique ID for a disk configuration"""
     config_str = (

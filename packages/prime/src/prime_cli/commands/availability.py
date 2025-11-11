@@ -97,6 +97,7 @@ def list(
     provider: Optional[str] = typer.Option(
         None, help="Filter by provider (e.g., aws, azure, google)"
     ),
+    disks: Optional[List[str]] = typer.Option(None, help="Filter by disk ids"),
     group_similar: bool = typer.Option(
         True, help="Group similar configurations from same provider"
     ),
@@ -112,7 +113,7 @@ def list(
 
         # Get availability data
         availability_data: Dict[str, List[GPUAvailability]] = availability_client.get(
-            gpu_type=gpu_type, gpu_count=gpu_count, regions=regions
+            gpu_type=gpu_type, gpu_count=gpu_count, regions=regions, disks=disks
         )
 
         # Filter by provider if provided

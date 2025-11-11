@@ -1,6 +1,9 @@
 from typing import Any, Dict, Iterable, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from rich.console import Console
+
+console = Console()
 
 
 class DiskConfig(BaseModel):
@@ -87,13 +90,16 @@ class DiskAvailability(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+
 DEFAULT_PAGE_SIZE = 100
+
 
 def _normalize_multi_value_option(values: Iterable[str]) -> List[str]:
     expanded: List[str] = []
     for value in values:
         expanded.extend(part.strip() for part in value.split(",") if part.strip())
     return expanded
+
 
 class AvailabilityClient:
     def __init__(self, client: Any) -> None:
@@ -112,7 +118,7 @@ class AvailabilityClient:
                 total_count = response.get("totalCount", 0)
                 results.extend(response.get("items", []))
             except Exception as e:
-                print(f"Error fetching availability page {page}: {e}")
+                console.print(f"Error fetching availability page {page}: {e}")
                 break
             if len(results) >= total_count:
                 break

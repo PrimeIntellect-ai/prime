@@ -42,6 +42,7 @@ class Sandbox(BaseModel):
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
     environment_vars: Optional[Dict[str, Any]] = Field(None, alias="environmentVars")
+    secrets: Optional[Dict[str, Any]] = Field(None, alias="secrets")
     advanced_configs: Optional[AdvancedConfigs] = Field(None, alias="advancedConfigs")
     labels: List[str] = Field(default_factory=list)
     created_at: datetime = Field(..., alias="createdAt")
@@ -80,6 +81,7 @@ class CreateSandboxRequest(BaseModel):
     gpu_count: int = 0
     timeout_minutes: int = 60
     environment_vars: Optional[Dict[str, str]] = None
+    secrets: Optional[Dict[str, str]] = None
     labels: List[str] = Field(default_factory=list)
     team_id: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
@@ -97,6 +99,7 @@ class UpdateSandboxRequest(BaseModel):
     gpu_count: Optional[int] = None
     timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
+    secrets: Optional[Dict[str, str]] = None
 
 
 class CommandRequest(BaseModel):

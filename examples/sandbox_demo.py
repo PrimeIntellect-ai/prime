@@ -33,6 +33,8 @@ def main() -> None:
             cpu_cores=1,
             memory_gb=2,
             timeout_minutes=120,  # 2 hours to avoid timeout during demo
+            environment_vars={"ENV": "demo", "DEBUG": "false"},
+            secrets={"API_KEY": "demo-secret-key-12345"},
         )
 
         print("Creating sandbox...")

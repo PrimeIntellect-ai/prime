@@ -15,6 +15,14 @@ def obfuscate_env_vars(env_vars: Dict[str, Any]) -> Dict[str, str]:
     return obfuscated
 
 
+def obfuscate_secrets(secrets: Dict[str, Any]) -> Dict[str, str]:
+    """Obfuscate secret values completely for display (keys only, all values as ***)."""
+    obfuscated: Dict[str, str] = {}
+    for key in secrets.keys():
+        obfuscated[key] = "***"
+    return obfuscated
+
+
 def format_ip_display(ip: Optional[Union[str, List[str]]]) -> str:
     """Format IP address(es) for display, handling both single and list cases."""
     if not ip:

@@ -30,6 +30,7 @@ from ..utils import (
     human_age,
     iso_timestamp,
     obfuscate_env_vars,
+    obfuscate_secrets,
     output_data_as_json,
     sort_by_created,
     status_color,
@@ -87,6 +88,8 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         data["exit_code"] = sandbox.exit_code
     if sandbox.environment_vars:
         data["environment_vars"] = obfuscate_env_vars(sandbox.environment_vars)
+    if sandbox.secrets:
+        data["secrets"] = obfuscate_secrets(sandbox.secrets)
     if sandbox.advanced_configs:
         data["advanced_configs"] = sandbox.advanced_configs.model_dump()
 
@@ -272,6 +275,10 @@ def get(
                 env_vars = json.dumps(sandbox_data["environment_vars"], indent=2)
                 table.add_row("Environment Variables", env_vars)
 
+            if "secrets" in sandbox_data:
+                secrets = json.dumps(sandbox_data["secrets"], indent=2)
+                table.add_row("Secrets", secrets)
+
             if "advanced_configs" in sandbox_data:
                 advanced_configs = json.dumps(sandbox_data["advanced_configs"], indent=2)
                 table.add_row("Advanced Configs", advanced_configs)
@@ -316,6 +323,10 @@ def create(
         None,
         help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
     ),
+    secret: Optional[List[str]] = typer.Option(
+        None,
+        help="Secrets in KEY=VALUE format. Can be specified multiple times.",
+    ),
     labels: Optional[List[str]] = typer.Option(
         None,
         "--label",
@@ -338,6 +349,15 @@ def create(
                     raise typer.Exit(1)
                 key, value = env_var.split("=", 1)
                 env_vars[key] = value
+
+        secrets_vars = {}
+        if secret:
+            for secret_var in secret:
+                if "=" not in secret_var:
+                    console.print("[red]Secrets must be in KEY=VALUE format[/red]")
+                    raise typer.Exit(1)
+                key, value = secret_var.split("=", 1)
+                secrets_vars[key] = value
 
         # Auto-generate name if not provided
         if not name:
@@ -363,6 +383,7 @@ def create(
             gpu_count=gpu_count,
             timeout_minutes=timeout_minutes,
             environment_vars=env_vars if env_vars else None,
+            secrets=secrets_vars if secrets_vars else None,
             labels=labels if labels else [],
             team_id=team_id,
         )
@@ -382,6 +403,9 @@ def create(
         if env_vars:
             obfuscated_env = obfuscate_env_vars(env_vars)
             console.print(f"Environment Variables: {obfuscated_env}")
+        if secrets_vars:
+            obfuscated_secrets = obfuscate_secrets(secrets_vars)
+            console.print(f"Secrets: {obfuscated_secrets}")
 
         if confirm_or_skip("\nDo you want to create this sandbox?", yes, default=True):
             with console.status("[bold blue]Creating sandbox...", spinner="dots"):

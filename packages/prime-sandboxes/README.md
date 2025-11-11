@@ -88,6 +88,28 @@ The SDK looks for credentials in this order:
 
 ## Advanced Features
 
+### Environment Variables and Secrets
+
+```python
+# Create sandbox with environment variables and secrets
+request = CreateSandboxRequest(
+    name="my-sandbox",
+    docker_image="python:3.11-slim",
+    environment_vars={
+        "DEBUG": "true",
+        "LOG_LEVEL": "info"
+    },
+    secrets={
+        "API_KEY": "sk-secret-key-here",
+        "DATABASE_PASSWORD": "super-secret-password"
+    }
+)
+
+sandbox = sandbox_client.create(request)
+```
+
+**Note:** Secrets are never displayed in logs or outputs. When retrieving sandbox details, only the secret keys are shown with values masked as `***`.
+
 ### File Operations
 
 ```python

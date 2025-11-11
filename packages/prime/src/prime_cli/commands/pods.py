@@ -88,7 +88,7 @@ def _format_pod_for_status(status: PodStatus, pod_details: Pod) -> Dict[str, Any
         status_data["attached_resources"] = [
             {
                 "id": str(resource.id),
-                "type": resource.type,
+                "type": resource.resource_type,
                 "status": resource.status,
                 "size": resource.size,
                 "mount_path": resource.mount_path,
@@ -385,6 +385,10 @@ def create(
     custom_template_id: Optional[str] = typer.Option(None, help="Custom template ID"),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID to use for the pod (uses config team_id if not specified)"
+    ),
+    disks: Optional[List[str]] = typer.Option(
+        None,
+        help="Attach existing disk IDs to the pod. Repeat option for multiple disks.",
     ),
     env: Optional[List[str]] = typer.Option(
         None,
@@ -702,6 +706,7 @@ def create(
                 "envVars": env_vars,
             },
             "provider": {"type": selected_gpu.provider} if selected_gpu.provider else {},
+            "disks": disks,
             "team": {
                 "teamId": team_id,
             }
@@ -723,6 +728,8 @@ def create(
         ):
             console.print(f"provider: {pod_config['provider']['type']}")
         console.print(f"team: {team_id}")
+        if disks:
+            console.print(f"disks: {', '.join(disks)}")
 
         if confirm_or_skip("\nDo you want to create this pod?", yes, default=True):
             try:
@@ -789,13 +796,13 @@ def _format_history_for_display(history_item: HistoryObj) -> Dict[str, Any]:
     """Format history item for display (both table and JSON)"""
     created_at = datetime.fromisoformat(history_item.created_at.replace("Z", "+00:00"))
     created_timestamp = iso_timestamp(created_at)
-    
+
     terminated_at = None
     terminated_timestamp = None
     if history_item.terminated_at:
         terminated_at = datetime.fromisoformat(history_item.terminated_at.replace("Z", "+00:00"))
         terminated_timestamp = iso_timestamp(terminated_at)
-    
+
     # Calculate duration if both dates exist
     duration = None
     if created_at and terminated_at:
@@ -838,8 +845,8 @@ def history(
         pods_client = PodsClient(base_client)
 
         history_list = pods_client.history(
-            offset=offset, 
-            limit=limit, 
+            offset=offset,
+            limit=limit,
         )
 
         if output == "json":

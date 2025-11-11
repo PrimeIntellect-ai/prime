@@ -1,9 +1,11 @@
 from typing import Any, Dict
 
 import typer
-from prime_core import APIClient, APIError, Config
+from prime_core import Config
 from rich.console import Console
 from rich.table import Table
+
+from ..client import APIClient, APIError
 
 app = typer.Typer(help="Show current authenticated user and update config", no_args_is_help=False)
 console = Console()

@@ -1,10 +1,19 @@
 import asyncio
 import re
+import sys
 from typing import Any, Dict, List, Optional
 
 from prime_core import APIClient, APIError, AsyncAPIClient
 
 from .exceptions import EvalsAPIError, InvalidEvaluationError
+
+
+def _build_user_agent() -> str:
+    """Build User-Agent string for prime-evals"""
+    from prime_evals import __version__
+
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    return f"prime-evals/{__version__} python/{python_version}"
 
 
 class EvalsClient:
@@ -179,7 +188,7 @@ class AsyncEvalsClient:
     """Async client for Prime Evals API"""
 
     def __init__(self, api_key: Optional[str] = None) -> None:
-        self.client = AsyncAPIClient(api_key=api_key)
+        self.client = AsyncAPIClient(api_key=api_key, user_agent=_build_user_agent())
 
     async def _resolve_environment_id(self, env_name: str) -> str:
         """

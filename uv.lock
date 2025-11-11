@@ -1408,7 +1408,6 @@ requires-dist = [
 
 [[package]]
 name = "prime-evals"
-version = "0.1.3"
 source = { editable = "packages/prime-evals" }
 dependencies = [
     { name = "httpx" },

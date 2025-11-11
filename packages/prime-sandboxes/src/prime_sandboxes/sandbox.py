@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -26,6 +27,14 @@ from .models import (
     SandboxListResponse,
     SandboxLogsResponse,
 )
+
+
+def _build_user_agent() -> str:
+    """Build User-Agent string for prime-sandboxes"""
+    from prime_sandboxes import __version__
+
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    return f"prime-sandboxes/{__version__} python/{python_version}"
 
 
 class SandboxAuthCache:
@@ -529,7 +538,7 @@ class AsyncSandboxClient:
             max_connections: Maximum number of concurrent connections (default: 1000)
             max_keepalive_connections: Maximum keep-alive connections (default: 200)
         """
-        self.client = AsyncAPIClient(api_key=api_key)
+        self.client = AsyncAPIClient(api_key=api_key, user_agent=_build_user_agent())
         self._auth_cache = SandboxAuthCache(
             self.client.config.config_dir / "sandbox_auth_cache.json",
             self.client,

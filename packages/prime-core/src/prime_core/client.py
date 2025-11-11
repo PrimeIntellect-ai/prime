@@ -1,8 +1,19 @@
+import sys
 from typing import Any, Dict, Optional
 
 import httpx
 
 from .config import Config
+
+
+def _default_user_agent() -> str:
+    """Build default User-Agent string for prime-core"""
+    from prime_core import __version__
+
+    python_version = (
+        f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    )
+    return f"prime-core/{__version__} python/{python_version}"
 
 
 class APIError(Exception):
@@ -38,6 +49,7 @@ class APIClient:
         self,
         api_key: Optional[str] = None,
         require_auth: bool = True,
+        user_agent: Optional[str] = None,
     ):
         # Load config
         self.config = Config()
@@ -53,6 +65,9 @@ class APIClient:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+
+        # Set User-Agent (default to prime-core if not provided)
+        headers["User-Agent"] = user_agent if user_agent else _default_user_agent()
 
         self.client = httpx.Client(
             headers=headers,
@@ -166,6 +181,7 @@ class AsyncAPIClient:
         self,
         api_key: Optional[str] = None,
         require_auth: bool = True,
+        user_agent: Optional[str] = None,
     ):
         # Load config
         self.config = Config()
@@ -181,6 +197,9 @@ class AsyncAPIClient:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+
+        # Set User-Agent (default to prime-core if not provided)
+        headers["User-Agent"] = user_agent if user_agent else _default_user_agent()
 
         self.client = httpx.AsyncClient(
             headers=headers,

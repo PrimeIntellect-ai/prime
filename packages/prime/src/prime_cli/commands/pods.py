@@ -7,13 +7,14 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import typer
-from prime_core import APIClient, APIError, Config
+from prime_core import Config
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.pods import HistoryObj, Pod, PodsClient, PodStatus
+from ..client import APIClient, APIError
 from ..helper.short_id import generate_short_id
 from ..utils import (
     confirm_or_skip,
@@ -789,13 +790,13 @@ def _format_history_for_display(history_item: HistoryObj) -> Dict[str, Any]:
     """Format history item for display (both table and JSON)"""
     created_at = datetime.fromisoformat(history_item.created_at.replace("Z", "+00:00"))
     created_timestamp = iso_timestamp(created_at)
-    
+
     terminated_at = None
     terminated_timestamp = None
     if history_item.terminated_at:
         terminated_at = datetime.fromisoformat(history_item.terminated_at.replace("Z", "+00:00"))
         terminated_timestamp = iso_timestamp(terminated_at)
-    
+
     # Calculate duration if both dates exist
     duration = None
     if created_at and terminated_at:
@@ -838,8 +839,8 @@ def history(
         pods_client = PodsClient(base_client)
 
         history_list = pods_client.history(
-            offset=offset, 
-            limit=limit, 
+            offset=offset,
+            limit=limit,
         )
 
         if output == "json":

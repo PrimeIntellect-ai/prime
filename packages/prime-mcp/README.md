@@ -9,6 +9,10 @@ Model Context Protocol (MCP) server for Prime Intellect - manage GPU pods, check
 - **Cluster Support** - Check multi-node cluster availability
 - **SSH Key Management** - Manage SSH keys for pod access
 
+## Demo
+
+![Prime MCP Demo](mcp-demo.gif)
+
 ## Installation
 
 ```bash

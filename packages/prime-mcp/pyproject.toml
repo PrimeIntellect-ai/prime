@@ -28,9 +28,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/PrimeIntellect-ai/prime-cli"
-Documentation = "https://github.com/PrimeIntellect-ai/prime-cli/tree/main/packages/prime-mcp"
-Repository = "https://github.com/PrimeIntellect-ai/prime-cli.git"
+Homepage = "https://github.com/PrimeIntellect-ai/prime"
+Documentation = "https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-mcp"
+Repository = "https://github.com/PrimeIntellect-ai/prime.git"
 
 [project.optional-dependencies]
 dev = [

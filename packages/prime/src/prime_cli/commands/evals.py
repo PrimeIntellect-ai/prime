@@ -5,12 +5,12 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-from prime_core import APIClient
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
 
+from ..client import APIClient
 from ..utils import output_data_as_json
 
 app = typer.Typer(

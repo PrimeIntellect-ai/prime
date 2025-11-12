@@ -1,12 +1,12 @@
 from typing import Any, Dict, List, Optional
 
 import typer
-from prime_core import APIClient, APIError
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 from ..api.availability import AvailabilityClient, GPUAvailability
+from ..client import APIClient, APIError
 from ..helper.short_id import generate_short_id, generate_short_id_disk
 from ..utils import output_data_as_json, status_color, validate_output_format
 from ..utils.display import STOCK_STATUS_COLORS
@@ -307,7 +307,7 @@ def disks(
             location = f"{disk.country or 'N/A'}"
             if disk.data_center:
                 location += f" ({disk.data_center})"
-            
+
             # Format price safely, handling None values
             price = (
                 f"${disk.spec.price_per_unit:.8f}"

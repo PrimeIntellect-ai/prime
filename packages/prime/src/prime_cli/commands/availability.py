@@ -304,12 +304,14 @@ def disks(
 
         formatted_disks: List[Dict[str, Any]] = []
         for disk in availability_data:
+            location = f"{disk.country or 'N/A'}"
+            if disk.data_center:
+                location += f" ({disk.data_center})"
+            
             formatted_disk = {
                 "short_id": generate_short_id_disk(disk),
                 "provider": disk.provider,
-                "location": f"{disk.country or 'N/A'} {
-                    '(' + disk.data_center + ')' if disk.data_center else ''
-                }",
+                "location": location,
                 "stock_status": disk.stock_status,
                 "price": f"${disk.spec.price_per_unit:.8f}",
                 "max_size": f"{disk.spec.max_count}",

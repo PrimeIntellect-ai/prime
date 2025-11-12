@@ -307,13 +307,20 @@ def disks(
             location = f"{disk.country or 'N/A'}"
             if disk.data_center:
                 location += f" ({disk.data_center})"
+            
+            # Format price safely, handling None values
+            price = (
+                f"${disk.spec.price_per_unit:.8f}"
+                if disk.spec.price_per_unit is not None
+                else "N/A"
+            )
 
             formatted_disk = {
                 "short_id": generate_short_id_disk(disk),
                 "provider": disk.provider,
                 "location": location,
                 "stock_status": disk.stock_status,
-                "price": f"${disk.spec.price_per_unit:.8f}",
+                "price": price,
                 "max_size": f"{disk.spec.max_count}",
                 "is_multinode": "Yes" if disk.is_multinode else "No",
             }

@@ -460,11 +460,11 @@ def update(
 
 
 @app.command(no_args_is_help=True)
-def delete(
+def terminate(
     disk_id: str,
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Delete a disk"""
+    """Terminate a disk"""
     try:
         base_client = APIClient()
         disks_client = DisksClient(base_client)

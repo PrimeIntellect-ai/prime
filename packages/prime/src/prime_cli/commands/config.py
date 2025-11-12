@@ -2,9 +2,11 @@ import os
 from typing import Optional
 
 import typer
-from prime_core import APIClient, APIError, Config
+from prime_core import Config
 from rich.console import Console
 from rich.table import Table
+
+from ..client import APIClient, APIError
 
 app = typer.Typer(help="Configure the CLI", no_args_is_help=True)
 console = Console()

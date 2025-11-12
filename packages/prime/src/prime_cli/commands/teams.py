@@ -1,8 +1,8 @@
 import typer
-from prime_core import APIClient, APIError
 from rich.console import Console
 from rich.table import Table
 
+from ..client import APIClient, APIError
 from ..utils import output_data_as_json, validate_output_format
 
 app = typer.Typer(help="List your teams", no_args_is_help=True)

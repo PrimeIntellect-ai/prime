@@ -1,12 +1,12 @@
 from typing import Any, Dict, List, Optional
 
 import typer
-from prime_core import APIClient, APIError
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 from ..api.availability import AvailabilityClient, GPUAvailability
+from ..client import APIClient, APIError
 from ..helper.short_id import generate_short_id
 from ..utils import output_data_as_json, status_color, validate_output_format
 from ..utils.display import STOCK_STATUS_COLORS

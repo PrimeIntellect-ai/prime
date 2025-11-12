@@ -307,7 +307,7 @@ def disks(
             location = f"{disk.country or 'N/A'}"
             if disk.data_center:
                 location += f" ({disk.data_center})"
-            
+
             formatted_disk = {
                 "short_id": generate_short_id_disk(disk),
                 "provider": disk.provider,

@@ -74,7 +74,9 @@ def test_availability_gpu_types(
     runner = CliRunner()
 
     # Invoke the CLI command with wide terminal to prevent truncation
-    result = runner.invoke(app, ["availability", "gpu-types"], env={"COLUMNS": "200", "LINES": "50"})
+    result = runner.invoke(
+        app, ["availability", "gpu-types"], env={"COLUMNS": "200", "LINES": "50"}
+    )
 
     # Check the exit code is 0 (success)
     assert result.exit_code == 0, f"Failed: {result.exit_code}\n{result.output}"
@@ -103,15 +105,15 @@ def test_availability_disks(mock_api_client: APIClient, capsys: pytest.CaptureFi
     assert "Provider" in result.output
     assert "Location" in result.output
     assert "Stock" in result.output
-    assert "Price" in result.output  # May be "Price/Hr/GB" or "Price/H…"
+    assert "Price" in result.output
     assert "Max Size" in result.output
-    assert "Multino" in result.output  # May be "Is Multinode" or "Multino…"
+    assert "Multinode" in result.output
 
     # Verify some expected data points from the test data
     # (check for partial strings to handle potential truncation)
     assert "runpod" in result.output
-    assert "hyperstack" in result.output  # "hyperstack" may be truncated
-    assert "crusoecloud" in result.output  # "crusoecloud" may be truncated
+    assert "hyperstack" in result.output
+    assert "crusoecloud" in result.output
     assert "dc_roan" in result.output
     assert "US" in result.output
     assert "NO" in result.output

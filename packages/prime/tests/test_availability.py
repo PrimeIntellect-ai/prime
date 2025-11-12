@@ -59,10 +59,10 @@ def test_availability_list(mock_api_client: APIClient, capsys: pytest.CaptureFix
     # Verify table headers are present (accounting for possible truncation)
     assert "Available GPU Resources" in result.output
     assert "ID" in result.output
-    assert "GPU" in result.output  # May be truncated to "GPU Ty..."
-    assert "vCPU" in result.output  # vCPUs may be truncated to "vC..."
-    assert "RAM" in result.output  # May be truncated
-    assert "Disk" in result.output  # Disk may be truncated to "Di..."
+    assert "GPU Type" in result.output
+    assert "vCPU" in result.output
+    assert "RAM" in result.output
+    assert "Disk" in result.output
 
     # Verify deployment instructions are present
     assert "To deploy a pod with one of these configurations:" in result.output
@@ -110,8 +110,8 @@ def test_availability_disks(mock_api_client: APIClient, capsys: pytest.CaptureFi
     # Verify some expected data points from the test data
     # (check for partial strings to handle potential truncation)
     assert "runpod" in result.output
-    assert "hyperstack" in result.output
-    assert "crusoecloud" in result.output
+    assert "hyperstack" in result.output  # "hyperstack" may be truncated
+    assert "crusoecloud" in result.output  # "crusoecloud" may be truncated
     assert "dc_roan" in result.output
     assert "US" in result.output
     assert "NO" in result.output

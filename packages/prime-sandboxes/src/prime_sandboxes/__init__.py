@@ -14,7 +14,12 @@ from prime_core import (
     UnauthorizedError,
 )
 
-from .exceptions import CommandTimeoutError, SandboxNotRunningError
+from .exceptions import (
+    CommandTimeoutError,
+    DownloadTimeoutError,
+    SandboxNotRunningError,
+    UploadTimeoutError,
+)
 from .models import (
     AdvancedConfigs,
     BulkDeleteSandboxRequest,
@@ -30,7 +35,7 @@ from .models import (
 )
 from .sandbox import AsyncSandboxClient, SandboxClient
 
-__version__ = "0.1.0"
+__version__ = "0.2.3"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -63,4 +68,6 @@ __all__ = [
     "TimeoutError",  # Deprecated alias
     "SandboxNotRunningError",
     "CommandTimeoutError",
+    "UploadTimeoutError",
+    "DownloadTimeoutError",
 ]

@@ -102,12 +102,12 @@ class APIClient:
                     "Please check that your API key has the correct permissions, "
                     "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
                     "or run 'prime login' to configure a new API key."
-                )
+                ) from e
             if e.response.status_code == 402:
                 raise PaymentRequiredError(
                     "Payment required. Please check your billing status at "
                     "https://app.primeintellect.ai/dashboard/billing"
-                )
+                ) from e
 
             # For other HTTP errors, try to extract the error message from the response
             try:
@@ -121,11 +121,16 @@ class APIClient:
 
             raise APIError(
                 f"HTTP {e.response.status_code}: {e.response.text or str(e)}"
-            )
+            ) from e
         except httpx.TimeoutException as e:
-            raise APITimeoutError(f"Request timed out: {e}")
+            raise APITimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
-            raise APIError(f"Request failed: {e}")
+            req = getattr(e, "request", None)
+            method = getattr(req, "method", "?")
+            u = getattr(req, "url", "?")
+            raise APIError(
+                f"Request failed: {e.__class__.__name__} at {method} {u}: {e}"
+            ) from e
 
     def get(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None
@@ -212,6 +217,7 @@ class AsyncAPIClient:
             response = await self.client.request(
                 method, url, params=params, json=json, timeout=timeout
             )
+
             response.raise_for_status()
 
             result = response.json()
@@ -225,12 +231,12 @@ class AsyncAPIClient:
                     "Please check that your API key has the correct permissions, "
                     "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
                     "or run 'prime login' to configure a new API key."
-                )
+                ) from e
             if e.response.status_code == 402:
                 raise PaymentRequiredError(
                     "Payment required. Please check your billing status at "
                     "https://app.primeintellect.ai/dashboard/billing"
-                )
+                ) from e
 
             # For other HTTP errors, try to extract the error message from the response
             try:
@@ -244,11 +250,16 @@ class AsyncAPIClient:
 
             raise APIError(
                 f"HTTP {e.response.status_code}: {e.response.text or str(e)}"
-            )
+            ) from e
         except httpx.TimeoutException as e:
-            raise APITimeoutError(f"Request timed out: {e}")
+            raise APITimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
-            raise APIError(f"Request failed: {e}")
+            req = getattr(e, "request", None)
+            method = getattr(req, "method", "?")
+            u = getattr(req, "url", "?")
+            raise APIError(
+                f"Request failed: {e.__class__.__name__} at {method} {u}: {e}"
+            ) from e
 
     async def get(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None

@@ -18,3 +18,19 @@ class CommandTimeoutError(RuntimeError):
     def __init__(self, sandbox_id: str, command: str, timeout: int):
         msg = f"Command '{command}' timed out after {timeout}s in sandbox {sandbox_id}"
         super().__init__(msg)
+
+
+class UploadTimeoutError(RuntimeError):
+    """Raised when a file upload times out."""
+
+    def __init__(self, sandbox_id: str, file_path: str, timeout: int):
+        msg = f"Upload to '{file_path}' timed out after {timeout}s in sandbox {sandbox_id}"
+        super().__init__(msg)
+
+
+class DownloadTimeoutError(RuntimeError):
+    """Raised when a file download times out."""
+
+    def __init__(self, sandbox_id: str, file_path: str, timeout: int):
+        msg = f"Download from '{file_path}' timed out after {timeout}s in sandbox {sandbox_id}"
+        super().__init__(msg)

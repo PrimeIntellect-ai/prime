@@ -36,13 +36,16 @@ def _format_disk_for_list(disk: Disk) -> Dict[str, Any]:
     created_timestamp = iso_timestamp(created_at)
     age = human_age(created_at)
 
+    country = disk.info.get("country", "N/A") if disk.info else "N/A"
+    data_center = disk.info.get("dataCenterId", "N/A") if disk.info else "N/A"
+
     return {
         "id": disk.id,
         "name": disk.name,
         "size": disk.size,
         "status": disk.status,
         "provider": disk.provider_type,
-        "location": f"{disk.info.get('country', 'N/A')} ({disk.info.get('dataCenterId', 'N/A')})",
+        "location": f"{country} ({data_center})",
         "created_at": created_timestamp,  # For JSON output
         "age": age,  # For table output
         "price_hr": disk.price_hr,
@@ -373,19 +376,29 @@ def create(
                 "team": {"teamId": team_id} if team_id else None,
             }
 
+        if not disk_config or not disk_config.get("disk") or not disk_config.get("provider"):
+            console.print("[red]Error: Invalid disk configuration[/red]")
+            raise typer.Exit(1)
+
         # Show configuration summary
         console.print("\n[bold]Disk Configuration Summary:[/bold]")
         console.print(f"Size: {size}GB")
         if name:
             console.print(f"Name: {name}")
-        if disk_config["disk"]["country"]:
-            console.print(f"Country: {disk_config['disk']['country']}")
-        if disk_config["disk"]["cloudId"]:
-            console.print(f"Cloud ID: {disk_config['disk']['cloudId']}")
-        if disk_config["disk"]["dataCenterId"]:
-            console.print(f"Data Center ID: {disk_config['disk']['dataCenterId']}")
-        if disk_config["provider"]["type"]:
-            console.print(f"Provider: {disk_config['provider']['type']}")
+
+        disk_data = disk_config.get("disk", {})
+        if isinstance(disk_data, dict):
+            if disk_data.get("country"):
+                console.print(f"Country: {disk_data.get('country')}")
+            if disk_data.get("cloudId"):
+                console.print(f"Cloud ID: {disk_data.get('cloudId')}")
+            if disk_data.get("dataCenterId"):
+                console.print(f"Data Center ID: {disk_data.get('dataCenterId')}")
+
+        provider_data = disk_config.get("provider", {})
+        if isinstance(provider_data, dict) and provider_data.get("type"):
+            console.print(f"Provider: {provider_data.get('type')}")
+
         if team_id:
             console.print(f"Team: {team_id}")
 

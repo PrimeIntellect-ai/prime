@@ -212,7 +212,7 @@ def push_image(
             console.print(f"[bold]Size:[/bold] {size_mb:.2f} MB")
         console.print()
         console.print("[bold]To use in a sandbox:[/bold]")
-        console.print(f"  prime sandbox create --image {result['full_image_path']}")
+        console.print(f"  prime sandbox create {result['full_image_path']}")
         console.print()
 
     except KeyboardInterrupt:

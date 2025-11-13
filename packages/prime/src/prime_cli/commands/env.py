@@ -33,7 +33,7 @@ console = Console()
 MAX_FILES_TO_SHOW = 10
 DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
-MAX_TARBALL_SIZE_LIMIT = 1 * 1024 * 1024 * 1024  # 1GB
+MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 
 
 def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:

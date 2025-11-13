@@ -3,7 +3,6 @@
 import json
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 import typer
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
@@ -23,8 +22,10 @@ def push_image(
     ),
     dockerfile: str = typer.Option("Dockerfile", "--dockerfile", "-f", help="Path to Dockerfile"),
     context: str = typer.Option(".", "--context", "-c", help="Build context directory"),
-    platform: Optional[str] = typer.Option(
-        None, "--platform", help="Target platform (e.g., linux/amd64, linux/arm64)"
+    platform: str = typer.Option(
+        "linux/amd64",
+        "--platform",
+        help="Target platform (defaults to linux/amd64 for Kubernetes compatibility)",
     ),
     no_cache: bool = typer.Option(False, "--no-cache", help="Build without using cache"),
 ):
@@ -34,7 +35,7 @@ def push_image(
     Examples:
         prime images push myapp:v1.0.0
         prime images push myapp:latest --dockerfile custom.Dockerfile
-        prime images push myapp:v1 --platform linux/amd64
+        prime images push myapp:v1 --platform linux/arm64
     """
     try:
         # Check if docker is installed
@@ -101,8 +102,8 @@ def push_image(
             str(dockerfile_path),
         ]
 
-        if platform:
-            build_cmd.extend(["--platform", platform])
+        # Always specify platform for consistent builds across different architectures
+        build_cmd.extend(["--platform", platform])
 
         if no_cache:
             build_cmd.append("--no-cache")

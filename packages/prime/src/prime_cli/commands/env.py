@@ -24,6 +24,7 @@ from ..api.inference import InferenceAPIError, InferenceClient
 from ..client import APIClient, APIError
 from ..utils import output_data_as_json, validate_output_format
 from ..utils.eval_push import push_eval_results_to_hub
+from ..utils.formatters import format_file_size
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
 console = Console()
@@ -33,18 +34,6 @@ MAX_FILES_TO_SHOW = 10
 DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 1 * 1024 * 1024 * 1024  # 1GB
-
-
-def format_file_size(size_bytes: int) -> str:
-    """Format file size in human-readable format."""
-    if size_bytes >= 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
-    elif size_bytes >= 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-    elif size_bytes >= 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    else:
-        return f"{size_bytes} bytes"
 
 
 def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:

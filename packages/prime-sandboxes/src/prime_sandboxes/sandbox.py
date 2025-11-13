@@ -314,6 +314,8 @@ class SandboxClient:
             u = getattr(req, "url", "?")
             status = getattr(resp, "status_code", "?")
             text = getattr(resp, "text", "")
+            if status == 408:
+                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
             raise APIError(f"HTTP {status} {method} {u}: {text}") from e
         except httpx.RequestError as e:
             req = getattr(e, "request", None)
@@ -686,6 +688,8 @@ class AsyncSandboxClient:
             u = getattr(req, "url", "?")
             status = getattr(resp, "status_code", "?")
             text = getattr(resp, "text", "")
+            if status == 408:
+                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
             raise APIError(f"HTTP {status} {method} {u}: {text}") from e
         except httpx.RequestError as e:
             req = getattr(e, "request", None)

@@ -218,6 +218,7 @@ def list_cmd(
         console.print(f"[red]Unexpected error: {e}[/red]")
         raise typer.Exit(1)
 
+
 @app.command()
 def push(
     path: str = typer.Option(".", "--path", "-p", help="Path to environment directory"),

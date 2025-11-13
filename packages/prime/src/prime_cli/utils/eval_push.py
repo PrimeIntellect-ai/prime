@@ -6,6 +6,8 @@ from prime_core import APIClient
 from prime_evals import EvalsAPIError, EvalsClient
 from rich.console import Console
 
+from .env_metadata import get_environment_metadata
+
 console = Console()
 
 
@@ -71,19 +73,14 @@ def push_eval_results_to_hub(
 
     console.print(f"[dim]Loaded {len(results_samples)} samples[/dim]")
 
-    env_metadata_path = Path("./environments") / module_name / ".env-metadata.json"
+    # Resolve environment slug from metadata if available
+    env_dir = Path("./environments") / module_name
+    hub_metadata = get_environment_metadata(env_dir)
     resolved_env_slug = None
 
-    if env_metadata_path.exists():
-        try:
-            with open(env_metadata_path, encoding="utf-8") as f:
-                hub_metadata = json.load(f)
-                if hub_metadata.get("owner") and hub_metadata.get("name"):
-                    resolved_env_slug = f"{hub_metadata.get('owner')}/{hub_metadata.get('name')}"
-                    console.print(f"[blue]✓ Found environment:[/blue] {env_name}")
-        except (json.JSONDecodeError, IOError, KeyError) as e:
-            console.print(f"[yellow]Warning: Could not load {env_metadata_path}: {e}[/yellow]")
-            console.print(f"[blue]Using environment name:[/blue] {env_name}")
+    if hub_metadata and hub_metadata.get("owner") and hub_metadata.get("name"):
+        resolved_env_slug = f"{hub_metadata.get('owner')}/{hub_metadata.get('name')}"
+        console.print(f"[blue]✓ Found environment:[/blue] {env_name}")
     else:
         console.print(f"[blue]Using environment name:[/blue] {env_name} (will be resolved)")
 

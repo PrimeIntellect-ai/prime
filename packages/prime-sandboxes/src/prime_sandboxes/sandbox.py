@@ -297,7 +297,8 @@ class SandboxClient:
         }
 
         try:
-            with httpx.Client(timeout=effective_timeout) as client:
+            client_timeout = effective_timeout + 5
+            with httpx.Client(timeout=client_timeout) as client:
                 response = client.post(
                     url,
                     json=payload,
@@ -673,9 +674,10 @@ class AsyncSandboxClient:
         }
 
         try:
+            client_timeout = effective_timeout + 5
             gateway_client = self._get_gateway_client()
             response = await gateway_client.post(
-                url, json=payload, headers=headers, timeout=effective_timeout
+                url, json=payload, headers=headers, timeout=client_timeout
             )
             response.raise_for_status()
             return CommandResponse.model_validate(response.json())

@@ -1,9 +1,12 @@
 """Commands for managing Docker images in Prime Intellect registry."""
 
 import json
-import subprocess
+import tarfile
+import tempfile
+import time
 from pathlib import Path
 
+import httpx
 import typer
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
 from rich.console import Console
@@ -27,7 +30,6 @@ def push_image(
         "--platform",
         help="Target platform (defaults to linux/amd64 for Kubernetes compatibility)",
     ),
-    no_cache: bool = typer.Option(False, "--no-cache", help="Build without using cache"),
 ):
     """
     Build and push a Docker image to Prime Intellect registry.
@@ -38,14 +40,6 @@ def push_image(
         prime images push myapp:v1 --platform linux/arm64
     """
     try:
-        # Check if docker is installed
-        try:
-            subprocess.run(["docker", "--version"], check=True, capture_output=True, text=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            console.print("[red]Error: Docker is not installed or not in PATH[/red]")
-            console.print("Please install Docker: https://docs.docker.com/get-docker/")
-            raise typer.Exit(1)
-
         # Parse image reference
         if ":" in image_reference:
             image_name, image_tag = image_reference.rsplit(":", 1)
@@ -61,160 +55,133 @@ def push_image(
         # Initialize API client
         client = APIClient()
 
-        # Get push token from backend
-        console.print("[cyan]🔐 Authenticating with Prime Intellect registry...[/cyan]")
-        try:
-            response = client.request("POST", "/images/push-token")
-            token_data = response
-        except UnauthorizedError:
-            console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
-            raise typer.Exit(1)
-        except APIError as e:
-            console.print(f"[red]Error: Failed to get push token: {e}[/red]")
-            raise typer.Exit(1)
-
-        registry_url = token_data["registry_url"]
-        access_token = token_data["access_token"]
-        user_namespace = token_data["user_namespace"]
-
-        # Construct full image path
-        full_image_path = f"{user_namespace}/{image_name}:{image_tag}"
-
-        console.print("[green]✓[/green] Authenticated")
-        console.print(f"[dim]Registry:[/dim] {registry_url}")
-        console.print(f"[dim]Full image path:[/dim] {full_image_path}")
-        console.print()
-
         # Check if Dockerfile exists
         dockerfile_path = Path(context) / dockerfile
         if not dockerfile_path.exists():
             console.print(f"[red]Error: Dockerfile not found at {dockerfile_path}[/red]")
             raise typer.Exit(1)
 
-        # Build image
-        console.print("[cyan]📦 Building image...[/cyan]")
-        build_cmd = [
-            "docker",
-            "build",
-            "-t",
-            full_image_path,
-            "-f",
-            str(dockerfile_path),
-        ]
-
-        # Always specify platform for consistent builds across different architectures
-        build_cmd.extend(["--platform", platform])
-
-        if no_cache:
-            build_cmd.append("--no-cache")
-
-        build_cmd.append(context)
-
-        console.print(f"[dim]$ {' '.join(build_cmd)}[/dim]")
-        console.print()
+        # Create tar.gz of build context
+        console.print("[cyan]📦 Preparing build context...[/cyan]")
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
+            tar_path = tmp_file.name
 
         try:
-            result = subprocess.run(build_cmd, check=True)
-            if result.returncode != 0:
-                raise subprocess.CalledProcessError(result.returncode, build_cmd)
-        except subprocess.CalledProcessError as e:
-            console.print(f"[red]❌ Build failed with exit code {e.returncode}[/red]")
-            raise typer.Exit(1)
+            with tarfile.open(tar_path, "w:gz") as tar:
+                tar.add(context, arcname=".")
 
-        console.print()
-        console.print("[green]✓[/green] Image built successfully")
-        console.print()
+            tar_size_mb = Path(tar_path).stat().st_size / (1024 * 1024)
+            console.print(f"[green]✓[/green] Build context packaged ({tar_size_mb:.2f} MB)")
+            console.print()
 
-        # Docker login
-        console.print("[cyan]🔐 Logging in to registry...[/cyan]")
-        login_cmd = ["docker", "login", "-u", "_token", "--password-stdin", registry_url]
+            # Initialize build
+            console.print("[cyan]🔐 Initiating build...[/cyan]")
+            try:
+                build_response = client.request(
+                    "POST",
+                    "/images/build",
+                    json={
+                        "image_name": image_name,
+                        "image_tag": image_tag,
+                        "dockerfile_path": dockerfile,
+                        "platform": platform,
+                    },
+                )
+            except UnauthorizedError:
+                console.print(
+                    "[red]Error: Not authenticated. Please run 'prime login' first.[/red]"
+                )
+                raise typer.Exit(1)
+            except APIError as e:
+                console.print(f"[red]Error: Failed to initiate build: {e}[/red]")
+                raise typer.Exit(1)
 
-        try:
-            subprocess.run(login_cmd, input=access_token.encode(), check=True, capture_output=True)
-        except subprocess.CalledProcessError:
-            console.print("[red]❌ Docker login failed[/red]")
-            raise typer.Exit(1)
+            build_id = build_response["build_id"]
+            upload_url = build_response["upload_url"]
 
-        console.print("[green]✓[/green] Logged in to registry")
-        console.print()
+            console.print("[green]✓[/green] Build initiated")
+            console.print()
 
-        # Push image
-        console.print("[cyan]⬆️  Pushing image to registry...[/cyan]")
-        console.print("[dim]This may take a few minutes depending on image size[/dim]")
-        console.print()
+            # Upload build context to GCS
+            console.print("[cyan]⬆️  Uploading build context...[/cyan]")
+            try:
+                with open(tar_path, "rb") as f:
+                    upload_response = httpx.put(
+                        upload_url,
+                        content=f,
+                        headers={"Content-Type": "application/octet-stream"},
+                        timeout=300.0,
+                    )
+                    upload_response.raise_for_status()
+            except httpx.HTTPError as e:
+                console.print(f"[red]❌ Upload failed: {e}[/red]")
+                raise typer.Exit(1)
 
-        push_cmd = ["docker", "push", full_image_path]
-        console.print(f"[dim]$ {' '.join(push_cmd)}[/dim]")
-        console.print()
+            console.print("[green]✓[/green] Build context uploaded")
+            console.print()
 
-        try:
-            subprocess.run(push_cmd, check=True)
-        except subprocess.CalledProcessError:
-            console.print("[red]❌ Push failed[/red]")
-            raise typer.Exit(1)
+            # Start the build
+            console.print("[cyan]🏗️  Starting build...[/cyan]")
+            try:
+                client.request(
+                    "POST",
+                    f"/images/build/{build_id}/start",
+                    json={"context_uploaded": True},
+                )
+            except APIError as e:
+                console.print(f"[red]Error: Failed to start build: {e}[/red]")
+                raise typer.Exit(1)
 
-        console.print()
-        console.print("[green]✓[/green] Image pushed successfully")
-        console.print()
+            console.print("[green]✓[/green] Build started")
+            console.print()
 
-        # Get image details
-        console.print("[cyan]📝 Registering image with backend...[/cyan]")
+            # Poll for build status
+            console.print("[cyan]Building image...[/cyan]")
+            console.print("[dim]This may take a few minutes depending on image complexity[/dim]")
+            console.print()
 
-        try:
-            # Get image digest and size using docker inspect
-            inspect_cmd = ["docker", "inspect", full_image_path]
-            inspect_result = subprocess.run(inspect_cmd, check=True, capture_output=True, text=True)
-            inspect_data = json.loads(inspect_result.stdout)
+            with console.status("[bold blue]Building image...", spinner="dots"):
+                while True:
+                    try:
+                        status_response = client.request("GET", f"/images/build/{build_id}")
+                        status = status_response["status"]
 
-            if inspect_data:
-                image_info = inspect_data[0]
-                repo_digests = image_info.get("RepoDigests", [])
-                digest = repo_digests[0] if repo_digests else None
-                size_bytes = image_info.get("Size", 0)
-            else:
-                digest = None
-                size_bytes = None
+                        if status == "COMPLETED":
+                            break
+                        elif status == "FAILED":
+                            error_msg = status_response.get("errorMessage", "Unknown error")
+                            console.print(f"\n[red]❌ Build failed: {error_msg}[/red]")
+                            raise typer.Exit(1)
+                        elif status == "CANCELLED":
+                            console.print("\n[yellow]Build was cancelled[/yellow]")
+                            raise typer.Exit(1)
 
-        except (subprocess.CalledProcessError, json.JSONDecodeError, IndexError):
-            console.print("[yellow]⚠️  Could not get image details, continuing...[/yellow]")
-            digest = None
-            size_bytes = None
+                        time.sleep(3)
+                    except APIError as e:
+                        console.print(f"\n[red]Error checking build status: {e}[/red]")
+                        raise typer.Exit(1)
 
-        # Register with backend
-        try:
-            register_response = client.request(
-                "POST",
-                "/images/register",
-                json={
-                    "image_name": image_name,
-                    "image_tag": image_tag,
-                    "digest": digest,
-                    "size_bytes": size_bytes,
-                },
-            )
-            result = register_response
-        except APIError as e:
-            console.print(
-                f"[yellow]⚠️  Warning: Failed to register image with backend: {e}[/yellow]"
-            )
-            console.print(
-                "[yellow]Image was pushed successfully but may not appear in "
-                "'prime images list'[/yellow]"
-            )
-            raise typer.Exit(0)
+            console.print("[green]✓[/green] Build completed successfully!")
+            console.print()
 
-        console.print("[green]✓[/green] Image registered")
-        console.print()
-        console.print("[bold green]✅ Success![/bold green]")
-        console.print()
-        console.print(f"[bold]Image:[/bold] {result['full_image_path']}")
-        if size_bytes:
-            size_mb = size_bytes / 1024 / 1024
-            console.print(f"[bold]Size:[/bold] {size_mb:.2f} MB")
-        console.print()
-        console.print("[bold]To use in a sandbox:[/bold]")
-        console.print(f"  prime sandbox create {result['full_image_path']}")
-        console.print()
+            # Get final build info
+            final_status = client.request("GET", f"/images/build/{build_id}")
+            full_image_path = final_status["fullImagePath"]
+
+            console.print("[bold green]✅ Success![/bold green]")
+            console.print()
+            console.print(f"[bold]Image:[/bold] {full_image_path}")
+            console.print()
+            console.print("[bold]To use in a sandbox:[/bold]")
+            console.print(f"  prime sandbox create {full_image_path}")
+            console.print()
+
+        finally:
+            # Clean up temporary tar file
+            try:
+                Path(tar_path).unlink()
+            except Exception:
+                pass
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled by user[/yellow]")
@@ -256,19 +223,19 @@ def list_images(
 
         for img in data["images"]:
             size_mb = ""
-            if img.get("size_bytes"):
-                size_mb = f"{img['size_bytes'] / 1024 / 1024:.1f} MB"
+            if img.get("sizeBytes"):
+                size_mb = f"{img['sizeBytes'] / 1024 / 1024:.1f} MB"
 
             # Format timestamp
             from datetime import datetime
 
             try:
-                pushed_dt = datetime.fromisoformat(img["pushed_at"].replace("Z", "+00:00"))
+                pushed_dt = datetime.fromisoformat(img["pushedAt"].replace("Z", "+00:00"))
                 pushed_str = pushed_dt.strftime("%Y-%m-%d %H:%M")
             except Exception:
-                pushed_str = img["pushed_at"]
+                pushed_str = img["pushedAt"]
 
-            table.add_row(img["image_name"], img["image_tag"], size_mb, pushed_str)
+            table.add_row(img["imageName"], img["imageTag"], size_mb, pushed_str)
 
         console.print()
         console.print(table)

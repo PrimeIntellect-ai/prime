@@ -7,3 +7,14 @@ dev-dependencies = [
     "ruff>=0.13.1",
     "ty>=0.0.1a21",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "packages/prime/src",
+    "packages/prime-core/src",
+    "packages/prime-sandboxes/src",
+    "packages/prime-evals/src",
+]
+testpaths = [
+    "packages/*/tests",
+]

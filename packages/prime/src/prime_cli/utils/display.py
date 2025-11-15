@@ -65,3 +65,12 @@ STOCK_STATUS_COLORS = {
     "Medium": "yellow",
     "Low": "red",
 }
+
+DISK_STATUS_COLORS = {
+    "ACTIVE": "green",
+    "PROVISIONING": "yellow",
+    "PENDING": "yellow",
+    "STOPPED": "blue",
+    "ERROR": "red",
+    "TERMINATED": "white",
+}

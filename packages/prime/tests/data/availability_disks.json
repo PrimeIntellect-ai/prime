@@ -1,0 +1,81 @@
+{
+    "items": [
+      {
+        "cloudId": null,
+        "provider": "runpod",
+        "dataCenter": "US-WA-1",
+        "country": "US",
+        "region": "united_states",
+        "spec": {
+          "minCount": 0,
+          "defaultCount": 0,
+          "maxCount": 8192,
+          "pricePerUnit": 0.0001111111111111111,
+          "step": 1,
+          "defaultIncludedInPrice": false,
+          "additionalInfo": null
+        },
+        "stockStatus": "Available",
+        "security": "secure_cloud",
+        "isMultinode": true
+      },
+      {
+        "cloudId": null,
+        "provider": "hyperstack",
+        "dataCenter": "NORWAY-1",
+        "country": "NO",
+        "region": "eu_north",
+        "spec": {
+          "minCount": 0,
+          "defaultCount": 0,
+          "maxCount": 100000,
+          "pricePerUnit": 9.7e-05,
+          "step": 1,
+          "defaultIncludedInPrice": false,
+          "additionalInfo": null
+        },
+        "stockStatus": "Available",
+        "security": "secure_cloud",
+        "isMultinode": false
+      },
+      {
+        "cloudId": null,
+        "provider": "crusoecloud",
+        "dataCenter": "eu-iceland1-a",
+        "country": "IS",
+        "region": "eu_north",
+        "spec": {
+          "minCount": 0,
+          "defaultCount": 0,
+          "maxCount": 8192,
+          "pricePerUnit": 0.00011545611010752688,
+          "step": 1,
+          "defaultIncludedInPrice": false,
+          "additionalInfo": null
+        },
+        "stockStatus": "Available",
+        "security": "secure_cloud",
+        "isMultinode": false
+      },
+      {
+        "cloudId": null,
+        "provider": "dc_roan",
+        "dataCenter": null,
+        "country": "US",
+        "region": "united_states",
+        "spec": {
+          "minCount": 0,
+          "defaultCount": 0,
+          "maxCount": 8192,
+          "pricePerUnit": 7e-05,
+          "step": 1,
+          "defaultIncludedInPrice": false,
+          "additionalInfo": null
+        },
+        "stockStatus": "Available",
+        "security": "secure_cloud",
+        "isMultinode": true
+      }
+    ],
+    "totalCount": 23
+  }

@@ -224,9 +224,9 @@ class PodsClient:
             raise APIError(f"Failed to delete pod: {str(e)}")
 
     def history(
-        self, 
-        offset: int = 0, 
-        limit: int = 100, 
+        self,
+        offset: int = 0,
+        limit: int = 100,
     ) -> HistoryList:
         """Get pods history"""
         try:

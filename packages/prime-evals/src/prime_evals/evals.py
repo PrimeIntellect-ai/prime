@@ -95,8 +95,7 @@ class EvalsClient:
                     # Just a name, resolve to database ID (get-or-create)
                     resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("name"))
                 elif "id" in resolved_env:
-                    # "id" key exists - assume it's already a database ID
-                    # (eval_push.py will use "slug" or "name" keys for non-db-ids)
+                    # "id" key exists - it's already a database ID
                     pass
                 resolved_environments.append(resolved_env)
 
@@ -281,8 +280,7 @@ class AsyncEvalsClient:
                         resolved_env.pop("name")
                     )
                 elif "id" in resolved_env:
-                    # "id" key exists - assume it's already a database ID
-                    # (eval_push.py will use "slug" or "name" keys for non-db-ids)
+                    # "id" key exists - it's already a database ID
                     pass
                 return resolved_env
 

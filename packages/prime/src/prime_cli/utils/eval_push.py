@@ -7,7 +7,7 @@ from prime_core import APIClient
 from prime_evals import EvalsAPIError, EvalsClient
 from rich.console import Console
 
-from .env_metadata import get_environment_metadata
+from .env_metadata import find_environment_metadata
 
 console = Console()
 
@@ -72,28 +72,11 @@ def push_eval_results_to_hub(
                 results_samples.append(json.loads(line))
 
     # Search for environment metadata in multiple possible locations
-    # 1. env_path (if provided via --env-path)
-    # 2. ./environments/{module_name} (where eval outputs are typically stored)
-    # 3. ./environments/{env_name} (alternative structure)
-    # 4. ./{env_name} (where prime env pull creates it)
-    # 5. ./{module_name} (alternative structure)
-    # 6. Current directory (if running from inside the environment directory)
-    possible_env_dirs = []
-    if env_path:
-        possible_env_dirs.append(env_path)
-    possible_env_dirs.extend([
-        Path("./environments") / module_name,
-        Path("./environments") / env_name,
-        Path(".") / env_name,
-        Path(".") / module_name,
-        Path("."),
-    ])
-    
-    hub_metadata = None
-    for env_dir in possible_env_dirs:
-        hub_metadata = get_environment_metadata(env_dir)
-        if hub_metadata:
-            break
+    hub_metadata = find_environment_metadata(
+        env_name=env_name,
+        env_path=env_path,
+        module_name=module_name,
+    )
     
     resolved_env_slug = None
     resolved_env_id = None

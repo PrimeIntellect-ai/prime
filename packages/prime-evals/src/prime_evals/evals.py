@@ -83,6 +83,7 @@ class EvalsClient:
 
         resolved_environments = None
         if environments:
+            # Initialize as empty list before resolution
             resolved_environments = []
             for env in environments:
                 resolved_env = env.copy()
@@ -101,6 +102,14 @@ class EvalsClient:
                     # Skip environments without valid identifiers
                     continue
                 resolved_environments.append(resolved_env)
+            
+            # Validate that we have at least one resolved environment if run_id is not provided
+            # This check happens AFTER resolution to catch cases where all environments were invalid
+            if not resolved_environments and not run_id:
+                raise InvalidEvaluationError(
+                    "All provided environments lack valid identifiers (slug, name, or id). "
+                    "Either provide valid environment identifiers or provide a 'run_id'. "
+                )
 
         payload = {
             "name": name,
@@ -267,6 +276,8 @@ class AsyncEvalsClient:
 
         resolved_environments = None
         if environments:
+            # Initialize as empty list before resolution
+            resolved_environments = []
 
             async def resolve_env(env: Dict[str, str]) -> Optional[Dict[str, str]]:
                 resolved_env = env.copy()
@@ -295,6 +306,14 @@ class AsyncEvalsClient:
             )
             # Filter out None values (environments without valid identifiers)
             resolved_environments = [env for env in resolved_environments_list if env is not None]
+            
+            # Validate that we have at least one resolved environment if run_id is not provided
+            # This check happens AFTER resolution to catch cases where all environments were invalid
+            if not resolved_environments and not run_id:
+                raise InvalidEvaluationError(
+                    "All provided environments lack valid identifiers (slug, name, or id). "
+                    "Either provide valid environment identifiers or provide a 'run_id'. "
+                )
 
         payload = {
             "name": name,

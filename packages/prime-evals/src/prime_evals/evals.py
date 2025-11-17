@@ -97,6 +97,9 @@ class EvalsClient:
                 elif "id" in resolved_env:
                     # "id" key exists - it's already a database ID
                     pass
+                else:
+                    # Skip environments without valid identifiers
+                    continue
                 resolved_environments.append(resolved_env)
 
         payload = {
@@ -265,7 +268,7 @@ class AsyncEvalsClient:
         resolved_environments = None
         if environments:
 
-            async def resolve_env(env: Dict[str, str]) -> Dict[str, str]:
+            async def resolve_env(env: Dict[str, str]) -> Optional[Dict[str, str]]:
                 resolved_env = env.copy()
                 # Handle different identifier types explicitly
                 # Check for explicit "slug" or "name" keys first
@@ -282,11 +285,16 @@ class AsyncEvalsClient:
                 elif "id" in resolved_env:
                     # "id" key exists - it's already a database ID
                     pass
+                else:
+                    # Skip environments without valid identifiers
+                    return None
                 return resolved_env
 
-            resolved_environments = await asyncio.gather(
+            resolved_environments_list = await asyncio.gather(
                 *[resolve_env(env) for env in environments]
             )
+            # Filter out None values (environments without valid identifiers)
+            resolved_environments = [env for env in resolved_environments_list if env is not None]
 
         payload = {
             "name": name,

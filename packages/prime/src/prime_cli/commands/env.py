@@ -24,6 +24,7 @@ from ..api.inference import InferenceAPIError, InferenceClient
 from ..client import APIClient, APIError
 from ..utils import output_data_as_json, validate_output_format
 from ..utils.eval_push import push_eval_results_to_hub
+from ..utils.formatters import format_file_size
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
 console = Console()
@@ -32,6 +33,7 @@ console = Console()
 MAX_FILES_TO_SHOW = 10
 DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
+MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 
 
 def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
@@ -564,6 +566,32 @@ def push(
                                         # archive structure
                                         arcname = file.relative_to(env_path)
                                         tar.add(file, arcname=str(arcname))
+
+                    # Check tarball size
+                    tarball_size = Path(tmp.name).stat().st_size
+                    tarball_size_formatted = format_file_size(tarball_size)
+                    console.print(f"Source archive size: {tarball_size_formatted}")
+
+                    if tarball_size > MAX_TARBALL_SIZE_LIMIT:
+                        max_size_formatted = format_file_size(MAX_TARBALL_SIZE_LIMIT)
+                        console.print(
+                            f"\n[yellow]⚠ Warning: Your tarball size ({tarball_size_formatted}) "
+                            f"exceeds the recommended limit of {max_size_formatted}.[/yellow]"
+                        )
+                        console.print(
+                            "[yellow]Large environment uploads may cause issues. Consider:[/yellow]"
+                        )
+                        console.print(
+                            "[yellow]  • Excluding large data files or model weights[/yellow]"
+                        )
+                        console.print(
+                            "[yellow]  • Checking for accidentally included build "
+                            "artifacts[/yellow]"
+                        )
+                        console.print(
+                            "[yellow]  • Using .gitignore patterns to exclude unnecessary "
+                            "files[/yellow]\n"
+                        )
 
                     with open(tmp.name, "rb") as f:
                         source_sha256 = hashlib.sha256(f.read()).hexdigest()

@@ -62,7 +62,7 @@ def push_image(
             raise typer.Exit(1)
 
         # Create tar.gz of build context
-        console.print("[cyan]📦 Preparing build context...[/cyan]")
+        console.print("[cyan]Preparing build context...[/cyan]")
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
             tar_path = tmp_file.name
 
@@ -75,7 +75,7 @@ def push_image(
             console.print()
 
             # Initialize build
-            console.print("[cyan]🔐 Initiating build...[/cyan]")
+            console.print("[cyan]Initiating build...[/cyan]")
             try:
                 build_response = client.request(
                     "POST",
@@ -103,7 +103,7 @@ def push_image(
             console.print()
 
             # Upload build context to GCS
-            console.print("[cyan]⬆️  Uploading build context...[/cyan]")
+            console.print("[cyan]Uploading build context...[/cyan]")
             try:
                 with open(tar_path, "rb") as f:
                     upload_response = httpx.put(
@@ -114,14 +114,14 @@ def push_image(
                     )
                     upload_response.raise_for_status()
             except httpx.HTTPError as e:
-                console.print(f"[red]❌ Upload failed: {e}[/red]")
+                console.print(f"[red]Upload failed: {e}[/red]")
                 raise typer.Exit(1)
 
             console.print("[green]✓[/green] Build context uploaded")
             console.print()
 
             # Start the build
-            console.print("[cyan]🏗️  Starting build...[/cyan]")
+            console.print("[cyan]Starting build...[/cyan]")
             try:
                 client.request(
                     "POST",
@@ -150,7 +150,7 @@ def push_image(
                             break
                         elif status == "FAILED":
                             error_msg = status_response.get("errorMessage", "Unknown error")
-                            console.print(f"\n[red]❌ Build failed: {error_msg}[/red]")
+                            console.print(f"\n[red]Build failed: {error_msg}[/red]")
                             raise typer.Exit(1)
                         elif status == "CANCELLED":
                             console.print("\n[yellow]Build was cancelled[/yellow]")
@@ -166,7 +166,7 @@ def push_image(
 
             image_ref = status_response.get("fullImagePath", f"{image_name}:{image_tag}")
 
-            console.print("[bold green]✅ Success![/bold green]")
+            console.print("[bold green]Success![/bold green]")
             console.print()
             console.print(f"[bold]Image:[/bold] {image_ref}")
             console.print()

@@ -98,6 +98,7 @@ def push_image(
 
             build_id = build_response["build_id"]
             upload_url = build_response["upload_url"]
+            full_image_path = build_response.get("fullImagePath", f"{image_name}:{image_tag}")
 
             console.print("[green]✓[/green] Build initiated")
             console.print()
@@ -138,7 +139,7 @@ def push_image(
             console.print("[bold green]Build initiated successfully![/bold green]")
             console.print()
             console.print(f"[bold]Build ID:[/bold] {build_id}")
-            console.print(f"[bold]Image:[/bold] {image_name}:{image_tag}")
+            console.print(f"[bold]Image:[/bold] {full_image_path}")
             console.print()
             console.print("[cyan]Your image is being built.[/cyan]")
             console.print()
@@ -150,7 +151,7 @@ def push_image(
             )
             console.print(
                 "[dim]Once completed, you can use it with: "
-                f"prime sandbox create {image_name}:{image_tag}[/dim]"
+                f"prime sandbox create {full_image_path}[/dim]"
             )
             console.print()
 

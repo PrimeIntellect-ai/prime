@@ -239,6 +239,12 @@ def push(
     auto_bump: bool = typer.Option(
         False, "--auto-bump", help="Automatically bump patch version before push"
     ),
+    rc: bool = typer.Option(False, "--rc", help="Bump or create a .rc pre-release (rc0 -> rc1)"),
+    post: bool = typer.Option(
+        False,
+        "--post",
+        help="Bump or create a .post release (post0 -> post1)",
+    ),
 ) -> None:
     """Push environment to registry"""
 
@@ -263,15 +269,27 @@ def push(
                 raise typer.Exit(1)
 
             # Auto-bump version if requested
-            if auto_bump:
+            if auto_bump or rc or post:
+                flags_set = sum(bool(x) for x in (auto_bump, rc, post))
+                if flags_set > 1:
+                    console.print(
+                        "[red]Error: --auto-bump, --rc, and --post are mutually exclusive[/red]"
+                    )
+                    raise typer.Exit(1)
                 current_version = project_info.get("version")
                 if not current_version:
                     console.print(
                         "[red]Error: No version found in pyproject.toml for auto-bump[/red]"
                     )
                     raise typer.Exit(1)
+                
+                if auto_bump:
+                    new_version = bump_version(current_version)
+                elif rc:
+                    new_version = bump_rc_version(current_version)
+                else:
+                    new_version = bump_post_version(current_version)
 
-                new_version = bump_version(current_version)
                 console.print(f"Auto-bumping version: {current_version} → {new_version}")
 
                 try:
@@ -962,6 +980,39 @@ def bump_version(version: str) -> str:
     else:
         return f"{version}.0.1"
 
+def bump_rc_version(version: str) -> str:
+    """
+    Bump or create an .post suffix.
+    Examples:
+      1.2.3 -> 1.2.3.post0
+      1.2.3.post0 -> 1.2.3.post1
+      1.2.3post2 -> 1.2.3post3
+    """
+    m = re.match(r"^(?P<base>.*?)(?:\.rc|rc)(?P<num>\d+)$", version)
+    if m:
+        base = m.group("base")
+        num = int(m.group("num"))
+        return f"{base}.rc{num + 1}"
+    else:
+        base = re.sub(r"([+-].*)$", "", version)
+        return f"{base}.rc0"
+    
+def bump_post_version(version: str) -> str:
+    """
+    Bump or create an .post suffix.
+    Examples:
+      1.2.3 -> 1.2.3.post0
+      1.2.3.post0 -> 1.2.3.post1
+      1.2.3post2 -> 1.2.3post3
+    """
+    m = re.match(r"^(?P<base>.*?)(?:\.post|post)(?P<num>\d+)$", version)
+    if m:
+        base = m.group("base")
+        num = int(m.group("num"))
+        return f"{base}.post{num + 1}"
+    else:
+        base = re.sub(r"([+-].*)$", "", version)
+        return f"{base}.post0"
 
 def update_pyproject_version(pyproject_path: Path, new_version: str) -> None:
     """Update version in pyproject.toml file."""

@@ -4,6 +4,7 @@ import json
 import tarfile
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -222,9 +223,6 @@ def list_images(
             size_mb = ""
             if img.get("sizeBytes"):
                 size_mb = f"{img['sizeBytes'] / 1024 / 1024:.1f} MB"
-
-            # Format timestamp
-            from datetime import datetime
 
             try:
                 pushed_dt = datetime.fromisoformat(img["pushedAt"].replace("Z", "+00:00"))

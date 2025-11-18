@@ -1,0 +1,403 @@
+{
+    "A100_80GB": {
+      "1": {
+        "cheapest": {
+          "onDemand": 0.99,
+          "communityPrice": null,
+          "spotPrice": 0.5748
+        },
+        "united_states": {
+          "onDemand": 0.99,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 1.35,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_east": {
+          "onDemand": 1.6735999999999998,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_north": {
+          "onDemand": 1.2147999999999999,
+          "communityPrice": null,
+          "spotPrice": 0.5748
+        },
+        "asia_northeast": {
+          "onDemand": 2.397,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      },
+      "2": {
+        "cheapest": {
+          "onDemand": 2.4,
+          "communityPrice": null,
+          "spotPrice": 1.1496
+        },
+        "united_states": {
+          "onDemand": 2.4,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 2.7,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_east": {
+          "onDemand": 3.3303999999999996,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_north": {
+          "onDemand": 2.4295999999999998,
+          "communityPrice": null,
+          "spotPrice": 1.1496
+        },
+        "asia_northeast": {
+          "onDemand": 4.795,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      },
+      "3": {
+        "cheapest": {
+          "onDemand": 4.9872,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "united_states": {
+          "onDemand": 4.9872,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 4.9872,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_north": {
+          "onDemand": 5.2553,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      },
+      "4": {
+        "cheapest": {
+          "onDemand": 4.8,
+          "communityPrice": null,
+          "spotPrice": 2.3091999999999997
+        },
+        "united_states": {
+          "onDemand": 4.8,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 5.4,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_north": {
+          "onDemand": 4.8591999999999995,
+          "communityPrice": null,
+          "spotPrice": 2.3091999999999997
+        }
+      },
+      "5": {
+        "cheapest": {
+          "onDemand": 8.300799999999999,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "united_states": {
+          "onDemand": 8.300799999999999,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 8.300799999999999,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_north": {
+          "onDemand": 8.800799999999999,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      },
+      "6": {
+        "cheapest": {
+          "onDemand": 9.9576,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "united_states": {
+          "onDemand": 9.9576,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 9.9576,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_north": {
+          "onDemand": 10.557599999999999,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      },
+      "7": {
+        "cheapest": {
+          "onDemand": 11.6144,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "united_states": {
+          "onDemand": 11.6144,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 11.6144,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_north": {
+          "onDemand": 12.3144,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      },
+      "8": {
+        "cheapest": {
+          "onDemand": 7.82,
+          "communityPrice": null,
+          "spotPrice": 4.618399999999999
+        },
+        "united_states": {
+          "onDemand": 9.84,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 10.8,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "australia": {
+          "onDemand": 14.32,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_north": {
+          "onDemand": 9.718399999999999,
+          "communityPrice": null,
+          "spotPrice": 4.618399999999999
+        },
+        "eu_west": {
+          "onDemand": 7.82,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      }
+    },
+    "H100_80GB": {
+      "1": {
+        "cheapest": {
+          "onDemand": 1.9,
+          "communityPrice": null,
+          "spotPrice": 1.157
+        },
+        "united_states": {
+          "onDemand": 2.35,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "asia_northeast": {
+          "onDemand": 2.7236,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 1.9,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_west": {
+          "onDemand": 2.7236,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_north": {
+          "onDemand": 2.0540999999999996,
+          "communityPrice": null,
+          "spotPrice": 1.157
+        },
+        "eu_east": {
+          "onDemand": 3.3586682325,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      },
+      "2": {
+        "cheapest": {
+          "onDemand": 3.8,
+          "communityPrice": null,
+          "spotPrice": 2.314
+        },
+        "asia_northeast": {
+          "onDemand": 5.4304,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 3.8,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_west": {
+          "onDemand": 5.4304,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "united_states": {
+          "onDemand": 4.7,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_north": {
+          "onDemand": 4.104699999999999,
+          "communityPrice": null,
+          "spotPrice": 2.314
+        },
+        "eu_east": {
+          "onDemand": 6.717336465,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      },
+      "3": {
+        "cheapest": {
+          "onDemand": 6.1552999999999995,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "asia_northeast": {
+          "onDemand": 8.1372,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 7.2372,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_north": {
+          "onDemand": 6.1552999999999995,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      },
+      "4": {
+        "cheapest": {
+          "onDemand": 7.6,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "asia_northeast": {
+          "onDemand": 10.844,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 7.6,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "united_states": {
+          "onDemand": 9.4,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "eu_north": {
+          "onDemand": 8.2059,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      },
+      "5": {
+        "cheapest": {
+          "onDemand": 12.050799999999999,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "asia_northeast": {
+          "onDemand": 13.550799999999999,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 12.050799999999999,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      },
+      "6": {
+        "cheapest": {
+          "onDemand": 14.4576,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "asia_northeast": {
+          "onDemand": 16.2576,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 14.4576,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      },
+      "7": {
+        "cheapest": {
+          "onDemand": 16.8644,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "asia_northeast": {
+          "onDemand": 18.964399999999998,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 16.8644,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      },
+      "8": {
+        "cheapest": {
+          "onDemand": 15.2,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "canada": {
+          "onDemand": 15.2,
+          "communityPrice": null,
+          "spotPrice": null
+        },
+        "united_states": {
+          "onDemand": 15.92,
+          "communityPrice": null,
+          "spotPrice": null
+        }
+      }
+    }
+}

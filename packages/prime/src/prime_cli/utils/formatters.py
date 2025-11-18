@@ -42,3 +42,15 @@ def format_resources(cpu_cores: int, memory_gb: int, gpu_count: int = 0) -> str:
 def format_gpu_spec(gpu_type: str, gpu_count: int) -> str:
     """Format GPU specification as 'Type x Count'."""
     return f"{gpu_type} x{gpu_count}"
+
+
+def format_file_size(size_bytes: int) -> str:
+    """Format file size in human-readable format."""
+    if size_bytes >= 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+    elif size_bytes >= 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    elif size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes} bytes"

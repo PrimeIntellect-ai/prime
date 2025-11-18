@@ -4,6 +4,7 @@ import typer
 
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
+from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
 from .commands.images import app as images_app
@@ -25,6 +26,7 @@ app = typer.Typer(
 
 app.add_typer(availability_app, name="availability")
 app.add_typer(config_app, name="config")
+app.add_typer(disks_app, name="disks")
 app.add_typer(pods_app, name="pods")
 app.add_typer(sandbox_app, name="sandbox")
 app.add_typer(login_app, name="login")

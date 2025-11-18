@@ -677,7 +677,7 @@ def push(
                 console.print(f"Wheel: {wheel_path.name}")
                 console.print(f"SHA256: {wheel_sha256}")
 
-                # Save environment hub metadata for future reference
+                # Save Environments hub metadata for future reference
                 try:
                     env_metadata = {
                         "environment_id": env_id,

@@ -164,16 +164,14 @@ def push_image(
             console.print("[green]✓[/green] Build completed successfully!")
             console.print()
 
-            # Get final build info
-            final_status = client.request("GET", f"/images/build/{build_id}")
-            full_image_path = final_status["fullImagePath"]
+            image_ref = status_response.get("fullImagePath", f"{image_name}:{image_tag}")
 
             console.print("[bold green]✅ Success![/bold green]")
             console.print()
-            console.print(f"[bold]Image:[/bold] {full_image_path}")
+            console.print(f"[bold]Image:[/bold] {image_ref}")
             console.print()
             console.print("[bold]To use in a sandbox:[/bold]")
-            console.print(f"  prime sandbox create {full_image_path}")
+            console.print(f"  prime sandbox create {image_ref}")
             console.print()
 
         finally:
@@ -216,8 +214,7 @@ def list_images(
 
         # Table output
         table = Table(title="Your Docker Images")
-        table.add_column("Image Name", style="cyan")
-        table.add_column("Tag", style="green")
+        table.add_column("Image Reference", style="cyan")
         table.add_column("Size", justify="right")
         table.add_column("Pushed", style="dim")
 
@@ -235,7 +232,9 @@ def list_images(
             except Exception:
                 pushed_str = img["pushedAt"]
 
-            table.add_row(img["imageName"], img["imageTag"], size_mb, pushed_str)
+            image_ref = img.get("fullImagePath", f"{img['imageName']}:{img['imageTag']}")
+
+            table.add_row(image_ref, size_mb, pushed_str)
 
         console.print()
         console.print(table)

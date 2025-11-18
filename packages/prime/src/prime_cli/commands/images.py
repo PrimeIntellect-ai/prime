@@ -3,7 +3,6 @@
 import json
 import tarfile
 import tempfile
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -136,43 +135,23 @@ def push_image(
             console.print("[green]✓[/green] Build started")
             console.print()
 
-            # Poll for build status
-            console.print("[cyan]Building image...[/cyan]")
-            console.print("[dim]This may take a few minutes depending on image complexity[/dim]")
+            console.print("[bold green]Build initiated successfully![/bold green]")
             console.print()
-
-            with console.status("[bold blue]Building image...", spinner="dots"):
-                while True:
-                    try:
-                        status_response = client.request("GET", f"/images/build/{build_id}")
-                        status = status_response["status"]
-
-                        if status == "COMPLETED":
-                            break
-                        elif status == "FAILED":
-                            error_msg = status_response.get("errorMessage", "Unknown error")
-                            console.print(f"\n[red]Build failed: {error_msg}[/red]")
-                            raise typer.Exit(1)
-                        elif status == "CANCELLED":
-                            console.print("\n[yellow]Build was cancelled[/yellow]")
-                            raise typer.Exit(1)
-
-                        time.sleep(3)
-                    except APIError as e:
-                        console.print(f"\n[red]Error checking build status: {e}[/red]")
-                        raise typer.Exit(1)
-
-            console.print("[green]✓[/green] Build completed successfully!")
+            console.print(f"[bold]Build ID:[/bold] {build_id}")
+            console.print(f"[bold]Image:[/bold] {image_name}:{image_tag}")
             console.print()
-
-            image_ref = status_response.get("fullImagePath", f"{image_name}:{image_tag}")
-
-            console.print("[bold green]Success![/bold green]")
+            console.print("[cyan]Your image is being built.[/cyan]")
             console.print()
-            console.print(f"[bold]Image:[/bold] {image_ref}")
+            console.print("[bold]Check build status:[/bold]")
+            console.print("  prime images list")
             console.print()
-            console.print("[bold]To use in a sandbox:[/bold]")
-            console.print(f"  prime sandbox create {image_ref}")
+            console.print(
+                "[dim]The build typically takes a few minutes depending on image complexity.[/dim]"
+            )
+            console.print(
+                "[dim]Once completed, you can use it with: "
+                f"prime sandbox create {image_name}:{image_tag}[/dim]"
+            )
             console.print()
 
         finally:
@@ -205,7 +184,7 @@ def list_images(
         data = response
 
         if not data["images"]:
-            console.print("[yellow]No images found.[/yellow]")
+            console.print("[yellow]No images or builds found.[/yellow]")
             console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
             return
 
@@ -216,23 +195,45 @@ def list_images(
         # Table output
         table = Table(title="Your Docker Images")
         table.add_column("Image Reference", style="cyan")
+        table.add_column("Status", justify="center")
         table.add_column("Size", justify="right")
-        table.add_column("Pushed", style="dim")
+        table.add_column("Created", style="dim")
 
         for img in data["images"]:
+            # Status with color coding
+            status = img.get("status", "UNKNOWN")
+            if status == "COMPLETED":
+                status_display = "[green]Ready[/green]"
+            elif status == "BUILDING":
+                status_display = "[yellow]Building[/yellow]"
+            elif status == "PENDING":
+                status_display = "[blue]Pending[/blue]"
+            elif status == "FAILED":
+                status_display = "[red]Failed[/red]"
+            elif status == "CANCELLED":
+                status_display = "[dim]Cancelled[/dim]"
+            else:
+                status_display = f"[dim]{status}[/dim]"
+
+            # Size
             size_mb = ""
             if img.get("sizeBytes"):
                 size_mb = f"{img['sizeBytes'] / 1024 / 1024:.1f} MB"
 
+            # Date - use pushedAt for completed images, createdAt for builds
             try:
-                pushed_dt = datetime.fromisoformat(img["pushedAt"].replace("Z", "+00:00"))
-                pushed_str = pushed_dt.strftime("%Y-%m-%d %H:%M")
+                if img.get("pushedAt"):
+                    date_dt = datetime.fromisoformat(img["pushedAt"].replace("Z", "+00:00"))
+                else:
+                    date_dt = datetime.fromisoformat(img["createdAt"].replace("Z", "+00:00"))
+                date_str = date_dt.strftime("%Y-%m-%d %H:%M")
             except Exception:
-                pushed_str = img["pushedAt"]
+                date_str = img.get("pushedAt") or img.get("createdAt", "")
 
+            # Image reference
             image_ref = img.get("fullImagePath", f"{img['imageName']}:{img['imageTag']}")
 
-            table.add_row(image_ref, size_mb, pushed_str)
+            table.add_row(image_ref, status_display, size_mb, date_str)
 
         console.print()
         console.print(table)

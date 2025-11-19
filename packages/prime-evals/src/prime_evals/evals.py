@@ -125,6 +125,9 @@ class EvalsClient:
             "metadata": metadata,
             "metrics": metrics,
         }
+        # Include team_id from config if set (for team-owned evaluations)
+        if self.client.config.team_id:
+            payload["team_id"] = self.client.config.team_id
         # Only include is_public if it's explicitly set (not None)
         if is_public is not None:
             payload["is_public"] = is_public
@@ -329,6 +332,9 @@ class AsyncEvalsClient:
             "metadata": metadata,
             "metrics": metrics,
         }
+        # Include team_id from config if set (for team-owned evaluations)
+        if self.client.config.team_id:
+            payload["team_id"] = self.client.config.team_id
         # Only include is_public if it's explicitly set (not None)
         if is_public is not None:
             payload["is_public"] = is_public

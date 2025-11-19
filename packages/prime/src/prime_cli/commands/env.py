@@ -757,6 +757,7 @@ def push(
                     # This handles environments that were pulled/pushed before we moved
                     # to .prime/ subfolder
                     old_metadata_path = env_path / ".env-metadata.json"
+                    migration_failed = False
                     if old_metadata_path.exists() and not metadata_path.exists():
                         try:
                             # Move the old file to the new location
@@ -766,6 +767,7 @@ def push(
                                 "to .prime/ subfolder[/dim]"
                             )
                         except (OSError, IOError) as e:
+                            migration_failed = True
                             console.print(
                                 f"[yellow]Warning: Could not migrate old .env-metadata.json "
                                 f"file to .prime/ subfolder: {e}[/yellow]"
@@ -788,6 +790,17 @@ def push(
                         except (json.JSONDecodeError, IOError) as e:
                             console.print(
                                 f"[yellow]Warning: Could not read existing metadata: {e}[/yellow]"
+                            )
+                            existing_metadata = {}
+                    elif migration_failed and old_metadata_path.exists():
+                        # If migration failed, read from old location to preserve metadata
+                        try:
+                            with open(old_metadata_path, "r") as f:
+                                existing_metadata = json.load(f)
+                        except (json.JSONDecodeError, IOError) as e:
+                            console.print(
+                                f"[yellow]Warning: Could not read existing metadata from "
+                                f"old location: {e}[/yellow]"
                             )
                             existing_metadata = {}
                     

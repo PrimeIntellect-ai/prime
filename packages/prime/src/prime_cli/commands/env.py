@@ -72,7 +72,7 @@ def display_upstream_environment_info(
         console.print(f"[blue]Using upstream environment {owner}/{env_name}[/blue]\n")
         return True
     else:
-        console.print("[blue]No upstream environment found.\n")
+        console.print("[blue]No upstream environment found.[/blue]\n")
         return False
 
 

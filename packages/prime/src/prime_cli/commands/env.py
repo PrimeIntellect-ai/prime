@@ -18,6 +18,7 @@ import toml
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.core import Config
 
@@ -804,13 +805,13 @@ def push(
                         json.dump(env_metadata, f, indent=2)
                     
                     if existing_metadata:
-                        console.print(
-                            "[dim]Updated environment metadata in .prime/.env-metadata.json[/dim]"
-                        )
+                        message = Text("Updated environment metadata in ", style="dim")
+                        message.append(str(metadata_path), style="dim")
+                        console.print(message)
                     else:
-                        console.print(
-                            "[dim]Saved environment metadata to .prime/.env-metadata.json[/dim]"
-                        )
+                        message = Text("Saved environment metadata to ", style="dim")
+                        message.append(str(metadata_path), style="dim")
+                        console.print(message)
                 except Exception as e:
                     console.print(
                         f"[yellow]Warning: Could not save environment metadata: {e}[/yellow]"
@@ -1013,7 +1014,9 @@ def pull(
             }
             with open(metadata_path, "w") as f:
                 json.dump(env_metadata, f, indent=2)
-            console.print("[dim]Created environment metadata at .prime/.env-metadata.json[/dim]")
+            message = Text("Created environment metadata at ", style="dim")
+            message.append(str(metadata_path), style="dim")
+            console.print(message)
         except Exception as e:
             console.print(f"[yellow]Warning: Could not create metadata file: {e}[/yellow]")
 

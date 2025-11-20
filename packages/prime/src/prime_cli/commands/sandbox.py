@@ -910,6 +910,13 @@ def expose_port(
     """Expose a port from a sandbox"""
     validate_output_format(output, console)
 
+    if protocol.upper() not in ["HTTP", "HTTPS"]:
+        console.print(
+            f"[red]Error:[/red] Protocol '{protocol}' is not supported. "
+            "Currently only HTTP and HTTPS are supported. TCP/UDP support is coming soon!"
+        )
+        raise typer.Exit(1)
+
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)

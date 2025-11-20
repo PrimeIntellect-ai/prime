@@ -21,6 +21,7 @@ Prime Intellect CLI & SDKs
 [![Downloads](https://img.shields.io/pypi/dm/prime)](https://pypi.org/project/prime/)
 
 Command line interface and SDKs for managing Prime Intellect GPU resources, sandboxes, and environments.
+
 </div>
 
 ## Overview
@@ -91,7 +92,7 @@ prime pods create --gpu A100 --count 1
 prime pods ssh <pod-id>
 
 # Create a sandbox
-prime sandbox create --image python:3.11
+prime sandbox create python:3.11
 ```
 
 ## Features
@@ -144,7 +145,7 @@ Isolated environments for running code remotely:
 
 ```bash
 # Create a sandbox
-prime sandbox create --image python:3.11
+prime sandbox create  python:3.11
 
 # List sandboxes
 prime sandbox list
@@ -271,6 +272,7 @@ prime pods create --gpu H100 --count 8 --name ml-training
 # SSH and start training
 prime pods ssh <pod-id>
 ```
+
 ## Support & Resources
 
 - **Documentation**: [github.com/PrimeIntellect-ai/prime-cli](https://github.com/PrimeIntellect-ai/prime-cli)

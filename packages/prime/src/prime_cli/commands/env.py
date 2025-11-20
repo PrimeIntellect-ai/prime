@@ -24,7 +24,7 @@ from rich.text import Text
 from ..api.inference import InferenceAPIError, InferenceClient
 from ..client import APIClient, APIError
 from ..utils import output_data_as_json, validate_output_format
-from ..utils.env_metadata import get_environment_metadata
+from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
 
@@ -52,18 +52,17 @@ def display_upstream_environment_info(
         env_path: Path to check for metadata (defaults to current directory)
         environment_name: Optional environment name to check in ./environments/{module_name}
     """
-    if env_path is None:
-        env_path = Path.cwd()
-    
-    # Check the provided path first
-    env_metadata = get_environment_metadata(env_path)
-    
-    # If not found and environment_name is provided, check ./environments/{module_name}
-    if not env_metadata and environment_name:
-        current_dir = Path.cwd()
+    # Determine module_name if environment_name is provided
+    module_name = None
+    if environment_name:
         module_name = environment_name.replace("-", "_")
-        env_dir = current_dir / "environments" / module_name
-        env_metadata = get_environment_metadata(env_dir)
+    
+    # Search for environment metadata in common locations
+    env_metadata = find_environment_metadata(
+        env_name=environment_name,
+        env_path=env_path,
+        module_name=module_name,
+    )
     
     if env_metadata and env_metadata.get("owner") and env_metadata.get("name"):
         owner = env_metadata.get("owner")
@@ -1956,8 +1955,18 @@ def eval_env(
             "should end in '/v1'"
         ),
     ),
-    push_to_hub: bool = typer.Option(
-        False, "--push-to-hub", "-P", help="Push results to Prime Evals Hub"
+    skip_upload: bool = typer.Option(
+        False,
+        "--skip-upload",
+        help="Skip uploading results to Prime Evals Hub (results are uploaded by default)",
+    ),
+    env_path: Optional[str] = typer.Option(
+        None,
+        "--env-path",
+        help=(
+            "Path to the environment directory "
+            "(used to locate .prime/.env-metadata.json for upstream resolution)"
+        ),
     ),
 ) -> None:
     """
@@ -1967,9 +1976,19 @@ def eval_env(
        prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7
        All extra args are forwarded unchanged to vf-eval.
     """
+
+    # Determine the path to check for upstream metadata
+    check_path = Path(env_path) if env_path else Path.cwd()
     # Display upstream environment info if metadata exists
-    display_upstream_environment_info(environment_name=environment)
-    
+    is_resolved = display_upstream_environment_info(
+        env_path=check_path, environment_name=environment
+    )
+    if not is_resolved:
+        console.print(
+            "[yellow]Evaluation results will not be uploaded or viewable on the platform "
+            "without a specified upstream environment.[/yellow]"
+        )
+
     config = Config()
 
     api_key = config.api_key
@@ -2079,13 +2098,14 @@ def eval_env(
         console.print("[red]Failed to start vf-eval process.[/red]")
         raise typer.Exit(1)
 
-    # Push to hub if requested and eval succeeded
-    if push_to_hub:
+    # Automatically push to hub after successful eval (unless --skip-upload is used)
+    if not skip_upload and is_resolved:
         try:
             push_eval_results_to_hub(
                 env_name=environment,
                 model=model,
                 job_id=job_id,
+                env_path=check_path,
             )
         except Exception as e:
             console.print(f"[red]Failed to push results to hub:[/red] {e}")

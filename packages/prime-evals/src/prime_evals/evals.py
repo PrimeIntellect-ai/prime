@@ -63,6 +63,7 @@ class EvalsClient:
         tags: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         metrics: Optional[Dict[str, Any]] = None,
+        is_public: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Create a new evaluation
 
@@ -82,10 +83,33 @@ class EvalsClient:
 
         resolved_environments = None
         if environments:
-            resolved_environments = [
-                {**env, "id": self._resolve_environment_id(env["id"])} if "id" in env else env
-                for env in environments
-            ]
+            # Initialize as empty list before resolution
+            resolved_environments = []
+            for env in environments:
+                resolved_env = env.copy()
+                # Handle different identifier types explicitly
+                # Check for explicit "slug" or "name" keys first
+                if "slug" in resolved_env:
+                    # Owner/name format, resolve to database ID
+                    resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("slug"))
+                elif "name" in resolved_env:
+                    # Just a name, resolve to database ID (get-or-create)
+                    resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("name"))
+                elif "id" in resolved_env:
+                    # "id" key exists - it's already a database ID
+                    pass
+                else:
+                    # Skip environments without valid identifiers
+                    continue
+                resolved_environments.append(resolved_env)
+            
+            # Validate that we have at least one resolved environment if run_id is not provided
+            # This check happens AFTER resolution to catch cases where all environments were invalid
+            if not resolved_environments and not run_id:
+                raise InvalidEvaluationError(
+                    "All provided environments lack valid identifiers (slug, name, or id). "
+                    "Either provide valid environment identifiers or provide a 'run_id'. "
+                )
 
         payload = {
             "name": name,
@@ -101,6 +125,12 @@ class EvalsClient:
             "metadata": metadata,
             "metrics": metrics,
         }
+        # Include team_id from config if set (for team-owned evaluations)
+        if self.client.config.team_id:
+            payload["team_id"] = self.client.config.team_id
+        # Only include is_public if it's explicitly set (not None)
+        if is_public is not None:
+            payload["is_public"] = is_public
         payload = {k: v for k, v in payload.items() if v is not None or k in ["tags"]}
 
         response = self.client.request("POST", "/evaluations/", json=payload)
@@ -229,6 +259,7 @@ class AsyncEvalsClient:
         tags: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         metrics: Optional[Dict[str, Any]] = None,
+        is_public: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Create a new evaluation
 
@@ -248,16 +279,44 @@ class AsyncEvalsClient:
 
         resolved_environments = None
         if environments:
+            # Initialize as empty list before resolution
+            resolved_environments = []
 
-            async def resolve_env(env: Dict[str, str]) -> Dict[str, str]:
+            async def resolve_env(env: Dict[str, str]) -> Optional[Dict[str, str]]:
                 resolved_env = env.copy()
-                if "id" in resolved_env:
-                    resolved_env["id"] = await self._resolve_environment_id(resolved_env["id"])
+                # Handle different identifier types explicitly
+                # Check for explicit "slug" or "name" keys first
+                if "slug" in resolved_env:
+                    # Owner/name format, resolve to database ID
+                    resolved_env["id"] = await self._resolve_environment_id(
+                        resolved_env.pop("slug")
+                    )
+                elif "name" in resolved_env:
+                    # Just a name, resolve to database ID (get-or-create)
+                    resolved_env["id"] = await self._resolve_environment_id(
+                        resolved_env.pop("name")
+                    )
+                elif "id" in resolved_env:
+                    # "id" key exists - it's already a database ID
+                    pass
+                else:
+                    # Skip environments without valid identifiers
+                    return None
                 return resolved_env
 
-            resolved_environments = await asyncio.gather(
+            resolved_environments_list = await asyncio.gather(
                 *[resolve_env(env) for env in environments]
             )
+            # Filter out None values (environments without valid identifiers)
+            resolved_environments = [env for env in resolved_environments_list if env is not None]
+            
+            # Validate that we have at least one resolved environment if run_id is not provided
+            # This check happens AFTER resolution to catch cases where all environments were invalid
+            if not resolved_environments and not run_id:
+                raise InvalidEvaluationError(
+                    "All provided environments lack valid identifiers (slug, name, or id). "
+                    "Either provide valid environment identifiers or provide a 'run_id'. "
+                )
 
         payload = {
             "name": name,
@@ -273,6 +332,12 @@ class AsyncEvalsClient:
             "metadata": metadata,
             "metrics": metrics,
         }
+        # Include team_id from config if set (for team-owned evaluations)
+        if self.client.config.team_id:
+            payload["team_id"] = self.client.config.team_id
+        # Only include is_public if it's explicitly set (not None)
+        if is_public is not None:
+            payload["is_public"] = is_public
         payload = {k: v for k, v in payload.items() if v is not None or k in ["tags"]}
 
         response = await self.client.request("POST", "/evaluations/", json=payload)

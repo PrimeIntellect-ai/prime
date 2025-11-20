@@ -4,7 +4,9 @@ import typer
 
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
+from .commands.disks import app as disks_app
 from .commands.env import app as env_app
+from .commands.evals import app as evals_app
 from .commands.inference import app as inference_app
 from .commands.login import app as login_app
 from .commands.pods import app as pods_app
@@ -23,6 +25,7 @@ app = typer.Typer(
 
 app.add_typer(availability_app, name="availability")
 app.add_typer(config_app, name="config")
+app.add_typer(disks_app, name="disks")
 app.add_typer(pods_app, name="pods")
 app.add_typer(sandbox_app, name="sandbox")
 app.add_typer(login_app, name="login")
@@ -30,6 +33,7 @@ app.add_typer(env_app, name="env")
 app.add_typer(inference_app, name="inference")
 app.add_typer(whoami_app, name="whoami")
 app.add_typer(teams_app, name="teams")
+app.add_typer(evals_app, name="eval")
 
 
 @app.callback(invoke_without_command=True)

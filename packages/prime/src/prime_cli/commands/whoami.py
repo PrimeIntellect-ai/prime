@@ -1,9 +1,11 @@
 from typing import Any, Dict
 
 import typer
-from prime_core import APIClient, APIError, Config
+from prime_core import Config
 from rich.console import Console
 from rich.table import Table
+
+from ..client import APIClient, APIError
 
 app = typer.Typer(help="Show current authenticated user and update config", no_args_is_help=False)
 console = Console()
@@ -23,6 +25,7 @@ def whoami() -> None:
         user_id = data.get("id")
         email = data.get("email")
         name = data.get("name")
+        scope = data.get("scope", {})
 
         # Update config
         config = Config()
@@ -30,7 +33,7 @@ def whoami() -> None:
             config.set_user_id(user_id)
             config.update_current_environment_file()
 
-        # Display table
+        # Display user info table
         table = Table(title="Current User")
         table.add_column("Field", style="cyan")
         table.add_column("Value", style="green")
@@ -38,6 +41,24 @@ def whoami() -> None:
         table.add_row("Name", name or "Unknown")
         table.add_row("Email", email or "Unknown")
         console.print(table)
+
+        # Display permissions table
+        if scope:
+            console.print()
+            perms_table = Table(title="Token Permissions")
+            perms_table.add_column("Scope", style="cyan")
+            perms_table.add_column("Read", style="magenta", justify="center")
+            perms_table.add_column("Write", style="magenta", justify="center")
+
+            for scope_name, permissions in scope.items():
+                if permissions is None:
+                    perms_table.add_row(scope_name, "-", "-")
+                else:
+                    read_val = "✓" if permissions.get("read", False) else "✗"
+                    write_val = "✓" if permissions.get("write", False) else "✗"
+                    perms_table.add_row(scope_name, read_val, write_val)
+
+            console.print(perms_table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

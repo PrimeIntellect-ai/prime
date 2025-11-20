@@ -45,6 +45,7 @@ prime availability list
 ## Features
 
 - **Environments** - Access hundreds of verified environments on our community hub
+- **Evaluations** - Push and manage evaluation results (supports JSON and verifiers format)
 - **GPU Resource Management** - Query and filter available GPU resources
 - **Pod Management** - Create, monitor, and terminate compute pods
 - **Sandboxes** - Easily run AI-generated code in the cloud
@@ -161,6 +162,29 @@ prime pods terminate <pod-id>
 prime pods ssh <pod-id>
 ```
 
+### Evaluations
+
+Push and manage evaluation results to the Environments hub. Supports verifiers format and JSON format.
+
+```bash
+# Auto-discover and push evaluations from current directory
+prime eval push
+
+# Push specific directory
+prime eval push examples/verifiers_example
+
+# List all evaluations
+prime eval list
+
+# Get evaluation details
+prime eval get <eval-id>
+
+# View evaluation samples
+prime eval samples <eval-id>
+```
+
+See [examples/README.md](./examples/README.md) for detailed format documentation.
+
 ### Team Management
 
 ```bash
@@ -193,6 +217,25 @@ uv run pytest packages/prime-sandboxes/tests
 ```
 
 All packages (prime-core, prime-sandboxes, prime) are installed in editable mode. Changes to code are immediately reflected.
+
+### Releasing
+
+This monorepo contains two independently versioned packages: `prime` (CLI + full SDK) and `prime-sandboxes` (lightweight SDK).
+
+Versions are single-sourced from each package's `__init__.py` file:
+- **prime**: `packages/prime/src/prime_cli/__init__.py`
+- **prime-sandboxes**: `packages/prime-sandboxes/src/prime_sandboxes/__init__.py`
+
+#### To release a new version:
+
+1. Update the `__version__` string in the appropriate `__init__.py` file
+2. Commit and push the change
+
+Tagging and publishing to PyPI is handled automatically by CI.
+
+#### Version sync considerations:
+
+When releasing `prime`, consider whether `prime-sandboxes` should also be bumped, as `prime` depends on `prime-sandboxes`. The packages can be released independently or together depending on what changed.
 
 ## License
 

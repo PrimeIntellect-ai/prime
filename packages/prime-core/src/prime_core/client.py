@@ -1,8 +1,19 @@
+import sys
 from typing import Any, Dict, Optional
 
 import httpx
 
 from .config import Config
+
+
+def _default_user_agent() -> str:
+    """Build default User-Agent string for prime-core"""
+    from prime_core import __version__
+
+    python_version = (
+        f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    )
+    return f"prime-core/{__version__} python/{python_version}"
 
 
 class APIError(Exception):
@@ -38,16 +49,16 @@ class APIClient:
         self,
         api_key: Optional[str] = None,
         require_auth: bool = True,
+        user_agent: Optional[str] = None,
     ):
         # Load config
         self.config = Config()
 
         # Use provided API key or fall back to config
         self.api_key = api_key or self.config.api_key
-        if require_auth and not self.api_key:
-            raise APIError(
-                "No API key configured. Use command 'prime login' to configure your API key.",
-            )
+
+        # Store require_auth for lazy validation on request
+        self.require_auth = require_auth
 
         # Setup client
         self.base_url = self.config.base_url
@@ -55,11 +66,20 @@ class APIClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        # Set User-Agent (default to prime-core if not provided)
+        headers["User-Agent"] = user_agent if user_agent else _default_user_agent()
+
         self.client = httpx.Client(
             headers=headers,
             follow_redirects=True,
             timeout=httpx.Timeout(30.0, connect=10.0),
         )
+
+    def _check_auth_required(self) -> None:
+        if self.require_auth and not self.api_key:
+            raise APIError(
+                "No API key configured. Use command 'prime login' to configure your API key.",
+            )
 
     def request(
         self,
@@ -70,6 +90,8 @@ class APIClient:
         timeout: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Make a request to the API"""
+        self._check_auth_required()
+
         # Ensure endpoint starts with /api/v1/
         if not endpoint.startswith("/"):
             endpoint = f"/api/v1/{endpoint}"
@@ -95,12 +117,12 @@ class APIClient:
                     "Please check that your API key has the correct permissions, "
                     "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
                     "or run 'prime login' to configure a new API key."
-                )
+                ) from e
             if e.response.status_code == 402:
                 raise PaymentRequiredError(
                     "Payment required. Please check your billing status at "
                     "https://app.primeintellect.ai/dashboard/billing"
-                )
+                ) from e
 
             # For other HTTP errors, try to extract the error message from the response
             try:
@@ -114,11 +136,16 @@ class APIClient:
 
             raise APIError(
                 f"HTTP {e.response.status_code}: {e.response.text or str(e)}"
-            )
+            ) from e
         except httpx.TimeoutException as e:
-            raise APITimeoutError(f"Request timed out: {e}")
+            raise APITimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
-            raise APIError(f"Request failed: {e}")
+            req = getattr(e, "request", None)
+            method = getattr(req, "method", "?")
+            u = getattr(req, "url", "?")
+            raise APIError(
+                f"Request failed: {e.__class__.__name__} at {method} {u}: {e}"
+            ) from e
 
     def get(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None
@@ -154,16 +181,16 @@ class AsyncAPIClient:
         self,
         api_key: Optional[str] = None,
         require_auth: bool = True,
+        user_agent: Optional[str] = None,
     ):
         # Load config
         self.config = Config()
 
         # Use provided API key or fall back to config
         self.api_key = api_key or self.config.api_key
-        if require_auth and not self.api_key:
-            raise APIError(
-                "No API key configured. Use command 'prime login' to configure your API key.",
-            )
+
+        # Store require_auth for lazy validation on request
+        self.require_auth = require_auth
 
         # Setup client
         self.base_url = self.config.base_url
@@ -171,11 +198,20 @@ class AsyncAPIClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        # Set User-Agent (default to prime-core if not provided)
+        headers["User-Agent"] = user_agent if user_agent else _default_user_agent()
+
         self.client = httpx.AsyncClient(
             headers=headers,
             follow_redirects=True,
             timeout=httpx.Timeout(30.0, connect=10.0),
         )
+
+    def _check_auth_required(self) -> None:
+        if self.require_auth and not self.api_key:
+            raise APIError(
+                "No API key configured. Use command 'prime login' to configure your API key.",
+            )
 
     async def request(
         self,
@@ -186,6 +222,8 @@ class AsyncAPIClient:
         timeout: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Make an async request to the API"""
+        self._check_auth_required()
+
         # Ensure endpoint starts with /api/v1/
         if not endpoint.startswith("/"):
             endpoint = f"/api/v1/{endpoint}"
@@ -198,6 +236,7 @@ class AsyncAPIClient:
             response = await self.client.request(
                 method, url, params=params, json=json, timeout=timeout
             )
+
             response.raise_for_status()
 
             result = response.json()
@@ -211,12 +250,12 @@ class AsyncAPIClient:
                     "Please check that your API key has the correct permissions, "
                     "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
                     "or run 'prime login' to configure a new API key."
-                )
+                ) from e
             if e.response.status_code == 402:
                 raise PaymentRequiredError(
                     "Payment required. Please check your billing status at "
                     "https://app.primeintellect.ai/dashboard/billing"
-                )
+                ) from e
 
             # For other HTTP errors, try to extract the error message from the response
             try:
@@ -230,11 +269,16 @@ class AsyncAPIClient:
 
             raise APIError(
                 f"HTTP {e.response.status_code}: {e.response.text or str(e)}"
-            )
+            ) from e
         except httpx.TimeoutException as e:
-            raise APITimeoutError(f"Request timed out: {e}")
+            raise APITimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
-            raise APIError(f"Request failed: {e}")
+            req = getattr(e, "request", None)
+            method = getattr(req, "method", "?")
+            u = getattr(req, "url", "?")
+            raise APIError(
+                f"Request failed: {e.__class__.__name__} at {method} {u}: {e}"
+            ) from e
 
     async def get(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None

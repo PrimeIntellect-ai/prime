@@ -1,9 +1,10 @@
 [project]
 name = "prime"
-version = "0.4.1"
+# Version is single-sourced from src/prime_cli/__init__.py via Hatch
+dynamic = ["version"]
 description = "Prime Intellect CLI + SDK"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 license = "MIT"
 authors = [
     { name = "Prime Intellect", email = "contact@primeintellect.ai" }
@@ -11,10 +12,11 @@ authors = [
 dependencies = [
     "prime-core",
     "prime-sandboxes>=0.1.0",
+    "prime-evals>=0.1.3",
     "typer>=0.9.0",
     "rich>=13.3.1",
     "cryptography>=41.0.0",
-    "verifiers>=0.1.5",
+    "verifiers>=0.1.6",
     "build>=1.0.0",
     "toml>=0.10.0",
 ]
@@ -46,13 +48,13 @@ dev = [
     "pytest>=7.0.0",
     "ruff>=0.13.1",
     "ty>=0.0.0a6",
-    "types-toml>=0.10.0",
-    "pre-commit>=3.5.0"
+    "types-toml>=0.10.0"
 ]
 
 [tool.uv.sources]
 prime-core = { workspace = true }
 prime-sandboxes = { workspace = true }
+prime-evals = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -132,6 +132,34 @@ class PodConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class HistoryObj(BaseModel):
+    id: str
+    name: str
+    provider_type: str = Field(..., alias="providerType")
+    provisioned_by: Optional[str] = Field(None, alias="provisionedBy")
+    type: str
+    created_at: str = Field(..., alias="createdAt")
+    terminated_at: Optional[str] = Field(None, alias="terminatedAt")
+    gpu_name: str = Field(..., alias="gpuName")
+    count: int = Field(..., alias="gpuCount")
+    socket: Optional[str] = None
+    price_hr: float = Field(..., alias="priceHr")
+    user_id: str = Field(..., alias="userId")
+    team_id: Optional[str] = Field(None, alias="teamId")
+    total_billed_price: float = Field(..., alias="totalBilledPrice")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class HistoryList(BaseModel):
+    total_count: int = Field(..., alias="total_count")
+    offset: int
+    limit: int
+    data: List[HistoryObj]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class PodsClient:
     def __init__(self, client: APIClient) -> None:
         self.client = client
@@ -194,3 +222,18 @@ class PodsClient:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to delete pod: {e.response.text}")
             raise APIError(f"Failed to delete pod: {str(e)}")
+
+    def history(
+        self,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> HistoryList:
+        """Get pods history"""
+        try:
+            params = {"offset": offset, "limit": limit}
+            response = self.client.get("/pods/history", params=params)
+            return HistoryList.model_validate(response)
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to get pods history: {e.response.text}")
+            raise APIError(f"Failed to get pods history: {str(e)}")

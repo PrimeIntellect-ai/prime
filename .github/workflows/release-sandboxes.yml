@@ -29,7 +29,7 @@ jobs:
         id: version
         working-directory: packages/prime-sandboxes
         run: |
-          VERSION=$(grep -E "^version\s*=" pyproject.toml | sed -E 's/version\s*=\s*"([^"]+)"/\1/')
+          VERSION=$(grep -E "^__version__\s*=\s*" src/prime_sandboxes/__init__.py | sed -E 's/^__version__[[:space:]]*=[[:space:]]*"([^"]+)".*$/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 

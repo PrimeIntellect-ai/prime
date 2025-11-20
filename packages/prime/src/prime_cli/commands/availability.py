@@ -1,13 +1,13 @@
 from typing import Any, Dict, List, Optional
 
 import typer
-from prime_core import APIClient, APIError
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 from ..api.availability import AvailabilityClient, GPUAvailability
-from ..helper.short_id import generate_short_id
+from ..client import APIClient, APIError
+from ..helper.short_id import generate_short_id, generate_short_id_disk
 from ..utils import output_data_as_json, status_color, validate_output_format
 from ..utils.display import STOCK_STATUS_COLORS
 
@@ -43,6 +43,16 @@ def _format_availability_for_display(gpu_entry: Dict[str, Any]) -> Dict[str, Any
     }
 
 
+def _format_disk_for_display(disk_entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Format disk data for display (both table and JSON)"""
+    return {
+        "id": disk_entry["short_id"],
+        "cloud_id": disk_entry["cloud_id"],
+        "provider": disk_entry["provider"],
+        "location": disk_entry["location"],
+    }
+
+
 @app.command()
 def gpu_types() -> None:
     """List available GPU types"""
@@ -52,17 +62,14 @@ def gpu_types() -> None:
         availability_client = AvailabilityClient(base_client)
 
         # Get availability data
-        availability_data = availability_client.get()
+        availability_data = availability_client.get_available_gpu_types()
 
         # Create display table
         table = Table(title="Available GPU Types")
         table.add_column("GPU Type", style="cyan")
 
-        # Get unique GPU types
-        gpu_types = sorted(availability_data.keys())
-
-        for gpu_type in gpu_types:
-            table.add_row(gpu_type.replace("_", " "))
+        for gpu_type in sorted(availability_data, key=lambda x: x.replace("_", " ")):
+            table.add_row(gpu_type)
 
         console.print(table)
 
@@ -90,6 +97,7 @@ def list(
     provider: Optional[str] = typer.Option(
         None, help="Filter by provider (e.g., aws, azure, google)"
     ),
+    disks: Optional[List[str]] = typer.Option(None, help="Filter by disk ids"),
     group_similar: bool = typer.Option(
         True, help="Group similar configurations from same provider"
     ),
@@ -105,7 +113,7 @@ def list(
 
         # Get availability data
         availability_data: Dict[str, List[GPUAvailability]] = availability_client.get(
-            gpu_type=gpu_type, gpu_count=gpu_count, regions=regions
+            gpu_type=gpu_type, gpu_count=gpu_count, regions=regions, disks=disks
         )
 
         # Filter by provider if provided
@@ -268,4 +276,104 @@ def list(
         import traceback
 
         traceback.print_exc()
+        raise typer.Exit(1)
+
+
+@app.command()
+def disks(
+    regions: Optional[List[str]] = typer.Option(
+        None, help="Filter by regions (e.g., united_states)"
+    ),
+    data_center_id: Optional[str] = typer.Option(
+        None, help="Filter by data center ID (e.g., US-1)"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List available disks"""
+    validate_output_format(output, console)
+
+    try:
+        # Create API clients
+        base_client = APIClient()
+        availability_client = AvailabilityClient(base_client)
+
+        # Get availability data
+        availability_data = availability_client.get_disks(
+            regions=regions, data_center_id=data_center_id
+        )
+
+        formatted_disks: List[Dict[str, Any]] = []
+        for disk in availability_data:
+            location = f"{disk.country or 'N/A'}"
+            if disk.data_center:
+                location += f" ({disk.data_center})"
+
+            # Format price safely, handling None values
+            price = (
+                f"${disk.spec.price_per_unit:.8f}"
+                if disk.spec.price_per_unit is not None
+                else "N/A"
+            )
+
+            formatted_disk = {
+                "short_id": generate_short_id_disk(disk),
+                "provider": disk.provider,
+                "location": location,
+                "stock_status": disk.stock_status,
+                "price": price,
+                "max_size": f"{disk.spec.max_count}",
+                "is_multinode": "Yes" if disk.is_multinode else "No",
+            }
+            formatted_disks.append(formatted_disk)
+
+        if output == "json":
+            json_data = formatted_disks
+            output_data = {
+                "disks": json_data,
+                "total_count": len(json_data),
+                "filters": {
+                    "regions": regions,
+                    "data_center_id": data_center_id,
+                },
+            }
+            output_data_as_json(output_data, console)
+        else:
+            # Table output
+            table = Table(title="Available Disks")
+            table.add_column("ID", style="cyan", no_wrap=True)
+            table.add_column("Provider", style="blue")
+            table.add_column("Location", style="green")
+            table.add_column("Stock", style="yellow")
+            table.add_column("Price/Hr/GB", style="magenta")
+            table.add_column("Max Size (GB)", style="blue")
+            table.add_column("Is Multinode", style="blue")
+
+            for disk in formatted_disks:
+                table.add_row(
+                    disk["short_id"],
+                    disk["provider"],
+                    disk["location"],
+                    disk["stock_status"],
+                    disk["price"],
+                    disk["max_size"],
+                    Text("Yes", style="green")
+                    if disk["is_multinode"] == "Yes"
+                    else Text("No", style="red"),
+                )
+
+            console.print(table)
+
+            console.print(
+                "\n[bold blue]To create a disk with one of these configurations:[/bold blue]"
+            )
+            console.print("1. Copy the ID of your desired configuration")
+            console.print("2. Run the following command:")
+            console.print("   [green]prime disks create --id <ID>[/green]")
+            console.print(
+                "\nThe command will guide you through an interactive ",
+                "setup process to configure the disk.",
+            )
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)

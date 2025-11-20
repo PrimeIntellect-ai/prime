@@ -1,0 +1,62 @@
+[project]
+name = "prime-evals"
+# Version is single-sourced from src/prime_evals/__init__.py via Hatch
+dynamic = ["version"]
+description = "Prime Intellect Evals SDK - Push and manage evaluations"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    { name = "Prime Intellect", email = "contact@primeintellect.ai" }
+]
+dependencies = [
+    "prime-core",
+    "httpx>=0.25.0",
+    "pydantic>=2.0.0",
+]
+keywords = ["evals", "evaluations"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+
+[project.urls]
+Homepage = "https://github.com/PrimeIntellect-ai/prime-cli"
+Documentation = "https://github.com/PrimeIntellect-ai/prime-cli/tree/main/packages/prime-evals"
+Repository = "https://github.com/PrimeIntellect-ai/prime-cli.git"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "ruff>=0.13.1",
+]
+
+[tool.uv.sources]
+prime-core = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/prime_evals/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/prime_evals"]
+# Bundle prime-core directly at the prime_core import path for PyPI distribution
+force-include = { "../prime-core/src/prime_core" = "prime_core" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+extend-select = ["E", "F", "I"]

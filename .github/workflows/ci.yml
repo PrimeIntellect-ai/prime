@@ -42,7 +42,10 @@ jobs:
 
     - name: Run tests
       working-directory: packages/prime-sandboxes
-      run: uv run pytest tests/ -v
+      env:
+        PRIME_API_KEY: ${{ secrets.PRIME_API_KEY }}
+        PRIME_TEAM_ID: ${{ secrets.PRIME_TEAM_ID }}
+      run: uv run pytest tests/ -v -n auto
 
   test-prime:
     runs-on: ubuntu-latest
@@ -68,6 +71,9 @@ jobs:
 
     - name: Run tests with pytest
       working-directory: packages/prime
+      env:
+        PRIME_API_KEY: ${{ secrets.PRIME_API_KEY }}
+        PRIME_TEAM_ID: ${{ secrets.PRIME_TEAM_ID }}
       run: uv run pytest tests/ -v
 
   type-check:

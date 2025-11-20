@@ -1,0 +1,88 @@
+name: Release prime-evals
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'packages/prime-evals/**'
+      - 'packages/prime-core/**'  # Changes to core affect evals
+      - '.github/workflows/release-evals.yml'
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: 'Force release even if tag exists'
+        required: false
+        default: 'false'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version
+        id: version
+        working-directory: packages/prime-evals
+        run: |
+          VERSION=$(grep -E "^__version__\s*=\s*" src/prime_evals/__init__.py | sed -E 's/^__version__[[:space:]]*=[[:space:]]*"([^"]+)".*$/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Check for existing tag
+        id: check_tag
+        run: |
+          TAG="prime-evals-v${{ steps.version.outputs.version }}"
+          if git tag -l "$TAG" | grep -q .; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag $TAG already exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Tag $TAG does not exist"
+          fi
+
+      - name: Set up Python
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        uses: astral-sh/setup-uv@v4
+
+      - name: Build package
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        working-directory: packages/prime-evals
+        run: |
+          # Use build script to bundle prime-core and remove it from dependencies
+          chmod +x build_for_pypi.sh
+          ./build_for_pypi.sh
+
+          # Install twine for publishing
+          uv venv
+          source .venv/bin/activate
+          uv pip install twine
+
+      - name: Create tag
+        if: steps.check_tag.outputs.exists != 'true'
+        run: |
+          TAG="prime-evals-v${{ steps.version.outputs.version }}"
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Publish to PyPI
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        working-directory: packages/prime-evals
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          source .venv/bin/activate
+          twine upload dist/*

@@ -5,13 +5,18 @@ import time
 from typing import Any, Dict, List, Optional
 
 import typer
-from prime_core import APIError, Config
 from prime_sandboxes import (
     APIClient,
+    APIError,
     BulkDeleteSandboxResponse,
+    CommandTimeoutError,
+    Config,
     CreateSandboxRequest,
+    PaymentRequiredError,
     Sandbox,
     SandboxClient,
+    SandboxNotRunningError,
+    UnauthorizedError,
 )
 from rich.console import Console
 from rich.markup import escape
@@ -25,6 +30,7 @@ from ..utils import (
     human_age,
     iso_timestamp,
     obfuscate_env_vars,
+    obfuscate_secrets,
     output_data_as_json,
     sort_by_created,
     status_color,
@@ -82,6 +88,8 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         data["exit_code"] = sandbox.exit_code
     if sandbox.environment_vars:
         data["environment_vars"] = obfuscate_env_vars(sandbox.environment_vars)
+    if sandbox.secrets:
+        data["secrets"] = obfuscate_secrets(sandbox.secrets)
     if sandbox.advanced_configs:
         data["advanced_configs"] = sandbox.advanced_configs.model_dump()
 
@@ -190,6 +198,14 @@ def list_sandboxes_cmd(
                     f"Use --page {page + 1} to see more.[/yellow]"
                 )
 
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -259,12 +275,24 @@ def get(
                 env_vars = json.dumps(sandbox_data["environment_vars"], indent=2)
                 table.add_row("Environment Variables", env_vars)
 
+            if "secrets" in sandbox_data:
+                secrets = json.dumps(sandbox_data["secrets"], indent=2)
+                table.add_row("Secrets", secrets)
+
             if "advanced_configs" in sandbox_data:
                 advanced_configs = json.dumps(sandbox_data["advanced_configs"], indent=2)
                 table.add_row("Advanced Configs", advanced_configs)
 
             console.print(table)
 
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -295,6 +323,10 @@ def create(
         None,
         help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
     ),
+    secret: Optional[List[str]] = typer.Option(
+        None,
+        help="Secrets in KEY=VALUE format. Can be specified multiple times.",
+    ),
     labels: Optional[List[str]] = typer.Option(
         None,
         "--label",
@@ -317,6 +349,15 @@ def create(
                     raise typer.Exit(1)
                 key, value = env_var.split("=", 1)
                 env_vars[key] = value
+
+        secrets_vars = {}
+        if secret:
+            for secret_var in secret:
+                if "=" not in secret_var:
+                    console.print("[red]Secrets must be in KEY=VALUE format[/red]")
+                    raise typer.Exit(1)
+                key, value = secret_var.split("=", 1)
+                secrets_vars[key] = value
 
         # Auto-generate name if not provided
         if not name:
@@ -342,6 +383,7 @@ def create(
             gpu_count=gpu_count,
             timeout_minutes=timeout_minutes,
             environment_vars=env_vars if env_vars else None,
+            secrets=secrets_vars if secrets_vars else None,
             labels=labels if labels else [],
             team_id=team_id,
         )
@@ -361,6 +403,9 @@ def create(
         if env_vars:
             obfuscated_env = obfuscate_env_vars(env_vars)
             console.print(f"Environment Variables: {obfuscated_env}")
+        if secrets_vars:
+            obfuscated_secrets = obfuscate_secrets(secrets_vars)
+            console.print(f"Secrets: {obfuscated_secrets}")
 
         if confirm_or_skip("\nDo you want to create this sandbox?", yes, default=True):
             with console.status("[bold blue]Creating sandbox...", spinner="dots"):
@@ -372,8 +417,16 @@ def create(
             )
         else:
             console.print("\nSandbox creation cancelled")
-            raise typer.Exit(0)
+            return
 
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -393,13 +446,21 @@ def delete(
         None, "--label", "-l", help="Delete all sandboxes with ALL these labels"
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    only_mine: bool = typer.Option(
+        True,
+        "--only-mine/--all-users",
+        help="Restrict '--all' deletes to only your sandboxes (default: only yours)",
+        show_default=True,
+    ),
 ) -> None:
-    """Delete one or more sandboxes by ID, by label, or all sandboxes with --all"""
+    """Delete one or more sandboxes by ID, by label, or all sandboxes with --all
+
+    --only-mine controls whether '--all' will restrict to your sandboxes or delete for all users.
+    """
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        # Validate arguments
         if sum([bool(all), bool(sandbox_ids), bool(labels)]) > 1:
             console.print(
                 "[red]Error:[/red] Cannot specify more than one of: sandbox IDs, --all, or --label"
@@ -413,54 +474,49 @@ def delete(
             raise typer.Exit(1)
 
         if all:
-            # Get all sandboxes to delete
             with console.status("[bold blue]Fetching all sandboxes...", spinner="dots"):
                 all_sandboxes = []
                 page = 1
                 while True:
                     list_response = sandbox_client.list(
-                        per_page=100, page=page, exclude_terminated=False
+                        per_page=100, page=page, exclude_terminated=True
                     )
                     all_sandboxes.extend(list_response.sandboxes)
                     if not list_response.has_next:
                         break
                     page += 1
 
-                # Filter to current user if configured, and exclude already terminated sandboxes
-                current_user_id = config.user_id
-                active_sandboxes = []
-                for s in all_sandboxes:
-                    if s.status in {"TERMINATED", "TIMEOUT"}:
-                        continue
-                    if current_user_id and s.user_id and s.user_id != current_user_id:
-                        continue
-                    active_sandboxes.append(s)
-                sandbox_ids = [s.id for s in active_sandboxes]
+                if only_mine:
+                    current_user_id = config.user_id
+                    sandboxes_to_delete = [
+                        s
+                        for s in all_sandboxes
+                        if (not current_user_id or not s.user_id or s.user_id == current_user_id)
+                    ]
+                else:
+                    sandboxes_to_delete = all_sandboxes
+
+                sandbox_ids = [s.id for s in sandboxes_to_delete]
 
                 if not sandbox_ids:
                     console.print("[yellow]No sandboxes to delete[/yellow]")
-                    raise typer.Exit(0)
+                    return
         else:
-            # Handle comma-separated IDs by splitting them
             parsed_ids = []
             for id_string in sandbox_ids or []:
-                # Split by comma and strip whitespace
                 if "," in id_string:
                     parsed_ids.extend([id.strip() for id in id_string.split(",") if id.strip()])
                 else:
                     parsed_ids.append(id_string.strip())
 
-            # Remove any empty strings and duplicates while preserving order
             cleaned_ids = []
             seen = set()
             for id in parsed_ids:
                 if id and id not in seen:
                     cleaned_ids.append(id)
                     seen.add(id)
-
             sandbox_ids = cleaned_ids
 
-        # Handle deletion by labels
         if labels:
             labels_str = ", ".join(labels)
             confirmation_msg = (
@@ -470,7 +526,7 @@ def delete(
 
             if not confirm_or_skip(confirmation_msg, yes):
                 console.print("Delete cancelled")
-                raise typer.Exit(0)
+                return
 
             with console.status("[bold blue]Deleting sandboxes by labels...", spinner="dots"):
                 result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(labels=labels)
@@ -483,13 +539,11 @@ def delete(
                 for sandbox_id in result.succeeded:
                     console.print(f"  ✓ {sandbox_id}")
 
-        # Handle single vs multiple sandbox IDs
         elif len(sandbox_ids) == 1 and not all:
-            # Single sandbox deletion
             sandbox_id = sandbox_ids[0]
             if not confirm_or_skip(f"Are you sure you want to delete sandbox {sandbox_id}?", yes):
                 console.print("Delete cancelled")
-                raise typer.Exit(0)
+                return
 
             with console.status("[bold blue]Deleting sandbox...", spinner="dots"):
                 sandbox_client.delete(sandbox_id)
@@ -497,7 +551,6 @@ def delete(
             console.print(f"[green]Successfully deleted sandbox {sandbox_id}[/green]")
 
         else:
-            # Bulk sandbox deletion
             if all:
                 confirmation_msg = (
                     f"Are you sure you want to delete ALL {len(sandbox_ids)} "
@@ -512,9 +565,8 @@ def delete(
 
             if not confirm_or_skip(confirmation_msg, yes):
                 console.print(cancel_msg)
-                raise typer.Exit(0)
+                return
 
-            # Batch the deletion into chunks of 100 to respect API limits
             batch_size = 100
             all_succeeded = []
             all_failed = []
@@ -560,6 +612,14 @@ def delete(
                     error = failure.get("error", "unknown error")
                     console.print(f"  ✗ {sandbox_id}: {error}")
 
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -585,6 +645,14 @@ def logs(sandbox_id: str) -> None:
         else:
             console.print(f"[yellow]No logs available for sandbox {sandbox_id}[/yellow]")
 
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
@@ -606,6 +674,11 @@ def run(
         "-e",
         "--env",
         help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
+    ),
+    timeout: Optional[int] = typer.Option(
+        None,
+        "--timeout",
+        help="Timeout for the command in seconds",
     ),
 ) -> None:
     """Execute a command in a sandbox"""
@@ -632,13 +705,18 @@ def run(
         if env_vars:
             obfuscated_env = obfuscate_env_vars(env_vars)
             console.print(f"[bold blue]Environment:[/bold blue] {obfuscated_env}")
+        if timeout is not None:
+            console.print(f"[bold blue]Timeout:[/bold blue] {timeout}s")
 
-        # Start timing
         start_time = time.perf_counter()
 
         with console.status("[bold blue]Running command...", spinner="dots"):
             result = sandbox_client.execute_command(
-                sandbox_id, command_str, working_dir, env_vars if env_vars else None
+                sandbox_id,
+                command_str,
+                working_dir,
+                env_vars if env_vars else None,
+                timeout=timeout,
             )
 
         # End timing
@@ -660,6 +738,23 @@ def run(
             console.print(f"\n[bold yellow]Exit code:[/bold yellow] {result.exit_code}")
             raise typer.Exit(result.exit_code)
 
+    except typer.Exit:
+        raise
+    except SandboxNotRunningError as e:
+        console.print(f"[red]Sandbox Not Running:[/red] {str(e)}")
+        console.print(
+            f"[yellow]Tip:[/yellow] Check sandbox status with: prime sandbox get {sandbox_id}"
+        )
+        raise typer.Exit(1)
+    except CommandTimeoutError as e:
+        console.print(f"[red]Command Timeout:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -710,6 +805,14 @@ def upload_file(
         console.print(f"[bold green]Size:[/bold green] {response.size:,} bytes")
         console.print(f"[bold green]Timestamp:[/bold green] {response.timestamp}")
 
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -739,7 +842,7 @@ def download_file(
         if os.path.exists(local_file):
             if not typer.confirm(f"File {local_file} already exists. Overwrite?"):
                 console.print("Download cancelled.")
-                raise typer.Exit(0)
+                return
 
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
@@ -760,11 +863,19 @@ def download_file(
         console.print(f"[bold green]Local path:[/bold green] {local_file}")
         console.print(f"[bold green]Size:[/bold green] {file_size:,} bytes")
 
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+    except typer.Exit:
+        raise
     except FileNotFoundError as e:
         console.print(f"[red]File not found:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")

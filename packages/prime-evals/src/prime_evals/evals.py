@@ -57,7 +57,7 @@ class EvalsClient:
         except APIError as e:
             raise EvalsAPIError(
                 f"Environment '{env_name}' does not exist in the hub. "
-                f"Please push the environment first with: prime env push {env_name}"
+                f"Please push the environment first with: prime env push"
             ) from e
 
     def _resolve_environments(
@@ -272,7 +272,7 @@ class AsyncEvalsClient:
         except APIError as e:
             raise EvalsAPIError(
                 f"Environment '{env_name}' does not exist in the hub. "
-                f"Please push the environment first with: prime env push {env_name}"
+                f"Please push the environment first with: prime env push"
             ) from e
 
     async def _resolve_environments(

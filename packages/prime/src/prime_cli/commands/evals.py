@@ -260,14 +260,14 @@ def _push_single_eval(
 
     environments = None
     if env_slug and not run_id and not eval_id:
-    # Determine if env_slug is a slug (owner/name) or a name
-    # Use appropriate key so _resolve_environments can properly resolve it
-    if "/" in env_slug:
-        # It's a slug (owner/name format)
-        environments = [{"slug": env_slug}]
-    else:
-        # It's a name (will be resolved by _resolve_environments)
-        environments = [{"name": env_slug}]
+        # Determine if env_slug is a slug (owner/name) or a name
+        # Use appropriate key so _resolve_environments can properly resolve it
+        if "/" in env_slug:
+            # It's a slug (owner/name format)
+            environments = [{"slug": env_slug}]
+        else:
+            # It's a name (will be resolved by _resolve_environments)
+            environments = [{"name": env_slug}]
 
     console.print()
 

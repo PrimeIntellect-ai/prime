@@ -108,17 +108,17 @@ def push_eval_results_to_hub(
     # Require accurate upstream for evaluation tracking
     if not resolved_env_slug and not resolved_env_id:
         console.print(
-            "[yellow]No upstream environment found. Cannot upload evaluation results "
-            "without specific environment identification.\nEnsure .prime/.env-metadata.json "
-            "exists in the environment directory or use --env-path to specify the "
-            "correct path.[/yellow]"
+            "[yellow]No upstream environment found. Evaluation results will not be "
+            "uploaded or viewable on the platform. Use `prime env push` to set an "
+            "upstream, or use `--env-path` to specify the correct path to the "
+            "environment.[/yellow]"
         )
         return None
 
     env_identifier = resolved_env_slug or resolved_env_id
     console.print(
         f"\n[blue]Uploading evaluation results, "
-        f"using remote environment: {env_identifier}[/blue]"
+        f"using upstream: {env_identifier}[/blue]"
     )
 
     if resolved_env_id:

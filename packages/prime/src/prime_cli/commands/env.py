@@ -2017,7 +2017,7 @@ def eval_env(
     is_resolved = display_upstream_environment_info(
         env_path=check_path, environment_name=environment
     )
-    if not is_resolved:
+    if not is_resolved and not skip_upload:
         console.print(
             "[yellow]Evaluation results will not be uploaded or viewable on the platform "
             "without a specified upstream environment. Use `prime env push` "
@@ -2134,22 +2134,27 @@ def eval_env(
         raise typer.Exit(1)
 
     # Automatically push to hub after successful eval (unless --skip-upload is used)
-    if not skip_upload and is_resolved:
-        try:
-            push_eval_results_to_hub(
-                env_name=environment,
-                model=model,
-                job_id=job_id,
-                env_path=check_path,
+    if not skip_upload:
+        if is_resolved:
+            try:
+                push_eval_results_to_hub(
+                    env_name=environment,
+                    model=model,
+                    job_id=job_id,
+                    env_path=check_path,
+                )
+            except Exception as e:
+                console.print(f"[red]Failed to push results to hub:[/red] {e}")
+                console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
+                raise typer.Exit(1)
+        else:
+            console.print(
+                "[dim]No upstream environment found. Skipped uploading evaluation "
+                "results to platform.\nUse `prime env push` to set an "
+                "upstream, or use `--env-path` to specify the correct path to the "
+                "environment if it's not the current directory.[/dim]"
             )
-        except Exception as e:
-            console.print(f"[red]Failed to push results to hub:[/red] {e}")
-            console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
-            raise typer.Exit(1)
     else:
         console.print(
-            "[dim]No upstream environment found. Skipped uploading evaluation "
-            "results to platform.\nUse `prime env push` to set an "
-            "upstream, or use `--env-path` to specify the correct path to the "
-            "environment if it's not the current directory.[/dim]"
+            "[dim]Skipped uploading evaluation results[/dim]"
         )

@@ -578,6 +578,10 @@ def push(
                         "[yellow]The content hash is based on your source files "
                         "(*.py, pyproject.toml, README.md).[/yellow]"
                     )
+                    console.print(
+                        "[dim]Alternatively, use the --auto-bump flag to push "
+                        "a new version without content changes[/dim]"
+                    )
                 else:
                     console.print(f"[red]Failed to prepare wheel upload: {e}[/red]")
                 raise typer.Exit(1)
@@ -689,6 +693,10 @@ def push(
                             console.print(
                                 "[yellow]The content hash is based on your source files "
                                 "(*.py, pyproject.toml, README.md).[/yellow]"
+                            )
+                            console.print(
+                                "[dim]Alternatively, use the --auto-bump flag to push "
+                                "a new version without content changes[/dim]"
                             )
                         else:
                             console.print(f"[red]Failed to prepare source upload: {e}[/red]")

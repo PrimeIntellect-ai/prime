@@ -71,19 +71,24 @@ class EvalsClient:
             resolved_env = env.copy()
             # Handle different identifier types explicitly
             # Check for explicit "slug" or "name" keys first
-            if "slug" in resolved_env:
-                # Owner/name format, resolve to database ID
-                resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("slug"))
-            elif "name" in resolved_env:
-                # Just a name, resolve to database ID (get-or-create)
-                resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("name"))
-            elif "id" in resolved_env:
-                # "id" key exists - it's already a database ID
-                pass
-            else:
-                # Skip environments without valid identifiers
+            try:
+                if "slug" in resolved_env:
+                    # Owner/name format, resolve to database ID
+                    resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("slug"))
+                elif "name" in resolved_env:
+                    # Just a name, resolve to database ID (get-or-create)
+                    resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("name"))
+                elif "id" in resolved_env:
+                    # "id" key exists - it's already a database ID
+                    pass
+                else:
+                    # Skip environments without valid identifiers
+                    continue
+                resolved_environments.append(resolved_env)
+            except EvalsAPIError:
+                # Skip environments that don't exist in the hub
+                # Continue processing remaining environments
                 continue
-            resolved_environments.append(resolved_env)
         return resolved_environments
 
     def create_evaluation(
@@ -285,28 +290,33 @@ class AsyncEvalsClient:
             resolved_env = env.copy()
             # Handle different identifier types explicitly
             # Check for explicit "slug" or "name" keys first
-            if "slug" in resolved_env:
-                # Owner/name format, resolve to database ID
-                resolved_env["id"] = await self._resolve_environment_id(
-                    resolved_env.pop("slug")
-                )
-            elif "name" in resolved_env:
-                # Just a name, resolve to database ID (get-or-create)
-                resolved_env["id"] = await self._resolve_environment_id(
-                    resolved_env.pop("name")
-                )
-            elif "id" in resolved_env:
-                # "id" key exists - it's already a database ID
-                pass
-            else:
-                # Skip environments without valid identifiers
+            try:
+                if "slug" in resolved_env:
+                    # Owner/name format, resolve to database ID
+                    resolved_env["id"] = await self._resolve_environment_id(
+                        resolved_env.pop("slug")
+                    )
+                elif "name" in resolved_env:
+                    # Just a name, resolve to database ID (get-or-create)
+                    resolved_env["id"] = await self._resolve_environment_id(
+                        resolved_env.pop("name")
+                    )
+                elif "id" in resolved_env:
+                    # "id" key exists - it's already a database ID
+                    pass
+                else:
+                    # Skip environments without valid identifiers
+                    return None
+                return resolved_env
+            except EvalsAPIError:
+                # Skip environments that don't exist in the hub
+                # Return None to filter them out
                 return None
-            return resolved_env
 
         resolved_environments_list = await asyncio.gather(
             *[resolve_env(env) for env in environments]
         )
-        # Filter out None values (environments without valid identifiers)
+        # Filter out None values (environments without valid identifiers or resolution failures)
         return [env for env in resolved_environments_list if env is not None]
 
     async def create_evaluation(

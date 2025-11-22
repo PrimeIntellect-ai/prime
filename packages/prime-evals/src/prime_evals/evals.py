@@ -31,18 +31,29 @@ class EvalsClient:
 
     def _resolve_environment_id(self, env_name: str) -> str:
         """
-        Resolve environment ID to owner/name format.
+        Resolve environment ID from name or slug (owner/name format).
+
+        If env_name is in owner/name format, resolves by owner slug.
+        Otherwise, resolves by name for the authenticated user (get-or-create).
 
         Raises:
             EvalsAPIError: If the environment does not exist (404)
         """
+        owner_slug = None
+        name = env_name
+
+        # Check if it's in owner/name format
         if re.match(r"^[^/]+/[^/]+$", env_name):
-            env_name = env_name.split("/", 1)[1]
+            owner_slug, name = env_name.split("/", 1)
 
         try:
-            resolve_data: Dict[str, Any] = {"name": env_name}
+            resolve_data: Dict[str, Any] = {"name": name}
 
-            if self.client.config.team_id:
+            if owner_slug:
+                # Full slug resolution - look up existing environment by owner
+                resolve_data["owner_slug"] = owner_slug
+            elif self.client.config.team_id:
+                # Use team_id for get-or-create behavior
                 resolve_data["team_id"] = self.client.config.team_id
 
             response = self.client.post("/environmentshub/resolve", json=resolve_data)
@@ -53,6 +64,32 @@ class EvalsClient:
                 f"Environment '{env_name}' does not exist in the hub. "
                 f"Please push the environment first with: prime env push {env_name}"
             ) from e
+
+    def _resolve_environments(
+        self, environments: List[Dict[str, str]]
+    ) -> List[Dict[str, str]]:
+        """
+        Resolve a list of environments from various identifier formats to database IDs.
+        """
+        resolved_environments = []
+        for env in environments:
+            resolved_env = env.copy()
+            # Handle different identifier types explicitly
+            # Check for explicit "slug" or "name" keys first
+            if "slug" in resolved_env:
+                # Owner/name format, resolve to database ID
+                resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("slug"))
+            elif "name" in resolved_env:
+                # Just a name, resolve to database ID (get-or-create)
+                resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("name"))
+            elif "id" in resolved_env:
+                # "id" key exists - it's already a database ID
+                pass
+            else:
+                # Skip environments without valid identifiers
+                continue
+            resolved_environments.append(resolved_env)
+        return resolved_environments
 
     def create_evaluation(
         self,
@@ -88,25 +125,7 @@ class EvalsClient:
 
         resolved_environments = None
         if environments:
-            # Initialize as empty list before resolution
-            resolved_environments = []
-            for env in environments:
-                resolved_env = env.copy()
-                # Handle different identifier types explicitly
-                # Check for explicit "slug" or "name" keys first
-                if "slug" in resolved_env:
-                    # Owner/name format, resolve to database ID
-                    resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("slug"))
-                elif "name" in resolved_env:
-                    # Just a name, resolve to database ID (get-or-create)
-                    resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("name"))
-                elif "id" in resolved_env:
-                    # "id" key exists - it's already a database ID
-                    pass
-                else:
-                    # Skip environments without valid identifiers
-                    continue
-                resolved_environments.append(resolved_env)
+            resolved_environments = self._resolve_environments(environments)
             
             # Validate that we have at least one resolved environment if run_id is not provided
             # This check happens AFTER resolution to catch cases where all environments were invalid
@@ -227,18 +246,29 @@ class AsyncEvalsClient:
 
     async def _resolve_environment_id(self, env_name: str) -> str:
         """
-        Resolve environment ID to owner/name format.
+        Resolve environment ID from name or slug (owner/name format).
+
+        If env_name is in owner/name format, resolves by owner slug.
+        Otherwise, resolves by name for the authenticated user (get-or-create).
 
         Raises:
             EvalsAPIError: If the environment does not exist (404)
         """
+        owner_slug = None
+        name = env_name
+
+        # Check if it's in owner/name format
         if re.match(r"^[^/]+/[^/]+$", env_name):
-            env_name = env_name.split("/", 1)[1]
+            owner_slug, name = env_name.split("/", 1)
 
         try:
-            resolve_data: Dict[str, Any] = {"name": env_name}
+            resolve_data: Dict[str, Any] = {"name": name}
 
-            if self.client.config.team_id:
+            if owner_slug:
+                # Full slug resolution - look up existing environment by owner
+                resolve_data["owner_slug"] = owner_slug
+            elif self.client.config.team_id:
+                # Use team_id for get-or-create behavior
                 resolve_data["team_id"] = self.client.config.team_id
 
             response = await self.client.post("/environmentshub/resolve", json=resolve_data)
@@ -249,6 +279,40 @@ class AsyncEvalsClient:
                 f"Environment '{env_name}' does not exist in the hub. "
                 f"Please push the environment first with: prime env push {env_name}"
             ) from e
+
+    async def _resolve_environments(
+        self, environments: List[Dict[str, str]]
+    ) -> List[Dict[str, str]]:
+        """
+        Resolve a list of environments from various identifier formats to database IDs.
+        """
+        async def resolve_env(env: Dict[str, str]) -> Optional[Dict[str, str]]:
+            resolved_env = env.copy()
+            # Handle different identifier types explicitly
+            # Check for explicit "slug" or "name" keys first
+            if "slug" in resolved_env:
+                # Owner/name format, resolve to database ID
+                resolved_env["id"] = await self._resolve_environment_id(
+                    resolved_env.pop("slug")
+                )
+            elif "name" in resolved_env:
+                # Just a name, resolve to database ID (get-or-create)
+                resolved_env["id"] = await self._resolve_environment_id(
+                    resolved_env.pop("name")
+                )
+            elif "id" in resolved_env:
+                # "id" key exists - it's already a database ID
+                pass
+            else:
+                # Skip environments without valid identifiers
+                return None
+            return resolved_env
+
+        resolved_environments_list = await asyncio.gather(
+            *[resolve_env(env) for env in environments]
+        )
+        # Filter out None values (environments without valid identifiers)
+        return [env for env in resolved_environments_list if env is not None]
 
     async def create_evaluation(
         self,
@@ -284,36 +348,7 @@ class AsyncEvalsClient:
 
         resolved_environments = None
         if environments:
-            # Initialize as empty list before resolution
-            resolved_environments = []
-
-            async def resolve_env(env: Dict[str, str]) -> Optional[Dict[str, str]]:
-                resolved_env = env.copy()
-                # Handle different identifier types explicitly
-                # Check for explicit "slug" or "name" keys first
-                if "slug" in resolved_env:
-                    # Owner/name format, resolve to database ID
-                    resolved_env["id"] = await self._resolve_environment_id(
-                        resolved_env.pop("slug")
-                    )
-                elif "name" in resolved_env:
-                    # Just a name, resolve to database ID (get-or-create)
-                    resolved_env["id"] = await self._resolve_environment_id(
-                        resolved_env.pop("name")
-                    )
-                elif "id" in resolved_env:
-                    # "id" key exists - it's already a database ID
-                    pass
-                else:
-                    # Skip environments without valid identifiers
-                    return None
-                return resolved_env
-
-            resolved_environments_list = await asyncio.gather(
-                *[resolve_env(env) for env in environments]
-            )
-            # Filter out None values (environments without valid identifiers)
-            resolved_environments = [env for env in resolved_environments_list if env is not None]
+            resolved_environments = await self._resolve_environments(environments)
             
             # Validate that we have at least one resolved environment if run_id is not provided
             # This check happens AFTER resolution to catch cases where all environments were invalid

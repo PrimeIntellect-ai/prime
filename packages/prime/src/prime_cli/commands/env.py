@@ -68,10 +68,10 @@ def display_upstream_environment_info(
     if env_metadata and env_metadata.get("owner") and env_metadata.get("name"):
         owner = env_metadata.get("owner")
         env_name = env_metadata.get("name")
-        console.print(f"[blue]Using upstream environment {owner}/{env_name}[/blue]\n")
+        console.print(f"[dim]Using upstream environment {owner}/{env_name}[/dim]\n")
         return True
     else:
-        console.print("[blue]No upstream environment found.[/blue]\n")
+        console.print("[dim]No upstream environment found.[/dim]\n")
         return False
 
 
@@ -803,6 +803,13 @@ def push(
                             )
                             existing_metadata = {}
                     
+                    # Check if upstream (owner/name) changed
+                    old_owner = existing_metadata.get("owner")
+                    old_name = existing_metadata.get("name")
+                    upstream_changed = False
+                    if existing_metadata and (old_owner != owner_name or old_name != env_name):
+                        upstream_changed = True
+                    
                     # Merge existing metadata with new push information
                     env_metadata = {
                         **existing_metadata,  # Preserve existing fields
@@ -824,6 +831,12 @@ def push(
                         message = Text("Saved environment metadata to ", style="dim")
                         message.append(str(metadata_path), style="dim")
                         console.print(message)
+                    
+                    # Report upstream change if it occurred
+                    if upstream_changed:
+                        upstream_message = Text("Upstream set to ", style="dim")
+                        upstream_message.append(f"{owner_name}/{env_name}", style="dim")
+                        console.print(upstream_message)
                 except Exception as e:
                     console.print(
                         f"[yellow]Warning: Could not save environment metadata: {e}[/yellow]"
@@ -1999,7 +2012,8 @@ def eval_env(
     if not is_resolved:
         console.print(
             "[yellow]Evaluation results will not be uploaded or viewable on the platform "
-            "without a specified upstream environment.[/yellow]"
+            "without a specified upstream environment. Use `prime env push` "
+            "to set an upstream.[/yellow]"
         )
 
     config = Config()
@@ -2124,3 +2138,10 @@ def eval_env(
             console.print(f"[red]Failed to push results to hub:[/red] {e}")
             console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
             raise typer.Exit(1)
+    else:
+        console.print(
+            "[dim]No upstream environment found. Skipped uploading evaluation "
+            "results to platform.\nUse `prime env push` to set an "
+            "upstream, or use `--env-path` to specify the correct path to the "
+            "environment if it's not the current directory.[/dim]"
+        )

@@ -906,10 +906,9 @@ def expose_port(
     sandbox_id: str = typer.Argument(..., help="Sandbox ID to expose port from"),
     port: int = typer.Argument(..., help="Port number to expose"),
     name: Optional[str] = typer.Option(None, help="Optional name for the exposed port"),
-    protocol: str = typer.Option("HTTP", help="Protocol (HTTP, HTTPS, TCP, SSH, UDP, RDP)"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Expose a port from a sandbox"""
+    """Expose an HTTP port from a sandbox"""
     validate_output_format(output, console)
 
     try:
@@ -917,7 +916,7 @@ def expose_port(
         sandbox_client = SandboxClient(base_client)
 
         with console.status("[bold blue]Exposing port...", spinner="dots"):
-            exposed = sandbox_client.expose(sandbox_id, port, name, protocol)
+            exposed = sandbox_client.expose(sandbox_id, port, name)
 
         if output == "json":
             output_data_as_json(exposed.model_dump(), console)
@@ -927,7 +926,6 @@ def expose_port(
             console.print(f"[bold green]Port:[/bold green] {exposed.port}")
             if exposed.name:
                 console.print(f"[bold green]Name:[/bold green] {exposed.name}")
-            console.print(f"[bold green]Protocol:[/bold green] {exposed.protocol}")
             console.print(f"[bold green]URL:[/bold green] {exposed.url}")
             console.print(f"[bold green]TLS Socket:[/bold green] {exposed.tls_socket}")
 
@@ -1061,7 +1059,7 @@ def ssh_connect(
         # Expose SSH port
         console.print(f"[bold blue]Exposing SSH port {port}...[/bold blue]")
         with console.status("[bold blue]Setting up SSH tunnel...", spinner="dots"):
-            exposed = sandbox_client.expose(sandbox_id, port, "ssh", "SSH")
+            exposed = sandbox_client.expose(sandbox_id, port, "ssh")
 
         exposure_id = exposed.exposure_id
         ssh_host = exposed.url.replace(f":{port}", "")  # Remove port from URL if present

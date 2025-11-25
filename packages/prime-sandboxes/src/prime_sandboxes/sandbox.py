@@ -532,15 +532,9 @@ class SandboxClient:
         sandbox_id: str,
         port: int,
         name: Optional[str] = None,
-        protocol: str = "HTTP",
     ) -> ExposedPort:
-        """Expose a port from a sandbox."""
-        if protocol.upper() != "HTTP":
-            raise ValueError(
-                f"Protocol '{protocol}' is not yet supported. "
-                "Only HTTP is currently available. TCP/UDP support is coming soon."
-            )
-        request = ExposePortRequest(port=port, name=name, protocol=protocol)
+        """Expose an HTTP port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name)
         response = self.client.request(
             "POST",
             f"/sandbox/{sandbox_id}/expose",
@@ -977,15 +971,9 @@ class AsyncSandboxClient:
         sandbox_id: str,
         port: int,
         name: Optional[str] = None,
-        protocol: str = "HTTP",
     ) -> ExposedPort:
-        """Expose a port from a sandbox."""
-        if protocol.upper() != "HTTP":
-            raise ValueError(
-                f"Protocol '{protocol}' is not yet supported. "
-                "Only HTTP is currently available. TCP/UDP support is coming soon."
-            )
-        request = ExposePortRequest(port=port, name=name, protocol=protocol)
+        """Expose an HTTP port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name)
         response = await self.client.request(
             "POST",
             f"/sandbox/{sandbox_id}/expose",

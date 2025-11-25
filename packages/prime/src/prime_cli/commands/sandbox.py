@@ -1,8 +1,6 @@
 import json
 import random
-import shutil
 import string
-import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
@@ -908,7 +906,10 @@ def expose_port(
     name: Optional[str] = typer.Option(None, help="Optional name for the exposed port"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Expose an HTTP port from a sandbox"""
+    """Expose an HTTP port from a sandbox.
+
+    Currently only HTTP is supported. TCP, UDP, and SSH support coming soon.
+    """
     validate_output_format(output, console)
 
     try:
@@ -1020,112 +1021,4 @@ def list_ports(
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
-        raise typer.Exit(1)
-
-
-@app.command("ssh", no_args_is_help=True)
-def ssh_connect(
-    sandbox_id: str = typer.Argument(..., help="Sandbox ID to SSH into"),
-    user: str = typer.Option("root", help="SSH user to connect as"),
-    port: int = typer.Option(22, help="SSH port in the sandbox"),
-    identity: Optional[str] = typer.Option(
-        None, "--identity", "-i", help="Path to SSH private key file"
-    ),
-    ssh_args: Optional[List[str]] = typer.Argument(
-        None, help="Additional SSH arguments after -- (e.g., -- -v for verbose)"
-    ),
-) -> None:
-    """Connect to a sandbox via SSH."""
-    try:
-        # Check if ssh command is available
-        if not shutil.which("ssh"):
-            console.print("[red]Error:[/red] SSH client not found. Please install OpenSSH.")
-            raise typer.Exit(1)
-
-        base_client = APIClient()
-        sandbox_client = SandboxClient(base_client)
-
-        # Check if sandbox is running
-        with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
-            sandbox = sandbox_client.get(sandbox_id)
-
-        if sandbox.status != "RUNNING":
-            console.print(f"[red]Error:[/red] Sandbox is not running (status: {sandbox.status})")
-            console.print(
-                f"[yellow]Tip:[/yellow] Check sandbox status with: prime sandbox get {sandbox_id}"
-            )
-            raise typer.Exit(1)
-
-        # Expose SSH port
-        console.print(f"[bold blue]Exposing SSH port {port}...[/bold blue]")
-        with console.status("[bold blue]Setting up SSH tunnel...", spinner="dots"):
-            exposed = sandbox_client.expose(sandbox_id, port, "ssh")
-
-        exposure_id = exposed.exposure_id
-        ssh_host = exposed.url.replace(f":{port}", "")  # Remove port from URL if present
-
-        try:
-            console.print("[green]✓[/green] SSH tunnel established!")
-            console.print(f"[bold green]Connecting to:[/bold green] {user}@{ssh_host}")
-            console.print(f"[bold green]Port:[/bold green] {port}")
-            console.print()
-            console.print("[dim]Press Ctrl+D or type 'exit' to disconnect[/dim]")
-            console.print()
-
-            # Build SSH command
-            ssh_cmd = ["ssh", f"{user}@{ssh_host}", "-p", str(port)]
-
-            # Add identity file if specified
-            if identity:
-                ssh_cmd.extend(["-i", identity])
-
-            # Add any additional SSH arguments
-            if ssh_args:
-                ssh_cmd.extend(ssh_args)
-
-            # Connect via SSH (this will be interactive)
-            result = subprocess.run(ssh_cmd)
-
-            # Check if SSH connection failed
-            if result.returncode != 0 and result.returncode != 255:
-                console.print(
-                    f"\n[yellow]SSH connection exited with code {result.returncode}[/yellow]"
-                )
-
-        finally:
-            # Clean up the exposure
-            console.print("\n[bold blue]Cleaning up SSH tunnel...[/bold blue]")
-            with console.status("[bold blue]Removing exposure...", spinner="dots"):
-                sandbox_client.unexpose(sandbox_id, exposure_id)
-            console.print("[green]✓[/green] SSH tunnel closed")
-
-    except KeyboardInterrupt:
-        console.print("\n[yellow]SSH connection interrupted[/yellow]")
-        # Try to clean up if we have an exposure_id
-        if "exposure_id" in locals():
-            try:
-                console.print("[bold blue]Cleaning up SSH tunnel...[/bold blue]")
-                sandbox_client.unexpose(sandbox_id, exposure_id)
-                console.print("[green]✓[/green] SSH tunnel closed")
-            except Exception:
-                pass
-        raise typer.Exit(130)
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
-        # Try to clean up if we have an exposure_id
-        if "exposure_id" in locals():
-            try:
-                sandbox_client.unexpose(sandbox_id, exposure_id)
-            except Exception:
-                pass
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
-        # Try to clean up if we have an exposure_id
-        if "exposure_id" in locals():
-            try:
-                sandbox_client.unexpose(sandbox_id, exposure_id)
-            except Exception:
-                pass
         raise typer.Exit(1)

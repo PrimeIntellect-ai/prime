@@ -102,6 +102,7 @@ class UpdateSandboxRequest(BaseModel):
     timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
     secrets: Optional[Dict[str, str]] = None
+    network_access: Optional[bool] = None
 
 
 class CommandRequest(BaseModel):

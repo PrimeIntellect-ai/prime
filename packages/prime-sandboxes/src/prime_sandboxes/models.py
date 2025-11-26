@@ -146,3 +146,29 @@ class BulkDeleteSandboxResponse(BaseModel):
     succeeded: List[str]
     failed: List[Dict[str, str]]
     message: str
+
+
+class ExposePortRequest(BaseModel):
+    """Request to expose a port"""
+
+    port: int
+    name: Optional[str] = None
+
+
+class ExposedPort(BaseModel):
+    """Information about an exposed port"""
+
+    exposure_id: str
+    sandbox_id: str
+    port: int
+    name: Optional[str]
+    url: str
+    tls_socket: str
+    protocol: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class ListExposedPortsResponse(BaseModel):
+    """Response for listing exposed ports"""
+
+    exposures: List[ExposedPort]

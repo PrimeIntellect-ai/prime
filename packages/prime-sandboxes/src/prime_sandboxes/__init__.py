@@ -27,7 +27,10 @@ from .models import (
     CommandRequest,
     CommandResponse,
     CreateSandboxRequest,
+    ExposedPort,
+    ExposePortRequest,
     FileUploadResponse,
+    ListExposedPortsResponse,
     Sandbox,
     SandboxListResponse,
     SandboxStatus,
@@ -60,6 +63,10 @@ __all__ = [
     "BulkDeleteSandboxRequest",
     "BulkDeleteSandboxResponse",
     "AdvancedConfigs",
+    # Port Forwarding
+    "ExposePortRequest",
+    "ExposedPort",
+    "ListExposedPortsResponse",
     # Exceptions
     "APIError",
     "UnauthorizedError",

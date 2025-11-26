@@ -22,7 +22,10 @@ from .models import (
     BulkDeleteSandboxResponse,
     CommandResponse,
     CreateSandboxRequest,
+    ExposedPort,
+    ExposePortRequest,
     FileUploadResponse,
+    ListExposedPortsResponse,
     Sandbox,
     SandboxListResponse,
     SandboxLogsResponse,
@@ -524,6 +527,30 @@ class SandboxClient:
         except Exception as e:
             raise APIError(f"Download failed: {e.__class__.__name__}: {e}") from e
 
+    def expose(
+        self,
+        sandbox_id: str,
+        port: int,
+        name: Optional[str] = None,
+    ) -> ExposedPort:
+        """Expose an HTTP port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name)
+        response = self.client.request(
+            "POST",
+            f"/sandbox/{sandbox_id}/expose",
+            json=request.model_dump(by_alias=False, exclude_none=True),
+        )
+        return ExposedPort.model_validate(response)
+
+    def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
+        """Unexpose a port from a sandbox."""
+        self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
+
+    def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
+        """List all exposed ports for a sandbox"""
+        response = self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
+        return ListExposedPortsResponse.model_validate(response)
+
 
 class AsyncSandboxClient:
     """Async client for sandbox API operations"""
@@ -938,3 +965,27 @@ class AsyncSandboxClient:
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Async context manager exit"""
         await self.aclose()
+
+    async def expose(
+        self,
+        sandbox_id: str,
+        port: int,
+        name: Optional[str] = None,
+    ) -> ExposedPort:
+        """Expose an HTTP port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name)
+        response = await self.client.request(
+            "POST",
+            f"/sandbox/{sandbox_id}/expose",
+            json=request.model_dump(by_alias=False, exclude_none=True),
+        )
+        return ExposedPort.model_validate(response)
+
+    async def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
+        """Unexpose a port from a sandbox."""
+        await self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
+
+    async def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
+        """List all exposed ports for a sandbox"""
+        response = await self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
+        return ListExposedPortsResponse.model_validate(response)

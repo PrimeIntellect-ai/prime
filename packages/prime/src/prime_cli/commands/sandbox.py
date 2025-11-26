@@ -897,3 +897,128 @@ def reset_cache(
         except Exception as e:
             console.print(f"[red]Error clearing cache: {e}[/red]")
             raise typer.Exit(1)
+
+
+@app.command("expose", no_args_is_help=True)
+def expose_port(
+    sandbox_id: str = typer.Argument(..., help="Sandbox ID to expose port from"),
+    port: int = typer.Argument(..., help="Port number to expose"),
+    name: Optional[str] = typer.Option(None, help="Optional name for the exposed port"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Expose an HTTP port from a sandbox.
+
+    Currently only HTTP is supported. TCP, UDP, and SSH support coming soon.
+    """
+    validate_output_format(output, console)
+
+    try:
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        with console.status("[bold blue]Exposing port...", spinner="dots"):
+            exposed = sandbox_client.expose(sandbox_id, port, name)
+
+        if output == "json":
+            output_data_as_json(exposed.model_dump(), console)
+        else:
+            console.print("[green]✓[/green] Port exposed successfully!")
+            console.print(f"[bold green]Exposure ID:[/bold green] {exposed.exposure_id}")
+            console.print(f"[bold green]Port:[/bold green] {exposed.port}")
+            if exposed.name:
+                console.print(f"[bold green]Name:[/bold green] {exposed.name}")
+            console.print(f"[bold green]URL:[/bold green] {exposed.url}")
+            console.print(f"[bold green]TLS Socket:[/bold green] {exposed.tls_socket}")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
+        raise typer.Exit(1)
+
+
+@app.command("unexpose", no_args_is_help=True)
+def unexpose_port(
+    sandbox_id: str = typer.Argument(..., help="Sandbox ID"),
+    exposure_id: str = typer.Argument(..., help="Exposure ID to remove"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Unexpose a port from a sandbox"""
+    try:
+        if not confirm_or_skip(
+            f"Are you sure you want to unexpose {exposure_id}?", yes, default=True
+        ):
+            console.print("Unexpose cancelled")
+            raise typer.Exit(0)
+
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        with console.status("[bold blue]Unexposing port...", spinner="dots"):
+            sandbox_client.unexpose(sandbox_id, exposure_id)
+
+        console.print(f"[green]✓ Successfully unexposed {exposure_id}[/green]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
+        raise typer.Exit(1)
+
+
+@app.command("list-ports", no_args_is_help=True)
+def list_ports(
+    sandbox_id: str = typer.Argument(..., help="Sandbox ID"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List all exposed ports for a sandbox"""
+    validate_output_format(output, console)
+
+    try:
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        with console.status("[bold blue]Fetching exposed ports...", spinner="dots"):
+            response = sandbox_client.list_exposed_ports(sandbox_id)
+
+        if output == "json":
+            output_data_as_json(
+                {"exposures": [exp.model_dump() for exp in response.exposures]}, console
+            )
+        else:
+            if not response.exposures:
+                console.print(f"[yellow]No exposed ports for sandbox {sandbox_id}[/yellow]")
+            else:
+                table = build_table(
+                    f"Exposed Ports for Sandbox {sandbox_id}",
+                    [
+                        ("Exposure ID", "cyan"),
+                        ("Port", "blue"),
+                        ("Name", "green"),
+                        ("URL", "magenta"),
+                        ("TLS Socket", "yellow"),
+                    ],
+                )
+
+                for exp in response.exposures:
+                    table.add_row(
+                        exp.exposure_id,
+                        str(exp.port),
+                        exp.name or "N/A",
+                        exp.url,
+                        exp.tls_socket,
+                    )
+
+                console.print(table)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
+        raise typer.Exit(1)

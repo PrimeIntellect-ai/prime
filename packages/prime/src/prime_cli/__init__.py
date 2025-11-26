@@ -1,5 +1,12 @@
 """Prime Intellect CLI."""
 
+from prime_cli.core import (
+    APIClient,
+    APIError,
+    APITimeoutError,
+    AsyncAPIClient,
+    Config,
+)
 from prime_sandboxes import (
     AsyncSandboxClient,
     CommandRequest,
@@ -13,15 +20,7 @@ from prime_sandboxes import (
     UpdateSandboxRequest,
 )
 
-from prime_cli.core import (
-    APIClient,
-    APIError,
-    APITimeoutError,
-    AsyncAPIClient,
-    Config,
-)
-
-__version__ = "0.4.12"
+__version__ = "0.4.13"
 
 __all__ = [
     "APIClient",

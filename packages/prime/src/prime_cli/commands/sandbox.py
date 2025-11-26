@@ -73,6 +73,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "disk_size_gb": sandbox.disk_size_gb,
         "disk_mount_path": sandbox.disk_mount_path,
         "gpu_count": sandbox.gpu_count,
+        "network_access": sandbox.network_access,
         "timeout_minutes": sandbox.timeout_minutes,
         "labels": sandbox.labels,
         "created_at": iso_timestamp(sandbox.created_at),
@@ -254,6 +255,11 @@ def get(
             table.add_row("Disk Size (GB)", str(sandbox_data["disk_size_gb"]))
             table.add_row("Disk Mount Path", sandbox_data["disk_mount_path"])
             table.add_row("GPU Count", str(sandbox_data["gpu_count"]))
+            network_display = Text(
+                "Enabled" if sandbox_data["network_access"] else "Disabled",
+                style="green" if sandbox_data["network_access"] else "yellow",
+            )
+            table.add_row("Network Access", network_display)
             table.add_row("Timeout (minutes)", str(sandbox_data["timeout_minutes"]))
 
             # Show labels
@@ -315,6 +321,11 @@ def create(
     memory_gb: int = typer.Option(2, help="Memory in GB"),
     disk_size_gb: int = typer.Option(10, help="Disk size in GB"),
     gpu_count: int = typer.Option(0, help="Number of GPUs"),
+    network_access: bool = typer.Option(
+        True,
+        "--network-access/--no-network-access",
+        help="Allow outbound internet access (enabled by default)",
+    ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
@@ -381,6 +392,7 @@ def create(
             memory_gb=memory_gb,
             disk_size_gb=disk_size_gb,
             gpu_count=gpu_count,
+            network_access=network_access,
             timeout_minutes=timeout_minutes,
             environment_vars=env_vars if env_vars else None,
             secrets=secrets_vars if secrets_vars else None,
@@ -396,6 +408,8 @@ def create(
         console.print(f"Resources: {cpu_cores} CPU, {memory_gb}GB RAM, {disk_size_gb}GB disk")
         if gpu_count > 0:
             console.print(f"GPUs: {gpu_count}")
+        network_status = "[green]Enabled[/green]" if network_access else "[yellow]Disabled[/yellow]"
+        console.print(f"Network Access: {network_status}")
         console.print(f"Timeout: {timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
         if labels:

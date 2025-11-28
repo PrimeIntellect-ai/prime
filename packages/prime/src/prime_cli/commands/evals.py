@@ -240,7 +240,7 @@ def _discover_eval_outputs() -> list[Path]:
 
 def _push_single_eval(
     config_path: str,
-    env_id: Optional[str],
+    env_slug: Optional[str],
     run_id: Optional[str],
     eval_id: Optional[str],
 ) -> str:
@@ -255,12 +255,19 @@ def _push_single_eval(
         console.print(f"[blue]✓ Loaded eval data (verifiers format):[/blue] {path}")
 
     detected_env = eval_data.get("env_id") or eval_data.get("env")
-    if not env_id and detected_env and not run_id and not eval_id:
-        env_id = detected_env
+    if not env_slug and detected_env and not run_id and not eval_id:
+        env_slug = detected_env
 
     environments = None
-    if env_id and not run_id and not eval_id:
-        environments = [{"id": env_id}]
+    if env_slug and not run_id and not eval_id:
+        # Determine if env_slug is a slug (owner/name) or a name
+        # Use appropriate key so _resolve_environments can properly resolve it
+        if "/" in env_slug:
+            # It's a slug (owner/name format)
+            environments = [{"slug": env_slug}]
+        else:
+            # It's a name (will be resolved by _resolve_environments)
+            environments = [{"name": env_slug}]
 
     console.print()
 

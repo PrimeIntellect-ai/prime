@@ -1,5 +1,5 @@
 [project]
-name = "prime-mcp"
+name = "prime-mcp-server"
 dynamic = ["version"]
 description = "Prime Intellect MCP Server"
 readme = "README.md"
@@ -29,7 +29,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/PrimeIntellect-ai/prime"
-Documentation = "https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-mcp"
+Documentation = "https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-mcp-server"
 Repository = "https://github.com/PrimeIntellect-ai/prime.git"
 
 [project.optional-dependencies]

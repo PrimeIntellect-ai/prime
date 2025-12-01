@@ -16,12 +16,12 @@ Model Context Protocol (MCP) server for Prime Intellect - manage GPU pods, check
 ## Installation
 
 ```bash
-pip install prime-mcp
+pip install prime-mcp-server
 ```
 
 Or with uv:
 ```bash
-uv pip install prime-mcp
+uv pip install prime-mcp-server
 ```
 
 ## Configuration
@@ -67,7 +67,7 @@ For complete documentation of all available tools and their parameters, see [doc
 ```bash
 # Clone the repo
 git clone https://github.com/PrimeIntellect-ai/prime.git
-cd prime/packages/prime-mcp
+cd prime/packages/prime-mcp-server
 
 # Install dependencies
 uv sync

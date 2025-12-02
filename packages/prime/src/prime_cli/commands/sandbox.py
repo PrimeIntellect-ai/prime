@@ -926,12 +926,7 @@ def expose_port(
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Expose a port from a sandbox.
-
-    Protocols:
-      - HTTP: Exposed via Cloudflare Tunnel with HTTPS URL (default)
-      - TCP/UDP: Exposed via LoadBalancer with direct TCP/UDP access
-    """
+    """Expose a port from a sandbox."""
     validate_output_format(output, console)
 
     # Validate protocol

@@ -1,8 +1,6 @@
 """Prime Intellect API clients."""
 
-# Import submodules to make them available as attributes
-# Re-export from prime_core for backwards compatibility
-from prime_core import (
+from prime_cli.core import (
     APIClient,
     APIError,
     APITimeoutError,

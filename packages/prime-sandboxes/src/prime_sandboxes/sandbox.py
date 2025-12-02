@@ -9,8 +9,8 @@ from typing import Any, Dict, List, Optional
 
 import aiofiles
 import httpx
-from prime_core import APIClient, APIError, AsyncAPIClient
 
+from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,

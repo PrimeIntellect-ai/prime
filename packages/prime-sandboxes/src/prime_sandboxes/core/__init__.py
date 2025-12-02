@@ -1,4 +1,4 @@
-"""Prime Intellect Core - Shared HTTP client and configuration."""
+"""Prime Sandboxes Core - HTTP client and configuration."""
 
 from .client import (
     APIClient,
@@ -9,8 +9,6 @@ from .client import (
     UnauthorizedError,
 )
 from .config import Config
-
-__version__ = "0.1.2"
 
 __all__ = [
     "APIClient",

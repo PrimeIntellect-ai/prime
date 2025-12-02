@@ -3,8 +3,7 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
-from prime_core import APIClient, APIError, AsyncAPIClient
-
+from .core import APIError, AsyncAPIClient
 from .exceptions import EvalsAPIError, InvalidEvaluationError
 
 
@@ -21,7 +20,13 @@ class EvalsClient:
     Client for the Prime Evals API
     """
 
-    def __init__(self, api_client: APIClient) -> None:
+    def __init__(self, api_client: Any) -> None:
+        """Initialize with an API client.
+
+        Args:
+            api_client: Any API client with get/post/request methods and a config attribute.
+                       Can be prime_cli.core.APIClient or prime_evals.core.APIClient.
+        """
         self.client = api_client
 
     def _resolve_environment_id(self, env_name: str) -> str:

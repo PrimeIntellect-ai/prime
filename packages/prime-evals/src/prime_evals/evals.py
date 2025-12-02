@@ -29,31 +29,54 @@ class EvalsClient:
         """
         self.client = api_client
 
-    def _resolve_environment_id(self, env_name: str) -> str:
+    def _lookup_environment_id(self, env_id: str) -> str:
         """
-        Resolve environment ID from name or slug (owner/name format).
-
-        If env_name is in owner/name format, resolves by owner slug.
-        Otherwise, resolves by name for the authenticated user (get-or-create).
+        Lookup an environment by ID to verify it exists.
 
         Raises:
             EvalsAPIError: If the environment does not exist (404)
         """
-        owner_slug = None
-        name = env_name
-
-        # Check if it's in owner/name format
-        if re.match(r"^[^/]+/[^/]+$", env_name):
-            owner_slug, name = env_name.split("/", 1)
-
         try:
-            resolve_data: Dict[str, Any] = {"name": name}
+            lookup_data: Dict[str, Any] = {"id": env_id}
+            response = self.client.post("/environmentshub/lookup", json=lookup_data)
+            return response["data"]["id"]
+        except APIError as e:
+            raise EvalsAPIError(
+                f"Environment with ID '{env_id}' does not exist in the hub. "
+                f"Please verify the environment ID is correct."
+            ) from e
 
-            if owner_slug:
-                # Full slug resolution - look up existing environment by owner
-                resolve_data["owner_slug"] = owner_slug
-            elif self.client.config.team_id:
-                # Use team_id for get-or-create behavior
+    def _lookup_environment_by_slug(self, owner_slug: str, name: str) -> str:
+        """
+        Lookup an environment by owner slug and name (lookup only, does not create).
+
+        Raises:
+            EvalsAPIError: If the environment does not exist (404)
+        """
+        try:
+            # Try team_slug first (lookup endpoint supports team_slug)
+            # If owner is not a team, backend will handle it appropriately
+            lookup_data: Dict[str, Any] = {"name": name, "team_slug": owner_slug}
+            response = self.client.post("/environmentshub/lookup", json=lookup_data)
+            return response["data"]["id"]
+        except APIError as e:
+            raise EvalsAPIError(
+                f"Environment '{owner_slug}/{name}' does not exist in the hub. "
+                f"Please ensure the environment exists and you have access to it."
+            ) from e
+
+    def _resolve_environment_id(self, env_name: str) -> str:
+        """
+        Resolve environment ID by name (get-or-create behavior).
+        Only used when no owner slug is provided.
+
+        Raises:
+            EvalsAPIError: If the environment does not exist (404)
+        """
+        try:
+            resolve_data: Dict[str, Any] = {"name": env_name}
+
+            if self.client.config.team_id:
                 resolve_data["team_id"] = self.client.config.team_id
 
             response = self.client.post("/environmentshub/resolve", json=resolve_data)
@@ -73,19 +96,26 @@ class EvalsClient:
         """
         resolved_environments = []
         for env in environments:
-            resolved_env = env.copy()
+            # Handle string inputs (convert to dict format)
+            if isinstance(env, str):
+                env = {"slug": env} if "/" in env else {"name": env}
+            
+            resolved_env = env.copy() if isinstance(env, dict) else {}
+            
             # Handle different identifier types explicitly
             # Check for explicit "slug" or "name" keys first
             try:
                 if "slug" in resolved_env:
-                    # Owner/name format, resolve to database ID
-                    resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("slug"))
+                    # Owner/name format, lookup (does not create)
+                    slug = resolved_env.pop("slug")
+                    owner_slug, name = slug.split("/", 1)
+                    resolved_env["id"] = self._lookup_environment_by_slug(owner_slug, name)
                 elif "name" in resolved_env:
                     # Just a name, resolve to database ID (get-or-create)
                     resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("name"))
                 elif "id" in resolved_env:
-                    # "id" key exists - it's already a database ID
-                    pass
+                    # "id" key exists - validate it exists in the hub via lookup
+                    resolved_env["id"] = self._lookup_environment_id(resolved_env["id"])
                 else:
                     # Skip environments without valid identifiers
                     continue
@@ -249,31 +279,54 @@ class AsyncEvalsClient:
     def __init__(self, api_key: Optional[str] = None) -> None:
         self.client = AsyncAPIClient(api_key=api_key, user_agent=_build_user_agent())
 
-    async def _resolve_environment_id(self, env_name: str) -> str:
+    async def _lookup_environment_id(self, env_id: str) -> str:
         """
-        Resolve environment ID from name or slug (owner/name format).
-
-        If env_name is in owner/name format, resolves by owner slug.
-        Otherwise, resolves by name for the authenticated user (get-or-create).
+        Lookup an environment by ID to verify it exists.
 
         Raises:
             EvalsAPIError: If the environment does not exist (404)
         """
-        owner_slug = None
-        name = env_name
-
-        # Check if it's in owner/name format
-        if re.match(r"^[^/]+/[^/]+$", env_name):
-            owner_slug, name = env_name.split("/", 1)
-
         try:
-            resolve_data: Dict[str, Any] = {"name": name}
+            lookup_data: Dict[str, Any] = {"id": env_id}
+            response = await self.client.post("/environmentshub/lookup", json=lookup_data)
+            return response["data"]["id"]
+        except APIError as e:
+            raise EvalsAPIError(
+                f"Environment with ID '{env_id}' does not exist in the hub. "
+                f"Please verify the environment ID is correct."
+            ) from e
 
-            if owner_slug:
-                # Full slug resolution - look up existing environment by owner
-                resolve_data["owner_slug"] = owner_slug
-            elif self.client.config.team_id:
-                # Use team_id for get-or-create behavior
+    async def _lookup_environment_by_slug(self, owner_slug: str, name: str) -> str:
+        """
+        Lookup an environment by owner slug and name (lookup only, does not create).
+
+        Raises:
+            EvalsAPIError: If the environment does not exist (404)
+        """
+        try:
+            # Try team_slug first (lookup endpoint supports team_slug)
+            # If owner is not a team, backend will handle it appropriately
+            lookup_data: Dict[str, Any] = {"name": name, "team_slug": owner_slug}
+            response = await self.client.post("/environmentshub/lookup", json=lookup_data)
+            return response["data"]["id"]
+        except APIError as e:
+            raise EvalsAPIError(
+                f"Environment '{owner_slug}/{name}' does not exist in the hub. "
+                f"Please ensure the environment exists and you have access to it."
+            ) from e
+
+    async def _resolve_environment_id(self, env_name: str) -> str:
+        """
+        Resolve environment ID by name (get-or-create behavior).
+        Only used when no owner slug is provided.
+
+        Raises:
+            EvalsAPIError: If the environment does not exist (404)
+        """
+        try:
+            resolve_data: Dict[str, Any] = {"name": env_name}
+
+            if self.client.config.team_id:
                 resolve_data["team_id"] = self.client.config.team_id
 
             response = await self.client.post("/environmentshub/resolve", json=resolve_data)
@@ -297,18 +350,18 @@ class AsyncEvalsClient:
             # Check for explicit "slug" or "name" keys first
             try:
                 if "slug" in resolved_env:
-                    # Owner/name format, resolve to database ID
-                    resolved_env["id"] = await self._resolve_environment_id(
-                        resolved_env.pop("slug")
-                    )
+                    # Owner/name format, lookup (does not create)
+                    slug = resolved_env.pop("slug")
+                    owner_slug, name = slug.split("/", 1)
+                    resolved_env["id"] = await self._lookup_environment_by_slug(owner_slug, name)
                 elif "name" in resolved_env:
                     # Just a name, resolve to database ID (get-or-create)
                     resolved_env["id"] = await self._resolve_environment_id(
                         resolved_env.pop("name")
                     )
                 elif "id" in resolved_env:
-                    # "id" key exists - it's already a database ID
-                    pass
+                    # "id" key exists - validate it exists in the hub via lookup
+                    await self._lookup_environment_id(resolved_env["id"])
                 else:
                     # Skip environments without valid identifiers
                     return None

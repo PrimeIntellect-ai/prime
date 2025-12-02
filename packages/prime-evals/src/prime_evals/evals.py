@@ -107,6 +107,9 @@ class EvalsClient:
                 if "slug" in resolved_env:
                     # Owner/name format, lookup (does not create)
                     slug = resolved_env.pop("slug")
+                    if "/" not in slug:
+                        # Invalid slug format - skip this environment
+                        continue
                     owner_slug, name = slug.split("/", 1)
                     resolved_env["id"] = self._lookup_environment_by_slug(owner_slug, name)
                 elif "name" in resolved_env:
@@ -355,6 +358,9 @@ class AsyncEvalsClient:
                 if "slug" in resolved_env:
                     # Owner/name format, lookup (does not create)
                     slug = resolved_env.pop("slug")
+                    if "/" not in slug:
+                        # Invalid slug format - skip this environment
+                        return None
                     owner_slug, name = slug.split("/", 1)
                     resolved_env["id"] = await self._lookup_environment_by_slug(owner_slug, name)
                 elif "name" in resolved_env:

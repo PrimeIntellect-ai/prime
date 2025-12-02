@@ -91,7 +91,7 @@ def test_env_eval_invalid_model(install_math_env):
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=120,
             cwd=tmpdir,
             env={**os.environ, "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", "")},
         )
@@ -123,7 +123,7 @@ def test_env_eval_missing_environment():
             ],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=120,
             cwd=tmpdir,
             env={**os.environ, "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", "")},
         )

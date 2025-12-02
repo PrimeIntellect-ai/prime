@@ -7,6 +7,7 @@ from prime_evals import EvalsAPIError, EvalsClient
 from rich.console import Console
 
 from prime_cli.core import APIClient
+
 from .env_metadata import find_environment_metadata
 
 console = Console()

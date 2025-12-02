@@ -1,0 +1,85 @@
+name: Release prime-core
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'packages/prime-core/**'
+      - '.github/workflows/release-prime-core.yml'
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: 'Force release even if tag exists'
+        required: false
+        default: 'false'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version
+        id: version
+        working-directory: packages/prime-core
+        run: |
+          VERSION=$(grep -E "^version\s*=" pyproject.toml | head -n1 | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*$/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Check for existing tag
+        id: check_tag
+        run: |
+          TAG="prime-core-v${{ steps.version.outputs.version }}"
+          if git tag -l "$TAG" | grep -q .; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag $TAG already exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Tag $TAG does not exist"
+          fi
+
+      - name: Set up Python
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        uses: astral-sh/setup-uv@v4
+
+      - name: Build package
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        working-directory: packages/prime-core
+        run: |
+          uv build --wheel --out-dir dist
+
+          # Install twine for publishing
+          uv venv
+          source .venv/bin/activate
+          uv pip install twine
+
+      - name: Create tag
+        if: steps.check_tag.outputs.exists != 'true'
+        run: |
+          TAG="prime-core-v${{ steps.version.outputs.version }}"
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Publish to PyPI
+        if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
+        working-directory: packages/prime-core
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          source .venv/bin/activate
+          twine upload dist/*

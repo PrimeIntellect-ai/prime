@@ -5,7 +5,6 @@ on:
     branches: [ "main" ]
     paths:
       - 'packages/prime-mcp-server/**'
-      - 'packages/prime-core/**'  # Changes to core affect mcp
       - '.github/workflows/release-mcp.yml'
   workflow_dispatch:
     inputs:
@@ -59,9 +58,7 @@ jobs:
         if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
         working-directory: packages/prime-mcp-server
         run: |
-          # Use build script to bundle prime-core and remove it from dependencies
-          chmod +x build_for_pypi.sh
-          ./build_for_pypi.sh
+          uv build
 
           # Install twine for publishing
           uv venv

@@ -1,5 +1,5 @@
-"""Config - re-exports from prime_core for backwards compatibility."""
+"""Config - re-exports from core."""
 
-from prime_core import Config
+from prime_cli.core import Config
 
 __all__ = ["Config"]

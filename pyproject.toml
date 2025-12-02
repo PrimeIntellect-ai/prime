@@ -12,9 +12,9 @@ dev-dependencies = [
 [tool.pytest.ini_options]
 pythonpath = [
     "packages/prime/src",
-    "packages/prime-core/src",
     "packages/prime-sandboxes/src",
     "packages/prime-evals/src",
+    "packages/prime-mcp-server/src",
 ]
 testpaths = [
     "packages/*/tests",

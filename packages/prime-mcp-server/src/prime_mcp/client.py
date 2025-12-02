@@ -1,6 +1,6 @@
 from typing import Any
 
-from prime_core import AsyncAPIClient
+from .core import AsyncAPIClient
 
 _client = AsyncAPIClient()
 

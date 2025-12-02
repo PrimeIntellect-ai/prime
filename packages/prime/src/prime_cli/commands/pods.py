@@ -7,10 +7,11 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import typer
-from prime_core import Config
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
+
+from prime_cli.core import Config
 
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.pods import HistoryObj, Pod, PodsClient, PodStatus

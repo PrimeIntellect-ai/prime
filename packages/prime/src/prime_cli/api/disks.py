@@ -1,8 +1,9 @@
 import json
 from typing import List, Optional
 
-from prime_core import APIClient, APIError
 from pydantic import BaseModel, ConfigDict, Field
+
+from prime_cli.core import APIClient, APIError
 
 
 class DiskInfo(BaseModel):

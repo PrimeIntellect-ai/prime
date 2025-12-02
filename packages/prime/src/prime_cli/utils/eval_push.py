@@ -2,9 +2,10 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from prime_core import APIClient
 from prime_evals import EvalsAPIError, EvalsClient
 from rich.console import Console
+
+from prime_cli.core import APIClient
 
 console = Console()
 

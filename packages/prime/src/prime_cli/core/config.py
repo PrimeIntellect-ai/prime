@@ -200,9 +200,7 @@ class Config:
     def save_environment(self, name: str) -> None:
         """Save current configuration as a named environment"""
         if name.lower() == "production":
-            raise ValueError(
-                "Cannot save custom environment with reserved name 'production'"
-            )
+            raise ValueError("Cannot save custom environment with reserved name 'production'")
 
         sanitized_name = self._sanitize_environment_name(name)
         env_file = self.environments_dir / f"{sanitized_name}.json"
@@ -234,9 +232,7 @@ class Config:
                 try:
                     env_config = json.loads(env_file.read_text())
                 except json.JSONDecodeError as e:
-                    raise ValueError(
-                        f"Invalid JSON in environment file {sanitized_name}.json: {e}"
-                    )
+                    raise ValueError(f"Invalid JSON in environment file {sanitized_name}.json: {e}")
 
                 if "api_key" in env_config:
                     self.set_api_key(env_config["api_key"])
@@ -245,12 +241,8 @@ class Config:
                 # Set user_id from environment
                 self.set_user_id(env_config.get("user_id", None))
                 self.set_base_url(env_config.get("base_url", self.DEFAULT_BASE_URL))
-                self.set_frontend_url(
-                    env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL)
-                )
-                self.set_inference_url(
-                    env_config.get("inference_url", self.DEFAULT_INFERENCE_URL)
-                )
+                self.set_frontend_url(env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL))
+                self.set_inference_url(env_config.get("inference_url", self.DEFAULT_INFERENCE_URL))
                 self.set_current_environment(name)
                 return True
         except ValueError:
@@ -263,9 +255,7 @@ class Config:
         if self.current_environment != "production":
             # Only update custom environments, not the built-in production
             try:
-                sanitized_name = self._sanitize_environment_name(
-                    self.current_environment
-                )
+                sanitized_name = self._sanitize_environment_name(self.current_environment)
                 env_file = self.environments_dir / f"{sanitized_name}.json"
                 if env_file.exists():
                     env_config = {

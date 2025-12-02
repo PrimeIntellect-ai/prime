@@ -4,7 +4,7 @@ A standalone SDK for managing and pushing evaluations to Prime Intellect.
 Includes HTTP client, authentication, and evaluation management
 """
 
-from prime_core import (
+from .core import (
     APIClient,
     APIError,
     APITimeoutError,
@@ -13,7 +13,6 @@ from prime_core import (
     PaymentRequiredError,
     UnauthorizedError,
 )
-
 from .evals import AsyncEvalsClient, EvalsClient
 from .exceptions import (
     EnvironmentNotFoundError,

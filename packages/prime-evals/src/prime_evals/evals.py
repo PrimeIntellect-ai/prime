@@ -1,6 +1,6 @@
 import asyncio
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from .core import APIError, AsyncAPIClient
 from .exceptions import EvalsAPIError, InvalidEvaluationError
@@ -88,7 +88,7 @@ class EvalsClient:
             ) from e
 
     def _resolve_environments(
-        self, environments: List[Dict[str, str]]
+        self, environments: List[Union[str, Dict[str, str]]]
     ) -> List[Dict[str, str]]:
         """
         Resolve a list of environments from various identifier formats to database IDs.
@@ -338,13 +338,17 @@ class AsyncEvalsClient:
             ) from e
 
     async def _resolve_environments(
-        self, environments: List[Dict[str, str]]
+        self, environments: List[Union[str, Dict[str, str]]]
     ) -> List[Dict[str, str]]:
         """
         Resolve a list of environments from various identifier formats to database IDs.
         """
-        async def resolve_env(env: Dict[str, str]) -> Optional[Dict[str, str]]:
-            resolved_env = env.copy()
+        async def resolve_env(env: Union[str, Dict[str, str]]) -> Optional[Dict[str, str]]:
+            # Handle string inputs (convert to dict format)
+            if isinstance(env, str):
+                env = {"slug": env} if "/" in env else {"name": env}
+            
+            resolved_env = env.copy() if isinstance(env, dict) else {}
             # Handle different identifier types explicitly
             # Check for explicit "slug" or "name" keys first
             try:

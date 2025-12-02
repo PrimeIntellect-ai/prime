@@ -1,10 +1,10 @@
-name: Release prime-mcp
+name: Release prime-mcp-server
 
 on:
   push:
     branches: [ "main" ]
     paths:
-      - 'packages/prime-mcp/**'
+      - 'packages/prime-mcp-server/**'
       - 'packages/prime-core/**'  # Changes to core affect mcp
       - '.github/workflows/release-mcp.yml'
   workflow_dispatch:
@@ -27,7 +27,7 @@ jobs:
 
       - name: Get version
         id: version
-        working-directory: packages/prime-mcp
+        working-directory: packages/prime-mcp-server
         run: |
           VERSION=$(grep -E "^__version__\s*=" src/prime_mcp/__init__.py | sed -E 's/__version__\s*=\s*"([^"]+)"/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -36,7 +36,7 @@ jobs:
       - name: Check for existing tag
         id: check_tag
         run: |
-          TAG="prime-mcp-v${{ steps.version.outputs.version }}"
+          TAG="prime-mcp-server-v${{ steps.version.outputs.version }}"
           if git tag -l "$TAG" | grep -q .; then
             echo "exists=true" >> $GITHUB_OUTPUT
             echo "Tag $TAG already exists"
@@ -57,7 +57,7 @@ jobs:
 
       - name: Build package
         if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
-        working-directory: packages/prime-mcp
+        working-directory: packages/prime-mcp-server
         run: |
           # Use build script to bundle prime-core and remove it from dependencies
           chmod +x build_for_pypi.sh
@@ -71,7 +71,7 @@ jobs:
       - name: Create tag
         if: steps.check_tag.outputs.exists != 'true'
         run: |
-          TAG="prime-mcp-v${{ steps.version.outputs.version }}"
+          TAG="prime-mcp-server-v${{ steps.version.outputs.version }}"
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git tag -a "$TAG" -m "Release $TAG"
@@ -79,7 +79,7 @@ jobs:
 
       - name: Publish to PyPI
         if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
-        working-directory: packages/prime-mcp
+        working-directory: packages/prime-mcp-server
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}

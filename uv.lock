@@ -12,7 +12,7 @@ members = [
     "prime",
     "prime-core",
     "prime-evals",
-    "prime-mcp",
+    "prime-mcp-server",
     "prime-sandboxes",
 ]
 
@@ -1692,8 +1692,8 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [[package]]
-name = "prime-mcp"
-source = { editable = "packages/prime-mcp" }
+name = "prime-mcp-server"
+source = { editable = "packages/prime-mcp-server" }
 dependencies = [
     { name = "fastmcp" },
     { name = "mcp" },

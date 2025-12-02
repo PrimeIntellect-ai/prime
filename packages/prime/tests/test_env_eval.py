@@ -54,11 +54,12 @@ def test_env_eval_single_turn_math(install_math_env):
                 "-m",
                 TEST_MODEL,
                 "-n",
-                "1",  # Only 1 example
+                "3",  # 3 examples
                 "-r",
-                "1",  # Only 1 rollout
+                "1",  # 1 rollout each
                 "-c",
                 "1",  # Max 1 concurrent request
+                "-v",  # Verbose output
             ],
             capture_output=True,
             text=True,

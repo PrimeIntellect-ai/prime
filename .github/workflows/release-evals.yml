@@ -58,7 +58,7 @@ jobs:
         if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
         working-directory: packages/prime-evals
         run: |
-          uv build
+          uv build --out-dir dist
 
           # Install twine for publishing
           uv venv

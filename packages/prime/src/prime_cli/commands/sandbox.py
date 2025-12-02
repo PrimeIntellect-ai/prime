@@ -918,20 +918,34 @@ def expose_port(
     sandbox_id: str = typer.Argument(..., help="Sandbox ID to expose port from"),
     port: int = typer.Argument(..., help="Port number to expose"),
     name: Optional[str] = typer.Option(None, help="Optional name for the exposed port"),
+    protocol: str = typer.Option(
+        "HTTP",
+        "--protocol",
+        "-p",
+        help="Protocol: HTTP or TCP/UDP",
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Expose an HTTP port from a sandbox.
+    """Expose a port from a sandbox.
 
-    Currently only HTTP is supported. TCP, UDP, and SSH support coming soon.
+    Protocols:
+      - HTTP: Exposed via Cloudflare Tunnel with HTTPS URL (default)
+      - TCP/UDP: Exposed via LoadBalancer with direct TCP/UDP access
     """
     validate_output_format(output, console)
+
+    # Validate protocol
+    protocol = protocol.upper()
+    if protocol not in ("HTTP", "TCP", "UDP"):
+        console.print(f"[red]Error:[/red] Invalid protocol '{protocol}'. Use HTTP, TCP, or UDP.")
+        raise typer.Exit(1)
 
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
         with console.status("[bold blue]Exposing port...", spinner="dots"):
-            exposed = sandbox_client.expose(sandbox_id, port, name)
+            exposed = sandbox_client.expose(sandbox_id, port, name, protocol)
 
         if output == "json":
             output_data_as_json(exposed.model_dump(), console)
@@ -939,9 +953,12 @@ def expose_port(
             console.print("[green]✓[/green] Port exposed successfully!")
             console.print(f"[bold green]Exposure ID:[/bold green] {exposed.exposure_id}")
             console.print(f"[bold green]Port:[/bold green] {exposed.port}")
+            console.print(f"[bold green]Protocol:[/bold green] {exposed.protocol or protocol}")
             if exposed.name:
                 console.print(f"[bold green]Name:[/bold green] {exposed.name}")
             console.print(f"[bold green]URL:[/bold green] {exposed.url}")
+            if protocol in ("TCP", "UDP") and exposed.external_port:
+                console.print(f"[bold green]External Port:[/bold green] {exposed.external_port}")
             console.print(f"[bold green]TLS Socket:[/bold green] {exposed.tls_socket}")
 
     except APIError as e:
@@ -1011,20 +1028,23 @@ def list_ports(
                     f"Exposed Ports for Sandbox {sandbox_id}",
                     [
                         ("Exposure ID", "cyan"),
+                        ("Protocol", "white"),
                         ("Port", "blue"),
+                        ("External", "blue"),
                         ("Name", "green"),
                         ("URL", "magenta"),
-                        ("TLS Socket", "yellow"),
                     ],
                 )
 
                 for exp in response.exposures:
+                    external_port = str(exp.external_port) if exp.external_port else "-"
                     table.add_row(
                         exp.exposure_id,
+                        exp.protocol or "HTTP",
                         str(exp.port),
-                        exp.name or "N/A",
+                        external_port,
+                        exp.name or "-",
                         exp.url,
-                        exp.tls_socket,
                     )
 
                 console.print(table)

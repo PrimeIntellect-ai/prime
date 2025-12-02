@@ -550,9 +550,10 @@ class SandboxClient:
         sandbox_id: str,
         port: int,
         name: Optional[str] = None,
+        protocol: str = "HTTP",
     ) -> ExposedPort:
-        """Expose an HTTP port from a sandbox."""
-        request = ExposePortRequest(port=port, name=name)
+        """Expose a port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name, protocol=protocol)
         response = self.client.request(
             "POST",
             f"/sandbox/{sandbox_id}/expose",
@@ -1006,9 +1007,10 @@ class AsyncSandboxClient:
         sandbox_id: str,
         port: int,
         name: Optional[str] = None,
+        protocol: str = "HTTP",
     ) -> ExposedPort:
-        """Expose an HTTP port from a sandbox."""
-        request = ExposePortRequest(port=port, name=name)
+        """Expose a port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name, protocol=protocol)
         response = await self.client.request(
             "POST",
             f"/sandbox/{sandbox_id}/expose",

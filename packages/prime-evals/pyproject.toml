@@ -51,8 +51,6 @@ path = "src/prime_evals/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/prime_evals"]
-# Bundle prime-core directly at the prime_core import path for PyPI distribution
-force-include = { "../prime-core/src/prime_core" = "prime_core" }
 
 [tool.ruff]
 line-length = 100

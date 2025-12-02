@@ -360,7 +360,7 @@ class AsyncEvalsClient:
                     )
                 elif "id" in resolved_env:
                     # "id" key exists - validate it exists in the hub via lookup
-                    await self._lookup_environment_id(resolved_env["id"])
+                    resolved_env["id"] = await self._lookup_environment_id(resolved_env["id"])
                 else:
                     # Skip environments without valid identifiers
                     return None

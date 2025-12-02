@@ -10,19 +10,6 @@ import pytest
 TEST_MODEL = "deepseek/deepseek-chat"
 
 
-def has_inference_access() -> bool:
-    """Check if we have access to Prime Inference API"""
-    result = subprocess.run(
-        ["uv", "run", "prime", "inference", "models"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env={**os.environ, "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", "")},
-    )
-    # If we get 401 or can't list models, we don't have inference access
-    return result.returncode == 0 and "401" not in result.stdout
-
-
 @pytest.fixture(scope="module")
 def install_math_env():
     """Install the single-turn-math environment for testing"""
@@ -48,14 +35,7 @@ def install_math_env():
     )
 
 
-@pytest.fixture(scope="module")
-def check_inference_access():
-    """Skip tests if we don't have inference access"""
-    if not has_inference_access():
-        pytest.skip("No access to Prime Inference API (API key may not have inference permissions)")
-
-
-def test_env_eval_single_turn_math(install_math_env, check_inference_access):
+def test_env_eval_single_turn_math(install_math_env):
     """Test running prime env eval with single_turn_math environment
 
     This test runs a minimal evaluation (1 example, 1 rollout) against

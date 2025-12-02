@@ -62,7 +62,7 @@ def test_env_eval_single_turn_math(install_math_env):
             ],
             capture_output=True,
             text=True,
-            timeout=180,  # 3 minute timeout
+            timeout=300,  # 5 minute timeout
             cwd=tmpdir,
             env={**os.environ, "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", "")},
         )

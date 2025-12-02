@@ -329,12 +329,30 @@ class SandboxClient:
         except Exception as e:
             raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
-    def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
+    def wait_for_creation(
+        self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
+    ) -> None:
+        """Wait for sandbox to be running and stable.
+
+        Args:
+            sandbox_id: The sandbox ID to wait for
+            max_attempts: Maximum polling attempts
+            stability_checks: Number of consecutive successful reachability checks required
+        """
+        consecutive_successes = 0
         for attempt in range(max_attempts):
             sandbox = self.get(sandbox_id)
             if sandbox.status == "RUNNING":
                 if self._is_sandbox_reachable(sandbox_id):
-                    return
+                    consecutive_successes += 1
+                    if consecutive_successes >= stability_checks:
+                        return
+                    # Small delay between stability checks
+                    time.sleep(0.5)
+                    continue
+                else:
+                    # Reset counter if check fails
+                    consecutive_successes = 0
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
                 raise SandboxNotRunningError(sandbox_id, sandbox.status)
 
@@ -728,15 +746,32 @@ class AsyncSandboxClient:
         except Exception as e:
             raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
-    async def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
-        """Wait for sandbox to be running (async version)"""
+    async def wait_for_creation(
+        self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
+    ) -> None:
+        """Wait for sandbox to be running and stable (async version).
+
+        Args:
+            sandbox_id: The sandbox ID to wait for
+            max_attempts: Maximum polling attempts
+            stability_checks: Number of consecutive successful reachability checks required
+        """
         import asyncio
 
+        consecutive_successes = 0
         for attempt in range(max_attempts):
             sandbox = await self.get(sandbox_id)
             if sandbox.status == "RUNNING":
                 if await self._is_sandbox_reachable(sandbox_id):
-                    return
+                    consecutive_successes += 1
+                    if consecutive_successes >= stability_checks:
+                        return
+                    # Small delay between stability checks
+                    await asyncio.sleep(0.5)
+                    continue
+                else:
+                    # Reset counter if check fails
+                    consecutive_successes = 0
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
                 raise SandboxNotRunningError(sandbox_id, sandbox.status)
 

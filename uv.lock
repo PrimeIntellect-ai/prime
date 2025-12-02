@@ -2694,7 +2694,7 @@ wheels = [
 
 [[package]]
 name = "verifiers"
-version = "0.1.6"
+version = "0.1.8.post1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "datasets" },
@@ -2707,10 +2707,13 @@ dependencies = [
     { name = "requests" },
     { name = "rich" },
     { name = "textual" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.12'" },
+    { name = "wget" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2e/47/d2e916c7009faca66466a4ffcd9f07f87b54215c0b82bdc2fc9a3bd04471/verifiers-0.1.6.tar.gz", hash = "sha256:1ee2f3eae39d894da2e67822c586f2314d6a9e840032b5e2dfe34ef4f614b1c6", size = 124961, upload-time = "2025-10-21T01:06:32.239Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d5/8f/8ab2a095cdc7db4cbbb8b21c8bb208aa7043cc6dfc99b65f24fd235f8bfd/verifiers-0.1.8.post1.tar.gz", hash = "sha256:8be547ecfdac8464128798b083601ca576061a3bdf522920c57dc0dc71ae649f", size = 117959, upload-time = "2025-11-26T07:50:29.426Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/26/3e/6115fcb03ee63316d4f1e866758aad135ecdc3392c35981635f46526687b/verifiers-0.1.6-py3-none-any.whl", hash = "sha256:e07203a78a95d877461affd242e2a29786fac8676c683bcfa69d307ba81abaa7", size = 115453, upload-time = "2025-10-21T01:06:30.717Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/0a/38a238f53de3aedd46a4cf36f06e8bce9a68e314d4b61ab6c7b8acd03dca/verifiers-0.1.8.post1-py3-none-any.whl", hash = "sha256:8ea9e536f3c1a40f28f000bc7196a84afd5d51bb497aae1262ab7852ccc19f9d", size = 106975, upload-time = "2025-11-26T07:50:28.157Z" },
 ]
 
 [[package]]
@@ -2786,6 +2789,12 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/68/a1/dcb68430b1d00b698ae7a7e0194433bce4f07ded185f0ee5fb21e2a2e91e/websockets-15.0.1-pp310-pypy310_pp73-win_amd64.whl", hash = "sha256:cad21560da69f4ce7658ca2cb83138fb4cf695a2ba3e475e0559e05991aa8122", size = 176884, upload-time = "2025-03-05T20:03:27.934Z" },
     { url = "https://files.pythonhosted.org/packages/fa/a8/5b41e0da817d64113292ab1f8247140aac61cbf6cfd085d6a0fa77f4984f/websockets-15.0.1-py3-none-any.whl", hash = "sha256:f7a866fbc1e97b5c617ee4116daaa09b722101d4a3c170c787450ba409f9736f", size = 169743, upload-time = "2025-03-05T20:03:39.41Z" },
 ]
+
+[[package]]
+name = "wget"
+version = "3.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/6a/62e288da7bcda82b935ff0c6cfe542970f04e29c756b0e147251b2fb251f/wget-3.2.zip", hash = "sha256:35e630eca2aa50ce998b9b1a127bb26b30dfee573702782aa982f875e3f16061", size = 10857, upload-time = "2015-10-22T15:26:37.51Z" }
 
 [[package]]
 name = "xxhash"

@@ -7,13 +7,13 @@ from .config import Config
 
 
 def _default_user_agent() -> str:
-    """Build default User-Agent string for prime-core"""
-    from prime_core import __version__
+    """Build default User-Agent string for prime-intellect-core"""
+    from prime_intellect_core import __version__
 
     python_version = (
         f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     )
-    return f"prime-core/{__version__} python/{python_version}"
+    return f"prime-intellect-core/{__version__} python/{python_version}"
 
 
 class APIError(Exception):

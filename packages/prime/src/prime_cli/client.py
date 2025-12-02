@@ -3,16 +3,16 @@
 import sys
 from typing import Optional
 
-from prime_core import APIClient as CoreAPIClient
+from prime_intellect_core import APIClient as CoreAPIClient
 
-# Re-export exceptions and other classes from prime_core
-from prime_core import (
+# Re-export exceptions and other classes from prime_intellect_core
+from prime_intellect_core import (
     APIError,
     APITimeoutError,
     PaymentRequiredError,
     UnauthorizedError,
 )
-from prime_core import AsyncAPIClient as CoreAsyncAPIClient
+from prime_intellect_core import AsyncAPIClient as CoreAsyncAPIClient
 
 __all__ = [
     "APIClient",

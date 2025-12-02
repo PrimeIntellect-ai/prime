@@ -1,7 +1,7 @@
 import json
 from typing import List, Optional
 
-from prime_core import APIClient, APIError
+from prime_intellect_core import APIClient, APIError
 from pydantic import BaseModel, ConfigDict, Field
 
 

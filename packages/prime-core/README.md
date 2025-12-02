@@ -1,4 +1,4 @@
-# prime-core
+# prime-intellect-core
 
 Shared HTTP client and configuration for Prime Intellect packages.
 
@@ -10,13 +10,13 @@ This is a core package used by:
 ## Installation
 
 ```bash
-pip install prime-core
+pip install prime-intellect-core
 ```
 
 ## Usage
 
 ```python
-from prime_core import APIClient, Config
+from prime_intellect_core import APIClient, Config
 
 # Uses PRIME_API_KEY env var or ~/.prime/config.json
 client = APIClient()

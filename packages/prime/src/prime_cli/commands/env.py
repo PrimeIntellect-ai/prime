@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 import httpx
 import toml
 import typer
-from prime_core import Config
+from prime_intellect_core import Config
 from rich.console import Console
 from rich.table import Table
 
@@ -282,7 +282,7 @@ def push(
                         "[red]Error: No version found in pyproject.toml for auto-bump[/red]"
                     )
                     raise typer.Exit(1)
-                
+
                 if auto_bump:
                     new_version = bump_version(current_version)
                 elif rc:
@@ -980,6 +980,7 @@ def bump_version(version: str) -> str:
     else:
         return f"{version}.0.1"
 
+
 def bump_rc_version(version: str) -> str:
     """
     Bump or create an .post suffix.
@@ -996,7 +997,8 @@ def bump_rc_version(version: str) -> str:
     else:
         base = re.sub(r"([+-].*)$", "", version)
         return f"{base}.rc0"
-    
+
+
 def bump_post_version(version: str) -> str:
     """
     Bump or create an .post suffix.
@@ -1013,6 +1015,7 @@ def bump_post_version(version: str) -> str:
     else:
         base = re.sub(r"([+-].*)$", "", version)
         return f"{base}.post0"
+
 
 def update_pyproject_version(pyproject_path: Path, new_version: str) -> None:
     """Update version in pyproject.toml file."""

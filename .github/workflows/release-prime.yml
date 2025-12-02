@@ -6,7 +6,6 @@ on:
       - main
     paths:
       - 'packages/prime/**'
-      - 'packages/prime-core/**'  # Changes to core affect prime
       - '.github/workflows/release-prime.yml'
   workflow_dispatch:
     inputs:
@@ -102,9 +101,7 @@ jobs:
         if: steps.check_tag.outputs.exists != 'true'
         working-directory: packages/prime
         run: |
-          # Use build script to bundle prime-core and remove it from dependencies
-          chmod +x build_for_pypi.sh
-          ./build_for_pypi.sh
+          uv build --wheel --out-dir dist
 
           # Install twine for publishing
           uv venv

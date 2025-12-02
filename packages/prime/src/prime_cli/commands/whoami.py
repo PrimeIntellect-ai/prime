@@ -1,7 +1,7 @@
 from typing import Any, Dict
 
 import typer
-from prime_core import Config
+from prime_intellect_core import Config
 from rich.console import Console
 from rich.table import Table
 

@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import aiofiles
 import httpx
-from prime_core import APIClient, APIError, AsyncAPIClient
+from prime_intellect_core import APIClient, APIError, AsyncAPIClient
 
 from .exceptions import (
     CommandTimeoutError,

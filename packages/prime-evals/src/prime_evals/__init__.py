@@ -4,7 +4,7 @@ A standalone SDK for managing and pushing evaluations to Prime Intellect.
 Includes HTTP client, authentication, and evaluation management
 """
 
-from prime_core import (
+from prime_intellect_core import (
     APIClient,
     APIError,
     APITimeoutError,

@@ -119,7 +119,7 @@ def test_upload_binary_file(sandbox_client, shared_sandbox):
 
 def test_download_nonexistent_file(sandbox_client, shared_sandbox):
     """Test downloading a file that doesn't exist"""
-    from prime_core import APIError
+    from prime_intellect_core import APIError
 
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
         download_path = f.name

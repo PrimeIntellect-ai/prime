@@ -10,7 +10,7 @@ authors = [
     { name = "Prime Intellect", email = "contact@primeintellect.ai" }
 ]
 dependencies = [
-    "prime-core",
+    "prime-intellect-core>=0.1.0",
     "prime-sandboxes>=0.1.0",
     "prime-evals>=0.1.3",
     "typer>=0.9.0",
@@ -52,7 +52,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-prime-core = { workspace = true }
+prime-intellect-core = { workspace = true }
 prime-sandboxes = { workspace = true }
 prime-evals = { workspace = true }
 
@@ -68,8 +68,6 @@ path = "src/prime_cli/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/prime_cli"]
-# Bundle prime-core directly at the prime_core import path for PyPI distribution
-force-include = { "../prime-core/src/prime_core" = "prime_core" }
 
 [tool.ruff]
 src = ["."]

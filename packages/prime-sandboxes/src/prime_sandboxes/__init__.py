@@ -4,7 +4,7 @@ A standalone SDK for managing remote code execution environments (sandboxes).
 Includes HTTP client, authentication, and full sandbox lifecycle management.
 """
 
-from prime_core import (
+from prime_intellect_core import (
     APIClient,
     APIError,
     APITimeoutError,

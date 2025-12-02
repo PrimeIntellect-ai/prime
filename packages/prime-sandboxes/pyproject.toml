@@ -10,7 +10,7 @@ authors = [
     { name = "Prime Intellect", email = "contact@primeintellect.ai" }
 ]
 dependencies = [
-    "prime-core",
+    "prime-intellect-core>=0.1.0",
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
     "aiofiles>=23.0.0",
@@ -41,7 +41,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-prime-core = { workspace = true }
+prime-intellect-core = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
@@ -52,8 +52,6 @@ path = "src/prime_sandboxes/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/prime_sandboxes"]
-# Bundle prime-core directly at the prime_core import path for PyPI distribution
-force-include = { "../prime-core/src/prime_core" = "prime_core" }
 
 [tool.pytest.ini_options]
 # Run tests in parallel with pytest-xdist

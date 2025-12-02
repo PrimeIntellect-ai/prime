@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 import typer
-from prime_core import APIClient, APIError, Config
+from prime_intellect_core import APIClient, APIError, Config
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text

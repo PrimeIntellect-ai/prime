@@ -3,7 +3,7 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
-from prime_core import APIClient, APIError, AsyncAPIClient
+from prime_intellect_core import APIClient, APIError, AsyncAPIClient
 
 from .exceptions import EvalsAPIError, InvalidEvaluationError
 

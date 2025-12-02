@@ -8,7 +8,7 @@ import typer
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.asymmetric import rsa
-from prime_core import Config
+from prime_intellect_core import Config
 from rich.console import Console
 
 from ..client import APIClient, APIError

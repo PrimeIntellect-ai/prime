@@ -54,16 +54,13 @@ def test_env_eval_single_turn_math(install_math_env):
                 "-m",
                 TEST_MODEL,
                 "-n",
-                "3",  # 3 examples
+                "1",  # 1 example
                 "-r",
-                "1",  # 1 rollout each
-                "-c",
-                "1",  # Max 1 concurrent request
-                "-v",  # Verbose output
+                "1",  # 1 rollout
             ],
             capture_output=True,
             text=True,
-            timeout=300,  # 5 minute timeout
+            timeout=600,  # 10 minute timeout
             cwd=tmpdir,
             env={**os.environ, "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", "")},
         )

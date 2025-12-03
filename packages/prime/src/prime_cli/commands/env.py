@@ -228,6 +228,12 @@ def push(
     name: Optional[str] = typer.Option(
         None, "--name", "-n", help="Override environment name (defaults to pyproject.toml name)"
     ),
+    owner: Optional[str] = typer.Option(
+        None,
+        "--owner",
+        "-o",
+        help="Owner slug (user or team) to push to (for collaborators with write access)",
+    ),
     team: Optional[str] = typer.Option(
         None,
         "--team",
@@ -379,7 +385,10 @@ def push(
 
             console.print("Resolving environment...")
             resolve_data = {"name": env_name, "visibility": visibility}
-            if team:
+            if owner:
+                # Push to a specific owner (user or team) - for collaborators with write access
+                resolve_data["owner_slug"] = owner
+            elif team:
                 resolve_data["team_slug"] = team
             elif client.config.team_id:
                 resolve_data["team_id"] = client.config.team_id

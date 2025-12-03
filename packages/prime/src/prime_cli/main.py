@@ -49,4 +49,8 @@ def callback(
 
 def run() -> None:
     """Entry point for the CLI"""
-    app()
+    try:
+        app()
+    except typer.Abort:
+        typer.echo("\nOperation cancelled")
+        raise typer.Exit(0)

@@ -679,7 +679,11 @@ def logs(sandbox_id: str) -> None:
 @app.command(no_args_is_help=True)
 def run(
     sandbox_id: str,
-    command: List[str] = typer.Argument(..., help="Command to execute"),
+    command: List[str] = typer.Argument(
+        ...,
+        help="Command to execute. Use -- before commands with options "
+        "(e.g., -- bash -c 'echo hello')",
+    ),
     working_dir: Optional[str] = typer.Option(
         None, "-w", "--working-dir", help="Working directory"
     ),
@@ -695,7 +699,13 @@ def run(
         help="Timeout for the command in seconds",
     ),
 ) -> None:
-    """Execute a command in a sandbox"""
+    """Execute a command in a sandbox.
+
+    Use -- to separate sandbox run options from the command arguments when
+    the command has its own options (starting with -). Example:
+
+        prime sandbox run <id> -- bash -c "echo hello"
+    """
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)

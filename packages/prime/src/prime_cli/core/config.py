@@ -273,13 +273,13 @@ class Config:
                         self.config["api_key"] = env_config["api_key"]
                     self.config["team_id"] = env_config.get("team_id", None)
                     self.config["user_id"] = env_config.get("user_id", None)
-                    self.config["base_url"] = env_config.get("base_url", self.DEFAULT_BASE_URL)
-                    self.config["frontend_url"] = env_config.get(
-                        "frontend_url", self.DEFAULT_FRONTEND_URL
-                    )
-                    self.config["inference_url"] = env_config.get(
-                        "inference_url", self.DEFAULT_INFERENCE_URL
-                    )
+                    # Normalize URLs the same way set_* methods do
+                    base_url = env_config.get("base_url", self.DEFAULT_BASE_URL)
+                    self.config["base_url"] = self._strip_api_v1(base_url)
+                    frontend_url = env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL)
+                    self.config["frontend_url"] = frontend_url.rstrip("/")
+                    inference_url = env_config.get("inference_url", self.DEFAULT_INFERENCE_URL)
+                    self.config["inference_url"] = inference_url.rstrip("/")
                     self.config["current_environment"] = name
                 return True
         except ValueError:

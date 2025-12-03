@@ -11,7 +11,7 @@ Model Context Protocol (MCP) server for Prime Intellect - manage GPU pods, check
 
 ## Demo
 
-![Prime MCP Demo](mcp-demo.gif)
+![Prime MCP Demo](https://raw.githubusercontent.com/PrimeIntellect-ai/prime/main/packages/prime-mcp-server/mcp-demo.gif)
 
 ## Installation
 

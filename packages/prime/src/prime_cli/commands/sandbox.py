@@ -1,5 +1,6 @@
 import json
 import random
+import shlex
 import string
 import time
 from typing import Any, Dict, List, Optional
@@ -720,8 +721,8 @@ def run(
                 key, value = env_var.split("=", 1)
                 env_vars[key] = value
 
-        # Join command list into a single string
-        command_str = " ".join(command)
+        # Join command list into a single string, preserving quoting for arguments with spaces
+        command_str = shlex.join(command)
 
         console.print(f"[bold blue]Executing command:[/bold blue] {command_str}")
         if working_dir:

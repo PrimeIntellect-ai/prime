@@ -752,6 +752,9 @@ def create(
             console.print("\nPod creation cancelled")
             raise typer.Exit(0)
 
+    except typer.Abort:
+        console.print("\n[yellow]Operation cancelled[/yellow]")
+        raise typer.Exit(0)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -1000,6 +1003,9 @@ def connect(pod_id: str) -> None:
             console.print(f"[red]SSH connection failed: {str(e)}[/red]")
             raise typer.Exit(1)
 
+    except typer.Abort:
+        console.print("\n[yellow]Operation cancelled[/yellow]")
+        raise typer.Exit(0)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)

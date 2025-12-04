@@ -18,12 +18,14 @@ import toml
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from prime_cli.core import Config
 
 from ..api.inference import InferenceAPIError, InferenceClient
 from ..client import APIClient, APIError
 from ..utils import output_data_as_json, validate_output_format
+from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
 
@@ -35,6 +37,42 @@ MAX_FILES_TO_SHOW = 10
 DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
+
+
+def display_upstream_environment_info(
+    env_path: Optional[Path] = None, environment_name: Optional[str] = None
+) -> bool:
+    """Display the upstream environment name if metadata exists.
+    
+    Checks the provided path (or current directory) for environment metadata
+    and displays "Using upstream environment {owner}/{name}" if found.
+    
+    If environment_name is provided, also checks ./environments/{module_name} as a fallback.
+    
+    Args:
+        env_path: Path to check for metadata (defaults to current directory)
+        environment_name: Optional environment name to check in ./environments/{module_name}
+    """
+    # Determine module_name if environment_name is provided
+    module_name = None
+    if environment_name:
+        module_name = environment_name.replace("-", "_")
+    
+    # Search for environment metadata in common locations
+    env_metadata = find_environment_metadata(
+        env_name=environment_name,
+        env_path=env_path,
+        module_name=module_name,
+    )
+    
+    if env_metadata and env_metadata.get("owner") and env_metadata.get("name"):
+        owner = env_metadata.get("owner")
+        env_name = env_metadata.get("name")
+        console.print(f"[dim]Using upstream environment {owner}/{env_name}[/dim]\n")
+        return True
+    else:
+        console.print("[dim]No upstream environment found.[/dim]\n")
+        return False
 
 
 def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
@@ -58,7 +96,7 @@ def should_include_directory_in_archive(dir_path: Path) -> bool:
     if not dir_path.is_dir():
         return False
 
-    # Skip hidden directories
+    # Skip hidden directories (includes .prime/, .git/, etc.)
     if dir_path.name.startswith("."):
         return False
 
@@ -257,6 +295,9 @@ def push(
 
     try:
         env_path = Path(path).resolve()
+
+        # Display upstream environment info if metadata exists
+        display_upstream_environment_info(env_path)
 
         # Validate basic structure
         pyproject_path = env_path / "pyproject.toml"
@@ -547,6 +588,10 @@ def push(
                         "[yellow]The content hash is based on your source files "
                         "(*.py, pyproject.toml, README.md).[/yellow]"
                     )
+                    console.print(
+                        "[dim]Alternatively, use the --auto-bump flag to push "
+                        "a new version without content changes[/dim]"
+                    )
                 else:
                     console.print(f"[red]Failed to prepare wheel upload: {e}[/red]")
                 raise typer.Exit(1)
@@ -659,6 +704,10 @@ def push(
                                 "[yellow]The content hash is based on your source files "
                                 "(*.py, pyproject.toml, README.md).[/yellow]"
                             )
+                            console.print(
+                                "[dim]Alternatively, use the --auto-bump flag to push "
+                                "a new version without content changes[/dim]"
+                            )
                         else:
                             console.print(f"[red]Failed to prepare source upload: {e}[/red]")
                         raise typer.Exit(1)
@@ -705,20 +754,97 @@ def push(
                 console.print(f"Wheel: {wheel_path.name}")
                 console.print(f"SHA256: {wheel_sha256}")
 
-                # Save Environments hub metadata for future reference
+                # Save or update environment hub metadata for future reference
                 try:
+                    prime_dir = env_path / ".prime"
+                    prime_dir.mkdir(exist_ok=True)
+                    metadata_path = prime_dir / ".env-metadata.json"
+                    
+                    # Backwards compatibility: Migrate .env-metadata.json from root to .prime/
+                    # This handles environments that were pulled/pushed before we moved
+                    # to .prime/ subfolder
+                    old_metadata_path = env_path / ".env-metadata.json"
+                    migration_failed = False
+                    if old_metadata_path.exists() and not metadata_path.exists():
+                        try:
+                            # Move the old file to the new location
+                            old_metadata_path.rename(metadata_path)
+                            console.print(
+                                "[dim]Migrated environment metadata from root "
+                                "to .prime/ subfolder[/dim]"
+                            )
+                        except (OSError, IOError) as e:
+                            migration_failed = True
+                            console.print(
+                                f"[yellow]Warning: Could not migrate old .env-metadata.json "
+                                f"file to .prime/ subfolder: {e}[/yellow]"
+                            )
+                    elif old_metadata_path.exists() and metadata_path.exists():
+                        # Both exist - prefer the one in .prime/ and remove the old one
+                        try:
+                            old_metadata_path.unlink()
+                        except (OSError, IOError):
+                            console.print(
+                                "[yellow]Warning: Could not remove old .env-metadata.json[/yellow]"
+                            )
+                    
+                    # Read existing metadata if it exists
+                    existing_metadata = {}
+                    if metadata_path.exists():
+                        try:
+                            with open(metadata_path, "r") as f:
+                                existing_metadata = json.load(f)
+                        except (json.JSONDecodeError, IOError) as e:
+                            console.print(
+                                f"[yellow]Warning: Could not read existing metadata: {e}[/yellow]"
+                            )
+                            existing_metadata = {}
+                    elif migration_failed and old_metadata_path.exists():
+                        # If migration failed, read from old location to preserve metadata
+                        try:
+                            with open(old_metadata_path, "r") as f:
+                                existing_metadata = json.load(f)
+                        except (json.JSONDecodeError, IOError) as e:
+                            console.print(
+                                f"[yellow]Warning: Could not read existing metadata from "
+                                f"old location: {e}[/yellow]"
+                            )
+                            existing_metadata = {}
+                    
+                    # Check if upstream (owner/name) changed
+                    old_owner = existing_metadata.get("owner")
+                    old_name = existing_metadata.get("name")
+                    upstream_changed = False
+                    if existing_metadata and (old_owner != owner_name or old_name != env_name):
+                        upstream_changed = True
+                    
+                    # Merge existing metadata with new push information
                     env_metadata = {
+                        **existing_metadata,  # Preserve existing fields
                         "environment_id": env_id,
                         "owner": owner_name,
                         "name": env_name,
                         "pushed_at": datetime.now().isoformat(),
                         "wheel_sha256": wheel_sha256,
-                        "visibility": visibility,
                     }
-                    metadata_path = env_path / ".env-metadata.json"
+                    
                     with open(metadata_path, "w") as f:
                         json.dump(env_metadata, f, indent=2)
-                    console.print(f"[dim]Saved environment metadata to {metadata_path.name}[/dim]")
+                    
+                    if existing_metadata:
+                        message = Text("Updated environment metadata in ", style="dim")
+                        message.append(str(metadata_path), style="dim")
+                        console.print(message)
+                    else:
+                        message = Text("Saved environment metadata to ", style="dim")
+                        message.append(str(metadata_path), style="dim")
+                        console.print(message)
+                    
+                    # Report upstream change if it occurred
+                    if upstream_changed:
+                        upstream_message = Text("Upstream set to ", style="dim")
+                        upstream_message.append(f"{owner_name}/{env_name}", style="dim")
+                        console.print(upstream_message)
                 except Exception as e:
                     console.print(
                         f"[yellow]Warning: Could not save environment metadata: {e}[/yellow]"
@@ -839,7 +965,19 @@ def pull(
         if target:
             target_dir = Path(target)
         else:
-            target_dir = Path.cwd() / f"{owner}-{name}-{version}"
+            # Check if the base directory exists and add index suffix if needed
+            base_dir = Path.cwd() / name
+            target_dir = base_dir
+            if target_dir.exists():
+                # Find the next available directory with index suffix
+                index = 1
+                while target_dir.exists():
+                    target_dir = Path.cwd() / f"{name}-{index}"
+                    index += 1
+                console.print(
+                    f"[yellow]Directory {base_dir} already exists. "
+                    f"Using {target_dir} instead.[/yellow]"
+                )
 
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -897,8 +1035,32 @@ def pull(
 
         console.print(f"[green]✓ Environment pulled to {target_dir}[/green]")
 
+        # Create .env-metadata.json for proper resolution
         try:
-            extracted_files = list(target_dir.iterdir())
+            prime_dir = target_dir / ".prime"
+            prime_dir.mkdir(exist_ok=True)
+            metadata_path = prime_dir / ".env-metadata.json"
+            env_metadata = {
+                "environment_id": details.get("id"),
+                "owner": owner,
+                "name": name,
+            }
+            with open(metadata_path, "w") as f:
+                json.dump(env_metadata, f, indent=2)
+            message = Text("Created environment metadata at ", style="dim")
+            message.append(str(metadata_path), style="dim")
+            console.print(message)
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not create metadata file: {e}[/yellow]")
+
+        try:
+            all_files = list(target_dir.iterdir())
+            # Filter out .prime directory and .env-metadata.json files
+            # (created locally, not extracted)
+            extracted_files = [
+                f for f in all_files
+                if f.name != ".prime" and f.name != ".env-metadata.json"
+            ]
             if extracted_files:
                 console.print("\nExtracted files:")
                 for file in extracted_files[:MAX_FILES_TO_SHOW]:
@@ -1827,8 +1989,18 @@ def eval_env(
             "should end in '/v1'"
         ),
     ),
-    push_to_hub: bool = typer.Option(
-        False, "--push-to-hub", "-P", help="Push results to Prime Evals Hub"
+    skip_upload: bool = typer.Option(
+        False,
+        "--skip-upload",
+        help="Skip uploading results to Prime Evals Hub (results are uploaded by default)",
+    ),
+    env_path: Optional[str] = typer.Option(
+        None,
+        "--env-path",
+        help=(
+            "Path to the environment directory "
+            "(used to locate .prime/.env-metadata.json for upstream resolution)"
+        ),
     ),
 ) -> None:
     """
@@ -1838,6 +2010,20 @@ def eval_env(
        prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7
        All extra args are forwarded unchanged to vf-eval.
     """
+
+    # Determine the path to check for upstream metadata
+    check_path = Path(env_path) if env_path else Path.cwd()
+    # Display upstream environment info if metadata exists
+    is_resolved = display_upstream_environment_info(
+        env_path=check_path, environment_name=environment
+    )
+    if not is_resolved and not skip_upload:
+        console.print(
+            "[yellow]Evaluation results will not be uploaded or viewable on the platform "
+            "without a specified upstream environment. Use `prime env push` "
+            "to set an upstream.[/yellow]"
+        )
+
     config = Config()
 
     api_key = config.api_key
@@ -1947,15 +2133,28 @@ def eval_env(
         console.print("[red]Failed to start vf-eval process.[/red]")
         raise typer.Exit(1)
 
-    # Push to hub if requested and eval succeeded
-    if push_to_hub:
-        try:
-            push_eval_results_to_hub(
-                env_name=environment,
-                model=model,
-                job_id=job_id,
+    # Automatically push to hub after successful eval (unless --skip-upload is used)
+    if not skip_upload:
+        if is_resolved:
+            try:
+                push_eval_results_to_hub(
+                    env_name=environment,
+                    model=model,
+                    job_id=job_id,
+                    env_path=check_path,
+                )
+            except Exception as e:
+                console.print(f"[red]Failed to push results to hub:[/red] {e}")
+                console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
+                raise typer.Exit(1)
+        else:
+            console.print(
+                "[dim]No upstream environment found. Skipped uploading evaluation "
+                "results to platform.\nUse `prime env push` to set an "
+                "upstream, or use `--env-path` to specify the correct path to the "
+                "environment if it's not the current directory.[/dim]"
             )
-        except Exception as e:
-            console.print(f"[red]Failed to push results to hub:[/red] {e}")
-            console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
-            raise typer.Exit(1)
+    else:
+        console.print(
+            "[dim]Skipped uploading evaluation results[/dim]"
+        )

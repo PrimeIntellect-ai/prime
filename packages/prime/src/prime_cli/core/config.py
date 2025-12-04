@@ -33,6 +33,11 @@ class Config:
         self._ensure_config_dir()
         self._load_config()
 
+        # Check for PRIME_CONTEXT env var to temporarily override config
+        context = os.getenv("PRIME_CONTEXT")
+        if context:
+            self.load_environment(context, persist=False)
+
     @staticmethod
     def _strip_api_v1(url: str) -> str:
         # make base_url consistent even if user passed a /api/v1 variant
@@ -214,15 +219,30 @@ class Config:
         }
         env_file.write_text(json.dumps(env_config, indent=2))
 
-    def load_environment(self, name: str) -> bool:
-        """Load a named environment configuration"""
+    def load_environment(self, name: str, persist: bool = True) -> bool:
+        """Load a named environment configuration.
+
+        Args:
+            name: The environment name to load
+            persist: If True, save changes to disk. If False, only update in-memory config.
+
+        Returns:
+            True if the environment was loaded successfully, False otherwise.
+        """
         if name.lower() == "production":
             # Built-in production environment
-            self.set_base_url(self.DEFAULT_BASE_URL)
-            self.set_frontend_url(self.DEFAULT_FRONTEND_URL)
-            self.set_inference_url(self.DEFAULT_INFERENCE_URL)
-            self.set_team_id(None)  # Production defaults to personal account
-            self.set_current_environment("production")
+            if persist:
+                self.set_base_url(self.DEFAULT_BASE_URL)
+                self.set_frontend_url(self.DEFAULT_FRONTEND_URL)
+                self.set_inference_url(self.DEFAULT_INFERENCE_URL)
+                self.set_team_id(None)  # Production defaults to personal account
+                self.set_current_environment("production")
+            else:
+                self.config["base_url"] = self.DEFAULT_BASE_URL
+                self.config["frontend_url"] = self.DEFAULT_FRONTEND_URL
+                self.config["inference_url"] = self.DEFAULT_INFERENCE_URL
+                self.config["team_id"] = None
+                self.config["current_environment"] = "production"
             return True
 
         try:
@@ -234,16 +254,33 @@ class Config:
                 except json.JSONDecodeError as e:
                     raise ValueError(f"Invalid JSON in environment file {sanitized_name}.json: {e}")
 
-                if "api_key" in env_config:
-                    self.set_api_key(env_config["api_key"])
-                # Set team_id from environment, defaulting to empty string
-                self.set_team_id(env_config.get("team_id", None))
-                # Set user_id from environment
-                self.set_user_id(env_config.get("user_id", None))
-                self.set_base_url(env_config.get("base_url", self.DEFAULT_BASE_URL))
-                self.set_frontend_url(env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL))
-                self.set_inference_url(env_config.get("inference_url", self.DEFAULT_INFERENCE_URL))
-                self.set_current_environment(name)
+                if persist:
+                    if "api_key" in env_config:
+                        self.set_api_key(env_config["api_key"])
+                    # Set team_id from environment, defaulting to empty string
+                    self.set_team_id(env_config.get("team_id", None))
+                    # Set user_id from environment
+                    self.set_user_id(env_config.get("user_id", None))
+                    self.set_base_url(env_config.get("base_url", self.DEFAULT_BASE_URL))
+                    self.set_frontend_url(env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL))
+                    self.set_inference_url(
+                        env_config.get("inference_url", self.DEFAULT_INFERENCE_URL)
+                    )
+                    self.set_current_environment(name)
+                else:
+                    # In-memory only - don't persist to disk
+                    if "api_key" in env_config:
+                        self.config["api_key"] = env_config["api_key"]
+                    self.config["team_id"] = env_config.get("team_id", None)
+                    self.config["user_id"] = env_config.get("user_id", None)
+                    # Normalize URLs the same way set_* methods do
+                    base_url = env_config.get("base_url", self.DEFAULT_BASE_URL)
+                    self.config["base_url"] = self._strip_api_v1(base_url)
+                    frontend_url = env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL)
+                    self.config["frontend_url"] = frontend_url.rstrip("/")
+                    inference_url = env_config.get("inference_url", self.DEFAULT_INFERENCE_URL)
+                    self.config["inference_url"] = inference_url.rstrip("/")
+                    self.config["current_environment"] = name
                 return True
         except ValueError:
             # Re-raise sanitization errors

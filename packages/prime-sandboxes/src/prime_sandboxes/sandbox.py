@@ -376,6 +376,9 @@ class SandboxClient:
         bg_cmd = f"nohup sh -c '{full_cmd}; echo $? > {exit_file}' > {log_file} 2>&1 &"
         self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
+        # Initial delay to let the process start
+        time.sleep(5)
+
         # Poll for completion
         while True:
             check = self.execute_command(sandbox_id, f"cat {exit_file} 2>/dev/null", timeout=10)
@@ -853,6 +856,9 @@ class AsyncSandboxClient:
         # Start detached process
         bg_cmd = f"nohup sh -c '{full_cmd}; echo $? > {exit_file}' > {log_file} 2>&1 &"
         await self.execute_command(sandbox_id, bg_cmd, timeout=10)
+
+        # Initial delay to let the process start
+        await asyncio.sleep(5)
 
         # Poll for completion
         while True:

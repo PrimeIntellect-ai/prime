@@ -204,12 +204,12 @@ def test_execute_background(sandbox_client, shared_sandbox):
     print("\nTesting execute_background with 10s sleep...")
     result = sandbox_client.execute_background(
         shared_sandbox.id,
-        "sleep 10 && echo 'background done'",
+        'sleep 10 && echo "background\'s done"',
         poll_interval=2,
     )
 
     assert result.exit_code == 0
-    assert "background done" in result.stdout
+    assert "background's done" in result.stdout
     print(f"✓ Background execution completed: {result.stdout.strip()}")
 
 
@@ -228,3 +228,17 @@ def test_execute_background_with_working_dir(sandbox_client, shared_sandbox):
     assert result.exit_code == 0
     assert "/tmp/bgtest" in result.stdout
     print(f"✓ Background with working_dir: {result.stdout.strip()}")
+
+
+def test_execute_background_timeout(sandbox_client, shared_sandbox):
+    """Test that execute_background respects max_wait"""
+    print("\nTesting execute_background timeout handling...")
+    with pytest.raises(CommandTimeoutError):
+        sandbox_client.execute_background(
+            shared_sandbox.id,
+            "sleep 30",
+            poll_interval=1,
+            max_wait=6,
+        )
+
+    print("✓ Background execution timeout raised as expected")

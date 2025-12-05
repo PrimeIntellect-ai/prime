@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import sys
 import time
 from datetime import datetime, timezone
@@ -336,6 +337,7 @@ class SandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         poll_interval: int = 10,
+        max_wait: Optional[int] = 3600,
     ) -> CommandResponse:
         """Execute a long-running command in the background with polling.
 
@@ -348,6 +350,7 @@ class SandboxClient:
             working_dir: Working directory for command execution
             env: Environment variables
             poll_interval: Seconds between completion checks (default: 10)
+            max_wait: Maximum seconds to wait for completion (default: 3600). Use None for no limit.
 
         Returns:
             CommandResponse with stdout, stderr, and exit_code
@@ -358,39 +361,50 @@ class SandboxClient:
         log_file = f"/tmp/job_{job_id}.log"
         exit_file = f"/tmp/job_{job_id}.exit"
 
-        # Build command with working dir if specified
-        if working_dir:
-            full_cmd = f"cd {working_dir} && {command}"
-        else:
-            full_cmd = command
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be greater than 0 seconds")
+        if max_wait is not None and max_wait <= 0:
+            raise ValueError("max_wait must be greater than 0 seconds or None")
 
-        # Add env vars if specified
         env_prefix = ""
         if env:
             for k, v in env.items():
-                escaped_v = v.replace("'", "'\\''")
-                env_prefix += f"export {k}='{escaped_v}'; "
-            full_cmd = env_prefix + full_cmd
+                env_prefix += f"export {k}={shlex.quote(v)}; "
+
+        dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
+        full_cmd = f"{env_prefix}{dir_prefix}{command}"
+        escaped_cmd = full_cmd.replace("'", "'\\''")
 
         # Start detached process
-        bg_cmd = f"nohup sh -c '{full_cmd}; echo $? > {exit_file}' > {log_file} 2>&1 &"
+        bg_cmd = f"nohup sh -c '{escaped_cmd}; echo $? > {exit_file}' > {log_file} 2>&1 &"
         self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
+        start_time = time.monotonic()
+
+        def sleep_or_timeout(delay: float) -> None:
+            if max_wait is not None:
+                elapsed = time.monotonic() - start_time
+                remaining = max_wait - elapsed
+                if remaining <= 0:
+                    raise CommandTimeoutError(sandbox_id, command, max_wait)
+                delay = min(delay, remaining)
+            time.sleep(delay)
+
         # Initial delay to let the process start
-        time.sleep(5)
+        sleep_or_timeout(5)
 
         # Poll for completion
         while True:
             check = self.execute_command(sandbox_id, f"cat {exit_file} 2>/dev/null", timeout=10)
             if check.stdout.strip():
                 break
-            time.sleep(poll_interval)
+            sleep_or_timeout(poll_interval)
 
         # Get results
         exit_code = int(check.stdout.strip())
         logs = self.execute_command(sandbox_id, f"cat {log_file}", timeout=60)
 
-        return CommandResponse(stdout=logs.stdout, stderr="", exit_code=exit_code, duration_ms=0)
+        return CommandResponse(stdout=logs.stdout, stderr="", exit_code=exit_code)
 
     def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
@@ -816,6 +830,7 @@ class AsyncSandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         poll_interval: int = 10,
+        max_wait: Optional[int] = 3600,
     ) -> CommandResponse:
         """Execute a long-running command in the background with polling (async).
 
@@ -828,6 +843,7 @@ class AsyncSandboxClient:
             working_dir: Working directory for command execution
             env: Environment variables
             poll_interval: Seconds between completion checks (default: 10)
+            max_wait: Maximum seconds to wait for completion (default: 3600). Use None for no limit.
 
         Returns:
             CommandResponse with stdout, stderr, and exit_code
@@ -839,26 +855,37 @@ class AsyncSandboxClient:
         log_file = f"/tmp/job_{job_id}.log"
         exit_file = f"/tmp/job_{job_id}.exit"
 
-        # Build command with working dir if specified
-        if working_dir:
-            full_cmd = f"cd {working_dir} && {command}"
-        else:
-            full_cmd = command
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be greater than 0 seconds")
+        if max_wait is not None and max_wait <= 0:
+            raise ValueError("max_wait must be greater than 0 seconds or None")
 
-        # Add env vars if specified
         env_prefix = ""
         if env:
             for k, v in env.items():
-                escaped_v = v.replace("'", "'\\''")
-                env_prefix += f"export {k}='{escaped_v}'; "
-            full_cmd = env_prefix + full_cmd
+                env_prefix += f"export {k}={shlex.quote(v)}; "
+
+        dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
+        full_cmd = f"{env_prefix}{dir_prefix}{command}"
+        escaped_cmd = full_cmd.replace("'", "'\\''")
 
         # Start detached process
-        bg_cmd = f"nohup sh -c '{full_cmd}; echo $? > {exit_file}' > {log_file} 2>&1 &"
+        bg_cmd = f"nohup sh -c '{escaped_cmd}; echo $? > {exit_file}' > {log_file} 2>&1 &"
         await self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
+        start_time = time.monotonic()
+
+        async def sleep_or_timeout(delay: float) -> None:
+            if max_wait is not None:
+                elapsed = time.monotonic() - start_time
+                remaining = max_wait - elapsed
+                if remaining <= 0:
+                    raise CommandTimeoutError(sandbox_id, command, max_wait)
+                delay = min(delay, remaining)
+            await asyncio.sleep(delay)
+
         # Initial delay to let the process start
-        await asyncio.sleep(5)
+        await sleep_or_timeout(5)
 
         # Poll for completion
         while True:
@@ -867,13 +894,13 @@ class AsyncSandboxClient:
             )
             if check.stdout.strip():
                 break
-            await asyncio.sleep(poll_interval)
+            await sleep_or_timeout(poll_interval)
 
         # Get results
         exit_code = int(check.stdout.strip())
         logs = await self.execute_command(sandbox_id, f"cat {log_file}", timeout=60)
 
-        return CommandResponse(stdout=logs.stdout, stderr="", exit_code=exit_code, duration_ms=0)
+        return CommandResponse(stdout=logs.stdout, stderr="", exit_code=exit_code)
 
     async def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2

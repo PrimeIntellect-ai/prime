@@ -550,9 +550,10 @@ class SandboxClient:
         sandbox_id: str,
         port: int,
         name: Optional[str] = None,
+        protocol: str = "HTTP",
     ) -> ExposedPort:
-        """Expose an HTTP port from a sandbox."""
-        request = ExposePortRequest(port=port, name=name)
+        """Expose a port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name, protocol=protocol)
         response = self.client.request(
             "POST",
             f"/sandbox/{sandbox_id}/expose",
@@ -567,6 +568,11 @@ class SandboxClient:
     def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
         """List all exposed ports for a sandbox"""
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
+        return ListExposedPortsResponse.model_validate(response)
+
+    def list_all_exposed_ports(self) -> ListExposedPortsResponse:
+        """List all exposed ports across all sandboxes for the current user"""
+        response = self.client.request("GET", "/sandbox/expose/all")
         return ListExposedPortsResponse.model_validate(response)
 
 
@@ -1006,9 +1012,10 @@ class AsyncSandboxClient:
         sandbox_id: str,
         port: int,
         name: Optional[str] = None,
+        protocol: str = "HTTP",
     ) -> ExposedPort:
-        """Expose an HTTP port from a sandbox."""
-        request = ExposePortRequest(port=port, name=name)
+        """Expose a port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name, protocol=protocol)
         response = await self.client.request(
             "POST",
             f"/sandbox/{sandbox_id}/expose",
@@ -1023,4 +1030,9 @@ class AsyncSandboxClient:
     async def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
         """List all exposed ports for a sandbox"""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
+        return ListExposedPortsResponse.model_validate(response)
+
+    async def list_all_exposed_ports(self) -> ListExposedPortsResponse:
+        """List all exposed ports across all sandboxes for the current user"""
+        response = await self.client.request("GET", "/sandbox/expose/all")
         return ListExposedPortsResponse.model_validate(response)

@@ -1,11 +1,13 @@
 """Sandbox client implementations."""
 
+import asyncio
 import json
 import os
 import re
 import shlex
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -365,7 +367,6 @@ class SandboxClient:
         Returns:
             CommandResponse with stdout, stderr, and exit_code
         """
-        import uuid
 
         job_id = uuid.uuid4().hex[:8]
         log_file = f"/tmp/job_{job_id}.log"
@@ -866,8 +867,6 @@ class AsyncSandboxClient:
         Returns:
             CommandResponse with stdout, stderr, and exit_code
         """
-        import asyncio
-        import uuid
 
         job_id = uuid.uuid4().hex[:8]
         log_file = f"/tmp/job_{job_id}.log"

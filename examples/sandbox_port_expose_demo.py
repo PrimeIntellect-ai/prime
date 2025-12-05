@@ -171,16 +171,16 @@ while True:
         print("TCP:  Use the TLS socket address with a TCP client")
 
         # Clean up exposures
-        # print("\n--- Cleanup ---")
-        # print("Removing port exposures...")
-        # sandbox_client.unexpose(sandbox.id, http_exposure.exposure_id)
-        # print(f"  Removed HTTP exposure: {http_exposure.exposure_id}")
-        # sandbox_client.unexpose(sandbox.id, tcp_exposure.exposure_id)
-        # print(f"  Removed TCP exposure: {tcp_exposure.exposure_id}")
+        print("\n--- Cleanup ---")
+        print("Removing port exposures...")
+        sandbox_client.unexpose(sandbox.id, http_exposure.exposure_id)
+        print(f"  Removed HTTP exposure: {http_exposure.exposure_id}")
+        sandbox_client.unexpose(sandbox.id, tcp_exposure.exposure_id)
+        print(f"  Removed TCP exposure: {tcp_exposure.exposure_id}")
 
-        # # Delete sandbox
-        # print(f"\nDeleting sandbox {sandbox.name}...")
-        # sandbox_client.delete(sandbox.id)
+        # Delete sandbox
+        print(f"\nDeleting sandbox {sandbox.name}...")
+        sandbox_client.delete(sandbox.id)
         print("Done!")
 
     except APIError as e:

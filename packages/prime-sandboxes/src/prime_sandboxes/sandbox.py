@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -32,6 +33,8 @@ from .models import (
     SandboxLogsResponse,
 )
 
+_ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 def _build_user_agent() -> str:
     """Build User-Agent string for prime-sandboxes"""
@@ -39,6 +42,13 @@ def _build_user_agent() -> str:
 
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     return f"prime-sandboxes/{__version__} python/{python_version}"
+
+
+def _validate_env_key(key: str) -> str:
+    """Ensure environment variable keys are valid shell identifiers."""
+    if not _ENV_VAR_PATTERN.fullmatch(key):
+        raise ValueError(f"Invalid environment variable name: {key!r}")
+    return key
 
 
 class SandboxAuthCache:
@@ -368,15 +378,23 @@ class SandboxClient:
 
         env_prefix = ""
         if env:
+            exports = []
             for k, v in env.items():
-                env_prefix += f"export {k}={shlex.quote(v)}; "
+                _validate_env_key(k)
+                exports.append(f"export {k}={shlex.quote(v)}")
+            env_prefix = "; ".join(exports)
+            if env_prefix:
+                env_prefix += "; "
 
         dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
-        full_cmd = f"{env_prefix}{dir_prefix}{command}"
-        escaped_cmd = full_cmd.replace("'", "'\\''")
+        command_body = f"{env_prefix}{dir_prefix}{command}"
+        exit_file_quoted = shlex.quote(exit_file)
+        log_file_quoted = shlex.quote(log_file)
+        sh_command = f"{command_body}; echo $? > {exit_file_quoted}"
+        quoted_sh_command = shlex.quote(sh_command)
 
         # Start detached process
-        bg_cmd = f"nohup sh -c '{escaped_cmd}; echo $? > {exit_file}' > {log_file} 2>&1 &"
+        bg_cmd = f"nohup sh -c {quoted_sh_command} > {log_file_quoted} 2>&1 &"
         self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
         start_time = time.monotonic()
@@ -862,15 +880,23 @@ class AsyncSandboxClient:
 
         env_prefix = ""
         if env:
+            exports = []
             for k, v in env.items():
-                env_prefix += f"export {k}={shlex.quote(v)}; "
+                _validate_env_key(k)
+                exports.append(f"export {k}={shlex.quote(v)}")
+            env_prefix = "; ".join(exports)
+            if env_prefix:
+                env_prefix += "; "
 
         dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
-        full_cmd = f"{env_prefix}{dir_prefix}{command}"
-        escaped_cmd = full_cmd.replace("'", "'\\''")
+        command_body = f"{env_prefix}{dir_prefix}{command}"
+        exit_file_quoted = shlex.quote(exit_file)
+        log_file_quoted = shlex.quote(log_file)
+        sh_command = f"{command_body}; echo $? > {exit_file_quoted}"
+        quoted_sh_command = shlex.quote(sh_command)
 
         # Start detached process
-        bg_cmd = f"nohup sh -c '{escaped_cmd}; echo $? > {exit_file}' > {log_file} 2>&1 &"
+        bg_cmd = f"nohup sh -c {quoted_sh_command} > {log_file_quoted} 2>&1 &"
         await self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
         start_time = time.monotonic()

@@ -1,6 +1,8 @@
 import json
 import random
+import shutil
 import string
+import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
@@ -1050,4 +1052,127 @@ def list_ports(
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
+        raise typer.Exit(1)
+
+
+@app.command("ssh", no_args_is_help=True)
+def ssh_connect(
+    sandbox_id: str = typer.Argument(..., help="Sandbox ID to SSH into"),
+    user: str = typer.Option("root", "--user", "-u", help="SSH user to connect as"),
+    port: int = typer.Option(22, "--port", "-p", help="SSH port in the sandbox"),
+    identity: Optional[str] = typer.Option(
+        None, "--identity", "-i", help="Path to SSH private key file"
+    ),
+    ssh_args: Optional[List[str]] = typer.Argument(
+        None, help="Additional SSH arguments (e.g., -- -v for verbose)"
+    ),
+) -> None:
+    """Connect to a sandbox via SSH.
+
+    This command exposes the SSH port, connects via SSH, and automatically cleans
+    up the port exposure when the session ends.
+
+    Examples:\n
+        prime sandbox ssh sb_abc123\n
+        prime sandbox ssh sb_abc123 -u ubuntu -p 2222\n
+        prime sandbox ssh sb_abc123 -i ~/.ssh/my_key\n
+        prime sandbox ssh sb_abc123 -- -v -L 8080:localhost:8080\n
+    """
+    exposure_id: Optional[str] = None
+    sandbox_client: Optional[SandboxClient] = None
+
+    def cleanup() -> None:
+        """Clean up the port exposure."""
+        if exposure_id and sandbox_client:
+            try:
+                console.print("\n[bold blue]Cleaning up SSH tunnel...[/bold blue]")
+                sandbox_client.unexpose(sandbox_id, exposure_id)
+                console.print("[green]✓[/green] SSH tunnel closed")
+            except Exception:
+                pass
+
+    try:
+        # Check if ssh command is available
+        if not shutil.which("ssh"):
+            console.print("[red]Error:[/red] SSH client not found. Please install OpenSSH.")
+            raise typer.Exit(1)
+
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        # Check if sandbox is running
+        with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
+            sandbox = sandbox_client.get(sandbox_id)
+
+        if sandbox.status != "RUNNING":
+            console.print(f"[red]Error:[/red] Sandbox is not running (status: {sandbox.status})")
+            console.print(
+                f"[yellow]Tip:[/yellow] Check sandbox status with: prime sandbox get {sandbox_id}"
+            )
+            raise typer.Exit(1)
+
+        # Expose SSH port as TCP
+        console.print(f"[bold blue]Exposing SSH port {port}...[/bold blue]")
+        with console.status("[bold blue]Setting up SSH tunnel...", spinner="dots"):
+            exposed = sandbox_client.expose(sandbox_id, port, "ssh", "TCP")
+            time.sleep(120)
+
+        exposure_id = exposed.exposure_id
+
+        # Parse the TLS socket to get host and external port
+        # Format is typically "hostname:port"
+        tls_parts = exposed.tls_socket.rsplit(":", 1)
+        if len(tls_parts) != 2:
+            console.print(f"[red]Error:[/red] Invalid TLS socket format: {exposed.tls_socket}")
+            cleanup()
+            raise typer.Exit(1)
+
+        ssh_host = tls_parts[0]
+        ssh_port = int(tls_parts[1])
+
+        console.print("[green]✓[/green] SSH tunnel established!")
+        console.print(f"[bold green]Connecting to:[/bold green] {user}@{ssh_host}")
+        console.print(f"[bold green]Port:[/bold green] {ssh_port}")
+        console.print()
+        console.print("[dim]Press Ctrl+D or type 'exit' to disconnect[/dim]")
+        console.print()
+
+        # Build SSH command
+        ssh_cmd = ["ssh", f"{user}@{ssh_host}", "-p", str(ssh_port)]
+
+        # Disable strict host key checking for dynamic hosts
+        ssh_cmd.extend(["-o", "StrictHostKeyChecking=no"])
+        ssh_cmd.extend(["-o", "UserKnownHostsFile=/dev/null"])
+
+        # Add identity file if specified
+        if identity:
+            ssh_cmd.extend(["-i", identity])
+
+        # Add any additional SSH arguments
+        if ssh_args:
+            ssh_cmd.extend(ssh_args)
+
+        # Connect via SSH (this will be interactive)
+        result = subprocess.run(ssh_cmd)
+
+        # Check if SSH connection failed
+        if result.returncode != 0 and result.returncode != 255:
+            console.print(f"\n[yellow]SSH connection exited with code {result.returncode}[/yellow]")
+
+        cleanup()
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]SSH connection interrupted[/yellow]")
+        cleanup()
+        raise typer.Exit(130)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        cleanup()
+        raise typer.Exit(1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
+        cleanup()
         raise typer.Exit(1)

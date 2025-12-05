@@ -329,6 +329,66 @@ class SandboxClient:
         except Exception as e:
             raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
+    def execute_background(
+        self,
+        sandbox_id: str,
+        command: str,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        poll_interval: int = 10,
+    ) -> CommandResponse:
+        """Execute a long-running command in the background with polling.
+
+        Use this for commands that may exceed the 300s timeout limit.
+        The command runs detached and output is captured to temp files.
+
+        Args:
+            sandbox_id: The sandbox ID
+            command: Command to execute
+            working_dir: Working directory for command execution
+            env: Environment variables
+            poll_interval: Seconds between completion checks (default: 10)
+
+        Returns:
+            CommandResponse with stdout, stderr, and exit_code
+        """
+        import uuid
+
+        job_id = uuid.uuid4().hex[:8]
+        log_file = f"/tmp/job_{job_id}.log"
+        exit_file = f"/tmp/job_{job_id}.exit"
+
+        # Build command with working dir if specified
+        if working_dir:
+            full_cmd = f"cd {working_dir} && {command}"
+        else:
+            full_cmd = command
+
+        # Add env vars if specified
+        env_prefix = ""
+        if env:
+            for k, v in env.items():
+                escaped_v = v.replace("'", "'\\''")
+                env_prefix += f"export {k}='{escaped_v}'; "
+            full_cmd = env_prefix + full_cmd
+
+        # Start detached process
+        bg_cmd = f"nohup sh -c '{full_cmd}; echo $? > {exit_file}' > {log_file} 2>&1 &"
+        self.execute_command(sandbox_id, bg_cmd, timeout=10)
+
+        # Poll for completion
+        while True:
+            check = self.execute_command(sandbox_id, f"cat {exit_file} 2>/dev/null", timeout=10)
+            if check.stdout.strip():
+                break
+            time.sleep(poll_interval)
+
+        # Get results
+        exit_code = int(check.stdout.strip())
+        logs = self.execute_command(sandbox_id, f"cat {log_file}", timeout=60)
+
+        return CommandResponse(stdout=logs.stdout, stderr="", exit_code=exit_code, duration_ms=0)
+
     def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
     ) -> None:

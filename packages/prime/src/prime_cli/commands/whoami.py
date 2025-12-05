@@ -26,6 +26,7 @@ def whoami() -> None:
         user_id = data.get("id")
         email = data.get("email")
         name = data.get("name")
+        slug = data.get("slug")
         scope = data.get("scope", {})
 
         # Update config
@@ -39,6 +40,7 @@ def whoami() -> None:
         table.add_column("Field", style="cyan")
         table.add_column("Value", style="green")
         table.add_row("User ID", user_id or "Unknown")
+        table.add_row("Username", slug or "[dim]Not set[/dim]")
         table.add_row("Name", name or "Unknown")
         table.add_row("Email", email or "Unknown")
         console.print(table)

@@ -201,10 +201,10 @@ def test_command_creates_and_reads_file(sandbox_client, shared_sandbox):
 
 def test_execute_background(sandbox_client, shared_sandbox):
     """Test execute_background for long-running commands"""
-    print("\nTesting execute_background with 5s sleep...")
+    print("\nTesting execute_background with 10s sleep...")
     result = sandbox_client.execute_background(
         shared_sandbox.id,
-        "sleep 5 && echo 'background done'",
+        "sleep 10 && echo 'background done'",
         poll_interval=2,
     )
 
@@ -220,9 +220,9 @@ def test_execute_background_with_working_dir(sandbox_client, shared_sandbox):
     print("\nTesting execute_background with working_dir...")
     result = sandbox_client.execute_background(
         shared_sandbox.id,
-        "pwd > output.txt && sleep 2 && cat output.txt",
+        "pwd > output.txt && sleep 10 && cat output.txt",
         working_dir="/tmp/bgtest",
-        poll_interval=1,
+        poll_interval=2,
     )
 
     assert result.exit_code == 0

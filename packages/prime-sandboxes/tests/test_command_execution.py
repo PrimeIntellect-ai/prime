@@ -197,3 +197,48 @@ def test_command_creates_and_reads_file(sandbox_client, shared_sandbox):
     assert read_result.exit_code == 0
     assert content in read_result.stdout
     print(f"✓ File operations successful: {read_result.stdout.strip()}")
+
+
+def test_execute_background(sandbox_client, shared_sandbox):
+    """Test execute_background for long-running commands"""
+    print("\nTesting execute_background with 10s sleep...")
+    result = sandbox_client.execute_background(
+        shared_sandbox.id,
+        'sleep 10 && echo "background\'s done"',
+        poll_interval=2,
+    )
+
+    assert result.exit_code == 0
+    assert "background's done" in result.stdout
+    print(f"✓ Background execution completed: {result.stdout.strip()}")
+
+
+def test_execute_background_with_working_dir(sandbox_client, shared_sandbox):
+    """Test execute_background with working directory"""
+    sandbox_client.execute_command(shared_sandbox.id, "mkdir -p /tmp/bgtest")
+
+    print("\nTesting execute_background with working_dir...")
+    result = sandbox_client.execute_background(
+        shared_sandbox.id,
+        "pwd > output.txt && sleep 10 && cat output.txt",
+        working_dir="/tmp/bgtest",
+        poll_interval=2,
+    )
+
+    assert result.exit_code == 0
+    assert "/tmp/bgtest" in result.stdout
+    print(f"✓ Background with working_dir: {result.stdout.strip()}")
+
+
+def test_execute_background_timeout(sandbox_client, shared_sandbox):
+    """Test that execute_background respects max_wait"""
+    print("\nTesting execute_background timeout handling...")
+    with pytest.raises(CommandTimeoutError):
+        sandbox_client.execute_background(
+            shared_sandbox.id,
+            "sleep 30",
+            poll_interval=1,
+            max_wait=6,
+        )
+
+    print("✓ Background execution timeout raised as expected")

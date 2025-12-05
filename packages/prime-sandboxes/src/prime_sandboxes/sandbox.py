@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 import aiofiles
 import httpx
 
+from prime_sandboxes import __version__
+
 from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
     CommandTimeoutError,
@@ -38,8 +40,6 @@ _ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 def _build_user_agent() -> str:
     """Build User-Agent string for prime-sandboxes"""
-    from prime_sandboxes import __version__
-
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     return f"prime-sandboxes/{__version__} python/{python_version}"
 

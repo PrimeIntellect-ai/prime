@@ -1126,7 +1126,6 @@ def ssh_connect(
         console.print(f"[bold blue]Exposing SSH port {port}...[/bold blue]")
         with console.status("[bold blue]Setting up SSH tunnel...", spinner="dots"):
             exposed = sandbox_client.expose(sandbox_id, port, "ssh", "TCP")
-            time.sleep(120)
 
         exposure_id = exposed.exposure_id
 
@@ -1140,6 +1139,7 @@ def ssh_connect(
 
         ssh_host = tls_parts[0]
         ssh_port = int(tls_parts[1])
+        time.sleep(120)
 
         console.print("[green]✓[/green] SSH tunnel established!")
         console.print(f"[bold green]Connecting to:[/bold green] {user}@{ssh_host}")

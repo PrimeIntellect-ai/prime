@@ -1009,53 +1009,96 @@ def unexpose_port(
         raise typer.Exit(1)
 
 
-@app.command("list-ports", no_args_is_help=True)
+@app.command("list-ports")
 def list_ports(
-    sandbox_id: str = typer.Argument(..., help="Sandbox ID"),
+    sandbox_id: Optional[str] = typer.Argument(
+        None, help="Sandbox ID (omit to list all exposed ports across all sandboxes)"
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List all exposed ports for a sandbox"""
+    """List exposed ports for a sandbox, or all sandboxes if no ID is provided"""
     validate_output_format(output, console)
 
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        with console.status("[bold blue]Fetching exposed ports...", spinner="dots"):
-            response = sandbox_client.list_exposed_ports(sandbox_id)
+        if sandbox_id:
+            # List ports for a specific sandbox
+            with console.status("[bold blue]Fetching exposed ports...", spinner="dots"):
+                response = sandbox_client.list_exposed_ports(sandbox_id)
 
-        if output == "json":
-            output_data_as_json(
-                {"exposures": [exp.model_dump() for exp in response.exposures]}, console
-            )
-        else:
-            if not response.exposures:
-                console.print(f"[yellow]No exposed ports for sandbox {sandbox_id}[/yellow]")
-            else:
-                table = build_table(
-                    f"Exposed Ports for Sandbox {sandbox_id}",
-                    [
-                        ("Exposure ID", "cyan"),
-                        ("Protocol", "white"),
-                        ("Port", "blue"),
-                        ("External", "blue"),
-                        ("Name", "green"),
-                        ("URL", "magenta"),
-                    ],
+            if output == "json":
+                output_data_as_json(
+                    {"exposures": [exp.model_dump() for exp in response.exposures]}, console
                 )
-
-                for exp in response.exposures:
-                    external_port = str(exp.external_port) if exp.external_port else "-"
-                    table.add_row(
-                        exp.exposure_id,
-                        exp.protocol or "HTTP",
-                        str(exp.port),
-                        external_port,
-                        exp.name or "-",
-                        exp.url,
+            else:
+                if not response.exposures:
+                    console.print(f"[yellow]No exposed ports for sandbox {sandbox_id}[/yellow]")
+                else:
+                    table = build_table(
+                        f"Exposed Ports for Sandbox {sandbox_id}",
+                        [
+                            ("Exposure ID", "cyan"),
+                            ("Protocol", "white"),
+                            ("Port", "blue"),
+                            ("External", "blue"),
+                            ("Name", "green"),
+                            ("URL", "magenta"),
+                        ],
                     )
 
-                console.print(table)
+                    for exp in response.exposures:
+                        external_port = str(exp.external_port) if exp.external_port else "-"
+                        table.add_row(
+                            exp.exposure_id,
+                            exp.protocol or "HTTP",
+                            str(exp.port),
+                            external_port,
+                            exp.name or "-",
+                            exp.url,
+                        )
+
+                    console.print(table)
+        else:
+            # List all exposed ports across all sandboxes
+            with console.status("[bold blue]Fetching all exposed ports...", spinner="dots"):
+                response = sandbox_client.list_all_exposed_ports()
+
+            if output == "json":
+                output_data_as_json(
+                    {"exposures": [exp.model_dump() for exp in response.exposures]}, console
+                )
+            else:
+                if not response.exposures:
+                    console.print("[yellow]No exposed ports found[/yellow]")
+                else:
+                    table = build_table(
+                        "All Exposed Ports",
+                        [
+                            ("Sandbox ID", "yellow"),
+                            ("Exposure ID", "cyan"),
+                            ("Protocol", "white"),
+                            ("Port", "blue"),
+                            ("External", "blue"),
+                            ("Name", "green"),
+                            ("URL", "magenta"),
+                        ],
+                    )
+
+                    for exp in response.exposures:
+                        external_port = str(exp.external_port) if exp.external_port else "-"
+                        table.add_row(
+                            exp.sandbox_id,
+                            exp.exposure_id,
+                            exp.protocol or "HTTP",
+                            str(exp.port),
+                            external_port,
+                            exp.name or "-",
+                            exp.url,
+                        )
+
+                    console.print(table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
@@ -1139,7 +1182,7 @@ def ssh_connect(
 
         ssh_host = tls_parts[0]
         ssh_port = int(tls_parts[1])
-        time.sleep(120)
+        time.sleep(15)
 
         console.print("[green]✓[/green] SSH tunnel established!")
         console.print(f"[bold green]Connecting to:[/bold green] {user}@{ssh_host}")

@@ -1,8 +1,9 @@
 name: Pod Lifecycle Test
 
+permissions:
+  contents: read
+
 on:
-  push:
-    branches: ["develop"]
   workflow_dispatch:
 
 jobs:
@@ -119,13 +120,13 @@ jobs:
         if [ -z "$POD_ID" ]; then
           echo "Failed to extract pod ID from CLI output, trying to find by name..."
           sleep 5
-          # Fallback: find pod by name in the list
+          # Fallback: find pod by exact name match
           PODS_JSON=$(uv run prime pods list --output=json)
           POD_ID=$(echo "$PODS_JSON" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 for pod in data.get('pods', []):
-    if pod.get('name', '').startswith('ci-test-'):
+    if pod.get('name') == '$POD_NAME':
         print(pod['id'])
         break
 " || echo "")

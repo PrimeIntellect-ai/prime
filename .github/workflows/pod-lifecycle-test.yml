@@ -1,0 +1,265 @@
+name: Pod Lifecycle Test
+
+on:
+  push:
+    branches: ["develop"]
+  workflow_dispatch:
+
+jobs:
+  test-pod-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      PRIME_API_KEY: ${{ secrets.POD_TEST_API_KEY }}
+      PRIME_BASE_URL: ${{ secrets.POD_TEST_BASE_URL }}
+      PRIME_TEAM_ID: ${{ secrets.POD_TEST_TEAM_ID }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.11'
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        version: "latest"
+
+    - name: Install Prime CLI
+      working-directory: packages/prime
+      run: uv sync --all-extras
+
+    - name: Verify Configuration
+      working-directory: packages/prime
+      run: |
+        echo "Verifying Prime CLI configuration..."
+        uv run prime config view
+        uv run prime whoami
+
+    - name: List Available GPUs
+      id: list-gpus
+      working-directory: packages/prime
+      run: |
+        echo "Fetching available GPU configurations..."
+        uv run prime availability list --output=json > availability.json
+        cat availability.json
+
+        # Find the cheapest available GPU (sort by price, pick first available)
+        RESULT=$(python3 << 'EOF'
+        import json
+        import sys
+
+        with open('availability.json', 'r') as f:
+            data = json.load(f)
+
+        gpu_resources = data.get('gpu_resources', [])
+
+        # Filter to only available GPUs and sort by price
+        available = []
+        for gpu in gpu_resources:
+            if gpu.get('stock_status') == 'Available':
+                price = gpu.get('price_value', float('inf'))
+                available.append({
+                    'cloud_id': gpu['cloud_id'],
+                    'id': gpu['id'],
+                    'gpu_type': gpu['gpu_type'],
+                    'gpu_count': gpu['gpu_count'],
+                    'provider': gpu.get('provider', 'unknown'),
+                    'price': price
+                })
+
+        if not available:
+            print("ERROR: No available GPUs found", file=sys.stderr)
+            sys.exit(1)
+
+        # Sort by price and pick cheapest
+        available.sort(key=lambda x: x['price'])
+        cheapest = available[0]
+
+        print(f"Selected: {cheapest['gpu_type']} x{cheapest['gpu_count']} @ ${cheapest['price']}/hr from {cheapest['provider']}", file=sys.stderr)
+        # Output both cloud_id and short id
+        print(f"{cheapest['cloud_id']}|{cheapest['id']}")
+        EOF
+        )
+
+        CLOUD_ID=$(echo "$RESULT" | cut -d'|' -f1)
+        SHORT_ID=$(echo "$RESULT" | cut -d'|' -f2)
+
+        echo "cloud_id=$CLOUD_ID" >> $GITHUB_OUTPUT
+        echo "short_id=$SHORT_ID" >> $GITHUB_OUTPUT
+        echo "Selected cloud_id: $CLOUD_ID (short: $SHORT_ID)"
+
+    - name: Create Test Pod
+      id: create-pod
+      working-directory: packages/prime
+      run: |
+        echo "Creating test pod..."
+        TIMESTAMP=$(date +%s)
+        POD_NAME="ci-test-${TIMESTAMP}"
+
+        # Create pod using the short ID (more reliable than cloud_id)
+        OUTPUT=$(uv run prime pods create \
+          --id "${{ steps.list-gpus.outputs.short_id }}" \
+          --name "$POD_NAME" \
+          --yes \
+          2>&1) || {
+            echo "Pod creation failed with output:"
+            echo "$OUTPUT"
+            exit 1
+        }
+
+        echo "$OUTPUT"
+
+        # Extract pod ID from output - handle ANSI codes
+        POD_ID=$(echo "$OUTPUT" | sed 's/\x1b\[[0-9;]*m//g' | grep -oE 'Successfully created pod [a-zA-Z0-9]+' | awk '{print $NF}' || echo "")
+
+        if [ -z "$POD_ID" ]; then
+          echo "Failed to extract pod ID from CLI output, trying to find by name..."
+          sleep 5
+          # Fallback: find pod by name in the list
+          PODS_JSON=$(uv run prime pods list --output=json)
+          POD_ID=$(echo "$PODS_JSON" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for pod in data.get('pods', []):
+    if pod.get('name', '').startswith('ci-test-'):
+        print(pod['id'])
+        break
+" || echo "")
+        fi
+
+        if [ -z "$POD_ID" ]; then
+          echo "Failed to find pod ID"
+          exit 1
+        fi
+
+        echo "pod_id=$POD_ID" >> $GITHUB_OUTPUT
+        echo "Created pod: $POD_ID"
+
+    - name: Wait for Pod to be Running
+      id: wait-running
+      working-directory: packages/prime
+      run: |
+        POD_ID="${{ steps.create-pod.outputs.pod_id }}"
+        echo "Waiting for pod $POD_ID to reach ACTIVE status..."
+
+        MAX_WAIT=600  # 10 minutes
+        POLL_INTERVAL=15
+        ELAPSED=0
+
+        while [ $ELAPSED -lt $MAX_WAIT ]; do
+          STATUS_JSON=$(uv run prime pods status "$POD_ID" --output=json 2>&1) || {
+            echo "Failed to get status, retrying..."
+            sleep $POLL_INTERVAL
+            ELAPSED=$((ELAPSED + POLL_INTERVAL))
+            continue
+          }
+
+          echo "$STATUS_JSON"
+
+          # Parse status info
+          PARSED=$(echo "$STATUS_JSON" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    status = d.get('status', 'UNKNOWN')
+    install_status = d.get('installation_status', '')
+    install_progress = d.get('installation_progress', 0)
+    install_error = d.get('installation_error', '')
+    print(f'{status}|{install_status}|{install_progress}|{install_error}')
+except Exception as e:
+    print(f'ERROR|{e}||')
+")
+
+          STATUS=$(echo "$PARSED" | cut -d'|' -f1)
+          INSTALL_STATUS=$(echo "$PARSED" | cut -d'|' -f2)
+          INSTALL_PROGRESS=$(echo "$PARSED" | cut -d'|' -f3)
+          INSTALL_ERROR=$(echo "$PARSED" | cut -d'|' -f4)
+
+          echo "Status: $STATUS | Install: $INSTALL_STATUS ($INSTALL_PROGRESS%)"
+
+          # Check for success - ACTIVE with FINISHED or no installation needed
+          if [ "$STATUS" = "ACTIVE" ]; then
+            if [ "$INSTALL_STATUS" = "FINISHED" ] || [ -z "$INSTALL_STATUS" ] || [ "$INSTALL_PROGRESS" = "100" ]; then
+              echo "Pod is fully active!"
+              echo "status=success" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
+          # Check for failure states
+          if [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "TERMINATED" ]; then
+            echo "Pod failed! Error: $INSTALL_ERROR"
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          sleep $POLL_INTERVAL
+          ELAPSED=$((ELAPSED + POLL_INTERVAL))
+          echo "Elapsed: ${ELAPSED}s / ${MAX_WAIT}s"
+        done
+
+        echo "Timeout waiting for pod to become active"
+        echo "status=timeout" >> $GITHUB_OUTPUT
+        exit 1
+
+    - name: Terminate Pod
+      id: terminate-pod
+      if: always() && steps.create-pod.outputs.pod_id != ''
+      working-directory: packages/prime
+      run: |
+        POD_ID="${{ steps.create-pod.outputs.pod_id }}"
+        echo "Terminating pod $POD_ID..."
+
+        uv run prime pods terminate "$POD_ID" --yes || {
+          echo "Warning: Pod termination may have failed"
+        }
+
+        echo "Pod termination initiated"
+
+    - name: Verify Pod Deleted
+      if: always() && steps.create-pod.outputs.pod_id != ''
+      working-directory: packages/prime
+      run: |
+        POD_ID="${{ steps.create-pod.outputs.pod_id }}"
+        echo "Verifying pod $POD_ID is deleted..."
+
+        # Wait a bit for deletion to propagate
+        sleep 10
+
+        # Check if pod appears in history (terminated pods)
+        HISTORY=$(uv run prime pods history --output=json)
+        echo "$HISTORY"
+
+        # Verify pod is no longer in active list
+        ACTIVE_PODS=$(uv run prime pods list --output=json)
+
+        if echo "$ACTIVE_PODS" | python3 -c "import json,sys; pods=json.load(sys.stdin).get('pods',[]); sys.exit(0 if not any(p['id']=='$POD_ID' for p in pods) else 1)"; then
+          echo "Pod successfully removed from active list"
+        else
+          echo "Warning: Pod still appears in active list"
+          exit 1
+        fi
+
+    - name: Test Summary
+      if: always()
+      run: |
+        echo "## Pod Lifecycle Test Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Step | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| GPU Selection | ${{ steps.list-gpus.outcome }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Pod Creation | ${{ steps.create-pod.outcome }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Wait for Running | ${{ steps.wait-running.outcome }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Pod Termination | ${{ steps.terminate-pod.outcome }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Details" >> $GITHUB_STEP_SUMMARY
+        if [ -n "${{ steps.create-pod.outputs.pod_id }}" ]; then
+          echo "- **Pod ID:** \`${{ steps.create-pod.outputs.pod_id }}\`" >> $GITHUB_STEP_SUMMARY
+        fi
+        if [ -n "${{ steps.list-gpus.outputs.short_id }}" ]; then
+          echo "- **GPU Config:** \`${{ steps.list-gpus.outputs.short_id }}\`" >> $GITHUB_STEP_SUMMARY
+        fi

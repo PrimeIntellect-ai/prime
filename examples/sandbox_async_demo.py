@@ -5,8 +5,7 @@ Async Sandbox API Demo - shows the improved async developer experience
 
 import asyncio
 
-from prime_core import APIError
-from prime_sandboxes import AsyncSandboxClient, CreateSandboxRequest
+from prime_sandboxes import APIError, AsyncSandboxClient, CreateSandboxRequest
 
 
 async def main() -> None:

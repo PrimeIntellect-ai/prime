@@ -12,9 +12,7 @@ Works with both:
     from prime import APIClient, SandboxClient, CreateSandboxRequest
 """
 
-# Using the modern package structure (works with both prime and prime-sandboxes)
-from prime_core import APIClient, APIError
-from prime_sandboxes import CreateSandboxRequest, SandboxClient
+from prime_sandboxes import APIClient, APIError, CreateSandboxRequest, SandboxClient
 
 
 def main() -> None:

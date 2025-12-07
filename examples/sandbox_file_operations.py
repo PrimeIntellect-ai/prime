@@ -14,9 +14,9 @@ import tempfile
 
 from prime_sandboxes import (
     AsyncSandboxClient,
+    Config,
     CreateSandboxRequest,
 )
-from prime_core import Config
 
 
 async def main() -> None:
@@ -164,8 +164,7 @@ if __name__ == "__main__":
 
 def sync_example() -> None:
     """Example using synchronous client"""
-    from prime_core import APIClient
-    from prime_sandboxes import SandboxClient
+    from prime_sandboxes import APIClient, SandboxClient
 
     print("\n🔄 Running synchronous example...")
 

@@ -1810,7 +1810,8 @@ def sync(
             raise typer.Exit(1)
 
         # Check if local content hash exists in remote versions
-        remote_hashes = {v.get("sha256", "") for v in versions_list}
+        # Note: content_hash is the directory content hash, sha256 is the wheel file hash
+        remote_hashes = {v.get("content_hash", "") for v in versions_list}
         is_in_sync = local_content_hash in remote_hashes
 
         if is_in_sync and not force:
@@ -1818,7 +1819,7 @@ def sync(
 
             # Show which version matches
             for v in versions_list:
-                if v.get("sha256") == local_content_hash:
+                if v.get("content_hash") == local_content_hash:
                     console.print(
                         f"[dim]Local content matches remote version "
                         f"{v.get('version', 'unknown')}[/dim]"
@@ -1875,7 +1876,8 @@ def sync(
 
         # Invoke the push command programmatically by calling the push logic
         # We'll use subprocess to call the push command to reuse all its logic
-        push_cmd = ["prime", "env", "push", "--path", str(env_path)]
+        # Pass --owner to ensure we push to the same namespace as the original push
+        push_cmd = ["prime", "env", "push", "--path", str(env_path), "--owner", owner]
         console.print("\n[dim]Running push...[/dim]")
 
         try:

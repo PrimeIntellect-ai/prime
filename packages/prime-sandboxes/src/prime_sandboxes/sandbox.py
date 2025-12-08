@@ -413,13 +413,16 @@ class SandboxClient:
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
-        check = self.execute_command(sandbox_id, f"cat {job.exit_file} 2>/dev/null", timeout=10)
+        exit_file_quoted = shlex.quote(job.exit_file)
+        log_file_quoted = shlex.quote(job.log_file)
+
+        check = self.execute_command(sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=10)
 
         if not check.stdout.strip():
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
         exit_code = int(check.stdout.strip())
-        logs = self.execute_command(sandbox_id, f"cat {job.log_file}", timeout=60)
+        logs = self.execute_command(sandbox_id, f"cat {log_file_quoted}", timeout=60)
 
         return BackgroundJobStatus(
             job_id=job.job_id,
@@ -914,15 +917,18 @@ class AsyncSandboxClient:
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
+        exit_file_quoted = shlex.quote(job.exit_file)
+        log_file_quoted = shlex.quote(job.log_file)
+
         check = await self.execute_command(
-            sandbox_id, f"cat {job.exit_file} 2>/dev/null", timeout=10
+            sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=10
         )
 
         if not check.stdout.strip():
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
         exit_code = int(check.stdout.strip())
-        logs = await self.execute_command(sandbox_id, f"cat {job.log_file}", timeout=60)
+        logs = await self.execute_command(sandbox_id, f"cat {log_file_quoted}", timeout=60)
 
         return BackgroundJobStatus(
             job_id=job.job_id,

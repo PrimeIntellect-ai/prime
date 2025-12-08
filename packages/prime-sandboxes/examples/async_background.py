@@ -48,7 +48,7 @@ async def create_ready_sandbox(sandbox_client: AsyncSandboxClient) -> str:
 
 
 async def execute_with_status_updates(
-    sandbox_client: AsyncSandboxClient, sandbox_id: str
+    sandbox_client: AsyncSandboxClient, sandbox_id: str, max_checks: int = 60
 ) -> BackgroundJobStatus:
     """Start a background job and poll for completion with status updates."""
     # This command counts up once per second to simulate a long-running task.
@@ -58,14 +58,14 @@ async def execute_with_status_updates(
     job = await sandbox_client.start_background_job(sandbox_id, background_command)
     print(f"✓ Job started: {job.job_id}")
 
-    checks = 0
-    while True:
+    for check in range(1, max_checks + 1):
         status = await sandbox_client.get_background_job(sandbox_id, job)
         if status.completed:
             return status
-        checks += 1
-        print(f"[status] Still running... check #{checks}")
+        print(f"[status] Still running... check #{check}")
         await asyncio.sleep(3)
+
+    raise TimeoutError(f"Job {job.job_id} did not complete within {max_checks} checks")
 
 
 async def cleanup_sandbox(sandbox_client: AsyncSandboxClient, sandbox_id: Optional[str]) -> None:

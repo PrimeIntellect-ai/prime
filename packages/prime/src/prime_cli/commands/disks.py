@@ -6,12 +6,12 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 import typer
-from prime_core import APIClient, APIError, Config
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 from prime_cli.api.availability import AvailabilityClient
+from prime_cli.core import APIClient, APIError, Config
 from prime_cli.helper.short_id import generate_short_id_disk
 
 from ..api.disks import Disk, DisksClient

@@ -9,8 +9,8 @@ from typing import Any, Dict, List, Optional
 
 import aiofiles
 import httpx
-from prime_core import APIClient, APIError, AsyncAPIClient
 
+from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
@@ -22,7 +22,10 @@ from .models import (
     BulkDeleteSandboxResponse,
     CommandResponse,
     CreateSandboxRequest,
+    ExposedPort,
+    ExposePortRequest,
     FileUploadResponse,
+    ListExposedPortsResponse,
     Sandbox,
     SandboxListResponse,
     SandboxLogsResponse,
@@ -297,7 +300,8 @@ class SandboxClient:
         }
 
         try:
-            with httpx.Client(timeout=effective_timeout) as client:
+            client_timeout = effective_timeout + 2
+            with httpx.Client(timeout=client_timeout) as client:
                 response = client.post(
                     url,
                     json=payload,
@@ -325,12 +329,30 @@ class SandboxClient:
         except Exception as e:
             raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
-    def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
+    def wait_for_creation(
+        self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
+    ) -> None:
+        """Wait for sandbox to be running and stable.
+
+        Args:
+            sandbox_id: The sandbox ID to wait for
+            max_attempts: Maximum polling attempts
+            stability_checks: Number of consecutive successful reachability checks required
+        """
+        consecutive_successes = 0
         for attempt in range(max_attempts):
             sandbox = self.get(sandbox_id)
             if sandbox.status == "RUNNING":
                 if self._is_sandbox_reachable(sandbox_id):
-                    return
+                    consecutive_successes += 1
+                    if consecutive_successes >= stability_checks:
+                        return
+                    # Small delay between stability checks
+                    time.sleep(0.5)
+                    continue
+                else:
+                    # Reset counter if check fails
+                    consecutive_successes = 0
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
                 raise SandboxNotRunningError(sandbox_id, sandbox.status)
 
@@ -523,6 +545,30 @@ class SandboxClient:
         except Exception as e:
             raise APIError(f"Download failed: {e.__class__.__name__}: {e}") from e
 
+    def expose(
+        self,
+        sandbox_id: str,
+        port: int,
+        name: Optional[str] = None,
+    ) -> ExposedPort:
+        """Expose an HTTP port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name)
+        response = self.client.request(
+            "POST",
+            f"/sandbox/{sandbox_id}/expose",
+            json=request.model_dump(by_alias=False, exclude_none=True),
+        )
+        return ExposedPort.model_validate(response)
+
+    def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
+        """Unexpose a port from a sandbox."""
+        self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
+
+    def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
+        """List all exposed ports for a sandbox"""
+        response = self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
+        return ListExposedPortsResponse.model_validate(response)
+
 
 class AsyncSandboxClient:
     """Async client for sandbox API operations"""
@@ -673,9 +719,10 @@ class AsyncSandboxClient:
         }
 
         try:
+            client_timeout = effective_timeout + 2
             gateway_client = self._get_gateway_client()
             response = await gateway_client.post(
-                url, json=payload, headers=headers, timeout=effective_timeout
+                url, json=payload, headers=headers, timeout=client_timeout
             )
             response.raise_for_status()
             return CommandResponse.model_validate(response.json())
@@ -699,15 +746,32 @@ class AsyncSandboxClient:
         except Exception as e:
             raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
-    async def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
-        """Wait for sandbox to be running (async version)"""
+    async def wait_for_creation(
+        self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
+    ) -> None:
+        """Wait for sandbox to be running and stable (async version).
+
+        Args:
+            sandbox_id: The sandbox ID to wait for
+            max_attempts: Maximum polling attempts
+            stability_checks: Number of consecutive successful reachability checks required
+        """
         import asyncio
 
+        consecutive_successes = 0
         for attempt in range(max_attempts):
             sandbox = await self.get(sandbox_id)
             if sandbox.status == "RUNNING":
                 if await self._is_sandbox_reachable(sandbox_id):
-                    return
+                    consecutive_successes += 1
+                    if consecutive_successes >= stability_checks:
+                        return
+                    # Small delay between stability checks
+                    await asyncio.sleep(0.5)
+                    continue
+                else:
+                    # Reset counter if check fails
+                    consecutive_successes = 0
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
                 raise SandboxNotRunningError(sandbox_id, sandbox.status)
 
@@ -936,3 +1000,27 @@ class AsyncSandboxClient:
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Async context manager exit"""
         await self.aclose()
+
+    async def expose(
+        self,
+        sandbox_id: str,
+        port: int,
+        name: Optional[str] = None,
+    ) -> ExposedPort:
+        """Expose an HTTP port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name)
+        response = await self.client.request(
+            "POST",
+            f"/sandbox/{sandbox_id}/expose",
+            json=request.model_dump(by_alias=False, exclude_none=True),
+        )
+        return ExposedPort.model_validate(response)
+
+    async def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
+        """Unexpose a port from a sandbox."""
+        await self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
+
+    async def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
+        """List all exposed ports for a sandbox"""
+        response = await self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
+        return ListExposedPortsResponse.model_validate(response)

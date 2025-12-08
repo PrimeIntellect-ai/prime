@@ -3,9 +3,10 @@ import re
 from typing import Optional
 
 import typer
-from prime_core import Config
 from rich.console import Console
 from rich.table import Table
+
+from prime_cli.core import Config
 
 from ..client import APIClient, APIError
 
@@ -18,10 +19,10 @@ TEAM_ID_PATTERN = re.compile(r"^c[a-z0-9]{24}$")
 
 def validate_team_id(team_id: str) -> bool:
     """Validate team ID format.
-    
+
     Args:
         team_id: The team ID to validate
-        
+
     Returns:
         True if valid, False otherwise
     """

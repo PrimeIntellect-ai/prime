@@ -41,12 +41,16 @@ import tempfile
 import time
 from typing import Dict, List, Tuple
 
-from prime_sandboxes import (
-    AsyncSandboxClient,
-    CreateSandboxRequest,
-)
-from prime_core import Config, APIError, UnauthorizedError, PaymentRequiredError
 import httpx
+
+from prime_sandboxes import (
+    APIError,
+    AsyncSandboxClient,
+    Config,
+    CreateSandboxRequest,
+    PaymentRequiredError,
+    UnauthorizedError,
+)
 
 
 def create_test_file(size_mb: int, file_path: str) -> str:

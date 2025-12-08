@@ -23,3 +23,4 @@ venv/
 .venv/
 ENV/
 test_env/
+.DS_Store

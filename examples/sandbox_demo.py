@@ -12,9 +12,7 @@ Works with both:
     from prime import APIClient, SandboxClient, CreateSandboxRequest
 """
 
-# Using the modern package structure (works with both prime and prime-sandboxes)
-from prime_core import APIClient, APIError
-from prime_sandboxes import CreateSandboxRequest, SandboxClient
+from prime_sandboxes import APIClient, APIError, CreateSandboxRequest, SandboxClient
 
 
 def main() -> None:
@@ -33,6 +31,8 @@ def main() -> None:
             cpu_cores=1,
             memory_gb=2,
             timeout_minutes=120,  # 2 hours to avoid timeout during demo
+            environment_vars={"ENV": "demo", "DEBUG": "false"},
+            secrets={"API_KEY": "demo-secret-key-12345"},
         )
 
         print("Creating sandbox...")

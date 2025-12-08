@@ -171,6 +171,81 @@ for s in sandboxes.sandboxes:
     print(f"{s.name}: {s.status}")
 ```
 
+### Long-Running Tasks
+
+Use `start_background_job` to run long-running tasks that continue after the API call returns. Poll for completion with `get_background_job`.
+
+```python
+from prime_sandboxes import SandboxClient, CreateSandboxRequest
+
+sandbox_client = SandboxClient()
+
+# Create sandbox with extended timeout
+sandbox = sandbox_client.create(CreateSandboxRequest(
+    name="training-job",
+    docker_image="python:3.11-slim",
+    timeout_minutes=1440,  # 24 hours
+    cpu_cores=4,
+    memory_gb=16,
+))
+sandbox_client.wait_for_creation(sandbox.id)
+
+# Start a long-running job in the background
+job = sandbox_client.start_background_job(
+    sandbox.id,
+    "python train.py --epochs 100"
+)
+print(f"Job started: {job.job_id}")
+
+# Poll for completion
+import time
+while True:
+    status = sandbox_client.get_background_job(sandbox.id, job)
+    if status.completed:
+        print(f"Job finished with exit code: {status.exit_code}")
+        print(status.stdout)
+        break
+    print("Still running...")
+    time.sleep(30)
+
+# Download results
+sandbox_client.download_file(sandbox.id, "/app/model.pt", "./model.pt")
+```
+
+#### Async version
+
+```python
+import asyncio
+from prime_sandboxes import AsyncSandboxClient, CreateSandboxRequest
+
+async def run_training():
+    async with AsyncSandboxClient() as client:
+        sandbox = await client.create(CreateSandboxRequest(
+            name="async-training",
+            docker_image="python:3.11-slim",
+            timeout_minutes=720,
+        ))
+        await client.wait_for_creation(sandbox.id)
+
+        # Start background job
+        job = await client.start_background_job(
+            sandbox.id,
+            "python train.py"
+        )
+
+        # Poll until done
+        while True:
+            status = await client.get_background_job(sandbox.id, job)
+            if status.completed:
+                print(status.stdout)
+                break
+            await asyncio.sleep(30)
+
+        await client.delete(sandbox.id)
+
+asyncio.run(run_training())
+```
+
 ## Documentation
 
 Full API reference: https://github.com/PrimeIntellect-ai/prime-cli/tree/main/packages/prime-sandboxes

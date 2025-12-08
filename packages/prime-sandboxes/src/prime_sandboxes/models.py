@@ -175,3 +175,21 @@ class ListExposedPortsResponse(BaseModel):
     """Response for listing exposed ports"""
 
     exposures: List[ExposedPort]
+
+
+class BackgroundJob(BaseModel):
+    """Background job handle returned when starting a background job"""
+
+    job_id: str
+    sandbox_id: str
+    log_file: str
+    exit_file: str
+
+
+class BackgroundJobStatus(BaseModel):
+    """Status of a background job"""
+
+    job_id: str
+    completed: bool
+    exit_code: Optional[int] = None
+    stdout: Optional[str] = None

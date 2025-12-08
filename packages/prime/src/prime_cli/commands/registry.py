@@ -28,11 +28,14 @@ config = Config()
 
 def _format_registry_row(credential: RegistryCredentialSummary) -> dict:
     server = credential.server or "registry-1.docker.io"
+    scope = credential.team_id or (
+        "user:" + credential.user_id if credential.user_id else "personal"
+    )
     return {
         "id": credential.id,
         "name": credential.name,
         "server": server,
-        "scope": credential.team_id or credential.user_id or "personal",
+        "scope": scope,
         "team_id": credential.team_id,
         "user_id": credential.user_id,
         "created_at": iso_timestamp(credential.created_at),
@@ -73,14 +76,11 @@ def list_registry_credentials(
             return
 
         for item in formatted:
-            scope_display = item["team_id"] or (
-                "user:" + item["user_id"] if item["user_id"] else "personal"
-            )
             table.add_row(
                 item["id"],
                 item["name"],
                 item["server"],
-                scope_display,
+                item["scope"],
                 f"{item['created_at']} ({item['age']})",
             )
 

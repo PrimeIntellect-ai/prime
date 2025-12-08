@@ -12,6 +12,8 @@ from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
 from rich.console import Console
 from rich.table import Table
 
+from ..utils import validate_output_format
+
 app = typer.Typer(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = Console()
 
@@ -184,6 +186,7 @@ def list_images(
         prime images list
         prime images list --output json
     """
+    validate_output_format(output, console)
     try:
         client = APIClient()
 

@@ -122,6 +122,8 @@ def check_docker_image(
             console.print(f"[red]Image not accessible:[/red] {result.details or 'Unknown error'}")
             raise typer.Exit(1)
 
+    except typer.Exit:
+        raise
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {str(e)}")
         raise typer.Exit(1)

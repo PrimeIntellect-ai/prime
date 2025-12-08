@@ -96,9 +96,15 @@ def push_image(
                 console.print(f"[red]Error: Failed to initiate build: {e}[/red]")
                 raise typer.Exit(1)
 
-            build_id = build_response["build_id"]
-            upload_url = build_response["upload_url"]
-            full_image_path = build_response.get("fullImagePath", f"{image_name}:{image_tag}")
+            build_id = build_response.get("build_id")
+            upload_url = build_response.get("upload_url")
+            if not build_id or not upload_url:
+                console.print(
+                    "[red]Error: Invalid response from server "
+                    "(missing build_id or upload_url)[/red]"
+                )
+                raise typer.Exit(1)
+            full_image_path = build_response.get("fullImagePath") or f"{image_name}:{image_tag}"
 
             console.print("[green]✓[/green] Build initiated")
             console.print()
@@ -232,7 +238,10 @@ def list_images(
                 date_str = img.get("pushedAt") or img.get("createdAt", "")
 
             # Image reference
-            image_ref = img.get("fullImagePath", f"{img['imageName']}:{img['imageTag']}")
+            image_ref = (
+                img.get("fullImagePath")
+                or f"{img.get('imageName', 'unknown')}:{img.get('imageTag', 'latest')}"
+            )
 
             table.add_row(image_ref, status_display, size_mb, date_str)
 

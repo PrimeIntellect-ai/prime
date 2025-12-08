@@ -391,7 +391,9 @@ class SandboxClient:
         command_body = f"{env_prefix}{dir_prefix}{command}"
         exit_file_quoted = shlex.quote(exit_file)
         log_file_quoted = shlex.quote(log_file)
-        sh_command = f"{command_body}; echo $? > {exit_file_quoted}"
+        # Wrap command in subshell so 'exit' terminates the subshell, not the outer shell.
+        # This ensures 'echo $?' always runs to capture the exit code.
+        sh_command = f"({command_body}); echo $? > {exit_file_quoted}"
         quoted_sh_command = shlex.quote(sh_command)
 
         # Start detached process
@@ -891,7 +893,9 @@ class AsyncSandboxClient:
         command_body = f"{env_prefix}{dir_prefix}{command}"
         exit_file_quoted = shlex.quote(exit_file)
         log_file_quoted = shlex.quote(log_file)
-        sh_command = f"{command_body}; echo $? > {exit_file_quoted}"
+        # Wrap command in subshell so 'exit' terminates the subshell, not the outer shell.
+        # This ensures 'echo $?' always runs to capture the exit code.
+        sh_command = f"({command_body}); echo $? > {exit_file_quoted}"
         quoted_sh_command = shlex.quote(sh_command)
 
         # Start detached process

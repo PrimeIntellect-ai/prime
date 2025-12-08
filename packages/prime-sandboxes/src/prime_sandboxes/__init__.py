@@ -4,7 +4,7 @@ A standalone SDK for managing remote code execution environments (sandboxes).
 Includes HTTP client, authentication, and full sandbox lifecycle management.
 """
 
-from prime_core import (
+from .core import (
     APIClient,
     APIError,
     APITimeoutError,
@@ -13,7 +13,6 @@ from prime_core import (
     PaymentRequiredError,
     UnauthorizedError,
 )
-
 from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
@@ -28,7 +27,10 @@ from .models import (
     CommandResponse,
     CreateSandboxRequest,
     DockerImageCheckResponse,
+    ExposedPort,
+    ExposePortRequest,
     FileUploadResponse,
+    ListExposedPortsResponse,
     RegistryCredentialSummary,
     Sandbox,
     SandboxListResponse,
@@ -37,7 +39,7 @@ from .models import (
 )
 from .sandbox import AsyncSandboxClient, AsyncTemplateClient, SandboxClient, TemplateClient
 
-__version__ = "0.2.3"
+__version__ = "0.2.5"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -66,6 +68,10 @@ __all__ = [
     "RegistryCredentialSummary",
     "DockerImageCheckResponse",
     "AdvancedConfigs",
+    # Port Forwarding
+    "ExposePortRequest",
+    "ExposedPort",
+    "ListExposedPortsResponse",
     # Exceptions
     "APIError",
     "UnauthorizedError",

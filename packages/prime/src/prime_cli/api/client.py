@@ -1,6 +1,6 @@
-"""API client - re-exports from prime_core for backwards compatibility."""
+"""API client - re-exports from core."""
 
-from prime_core import (
+from prime_cli.core import (
     APIClient,
     APIError,
     APITimeoutError,

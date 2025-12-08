@@ -1,8 +1,9 @@
 import json
 from typing import Any, List, Optional, Union
 
-from prime_core import APIClient, APIError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from prime_cli.core import APIClient, APIError
 
 
 def clean_connection_fields(v: Any) -> Any:
@@ -224,9 +225,9 @@ class PodsClient:
             raise APIError(f"Failed to delete pod: {str(e)}")
 
     def history(
-        self, 
-        offset: int = 0, 
-        limit: int = 100, 
+        self,
+        offset: int = 0,
+        limit: int = 100,
     ) -> HistoryList:
         """Get pods history"""
         try:

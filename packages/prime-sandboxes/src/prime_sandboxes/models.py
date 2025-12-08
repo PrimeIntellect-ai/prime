@@ -39,9 +39,11 @@ class Sandbox(BaseModel):
     disk_size_gb: int = Field(..., alias="diskSizeGB")
     disk_mount_path: str = Field(..., alias="diskMountPath")
     gpu_count: int = Field(..., alias="gpuCount")
+    network_access: bool = Field(True, alias="networkAccess")
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
     environment_vars: Optional[Dict[str, Any]] = Field(None, alias="environmentVars")
+    secrets: Optional[Dict[str, Any]] = Field(None, alias="secrets")
     advanced_configs: Optional[AdvancedConfigs] = Field(None, alias="advancedConfigs")
     labels: List[str] = Field(default_factory=list)
     created_at: datetime = Field(..., alias="createdAt")
@@ -79,8 +81,10 @@ class CreateSandboxRequest(BaseModel):
     memory_gb: int = 2
     disk_size_gb: int = 5
     gpu_count: int = 0
+    network_access: bool = True
     timeout_minutes: int = 60
     environment_vars: Optional[Dict[str, str]] = None
+    secrets: Optional[Dict[str, str]] = None
     labels: List[str] = Field(default_factory=list)
     team_id: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
@@ -100,6 +104,8 @@ class UpdateSandboxRequest(BaseModel):
     timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
     registry_credentials_id: Optional[str] = None
+    secrets: Optional[Dict[str, str]] = None
+    network_access: Optional[bool] = None
 
 
 class CommandRequest(BaseModel):
@@ -165,3 +171,29 @@ class RegistryCredentialSummary(BaseModel):
 class DockerImageCheckResponse(BaseModel):
     accessible: bool
     details: str
+
+
+class ExposePortRequest(BaseModel):
+    """Request to expose a port"""
+
+    port: int
+    name: Optional[str] = None
+
+
+class ExposedPort(BaseModel):
+    """Information about an exposed port"""
+
+    exposure_id: str
+    sandbox_id: str
+    port: int
+    name: Optional[str]
+    url: str
+    tls_socket: str
+    protocol: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class ListExposedPortsResponse(BaseModel):
+    """Response for listing exposed ports"""
+
+    exposures: List[ExposedPort]

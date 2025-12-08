@@ -164,7 +164,7 @@ prime pods ssh <pod-id>
 
 ### Evaluations
 
-Push and manage evaluation results to the Environment Hub. Supports verifiers format and JSON format.
+Push and manage evaluation results to the Environments hub. Supports verifiers format and JSON format.
 
 ```bash
 # Auto-discover and push evaluations from current directory

@@ -1,0 +1,57 @@
+[project]
+name = "prime-mcp-server"
+dynamic = ["version"]
+description = "Prime Intellect MCP Server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    { name = "Prime Intellect", email = "contact@primeintellect.ai" }
+]
+dependencies = [
+    "httpx>=0.25.0",
+    "mcp>=1.0.0",
+    "fastmcp>=0.2.0",
+]
+keywords = ["mcp", "model-context-protocol"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+
+[project.urls]
+Homepage = "https://github.com/PrimeIntellect-ai/prime"
+Documentation = "https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-mcp-server"
+Repository = "https://github.com/PrimeIntellect-ai/prime.git"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.13.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/prime_mcp"]
+
+[tool.hatch.version]
+path = "src/prime_mcp/__init__.py"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+extend-select = ["E", "F", "I"]

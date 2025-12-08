@@ -15,6 +15,14 @@ def obfuscate_env_vars(env_vars: Dict[str, Any]) -> Dict[str, str]:
     return obfuscated
 
 
+def obfuscate_secrets(secrets: Dict[str, Any]) -> Dict[str, str]:
+    """Obfuscate secret values completely for display (keys only, all values as ***)."""
+    obfuscated: Dict[str, str] = {}
+    for key in secrets.keys():
+        obfuscated[key] = "***"
+    return obfuscated
+
+
 def format_ip_display(ip: Optional[Union[str, List[str]]]) -> str:
     """Format IP address(es) for display, handling both single and list cases."""
     if not ip:
@@ -42,3 +50,15 @@ def format_resources(cpu_cores: int, memory_gb: int, gpu_count: int = 0) -> str:
 def format_gpu_spec(gpu_type: str, gpu_count: int) -> str:
     """Format GPU specification as 'Type x Count'."""
     return f"{gpu_type} x{gpu_count}"
+
+
+def format_file_size(size_bytes: int) -> str:
+    """Format file size in human-readable format."""
+    if size_bytes >= 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+    elif size_bytes >= 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    elif size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes} bytes"

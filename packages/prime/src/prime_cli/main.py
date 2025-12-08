@@ -1,9 +1,11 @@
 from importlib.metadata import version
+from typing import Optional
 
 import typer
 
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
+from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
 from .commands.inference import app as inference_app
@@ -13,6 +15,7 @@ from .commands.registry import app as registry_app
 from .commands.sandbox import app as sandbox_app
 from .commands.teams import app as teams_app
 from .commands.whoami import app as whoami_app
+from .core import Config
 
 __version__ = version("prime")
 
@@ -25,6 +28,7 @@ app = typer.Typer(
 
 app.add_typer(availability_app, name="availability")
 app.add_typer(config_app, name="config")
+app.add_typer(disks_app, name="disks")
 app.add_typer(pods_app, name="pods")
 app.add_typer(sandbox_app, name="sandbox")
 app.add_typer(registry_app, name="registry")
@@ -40,13 +44,38 @@ app.add_typer(evals_app, name="eval")
 def callback(
     ctx: typer.Context,
     version_flag: bool = typer.Option(False, "--version", "-v", help="Show version and exit"),
+    context: Optional[str] = typer.Option(
+        None,
+        "--context",
+        "-c",
+        help="Use a specific config context/environment for this command",
+    ),
 ) -> None:
     """Prime Intellect CLI"""
     if version_flag:
         typer.echo(f"Prime CLI version: {__version__}")
         raise typer.Exit()
 
+    if context:
+        import os
+
+        config = Config()
+        # Check if the context exists
+        if context.lower() != "production" and context not in config.list_environments():
+            typer.echo(f"Error: Unknown context '{context}'", err=True)
+            typer.echo("Available contexts:", err=True)
+            for env_name in config.list_environments():
+                typer.echo(f"  - {env_name}", err=True)
+            raise typer.Exit(1)
+
+        # Set environment variable so Config instances in subcommands pick it up
+        os.environ["PRIME_CONTEXT"] = context
+
 
 def run() -> None:
     """Entry point for the CLI"""
-    app()
+    try:
+        app()
+    except typer.Abort:
+        typer.echo("\nOperation cancelled")
+        raise typer.Exit(0)

@@ -242,3 +242,17 @@ def test_execute_background_timeout(sandbox_client, shared_sandbox):
         )
 
     print("✓ Background execution timeout raised as expected")
+
+
+def test_execute_background_with_exit_command(sandbox_client, shared_sandbox):
+    """Test execute_background handles commands ending with exit"""
+    print("\nTesting execute_background with exit command...")
+    result = sandbox_client.execute_background(
+        shared_sandbox.id,
+        "echo 'before exit' && exit 5",
+        poll_interval=1,
+    )
+
+    assert result.exit_code == 5
+    assert "before exit" in result.stdout
+    print(f"✓ Exit command handled correctly, exit_code={result.exit_code}")

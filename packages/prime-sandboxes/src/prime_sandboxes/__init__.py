@@ -26,16 +26,18 @@ from .models import (
     CommandRequest,
     CommandResponse,
     CreateSandboxRequest,
+    DockerImageCheckResponse,
     ExposedPort,
     ExposePortRequest,
     FileUploadResponse,
     ListExposedPortsResponse,
+    RegistryCredentialSummary,
     Sandbox,
     SandboxListResponse,
     SandboxStatus,
     UpdateSandboxRequest,
 )
-from .sandbox import AsyncSandboxClient, SandboxClient
+from .sandbox import AsyncSandboxClient, AsyncTemplateClient, SandboxClient, TemplateClient
 
 __version__ = "0.2.5"
 
@@ -50,6 +52,8 @@ __all__ = [
     # Sandbox Clients
     "SandboxClient",
     "AsyncSandboxClient",
+    "TemplateClient",
+    "AsyncTemplateClient",
     # Models
     "Sandbox",
     "SandboxStatus",
@@ -61,6 +65,8 @@ __all__ = [
     "FileUploadResponse",
     "BulkDeleteSandboxRequest",
     "BulkDeleteSandboxResponse",
+    "RegistryCredentialSummary",
+    "DockerImageCheckResponse",
     "AdvancedConfigs",
     # Port Forwarding
     "ExposePortRequest",

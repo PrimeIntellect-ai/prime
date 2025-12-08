@@ -22,10 +22,12 @@ from .models import (
     BulkDeleteSandboxResponse,
     CommandResponse,
     CreateSandboxRequest,
+    DockerImageCheckResponse,
     ExposedPort,
     ExposePortRequest,
     FileUploadResponse,
     ListExposedPortsResponse,
+    RegistryCredentialSummary,
     Sandbox,
     SandboxListResponse,
     SandboxLogsResponse,
@@ -1024,3 +1026,65 @@ class AsyncSandboxClient:
         """List all exposed ports for a sandbox"""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
         return ListExposedPortsResponse.model_validate(response)
+
+
+class TemplateClient:
+    """Client for template/registry helper APIs."""
+
+    def __init__(self, api_client: Optional[APIClient] = None):
+        self.client = api_client or APIClient()
+
+    def list_registry_credentials(self) -> List[RegistryCredentialSummary]:
+        response = self.client.request("GET", "/template/registry-credentials")
+        credentials = response.get("credentials", [])
+        return [RegistryCredentialSummary.model_validate(item) for item in credentials]
+
+    def check_docker_image(
+        self, image: str, registry_credentials_id: Optional[str] = None
+    ) -> DockerImageCheckResponse:
+        payload: Dict[str, Any] = {"image": image}
+        if registry_credentials_id:
+            payload["registry_credentials_id"] = registry_credentials_id
+        response = self.client.request(
+            "POST",
+            "/template/check-docker-image",
+            json=payload,
+        )
+        return DockerImageCheckResponse.model_validate(response)
+
+
+class AsyncTemplateClient:
+    """Async client for template/registry helper APIs."""
+
+    def __init__(self, api_client: Optional[AsyncAPIClient] = None):
+        self.client = api_client or AsyncAPIClient()
+
+    async def list_registry_credentials(self) -> List[RegistryCredentialSummary]:
+        response = await self.client.request("GET", "/template/registry-credentials")
+        credentials = response.get("credentials", [])
+        return [RegistryCredentialSummary.model_validate(item) for item in credentials]
+
+    async def check_docker_image(
+        self, image: str, registry_credentials_id: Optional[str] = None
+    ) -> DockerImageCheckResponse:
+        payload: Dict[str, Any] = {"image": image}
+        if registry_credentials_id:
+            payload["registry_credentials_id"] = registry_credentials_id
+        response = await self.client.request(
+            "POST",
+            "/template/check-docker-image",
+            json=payload,
+        )
+        return DockerImageCheckResponse.model_validate(response)
+
+    async def aclose(self) -> None:
+        """Close the async client"""
+        await self.client.aclose()
+
+    async def __aenter__(self) -> "AsyncTemplateClient":
+        """Async context manager entry"""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager exit"""
+        await self.aclose()

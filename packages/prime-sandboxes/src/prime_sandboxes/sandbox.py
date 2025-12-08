@@ -1076,3 +1076,15 @@ class AsyncTemplateClient:
             json=payload,
         )
         return DockerImageCheckResponse.model_validate(response)
+
+    async def aclose(self) -> None:
+        """Close the async client"""
+        await self.client.aclose()
+
+    async def __aenter__(self) -> "AsyncTemplateClient":
+        """Async context manager entry"""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager exit"""
+        await self.aclose()

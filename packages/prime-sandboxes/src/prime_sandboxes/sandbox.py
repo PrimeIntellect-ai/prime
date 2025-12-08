@@ -22,6 +22,8 @@ from .exceptions import (
     UploadTimeoutError,
 )
 from .models import (
+    BackgroundJob,
+    BackgroundJobStatus,
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
     CommandResponse,
@@ -342,40 +344,30 @@ class SandboxClient:
         except Exception as e:
             raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
-    def execute_background(
+    def start_background_job(
         self,
         sandbox_id: str,
         command: str,
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
-        poll_interval: int = 10,
-        max_wait: Optional[int] = 3600,
-    ) -> CommandResponse:
-        """Execute a long-running command in the background with polling.
+    ) -> BackgroundJob:
+        """Start a long-running command in the background.
 
-        Use this for commands that may exceed the 300s timeout limit.
-        The command runs detached and output is captured to temp files.
+        Returns immediately with a job handle. Use get_background_job() to check
+        status and retrieve results.
 
         Args:
             sandbox_id: The sandbox ID
             command: Command to execute
             working_dir: Working directory for command execution
             env: Environment variables
-            poll_interval: Seconds between completion checks (default: 10)
-            max_wait: Maximum seconds to wait for completion (default: 3600). Use None for no limit.
 
         Returns:
-            CommandResponse with stdout, stderr, and exit_code
+            BackgroundJob with job_id and file paths for polling
         """
-
         job_id = uuid.uuid4().hex[:8]
         log_file = f"/tmp/job_{job_id}.log"
         exit_file = f"/tmp/job_{job_id}.exit"
-
-        if poll_interval <= 0:
-            raise ValueError("poll_interval must be greater than 0 seconds")
-        if max_wait is not None and max_wait <= 0:
-            raise ValueError("max_wait must be greater than 0 seconds or None")
 
         env_prefix = ""
         if env:
@@ -400,32 +392,41 @@ class SandboxClient:
         bg_cmd = f"nohup sh -c {quoted_sh_command} > {log_file_quoted} 2>&1 &"
         self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
-        start_time = time.monotonic()
+        return BackgroundJob(
+            job_id=job_id,
+            sandbox_id=sandbox_id,
+            log_file=log_file,
+            exit_file=exit_file,
+        )
 
-        def sleep_or_timeout(delay: float) -> None:
-            if max_wait is not None:
-                elapsed = time.monotonic() - start_time
-                remaining = max_wait - elapsed
-                if remaining <= 0:
-                    raise CommandTimeoutError(sandbox_id, command, max_wait)
-                delay = min(delay, remaining)
-            time.sleep(delay)
+    def get_background_job(
+        self,
+        sandbox_id: str,
+        job: BackgroundJob,
+    ) -> BackgroundJobStatus:
+        """Check the status of a background job.
 
-        # Initial delay to let the process start
-        sleep_or_timeout(5)
+        Args:
+            sandbox_id: The sandbox ID
+            job: The BackgroundJob handle from start_background_job()
 
-        # Poll for completion
-        while True:
-            check = self.execute_command(sandbox_id, f"cat {exit_file} 2>/dev/null", timeout=10)
-            if check.stdout.strip():
-                break
-            sleep_or_timeout(poll_interval)
+        Returns:
+            BackgroundJobStatus with completed flag, and exit_code/stdout if done
+        """
+        check = self.execute_command(sandbox_id, f"cat {job.exit_file} 2>/dev/null", timeout=10)
 
-        # Get results
+        if not check.stdout.strip():
+            return BackgroundJobStatus(job_id=job.job_id, completed=False)
+
         exit_code = int(check.stdout.strip())
-        logs = self.execute_command(sandbox_id, f"cat {log_file}", timeout=60)
+        logs = self.execute_command(sandbox_id, f"cat {job.log_file}", timeout=60)
 
-        return CommandResponse(stdout=logs.stdout, stderr="", exit_code=exit_code)
+        return BackgroundJobStatus(
+            job_id=job.job_id,
+            completed=True,
+            exit_code=exit_code,
+            stdout=logs.stdout,
+        )
 
     def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
@@ -844,40 +845,30 @@ class AsyncSandboxClient:
         except Exception as e:
             raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
-    async def execute_background(
+    async def start_background_job(
         self,
         sandbox_id: str,
         command: str,
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
-        poll_interval: int = 10,
-        max_wait: Optional[int] = 3600,
-    ) -> CommandResponse:
-        """Execute a long-running command in the background with polling (async).
+    ) -> BackgroundJob:
+        """Start a long-running command in the background (async).
 
-        Use this for commands that may exceed the 300s timeout limit.
-        The command runs detached and output is captured to temp files.
+        Returns immediately with a job handle. Use get_background_job() to check
+        status and retrieve results.
 
         Args:
             sandbox_id: The sandbox ID
             command: Command to execute
             working_dir: Working directory for command execution
             env: Environment variables
-            poll_interval: Seconds between completion checks (default: 10)
-            max_wait: Maximum seconds to wait for completion (default: 3600). Use None for no limit.
 
         Returns:
-            CommandResponse with stdout, stderr, and exit_code
+            BackgroundJob with job_id and file paths for polling
         """
-
         job_id = uuid.uuid4().hex[:8]
         log_file = f"/tmp/job_{job_id}.log"
         exit_file = f"/tmp/job_{job_id}.exit"
-
-        if poll_interval <= 0:
-            raise ValueError("poll_interval must be greater than 0 seconds")
-        if max_wait is not None and max_wait <= 0:
-            raise ValueError("max_wait must be greater than 0 seconds or None")
 
         env_prefix = ""
         if env:
@@ -902,34 +893,43 @@ class AsyncSandboxClient:
         bg_cmd = f"nohup sh -c {quoted_sh_command} > {log_file_quoted} 2>&1 &"
         await self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
-        start_time = time.monotonic()
+        return BackgroundJob(
+            job_id=job_id,
+            sandbox_id=sandbox_id,
+            log_file=log_file,
+            exit_file=exit_file,
+        )
 
-        async def sleep_or_timeout(delay: float) -> None:
-            if max_wait is not None:
-                elapsed = time.monotonic() - start_time
-                remaining = max_wait - elapsed
-                if remaining <= 0:
-                    raise CommandTimeoutError(sandbox_id, command, max_wait)
-                delay = min(delay, remaining)
-            await asyncio.sleep(delay)
+    async def get_background_job(
+        self,
+        sandbox_id: str,
+        job: BackgroundJob,
+    ) -> BackgroundJobStatus:
+        """Check the status of a background job (async).
 
-        # Initial delay to let the process start
-        await sleep_or_timeout(5)
+        Args:
+            sandbox_id: The sandbox ID
+            job: The BackgroundJob handle from start_background_job()
 
-        # Poll for completion
-        while True:
-            check = await self.execute_command(
-                sandbox_id, f"cat {exit_file} 2>/dev/null", timeout=10
-            )
-            if check.stdout.strip():
-                break
-            await sleep_or_timeout(poll_interval)
+        Returns:
+            BackgroundJobStatus with completed flag, and exit_code/stdout if done
+        """
+        check = await self.execute_command(
+            sandbox_id, f"cat {job.exit_file} 2>/dev/null", timeout=10
+        )
 
-        # Get results
+        if not check.stdout.strip():
+            return BackgroundJobStatus(job_id=job.job_id, completed=False)
+
         exit_code = int(check.stdout.strip())
-        logs = await self.execute_command(sandbox_id, f"cat {log_file}", timeout=60)
+        logs = await self.execute_command(sandbox_id, f"cat {job.log_file}", timeout=60)
 
-        return CommandResponse(stdout=logs.stdout, stderr="", exit_code=exit_code)
+        return BackgroundJobStatus(
+            job_id=job.job_id,
+            completed=True,
+            exit_code=exit_code,
+            stdout=logs.stdout,
+        )
 
     async def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
@@ -941,7 +941,6 @@ class AsyncSandboxClient:
             max_attempts: Maximum polling attempts
             stability_checks: Number of consecutive successful reachability checks required
         """
-        import asyncio
 
         consecutive_successes = 0
         for attempt in range(max_attempts):
@@ -968,7 +967,6 @@ class AsyncSandboxClient:
         self, sandbox_ids: List[str], max_attempts: int = 60
     ) -> Dict[str, str]:
         """Wait for multiple sandboxes to be running using list endpoint"""
-        import asyncio
 
         sandbox_id_set = set(sandbox_ids)
         final_statuses = {}

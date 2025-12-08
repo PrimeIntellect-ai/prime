@@ -1,5 +1,7 @@
 """Tests for advanced sandbox command execution"""
 
+import time
+
 import pytest
 
 from prime_sandboxes import CreateSandboxRequest
@@ -199,60 +201,71 @@ def test_command_creates_and_reads_file(sandbox_client, shared_sandbox):
     print(f"✓ File operations successful: {read_result.stdout.strip()}")
 
 
-def test_execute_background(sandbox_client, shared_sandbox):
-    """Test execute_background for long-running commands"""
-    print("\nTesting execute_background with 10s sleep...")
-    result = sandbox_client.execute_background(
+def test_start_background_job(sandbox_client, shared_sandbox):
+    """Test start_background_job and get_background_job for long-running commands"""
+    print("\nTesting start_background_job with 5s sleep...")
+    job = sandbox_client.start_background_job(
         shared_sandbox.id,
-        'sleep 10 && echo "background\'s done"',
-        poll_interval=2,
+        'sleep 5 && echo "background\'s done"',
     )
 
-    assert result.exit_code == 0
-    assert "background's done" in result.stdout
-    print(f"✓ Background execution completed: {result.stdout.strip()}")
+    assert job.job_id is not None
+    assert job.sandbox_id == shared_sandbox.id
+    print(f"✓ Job started: {job.job_id}")
+
+    # Poll until complete
+    for _ in range(20):
+        status = sandbox_client.get_background_job(shared_sandbox.id, job)
+        if status.completed:
+            break
+        time.sleep(1)
+
+    assert status.completed
+    assert status.exit_code == 0
+    assert "background's done" in status.stdout
+    print(f"✓ Background execution completed: {status.stdout.strip()}")
 
 
-def test_execute_background_with_working_dir(sandbox_client, shared_sandbox):
-    """Test execute_background with working directory"""
+def test_start_background_job_with_working_dir(sandbox_client, shared_sandbox):
+    """Test start_background_job with working directory"""
     sandbox_client.execute_command(shared_sandbox.id, "mkdir -p /tmp/bgtest")
 
-    print("\nTesting execute_background with working_dir...")
-    result = sandbox_client.execute_background(
+    print("\nTesting start_background_job with working_dir...")
+    job = sandbox_client.start_background_job(
         shared_sandbox.id,
-        "pwd > output.txt && sleep 10 && cat output.txt",
+        "pwd > output.txt && sleep 5 && cat output.txt",
         working_dir="/tmp/bgtest",
-        poll_interval=2,
     )
 
-    assert result.exit_code == 0
-    assert "/tmp/bgtest" in result.stdout
-    print(f"✓ Background with working_dir: {result.stdout.strip()}")
+    # Poll until complete
+    for _ in range(20):
+        status = sandbox_client.get_background_job(shared_sandbox.id, job)
+        if status.completed:
+            break
+        time.sleep(1)
+
+    assert status.completed
+    assert status.exit_code == 0
+    assert "/tmp/bgtest" in status.stdout
+    print(f"✓ Background with working_dir: {status.stdout.strip()}")
 
 
-def test_execute_background_timeout(sandbox_client, shared_sandbox):
-    """Test that execute_background respects max_wait"""
-    print("\nTesting execute_background timeout handling...")
-    with pytest.raises(CommandTimeoutError):
-        sandbox_client.execute_background(
-            shared_sandbox.id,
-            "sleep 30",
-            poll_interval=1,
-            max_wait=6,
-        )
-
-    print("✓ Background execution timeout raised as expected")
-
-
-def test_execute_background_with_exit_command(sandbox_client, shared_sandbox):
-    """Test execute_background handles commands ending with exit"""
-    print("\nTesting execute_background with exit command...")
-    result = sandbox_client.execute_background(
+def test_start_background_job_with_exit_command(sandbox_client, shared_sandbox):
+    """Test start_background_job handles commands ending with exit"""
+    print("\nTesting start_background_job with exit command...")
+    job = sandbox_client.start_background_job(
         shared_sandbox.id,
         "echo 'before exit' && exit 5",
-        poll_interval=1,
     )
 
-    assert result.exit_code == 5
-    assert "before exit" in result.stdout
-    print(f"✓ Exit command handled correctly, exit_code={result.exit_code}")
+    # Poll until complete
+    for _ in range(20):
+        status = sandbox_client.get_background_job(shared_sandbox.id, job)
+        if status.completed:
+            break
+        time.sleep(1)
+
+    assert status.completed
+    assert status.exit_code == 5
+    assert "before exit" in status.stdout
+    print(f"✓ Exit command handled correctly, exit_code={status.exit_code}")

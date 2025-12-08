@@ -21,6 +21,8 @@ from .exceptions import (
 )
 from .models import (
     AdvancedConfigs,
+    BackgroundJob,
+    BackgroundJobStatus,
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
     CommandRequest,
@@ -62,6 +64,8 @@ __all__ = [
     "BulkDeleteSandboxRequest",
     "BulkDeleteSandboxResponse",
     "AdvancedConfigs",
+    "BackgroundJob",
+    "BackgroundJobStatus",
     # Port Forwarding
     "ExposePortRequest",
     "ExposedPort",

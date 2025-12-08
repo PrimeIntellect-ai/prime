@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Async sandbox example showing execute_background usage."""
+"""Async sandbox example showing background job usage."""
 
 import asyncio
 from typing import Optional
@@ -7,7 +7,7 @@ from typing import Optional
 from prime_sandboxes import (
     APIError,
     AsyncSandboxClient,
-    CommandResponse,
+    BackgroundJobStatus,
     CreateSandboxRequest,
 )
 
@@ -22,7 +22,7 @@ async def run_background_count_example() -> None:
         result = await execute_with_status_updates(sandbox_client, sandbox_id)
         print("\nBackground job finished!")
         print(f"exit_code: {result.exit_code}")
-        print("stdout:\n" + result.stdout.strip())
+        print("stdout:\n" + (result.stdout or "").strip())
     finally:
         await cleanup_sandbox(sandbox_client, sandbox_id)
 
@@ -49,34 +49,23 @@ async def create_ready_sandbox(sandbox_client: AsyncSandboxClient) -> str:
 
 async def execute_with_status_updates(
     sandbox_client: AsyncSandboxClient, sandbox_id: str
-) -> CommandResponse:
-    """Kick off execute_background and report progress concurrently."""
+) -> BackgroundJobStatus:
+    """Start a background job and poll for completion with status updates."""
     # This command counts up once per second to simulate a long-running task.
     background_command = "for i in $(seq 1 15); do echo Background counter: $i; sleep 1; done"
 
-    done = asyncio.Event()
+    print("\nStarting async background job...")
+    job = await sandbox_client.start_background_job(sandbox_id, background_command)
+    print(f"✓ Job started: {job.job_id}")
 
-    async def show_status() -> None:
-        checks = 0
-        while not done.is_set():
-            checks += 1
-            print(f"[status] Still running... check #{checks}")
-            await asyncio.sleep(3)
-
-    async def run_job():
-        try:
-            print("\nStarting async background execution...")
-            return await sandbox_client.execute_background(
-                sandbox_id,
-                background_command,
-                poll_interval=5,
-                max_wait=120,
-            )
-        finally:
-            done.set()
-
-    result, _ = await asyncio.gather(run_job(), show_status())
-    return result
+    checks = 0
+    while True:
+        status = await sandbox_client.get_background_job(sandbox_id, job)
+        if status.completed:
+            return status
+        checks += 1
+        print(f"[status] Still running... check #{checks}")
+        await asyncio.sleep(3)
 
 
 async def cleanup_sandbox(sandbox_client: AsyncSandboxClient, sandbox_id: Optional[str]) -> None:

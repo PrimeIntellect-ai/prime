@@ -1926,10 +1926,19 @@ def delete(
         raise typer.Exit(1)
 
 
-def _check_environment_installed(env_name: str) -> bool:
+def _check_environment_installed(env_name: str, required_version: str | None = None) -> bool:
     """Check if an environment package is installed and loadable."""
     try:
-        check_code = f"from verifiers import load_environment; load_environment('{env_name}')"
+        if required_version:
+            check_code = (
+                f"from verifiers import load_environment; "
+                f"from importlib.metadata import version; "
+                f"load_environment('{env_name}'); "
+                f"v = version('{env_name.replace('-', '_')}'); "
+                f"exit(0 if v == '{required_version}' else 1)"
+            )
+        else:
+            check_code = f"from verifiers import load_environment; load_environment('{env_name}')"
         result = subprocess.run(
             ["uv", "run", "python", "-c", check_code],
             capture_output=True,
@@ -1958,6 +1967,9 @@ def _auto_install_environment(env_slug: str) -> bool:
             return False
 
         owner, name = parts
+        if not owner or not name:
+            console.print(f"[red]Invalid environment slug format: {env_slug}[/red]")
+            return False
 
         try:
             details = fetch_environment_details(client, owner, name, version)
@@ -2111,14 +2123,16 @@ def eval_env(
             env_slug, version = environment.rsplit("@", 1)
 
         parts = env_slug.split("/")
-        if len(parts) == 2:
+        if len(parts) == 2 and parts[0] and parts[1]:
             upstream_owner, upstream_name = parts
             env_name_for_vf_eval = upstream_name
             console.print(
                 f"[dim]Using upstream environment {upstream_owner}/{upstream_name}[/dim]\n"
             )
 
-            if not _check_environment_installed(upstream_name):
+            required_version = version if version != "latest" else None
+            needs_install = not _check_environment_installed(upstream_name, required_version)
+            if needs_install:
                 if not _auto_install_environment(environment):
                     console.print(
                         f"[red]Failed to install environment {environment}.[/red]\n"

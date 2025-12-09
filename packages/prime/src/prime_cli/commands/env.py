@@ -1929,8 +1929,8 @@ def delete(
 def _check_environment_installed(env_name: str, required_version: str | None = None) -> bool:
     """Check if an environment package is installed and loadable."""
     try:
+        pkg_name = normalize_package_name(env_name)
         if required_version:
-            pkg_name = env_name.replace("-", "_")
             check_code = (
                 f"from verifiers import load_environment; "
                 f"from importlib.metadata import version as get_version; "

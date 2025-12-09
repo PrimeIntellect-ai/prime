@@ -18,6 +18,7 @@ def push_eval_results_to_hub(
     model: str,
     job_id: str,
     env_path: Optional[Path] = None,
+    upstream_slug: Optional[str] = None,
 ) -> None:
     """
     Push evaluation results to Prime Evals Hub after vf-eval completes.
@@ -25,7 +26,7 @@ def push_eval_results_to_hub(
     This function:
     1. Locates the most recent vf-eval output directory
     2. Reads and parses metadata.json and results.jsonl
-    3. Resolves environment ID (from metadata or by name)
+    3. Resolves environment ID (from metadata, upstream_slug, or by name)
     4. Converts results to Prime Evals API format
     5. Creates evaluation, pushes samples, and finalizes
 
@@ -34,6 +35,8 @@ def push_eval_results_to_hub(
         model: Model identifier (e.g., "meta-llama/llama-3.1-70b-instruct")
         job_id: Unique job ID for tracking
         env_path: Optional path to the environment directory (defaults to current directory)
+        upstream_slug: Optional upstream environment slug (e.g., "primeintellect/gpqa")
+                      If provided, bypasses metadata file lookup
     """
     # Step 1: Find the output directory
     module_name = env_name.replace("-", "_")
@@ -72,39 +75,40 @@ def push_eval_results_to_hub(
             if line.strip():
                 results_samples.append(json.loads(line))
 
-    # Search for environment metadata in multiple possible locations
-    hub_metadata = find_environment_metadata(
-        env_name=env_name,
-        env_path=env_path,
-        module_name=module_name,
-    )
-    
     resolved_env_slug = None
     resolved_env_id = None
 
-    if hub_metadata:
-        try:
-            # Prefer database ID if available (no resolution needed)
-            if hub_metadata.get("environment_id"):
-                resolved_env_id = hub_metadata.get("environment_id")
-                owner = hub_metadata.get("owner")
-                name = hub_metadata.get("name")
-                resolved_env_slug = (
-                    f"{owner}/{name}" if owner and name else None
+    if upstream_slug:
+        resolved_env_slug = upstream_slug
+        resolved_env_id = None
+    else:
+        # Search for environment metadata in multiple possible locations
+        hub_metadata = find_environment_metadata(
+            env_name=env_name,
+            env_path=env_path,
+            module_name=module_name,
+        )
+
+        if hub_metadata:
+            try:
+                # Prefer database ID if available (no resolution needed)
+                if hub_metadata.get("environment_id"):
+                    resolved_env_id = hub_metadata.get("environment_id")
+                    owner = hub_metadata.get("owner")
+                    name = hub_metadata.get("name")
+                    resolved_env_slug = f"{owner}/{name}" if owner and name else None
+                elif hub_metadata.get("owner") and hub_metadata.get("name"):
+                    resolved_env_slug = f"{hub_metadata.get('owner')}/{hub_metadata.get('name')}"
+                    resolved_env_id = None
+                else:
+                    resolved_env_slug = None
+                    resolved_env_id = None
+            except (KeyError, AttributeError) as e:
+                console.print(
+                    f"[yellow]Warning: Could not parse environment metadata: {e}[/yellow]"
                 )
-            elif hub_metadata.get("owner") and hub_metadata.get("name"):
-                resolved_env_slug = f"{hub_metadata.get('owner')}/{hub_metadata.get('name')}"
-                resolved_env_id = None
-            else:
                 resolved_env_slug = None
                 resolved_env_id = None
-        except (KeyError, AttributeError) as e:
-            console.print(f"[yellow]Warning: Could not parse environment metadata: {e}[/yellow]")
-            resolved_env_slug = None
-            resolved_env_id = None
-    else:
-        resolved_env_slug = None
-        resolved_env_id = None
 
     # Require accurate upstream for evaluation tracking
     if not resolved_env_slug and not resolved_env_id:
@@ -117,10 +121,7 @@ def push_eval_results_to_hub(
         return None
 
     env_identifier = resolved_env_slug or resolved_env_id
-    console.print(
-        f"\n[blue]Uploading evaluation results, "
-        f"using upstream: {env_identifier}[/blue]"
-    )
+    console.print(f"\n[blue]Uploading evaluation results, using upstream: {env_identifier}[/blue]")
 
     if resolved_env_id:
         environments = [{"id": resolved_env_id}]

@@ -43,12 +43,12 @@ def display_upstream_environment_info(
     env_path: Optional[Path] = None, environment_name: Optional[str] = None
 ) -> bool:
     """Display the upstream environment name if metadata exists.
-    
+
     Checks the provided path (or current directory) for environment metadata
     and displays "Using upstream environment {owner}/{name}" if found.
-    
+
     If environment_name is provided, also checks ./environments/{module_name} as a fallback.
-    
+
     Args:
         env_path: Path to check for metadata (defaults to current directory)
         environment_name: Optional environment name to check in ./environments/{module_name}
@@ -57,14 +57,14 @@ def display_upstream_environment_info(
     module_name = None
     if environment_name:
         module_name = environment_name.replace("-", "_")
-    
+
     # Search for environment metadata in common locations
     env_metadata = find_environment_metadata(
         env_name=environment_name,
         env_path=env_path,
         module_name=module_name,
     )
-    
+
     if env_metadata and env_metadata.get("owner") and env_metadata.get("name"):
         owner = env_metadata.get("owner")
         env_name = env_metadata.get("name")
@@ -759,7 +759,7 @@ def push(
                     prime_dir = env_path / ".prime"
                     prime_dir.mkdir(exist_ok=True)
                     metadata_path = prime_dir / ".env-metadata.json"
-                    
+
                     # Backwards compatibility: Migrate .env-metadata.json from root to .prime/
                     # This handles environments that were pulled/pushed before we moved
                     # to .prime/ subfolder
@@ -787,7 +787,7 @@ def push(
                             console.print(
                                 "[yellow]Warning: Could not remove old .env-metadata.json[/yellow]"
                             )
-                    
+
                     # Read existing metadata if it exists
                     existing_metadata = {}
                     if metadata_path.exists():
@@ -810,14 +810,14 @@ def push(
                                 f"old location: {e}[/yellow]"
                             )
                             existing_metadata = {}
-                    
+
                     # Check if upstream (owner/name) changed
                     old_owner = existing_metadata.get("owner")
                     old_name = existing_metadata.get("name")
                     upstream_changed = False
                     if existing_metadata and (old_owner != owner_name or old_name != env_name):
                         upstream_changed = True
-                    
+
                     # Merge existing metadata with new push information
                     env_metadata = {
                         **existing_metadata,  # Preserve existing fields
@@ -827,10 +827,10 @@ def push(
                         "pushed_at": datetime.now().isoformat(),
                         "wheel_sha256": wheel_sha256,
                     }
-                    
+
                     with open(metadata_path, "w") as f:
                         json.dump(env_metadata, f, indent=2)
-                    
+
                     if existing_metadata:
                         message = Text("Updated environment metadata in ", style="dim")
                         message.append(str(metadata_path), style="dim")
@@ -839,7 +839,7 @@ def push(
                         message = Text("Saved environment metadata to ", style="dim")
                         message.append(str(metadata_path), style="dim")
                         console.print(message)
-                    
+
                     # Report upstream change if it occurred
                     if upstream_changed:
                         upstream_message = Text("Upstream set to ", style="dim")
@@ -1058,8 +1058,7 @@ def pull(
             # Filter out .prime directory and .env-metadata.json files
             # (created locally, not extracted)
             extracted_files = [
-                f for f in all_files
-                if f.name != ".prime" and f.name != ".env-metadata.json"
+                f for f in all_files if f.name != ".prime" and f.name != ".env-metadata.json"
             ]
             if extracted_files:
                 console.print("\nExtracted files:")
@@ -1927,6 +1926,91 @@ def delete(
         raise typer.Exit(1)
 
 
+def _check_environment_installed(env_name: str) -> bool:
+    """Check if an environment package is installed and loadable."""
+    try:
+        check_code = f"from verifiers import load_environment; load_environment('{env_name}')"
+        result = subprocess.run(
+            ["uv", "run", "python", "-c", check_code],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _auto_install_environment(env_slug: str) -> bool:
+    """Automatically install an environment from the hub."""
+    console.print(f"\n[cyan]Environment not found locally. Installing {env_slug}...[/cyan]")
+
+    try:
+        client = APIClient(require_auth=False)
+
+        version = "latest"
+        env_id = env_slug
+        if "@" in env_slug:
+            env_id, version = env_slug.rsplit("@", 1)
+
+        parts = env_id.split("/")
+        if len(parts) != 2:
+            console.print(f"[red]Invalid environment slug format: {env_slug}[/red]")
+            return False
+
+        owner, name = parts
+
+        try:
+            details = fetch_environment_details(client, owner, name, version)
+        except APIError as e:
+            console.print(f"[red]Failed to find environment {env_slug} on hub: {e}[/red]")
+            return False
+
+        simple_index_url = details.get("simple_index_url")
+        wheel_url = process_wheel_url(details.get("wheel_url"))
+
+        if not simple_index_url and not wheel_url:
+            if details.get("visibility") == "PRIVATE":
+                console.print(
+                    f"[red]Cannot auto-install private environment {env_slug}.[/red]\n"
+                    "[yellow]Please use 'prime env pull' to download and install locally.[/yellow]"
+                )
+            else:
+                console.print(f"[red]No installation method available for {env_slug}[/red]")
+            return False
+
+        normalized_name = normalize_package_name(name)
+
+        if simple_index_url:
+            if version and version != "latest":
+                cmd_parts = [
+                    "uv",
+                    "pip",
+                    "install",
+                    f"{normalized_name}=={version}",
+                    "--extra-index-url",
+                    simple_index_url,
+                ]
+            else:
+                cmd_parts = [
+                    "uv",
+                    "pip",
+                    "install",
+                    normalized_name,
+                    "--extra-index-url",
+                    simple_index_url,
+                ]
+        else:
+            assert wheel_url is not None
+            cmd_parts = get_install_command("uv", wheel_url)
+
+        execute_install_command(cmd_parts, env_id, version, "uv")
+        return True
+
+    except Exception as e:
+        console.print(f"[red]Failed to auto-install environment: {e}[/red]")
+        return False
+
+
 @app.command(
     "eval",
     no_args_is_help=True,
@@ -1936,7 +2020,7 @@ def eval_env(
     ctx: typer.Context,
     environment: str = typer.Argument(
         ...,
-        help="Installed Verifiers environment name (e.g. 'wordle')",
+        help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/gpqa')",
     ),
     model: str = typer.Option(
         "meta-llama/llama-3.1-70b-instruct",
@@ -2008,21 +2092,57 @@ def eval_env(
 
     Example:
        prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7
+       prime env eval primeintellect/gpqa -m openai/gpt-4.1-mini -n 5
        All extra args are forwarded unchanged to vf-eval.
     """
 
-    # Determine the path to check for upstream metadata
-    check_path = Path(env_path) if env_path else Path.cwd()
-    # Display upstream environment info if metadata exists
-    is_resolved = display_upstream_environment_info(
-        env_path=check_path, environment_name=environment
+    is_slug = (
+        "/" in environment and not environment.startswith("./") and not environment.startswith("/")
     )
-    if not is_resolved and not skip_upload:
-        console.print(
-            "[yellow]Evaluation results will not be uploaded or viewable on the platform "
-            "without a specified upstream environment. Use `prime env push` "
-            "to set an upstream.[/yellow]"
+
+    upstream_owner = None
+    upstream_name = None
+    env_name_for_vf_eval = environment
+
+    if is_slug:
+        env_slug = environment
+        version = "latest"
+        if "@" in environment:
+            env_slug, version = environment.rsplit("@", 1)
+
+        parts = env_slug.split("/")
+        if len(parts) == 2:
+            upstream_owner, upstream_name = parts
+            env_name_for_vf_eval = upstream_name
+            console.print(
+                f"[dim]Using upstream environment {upstream_owner}/{upstream_name}[/dim]\n"
+            )
+
+            if not _check_environment_installed(upstream_name):
+                if not _auto_install_environment(environment):
+                    console.print(
+                        f"[red]Failed to install environment {environment}.[/red]\n"
+                        "[yellow]You can manually install it with:[/yellow]\n"
+                        f"  prime env install {environment}"
+                    )
+                    raise typer.Exit(1)
+                console.print()
+
+            is_resolved = True
+        else:
+            console.print(f"[red]Invalid environment slug format: {environment}[/red]")
+            raise typer.Exit(1)
+    else:
+        check_path = Path(env_path) if env_path else Path.cwd()
+        is_resolved = display_upstream_environment_info(
+            env_path=check_path, environment_name=environment
         )
+        if not is_resolved and not skip_upload:
+            console.print(
+                "[yellow]Evaluation results will not be uploaded or viewable on the platform "
+                "without a specified upstream environment. Use `prime env push` "
+                "to set an upstream.[/yellow]"
+            )
 
     config = Config()
 
@@ -2062,7 +2182,7 @@ def eval_env(
             )
             raise typer.Exit(1)
 
-    cmd = ["uv", "run", "vf-eval", environment]
+    cmd = ["uv", "run", "vf-eval", env_name_for_vf_eval]
 
     # Add chosen inference url
     cmd += ["-b", inference_url]
@@ -2109,7 +2229,7 @@ def eval_env(
     # Generate job_id for end-to-end tracing of eval runs
     eval_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     job_uuid = str(uuid.uuid4())[:8]
-    sanitized_env = environment.replace("-", "_").replace("/", "_")
+    sanitized_env = env_name_for_vf_eval.replace("-", "_").replace("/", "_")
     sanitized_model = model.replace("/", "_").replace("-", "_")
     job_id = f"{sanitized_env}_{sanitized_model}_{eval_timestamp}_{job_uuid}"
 
@@ -2137,12 +2257,22 @@ def eval_env(
     if not skip_upload:
         if is_resolved:
             try:
-                push_eval_results_to_hub(
-                    env_name=environment,
-                    model=model,
-                    job_id=job_id,
-                    env_path=check_path,
-                )
+                if is_slug and upstream_owner and upstream_name:
+                    push_eval_results_to_hub(
+                        env_name=env_name_for_vf_eval,
+                        model=model,
+                        job_id=job_id,
+                        env_path=Path(env_path) if env_path else None,
+                        upstream_slug=f"{upstream_owner}/{upstream_name}",
+                    )
+                else:
+                    check_path = Path(env_path) if env_path else Path.cwd()
+                    push_eval_results_to_hub(
+                        env_name=env_name_for_vf_eval,
+                        model=model,
+                        job_id=job_id,
+                        env_path=check_path,
+                    )
             except Exception as e:
                 console.print(f"[red]Failed to push results to hub:[/red] {e}")
                 console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
@@ -2155,6 +2285,4 @@ def eval_env(
                 "environment if it's not the current directory.[/dim]"
             )
     else:
-        console.print(
-            "[dim]Skipped uploading evaluation results[/dim]"
-        )
+        console.print("[dim]Skipped uploading evaluation results[/dim]")

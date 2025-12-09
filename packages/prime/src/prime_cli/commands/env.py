@@ -1930,12 +1930,15 @@ def _check_environment_installed(env_name: str, required_version: str | None = N
     """Check if an environment package is installed and loadable."""
     try:
         if required_version:
+            pkg_name = env_name.replace("-", "_")
             check_code = (
                 f"from verifiers import load_environment; "
-                f"from importlib.metadata import version; "
+                f"from importlib.metadata import version as get_version; "
+                f"from packaging.version import Version; "
                 f"load_environment('{env_name}'); "
-                f"v = version('{env_name.replace('-', '_')}'); "
-                f"exit(0 if v == '{required_version}' else 1)"
+                f"installed = Version(get_version('{pkg_name}')); "
+                f"required = Version('{required_version}'); "
+                f"exit(0 if installed == required else 1)"
             )
         else:
             check_code = f"from verifiers import load_environment; load_environment('{env_name}')"

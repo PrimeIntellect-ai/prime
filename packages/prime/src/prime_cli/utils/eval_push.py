@@ -123,12 +123,23 @@ def push_eval_results_to_hub(
     env_identifier = resolved_env_slug or resolved_env_id
     console.print(f"\n[blue]Uploading evaluation results, using upstream: {env_identifier}[/blue]")
 
+    api_client = APIClient()
+
     if resolved_env_id:
         environments = [{"id": resolved_env_id}]
     elif resolved_env_slug:
-        environments = [{"slug": resolved_env_slug}]
+        try:
+            owner, name = resolved_env_slug.split("/", 1)
+            response = api_client.get(f"/environmentshub/{owner}/{name}/@latest")
+            details = response.get("data", response)
+            env_id = details.get("id")
+            if env_id:
+                environments = [{"id": env_id}]
+            else:
+                environments = [{"slug": resolved_env_slug}]
+        except Exception:
+            environments = [{"slug": resolved_env_slug}]
     else:
-        # This should never happen due to the check above, but keeping for safety
         raise ValueError("No valid environment identifier found")
     metrics = {k: v for k, v in metadata.items() if k.startswith("avg_")}
 
@@ -145,7 +156,6 @@ def push_eval_results_to_hub(
 
     eval_name = f"{env_name}--{model}--{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    api_client = APIClient()
     evals_client = EvalsClient(api_client)
 
     create_response = evals_client.create_evaluation(

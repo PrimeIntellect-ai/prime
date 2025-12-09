@@ -1506,57 +1506,10 @@ def install(
 
             console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
 
-            # Generate install command preferring simple index over wheel URL
-            normalized_name = normalize_package_name(name)
-
-            if simple_index_url:
-                # Prefer simple index approach
-                if with_tool == "uv":
-                    if target_version and target_version != "latest":
-                        cmd_parts = [
-                            "uv",
-                            "pip",
-                            "install",
-                            f"{normalized_name}=={target_version}",
-                            "--extra-index-url",
-                            simple_index_url,
-                        ]
-                    else:
-                        cmd_parts = [
-                            "uv",
-                            "pip",
-                            "install",
-                            normalized_name,
-                            "--extra-index-url",
-                            simple_index_url,
-                        ]
-                else:  # pip
-                    if target_version and target_version != "latest":
-                        cmd_parts = [
-                            "pip",
-                            "install",
-                            f"{normalized_name}=={target_version}",
-                            "--extra-index-url",
-                            simple_index_url,
-                        ]
-                    else:
-                        cmd_parts = [
-                            "pip",
-                            "install",
-                            normalized_name,
-                            "--extra-index-url",
-                            simple_index_url,
-                        ]
-            elif wheel_url:
-                # Fall back to wheel URL if simple index not available
-                try:
-                    cmd_parts = get_install_command(with_tool, wheel_url)
-                except ValueError as e:
-                    skipped_envs.append((f"{env_id}@{target_version}", str(e)))
-                    console.print(f"[yellow]⚠ Skipping {env_id}@{target_version}: {e}[/yellow]")
-                    continue
-            else:
-                # Should not reach here due to earlier checks, but just in case
+            cmd_parts = _build_install_command(
+                name, target_version, simple_index_url, wheel_url, with_tool
+            )
+            if not cmd_parts:
                 skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
                 console.print(
                     f"[yellow]⚠ Skipping {env_id}@{target_version}: No installation method[/yellow]"
@@ -1926,78 +1879,20 @@ def delete(
         raise typer.Exit(1)
 
 
-def _check_environment_installed(env_name: str, required_version: str | None = None) -> bool:
-    """Check if an environment package is installed and loadable."""
-    try:
-        pkg_name = normalize_package_name(env_name)
-        if required_version:
-            check_code = (
-                f"from verifiers import load_environment; "
-                f"from importlib.metadata import version as get_version; "
-                f"from packaging.version import Version; "
-                f"load_environment('{env_name}'); "
-                f"installed = Version(get_version('{pkg_name}')); "
-                f"required = Version('{required_version}'); "
-                f"exit(0 if installed == required else 1)"
-            )
-        else:
-            check_code = f"from verifiers import load_environment; load_environment('{env_name}')"
-        result = subprocess.run(
-            ["uv", "run", "python", "-c", check_code],
-            capture_output=True,
-            text=True,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+def _build_install_command(
+    name: str,
+    version: str,
+    simple_index_url: Optional[str],
+    wheel_url: Optional[str],
+    tool: str = "uv",
+) -> Optional[List[str]]:
+    """Build install command for an environment. Returns None if no install method available."""
+    normalized_name = normalize_package_name(name)
 
-
-def _auto_install_environment(env_slug: str) -> bool:
-    """Automatically install an environment from the hub."""
-    console.print(f"\n[cyan]Environment not found locally. Installing {env_slug}...[/cyan]")
-
-    try:
-        client = APIClient(require_auth=False)
-
-        version = "latest"
-        env_id = env_slug
-        if "@" in env_slug:
-            env_id, version = env_slug.rsplit("@", 1)
-
-        parts = env_id.split("/")
-        if len(parts) != 2:
-            console.print(f"[red]Invalid environment slug format: {env_slug}[/red]")
-            return False
-
-        owner, name = parts
-        if not owner or not name:
-            console.print(f"[red]Invalid environment slug format: {env_slug}[/red]")
-            return False
-
-        try:
-            details = fetch_environment_details(client, owner, name, version)
-        except APIError as e:
-            console.print(f"[red]Failed to find environment {env_slug} on hub: {e}[/red]")
-            return False
-
-        simple_index_url = details.get("simple_index_url")
-        wheel_url = process_wheel_url(details.get("wheel_url"))
-
-        if not simple_index_url and not wheel_url:
-            if details.get("visibility") == "PRIVATE":
-                console.print(
-                    f"[red]Cannot auto-install private environment {env_slug}.[/red]\n"
-                    "[yellow]Please use 'prime env pull' to download and install locally.[/yellow]"
-                )
-            else:
-                console.print(f"[red]No installation method available for {env_slug}[/red]")
-            return False
-
-        normalized_name = normalize_package_name(name)
-
-        if simple_index_url:
+    if simple_index_url:
+        if tool == "uv":
             if version and version != "latest":
-                cmd_parts = [
+                return [
                     "uv",
                     "pip",
                     "install",
@@ -2005,24 +1900,79 @@ def _auto_install_environment(env_slug: str) -> bool:
                     "--extra-index-url",
                     simple_index_url,
                 ]
-            else:
-                cmd_parts = [
-                    "uv",
+            return [
+                "uv",
+                "pip",
+                "install",
+                normalized_name,
+                "--extra-index-url",
+                simple_index_url,
+            ]
+        else:  # pip
+            if version and version != "latest":
+                return [
                     "pip",
                     "install",
-                    normalized_name,
+                    f"{normalized_name}=={version}",
                     "--extra-index-url",
                     simple_index_url,
                 ]
+            return [
+                "pip",
+                "install",
+                normalized_name,
+                "--extra-index-url",
+                simple_index_url,
+            ]
+    elif wheel_url:
+        try:
+            return get_install_command(tool, wheel_url)
+        except ValueError:
+            return None
+
+    return None
+
+
+def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
+    """Install a single environment from the hub. Returns True on success."""
+    try:
+        env_id, version = validate_env_id(env_slug)
+    except ValueError as e:
+        console.print(f"[red]Invalid environment format: {e}[/red]")
+        return False
+
+    owner, name = env_id.split("/")
+
+    try:
+        client = APIClient(require_auth=False)
+        details = fetch_environment_details(client, owner, name, version)
+    except APIError as e:
+        console.print(f"[red]Failed to find environment {env_slug}: {e}[/red]")
+        return False
+
+    simple_index_url = details.get("simple_index_url")
+    wheel_url = process_wheel_url(details.get("wheel_url"))
+
+    if not simple_index_url and not wheel_url:
+        if details.get("visibility") == "PRIVATE":
+            console.print(
+                f"[red]Cannot install private environment {env_slug}.[/red]\n"
+                "[yellow]Use 'prime env pull' to download and install locally.[/yellow]"
+            )
         else:
-            assert wheel_url is not None
-            cmd_parts = get_install_command("uv", wheel_url)
+            console.print(f"[red]No installation method available for {env_slug}[/red]")
+        return False
 
-        execute_install_command(cmd_parts, env_id, version, "uv")
+    cmd_parts = _build_install_command(name, version, simple_index_url, wheel_url, tool)
+    if not cmd_parts:
+        console.print(f"[red]Failed to build install command for {env_slug}[/red]")
+        return False
+
+    try:
+        execute_install_command(cmd_parts, env_id, version, tool)
         return True
-
     except Exception as e:
-        console.print(f"[red]Failed to auto-install environment: {e}[/red]")
+        console.print(f"[red]Installation failed: {e}[/red]")
         return False
 
 
@@ -2132,18 +2082,15 @@ def eval_env(
             console.print(
                 f"[dim]Using upstream environment {upstream_owner}/{upstream_name}[/dim]\n"
             )
-
-            required_version = version if version != "latest" else None
-            needs_install = not _check_environment_installed(upstream_name, required_version)
-            if needs_install:
-                if not _auto_install_environment(environment):
-                    console.print(
-                        f"[red]Failed to install environment {environment}.[/red]\n"
-                        "[yellow]You can manually install it with:[/yellow]\n"
-                        f"  prime env install {environment}"
-                    )
-                    raise typer.Exit(1)
-                console.print()
+            console.print(f"[cyan]Installing {environment}...[/cyan]")
+            if not _install_single_environment(environment):
+                console.print(
+                    f"[red]Failed to install environment {environment}.[/red]\n"
+                    "[yellow]You can manually install it with:[/yellow]\n"
+                    f"  prime env install {environment}"
+                )
+                raise typer.Exit(1)
+            console.print()
 
             is_resolved = True
         else:

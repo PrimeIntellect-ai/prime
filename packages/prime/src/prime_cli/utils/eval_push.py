@@ -31,7 +31,7 @@ def push_eval_results_to_hub(
 
     Args:
         env_name: Environment name (e.g., "simpleqa")
-        model: Model identifier (e.g., "meta-llama/llama-3.1-70b-instruct")
+        model: Model identifier (e.g., "openai/gpt-4.1-mini")
         job_id: Unique job ID for tracking
         env_path: Optional path to the environment directory (defaults to current directory)
     """
@@ -78,7 +78,7 @@ def push_eval_results_to_hub(
         env_path=env_path,
         module_name=module_name,
     )
-    
+
     resolved_env_slug = None
     resolved_env_id = None
 
@@ -89,9 +89,7 @@ def push_eval_results_to_hub(
                 resolved_env_id = hub_metadata.get("environment_id")
                 owner = hub_metadata.get("owner")
                 name = hub_metadata.get("name")
-                resolved_env_slug = (
-                    f"{owner}/{name}" if owner and name else None
-                )
+                resolved_env_slug = f"{owner}/{name}" if owner and name else None
             elif hub_metadata.get("owner") and hub_metadata.get("name"):
                 resolved_env_slug = f"{hub_metadata.get('owner')}/{hub_metadata.get('name')}"
                 resolved_env_id = None
@@ -117,10 +115,7 @@ def push_eval_results_to_hub(
         return None
 
     env_identifier = resolved_env_slug or resolved_env_id
-    console.print(
-        f"\n[blue]Uploading evaluation results, "
-        f"using upstream: {env_identifier}[/blue]"
-    )
+    console.print(f"\n[blue]Uploading evaluation results, using upstream: {env_identifier}[/blue]")
 
     if resolved_env_id:
         environments = [{"id": resolved_env_id}]

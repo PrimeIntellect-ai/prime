@@ -391,7 +391,10 @@ class SandboxClient:
         quoted_sh_command = shlex.quote(sh_command)
 
         # Start detached process with separate stdout and stderr log files
-        bg_cmd = f"nohup sh -c {quoted_sh_command} > {stdout_log_file_quoted} 2> {stderr_log_file_quoted} &"
+        bg_cmd = (
+            f"nohup sh -c {quoted_sh_command} "
+            f"> {stdout_log_file_quoted} 2> {stderr_log_file_quoted} &"
+        )
         self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
         return BackgroundJob(
@@ -901,7 +904,10 @@ class AsyncSandboxClient:
         quoted_sh_command = shlex.quote(sh_command)
 
         # Start detached process with separate stdout and stderr log files
-        bg_cmd = f"nohup sh -c {quoted_sh_command} > {stdout_log_file_quoted} 2> {stderr_log_file_quoted} &"
+        bg_cmd = (
+            f"nohup sh -c {quoted_sh_command} "
+            f"> {stdout_log_file_quoted} 2> {stderr_log_file_quoted} &"
+        )
         await self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
         return BackgroundJob(
@@ -938,8 +944,12 @@ class AsyncSandboxClient:
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
         exit_code = int(check.stdout.strip())
-        stdout_logs = await self.execute_command(sandbox_id, f"cat {stdout_log_file_quoted}", timeout=60)
-        stderr_logs = await self.execute_command(sandbox_id, f"cat {stderr_log_file_quoted}", timeout=60)
+        stdout_logs = await self.execute_command(
+            sandbox_id, f"cat {stdout_log_file_quoted}", timeout=60
+        )
+        stderr_logs = await self.execute_command(
+            sandbox_id, f"cat {stderr_log_file_quoted}", timeout=60
+        )
 
         return BackgroundJobStatus(
             job_id=job.job_id,

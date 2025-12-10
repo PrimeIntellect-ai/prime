@@ -366,7 +366,8 @@ class SandboxClient:
             BackgroundJob with job_id and file paths for polling
         """
         job_id = uuid.uuid4().hex[:8]
-        log_file = f"/tmp/job_{job_id}.log"
+        stdout_log_file = f"/tmp/job_{job_id}.stdout.log"
+        stderr_log_file = f"/tmp/job_{job_id}.stderr.log"
         exit_file = f"/tmp/job_{job_id}.exit"
 
         env_prefix = ""
@@ -382,20 +383,25 @@ class SandboxClient:
         dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
         exit_file_quoted = shlex.quote(exit_file)
-        log_file_quoted = shlex.quote(log_file)
+        stdout_log_file_quoted = shlex.quote(stdout_log_file)
+        stderr_log_file_quoted = shlex.quote(stderr_log_file)
         # Wrap command in subshell so 'exit' terminates the subshell, not the outer shell.
         # This ensures 'echo $?' always runs to capture the exit code.
         sh_command = f"({command_body}); echo $? > {exit_file_quoted}"
         quoted_sh_command = shlex.quote(sh_command)
 
-        # Start detached process
-        bg_cmd = f"nohup sh -c {quoted_sh_command} > {log_file_quoted} 2>&1 &"
+        # Start detached process with separate stdout and stderr log files
+        bg_cmd = (
+            f"nohup sh -c {quoted_sh_command} "
+            f"> {stdout_log_file_quoted} 2> {stderr_log_file_quoted} &"
+        )
         self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
         return BackgroundJob(
             job_id=job_id,
             sandbox_id=sandbox_id,
-            log_file=log_file,
+            stdout_log_file=stdout_log_file,
+            stderr_log_file=stderr_log_file,
             exit_file=exit_file,
         )
 
@@ -414,7 +420,8 @@ class SandboxClient:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
         exit_file_quoted = shlex.quote(job.exit_file)
-        log_file_quoted = shlex.quote(job.log_file)
+        stdout_log_file_quoted = shlex.quote(job.stdout_log_file)
+        stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
 
         check = self.execute_command(sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=10)
 
@@ -422,13 +429,15 @@ class SandboxClient:
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
         exit_code = int(check.stdout.strip())
-        logs = self.execute_command(sandbox_id, f"cat {log_file_quoted}", timeout=60)
+        stdout_logs = self.execute_command(sandbox_id, f"cat {stdout_log_file_quoted}", timeout=60)
+        stderr_logs = self.execute_command(sandbox_id, f"cat {stderr_log_file_quoted}", timeout=60)
 
         return BackgroundJobStatus(
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
-            stdout=logs.stdout,
+            stdout=stdout_logs.stdout,
+            stderr=stderr_logs.stdout,
         )
 
     def wait_for_creation(
@@ -870,7 +879,8 @@ class AsyncSandboxClient:
             BackgroundJob with job_id and file paths for polling
         """
         job_id = uuid.uuid4().hex[:8]
-        log_file = f"/tmp/job_{job_id}.log"
+        stdout_log_file = f"/tmp/job_{job_id}.stdout.log"
+        stderr_log_file = f"/tmp/job_{job_id}.stderr.log"
         exit_file = f"/tmp/job_{job_id}.exit"
 
         env_prefix = ""
@@ -886,20 +896,25 @@ class AsyncSandboxClient:
         dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
         command_body = f"{env_prefix}{dir_prefix}{command}"
         exit_file_quoted = shlex.quote(exit_file)
-        log_file_quoted = shlex.quote(log_file)
+        stdout_log_file_quoted = shlex.quote(stdout_log_file)
+        stderr_log_file_quoted = shlex.quote(stderr_log_file)
         # Wrap command in subshell so 'exit' terminates the subshell, not the outer shell.
         # This ensures 'echo $?' always runs to capture the exit code.
         sh_command = f"({command_body}); echo $? > {exit_file_quoted}"
         quoted_sh_command = shlex.quote(sh_command)
 
-        # Start detached process
-        bg_cmd = f"nohup sh -c {quoted_sh_command} > {log_file_quoted} 2>&1 &"
+        # Start detached process with separate stdout and stderr log files
+        bg_cmd = (
+            f"nohup sh -c {quoted_sh_command} "
+            f"> {stdout_log_file_quoted} 2> {stderr_log_file_quoted} &"
+        )
         await self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
         return BackgroundJob(
             job_id=job_id,
             sandbox_id=sandbox_id,
-            log_file=log_file,
+            stdout_log_file=stdout_log_file,
+            stderr_log_file=stderr_log_file,
             exit_file=exit_file,
         )
 
@@ -918,7 +933,8 @@ class AsyncSandboxClient:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
         exit_file_quoted = shlex.quote(job.exit_file)
-        log_file_quoted = shlex.quote(job.log_file)
+        stdout_log_file_quoted = shlex.quote(job.stdout_log_file)
+        stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
 
         check = await self.execute_command(
             sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=10
@@ -928,13 +944,19 @@ class AsyncSandboxClient:
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
         exit_code = int(check.stdout.strip())
-        logs = await self.execute_command(sandbox_id, f"cat {log_file_quoted}", timeout=60)
+        stdout_logs = await self.execute_command(
+            sandbox_id, f"cat {stdout_log_file_quoted}", timeout=60
+        )
+        stderr_logs = await self.execute_command(
+            sandbox_id, f"cat {stderr_log_file_quoted}", timeout=60
+        )
 
         return BackgroundJobStatus(
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
-            stdout=logs.stdout,
+            stdout=stdout_logs.stdout,
+            stderr=stderr_logs.stdout,
         )
 
     async def wait_for_creation(

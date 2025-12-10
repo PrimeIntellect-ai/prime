@@ -1,12 +1,15 @@
 import json
+import os
 import random
 import shlex
 import shutil
 import string
 import subprocess
+import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
+import httpx
 import typer
 from prime_sandboxes import (
     APIClient,
@@ -1112,10 +1115,8 @@ def list_ports(
 @app.command("ssh", no_args_is_help=True)
 def ssh_connect(
     sandbox_id: str = typer.Argument(..., help="Sandbox ID to SSH into"),
-    user: str = typer.Option("root", "--user", "-u", help="SSH user to connect as"),
-    port: int = typer.Option(22, "--port", "-p", help="SSH port in the sandbox"),
     identity: Optional[str] = typer.Option(
-        None, "--identity", "-i", help="Path to SSH private key file"
+        None, "--identity", "-i", help="Path to SSH private key file (will be authorized)"
     ),
     ssh_args: Optional[List[str]] = typer.Argument(
         None, help="Additional SSH arguments (e.g., -- -v for verbose)"
@@ -1123,27 +1124,29 @@ def ssh_connect(
 ) -> None:
     """Connect to a sandbox via SSH.
 
-    This command exposes the SSH port, connects via SSH, and automatically cleans
-    up the port exposure when the session ends.
+    This command creates a SSH session, authorizes your key, and cleans up the exposure.
 
     Examples:\n
         prime sandbox ssh sb_abc123\n
-        prime sandbox ssh sb_abc123 -u ubuntu -p 2222\n
         prime sandbox ssh sb_abc123 -i ~/.ssh/my_key\n
         prime sandbox ssh sb_abc123 -- -v -L 8080:localhost:8080\n
     """
-    exposure_id: Optional[str] = None
+    session_id: Optional[str] = None
     sandbox_client: Optional[SandboxClient] = None
+    temp_dir: Optional[str] = None
+    key_path: Optional[str] = None
 
     def cleanup() -> None:
-        """Clean up the port exposure."""
-        if exposure_id and sandbox_client:
+        """Clean up the SSH session and temporary keys."""
+        if session_id and sandbox_client:
             try:
-                console.print("\n[bold blue]Cleaning up SSH tunnel...[/bold blue]")
-                sandbox_client.unexpose(sandbox_id, exposure_id)
-                console.print("[green]✓[/green] SSH tunnel closed")
+                console.print("\n[bold blue]Cleaning up SSH session...[/bold blue]")
+                sandbox_client.close_ssh_session(sandbox_id, session_id)
+                console.print("[green]✓[/green] SSH session closed")
             except Exception:
                 pass
+        if temp_dir and os.path.isdir(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     try:
         # Check if ssh command is available
@@ -1165,42 +1168,81 @@ def ssh_connect(
             )
             raise typer.Exit(1)
 
-        # Expose SSH port as TCP
-        console.print(f"[bold blue]Exposing SSH port {port}...[/bold blue]")
-        with console.status("[bold blue]Setting up SSH tunnel...", spinner="dots"):
-            exposed = sandbox_client.expose(sandbox_id, port, "ssh", "TCP")
+        # Prepare SSH key (use provided identity or generate ephemeral)
+        def load_public_key_from_identity(path: str) -> str:
+            pub_path = f"{path}.pub"
+            if os.path.exists(pub_path):
+                with open(pub_path, "r") as f:
+                    return f.read().strip()
+            result = subprocess.run(
+                ["ssh-keygen", "-y", "-f", path],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return result.stdout.strip()
 
-        exposure_id = exposed.exposure_id
+        if identity:
+            key_path = os.path.expanduser(identity)
+            if not os.path.exists(key_path):
+                console.print(f"[red]Error:[/red] Identity file not found: {key_path}")
+                raise typer.Exit(1)
+            public_key = load_public_key_from_identity(key_path)
+        else:
+            temp_dir = tempfile.mkdtemp(prefix="prime-ssh-")
+            key_path = os.path.join(temp_dir, "id_ed25519")
+            subprocess.run(
+                ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", key_path],
+                check=True,
+                capture_output=True,
+            )
+            with open(f"{key_path}.pub", "r") as f:
+                public_key = f.read().strip()
 
-        # Parse the TLS socket to get host and external port
-        # Format is typically "hostname:port"
-        tls_parts = exposed.tls_socket.rsplit(":", 1)
-        if len(tls_parts) != 2:
-            console.print(f"[red]Error:[/red] Invalid TLS socket format: {exposed.tls_socket}")
+        # Create SSH session
+        console.print("[bold blue]Creating SSH session...[/bold blue]")
+        with console.status("[bold blue]Setting up SSH session...", spinner="dots"):
+            session = sandbox_client.create_ssh_session(sandbox_id, public_key=public_key)
+        session_id = session.session_id
+
+        # Authorize the key
+        authorize_url = (
+            f"{session.gateway_url.rstrip('/')}/{session.user_ns}/{session.job_id}/authorize"
+        )
+        headers = {"Authorization": f"Bearer {session.token}"}
+        payload = {
+            "session_id": session.session_id,
+            "public_key": public_key,
+            "ttl_seconds": session.ttl_seconds,
+        }
+        try:
+            with httpx.Client(timeout=30) as client:
+                client.post(authorize_url, json=payload, headers=headers).raise_for_status()
+        except Exception as e:
+            console.print(f"[red]Error:[/red] Failed to authorize SSH key: {e}")
             cleanup()
             raise typer.Exit(1)
 
-        ssh_host = tls_parts[0]
-        ssh_port = int(tls_parts[1])
-        time.sleep(15)
+        ssh_host = session.host
+        ssh_port = session.port
 
-        console.print("[green]✓[/green] SSH tunnel established!")
-        console.print(f"[bold green]Connecting to:[/bold green] {user}@{ssh_host}")
+        console.print("[green]✓[/green] SSH session ready!")
+        console.print(f"[bold green]Connecting to:[/bold green] {session.session_id}@{ssh_host}")
         console.print(f"[bold green]Port:[/bold green] {ssh_port}")
         console.print()
         console.print("[dim]Press Ctrl+D or type 'exit' to disconnect[/dim]")
         console.print()
 
         # Build SSH command
-        ssh_cmd = ["ssh", f"{user}@{ssh_host}", "-p", str(ssh_port)]
+        ssh_cmd = ["ssh", f"{session.session_id}@{ssh_host}", "-p", str(ssh_port)]
 
         # Disable strict host key checking for dynamic hosts
         ssh_cmd.extend(["-o", "StrictHostKeyChecking=no"])
         ssh_cmd.extend(["-o", "UserKnownHostsFile=/dev/null"])
 
         # Add identity file if specified
-        if identity:
-            ssh_cmd.extend(["-i", identity])
+        if key_path:
+            ssh_cmd.extend(["-i", key_path])
 
         # Add any additional SSH arguments
         if ssh_args:

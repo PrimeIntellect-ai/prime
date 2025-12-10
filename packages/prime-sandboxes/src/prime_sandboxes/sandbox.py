@@ -35,6 +35,7 @@ from .models import (
     Sandbox,
     SandboxListResponse,
     SandboxLogsResponse,
+    SSHSession,
 )
 
 _ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -677,6 +678,27 @@ class SandboxClient:
         response = self.client.request("GET", "/sandbox/expose/all")
         return ListExposedPortsResponse.model_validate(response)
 
+    def create_ssh_session(
+        self,
+        sandbox_id: str,
+        public_key: str,
+        ttl_seconds: Optional[int] = None,
+    ) -> SSHSession:
+        """Create an SSH session"""
+        payload: Dict[str, Any] = {"public_key": public_key}
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = ttl_seconds
+        response = self.client.request(
+            "POST",
+            f"/sandbox/{sandbox_id}/ssh-session",
+            json=payload,
+        )
+        return SSHSession.model_validate(response)
+
+    def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
+        """Close an SSH session and remove its exposure"""
+        self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
+
 
 class AsyncSandboxClient:
     """Async client for sandbox API operations"""
@@ -1225,3 +1247,24 @@ class AsyncSandboxClient:
         """List all exposed ports across all sandboxes for the current user"""
         response = await self.client.request("GET", "/sandbox/expose/all")
         return ListExposedPortsResponse.model_validate(response)
+
+    async def create_ssh_session(
+        self,
+        sandbox_id: str,
+        public_key: str,
+        ttl_seconds: Optional[int] = None,
+    ) -> SSHSession:
+        """Create an SSH session"""
+        payload: Dict[str, Any] = {"public_key": public_key}
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = ttl_seconds
+        response = await self.client.request(
+            "POST",
+            f"/sandbox/{sandbox_id}/ssh-session",
+            json=payload,
+        )
+        return SSHSession.model_validate(response)
+
+    async def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
+        """Close an SSH session and remove its exposure"""
+        await self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")

@@ -179,6 +179,23 @@ class ListExposedPortsResponse(BaseModel):
     exposures: List[ExposedPort]
 
 
+class SSHSession(BaseModel):
+    """SSH session details"""
+
+    session_id: str
+    exposure_id: str
+    sandbox_id: str
+    host: str
+    port: int
+    tls_socket: str
+    expires_at: datetime
+    ttl_seconds: int
+    gateway_url: str
+    user_ns: str
+    job_id: str
+    token: str
+
+
 class BackgroundJob(BaseModel):
     """Background job handle returned when starting a background job"""
 

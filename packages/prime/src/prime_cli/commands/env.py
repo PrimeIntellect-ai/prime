@@ -100,8 +100,8 @@ def should_include_directory_in_archive(dir_path: Path) -> bool:
     if dir_path.name.startswith("."):
         return False
 
-    # Skip build artifacts and cache directories
-    if dir_path.name in ["dist", "__pycache__", "build"]:
+    # Skip build artifacts, cache directories, and outputs
+    if dir_path.name in ["dist", "__pycache__", "build", "outputs"]:
         return False
 
     # Skip egg-info directories
@@ -2014,12 +2014,12 @@ def eval_env(
         help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/gpqa')",
     ),
     model: str = typer.Option(
-        "meta-llama/llama-3.1-70b-instruct",
+        "openai/gpt-4.1-mini",
         "--model",
         "-m",
         help=(
-            "Model to use (e.g. 'meta-llama/llama-3.1-70b-instruct', see 'prime inference models' "
-            "for available models)"
+            "Model to use (e.g. 'openai/gpt-4.1-mini', 'prime-intellect/intellect-3', "
+            "see 'prime inference models' for available models)"
         ),
     ),
     # --- vf-eval options ---
@@ -2082,7 +2082,7 @@ def eval_env(
     Run verifiers' vf-eval with Prime Inference
 
     Example:
-       prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7
+       prime env eval meow -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
        prime env eval primeintellect/gpqa -m openai/gpt-4.1-mini -n 5
        All extra args are forwarded unchanged to vf-eval.
     """

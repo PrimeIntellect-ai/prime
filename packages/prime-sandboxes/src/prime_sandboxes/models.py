@@ -184,7 +184,8 @@ class BackgroundJob(BaseModel):
 
     job_id: str
     sandbox_id: str
-    log_file: str
+    stdout_log_file: str
+    stderr_log_file: str
     exit_file: str
 
 
@@ -195,3 +196,4 @@ class BackgroundJobStatus(BaseModel):
     completed: bool
     exit_code: Optional[int] = None
     stdout: Optional[str] = None
+    stderr: Optional[str] = None

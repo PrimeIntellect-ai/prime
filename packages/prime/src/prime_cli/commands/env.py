@@ -1879,6 +1879,32 @@ def delete(
         raise typer.Exit(1)
 
 
+def _is_environment_installed(env_name: str, required_version: Optional[str] = None) -> bool:
+    """Check if an environment is installed and loadable."""
+    try:
+        pkg_name = normalize_package_name(env_name)
+        if required_version and required_version != "latest":
+            check_code = (
+                f"from verifiers import load_environment; "
+                f"from importlib.metadata import version as get_version; "
+                f"from packaging.version import Version; "
+                f"load_environment('{env_name}'); "
+                f"installed = Version(get_version('{pkg_name}')); "
+                f"required = Version('{required_version}'); "
+                f"exit(0 if installed == required else 1)"
+            )
+        else:
+            check_code = f"from verifiers import load_environment; load_environment('{env_name}')"
+        result = subprocess.run(
+            ["uv", "run", "python", "-c", check_code],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def _build_install_command(
     name: str,
     version: str,
@@ -2071,9 +2097,9 @@ def eval_env(
 
     if is_slug:
         env_slug = environment
-        version = "latest"
+        requested_version = "latest"
         if "@" in environment:
-            env_slug, version = environment.rsplit("@", 1)
+            env_slug, requested_version = environment.rsplit("@", 1)
 
         parts = env_slug.split("/")
         if len(parts) == 2 and parts[0] and parts[1]:
@@ -2082,10 +2108,12 @@ def eval_env(
             console.print(
                 f"[dim]Using upstream environment {upstream_owner}/{upstream_name}[/dim]\n"
             )
-            console.print(f"[cyan]Installing {environment}...[/cyan]")
-            if not _install_single_environment(environment):
-                raise typer.Exit(1)
-            console.print()
+
+            if not _is_environment_installed(upstream_name, requested_version):
+                console.print(f"[cyan]Installing {environment}...[/cyan]")
+                if not _install_single_environment(environment):
+                    raise typer.Exit(1)
+                console.print()
 
             is_resolved = True
         else:

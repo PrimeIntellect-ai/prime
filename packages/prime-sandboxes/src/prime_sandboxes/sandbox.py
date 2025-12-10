@@ -1,9 +1,13 @@
 """Sandbox client implementations."""
 
+import asyncio
 import json
 import os
+import re
+import shlex
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -18,6 +22,8 @@ from .exceptions import (
     UploadTimeoutError,
 )
 from .models import (
+    BackgroundJob,
+    BackgroundJobStatus,
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
     CommandResponse,
@@ -31,6 +37,8 @@ from .models import (
     SandboxLogsResponse,
 )
 
+_ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 def _build_user_agent() -> str:
     """Build User-Agent string for prime-sandboxes"""
@@ -38,6 +46,13 @@ def _build_user_agent() -> str:
 
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     return f"prime-sandboxes/{__version__} python/{python_version}"
+
+
+def _validate_env_key(key: str) -> str:
+    """Ensure environment variable keys are valid shell identifiers."""
+    if not _ENV_VAR_PATTERN.fullmatch(key):
+        raise ValueError(f"Invalid environment variable name: {key!r}")
+    return key
 
 
 class SandboxAuthCache:
@@ -328,6 +343,93 @@ class SandboxClient:
             raise APIError(f"Request failed: {e.__class__.__name__} at {method} {u}: {e}") from e
         except Exception as e:
             raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
+
+    def start_background_job(
+        self,
+        sandbox_id: str,
+        command: str,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+    ) -> BackgroundJob:
+        """Start a long-running command in the background.
+
+        Returns immediately with a job handle. Use get_background_job() to check
+        status and retrieve results.
+
+        Args:
+            sandbox_id: The sandbox ID
+            command: Command to execute
+            working_dir: Working directory for command execution
+            env: Environment variables
+
+        Returns:
+            BackgroundJob with job_id and file paths for polling
+        """
+        job_id = uuid.uuid4().hex[:8]
+        log_file = f"/tmp/job_{job_id}.log"
+        exit_file = f"/tmp/job_{job_id}.exit"
+
+        env_prefix = ""
+        if env:
+            exports = []
+            for k, v in env.items():
+                _validate_env_key(k)
+                exports.append(f"export {k}={shlex.quote(v)}")
+            env_prefix = "; ".join(exports)
+            if env_prefix:
+                env_prefix += "; "
+
+        dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
+        command_body = f"{env_prefix}{dir_prefix}{command}"
+        exit_file_quoted = shlex.quote(exit_file)
+        log_file_quoted = shlex.quote(log_file)
+        # Wrap command in subshell so 'exit' terminates the subshell, not the outer shell.
+        # This ensures 'echo $?' always runs to capture the exit code.
+        sh_command = f"({command_body}); echo $? > {exit_file_quoted}"
+        quoted_sh_command = shlex.quote(sh_command)
+
+        # Start detached process
+        bg_cmd = f"nohup sh -c {quoted_sh_command} > {log_file_quoted} 2>&1 &"
+        self.execute_command(sandbox_id, bg_cmd, timeout=10)
+
+        return BackgroundJob(
+            job_id=job_id,
+            sandbox_id=sandbox_id,
+            log_file=log_file,
+            exit_file=exit_file,
+        )
+
+    def get_background_job(
+        self,
+        sandbox_id: str,
+        job: BackgroundJob,
+    ) -> BackgroundJobStatus:
+        """Check the status of a background job.
+
+        Args:
+            sandbox_id: The sandbox ID
+            job: The BackgroundJob handle from start_background_job()
+
+        Returns:
+            BackgroundJobStatus with completed flag, and exit_code/stdout if done
+        """
+        exit_file_quoted = shlex.quote(job.exit_file)
+        log_file_quoted = shlex.quote(job.log_file)
+
+        check = self.execute_command(sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=10)
+
+        if not check.stdout.strip():
+            return BackgroundJobStatus(job_id=job.job_id, completed=False)
+
+        exit_code = int(check.stdout.strip())
+        logs = self.execute_command(sandbox_id, f"cat {log_file_quoted}", timeout=60)
+
+        return BackgroundJobStatus(
+            job_id=job.job_id,
+            completed=True,
+            exit_code=exit_code,
+            stdout=logs.stdout,
+        )
 
     def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
@@ -752,6 +854,95 @@ class AsyncSandboxClient:
         except Exception as e:
             raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
+    async def start_background_job(
+        self,
+        sandbox_id: str,
+        command: str,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+    ) -> BackgroundJob:
+        """Start a long-running command in the background (async).
+
+        Returns immediately with a job handle. Use get_background_job() to check
+        status and retrieve results.
+
+        Args:
+            sandbox_id: The sandbox ID
+            command: Command to execute
+            working_dir: Working directory for command execution
+            env: Environment variables
+
+        Returns:
+            BackgroundJob with job_id and file paths for polling
+        """
+        job_id = uuid.uuid4().hex[:8]
+        log_file = f"/tmp/job_{job_id}.log"
+        exit_file = f"/tmp/job_{job_id}.exit"
+
+        env_prefix = ""
+        if env:
+            exports = []
+            for k, v in env.items():
+                _validate_env_key(k)
+                exports.append(f"export {k}={shlex.quote(v)}")
+            env_prefix = "; ".join(exports)
+            if env_prefix:
+                env_prefix += "; "
+
+        dir_prefix = f"cd {shlex.quote(working_dir)} && " if working_dir else ""
+        command_body = f"{env_prefix}{dir_prefix}{command}"
+        exit_file_quoted = shlex.quote(exit_file)
+        log_file_quoted = shlex.quote(log_file)
+        # Wrap command in subshell so 'exit' terminates the subshell, not the outer shell.
+        # This ensures 'echo $?' always runs to capture the exit code.
+        sh_command = f"({command_body}); echo $? > {exit_file_quoted}"
+        quoted_sh_command = shlex.quote(sh_command)
+
+        # Start detached process
+        bg_cmd = f"nohup sh -c {quoted_sh_command} > {log_file_quoted} 2>&1 &"
+        await self.execute_command(sandbox_id, bg_cmd, timeout=10)
+
+        return BackgroundJob(
+            job_id=job_id,
+            sandbox_id=sandbox_id,
+            log_file=log_file,
+            exit_file=exit_file,
+        )
+
+    async def get_background_job(
+        self,
+        sandbox_id: str,
+        job: BackgroundJob,
+    ) -> BackgroundJobStatus:
+        """Check the status of a background job (async).
+
+        Args:
+            sandbox_id: The sandbox ID
+            job: The BackgroundJob handle from start_background_job()
+
+        Returns:
+            BackgroundJobStatus with completed flag, and exit_code/stdout if done
+        """
+        exit_file_quoted = shlex.quote(job.exit_file)
+        log_file_quoted = shlex.quote(job.log_file)
+
+        check = await self.execute_command(
+            sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=10
+        )
+
+        if not check.stdout.strip():
+            return BackgroundJobStatus(job_id=job.job_id, completed=False)
+
+        exit_code = int(check.stdout.strip())
+        logs = await self.execute_command(sandbox_id, f"cat {log_file_quoted}", timeout=60)
+
+        return BackgroundJobStatus(
+            job_id=job.job_id,
+            completed=True,
+            exit_code=exit_code,
+            stdout=logs.stdout,
+        )
+
     async def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
     ) -> None:
@@ -762,7 +953,6 @@ class AsyncSandboxClient:
             max_attempts: Maximum polling attempts
             stability_checks: Number of consecutive successful reachability checks required
         """
-        import asyncio
 
         consecutive_successes = 0
         for attempt in range(max_attempts):
@@ -789,7 +979,6 @@ class AsyncSandboxClient:
         self, sandbox_ids: List[str], max_attempts: int = 60
     ) -> Dict[str, str]:
         """Wait for multiple sandboxes to be running using list endpoint"""
-        import asyncio
 
         sandbox_id_set = set(sandbox_ids)
         final_statuses = {}

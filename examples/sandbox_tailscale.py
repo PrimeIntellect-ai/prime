@@ -1,8 +1,7 @@
 import os
 import sys
 
-from prime_core import APIClient
-from prime_sandboxes import CreateSandboxRequest, SandboxClient
+from prime_sandboxes import APIClient, CreateSandboxRequest, SandboxClient
 
 
 def main() -> None:

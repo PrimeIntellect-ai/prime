@@ -2084,11 +2084,6 @@ def eval_env(
             )
             console.print(f"[cyan]Installing {environment}...[/cyan]")
             if not _install_single_environment(environment):
-                console.print(
-                    f"[red]Failed to install environment {environment}.[/red]\n"
-                    "[yellow]You can manually install it with:[/yellow]\n"
-                    f"  prime env install {environment}"
-                )
                 raise typer.Exit(1)
             console.print()
 

@@ -1202,7 +1202,7 @@ def ssh_connect(
         # Create SSH session
         console.print("[bold blue]Creating SSH session...[/bold blue]")
         with console.status("[bold blue]Setting up SSH session...", spinner="dots"):
-            session = sandbox_client.create_ssh_session(sandbox_id, public_key=public_key)
+            session = sandbox_client.create_ssh_session(sandbox_id)
         session_id = session.session_id
 
         # Authorize the key

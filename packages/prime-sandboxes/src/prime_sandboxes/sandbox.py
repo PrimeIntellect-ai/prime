@@ -681,11 +681,10 @@ class SandboxClient:
     def create_ssh_session(
         self,
         sandbox_id: str,
-        public_key: str,
         ttl_seconds: Optional[int] = None,
     ) -> SSHSession:
         """Create an SSH session"""
-        payload: Dict[str, Any] = {"public_key": public_key}
+        payload: Dict[str, Any] = {}
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
         response = self.client.request(
@@ -1251,11 +1250,10 @@ class AsyncSandboxClient:
     async def create_ssh_session(
         self,
         sandbox_id: str,
-        public_key: str,
         ttl_seconds: Optional[int] = None,
     ) -> SSHSession:
         """Create an SSH session"""
-        payload: Dict[str, Any] = {"public_key": public_key}
+        payload: Dict[str, Any] = {}
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
         response = await self.client.request(

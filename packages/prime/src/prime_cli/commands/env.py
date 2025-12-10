@@ -43,12 +43,12 @@ def display_upstream_environment_info(
     env_path: Optional[Path] = None, environment_name: Optional[str] = None
 ) -> bool:
     """Display the upstream environment name if metadata exists.
-    
+
     Checks the provided path (or current directory) for environment metadata
     and displays "Using upstream environment {owner}/{name}" if found.
-    
+
     If environment_name is provided, also checks ./environments/{module_name} as a fallback.
-    
+
     Args:
         env_path: Path to check for metadata (defaults to current directory)
         environment_name: Optional environment name to check in ./environments/{module_name}
@@ -57,14 +57,14 @@ def display_upstream_environment_info(
     module_name = None
     if environment_name:
         module_name = environment_name.replace("-", "_")
-    
+
     # Search for environment metadata in common locations
     env_metadata = find_environment_metadata(
         env_name=environment_name,
         env_path=env_path,
         module_name=module_name,
     )
-    
+
     if env_metadata and env_metadata.get("owner") and env_metadata.get("name"):
         owner = env_metadata.get("owner")
         env_name = env_metadata.get("name")
@@ -100,8 +100,8 @@ def should_include_directory_in_archive(dir_path: Path) -> bool:
     if dir_path.name.startswith("."):
         return False
 
-    # Skip build artifacts and cache directories
-    if dir_path.name in ["dist", "__pycache__", "build"]:
+    # Skip build artifacts, cache directories, and outputs
+    if dir_path.name in ["dist", "__pycache__", "build", "outputs"]:
         return False
 
     # Skip egg-info directories
@@ -759,7 +759,7 @@ def push(
                     prime_dir = env_path / ".prime"
                     prime_dir.mkdir(exist_ok=True)
                     metadata_path = prime_dir / ".env-metadata.json"
-                    
+
                     # Backwards compatibility: Migrate .env-metadata.json from root to .prime/
                     # This handles environments that were pulled/pushed before we moved
                     # to .prime/ subfolder
@@ -787,7 +787,7 @@ def push(
                             console.print(
                                 "[yellow]Warning: Could not remove old .env-metadata.json[/yellow]"
                             )
-                    
+
                     # Read existing metadata if it exists
                     existing_metadata = {}
                     if metadata_path.exists():
@@ -810,14 +810,14 @@ def push(
                                 f"old location: {e}[/yellow]"
                             )
                             existing_metadata = {}
-                    
+
                     # Check if upstream (owner/name) changed
                     old_owner = existing_metadata.get("owner")
                     old_name = existing_metadata.get("name")
                     upstream_changed = False
                     if existing_metadata and (old_owner != owner_name or old_name != env_name):
                         upstream_changed = True
-                    
+
                     # Merge existing metadata with new push information
                     env_metadata = {
                         **existing_metadata,  # Preserve existing fields
@@ -827,10 +827,10 @@ def push(
                         "pushed_at": datetime.now().isoformat(),
                         "wheel_sha256": wheel_sha256,
                     }
-                    
+
                     with open(metadata_path, "w") as f:
                         json.dump(env_metadata, f, indent=2)
-                    
+
                     if existing_metadata:
                         message = Text("Updated environment metadata in ", style="dim")
                         message.append(str(metadata_path), style="dim")
@@ -839,7 +839,7 @@ def push(
                         message = Text("Saved environment metadata to ", style="dim")
                         message.append(str(metadata_path), style="dim")
                         console.print(message)
-                    
+
                     # Report upstream change if it occurred
                     if upstream_changed:
                         upstream_message = Text("Upstream set to ", style="dim")
@@ -1058,8 +1058,7 @@ def pull(
             # Filter out .prime directory and .env-metadata.json files
             # (created locally, not extracted)
             extracted_files = [
-                f for f in all_files
-                if f.name != ".prime" and f.name != ".env-metadata.json"
+                f for f in all_files if f.name != ".prime" and f.name != ".env-metadata.json"
             ]
             if extracted_files:
                 console.print("\nExtracted files:")
@@ -1939,12 +1938,12 @@ def eval_env(
         help="Installed Verifiers environment name (e.g. 'wordle')",
     ),
     model: str = typer.Option(
-        "meta-llama/llama-3.1-70b-instruct",
+        "openai/gpt-4.1-mini",
         "--model",
         "-m",
         help=(
-            "Model to use (e.g. 'meta-llama/llama-3.1-70b-instruct', see 'prime inference models' "
-            "for available models)"
+            "Model to use (e.g. 'openai/gpt-4.1-mini', 'prime-intellect/intellect-3', "
+            "see 'prime inference models' for available models)"
         ),
     ),
     # --- vf-eval options ---
@@ -2007,7 +2006,7 @@ def eval_env(
     Run verifiers' vf-eval with Prime Inference
 
     Example:
-       prime env eval meow -m meta-llama/llama-3.1-70b-instruct -n 2 -r 3 -t 1024 -T 0.7
+       prime env eval meow -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
        All extra args are forwarded unchanged to vf-eval.
     """
 
@@ -2155,6 +2154,4 @@ def eval_env(
                 "environment if it's not the current directory.[/dim]"
             )
     else:
-        console.print(
-            "[dim]Skipped uploading evaluation results[/dim]"
-        )
+        console.print("[dim]Skipped uploading evaluation results[/dim]")

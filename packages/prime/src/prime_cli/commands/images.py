@@ -6,6 +6,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import click
 import httpx
 import typer
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
@@ -30,6 +31,7 @@ def push_image(
     platform: str = typer.Option(
         "linux/amd64",
         "--platform",
+        click_type=click.Choice(["linux/amd64", "linux/arm64"]),
         help="Target platform (defaults to linux/amd64 for Kubernetes compatibility)",
     ),
 ):

@@ -5,6 +5,7 @@ from typing import Optional
 
 import httpx
 import typer
+from click.exceptions import Abort
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -63,6 +64,15 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
                     selected_team = teams[selection - 1]
                     team_id = selected_team.get("teamId")
                     team_name = selected_team.get("name", "Unknown")
+
+                    if not team_id:
+                        console.print(
+                            "[yellow]Team data is invalid. Using personal account.[/yellow]"
+                        )
+                        config.set_team_id(None)
+                        config.update_current_environment_file()
+                        return
+
                     config.set_team_id(team_id)
                     config.update_current_environment_file()
                     console.print(f"[green]Team context set.[/green] Using team '{team_name}'.")
@@ -77,12 +87,16 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
                     return
 
                 console.print(f"[red]Invalid selection. Enter 1-{len(teams)}.[/red]")
-            except (ValueError, KeyboardInterrupt):
-                console.print("[yellow]Cancelled. Using personal account.[/yellow]")
+            except Abort:
+                console.print("\n[yellow]Cancelled. Using personal account.[/yellow]")
                 config.set_team_id(None)
                 config.update_current_environment_file()
                 return
 
+    except Abort:
+        console.print("\n[yellow]Cancelled. Using personal account.[/yellow]")
+        config.set_team_id(None)
+        config.update_current_environment_file()
     except APIError as e:
         console.print(f"[yellow]Could not fetch teams: {e}[/yellow]")
         console.print("[dim]Using personal account.[/dim]")

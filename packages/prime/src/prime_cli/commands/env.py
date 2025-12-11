@@ -1880,27 +1880,26 @@ def delete(
 
 
 def _is_environment_installed(env_name: str, required_version: Optional[str] = None) -> bool:
-    """Check if an environment is installed and loadable."""
+    """Check if an environment package is installed."""
     try:
         pkg_name = normalize_package_name(env_name)
-        if required_version and required_version != "latest":
-            check_code = (
-                f"from verifiers import load_environment; "
-                f"from importlib.metadata import version as get_version; "
-                f"from packaging.version import Version; "
-                f"load_environment('{env_name}'); "
-                f"installed = Version(get_version('{pkg_name}')); "
-                f"required = Version('{required_version}'); "
-                f"exit(0 if installed == required else 1)"
-            )
-        else:
-            check_code = f"from verifiers import load_environment; load_environment('{env_name}')"
         result = subprocess.run(
-            ["uv", "run", "python", "-c", check_code],
+            ["uv", "pip", "show", pkg_name],
             capture_output=True,
             text=True,
         )
-        return result.returncode == 0
+
+        if result.returncode != 0:
+            return False
+
+        if required_version and required_version != "latest":
+            for line in result.stdout.splitlines():
+                if line.startswith("Version:"):
+                    installed_version = line.split(":", 1)[1].strip()
+                    return installed_version == required_version
+            return False
+
+        return True
     except Exception:
         return False
 

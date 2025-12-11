@@ -13,6 +13,7 @@ from .commands.evals import app as evals_app
 from .commands.inference import app as inference_app
 from .commands.login import app as login_app
 from .commands.pods import app as pods_app
+from .commands.rl import app as rl_app
 from .commands.sandbox import app as sandbox_app
 from .commands.teams import app as teams_app
 from .commands.whoami import app as whoami_app
@@ -37,6 +38,7 @@ app.add_typer(inference_app, name="inference")
 app.add_typer(whoami_app, name="whoami")
 app.add_typer(teams_app, name="teams")
 app.add_typer(evals_app, name="eval")
+app.add_typer(rl_app, name="rl")
 
 
 @app.callback(invoke_without_command=True)

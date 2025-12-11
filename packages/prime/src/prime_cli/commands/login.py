@@ -18,6 +18,82 @@ app = typer.Typer(help="Login to Prime Intellect")
 console = Console()
 
 
+def fetch_and_select_team(client: APIClient, config: Config) -> None:
+    """Fetch user's teams and prompt for selection."""
+    try:
+        response = client.get("/user/teams")
+        teams = response.get("data", []) if isinstance(response, dict) else []
+
+        if not teams:
+            config.set_team_id(None)
+            config.update_current_environment_file()
+            console.print("[dim]No teams found. Using personal account.[/dim]")
+            return
+
+        console.print()
+        console.print(
+            "[dim]Using a team context shares your environments, evals, "
+            "and pods with team members.[/dim]"
+        )
+        want_team = typer.confirm("Would you like to select a team?", default=False)
+
+        if not want_team:
+            config.set_team_id(None)
+            config.update_current_environment_file()
+            console.print("[green]Using personal account.[/green]")
+            return
+
+        console.print("\n[bold]Available teams:[/bold]\n")
+        for idx, team in enumerate(teams, start=1):
+            role = team.get("role", "member")
+            role_badge = f"[yellow]{role}[/yellow]" if role == "admin" else f"[dim]{role}[/dim]"
+            console.print(f"  [cyan]({idx})[/cyan] {team.get('name', 'Unknown')} {role_badge}")
+
+        console.print()
+
+        while True:
+            try:
+                selection = typer.prompt(
+                    "Select team",
+                    type=int,
+                    default=1,
+                )
+
+                if 1 <= selection <= len(teams):
+                    selected_team = teams[selection - 1]
+                    team_id = selected_team.get("teamId")
+                    team_name = selected_team.get("name", "Unknown")
+                    config.set_team_id(team_id)
+                    config.update_current_environment_file()
+                    console.print(f"[green]Team context set.[/green] Using team '{team_name}'.")
+                    console.print(
+                        "[dim]Your environments, evals, and pods will be shared "
+                        "with team members.[/dim]"
+                    )
+                    console.print(
+                        "[dim]To switch to personal account: "
+                        "prime config set-team-id (leave empty)[/dim]"
+                    )
+                    return
+
+                console.print(f"[red]Invalid selection. Enter 1-{len(teams)}.[/red]")
+            except (ValueError, KeyboardInterrupt):
+                console.print("[yellow]Cancelled. Using personal account.[/yellow]")
+                config.set_team_id(None)
+                config.update_current_environment_file()
+                return
+
+    except APIError as e:
+        console.print(f"[yellow]Could not fetch teams: {e}[/yellow]")
+        console.print("[dim]Using personal account.[/dim]")
+        config.set_team_id(None)
+        config.update_current_environment_file()
+    except Exception:
+        console.print("[dim]Using personal account.[/dim]")
+        config.set_team_id(None)
+        config.update_current_environment_file()
+
+
 def generate_ephemeral_keypair() -> tuple[rsa.RSAPrivateKey, str]:
     """Generate a temporary RSA key pair for secure communication"""
     try:
@@ -155,6 +231,8 @@ def login() -> None:
                                     config.set_user_id(user_id)
                                     config.update_current_environment_file()
                             console.print("[green]Successfully logged in![/green]")
+
+                            fetch_and_select_team(client, config)
                         except (APIError, Exception):
                             console.print("[yellow]Logged in, but failed to fetch user id[/yellow]")
                     else:

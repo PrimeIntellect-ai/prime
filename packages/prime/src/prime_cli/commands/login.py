@@ -233,8 +233,8 @@ def login() -> None:
                         config.update_current_environment_file()
 
                         # Attempt to fetch the current user id
+                        client = APIClient(api_key=api_key)
                         try:
-                            client = APIClient(api_key=api_key)
                             whoami_resp = client.get("/user/whoami")
                             data = (
                                 whoami_resp.get("data") if isinstance(whoami_resp, dict) else None
@@ -244,11 +244,11 @@ def login() -> None:
                                 if user_id:
                                     config.set_user_id(user_id)
                                     config.update_current_environment_file()
-                            console.print("[green]Successfully logged in![/green]")
-
-                            fetch_and_select_team(client, config)
                         except (APIError, Exception):
                             console.print("[yellow]Logged in, but failed to fetch user id[/yellow]")
+
+                        console.print("[green]Successfully logged in![/green]")
+                        fetch_and_select_team(client, config)
                     else:
                         console.print("[red]Failed to decrypt authentication token[/red]")
                     break

@@ -191,15 +191,15 @@ def list_images(
         client = APIClient()
 
         response = client.request("GET", "/images")
-        data = response
+        images = response.get("data", [])
 
-        if not data["images"]:
+        if not images:
             console.print("[yellow]No images or builds found.[/yellow]")
             console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
             return
 
         if output == "json":
-            console.print(json.dumps(data, indent=2))
+            console.print(json.dumps(response, indent=2))
             return
 
         # Table output
@@ -209,7 +209,7 @@ def list_images(
         table.add_column("Size", justify="right")
         table.add_column("Created", style="dim")
 
-        for img in data["images"]:
+        for img in images:
             # Status with color coding
             status = img.get("status", "UNKNOWN")
             if status == "COMPLETED":
@@ -251,7 +251,7 @@ def list_images(
         console.print()
         console.print(table)
         console.print()
-        console.print(f"[dim]Total: {data['total']} image(s)[/dim]")
+        console.print(f"[dim]Total: {len(images)} image(s)[/dim]")
         console.print()
 
     except UnauthorizedError:

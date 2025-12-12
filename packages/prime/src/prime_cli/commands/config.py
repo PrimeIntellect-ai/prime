@@ -59,11 +59,13 @@ def view() -> None:
 
     # Show Team
     team_id = settings["team_id"]
-    team_name = settings.get("team_name")
+    team_from_env = _env_set("PRIME_TEAM_ID")
     if team_id:
-        team_label = f"{team_name} ({team_id})" if team_name else team_id
-        if _env_set("PRIME_TEAM_ID"):
-            team_label += " (from env var)"
+        if team_from_env:
+            team_label = f"{team_id} (from env var)"
+        else:
+            team_name = settings.get("team_name")
+            team_label = f"{team_name} ({team_id})" if team_name else team_id
     else:
         team_label = "Personal Account"
     table.add_row("Team", team_label)

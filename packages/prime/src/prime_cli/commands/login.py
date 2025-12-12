@@ -26,7 +26,7 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
         teams = fetch_teams(client)
 
         if not teams:
-            config.set_team_id(None)
+            config.set_team(None)
             config.update_current_environment_file()
             return
 
@@ -49,7 +49,7 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
                 selection = typer.prompt("Select", type=int, default=1)
 
                 if selection == 1:
-                    config.set_team_id(None)
+                    config.set_team(None)
                     config.update_current_environment_file()
                     console.print("[green]Using personal account.[/green]")
                     return
@@ -61,26 +61,26 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
 
                     if not team_id:
                         console.print("[yellow]Invalid team. Using personal account.[/yellow]")
-                        config.set_team_id(None)
+                        config.set_team(None)
                         config.update_current_environment_file()
                         return
 
-                    config.set_team_id(team_id)
+                    config.set_team(team_id, team_name=team_name)
                     config.update_current_environment_file()
                     console.print(f"[green]Using team '{team_name}'.[/green]")
                     return
 
                 console.print(f"[red]Invalid selection. Enter 1-{len(teams) + 1}.[/red]")
             except Abort:
-                config.set_team_id(None)
+                config.set_team(None)
                 config.update_current_environment_file()
                 return
 
     except Abort:
-        config.set_team_id(None)
+        config.set_team(None)
         config.update_current_environment_file()
     except (APIError, Exception):
-        config.set_team_id(None)
+        config.set_team(None)
         config.update_current_environment_file()
 
 

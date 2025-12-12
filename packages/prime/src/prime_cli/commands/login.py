@@ -5,6 +5,7 @@ from typing import Optional
 
 import httpx
 import typer
+from click.exceptions import Abort
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -13,9 +14,74 @@ from rich.console import Console
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
+from .teams import fetch_teams
 
 app = typer.Typer(help="Login to Prime Intellect")
 console = Console()
+
+
+def fetch_and_select_team(client: APIClient, config: Config) -> None:
+    """Fetch user's teams and prompt for selection."""
+    try:
+        teams = fetch_teams(client)
+
+        if not teams:
+            config.set_team(None)
+            config.update_current_environment_file()
+            return
+
+        console.print("\n[bold]Select:[/bold]\n")
+        console.print("  [cyan](1)[/cyan] Personal")
+        for idx, team in enumerate(teams, start=2):
+            role = team.get("role", "member")
+            role_display = role.lower()
+            role_badge = (
+                f"[yellow](role: {role_display})[/yellow]"
+                if role == "admin"
+                else f"[dim](role: {role_display})[/dim]"
+            )
+            console.print(f"  [cyan]({idx})[/cyan] {team.get('name', 'Unknown')} {role_badge}")
+
+        console.print("\n[dim]You can always change this with 'prime config set-team-id'[/dim]")
+
+        while True:
+            try:
+                selection = typer.prompt("Select", type=int, default=1)
+
+                if selection == 1:
+                    config.set_team(None)
+                    config.update_current_environment_file()
+                    console.print("[green]Using personal account.[/green]")
+                    return
+
+                if 2 <= selection <= len(teams) + 1:
+                    selected_team = teams[selection - 2]
+                    team_id = selected_team.get("teamId")
+                    team_name = selected_team.get("name", "Unknown")
+
+                    if not team_id:
+                        console.print("[yellow]Invalid team. Using personal account.[/yellow]")
+                        config.set_team(None)
+                        config.update_current_environment_file()
+                        return
+
+                    config.set_team(team_id, team_name=team_name)
+                    config.update_current_environment_file()
+                    console.print(f"[green]Using team '{team_name}'.[/green]")
+                    return
+
+                console.print(f"[red]Invalid selection. Enter 1-{len(teams) + 1}.[/red]")
+            except Abort:
+                config.set_team(None)
+                config.update_current_environment_file()
+                return
+
+    except Abort:
+        config.set_team(None)
+        config.update_current_environment_file()
+    except (APIError, Exception):
+        config.set_team(None)
+        config.update_current_environment_file()
 
 
 def generate_ephemeral_keypair() -> tuple[rsa.RSAPrivateKey, str]:
@@ -143,8 +209,8 @@ def login() -> None:
                         config.update_current_environment_file()
 
                         # Attempt to fetch the current user id
+                        client = APIClient(api_key=api_key)
                         try:
-                            client = APIClient(api_key=api_key)
                             whoami_resp = client.get("/user/whoami")
                             data = (
                                 whoami_resp.get("data") if isinstance(whoami_resp, dict) else None
@@ -154,9 +220,11 @@ def login() -> None:
                                 if user_id:
                                     config.set_user_id(user_id)
                                     config.update_current_environment_file()
-                            console.print("[green]Successfully logged in![/green]")
                         except (APIError, Exception):
                             console.print("[yellow]Logged in, but failed to fetch user id[/yellow]")
+
+                        console.print("[green]Successfully logged in![/green]")
+                        fetch_and_select_team(client, config)
                     else:
                         console.print("[red]Failed to decrypt authentication token[/red]")
                     break

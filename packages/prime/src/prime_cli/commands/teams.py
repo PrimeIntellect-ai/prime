@@ -9,6 +9,12 @@ app = typer.Typer(help="List your teams", no_args_is_help=True)
 console = Console()
 
 
+def fetch_teams(client: APIClient) -> list[dict]:
+    """Fetch teams for the current user."""
+    response = client.get("/user/teams")
+    return response.get("data", []) if isinstance(response, dict) else []
+
+
 @app.command(name="list")
 def list_teams(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
@@ -18,15 +24,11 @@ def list_teams(
 
     try:
         client = APIClient()
-        response = client.get("/user/teams")
-        data = response.get("data") if isinstance(response, dict) else []
+        teams = fetch_teams(client)
 
         if output == "json":
-            teams = data if isinstance(data, list) else []
             output_data_as_json({"teams": teams, "total_count": len(teams)}, console)
             return
-
-        teams = data if isinstance(data, list) else []
         table = Table(title=f"Teams (Total: {len(teams)})", show_lines=True)
         table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("Name", style="blue")

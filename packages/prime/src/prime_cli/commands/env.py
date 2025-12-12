@@ -1506,57 +1506,10 @@ def install(
 
             console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
 
-            # Generate install command preferring simple index over wheel URL
-            normalized_name = normalize_package_name(name)
-
-            if simple_index_url:
-                # Prefer simple index approach
-                if with_tool == "uv":
-                    if target_version and target_version != "latest":
-                        cmd_parts = [
-                            "uv",
-                            "pip",
-                            "install",
-                            f"{normalized_name}=={target_version}",
-                            "--extra-index-url",
-                            simple_index_url,
-                        ]
-                    else:
-                        cmd_parts = [
-                            "uv",
-                            "pip",
-                            "install",
-                            normalized_name,
-                            "--extra-index-url",
-                            simple_index_url,
-                        ]
-                else:  # pip
-                    if target_version and target_version != "latest":
-                        cmd_parts = [
-                            "pip",
-                            "install",
-                            f"{normalized_name}=={target_version}",
-                            "--extra-index-url",
-                            simple_index_url,
-                        ]
-                    else:
-                        cmd_parts = [
-                            "pip",
-                            "install",
-                            normalized_name,
-                            "--extra-index-url",
-                            simple_index_url,
-                        ]
-            elif wheel_url:
-                # Fall back to wheel URL if simple index not available
-                try:
-                    cmd_parts = get_install_command(with_tool, wheel_url)
-                except ValueError as e:
-                    skipped_envs.append((f"{env_id}@{target_version}", str(e)))
-                    console.print(f"[yellow]⚠ Skipping {env_id}@{target_version}: {e}[/yellow]")
-                    continue
-            else:
-                # Should not reach here due to earlier checks, but just in case
+            cmd_parts = _build_install_command(
+                name, target_version, simple_index_url, wheel_url, with_tool
+            )
+            if not cmd_parts:
                 skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
                 console.print(
                     f"[yellow]⚠ Skipping {env_id}@{target_version}: No installation method[/yellow]"
@@ -1926,6 +1879,128 @@ def delete(
         raise typer.Exit(1)
 
 
+def _is_environment_installed(env_name: str, required_version: Optional[str] = None) -> bool:
+    """Check if an environment package is installed."""
+    try:
+        pkg_name = normalize_package_name(env_name)
+        result = subprocess.run(
+            ["uv", "pip", "show", pkg_name],
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            return False
+
+        if required_version and required_version != "latest":
+            for line in result.stdout.splitlines():
+                if line.startswith("Version:"):
+                    installed_version = line.split(":", 1)[1].strip()
+                    return installed_version == required_version
+            return False
+
+        return True
+    except Exception:
+        return False
+
+
+def _build_install_command(
+    name: str,
+    version: str,
+    simple_index_url: Optional[str],
+    wheel_url: Optional[str],
+    tool: str = "uv",
+) -> Optional[List[str]]:
+    """Build install command for an environment. Returns None if no install method available."""
+    normalized_name = normalize_package_name(name)
+
+    if simple_index_url:
+        if tool == "uv":
+            if version and version != "latest":
+                return [
+                    "uv",
+                    "pip",
+                    "install",
+                    f"{normalized_name}=={version}",
+                    "--extra-index-url",
+                    simple_index_url,
+                ]
+            return [
+                "uv",
+                "pip",
+                "install",
+                normalized_name,
+                "--extra-index-url",
+                simple_index_url,
+            ]
+        else:  # pip
+            if version and version != "latest":
+                return [
+                    "pip",
+                    "install",
+                    f"{normalized_name}=={version}",
+                    "--extra-index-url",
+                    simple_index_url,
+                ]
+            return [
+                "pip",
+                "install",
+                normalized_name,
+                "--extra-index-url",
+                simple_index_url,
+            ]
+    elif wheel_url:
+        try:
+            return get_install_command(tool, wheel_url)
+        except ValueError:
+            return None
+
+    return None
+
+
+def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
+    """Install a single environment from the hub. Returns True on success."""
+    try:
+        env_id, version = validate_env_id(env_slug)
+    except ValueError as e:
+        console.print(f"[red]Invalid environment format: {e}[/red]")
+        return False
+
+    owner, name = env_id.split("/")
+
+    try:
+        client = APIClient(require_auth=False)
+        details = fetch_environment_details(client, owner, name, version)
+    except APIError as e:
+        console.print(f"[red]Failed to find environment {env_slug}: {e}[/red]")
+        return False
+
+    simple_index_url = details.get("simple_index_url")
+    wheel_url = process_wheel_url(details.get("wheel_url"))
+
+    if not simple_index_url and not wheel_url:
+        if details.get("visibility") == "PRIVATE":
+            console.print(
+                f"[red]Cannot install private environment {env_slug}.[/red]\n"
+                "[yellow]Use 'prime env pull' to download and install locally.[/yellow]"
+            )
+        else:
+            console.print(f"[red]No installation method available for {env_slug}[/red]")
+        return False
+
+    cmd_parts = _build_install_command(name, version, simple_index_url, wheel_url, tool)
+    if not cmd_parts:
+        console.print(f"[red]Failed to build install command for {env_slug}[/red]")
+        return False
+
+    try:
+        execute_install_command(cmd_parts, env_id, version, tool)
+        return True
+    except Exception as e:
+        console.print(f"[red]Installation failed: {e}[/red]")
+        return False
+
+
 @app.command(
     "eval",
     no_args_is_help=True,
@@ -1935,7 +2010,7 @@ def eval_env(
     ctx: typer.Context,
     environment: str = typer.Argument(
         ...,
-        help="Installed Verifiers environment name (e.g. 'wordle')",
+        help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/gpqa')",
     ),
     model: str = typer.Option(
         "openai/gpt-4.1-mini",
@@ -2007,21 +2082,53 @@ def eval_env(
 
     Example:
        prime env eval meow -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
+       prime env eval primeintellect/gpqa -m openai/gpt-4.1-mini -n 5
        All extra args are forwarded unchanged to vf-eval.
     """
 
-    # Determine the path to check for upstream metadata
-    check_path = Path(env_path) if env_path else Path.cwd()
-    # Display upstream environment info if metadata exists
-    is_resolved = display_upstream_environment_info(
-        env_path=check_path, environment_name=environment
+    is_slug = (
+        "/" in environment and not environment.startswith("./") and not environment.startswith("/")
     )
-    if not is_resolved and not skip_upload:
-        console.print(
-            "[yellow]Evaluation results will not be uploaded or viewable on the platform "
-            "without a specified upstream environment. Use `prime env push` "
-            "to set an upstream.[/yellow]"
+
+    upstream_owner = None
+    upstream_name = None
+    env_name_for_vf_eval = environment
+
+    if is_slug:
+        env_slug = environment
+        requested_version = "latest"
+        if "@" in environment:
+            env_slug, requested_version = environment.rsplit("@", 1)
+
+        parts = env_slug.split("/")
+        if len(parts) == 2 and parts[0] and parts[1]:
+            upstream_owner, upstream_name = parts
+            env_name_for_vf_eval = upstream_name
+            console.print(
+                f"[dim]Using upstream environment {upstream_owner}/{upstream_name}[/dim]\n"
+            )
+
+            if not _is_environment_installed(upstream_name, requested_version):
+                console.print(f"[cyan]Installing {environment}...[/cyan]")
+                if not _install_single_environment(environment):
+                    raise typer.Exit(1)
+                console.print()
+
+            is_resolved = True
+        else:
+            console.print(f"[red]Invalid environment slug format: {environment}[/red]")
+            raise typer.Exit(1)
+    else:
+        check_path = Path(env_path) if env_path else Path.cwd()
+        is_resolved = display_upstream_environment_info(
+            env_path=check_path, environment_name=environment
         )
+        if not is_resolved and not skip_upload:
+            console.print(
+                "[yellow]Evaluation results will not be uploaded or viewable on the platform "
+                "without a specified upstream environment. Use `prime env push` "
+                "to set an upstream.[/yellow]"
+            )
 
     config = Config()
 
@@ -2061,7 +2168,7 @@ def eval_env(
             )
             raise typer.Exit(1)
 
-    cmd = ["uv", "run", "vf-eval", environment]
+    cmd = ["uv", "run", "vf-eval", env_name_for_vf_eval]
 
     # Add chosen inference url
     cmd += ["-b", inference_url]
@@ -2108,7 +2215,7 @@ def eval_env(
     # Generate job_id for end-to-end tracing of eval runs
     eval_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     job_uuid = str(uuid.uuid4())[:8]
-    sanitized_env = environment.replace("-", "_").replace("/", "_")
+    sanitized_env = env_name_for_vf_eval.replace("-", "_").replace("/", "_")
     sanitized_model = model.replace("/", "_").replace("-", "_")
     job_id = f"{sanitized_env}_{sanitized_model}_{eval_timestamp}_{job_uuid}"
 
@@ -2136,12 +2243,22 @@ def eval_env(
     if not skip_upload:
         if is_resolved:
             try:
-                push_eval_results_to_hub(
-                    env_name=environment,
-                    model=model,
-                    job_id=job_id,
-                    env_path=check_path,
-                )
+                if is_slug and upstream_owner and upstream_name:
+                    push_eval_results_to_hub(
+                        env_name=env_name_for_vf_eval,
+                        model=model,
+                        job_id=job_id,
+                        env_path=Path(env_path) if env_path else None,
+                        upstream_slug=f"{upstream_owner}/{upstream_name}",
+                    )
+                else:
+                    check_path = Path(env_path) if env_path else Path.cwd()
+                    push_eval_results_to_hub(
+                        env_name=env_name_for_vf_eval,
+                        model=model,
+                        job_id=job_id,
+                        env_path=check_path,
+                    )
             except Exception as e:
                 console.print(f"[red]Failed to push results to hub:[/red] {e}")
                 console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")

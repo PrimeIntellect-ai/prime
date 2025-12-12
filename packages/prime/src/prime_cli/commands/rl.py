@@ -33,7 +33,10 @@ def _get_status_color(status: str) -> str:
 def _format_run_for_display(run: RFTRun) -> Dict[str, Any]:
     """Format run data for display (both table and JSON)."""
     created_at = run.created_at.strftime("%Y-%m-%d %H:%M") if run.created_at else ""
-    env_names = [env.get("name", env.get("id", "?")) for env in run.environments]
+    env_names = [
+        env.get("slug", env.get("name", env.get("id", "?")))
+        for env in run.environments
+    ]
     envs_display = ", ".join(env_names[:3])
     if len(env_names) > 3:
         envs_display += f" (+{len(env_names) - 3})"
@@ -48,27 +51,6 @@ def _format_run_for_display(run: RFTRun) -> Dict[str, Any]:
         "created_at": created_at,
         "team_id": run.team_id,
     }
-
-
-def _resolve_environment(client: APIClient, env_slug: str) -> Dict[str, Any]:
-    """Resolve an environment slug (owner/name) to its ID and metadata."""
-    if "/" not in env_slug:
-        raise ValueError(
-            f"Invalid environment format: '{env_slug}'. Expected 'owner/name' format."
-        )
-
-    owner, name = env_slug.split("/", 1)
-
-    try:
-        response = client.get(f"/environmentshub/{owner}/{name}/@latest")
-        data = response.get("data", response)
-        return {
-            "id": data.get("id"),
-            "name": name,
-            "args": {},
-        }
-    except APIError as e:
-        raise APIError(f"Failed to resolve environment '{env_slug}': {e}")
 
 
 @app.command("models")
@@ -221,7 +203,6 @@ def delete_run(
 
 @app.command("run", no_args_is_help=True)
 def create_run(
-
     environments: List[str] = typer.Argument(
         ...,
         help="Environment slugs to train on (e.g., 'owner/env-name')",
@@ -229,11 +210,17 @@ def create_run(
     model: str = typer.Option(
         ..., "-m", "--model", help="Model to fine-tune"
     ),
+    name: Optional[str] = typer.Option(
+        None, "-n", "--name", help="Run name (auto-generated if not provided)"
+    ),
     rollouts: int = typer.Option(
         8, "-r", "--rollouts", help="Number of rollouts per example"
     ),
     seq_len: int = typer.Option(4096, "-s", "--seq-len", help="Sequence length"),
     max_steps: int = typer.Option(100, "--max-steps", help="Maximum training steps"),
+    wandb_entity: Optional[str] = typer.Option(
+        None, "--wandb-entity", help="Weights & Biases entity (username or team name)"
+    ),
     wandb_project: Optional[str] = typer.Option(
         None, "--wandb-project", help="Weights & Biases project name"
     ),
@@ -245,9 +232,6 @@ def create_run(
         "--wandb-api-key",
         help="Weights & Biases API key (or set WANDB_API_KEY env var)",
         envvar="WANDB_API_KEY",
-    ),
-    team: Optional[str] = typer.Option(
-        None, "-t", "--team", help="Team ID for team-owned run"
     ),
     output: str = typer.Option(
         "table", "--output", "-o", help="Output format: table or json"
@@ -270,27 +254,21 @@ def create_run(
         rft_client = RFTClient(api_client)
         config = Config()
 
-        # Use provided team or default from config
-        team_id = team or config.team_id
-
         console.print("[bold]Creating RL training run...[/bold]\n")
 
-        # Resolve environments
-        console.print("[dim]Resolving environments...[/dim]")
-        resolved_envs = []
+        # Validate environment slug format
         for env_slug in environments:
-            try:
-                env_data = _resolve_environment(api_client, env_slug)
-                resolved_envs.append(env_data)
-                console.print(f"  [green]✓[/green] {env_slug}")
-            except (APIError, ValueError) as e:
-                console.print(f"  [red]✗[/red] {env_slug}: {e}")
+            if "/" not in env_slug:
+                console.print(
+                    f"[red]Error:[/red] Invalid environment format: '{env_slug}'. "
+                    "Expected 'owner/name' format."
+                )
                 raise typer.Exit(1)
-
-        console.print()
 
         # Show configuration
         console.print("[bold]Configuration:[/bold]")
+        if name:
+            console.print(f"  Name: {name}")
         console.print(f"  Model: {model}")
         console.print(f"  Environments: {', '.join(environments)}")
         console.print(f"  Max Steps: {max_steps}")
@@ -298,21 +276,23 @@ def create_run(
         console.print(f"  Sequence Length: {seq_len}")
         if wandb_project:
             console.print(f"  W&B Project: {wandb_project}")
-        if team_id:
-            console.print(f"  Team: {team_id}")
+        if config.team_id:
+            console.print(f"  Team: {config.team_id}")
         console.print()
 
         # Create the run
         run = rft_client.create_run(
             model_name=model,
-            environments=resolved_envs,
+            environments=[{"slug": slug} for slug in environments],
             rollouts_per_example=rollouts,
             seq_len=seq_len,
             max_steps=max_steps,
+            name=name,
+            wandb_entity=wandb_entity,
             wandb_project=wandb_project,
             wandb_run_name=wandb_name,
             wandb_api_key=wandb_api_key,
-            team_id=team_id,
+            team_id=config.team_id,
         )
 
         if output == "json":
@@ -320,11 +300,11 @@ def create_run(
             return
 
         console.print("[green]✓ Run created successfully![/green]")
-        console.print(f"\n[bold]Run ID:[/bold] {run.id}")
-        console.print(f"[bold]Status:[/bold] {run.status}")
 
-        console.print("\n[dim]View your runs with:[/dim]")
-        console.print("  prime rl runs")
+        # Show dashboard link
+        dashboard_url = f"{config.frontend_url}/dashboard/training/{run.id}"
+        console.print("\n[cyan]Monitor run at:[/cyan]")
+        console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

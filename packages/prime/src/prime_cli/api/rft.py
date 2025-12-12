@@ -20,6 +20,7 @@ class RFTRun(BaseModel):
     """RFT Training Run."""
 
     id: str = Field(..., description="Run ID")
+    name: str = Field(..., description="Run name")
     user_id: str = Field(..., alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
     cluster_id: str = Field(..., alias="rftClusterId")
@@ -34,6 +35,7 @@ class RFTRun(BaseModel):
     run_config: Optional[Dict[str, Any]] = Field(None, alias="runConfig")
 
     # Monitoring
+    wandb_entity: Optional[str] = Field(None, alias="wandbEntity")
     wandb_project: Optional[str] = Field(None, alias="wandbProject")
     wandb_run_name: Optional[str] = Field(None, alias="wandbRunName")
 
@@ -85,6 +87,8 @@ class RFTClient:
         rollouts_per_example: int = 8,
         seq_len: int = 4096,
         max_steps: int = 100,
+        name: Optional[str] = None,
+        wandb_entity: Optional[str] = None,
         wandb_project: Optional[str] = None,
         wandb_run_name: Optional[str] = None,
         wandb_api_key: Optional[str] = None,
@@ -102,10 +106,14 @@ class RFTClient:
                 "secrets": [],
             }
 
+            if name:
+                payload["name"] = name
+
             # Add monitoring config if W&B is specified
-            if wandb_project:
+            if wandb_entity or wandb_project:
                 payload["monitoring"] = {
                     "wandb": {
+                        "entity": wandb_entity,
                         "project": wandb_project,
                         "name": wandb_run_name,
                     }

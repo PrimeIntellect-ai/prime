@@ -88,14 +88,16 @@ class Config:
     @property
     def team_id(self) -> Optional[str]:
         """Get team ID with precedence: env > file > None."""
-        team_id = os.getenv("PRIME_TEAM_ID")
-        if team_id is not None:
-            return team_id
-        return self.config.get("team_id") or None
+        return os.getenv("PRIME_TEAM_ID") or self.config.get("team_id") or None
+
+    @property
+    def team_id_from_env(self) -> bool:
+        """Check if team ID is set via environment variable."""
+        return bool(os.getenv("PRIME_TEAM_ID"))
 
     @property
     def team_name(self) -> Optional[str]:
-        """Get team name from config file."""
+        """Get team name from config file (only valid if team_id not from env)."""
         return self.config.get("team_name") or None
 
     def set_team(self, value: str | None, team_name: str | None = None) -> None:
@@ -220,7 +222,7 @@ class Config:
         env_config = {
             "api_key": self.api_key,
             "team_id": self.team_id,
-            "team_name": self.team_name,
+            "team_name": None if self.team_id_from_env else self.team_name,
             "user_id": self.user_id,
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
@@ -312,7 +314,7 @@ class Config:
                     env_config = {
                         "api_key": self.api_key,
                         "team_id": self.team_id,
-                        "team_name": self.team_name,
+                        "team_name": None if self.team_id_from_env else self.team_name,
                         "user_id": self.user_id,
                         "base_url": self.base_url,
                         "frontend_url": self.frontend_url,

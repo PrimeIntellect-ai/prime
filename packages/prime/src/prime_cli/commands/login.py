@@ -14,6 +14,7 @@ from rich.console import Console
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
+from .teams import fetch_teams
 
 app = typer.Typer(help="Login to Prime Intellect")
 console = Console()
@@ -22,88 +23,63 @@ console = Console()
 def fetch_and_select_team(client: APIClient, config: Config) -> None:
     """Fetch user's teams and prompt for selection."""
     try:
-        response = client.get("/user/teams")
-        teams = response.get("data", []) if isinstance(response, dict) else []
+        teams = fetch_teams(client)
 
         if not teams:
             config.set_team_id(None)
             config.update_current_environment_file()
-            console.print("[dim]No teams found. Using personal account.[/dim]")
             return
 
-        console.print()
-        console.print(
-            "[dim]Using a team context shares your environments, evals, "
-            "and pods with team members.[/dim]"
-        )
-        want_team = typer.confirm("Would you like to select a team?", default=False)
-
-        if not want_team:
-            config.set_team_id(None)
-            config.update_current_environment_file()
-            console.print("[green]Using personal account.[/green]")
-            return
-
-        console.print("\n[bold]Available teams:[/bold]\n")
-        for idx, team in enumerate(teams, start=1):
+        console.print("\n[bold]Select:[/bold]\n")
+        console.print("  [cyan](1)[/cyan] Personal")
+        for idx, team in enumerate(teams, start=2):
             role = team.get("role", "member")
-            role_badge = f"[yellow]{role}[/yellow]" if role == "admin" else f"[dim]{role}[/dim]"
+            role_display = role.lower()
+            role_badge = (
+                f"[yellow](role: {role_display})[/yellow]"
+                if role == "admin"
+                else f"[dim](role: {role_display})[/dim]"
+            )
             console.print(f"  [cyan]({idx})[/cyan] {team.get('name', 'Unknown')} {role_badge}")
 
-        console.print()
+        console.print("\n[dim]You can always change this with 'prime config set-team-id'[/dim]")
 
         while True:
             try:
-                selection = typer.prompt(
-                    "Select team",
-                    type=int,
-                    default=1,
-                )
+                selection = typer.prompt("Select", type=int, default=1)
 
-                if 1 <= selection <= len(teams):
-                    selected_team = teams[selection - 1]
+                if selection == 1:
+                    config.set_team_id(None)
+                    config.update_current_environment_file()
+                    console.print("[green]Using personal account.[/green]")
+                    return
+
+                if 2 <= selection <= len(teams) + 1:
+                    selected_team = teams[selection - 2]
                     team_id = selected_team.get("teamId")
                     team_name = selected_team.get("name", "Unknown")
 
                     if not team_id:
-                        console.print(
-                            "[yellow]Team data is invalid. Using personal account.[/yellow]"
-                        )
+                        console.print("[yellow]Invalid team. Using personal account.[/yellow]")
                         config.set_team_id(None)
                         config.update_current_environment_file()
                         return
 
                     config.set_team_id(team_id)
                     config.update_current_environment_file()
-                    console.print(f"[green]Team context set.[/green] Using team '{team_name}'.")
-                    console.print(
-                        "[dim]Your environments, evals, and pods will be shared "
-                        "with team members.[/dim]"
-                    )
-                    console.print(
-                        "[dim]To switch to personal account: "
-                        "prime config set-team-id (leave empty)[/dim]"
-                    )
+                    console.print(f"[green]Using team '{team_name}'.[/green]")
                     return
 
-                console.print(f"[red]Invalid selection. Enter 1-{len(teams)}.[/red]")
+                console.print(f"[red]Invalid selection. Enter 1-{len(teams) + 1}.[/red]")
             except Abort:
-                console.print("\n[yellow]Cancelled. Using personal account.[/yellow]")
                 config.set_team_id(None)
                 config.update_current_environment_file()
                 return
 
     except Abort:
-        console.print("\n[yellow]Cancelled. Using personal account.[/yellow]")
         config.set_team_id(None)
         config.update_current_environment_file()
-    except APIError as e:
-        console.print(f"[yellow]Could not fetch teams: {e}[/yellow]")
-        console.print("[dim]Using personal account.[/dim]")
-        config.set_team_id(None)
-        config.update_current_environment_file()
-    except Exception:
-        console.print("[dim]Using personal account.[/dim]")
+    except (APIError, Exception):
         config.set_team_id(None)
         config.update_current_environment_file()
 

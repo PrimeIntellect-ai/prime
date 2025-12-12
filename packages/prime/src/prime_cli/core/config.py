@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 class ConfigModel(BaseModel):
     api_key: str = ""
     team_id: str | None = None
+    team_name: str | None = None
     user_id: str | None = None
     base_url: str = "https://api.primeintellect.ai"
     frontend_url: str = "https://app.primeintellect.ai"
@@ -92,9 +93,15 @@ class Config:
             return team_id
         return self.config.get("team_id") or None
 
-    def set_team_id(self, value: str | None) -> None:
-        """Set team ID in config file"""
-        self.config["team_id"] = value if value else None
+    @property
+    def team_name(self) -> Optional[str]:
+        """Get team name from config file."""
+        return self.config.get("team_name") or None
+
+    def set_team(self, value: str | None, team_name: str | None = None) -> None:
+        """Set team ID and name in config file."""
+        self.config["team_id"] = value or None
+        self.config["team_name"] = team_name if value else None
         self._save_config(self.config)
 
     @property
@@ -194,6 +201,7 @@ class Config:
         return {
             "api_key": self.api_key,
             "team_id": self.team_id,
+            "team_name": self.team_name,
             "user_id": self.user_id,
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
@@ -212,6 +220,7 @@ class Config:
         env_config = {
             "api_key": self.api_key,
             "team_id": self.team_id,
+            "team_name": self.team_name,
             "user_id": self.user_id,
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
@@ -235,13 +244,14 @@ class Config:
                 self.set_base_url(self.DEFAULT_BASE_URL)
                 self.set_frontend_url(self.DEFAULT_FRONTEND_URL)
                 self.set_inference_url(self.DEFAULT_INFERENCE_URL)
-                self.set_team_id(None)  # Production defaults to personal account
+                self.set_team(None)  # Production defaults to personal account
                 self.set_current_environment("production")
             else:
                 self.config["base_url"] = self.DEFAULT_BASE_URL
                 self.config["frontend_url"] = self.DEFAULT_FRONTEND_URL
                 self.config["inference_url"] = self.DEFAULT_INFERENCE_URL
                 self.config["team_id"] = None
+                self.config["team_name"] = None
                 self.config["current_environment"] = "production"
             return True
 
@@ -257,8 +267,11 @@ class Config:
                 if persist:
                     if "api_key" in env_config:
                         self.set_api_key(env_config["api_key"])
-                    # Set team_id from environment, defaulting to empty string
-                    self.set_team_id(env_config.get("team_id", None))
+                    # Set team_id and team_name from environment
+                    self.set_team(
+                        env_config.get("team_id", None),
+                        team_name=env_config.get("team_name", None),
+                    )
                     # Set user_id from environment
                     self.set_user_id(env_config.get("user_id", None))
                     self.set_base_url(env_config.get("base_url", self.DEFAULT_BASE_URL))
@@ -272,6 +285,7 @@ class Config:
                     if "api_key" in env_config:
                         self.config["api_key"] = env_config["api_key"]
                     self.config["team_id"] = env_config.get("team_id", None)
+                    self.config["team_name"] = env_config.get("team_name", None)
                     self.config["user_id"] = env_config.get("user_id", None)
                     # Normalize URLs the same way set_* methods do
                     base_url = env_config.get("base_url", self.DEFAULT_BASE_URL)
@@ -298,6 +312,7 @@ class Config:
                     env_config = {
                         "api_key": self.api_key,
                         "team_id": self.team_id,
+                        "team_name": self.team_name,
                         "user_id": self.user_id,
                         "base_url": self.base_url,
                         "frontend_url": self.frontend_url,

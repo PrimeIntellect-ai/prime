@@ -9,15 +9,36 @@ from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
+from typer.core import TyperGroup
 
 from ..client import APIClient
 from ..utils import output_data_as_json
+from .env import run_eval
 
-app = typer.Typer(
-    help="Manage evaluations (push, list, and view evaluation results)",
-    no_args_is_help=True,
-)
 console = Console()
+
+
+class DefaultGroup(TyperGroup):
+    """A TyperGroup that invokes a default command if no subcommand is matched."""
+
+    def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.default_cmd_name = default_cmd_name
+
+    def parse_args(self, ctx, args):
+        # If first arg doesn't match a command, prepend the default command
+        if args and args[0] not in self.commands and not args[0].startswith("-"):
+            args = [self.default_cmd_name] + list(args)
+        return super().parse_args(ctx, args)
+
+    def format_usage(self, ctx, formatter):
+        formatter.write_usage(
+            ctx.command_path,
+            "[OPTIONS] ENVIRONMENT [ARGS]... | COMMAND [ARGS]...",
+        )
+
+
+subcommands_app = typer.Typer()
 
 
 def handle_errors(func):
@@ -51,7 +72,7 @@ def format_output(data: dict, output: str) -> None:
         console.print(syntax)
 
 
-@app.command("list")
+@subcommands_app.command("list")
 @handle_errors
 def list_evals(
     output: str = typer.Option("table", "--output", "-o", help="table|json"),
@@ -135,7 +156,7 @@ def list_evals(
         raise typer.Exit(1)
 
 
-@app.command("get")
+@subcommands_app.command("get")
 @handle_errors
 def get_eval(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation to retrieve"),
@@ -149,7 +170,7 @@ def get_eval(
     format_output(data, output)
 
 
-@app.command("samples")
+@subcommands_app.command("samples")
 @handle_errors
 def get_samples(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation"),
@@ -339,7 +360,7 @@ def _push_single_eval(
     return eval_id
 
 
-@app.command("push")
+@subcommands_app.command("push")
 @handle_errors
 def push_eval(
     config_path: Optional[str] = typer.Argument(
@@ -470,3 +491,118 @@ def push_eval(
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+# Main app using custom DefaultGroup for `prime eval <env>` support
+app = typer.Typer(
+    cls=DefaultGroup,
+    help="Run evaluations or manage results (list, get, push, samples)",
+    no_args_is_help=True,
+)
+
+# Add subcommands from subcommands_app
+app.add_typer(subcommands_app, name="")
+
+
+@app.command(
+    "run",
+    hidden=True,  # Hidden because it's the default - users use `prime eval <env>` directly
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def run_eval_cmd(
+    ctx: typer.Context,
+    environment: str = typer.Argument(
+        ...,
+        help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/gpqa')",
+    ),
+    model: str = typer.Option(
+        "openai/gpt-4.1-mini",
+        "--model",
+        "-m",
+        help=(
+            "Model to use (e.g. 'openai/gpt-4.1-mini', 'prime-intellect/intellect-3', "
+            "see 'prime inference models' for available models)"
+        ),
+    ),
+    num_examples: Optional[int] = typer.Option(
+        5, "--num-examples", "-n", help="Number of examples"
+    ),
+    rollouts_per_example: Optional[int] = typer.Option(
+        3, "--rollouts-per-example", "-r", help="Rollouts per example"
+    ),
+    max_concurrent: Optional[int] = typer.Option(
+        32, "--max-concurrent", "-c", help="Max concurrent requests"
+    ),
+    max_tokens: Optional[int] = typer.Option(
+        None, "--max-tokens", "-t", help="Max tokens to generate (unset → model default)"
+    ),
+    temperature: Optional[float] = typer.Option(None, "--temperature", "-T", help="Temperature"),
+    sampling_args: Optional[str] = typer.Option(
+        None,
+        "--sampling-args",
+        "-S",
+        help='Sampling args as JSON, e.g. \'{"enable_thinking": false, "max_tokens": 256}\'',
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    save_results: bool = typer.Option(True, "--save-results", "-s", help="Save results to disk"),
+    save_every: int = typer.Option(1, "--save-every", "-f", help="Save dataset every n rollouts"),
+    save_to_hf_hub: bool = typer.Option(False, "--save-to-hf-hub", "-H", help="Save to HF Hub"),
+    hf_hub_dataset_name: Optional[str] = typer.Option(
+        None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
+    ),
+    env_args: Optional[str] = typer.Option(
+        None, "--env-args", "-a", help='Environment args as JSON, e.g. \'{"key":"value"}\''
+    ),
+    api_key_var: Optional[str] = typer.Option(
+        None, "--api-key-var", "-k", help="override api key variable instead of using PRIME_API_KEY"
+    ),
+    api_base_url: Optional[str] = typer.Option(
+        None,
+        "--api-base-url",
+        "-b",
+        help=(
+            "override api base url variable instead of using prime inference url, "
+            "should end in '/v1'"
+        ),
+    ),
+    skip_upload: bool = typer.Option(
+        False,
+        "--skip-upload",
+        help="Skip uploading results to Prime Evals Hub (results are uploaded by default)",
+    ),
+    env_path: Optional[str] = typer.Option(
+        None,
+        "--env-path",
+        help=(
+            "Path to the environment directory "
+            "(used to locate .prime/.env-metadata.json for upstream resolution)"
+        ),
+    ),
+) -> None:
+    """
+    Run verifiers' vf-eval with Prime Inference.
+
+    Examples:
+       prime eval primeintellect/gpqa -m openai/gpt-4.1-mini -n 5
+       prime eval wordle -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
+    """
+    run_eval(
+        environment=environment,
+        model=model,
+        num_examples=num_examples,
+        rollouts_per_example=rollouts_per_example,
+        max_concurrent=max_concurrent,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        sampling_args=sampling_args,
+        verbose=verbose,
+        save_results=save_results,
+        save_every=save_every,
+        save_to_hf_hub=save_to_hf_hub,
+        hf_hub_dataset_name=hf_hub_dataset_name,
+        env_args=env_args,
+        api_key_var=api_key_var,
+        api_base_url=api_base_url,
+        skip_upload=skip_upload,
+        env_path=env_path,
+    )

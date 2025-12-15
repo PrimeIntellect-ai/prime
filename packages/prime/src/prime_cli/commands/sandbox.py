@@ -99,6 +99,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
 
 
 @app.command("list")
+@app.command("ls", hidden=True)
 def list_sandboxes_cmd(
     team_id: Optional[str] = typer.Option(
         None, help="Filter by team ID (uses config team_id if not specified)"
@@ -913,35 +914,6 @@ def download_file(
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
         raise typer.Exit(1)
-
-
-@app.command("ls")
-def ls(
-    team_id: Optional[str] = typer.Option(
-        None, help="Filter by team ID (uses config team_id if not specified)"
-    ),
-    status: Optional[str] = typer.Option(None, help="Filter by status"),
-    labels: Optional[List[str]] = typer.Option(
-        None,
-        "--label",
-        "-l",
-        help="Filter by labels (can specify multiple, sandboxes must have ALL)",
-    ),
-    page: int = typer.Option(1, help="Page number"),
-    per_page: int = typer.Option(50, help="Items per page"),
-    all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """List your sandboxes (alias for 'list')"""
-    list_sandboxes_cmd(
-        team_id=team_id,
-        status=status,
-        labels=labels,
-        page=page,
-        per_page=per_page,
-        all=all,
-        output=output,
-    )
 
 
 @app.command("reset-cache")

@@ -2023,8 +2023,6 @@ def run_eval(
 ) -> None:
     """
     Run verifiers' vf-eval with Prime Inference
-
-    This is the shared implementation used by both `prime eval` and `prime env eval`.
     """
     is_slug = (
         "/" in environment and not environment.startswith("./") and not environment.startswith("/")

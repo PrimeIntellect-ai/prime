@@ -721,11 +721,13 @@ def run(
                 key, value = env_var.split("=", 1)
                 env_vars[key] = value
 
-        # Join command list into a single string, preserving quoting for arguments with spaces
         # Handle case where user passes entire command as a quoted string (e.g., "ls /home")
-        if len(command) == 1 and " " in command[0]:
-            # User passed something like "ls /home" - use it directly as a shell command
-            command_str = command[0]
+        # We need to parse it properly to handle both:
+        # - "ls /home" -> should become: ls /home
+        # - "./my script.sh" -> should become: './my script.sh' (properly quoted)
+        if len(command) == 1:
+            # Parse the single string as shell tokens, then re-join properly
+            command_str = shlex.join(shlex.split(command[0]))
         else:
             command_str = shlex.join(command)
 

@@ -35,7 +35,7 @@ def push_eval_results_to_hub(
         model: Model identifier (e.g., "openai/gpt-4.1-mini")
         job_id: Unique job ID for tracking
         env_path: Optional path to the environment directory (defaults to current directory)
-        upstream_slug: Optional upstream environment slug (e.g., "primeintellect/gpqa")
+        upstream_slug: Optional upstream environment slug (e.g., "primeintellect/wordle")
                       If provided, bypasses metadata file lookup
     """
     # Step 1: Find the output directory

@@ -2022,7 +2022,7 @@ def run_eval(
     env_path: Optional[str],
 ) -> None:
     """
-    Core implementation for running verifiers' vf-eval with Prime Inference.
+    Run verifiers' vf-eval with Prime Inference
 
     This is the shared implementation used by both `prime eval` and `prime env eval`.
     """
@@ -2224,7 +2224,7 @@ def eval_env(
     ctx: typer.Context,
     environment: str = typer.Argument(
         ...,
-        help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/gpqa')",
+        help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/wordle')",
     ),
     model: str = typer.Option(
         "openai/gpt-4.1-mini",
@@ -2291,16 +2291,7 @@ def eval_env(
         ),
     ),
 ) -> None:
-    """
-    This command has been moved to `prime eval`. Please use `prime eval` instead.
-
-    Example:
-       prime eval meow -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
-       prime eval primeintellect/gpqa -m openai/gpt-4.1-mini -n 5
-    """
-    console.print(
-        "[yellow]'prime env eval' is deprecated. Please use 'prime eval' instead.[/yellow]\n"
-    )
+    """Use 'prime eval' instead."""
 
     run_eval(
         environment=environment,

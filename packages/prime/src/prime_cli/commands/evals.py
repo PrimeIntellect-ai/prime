@@ -19,14 +19,11 @@ console = Console()
 
 
 class DefaultGroup(TyperGroup):
-    """A TyperGroup that invokes a default command if no subcommand is matched."""
-
     def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
         super().__init__(*args, **kwargs)
         self.default_cmd_name = default_cmd_name
 
     def parse_args(self, ctx, args):
-        # If first arg doesn't match a command, prepend the default command
         if args and args[0] not in self.commands and not args[0].startswith("-"):
             args = [self.default_cmd_name] + list(args)
         return super().parse_args(ctx, args)
@@ -42,8 +39,6 @@ subcommands_app = typer.Typer()
 
 
 def handle_errors(func):
-    """Decorator to handle common errors in eval commands."""
-
     @wraps(func)
     def wrapper(*args, **kwargs):
         try:
@@ -493,27 +488,25 @@ def push_eval(
         raise typer.Exit(1)
 
 
-# Main app using custom DefaultGroup for `prime eval <env>` support
 app = typer.Typer(
     cls=DefaultGroup,
     help="Run evaluations or manage results (list, get, push, samples)",
     no_args_is_help=True,
 )
 
-# Add subcommands from subcommands_app
 app.add_typer(subcommands_app, name="")
 
 
 @app.command(
     "run",
-    hidden=True,  # Hidden because it's the default - users use `prime eval <env>` directly
+    hidden=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def run_eval_cmd(
     ctx: typer.Context,
     environment: str = typer.Argument(
         ...,
-        help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/gpqa')",
+        help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/wordle')",
     ),
     model: str = typer.Option(
         "openai/gpt-4.1-mini",
@@ -583,7 +576,7 @@ def run_eval_cmd(
     Run verifiers' vf-eval with Prime Inference.
 
     Examples:
-       prime eval primeintellect/gpqa -m openai/gpt-4.1-mini -n 5
+       prime eval primeintellect/wordle -m openai/gpt-4.1-mini -n 5
        prime eval wordle -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
     """
     run_eval(

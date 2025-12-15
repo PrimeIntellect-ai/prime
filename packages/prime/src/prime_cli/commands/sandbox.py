@@ -116,7 +116,7 @@ def list_sandboxes_cmd(
     all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List your sandboxes (excludes terminated by default)"""
+    """List your sandboxes (shortcut: ls)"""
     validate_output_format(output, console)
 
     try:

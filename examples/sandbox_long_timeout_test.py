@@ -17,7 +17,7 @@ Examples:
 import argparse
 import time
 
-from prime_sandboxes import APIError, CreateSandboxRequest, SandboxClient
+from prime_sandboxes import APIClient, APIError, CreateSandboxRequest, SandboxClient
 
 
 def main() -> None:
@@ -37,7 +37,8 @@ def main() -> None:
     print("For tasks > 15 minutes, use background jobs instead.\n")
 
     try:
-        client = SandboxClient()
+        api_client = APIClient()
+        client = SandboxClient(api_client)
 
         # Create sandbox
         request = CreateSandboxRequest(

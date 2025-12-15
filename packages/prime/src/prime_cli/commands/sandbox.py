@@ -722,7 +722,7 @@ def run(
                 env_vars[key] = value
 
         # Join command list into a single string, preserving quoting for arguments with spaces
-        # Handle case where user passes entire command as a single quoted string (e.g., "ls /home")
+        # Handle case where user passes entire command as a quoted string (e.g., "ls /home")
         if len(command) == 1 and " " in command[0]:
             # User passed something like "ls /home" - use it directly as a shell command
             command_str = command[0]

@@ -2235,7 +2235,6 @@ def eval_env(
             "see 'prime inference models' for available models)"
         ),
     ),
-    # --- vf-eval options ---
     num_examples: Optional[int] = typer.Option(
         5, "--num-examples", "-n", help="Number of examples"
     ),

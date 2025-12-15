@@ -500,6 +500,7 @@ app.add_typer(subcommands_app, name="")
 @app.command(
     "run",
     hidden=True,
+    no_args_is_help=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def run_eval_cmd(

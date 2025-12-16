@@ -30,9 +30,8 @@ class DefaultGroup(TyperGroup):
         if args[0] in ("--help", "-h"):
             return super().parse_args(ctx, args)
 
-        for arg in args:
-            if not arg.startswith("-") and arg in self.commands:
-                return super().parse_args(ctx, args)
+        if args[0] in self.commands:
+            return super().parse_args(ctx, args)
 
         args = [self.default_cmd_name] + list(args)
         return super().parse_args(ctx, args)

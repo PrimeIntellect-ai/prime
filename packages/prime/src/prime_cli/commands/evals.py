@@ -24,8 +24,17 @@ class DefaultGroup(TyperGroup):
         self.default_cmd_name = default_cmd_name
 
     def parse_args(self, ctx, args):
-        if args and args[0] not in self.commands and not args[0].startswith("-"):
-            args = [self.default_cmd_name] + list(args)
+        if not args:
+            return super().parse_args(ctx, args)
+
+        if args[0] in ("--help", "-h"):
+            return super().parse_args(ctx, args)
+
+        for arg in args:
+            if not arg.startswith("-") and arg in self.commands:
+                return super().parse_args(ctx, args)
+
+        args = [self.default_cmd_name] + list(args)
         return super().parse_args(ctx, args)
 
     def format_usage(self, ctx, formatter):
@@ -490,7 +499,10 @@ def push_eval(
 
 app = typer.Typer(
     cls=DefaultGroup,
-    help="Run evaluations or manage results (list, get, push, samples)",
+    help=(
+        "Run evaluations or manage results (list, get, push, samples).\n\n"
+        "By default, 'prime eval <environment>' runs 'prime eval run <environment>'."
+    ),
     no_args_is_help=True,
 )
 
@@ -499,7 +511,6 @@ app.add_typer(subcommands_app, name="")
 
 @app.command(
     "run",
-    hidden=True,
     no_args_is_help=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )

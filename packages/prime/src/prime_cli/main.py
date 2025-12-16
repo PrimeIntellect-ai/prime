@@ -1,9 +1,9 @@
-from importlib.metadata import version
 from typing import Optional
 
 import typer
 from rich.console import Console
 
+from . import __version__
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
 from .commands.disks import app as disks_app
@@ -17,8 +17,6 @@ from .commands.teams import app as teams_app
 from .commands.whoami import app as whoami_app
 from .core import Config
 from .utils.version_check import check_for_update
-
-__version__ = version("prime")
 
 app = typer.Typer(
     name="prime",

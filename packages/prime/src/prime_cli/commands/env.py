@@ -2001,91 +2001,29 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
         return False
 
 
-@app.command(
-    "eval",
-    no_args_is_help=True,
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-)
-def eval_env(
-    ctx: typer.Context,
-    environment: str = typer.Argument(
-        ...,
-        help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/gpqa')",
-    ),
-    model: str = typer.Option(
-        "openai/gpt-4.1-mini",
-        "--model",
-        "-m",
-        help=(
-            "Model to use (e.g. 'openai/gpt-4.1-mini', 'prime-intellect/intellect-3', "
-            "see 'prime inference models' for available models)"
-        ),
-    ),
-    # --- vf-eval options ---
-    num_examples: Optional[int] = typer.Option(
-        5, "--num-examples", "-n", help="Number of examples"
-    ),
-    rollouts_per_example: Optional[int] = typer.Option(
-        3, "--rollouts-per-example", "-r", help="Rollouts per example"
-    ),
-    max_concurrent: Optional[int] = typer.Option(
-        32, "--max-concurrent", "-c", help="Max concurrent requests"
-    ),
-    max_tokens: Optional[int] = typer.Option(
-        None, "--max-tokens", "-t", help="Max tokens to generate (unset → model default)"
-    ),
-    temperature: Optional[float] = typer.Option(None, "--temperature", "-T", help="Temperature"),
-    sampling_args: Optional[str] = typer.Option(
-        None,
-        "--sampling-args",
-        "-S",
-        help='Sampling args as JSON, e.g. \'{"enable_thinking": false, "max_tokens": 256}\'',
-    ),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
-    save_results: bool = typer.Option(True, "--save-results", "-s", help="Save results to disk"),
-    save_every: int = typer.Option(1, "--save-every", "-f", help="Save dataset every n rollouts"),
-    save_to_hf_hub: bool = typer.Option(False, "--save-to-hf-hub", "-H", help="Save to HF Hub"),
-    hf_hub_dataset_name: Optional[str] = typer.Option(
-        None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
-    ),
-    env_args: Optional[str] = typer.Option(
-        None, "--env-args", "-a", help='Environment args as JSON, e.g. \'{"key":"value"}\''
-    ),
-    api_key_var: Optional[str] = typer.Option(
-        None, "--api-key-var", "-k", help="override api key variable instead of using PRIME_API_KEY"
-    ),
-    api_base_url: Optional[str] = typer.Option(
-        None,
-        "--api-base-url",
-        "-b",
-        help=(
-            "override api base url variable instead of using prime inference url, "
-            "should end in '/v1'"
-        ),
-    ),
-    skip_upload: bool = typer.Option(
-        False,
-        "--skip-upload",
-        help="Skip uploading results to Prime Evals Hub (results are uploaded by default)",
-    ),
-    env_path: Optional[str] = typer.Option(
-        None,
-        "--env-path",
-        help=(
-            "Path to the environment directory "
-            "(used to locate .prime/.env-metadata.json for upstream resolution)"
-        ),
-    ),
+def run_eval(
+    environment: str,
+    model: str,
+    num_examples: Optional[int],
+    rollouts_per_example: Optional[int],
+    max_concurrent: Optional[int],
+    max_tokens: Optional[int],
+    temperature: Optional[float],
+    sampling_args: Optional[str],
+    verbose: bool,
+    save_results: bool,
+    save_every: int,
+    save_to_hf_hub: bool,
+    hf_hub_dataset_name: Optional[str],
+    env_args: Optional[str],
+    api_key_var: Optional[str],
+    api_base_url: Optional[str],
+    skip_upload: bool,
+    env_path: Optional[str],
 ) -> None:
     """
     Run verifiers' vf-eval with Prime Inference
-
-    Example:
-       prime env eval meow -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
-       prime env eval primeintellect/gpqa -m openai/gpt-4.1-mini -n 5
-       All extra args are forwarded unchanged to vf-eval.
     """
-
     is_slug = (
         "/" in environment and not environment.startswith("./") and not environment.startswith("/")
     )
@@ -2272,3 +2210,103 @@ def eval_env(
             )
     else:
         console.print("[dim]Skipped uploading evaluation results[/dim]")
+
+
+@app.command(
+    "eval",
+    no_args_is_help=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    deprecated=True,
+)
+def eval_env(
+    ctx: typer.Context,
+    environment: str = typer.Argument(
+        ...,
+        help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/wordle')",
+    ),
+    model: str = typer.Option(
+        "openai/gpt-4.1-mini",
+        "--model",
+        "-m",
+        help=(
+            "Model to use (e.g. 'openai/gpt-4.1-mini', 'prime-intellect/intellect-3', "
+            "see 'prime inference models' for available models)"
+        ),
+    ),
+    num_examples: Optional[int] = typer.Option(
+        5, "--num-examples", "-n", help="Number of examples"
+    ),
+    rollouts_per_example: Optional[int] = typer.Option(
+        3, "--rollouts-per-example", "-r", help="Rollouts per example"
+    ),
+    max_concurrent: Optional[int] = typer.Option(
+        32, "--max-concurrent", "-c", help="Max concurrent requests"
+    ),
+    max_tokens: Optional[int] = typer.Option(
+        None, "--max-tokens", "-t", help="Max tokens to generate (unset → model default)"
+    ),
+    temperature: Optional[float] = typer.Option(None, "--temperature", "-T", help="Temperature"),
+    sampling_args: Optional[str] = typer.Option(
+        None,
+        "--sampling-args",
+        "-S",
+        help='Sampling args as JSON, e.g. \'{"enable_thinking": false, "max_tokens": 256}\'',
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    save_results: bool = typer.Option(True, "--save-results", "-s", help="Save results to disk"),
+    save_every: int = typer.Option(1, "--save-every", "-f", help="Save dataset every n rollouts"),
+    save_to_hf_hub: bool = typer.Option(False, "--save-to-hf-hub", "-H", help="Save to HF Hub"),
+    hf_hub_dataset_name: Optional[str] = typer.Option(
+        None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
+    ),
+    env_args: Optional[str] = typer.Option(
+        None, "--env-args", "-a", help='Environment args as JSON, e.g. \'{"key":"value"}\''
+    ),
+    api_key_var: Optional[str] = typer.Option(
+        None, "--api-key-var", "-k", help="override api key variable instead of using PRIME_API_KEY"
+    ),
+    api_base_url: Optional[str] = typer.Option(
+        None,
+        "--api-base-url",
+        "-b",
+        help=(
+            "override api base url variable instead of using prime inference url, "
+            "should end in '/v1'"
+        ),
+    ),
+    skip_upload: bool = typer.Option(
+        False,
+        "--skip-upload",
+        help="Skip uploading results to Prime Evals Hub (results are uploaded by default)",
+    ),
+    env_path: Optional[str] = typer.Option(
+        None,
+        "--env-path",
+        help=(
+            "Path to the environment directory "
+            "(used to locate .prime/.env-metadata.json for upstream resolution)"
+        ),
+    ),
+) -> None:
+    """Use 'prime eval' instead."""
+
+    run_eval(
+        environment=environment,
+        model=model,
+        num_examples=num_examples,
+        rollouts_per_example=rollouts_per_example,
+        max_concurrent=max_concurrent,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        sampling_args=sampling_args,
+        verbose=verbose,
+        save_results=save_results,
+        save_every=save_every,
+        save_to_hf_hub=save_to_hf_hub,
+        hf_hub_dataset_name=hf_hub_dataset_name,
+        env_args=env_args,
+        api_key_var=api_key_var,
+        api_base_url=api_base_url,
+        skip_upload=skip_upload,
+        env_path=env_path,
+    )

@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 import typer
 from rich.console import Console
 from rich.table import Table
+from typer.core import TyperGroup
 
 from prime_cli.core import Config
 
@@ -12,8 +13,35 @@ from ..api.rft import RFTClient, RFTRun
 from ..client import APIClient, APIError
 from ..utils import output_data_as_json, validate_output_format
 
-app = typer.Typer(help="Manage RL training runs", no_args_is_help=True)
 console = Console()
+
+
+class DefaultGroup(TyperGroup):
+    def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.default_cmd_name = default_cmd_name
+
+    def parse_args(self, ctx, args):
+        if not args:
+            return super().parse_args(ctx, args)
+
+        if args[0] in ("--help", "-h"):
+            return super().parse_args(ctx, args)
+
+        if args[0] in self.commands:
+            return super().parse_args(ctx, args)
+
+        args = [self.default_cmd_name] + list(args)
+        return super().parse_args(ctx, args)
+
+    def format_usage(self, ctx, formatter):
+        formatter.write_usage(
+            ctx.command_path,
+            "[OPTIONS] ENVIRONMENTS... | COMMAND [ARGS]...",
+        )
+
+
+subcommands_app = typer.Typer()
 
 # Status color mapping
 RUN_STATUS_COLORS = {
@@ -53,7 +81,7 @@ def _format_run_for_display(run: RFTRun) -> Dict[str, Any]:
     }
 
 
-@app.command("models")
+@subcommands_app.command("models")
 def list_models(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
@@ -90,7 +118,7 @@ def list_models(
         raise typer.Exit(1)
 
 
-@app.command("runs")
+@subcommands_app.command("runs")
 def list_runs(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
@@ -144,7 +172,7 @@ def list_runs(
         raise typer.Exit(1)
 
 
-@app.command("stop")
+@subcommands_app.command("stop")
 def stop_run(
     run_id: str = typer.Argument(..., help="Run ID to stop"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
@@ -170,7 +198,7 @@ def stop_run(
         raise typer.Exit(1)
 
 
-@app.command("delete")
+@subcommands_app.command("delete")
 def delete_run(
     run_id: str = typer.Argument(..., help="Run ID to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
@@ -199,6 +227,18 @@ def delete_run(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+app = typer.Typer(
+    cls=DefaultGroup,
+    help=(
+        "Manage RL training runs.\n\n"
+        "By default, 'prime rl <environments>' runs 'prime rl run <environments>'."
+    ),
+    no_args_is_help=True,
+)
+
+app.add_typer(subcommands_app, name="")
 
 
 @app.command("run", no_args_is_help=True)

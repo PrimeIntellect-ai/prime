@@ -121,7 +121,7 @@ def push_image(
                         upload_url,
                         content=f,
                         headers={"Content-Type": "application/octet-stream"},
-                        timeout=300.0,
+                        timeout=600.0,
                     )
                     upload_response.raise_for_status()
             except httpx.HTTPError as e:

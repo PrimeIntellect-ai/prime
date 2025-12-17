@@ -11,7 +11,7 @@ from typer.core import TyperGroup
 
 from prime_cli.core import Config
 
-from ..api.rft import RFTClient, RFTRun
+from ..api.rl import RLClient, RLRun
 from ..client import APIClient, APIError
 from ..utils import BaseConfig, output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
@@ -105,7 +105,7 @@ def _get_status_color(status: str) -> str:
     return RUN_STATUS_COLORS.get(status.upper(), "white")
 
 
-def _format_run_for_display(run: RFTRun) -> Dict[str, Any]:
+def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     """Format run data for display (both table and JSON)."""
     created_at = run.created_at.strftime("%Y-%m-%d %H:%M") if run.created_at else ""
     env_names = [
@@ -137,9 +137,9 @@ def list_models(
 
     try:
         api_client = APIClient()
-        rft_client = RFTClient(api_client)
+        rl_client = RLClient(api_client)
 
-        models = rft_client.list_models()
+        models = rl_client.list_models()
 
         if output == "json":
             output_data_as_json({"models": [m.model_dump() for m in models]}, console)
@@ -148,7 +148,7 @@ def list_models(
         if not models:
             console.print("[yellow]No models available for RL training.[/yellow]")
             console.print(
-                "[dim]This could mean no healthy RFT clusters are running.[/dim]"
+                "[dim]This could mean no healthy RL clusters are running.[/dim]"
             )
             return
 
@@ -175,13 +175,13 @@ def list_runs(
 
     try:
         api_client = APIClient()
-        rft_client = RFTClient(api_client)
+        rl_client = RLClient(api_client)
         config = Config()
 
         # Use provided team or default from config
         team_id = team or config.team_id
 
-        runs = rft_client.list_runs(team_id=team_id)
+        runs = rl_client.list_runs(team_id=team_id)
 
         if output == "json":
             output_data_as_json({"runs": [r.model_dump() for r in runs]}, console)
@@ -233,9 +233,9 @@ def stop_run(
                 raise typer.Exit(0)
 
         api_client = APIClient()
-        rft_client = RFTClient(api_client)
+        rl_client = RLClient(api_client)
 
-        run = rft_client.stop_run(run_id)
+        run = rl_client.stop_run(run_id)
 
         console.print(f"[green]✓ Run {run_id} stopped successfully[/green]")
         console.print(f"Status: {run.status}")
@@ -261,9 +261,9 @@ def delete_run(
                 raise typer.Exit(0)
 
         api_client = APIClient()
-        rft_client = RFTClient(api_client)
+        rl_client = RLClient(api_client)
 
-        success = rft_client.delete_run(run_id)
+        success = rl_client.delete_run(run_id)
 
         if success:
             console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
@@ -445,7 +445,7 @@ def create_run(
 
     try:
         api_client = APIClient()
-        rft_client = RFTClient(api_client)
+        rl_client = RLClient(api_client)
         app_config = Config()
 
         console.print("[bold]Creating RL training run...[/bold]\n")
@@ -475,7 +475,7 @@ def create_run(
         console.print()
 
         # Create the run
-        run = rft_client.create_run(
+        run = rl_client.create_run(
             model_name=cfg.model,
             environments=[{"slug": slug} for slug in cfg.environments],
             rollouts_per_example=cfg.rollouts,

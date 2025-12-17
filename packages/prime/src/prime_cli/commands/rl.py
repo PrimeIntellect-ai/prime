@@ -330,7 +330,7 @@ def init_config(
 app = typer.Typer(
     cls=DefaultGroup,
     help=(
-        "Manage RL training runs.\n\n"
+        "Manage hosted RL training runs.\n\n"
         "By default, 'prime rl <environments>' runs 'prime rl run <environments>'."
     ),
     no_args_is_help=True,
@@ -339,7 +339,7 @@ app = typer.Typer(
 app.add_typer(subcommands_app, name="")
 
 
-@app.command("run")
+@app.command("run", help="Create and start an RL training run [default]")
 def create_run(
     ctx: typer.Context,
     environments: Optional[List[str]] = typer.Argument(
@@ -386,9 +386,7 @@ def create_run(
         "table", "--output", "-o", help="Output format: table or json"
     ),
 ) -> None:
-    """Create an RL training run with specified environments and model.
-
-    Configuration can be provided via CLI options, a TOML config file, or both.
+    """Configuration can be provided via CLI options, a TOML config file, or both.
     CLI options take precedence over config file values.
 
     Example TOML config (rl-config.toml):

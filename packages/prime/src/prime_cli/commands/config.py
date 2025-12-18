@@ -9,6 +9,7 @@ from rich.table import Table
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
+from .teams import fetch_teams
 
 app = typer.Typer(help="Configure the CLI", no_args_is_help=True)
 console = Console()
@@ -56,12 +57,18 @@ def view() -> None:
         masked_key = "Not set"
     table.add_row("API Key", masked_key)
 
-    # Show Team ID
+    # Show Team
     team_id = settings["team_id"]
-    team_label = team_id or "Personal Account"
-    if team_id and _env_set("PRIME_TEAM_ID"):
-        team_label += " (from env var)"
-    table.add_row("Team ID", team_label)
+    team_from_env = _env_set("PRIME_TEAM_ID")
+    if team_id:
+        if team_from_env:
+            team_label = f"{team_id} (from env var)"
+        else:
+            team_name = settings.get("team_name")
+            team_label = f"{team_name} ({team_id})" if team_name else team_id
+    else:
+        team_label = "Personal Account"
+    table.add_row("Team", team_label)
 
     # Show User ID
     user_id = settings.get("user_id")
@@ -167,9 +174,24 @@ def set_team_id(
         raise typer.Exit(code=1)
 
     config = Config()
-    config.set_team_id(team_id)
+    team_name = None
     if team_id:
-        console.print(f"[green]Team ID '{team_id}' configured successfully![/green]")
+        try:
+            client = APIClient()
+            teams = fetch_teams(client)
+            for team in teams:
+                if team.get("teamId") == team_id:
+                    team_name = team.get("name")
+                    break
+        except (APIError, Exception):
+            pass
+
+    config.set_team(team_id, team_name=team_name)
+    if team_id:
+        if team_name:
+            console.print(f"[green]Team '{team_name}' ({team_id}) configured successfully![/green]")
+        else:
+            console.print(f"[green]Team ID '{team_id}' configured successfully![/green]")
     else:
         console.print("[green]Team ID cleared. Using personal account.[/green]")
 
@@ -178,7 +200,7 @@ def set_team_id(
 def remove_team_id() -> None:
     """Remove team ID to use personal account"""
     config = Config()
-    config.set_team_id(None)
+    config.set_team(None)
     console.print("[green]Team ID removed. Using personal account.[/green]")
 
 
@@ -327,7 +349,7 @@ def reset(
     if yes or typer.confirm("Are you sure you want to reset all settings?"):
         config = Config()
         config.set_api_key("")
-        config.set_team_id(None)
+        config.set_team(None)
         config.set_base_url(Config.DEFAULT_BASE_URL)
         config.set_frontend_url(Config.DEFAULT_FRONTEND_URL)
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)

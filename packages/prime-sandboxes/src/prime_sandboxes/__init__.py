@@ -21,6 +21,8 @@ from .exceptions import (
 )
 from .models import (
     AdvancedConfigs,
+    BackgroundJob,
+    BackgroundJobStatus,
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
     CommandRequest,
@@ -39,7 +41,7 @@ from .models import (
 )
 from .sandbox import AsyncSandboxClient, AsyncTemplateClient, SandboxClient, TemplateClient
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -68,6 +70,8 @@ __all__ = [
     "RegistryCredentialSummary",
     "DockerImageCheckResponse",
     "AdvancedConfigs",
+    "BackgroundJob",
+    "BackgroundJobStatus",
     # Port Forwarding
     "ExposePortRequest",
     "ExposedPort",

@@ -3,12 +3,11 @@
 from pathlib import Path
 from typing import Any
 
-from typing_extensions import Self
-
 import toml
 import typer
 from pydantic import BaseModel
 from rich.console import Console
+from typing_extensions import Self
 
 
 def load_toml(path: str, console: Console | None = None) -> dict[str, Any]:

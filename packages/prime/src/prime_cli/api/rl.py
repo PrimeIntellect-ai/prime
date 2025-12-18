@@ -20,7 +20,7 @@ class RLRun(BaseModel):
     """RL Training Run."""
 
     id: str = Field(..., description="Run ID")
-    name: str = Field(..., description="Run name")
+    name: Optional[str] = Field(None, description="Run name")
     user_id: str = Field(..., alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
     cluster_id: str = Field(..., alias="rftClusterId")
@@ -30,7 +30,7 @@ class RLRun(BaseModel):
     rollouts_per_example: int = Field(..., alias="rolloutsPerExample")
     seq_len: int = Field(..., alias="seqLen")
     max_steps: int = Field(..., alias="maxSteps")
-    model_name: str = Field(..., alias="modelName")
+    base_model: str = Field(..., alias="baseModel")
     environments: List[Dict[str, Any]] = Field(default_factory=list)
     run_config: Optional[Dict[str, Any]] = Field(None, alias="runConfig")
 
@@ -97,13 +97,19 @@ class RLClient:
     ) -> RLRun:
         """Create a new RL training run."""
         try:
+            secrets: List[Dict[str, str]] = []
+
+            # Add W&B API key as a secret if provided
+            if wandb_api_key:
+                secrets.append({"key": "WANDB_API_KEY", "value": wandb_api_key})
+
             payload: Dict[str, Any] = {
                 "model": {"name": model_name},
                 "environments": environments,
                 "rollouts_per_example": rollouts_per_example,
                 "seq_len": seq_len,
                 "max_steps": max_steps,
-                "secrets": [],
+                "secrets": secrets,
             }
 
             if name:
@@ -118,10 +124,6 @@ class RLClient:
                         "name": wandb_run_name,
                     }
                 }
-
-            # Add W&B API key as a secret if provided
-            if wandb_api_key:
-                payload["secrets"].append({"key": "WANDB_API_KEY", "value": wandb_api_key})
 
             if team_id:
                 payload["team_id"] = team_id

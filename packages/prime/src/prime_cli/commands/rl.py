@@ -119,7 +119,7 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     return {
         "id": run.id,
         "status": run.status,
-        "model": run.model_name,
+        "model": run.base_model,
         "environments": envs_display,
         "steps": f"{run.max_steps}",
         "rollouts": str(run.rollouts_per_example),
@@ -436,12 +436,23 @@ def create_run(
 
     # Validate required fields
     if not cfg.environments:
-        console.print("[red]Error:[/red] No environments specified. Provide via CLI or config file.")
+        console.print(
+            "[red]Error:[/red] No environments specified. Provide via CLI or config file."
+        )
         raise typer.Exit(1)
 
     if not cfg.model:
-        console.print("[red]Error:[/red] No model specified. Use --model or set 'model' in config file.")
+        console.print(
+            "[red]Error:[/red] No model specified. Use --model or set 'model' in config."
+        )
         raise typer.Exit(1)
+
+    # Warn if wandb is configured but no API key is provided
+    if (cfg.wandb.entity or cfg.wandb.project) and not cfg.wandb.api_key:
+        console.print(
+            "[yellow]Warning:[/yellow] W&B config detected but no API key provided.\n"
+            "  Set via: --wandb-api-key or WANDB_API_KEY env var\n"
+        )
 
     try:
         api_client = APIClient()

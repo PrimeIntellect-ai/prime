@@ -37,6 +37,7 @@ Repository = "https://github.com/PrimeIntellect-ai/prime-cli.git"
 dev = [
     "pytest>=7.0.0",
     "pytest-xdist>=3.0.0",
+    "pytest-asyncio>=0.23.0",
     "ruff>=0.13.1",
 ]
 

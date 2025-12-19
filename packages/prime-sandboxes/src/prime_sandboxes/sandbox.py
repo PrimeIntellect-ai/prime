@@ -44,11 +44,11 @@ from .models import (
 )
 
 # Retry configuration for transient connection errors on gateway requests
+# Note: ReadTimeout is NOT included because the request may have been processed
 GATEWAY_RETRYABLE_EXCEPTIONS = (
     httpx.RemoteProtocolError,  # Server disconnected unexpectedly
     httpx.ConnectError,  # Connection refused/failed
     httpx.PoolTimeout,  # No connection available in pool
-    httpx.ReadTimeout,  # Server took too long to send response
 )
 
 # Retry decorator for gateway requests

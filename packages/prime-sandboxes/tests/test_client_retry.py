@@ -166,20 +166,20 @@ class TestSyncGatewayRetry:
         assert result == "success"
         assert call_count == 2
 
-    def test_gateway_retry_on_read_timeout(self):
-        """Test retry on ReadTimeout."""
+    def test_gateway_retry_on_connect_error(self):
+        """Test retry on ConnectError."""
         from prime_sandboxes.sandbox import _gateway_retry
 
         call_count = 0
 
         @_gateway_retry
-        def read_timeout_then_succeed():
+        def connect_error_then_succeed():
             nonlocal call_count
             call_count += 1
             if call_count < 2:
-                raise httpx.ReadTimeout("Read timed out")
+                raise httpx.ConnectError("Connection refused")
             return "success"
 
-        result = read_timeout_then_succeed()
+        result = connect_error_then_succeed()
         assert result == "success"
         assert call_count == 2

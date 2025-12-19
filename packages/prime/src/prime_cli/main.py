@@ -79,8 +79,9 @@ def callback(
                 f"(installed: {__version__})[/yellow]"
             )
             console.print(
-                "[dim]Run: uv pip install --upgrade prime  or  uv tool upgrade prime[/dim]\n"
+                "[dim]Run: uv pip install --upgrade prime  or  uv tool upgrade prime[/dim]"
             )
+            console.print("[dim]Set PRIME_DISABLE_VERSION_CHECK=1 to disable this check[/dim]\n")
 
 
 def run() -> None:

@@ -11,6 +11,7 @@ from prime_cli import __version__
 
 PYPI_URL = "https://pypi.org/pypi/prime/json"
 CACHE_DURATION = 86400
+NOTIFICATION_INTERVAL = 21600
 REQUEST_TIMEOUT = 2.0
 
 
@@ -33,17 +34,50 @@ def _read_cache() -> dict | None:
         return None
 
 
-def _write_cache(latest_version: str) -> None:
+def _write_cache(
+    latest_version: str, last_notified: float | None = None, preserve_notified: bool = False
+) -> None:
     """Write version check data to cache."""
     cache_file = _get_cache_file()
     try:
+        existing_notified = None
+        if preserve_notified:
+            existing_cache = _read_cache()
+            if existing_cache:
+                existing_notified = existing_cache.get("last_notified")
+
         cache_data = {
             "last_check": time.time(),
             "latest_version": latest_version,
+            "last_notified": last_notified if last_notified is not None else existing_notified,
         }
         cache_file.write_text(json.dumps(cache_data))
     except OSError:
         pass
+
+
+def _mark_notified(latest_version: str) -> None:
+    """Mark that we've shown the update notification."""
+    cache_file = _get_cache_file()
+    try:
+        cache_data = _read_cache() or {}
+        cache_data["last_notified"] = time.time()
+        cache_data["latest_version"] = latest_version
+        if "last_check" not in cache_data:
+            cache_data["last_check"] = time.time()
+        cache_file.write_text(json.dumps(cache_data))
+    except OSError:
+        pass
+
+
+def _should_show_notification(cache_data: dict | None) -> bool:
+    """Check if enough time has passed since the last notification."""
+    if cache_data is None:
+        return True
+    last_notified = cache_data.get("last_notified")
+    if last_notified is None:
+        return True
+    return (time.time() - last_notified) >= NOTIFICATION_INTERVAL
 
 
 def _is_cache_valid(cache_data: dict) -> bool:
@@ -75,7 +109,8 @@ def check_for_update() -> Tuple[bool, str | None]:
         else:
             latest_version = get_latest_pypi_version()
             if latest_version:
-                _write_cache(latest_version)
+                _write_cache(latest_version, preserve_notified=True)
+                cache_data = _read_cache()
 
         if not latest_version:
             return (False, None)
@@ -84,7 +119,10 @@ def check_for_update() -> Tuple[bool, str | None]:
         latest = version.parse(latest_version)
 
         if installed < latest:
-            return (True, latest_version)
+            if _should_show_notification(cache_data):
+                _mark_notified(latest_version)
+                return (True, latest_version)
+            return (False, latest_version)
 
         return (False, latest_version)
 

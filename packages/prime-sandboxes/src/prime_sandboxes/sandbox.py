@@ -13,6 +13,12 @@ from typing import Any, Dict, List, Optional
 
 import aiofiles
 import httpx
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
@@ -36,6 +42,23 @@ from .models import (
     SandboxListResponse,
     SandboxLogsResponse,
 )
+
+# Retry configuration for transient connection errors on gateway requests
+GATEWAY_RETRYABLE_EXCEPTIONS = (
+    httpx.RemoteProtocolError,  # Server disconnected unexpectedly
+    httpx.ConnectError,  # Connection refused/failed
+    httpx.PoolTimeout,  # No connection available in pool
+    httpx.ReadTimeout,  # Server took too long to send response
+)
+
+# Retry decorator for gateway requests
+_gateway_retry = retry(
+    retry=retry_if_exception_type(GATEWAY_RETRYABLE_EXCEPTIONS),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
+    reraise=True,
+)
+
 
 _ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -725,6 +748,34 @@ class AsyncSandboxClient:
             )
         return self._gateway_client
 
+    @_gateway_retry
+    async def _gateway_post(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        timeout: float,
+        json: Optional[Dict[str, Any]] = None,
+        files: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> httpx.Response:
+        """Make a POST request to the gateway with retry on transient errors."""
+        gateway_client = self._get_gateway_client()
+        return await gateway_client.post(
+            url, json=json, files=files, params=params, headers=headers, timeout=timeout
+        )
+
+    @_gateway_retry
+    async def _gateway_get(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        params: Dict[str, Any],
+        timeout: float,
+    ) -> httpx.Response:
+        """Make a GET request to the gateway with retry on transient errors."""
+        gateway_client = self._get_gateway_client()
+        return await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
+
     async def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
         """Test if a sandbox is reachable by executing a simple echo command"""
         try:
@@ -831,9 +882,8 @@ class AsyncSandboxClient:
 
         try:
             client_timeout = effective_timeout + 2
-            gateway_client = self._get_gateway_client()
-            response = await gateway_client.post(
-                url, json=payload, headers=headers, timeout=client_timeout
+            response = await self._gateway_post(
+                url, headers=headers, timeout=client_timeout, json=payload
             )
             response.raise_for_status()
             return CommandResponse.model_validate(response.json())
@@ -1085,10 +1135,9 @@ class AsyncSandboxClient:
             file_content = await f.read()
 
         try:
-            gateway_client = self._get_gateway_client()
             files = {"file": (os.path.basename(local_file_path), file_content)}
-            response = await gateway_client.post(
-                url, files=files, params=params, headers=headers, timeout=effective_timeout
+            response = await self._gateway_post(
+                url, headers=headers, timeout=effective_timeout, files=files, params=params
             )
             response.raise_for_status()
             return FileUploadResponse.model_validate(response.json())
@@ -1135,10 +1184,9 @@ class AsyncSandboxClient:
         effective_timeout = timeout if timeout is not None else 300
 
         try:
-            gateway_client = self._get_gateway_client()
             files = {"file": (filename, file_bytes)}
-            response = await gateway_client.post(
-                url, files=files, params=params, headers=headers, timeout=effective_timeout
+            response = await self._gateway_post(
+                url, headers=headers, timeout=effective_timeout, files=files, params=params
             )
             response.raise_for_status()
             return FileUploadResponse.model_validate(response.json())
@@ -1168,9 +1216,8 @@ class AsyncSandboxClient:
         effective_timeout = timeout if timeout is not None else 300
 
         try:
-            gateway_client = self._get_gateway_client()
-            response = await gateway_client.get(
-                url, params=params, headers=headers, timeout=effective_timeout
+            response = await self._gateway_get(
+                url, headers=headers, params=params, timeout=effective_timeout
             )
             response.raise_for_status()
             content = response.content

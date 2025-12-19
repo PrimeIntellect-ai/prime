@@ -15,7 +15,13 @@ from .config import Config
 
 # Retry configuration for transient connection errors
 # These errors occur when the server closes idle connections in the pool
-RETRYABLE_EXCEPTIONS = (httpx.RemoteProtocolError, httpx.ConnectError)
+# or when we fail to establish/maintain a connection
+RETRYABLE_EXCEPTIONS = (
+    httpx.RemoteProtocolError,  # Server disconnected unexpectedly
+    httpx.ConnectError,  # Connection refused/failed
+    httpx.PoolTimeout,  # No connection available in pool
+    httpx.ReadTimeout,  # Server took too long to send response
+)
 
 
 def _default_user_agent() -> str:

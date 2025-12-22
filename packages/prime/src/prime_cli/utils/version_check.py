@@ -93,7 +93,14 @@ def get_latest_pypi_version() -> str | None:
         response.raise_for_status()
         data = response.json()
         return data["info"]["version"]
-    except (httpx.RequestError, httpx.HTTPStatusError, KeyError, json.JSONDecodeError):
+    except (
+        httpx.RequestError,
+        httpx.HTTPStatusError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        json.JSONDecodeError,
+    ):
         return None
 
 

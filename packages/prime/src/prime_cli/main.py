@@ -1,3 +1,4 @@
+import sys
 from typing import Optional
 
 import typer
@@ -73,7 +74,7 @@ def callback(
     if ctx.invoked_subcommand is not None:
         update_available, latest = check_for_update()
         if update_available and latest:
-            console = Console(stderr=True)
+            console = Console(stderr=True, force_terminal=sys.stderr.isatty())
             console.print(
                 f"[yellow]A new version of prime is available: {latest} "
                 f"(installed: {__version__})[/yellow]"

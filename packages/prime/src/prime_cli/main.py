@@ -2,6 +2,7 @@ from importlib.metadata import version
 from typing import Optional
 
 import typer
+from rich.console import Console
 
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
@@ -15,6 +16,7 @@ from .commands.sandbox import app as sandbox_app
 from .commands.teams import app as teams_app
 from .commands.whoami import app as whoami_app
 from .core import Config
+from .utils.version_check import check_for_update
 
 __version__ = version("prime")
 
@@ -72,6 +74,13 @@ def callback(
 
 def run() -> None:
     """Entry point for the CLI"""
+    # Check for updates or skip if cached
+    if latest_version := check_for_update(__version__):
+        Console(stderr=True).print(
+            f"[bold yellow]Update available:[/bold yellow] {__version__} → {latest_version}\n"
+            f"Run: [bold cyan]uv tool upgrade prime[/bold cyan]\n"
+        )
+
     try:
         app()
     except typer.Abort:

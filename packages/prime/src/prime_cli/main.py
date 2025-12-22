@@ -1,8 +1,10 @@
-from importlib.metadata import version
+import sys
 from typing import Optional
 
 import typer
+from rich.console import Console
 
+from . import __version__
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
 from .commands.disks import app as disks_app
@@ -15,8 +17,7 @@ from .commands.sandbox import app as sandbox_app
 from .commands.teams import app as teams_app
 from .commands.whoami import app as whoami_app
 from .core import Config
-
-__version__ = version("prime")
+from .utils.version_check import check_for_update
 
 app = typer.Typer(
     name="prime",
@@ -68,6 +69,18 @@ def callback(
 
         # Set environment variable so Config instances in subcommands pick it up
         os.environ["PRIME_CONTEXT"] = context
+
+    # Check for updates (only when a subcommand is being executed)
+    if ctx.invoked_subcommand is not None:
+        update_available, latest = check_for_update()
+        if update_available and latest:
+            console = Console(stderr=True, force_terminal=sys.stderr.isatty())
+            console.print(
+                f"[yellow]A new version of prime is available: {latest} "
+                f"(installed: {__version__})[/yellow]"
+            )
+            console.print("[dim]Run: uv pip install --upgrade prime or uv tool upgrade prime[/dim]")
+            console.print("[dim]Set PRIME_DISABLE_VERSION_CHECK=1 to disable this check[/dim]\n")
 
 
 def run() -> None:

@@ -80,6 +80,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "created_at": iso_timestamp(sandbox.created_at),
         "user_id": sandbox.user_id,
         "team_id": sandbox.team_id,
+        "registry_credentials_id": getattr(sandbox, "registry_credentials_id", None),
     }
 
     if sandbox.started_at:
@@ -278,6 +279,11 @@ def get(
 
             table.add_row("User ID", sandbox_data["user_id"] or "N/A")
             table.add_row("Team ID", sandbox_data["team_id"] or "Personal")
+            if sandbox_data.get("registry_credentials_id"):
+                table.add_row(
+                    "Registry Credentials",
+                    sandbox_data["registry_credentials_id"],
+                )
 
             if "environment_vars" in sandbox_data:
                 env_vars = json.dumps(sandbox_data["environment_vars"], indent=2)
@@ -331,6 +337,11 @@ def create(
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
+    ),
+    registry_credentials_id: Optional[str] = typer.Option(
+        None,
+        "--registry-credentials-id",
+        help="Registry credentials ID for pulling private images",
     ),
     env: Optional[List[str]] = typer.Option(
         None,
@@ -400,6 +411,7 @@ def create(
             secrets=secrets_vars if secrets_vars else None,
             labels=labels if labels else [],
             team_id=team_id,
+            registry_credentials_id=registry_credentials_id,
         )
 
         # Show configuration summary
@@ -414,6 +426,8 @@ def create(
         console.print(f"Network Access: {network_status}")
         console.print(f"Timeout: {timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
+        if registry_credentials_id:
+            console.print(f"Registry Credentials: {registry_credentials_id}")
         if labels:
             console.print(f"Labels: {', '.join(labels)}")
         if env_vars:

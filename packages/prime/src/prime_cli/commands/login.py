@@ -42,7 +42,7 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
             )
             console.print(f"  [cyan]({idx})[/cyan] {team.get('name', 'Unknown')} {role_badge}")
 
-        console.print("\n[dim]You can always change this with 'prime config set-team-id'[/dim]")
+        console.print("\n[dim]To switch accounts or teams later, run 'prime login' again.[/dim]")
 
         while True:
             try:

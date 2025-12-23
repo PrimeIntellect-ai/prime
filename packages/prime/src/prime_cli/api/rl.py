@@ -148,11 +148,10 @@ class RLClient:
                 raise APIError(f"Failed to stop RL run: {e.response.text}")
             raise APIError(f"Failed to stop RL run: {str(e)}")
 
-    def delete_run(self, run_id: str) -> bool:
+    def delete_run(self, run_id: str) -> None:
         """Delete an RL run."""
         try:
-            response = self.client.delete(f"/rft/runs/{run_id}")
-            return response.get("success", False)
+            self.client.delete(f"/rft/runs/{run_id}")
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to delete RL run: {e.response.text}")

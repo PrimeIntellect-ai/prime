@@ -263,13 +263,8 @@ def delete_run(
         api_client = APIClient()
         rl_client = RLClient(api_client)
 
-        success = rl_client.delete_run(run_id)
-
-        if success:
-            console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
-        else:
-            console.print(f"[red]Failed to delete run {run_id}[/red]")
-            raise typer.Exit(1)
+        rl_client.delete_run(run_id)
+        console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

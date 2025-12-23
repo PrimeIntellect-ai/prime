@@ -35,14 +35,31 @@ def whoami() -> None:
             config.set_user_id(user_id)
             config.update_current_environment_file()
 
-        # Display user info table
-        table = Table(title="Current User")
+        # Display account info table
+        table = Table(title="Account")
         table.add_column("Field", style="cyan")
         table.add_column("Value", style="green")
+
+        # Account type (Team or Personal) - shown first
+        if config.team_id:
+            table.add_row("Type", "[yellow]Team[/yellow]")
+            table.add_section()
+            table.add_row("Team ID", config.team_id)
+            table.add_row("Team Name", config.team_name or "[dim]Unknown[/dim]")
+            if config.team_role:
+                table.add_row("Role", config.team_role)
+        else:
+            table.add_row("Type", "Personal")
+
+        # Add section divider between account and user details
+        table.add_section()
+
+        # User details
         table.add_row("User ID", user_id or "Unknown")
         table.add_row("Username", slug or "[dim]Not set[/dim]")
         table.add_row("Name", name or "Unknown")
         table.add_row("Email", email or "Unknown")
+
         console.print(table)
 
         # Display permissions table

@@ -41,6 +41,7 @@ from .models import (
     Sandbox,
     SandboxListResponse,
     SandboxLogsResponse,
+    SSHSession,
 )
 
 # Retry configuration for transient connection errors on gateway requests
@@ -711,9 +712,10 @@ class SandboxClient:
         sandbox_id: str,
         port: int,
         name: Optional[str] = None,
+        protocol: str = "HTTP",
     ) -> ExposedPort:
-        """Expose an HTTP port from a sandbox."""
-        request = ExposePortRequest(port=port, name=name)
+        """Expose a port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name, protocol=protocol)
         response = self.client.request(
             "POST",
             f"/sandbox/{sandbox_id}/expose",
@@ -729,6 +731,31 @@ class SandboxClient:
         """List all exposed ports for a sandbox"""
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
         return ListExposedPortsResponse.model_validate(response)
+
+    def list_all_exposed_ports(self) -> ListExposedPortsResponse:
+        """List all exposed ports across all sandboxes for the current user"""
+        response = self.client.request("GET", "/sandbox/expose/all")
+        return ListExposedPortsResponse.model_validate(response)
+
+    def create_ssh_session(
+        self,
+        sandbox_id: str,
+        ttl_seconds: Optional[int] = None,
+    ) -> SSHSession:
+        """Create an SSH session"""
+        payload: Dict[str, Any] = {}
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = ttl_seconds
+        response = self.client.request(
+            "POST",
+            f"/sandbox/{sandbox_id}/ssh-session",
+            json=payload,
+        )
+        return SSHSession.model_validate(response)
+
+    def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
+        """Close an SSH session and remove its exposure"""
+        self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
 
 class AsyncSandboxClient:
@@ -1291,9 +1318,10 @@ class AsyncSandboxClient:
         sandbox_id: str,
         port: int,
         name: Optional[str] = None,
+        protocol: str = "HTTP",
     ) -> ExposedPort:
-        """Expose an HTTP port from a sandbox."""
-        request = ExposePortRequest(port=port, name=name)
+        """Expose a port from a sandbox."""
+        request = ExposePortRequest(port=port, name=name, protocol=protocol)
         response = await self.client.request(
             "POST",
             f"/sandbox/{sandbox_id}/expose",
@@ -1309,3 +1337,28 @@ class AsyncSandboxClient:
         """List all exposed ports for a sandbox"""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
         return ListExposedPortsResponse.model_validate(response)
+
+    async def list_all_exposed_ports(self) -> ListExposedPortsResponse:
+        """List all exposed ports across all sandboxes for the current user"""
+        response = await self.client.request("GET", "/sandbox/expose/all")
+        return ListExposedPortsResponse.model_validate(response)
+
+    async def create_ssh_session(
+        self,
+        sandbox_id: str,
+        ttl_seconds: Optional[int] = None,
+    ) -> SSHSession:
+        """Create an SSH session"""
+        payload: Dict[str, Any] = {}
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = ttl_seconds
+        response = await self.client.request(
+            "POST",
+            f"/sandbox/{sandbox_id}/ssh-session",
+            json=payload,
+        )
+        return SSHSession.model_validate(response)
+
+    async def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
+        """Close an SSH session and remove its exposure"""
+        await self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")

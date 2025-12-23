@@ -156,6 +156,7 @@ class ExposePortRequest(BaseModel):
 
     port: int
     name: Optional[str] = None
+    protocol: str = "HTTP"  # HTTP or TCP/UDP
 
 
 class ExposedPort(BaseModel):
@@ -168,6 +169,7 @@ class ExposedPort(BaseModel):
     url: str
     tls_socket: str
     protocol: Optional[str] = None
+    external_port: Optional[int] = None  # For TCP/UDP exposures
     created_at: Optional[str] = None
 
 
@@ -175,6 +177,23 @@ class ListExposedPortsResponse(BaseModel):
     """Response for listing exposed ports"""
 
     exposures: List[ExposedPort]
+
+
+class SSHSession(BaseModel):
+    """SSH session details"""
+
+    session_id: str
+    exposure_id: str
+    sandbox_id: str
+    host: str
+    port: int
+    tls_socket: str
+    expires_at: datetime
+    ttl_seconds: int
+    gateway_url: str
+    user_ns: str
+    job_id: str
+    token: str
 
 
 class BackgroundJob(BaseModel):

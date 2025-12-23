@@ -42,7 +42,7 @@ def whoami() -> None:
 
         # Account type (Team or Personal) - shown first
         if config.team_id:
-            table.add_row("Type", "[yellow]Team[/yellow]")
+            table.add_row("Type", "Team")
             table.add_section()
             table.add_row("Team ID", config.team_id)
             table.add_row("Team Name", config.team_name or "[dim]Unknown[/dim]")

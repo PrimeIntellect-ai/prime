@@ -51,6 +51,11 @@ GATEWAY_RETRYABLE_EXCEPTIONS = (
     httpx.PoolTimeout,  # No connection available in pool
 )
 
+# Some gateway endpoints can briefly return 409 while a sandbox transitions to RUNNING.
+# This is a server-side race; retry a few times with backoff to reduce flakiness.
+_SANDBOX_NOT_READY_MAX_RETRIES = 6
+_SANDBOX_NOT_READY_BACKOFF_SECONDS = (0.25, 0.5, 1.0, 2.0, 2.0, 2.0)
+
 # Retry decorator for gateway requests
 _gateway_retry = retry(
     retry=retry_if_exception_type(GATEWAY_RETRYABLE_EXCEPTIONS),
@@ -76,6 +81,23 @@ def _validate_env_key(key: str) -> str:
     if not _ENV_VAR_PATTERN.fullmatch(key):
         raise ValueError(f"Invalid environment variable name: {key!r}")
     return key
+
+
+def _is_sandbox_not_ready(resp: Optional[httpx.Response]) -> bool:
+    """Detect the gateway's transient 'sandbox_not_ready' response."""
+    if resp is None or resp.status_code != 409:
+        return False
+    try:
+        payload = resp.json()
+        if isinstance(payload, dict) and payload.get("error") == "sandbox_not_ready":
+            return True
+    except Exception:
+        pass
+    # Fallback to text check (best-effort)
+    try:
+        return "sandbox_not_ready" in (resp.text or "")
+    except Exception:
+        return False
 
 
 class SandboxAuthCache:
@@ -364,12 +386,25 @@ class SandboxClient:
         }
 
         try:
-            client_timeout = effective_timeout + 2
-            response = self._gateway_post(
-                url, headers=headers, timeout=client_timeout, json=payload
-            )
-            response.raise_for_status()
-            return CommandResponse.model_validate(response.json())
+            last_status_err: Optional[httpx.HTTPStatusError] = None
+            for attempt in range(_SANDBOX_NOT_READY_MAX_RETRIES + 1):
+                try:
+                    client_timeout = effective_timeout + 2
+                    response = self._gateway_post(
+                        url, headers=headers, timeout=client_timeout, json=payload
+                    )
+                    response.raise_for_status()
+                    return CommandResponse.model_validate(response.json())
+                except httpx.HTTPStatusError as e:
+                    last_status_err = e
+                    resp = getattr(e, "response", None)
+                    if attempt < _SANDBOX_NOT_READY_MAX_RETRIES and _is_sandbox_not_ready(resp):
+                        time.sleep(_SANDBOX_NOT_READY_BACKOFF_SECONDS[attempt])
+                        continue
+                    raise
+
+            # Should be unreachable (loop raises), but keep for safety.
+            raise last_status_err if last_status_err else RuntimeError("Command failed")
         except httpx.TimeoutException as e:
             raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
         except httpx.HTTPStatusError as e:
@@ -908,12 +943,24 @@ class AsyncSandboxClient:
         }
 
         try:
-            client_timeout = effective_timeout + 2
-            response = await self._gateway_post(
-                url, headers=headers, timeout=client_timeout, json=payload
-            )
-            response.raise_for_status()
-            return CommandResponse.model_validate(response.json())
+            last_status_err: Optional[httpx.HTTPStatusError] = None
+            for attempt in range(_SANDBOX_NOT_READY_MAX_RETRIES + 1):
+                try:
+                    client_timeout = effective_timeout + 2
+                    response = await self._gateway_post(
+                        url, headers=headers, timeout=client_timeout, json=payload
+                    )
+                    response.raise_for_status()
+                    return CommandResponse.model_validate(response.json())
+                except httpx.HTTPStatusError as e:
+                    last_status_err = e
+                    resp = getattr(e, "response", None)
+                    if attempt < _SANDBOX_NOT_READY_MAX_RETRIES and _is_sandbox_not_ready(resp):
+                        await asyncio.sleep(_SANDBOX_NOT_READY_BACKOFF_SECONDS[attempt])
+                        continue
+                    raise
+
+            raise last_status_err if last_status_err else RuntimeError("Command failed")
         except httpx.TimeoutException as e:
             raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
         except httpx.HTTPStatusError as e:

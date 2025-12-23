@@ -165,7 +165,7 @@ def list_models(
         raise typer.Exit(1)
 
 
-@subcommands_app.command("runs")
+@subcommands_app.command("list")
 def list_runs(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
@@ -488,7 +488,7 @@ def create_run(
         # Create the run
         run = rl_client.create_run(
             model_name=cfg.model,
-            environments=[{"slug": slug} for slug in cfg.environments],
+            environments=[{"id": slug} for slug in cfg.environments],
             rollouts_per_example=cfg.rollouts,
             seq_len=cfg.seq_len,
             max_steps=cfg.max_steps,

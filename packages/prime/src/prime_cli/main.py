@@ -72,15 +72,27 @@ def callback(
 
     # Check for updates (only when a subcommand is being executed)
     if ctx.invoked_subcommand is not None:
+        console = Console(stderr=True, force_terminal=sys.stderr.isatty())
+
         update_available, latest = check_for_update()
         if update_available and latest:
-            console = Console(stderr=True, force_terminal=sys.stderr.isatty())
             console.print(
                 f"[yellow]A new version of prime is available: {latest} "
                 f"(installed: {__version__})[/yellow]"
             )
             console.print("[dim]Run: uv pip install --upgrade prime or uv tool upgrade prime[/dim]")
             console.print("[dim]Set PRIME_DISABLE_VERSION_CHECK=1 to disable this check[/dim]\n")
+
+        config = Config()
+        if config.team_id:
+            if config.team_id_from_env:
+                console.print(
+                    f"[cyan]ℹ Using team account: {config.team_id} (from env var)[/cyan]\n"
+                )
+            elif config.team_name:
+                console.print(f"[cyan]ℹ Using team account: {config.team_name}[/cyan]\n")
+            else:
+                console.print(f"[cyan]ℹ Using team account: {config.team_id}[/cyan]\n")
 
 
 def run() -> None:

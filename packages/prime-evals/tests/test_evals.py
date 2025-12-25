@@ -111,7 +111,7 @@ def test_sample_model_with_metadata():
         "reward": 1.0,
         "answer": "18",
         "custom_field": "custom_value",  # Extra field should be allowed
-        "metadata": {"batch": 1},
+        "info": {"batch": 1},
     }
 
     sample = Sample.model_validate(data)
@@ -119,7 +119,7 @@ def test_sample_model_with_metadata():
     assert sample.example_id == 0
     assert sample.task == "gsm8k"
     assert sample.reward == 1.0
-    assert sample.metadata == {"batch": 1}
+    assert sample.info == {"batch": 1}
 
 
 def test_evals_client_context_manager():

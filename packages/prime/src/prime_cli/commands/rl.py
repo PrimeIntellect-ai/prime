@@ -203,7 +203,7 @@ def list_runs(
             formatted = _format_run_for_display(run)
             status_color = _get_status_color(run.status)
             table.add_row(
-                formatted["id"][:12] + "...",
+                formatted["id"],
                 f"[{status_color}]{formatted['status']}[/{status_color}]",
                 formatted["model"][:30],
                 formatted["environments"],

@@ -510,6 +510,7 @@ app.add_typer(subcommands_app, name="")
 
 @app.command(
     "run",
+    help="Run an evaluation with Prime Inference [default]",
     no_args_is_help=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )

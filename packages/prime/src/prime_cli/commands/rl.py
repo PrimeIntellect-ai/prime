@@ -109,7 +109,7 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     """Format run data for display (both table and JSON)."""
     created_at = run.created_at.strftime("%Y-%m-%d %H:%M") if run.created_at else ""
     env_names = [
-        env.get("slug", env.get("name", env.get("id", "?")))
+        env.get("slug") or env.get("name") or env.get("id") or "?"
         for env in run.environments
     ]
     envs_display = ", ".join(env_names[:3])

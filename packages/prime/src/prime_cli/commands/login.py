@@ -42,7 +42,7 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
             )
             console.print(f"  [cyan]({idx})[/cyan] {team.get('name', 'Unknown')} {role_badge}")
 
-        console.print("\n[dim]You can always change this with 'prime config set-team-id'[/dim]")
+        console.print("\n[dim]You can always change this by running 'prime login' again.[/dim]")
 
         while True:
             try:
@@ -58,6 +58,7 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
                     selected_team = teams[selection - 2]
                     team_id = selected_team.get("teamId")
                     team_name = selected_team.get("name", "Unknown")
+                    team_role = selected_team.get("role", "member")
 
                     if not team_id:
                         console.print("[yellow]Invalid team. Using personal account.[/yellow]")
@@ -65,7 +66,7 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
                         config.update_current_environment_file()
                         return
 
-                    config.set_team(team_id, team_name=team_name)
+                    config.set_team(team_id, team_name=team_name, team_role=team_role)
                     config.update_current_environment_file()
                     console.print(f"[green]Using team '{team_name}'.[/green]")
                     return

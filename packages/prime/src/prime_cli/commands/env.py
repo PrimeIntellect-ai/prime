@@ -1921,6 +1921,7 @@ def _build_install_command(
                     "uv",
                     "pip",
                     "install",
+                    "--upgrade",
                     f"{normalized_name}=={version}",
                     "--extra-index-url",
                     simple_index_url,
@@ -1929,6 +1930,7 @@ def _build_install_command(
                 "uv",
                 "pip",
                 "install",
+                "--upgrade",
                 normalized_name,
                 "--extra-index-url",
                 simple_index_url,
@@ -1938,6 +1940,7 @@ def _build_install_command(
                 return [
                     "pip",
                     "install",
+                    "--upgrade",
                     f"{normalized_name}=={version}",
                     "--extra-index-url",
                     simple_index_url,
@@ -1945,6 +1948,7 @@ def _build_install_command(
             return [
                 "pip",
                 "install",
+                "--upgrade",
                 normalized_name,
                 "--extra-index-url",
                 simple_index_url,

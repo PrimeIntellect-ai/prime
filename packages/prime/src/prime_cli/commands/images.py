@@ -15,7 +15,9 @@ from rich.table import Table
 
 from ..utils import validate_output_format
 
-app = typer.Typer(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
+app = typer.Typer(
+    help="Manage Docker images in Prime Intellect registry [closed beta]", no_args_is_help=True
+)
 console = Console()
 
 config = Config()

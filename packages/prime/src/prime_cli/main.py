@@ -10,9 +10,11 @@ from .commands.config import app as config_app
 from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
+from .commands.images import app as images_app
 from .commands.inference import app as inference_app
 from .commands.login import app as login_app
 from .commands.pods import app as pods_app
+from .commands.registry import app as registry_app
 from .commands.sandbox import app as sandbox_app
 from .commands.teams import app as teams_app
 from .commands.whoami import app as whoami_app
@@ -31,8 +33,10 @@ app.add_typer(config_app, name="config")
 app.add_typer(disks_app, name="disks")
 app.add_typer(pods_app, name="pods")
 app.add_typer(sandbox_app, name="sandbox")
+app.add_typer(registry_app, name="registry")
 app.add_typer(login_app, name="login")
 app.add_typer(env_app, name="env")
+app.add_typer(images_app, name="images")
 app.add_typer(inference_app, name="inference")
 app.add_typer(whoami_app, name="whoami")
 app.add_typer(teams_app, name="teams")

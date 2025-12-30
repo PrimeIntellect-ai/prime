@@ -83,7 +83,7 @@ class Sample(BaseModel):
     correct: Optional[bool] = None
     format_reward: Optional[float] = Field(None, alias="formatReward")
     correctness: Optional[float] = None
-    metadata: Optional[Dict[str, Any]] = None
+    info: Optional[Dict[str, Any]] = None
 
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 

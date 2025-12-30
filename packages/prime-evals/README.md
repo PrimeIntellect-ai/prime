@@ -154,7 +154,7 @@ samples_batch = [
         "completion": [
             {"role": "assistant", "content": f"The answer is {i * 2}."}
         ],
-        "metadata": {"batch": 1}
+        "info": {"batch": 1}
     }
     for i in range(10)
 ]

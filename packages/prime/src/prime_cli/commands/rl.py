@@ -1,6 +1,7 @@
 """RL (Reinforcement Learning) training commands."""
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -281,8 +282,6 @@ def get_logs(
         rl_client = RLClient(api_client)
 
         if follow:
-            import time
-
             seen_lines = 0
             while True:
                 logs = rl_client.get_logs(run_id, tail_lines=tail)

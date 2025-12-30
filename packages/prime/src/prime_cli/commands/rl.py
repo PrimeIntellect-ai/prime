@@ -295,21 +295,34 @@ def get_logs(
             console.print(f"[dim]Watching logs for run {run_id}... (Ctrl+C to stop)[/dim]\n")
             last_log_hash = ""
             printed_lines: set[str] = set()
+            consecutive_errors = 0
 
             while True:
-                logs = strip_ansi(rl_client.get_logs(run_id, tail_lines=tail))
-                current_hash = hash(logs)
+                try:
+                    logs = strip_ansi(rl_client.get_logs(run_id, tail_lines=tail))
+                    consecutive_errors = 0
+                    current_hash = hash(logs)
 
-                if current_hash != last_log_hash:
-                    lines = logs.splitlines()
-                    for line in lines:
-                        line_hash = hash(line)
-                        if line_hash not in printed_lines:
-                            console.print(line)
-                            printed_lines.add(line_hash)
-                    last_log_hash = current_hash
+                    if current_hash != last_log_hash:
+                        lines = logs.splitlines()
+                        for line in lines:
+                            line_hash = hash(line)
+                            if line_hash not in printed_lines:
+                                console.print(line)
+                                printed_lines.add(line_hash)
+                        last_log_hash = current_hash
+                except APIError as e:
+                    consecutive_errors += 1
+                    if "429" in str(e):
+                        if consecutive_errors >= 3:
+                            console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
+                            time.sleep(30)
+                        else:
+                            time.sleep(10)
+                        continue
+                    raise
 
-                time.sleep(2)
+                time.sleep(5)  # Poll every 5 seconds to avoid rate limits
         else:
             logs = strip_ansi(rl_client.get_logs(run_id, tail_lines=tail))
             if logs:

@@ -27,10 +27,33 @@ DEFAULT_RL_MODEL = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
 # ANSI escape code pattern
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
+# Progress bar pattern (tqdm-style progress bars)
+PROGRESS_BAR = re.compile(r".*\|[█▏▎▍▌▋▊▉ ]{10,}\|.*")
+
 
 def strip_ansi(text: str) -> str:
     """Remove ANSI escape codes from text."""
     return ANSI_ESCAPE.sub("", text)
+
+
+def filter_progress_bars(text: str) -> str:
+    """Filter out progress bar lines, keeping only meaningful log lines."""
+    lines = text.splitlines()
+    filtered = []
+    for line in lines:
+        # Skip progress bar lines
+        if PROGRESS_BAR.match(line):
+            continue
+        # Skip lines that are just percentage updates
+        if re.match(r"^\s*\d+%\|", line):
+            continue
+        filtered.append(line)
+    return "\n".join(filtered)
+
+
+def clean_logs(text: str) -> str:
+    """Clean logs by stripping ANSI codes and filtering progress bars."""
+    return filter_progress_bars(strip_ansi(text))
 
 
 def generate_rl_config_template(environment: str | None = None) -> str:
@@ -284,14 +307,13 @@ def get_logs(
     run_id: str = typer.Argument(..., help="Run ID to get logs for"),
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
-    watch: bool = typer.Option(False, "--watch", "-w", help="Watch and append new logs"),
 ) -> None:
     """Get logs for an RL training run."""
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
 
-        if follow or watch:
+        if follow:
             console.print(f"[dim]Watching logs for run {run_id}... (Ctrl+C to stop)[/dim]\n")
             last_log_hash = ""
             printed_lines: set[str] = set()
@@ -299,7 +321,7 @@ def get_logs(
 
             while True:
                 try:
-                    logs = strip_ansi(rl_client.get_logs(run_id, tail_lines=tail))
+                    logs = clean_logs(rl_client.get_logs(run_id, tail_lines=tail))
                     consecutive_errors = 0
                     current_hash = hash(logs)
 
@@ -324,7 +346,7 @@ def get_logs(
 
                 time.sleep(5)  # Poll every 5 seconds to avoid rate limits
         else:
-            logs = strip_ansi(rl_client.get_logs(run_id, tail_lines=tail))
+            logs = clean_logs(rl_client.get_logs(run_id, tail_lines=tail))
             if logs:
                 console.print(logs)
             else:

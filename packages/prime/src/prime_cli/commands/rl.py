@@ -37,17 +37,31 @@ def strip_ansi(text: str) -> str:
 
 
 def filter_progress_bars(text: str) -> str:
-    """Filter out progress bar lines, keeping only 100% completion lines."""
+    """Filter out progress bar updates, keeping only 100% completion lines.
+
+    Progress bars from tqdm often appear as multiple updates on the same line
+    (due to carriage return handling). This extracts just the final 100% part.
+    """
     lines = text.splitlines()
     filtered = []
     for line in lines:
-        # Check if it's a progress bar line
-        if PROGRESS_BAR.match(line) or re.match(r"^\s*\d+%\|", line):
-            # Keep only 100% completion lines
+        # Check if line contains progress bars
+        if PROGRESS_BAR.search(line) or re.search(r"\d+%\|", line):
+            # If it has 100%, extract just that part
             if "100%" in line:
-                filtered.append(line)
+                # Find the last 100% progress bar and extract it
+                # Pattern: text before + "100%|...bars...|" + stats after
+                match = re.search(r"([^|]*100%\|[█▏▎▍▌▋▊▉ ]+\|[^\n]*?)(?=\d+%\||$)", line)
+                if match:
+                    filtered.append(match.group(1).strip())
+                else:
+                    # Fallback: just include the line
+                    filtered.append(line)
+            # Skip lines with only non-100% progress
             continue
-        filtered.append(line)
+        # Keep non-progress-bar lines, but skip empty lines
+        if line.strip():
+            filtered.append(line)
     return "\n".join(filtered)
 
 

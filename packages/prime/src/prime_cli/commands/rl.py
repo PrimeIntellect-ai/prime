@@ -26,7 +26,7 @@ DEFAULT_RL_MODEL = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
 def generate_rl_config_template(environment: str | None = None) -> str:
     """Generate a TOML config template for RL training."""
     env_value = environment or "your-username/your-environment"
-    
+
     return f'''\
 model = "{DEFAULT_RL_MODEL}"
 environments = ["{env_value}"]
@@ -42,6 +42,7 @@ seq_len = 4096    # max tokens per response
 # project = "my-project"
 # name = "experiment-1"
 '''
+
 
 class WandbConfig(BaseModel):
     """Weights & Biases configuration."""
@@ -111,8 +112,7 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     """Format run data for display (both table and JSON)."""
     created_at = run.created_at.strftime("%Y-%m-%d %H:%M") if run.created_at else ""
     env_names = [
-        env.get("slug") or env.get("name") or env.get("id") or "?"
-        for env in run.environments
+        env.get("slug") or env.get("name") or env.get("id") or "?" for env in run.environments
     ]
     envs_display = ", ".join(env_names[:3])
     if len(env_names) > 3:
@@ -149,9 +149,7 @@ def list_models(
 
         if not models:
             console.print("[yellow]No models available for RL training.[/yellow]")
-            console.print(
-                "[dim]This could mean no healthy RL clusters are running.[/dim]"
-            )
+            console.print("[dim]This could mean no healthy RL clusters are running.[/dim]")
             return
 
         table = Table(title="Prime RL — Models")
@@ -255,9 +253,7 @@ def delete_run(
     """Delete an RL training run."""
     try:
         if not force:
-            confirm = typer.confirm(
-                f"Are you sure you want to permanently delete run {run_id}?"
-            )
+            confirm = typer.confirm(f"Are you sure you want to permanently delete run {run_id}?")
             if not confirm:
                 console.print("Cancelled.")
                 raise typer.Exit(0)
@@ -273,15 +269,50 @@ def delete_run(
         raise typer.Exit(1)
 
 
+@subcommands_app.command("logs")
+def get_logs(
+    run_id: str = typer.Argument(..., help="Run ID to get logs for"),
+    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+) -> None:
+    """Get logs for an RL training run."""
+    try:
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+
+        if follow:
+            import time
+
+            seen_lines = 0
+            while True:
+                logs = rl_client.get_logs(run_id, tail_lines=tail)
+                lines = logs.splitlines()
+                if len(lines) > seen_lines:
+                    for line in lines[seen_lines:]:
+                        console.print(line)
+                    seen_lines = len(lines)
+                time.sleep(2)
+        else:
+            logs = rl_client.get_logs(run_id, tail_lines=tail)
+            if logs:
+                console.print(logs)
+            else:
+                console.print("[yellow]No logs available yet.[/yellow]")
+
+    except KeyboardInterrupt:
+        pass
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
 @subcommands_app.command("init")
 def init_config(
     output: str = typer.Argument(
         "configs/rl.toml",
         help="Output path for the config file",
     ),
-    force: bool = typer.Option(
-        False, "--force", "-f", help="Overwrite existing file"
-    ),
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing file"),
 ) -> None:
     """Generate a template TOML config file for RL training.
 
@@ -343,9 +374,7 @@ def create_run(
         None,
         help="Environment slugs to train on (e.g., 'owner/env-name')",
     ),
-    model: Optional[str] = typer.Option(
-        None, "-m", "--model", help="Model to fine-tune"
-    ),
+    model: Optional[str] = typer.Option(None, "-m", "--model", help="Model to fine-tune"),
     name: Optional[str] = typer.Option(
         None, "-n", "--name", help="Run name (auto-generated if not provided)"
     ),
@@ -383,11 +412,9 @@ def create_run(
         None,
         "--run-config",
         hidden=True,
-        help="Additional run configuration as JSON (admin only), e.g. '{\"key\": \"value\"}'",
+        help='Additional run configuration as JSON (admin only), e.g. \'{"key": "value"}\'',
     ),
-    output: str = typer.Option(
-        "table", "--output", "-o", help="Output format: table or json"
-    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Configuration can be provided via CLI options, a TOML config file, or both.
     CLI options take precedence over config file values.
@@ -424,7 +451,7 @@ def create_run(
         except json.JSONDecodeError as e:
             console.print(
                 f"[red]Error:[/red] Invalid JSON in --run-config: {e}\n"
-                "  Expected format: --run-config '{\"key\": \"value\"}'"
+                '  Expected format: --run-config \'{"key": "value"}\''
             )
             raise typer.Exit(1)
 
@@ -457,9 +484,7 @@ def create_run(
         raise typer.Exit(1)
 
     if not cfg.model:
-        console.print(
-            "[red]Error:[/red] No model specified. Use --model or set 'model' in config."
-        )
+        console.print("[red]Error:[/red] No model specified. Use --model or set 'model' in config.")
         raise typer.Exit(1)
 
     # Warn if wandb is configured but no API key is provided

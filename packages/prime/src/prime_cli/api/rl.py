@@ -161,3 +161,15 @@ class RLClient:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to delete RL run: {e.response.text}")
             raise APIError(f"Failed to delete RL run: {str(e)}")
+
+    def get_logs(self, run_id: str, tail_lines: int = 1000) -> str:
+        """Get logs for an RL run."""
+        try:
+            response = self.client.get(
+                f"/rft/runs/{run_id}/logs", params={"tail_lines": tail_lines}
+            )
+            return response.get("logs", "")
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to get RL run logs: {e.response.text}")
+            raise APIError(f"Failed to get RL run logs: {str(e)}")

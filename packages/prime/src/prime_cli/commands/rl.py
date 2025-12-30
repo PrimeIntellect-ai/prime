@@ -315,24 +315,30 @@ def get_logs(
 
         if follow:
             console.print(f"[dim]Watching logs for run {run_id}... (Ctrl+C to stop)[/dim]\n")
-            last_log_hash = ""
-            printed_lines: set[str] = set()
+            last_logs = ""
             consecutive_errors = 0
 
             while True:
                 try:
                     logs = clean_logs(rl_client.get_logs(run_id, tail_lines=tail))
                     consecutive_errors = 0
-                    current_hash = hash(logs)
 
-                    if current_hash != last_log_hash:
-                        lines = logs.splitlines()
-                        for line in lines:
-                            line_hash = hash(line)
-                            if line_hash not in printed_lines:
+                    if logs != last_logs:
+                        # Find new content by comparing line counts
+                        old_lines = last_logs.splitlines() if last_logs else []
+                        new_lines = logs.splitlines()
+
+                        # Print new lines (those beyond what we had before)
+                        # This handles the case where logs grow at the end
+                        if len(new_lines) > len(old_lines):
+                            for line in new_lines[len(old_lines) :]:
                                 console.print(line)
-                                printed_lines.add(line_hash)
-                        last_log_hash = current_hash
+                        elif not last_logs:
+                            # First fetch, print everything
+                            for line in new_lines:
+                                console.print(line)
+
+                        last_logs = logs
                 except APIError as e:
                     consecutive_errors += 1
                     if "429" in str(e):
@@ -535,6 +541,14 @@ def create_run(
 
     # Build eval config if any eval options are provided
     parsed_eval_config: Optional[Dict[str, Any]] = None
+    has_eval_options = any(
+        x is not None for x in [eval_interval, eval_num_examples, eval_rollouts, eval_base_model]
+    )
+    if has_eval_options and not eval_envs:
+        console.print(
+            "[yellow]Warning:[/yellow] --eval-interval, --eval-num-examples, --eval-rollouts, "
+            "and --eval-base-model require --eval-envs to take effect"
+        )
     if eval_envs:
         parsed_eval_config = {
             "environments": [{"id": env} for env in eval_envs],

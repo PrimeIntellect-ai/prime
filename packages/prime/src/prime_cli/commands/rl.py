@@ -1,5 +1,6 @@
 """RL (Reinforcement Learning) training commands."""
 
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -37,8 +38,8 @@ seq_len = 4096    # max tokens per response
 # name = "my-experiment"
 
 # [wandb]
-# project = "my-project"
 # entity = "my-team"
+# project = "my-project"
 # name = "experiment-1"
 '''
 
@@ -61,6 +62,7 @@ class RLRunConfig(BaseConfig):
     seq_len: int = 4096
     max_steps: int = 100
     wandb: WandbConfig = Field(default_factory=WandbConfig)
+    run_config: Optional[Dict[str, Any]] = Field(default=None)
 
 
 class DefaultGroup(TyperGroup):
@@ -377,6 +379,12 @@ def create_run(
         "-c",
         help="Path to TOML config file (CLI options override config file values)",
     ),
+    run_config: Optional[str] = typer.Option(
+        None,
+        "--run-config",
+        hidden=True,
+        help="Additional run configuration as JSON (admin only), e.g. '{\"key\": \"value\"}'",
+    ),
     output: str = typer.Option(
         "table", "--output", "-o", help="Output format: table or json"
     ),
@@ -409,6 +417,17 @@ def create_run(
 
     validate_output_format(output, console)
 
+    parsed_run_config: Optional[Dict[str, Any]] = None
+    if run_config:
+        try:
+            parsed_run_config = json.loads(run_config)
+        except json.JSONDecodeError as e:
+            console.print(
+                f"[red]Error:[/red] Invalid JSON in --run-config: {e}\n"
+                "  Expected format: --run-config '{\"key\": \"value\"}'"
+            )
+            raise typer.Exit(1)
+
     # Load and merge config: CLI > TOML > defaults
     if config_file:
         console.print(f"[dim]Loading config from {config_file}[/dim]\n")
@@ -427,6 +446,7 @@ def create_run(
         wandb_project=wandb_project,
         wandb_name=wandb_name,
         wandb_api_key=wandb_api_key,
+        run_config=parsed_run_config,
     )
 
     # Validate required fields
@@ -493,6 +513,7 @@ def create_run(
             wandb_run_name=cfg.wandb.name,
             wandb_api_key=cfg.wandb.api_key,
             team_id=app_config.team_id,
+            run_config=cfg.run_config,
         )
 
         if output == "json":

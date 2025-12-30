@@ -37,15 +37,15 @@ def strip_ansi(text: str) -> str:
 
 
 def filter_progress_bars(text: str) -> str:
-    """Filter out progress bar lines, keeping only meaningful log lines."""
+    """Filter out progress bar lines, keeping only 100% completion lines."""
     lines = text.splitlines()
     filtered = []
     for line in lines:
-        # Skip progress bar lines
-        if PROGRESS_BAR.match(line):
-            continue
-        # Skip lines that are just percentage updates
-        if re.match(r"^\s*\d+%\|", line):
+        # Check if it's a progress bar line
+        if PROGRESS_BAR.match(line) or re.match(r"^\s*\d+%\|", line):
+            # Keep only 100% completion lines
+            if "100%" in line:
+                filtered.append(line)
             continue
         filtered.append(line)
     return "\n".join(filtered)

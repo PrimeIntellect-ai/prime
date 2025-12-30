@@ -2163,12 +2163,6 @@ def run_eval(
     # If a team is configured, pass it to vf-eval via header
     if config.team_id:
         cmd += ["--header", f"X-Prime-Team-ID: {config.team_id}"]
-        if config.team_id_from_env:
-            console.print(f"[cyan]ℹ Using team account: {config.team_id} (from env var)[/cyan]")
-        elif config.team_name:
-            console.print(f"[cyan]ℹ Using team account: {config.team_name}[/cyan]")
-        else:
-            console.print(f"[cyan]ℹ Using team account: {config.team_id}[/cyan]")
 
     console.print(f"[dim]Eval job_id: {job_id}[/dim]")
 

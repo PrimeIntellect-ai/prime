@@ -104,6 +104,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
 
 
 @app.command("list")
+@app.command("ls", hidden=True)
 def list_sandboxes_cmd(
     team_id: Optional[str] = typer.Option(
         None, help="Filter by team ID (uses config team_id if not specified)"
@@ -120,7 +121,7 @@ def list_sandboxes_cmd(
     all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List your sandboxes (excludes terminated by default)"""
+    """List your sandboxes (shortcut: ls)"""
     validate_output_format(output, console)
 
     try:
@@ -726,8 +727,15 @@ def run(
                 key, value = env_var.split("=", 1)
                 env_vars[key] = value
 
-        # Join command list into a single string, preserving quoting for arguments with spaces
-        command_str = shlex.join(command)
+        # Handle case where user passes entire command as a quoted string (e.g., "ls /home")
+        # We need to parse it properly to handle both:
+        # - "ls /home" -> should become: ls /home
+        # - "./my script.sh" -> should become: './my script.sh' (properly quoted)
+        if len(command) == 1:
+            # Parse the single string as shell tokens, then re-join properly
+            command_str = shlex.join(shlex.split(command[0]))
+        else:
+            command_str = shlex.join(command)
 
         console.print(f"[bold blue]Executing command:[/bold blue] {command_str}")
         if working_dir:

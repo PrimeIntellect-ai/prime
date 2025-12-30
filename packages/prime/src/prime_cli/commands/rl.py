@@ -86,6 +86,16 @@ class WandbConfig(BaseModel):
     api_key: str | None = None
 
 
+class EvalConfig(BaseModel):
+    """Evaluation configuration."""
+
+    environments: list[str] = Field(default_factory=list)
+    interval: int | None = None
+    num_examples: int | None = None
+    rollouts_per_example: int | None = None
+    eval_base_model: bool | None = None
+
+
 class RLRunConfig(BaseConfig):
     """Configuration for an RL training run."""
 
@@ -97,6 +107,7 @@ class RLRunConfig(BaseConfig):
     max_steps: int = 100
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     run_config: Optional[Dict[str, Any]] = Field(default=None)
+    eval: EvalConfig = Field(default_factory=EvalConfig)
 
 
 class DefaultGroup(TyperGroup):
@@ -544,29 +555,6 @@ def create_run(
             )
             raise typer.Exit(1)
 
-    # Build eval config if any eval options are provided
-    parsed_eval_config: Optional[Dict[str, Any]] = None
-    has_eval_options = any(
-        x is not None for x in [eval_interval, eval_num_examples, eval_rollouts, eval_base_model]
-    )
-    if has_eval_options and not eval_envs:
-        console.print(
-            "[yellow]Warning:[/yellow] --eval-interval, --eval-num-examples, --eval-rollouts, "
-            "and --eval-base-model require --eval-envs to take effect"
-        )
-    if eval_envs:
-        parsed_eval_config = {
-            "environments": [{"id": env} for env in eval_envs],
-        }
-        if eval_interval is not None:
-            parsed_eval_config["interval"] = eval_interval
-        if eval_num_examples is not None:
-            parsed_eval_config["num_examples"] = eval_num_examples
-        if eval_rollouts is not None:
-            parsed_eval_config["rollouts_per_example"] = eval_rollouts
-        if eval_base_model is not None:
-            parsed_eval_config["eval_base_model"] = eval_base_model
-
     # Load and merge config: CLI > TOML > defaults
     if config_file:
         console.print(f"[dim]Loading config from {config_file}[/dim]\n")
@@ -587,6 +575,48 @@ def create_run(
         wandb_api_key=wandb_api_key,
         run_config=parsed_run_config,
     )
+
+    # Build eval config: merge CLI options with config file (CLI takes precedence)
+    parsed_eval_config: Optional[Dict[str, Any]] = None
+    # Get eval environments from CLI or config file
+    final_eval_envs = eval_envs or cfg.eval.environments
+    has_eval_options = any(
+        x is not None for x in [eval_interval, eval_num_examples, eval_rollouts, eval_base_model]
+    )
+    has_config_eval_options = any(
+        x is not None
+        for x in [
+            cfg.eval.interval,
+            cfg.eval.num_examples,
+            cfg.eval.rollouts_per_example,
+            cfg.eval.eval_base_model,
+        ]
+    )
+    if (has_eval_options or has_config_eval_options) and not final_eval_envs:
+        console.print(
+            "[yellow]Warning:[/yellow] Eval options require eval environments to take effect.\n"
+            "  Use --eval-envs or set [eval] environments in config file."
+        )
+    if final_eval_envs:
+        parsed_eval_config = {
+            "environments": [{"id": env} for env in final_eval_envs],
+        }
+        # CLI options take precedence over config file
+        interval = eval_interval if eval_interval is not None else cfg.eval.interval
+        num_examples = eval_num_examples if eval_num_examples is not None else cfg.eval.num_examples
+        rollouts_per_ex = (
+            eval_rollouts if eval_rollouts is not None else cfg.eval.rollouts_per_example
+        )
+        base_model = eval_base_model if eval_base_model is not None else cfg.eval.eval_base_model
+
+        if interval is not None:
+            parsed_eval_config["interval"] = interval
+        if num_examples is not None:
+            parsed_eval_config["num_examples"] = num_examples
+        if rollouts_per_ex is not None:
+            parsed_eval_config["rollouts_per_example"] = rollouts_per_ex
+        if base_model is not None:
+            parsed_eval_config["eval_base_model"] = base_model
 
     # Validate required fields
     if not cfg.environments:

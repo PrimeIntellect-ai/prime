@@ -1,6 +1,7 @@
 """RL (Reinforcement Learning) training commands."""
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -22,6 +23,14 @@ console = Console()
 
 # Default model for RL training
 DEFAULT_RL_MODEL = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
+
+# ANSI escape code pattern
+ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    return ANSI_ESCAPE.sub("", text)
 
 
 def generate_rl_config_template(environment: str | None = None) -> str:
@@ -288,7 +297,7 @@ def get_logs(
             printed_lines: set[str] = set()
 
             while True:
-                logs = rl_client.get_logs(run_id, tail_lines=tail)
+                logs = strip_ansi(rl_client.get_logs(run_id, tail_lines=tail))
                 current_hash = hash(logs)
 
                 if current_hash != last_log_hash:
@@ -302,7 +311,7 @@ def get_logs(
 
                 time.sleep(2)
         else:
-            logs = rl_client.get_logs(run_id, tail_lines=tail)
+            logs = strip_ansi(rl_client.get_logs(run_id, tail_lines=tail))
             if logs:
                 console.print(logs)
             else:

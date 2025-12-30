@@ -331,23 +331,17 @@ def get_logs(
                             # First fetch, print everything
                             for line in new_lines:
                                 console.print(line)
-                        elif len(new_lines) > len(old_lines):
-                            # Logs grew, print new lines at the end
-                            for line in new_lines[len(old_lines) :]:
-                                console.print(line)
                         else:
-                            # Logs rotated (tail window), find overlap between
-                            # end of old_lines and start of new_lines
+                            # Find overlap between end of old_lines and start of new_lines
+                            # This handles both growth and rotation cases
                             overlap = 0
                             max_overlap = min(len(old_lines), len(new_lines))
                             for i in range(1, max_overlap + 1):
-                                # Check if last i lines of old match first i lines of new
                                 if old_lines[-i:] == new_lines[:i]:
                                     overlap = i
                             # Print lines after the overlap
-                            if overlap > 0:
-                                for line in new_lines[overlap:]:
-                                    console.print(line)
+                            for line in new_lines[overlap:]:
+                                console.print(line)
 
                         last_logs = logs
                 except APIError as e:

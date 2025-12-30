@@ -639,6 +639,15 @@ def create_run(
         )
         raise typer.Exit(1)
 
+    # Validate environment slug format
+    for env_slug in cfg.environments:
+        if "/" not in env_slug:
+            console.print(
+                f"[red]Error:[/red] Invalid environment format: '{env_slug}'. "
+                "Expected 'owner/name' format."
+            )
+            raise typer.Exit(1)
+
     if not cfg.model:
         console.print("[red]Error:[/red] No model specified. Use --model or set 'model' in config.")
         raise typer.Exit(1)

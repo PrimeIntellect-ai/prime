@@ -423,6 +423,31 @@ def create_run(
         hidden=True,
         help='Additional run configuration as JSON (admin only), e.g. \'{"key": "value"}\'',
     ),
+    eval_envs: Optional[List[str]] = typer.Option(
+        None,
+        "--eval-envs",
+        help="Environments to evaluate on (e.g., 'reverse-text' or 'owner/env')",
+    ),
+    eval_interval: Optional[int] = typer.Option(
+        None,
+        "--eval-interval",
+        help="Evaluate every N training steps [default: 100]",
+    ),
+    eval_num_examples: Optional[int] = typer.Option(
+        None,
+        "--eval-num-examples",
+        help="Number of examples per eval environment (-1 for all) [default: -1]",
+    ),
+    eval_rollouts: Optional[int] = typer.Option(
+        None,
+        "--eval-rollouts",
+        help="Rollouts per example for evaluation [default: 1]",
+    ),
+    eval_base_model: Optional[bool] = typer.Option(
+        None,
+        "--eval-base-model/--no-eval-base-model",
+        help="Evaluate base model before training [default: True]",
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Configuration can be provided via CLI options, a TOML config file, or both.
@@ -463,6 +488,21 @@ def create_run(
                 '  Expected format: --run-config \'{"key": "value"}\''
             )
             raise typer.Exit(1)
+
+    # Build eval config if any eval options are provided
+    parsed_eval_config: Optional[Dict[str, Any]] = None
+    if eval_envs:
+        parsed_eval_config = {
+            "environments": [{"id": env} for env in eval_envs],
+        }
+        if eval_interval is not None:
+            parsed_eval_config["interval"] = eval_interval
+        if eval_num_examples is not None:
+            parsed_eval_config["num_examples"] = eval_num_examples
+        if eval_rollouts is not None:
+            parsed_eval_config["rollouts_per_example"] = eval_rollouts
+        if eval_base_model is not None:
+            parsed_eval_config["eval_base_model"] = eval_base_model
 
     # Load and merge config: CLI > TOML > defaults
     if config_file:
@@ -523,6 +563,11 @@ def create_run(
             console.print(f"  W&B Project: {cfg.wandb.project}")
         if app_config.team_id:
             console.print(f"  Team: {app_config.team_id}")
+        if parsed_eval_config:
+            eval_env_ids = [e["id"] for e in parsed_eval_config.get("environments", [])]
+            console.print(f"  Eval Environments: {', '.join(eval_env_ids)}")
+            if "interval" in parsed_eval_config:
+                console.print(f"  Eval Interval: {parsed_eval_config['interval']}")
         console.print()
 
         # Create the run
@@ -539,6 +584,7 @@ def create_run(
             wandb_api_key=cfg.wandb.api_key,
             team_id=app_config.team_id,
             run_config=cfg.run_config,
+            eval_config=parsed_eval_config,
         )
 
         if output == "json":

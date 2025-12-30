@@ -275,21 +275,31 @@ def get_logs(
     run_id: str = typer.Argument(..., help="Run ID to get logs for"),
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+    watch: bool = typer.Option(False, "--watch", "-w", help="Watch and append new logs"),
 ) -> None:
     """Get logs for an RL training run."""
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
 
-        if follow:
-            seen_lines = 0
+        if follow or watch:
+            console.print(f"[dim]Watching logs for run {run_id}... (Ctrl+C to stop)[/dim]\n")
+            last_log_hash = ""
+            printed_lines: set[str] = set()
+
             while True:
                 logs = rl_client.get_logs(run_id, tail_lines=tail)
-                lines = logs.splitlines()
-                if len(lines) > seen_lines:
-                    for line in lines[seen_lines:]:
-                        console.print(line)
-                    seen_lines = len(lines)
+                current_hash = hash(logs)
+
+                if current_hash != last_log_hash:
+                    lines = logs.splitlines()
+                    for line in lines:
+                        line_hash = hash(line)
+                        if line_hash not in printed_lines:
+                            console.print(line)
+                            printed_lines.add(line_hash)
+                    last_log_hash = current_hash
+
                 time.sleep(2)
         else:
             logs = rl_client.get_logs(run_id, tail_lines=tail)
@@ -299,7 +309,7 @@ def get_logs(
                 console.print("[yellow]No logs available yet.[/yellow]")
 
     except KeyboardInterrupt:
-        pass
+        console.print("\n[dim]Stopped watching logs.[/dim]")
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

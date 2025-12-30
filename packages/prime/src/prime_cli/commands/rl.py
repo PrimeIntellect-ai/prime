@@ -510,15 +510,6 @@ def create_run(
 
         console.print("[bold]Creating RL training run...[/bold]\n")
 
-        # Validate environment slug format
-        for env_slug in cfg.environments:
-            if "/" not in env_slug:
-                console.print(
-                    f"[red]Error:[/red] Invalid environment format: '{env_slug}'. "
-                    "Expected 'owner/name' format."
-                )
-                raise typer.Exit(1)
-
         # Show configuration
         console.print("[bold]Configuration:[/bold]")
         if cfg.name:

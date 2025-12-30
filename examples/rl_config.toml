@@ -2,7 +2,7 @@
 # Usage: prime rl -c examples/rl_config.toml
 
 model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
-environments = ["dev-prime/single-turn-math"]
+environments = ["reverse-text"]
 
 rollouts = 8      # number of attempts per prompt/example
 max_steps = 100   # total training iterations

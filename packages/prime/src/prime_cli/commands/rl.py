@@ -324,19 +324,30 @@ def get_logs(
                     consecutive_errors = 0
 
                     if logs != last_logs:
-                        # Find new content by comparing line counts
                         old_lines = last_logs.splitlines() if last_logs else []
                         new_lines = logs.splitlines()
 
-                        # Print new lines (those beyond what we had before)
-                        # This handles the case where logs grow at the end
-                        if len(new_lines) > len(old_lines):
-                            for line in new_lines[len(old_lines) :]:
-                                console.print(line)
-                        elif not last_logs:
+                        if not last_logs:
                             # First fetch, print everything
                             for line in new_lines:
                                 console.print(line)
+                        elif len(new_lines) > len(old_lines):
+                            # Logs grew, print new lines at the end
+                            for line in new_lines[len(old_lines) :]:
+                                console.print(line)
+                        else:
+                            # Logs rotated (tail window), find overlap between
+                            # end of old_lines and start of new_lines
+                            overlap = 0
+                            max_overlap = min(len(old_lines), len(new_lines))
+                            for i in range(1, max_overlap + 1):
+                                # Check if last i lines of old match first i lines of new
+                                if old_lines[-i:] == new_lines[:i]:
+                                    overlap = i
+                            # Print lines after the overlap
+                            if overlap > 0:
+                                for line in new_lines[overlap:]:
+                                    console.print(line)
 
                         last_logs = logs
                 except APIError as e:

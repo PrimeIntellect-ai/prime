@@ -1,6 +1,6 @@
 from mcp.server.fastmcp import FastMCP
 
-from prime_mcp.tools import availability, pods, ssh
+from prime_mcp.tools import availability, pods, sandboxes, ssh
 
 mcp = FastMCP("primeintellect")
 
@@ -251,6 +251,301 @@ async def manage_ssh_keys(
         SSH key operation result
     """
     return await ssh.manage_ssh_keys(action, key_name, public_key, key_id, offset, limit)
+
+
+@mcp.tool()
+async def create_sandbox(
+    name: str,
+    docker_image: str = "python:3.11-slim",
+    start_command: str | None = "tail -f /dev/null",
+    cpu_cores: int = 1,
+    memory_gb: int = 2,
+    disk_size_gb: int = 5,
+    gpu_count: int = 0,
+    network_access: bool = True,
+    timeout_minutes: int = 60,
+    environment_vars: dict[str, str] | None = None,
+    labels: list[str] | None = None,
+    team_id: str | None = None,
+    registry_credentials_id: str | None = None,
+) -> dict:
+    """Create a new sandbox for isolated code execution.
+
+    A sandbox is a containerized environment where you can safely execute code,
+    run commands, and manage files in isolation. Perfect for:
+    - Running untrusted code safely
+    - Testing and development
+    - Data processing pipelines
+    - CI/CD tasks
+
+    WORKFLOW:
+    1. Create sandbox with create_sandbox()
+    2. Wait for status to become RUNNING (check with get_sandbox())
+    3. Execute commands with execute_sandbox_command()
+    4. Clean up with delete_sandbox()
+
+    Args:
+        name: Name for the sandbox (required)
+        docker_image: Docker image to use (default: "python:3.11-slim")
+            Popular options: python:3.11-slim, ubuntu:22.04, node:20-slim
+        start_command: Command to run on startup (default: "tail -f /dev/null")
+        cpu_cores: Number of CPU cores (default: 1, min: 1)
+        memory_gb: Memory in GB (default: 2, min: 1)
+        disk_size_gb: Disk size in GB (default: 5, min: 1)
+        gpu_count: Number of GPUs (default: 0)
+        network_access: Enable network access (default: True)
+        timeout_minutes: Auto-termination timeout (default: 60 minutes)
+        environment_vars: Environment variables as key-value pairs
+        labels: Labels for organizing and filtering sandboxes
+        team_id: Team ID for organization accounts
+        registry_credentials_id: ID for private Docker registry credentials
+
+    Returns:
+        Created sandbox details including ID, status, and configuration
+    """
+    return await sandboxes.create_sandbox(
+        name=name,
+        docker_image=docker_image,
+        start_command=start_command,
+        cpu_cores=cpu_cores,
+        memory_gb=memory_gb,
+        disk_size_gb=disk_size_gb,
+        gpu_count=gpu_count,
+        network_access=network_access,
+        timeout_minutes=timeout_minutes,
+        environment_vars=environment_vars,
+        labels=labels,
+        team_id=team_id,
+        registry_credentials_id=registry_credentials_id,
+    )
+
+
+@mcp.tool()
+async def list_sandboxes(
+    team_id: str | None = None,
+    status: str | None = None,
+    labels: list[str] | None = None,
+    page: int = 1,
+    per_page: int = 50,
+    exclude_terminated: bool = False,
+) -> dict:
+    """List all sandboxes in your account.
+
+    Args:
+        team_id: Filter by team ID
+        status: Filter by status (PENDING, PROVISIONING, RUNNING, STOPPED, ERROR, TERMINATED)
+        labels: Filter by labels (sandboxes must have ALL specified labels)
+        page: Page number for pagination (default: 1)
+        per_page: Results per page (default: 50, max: 100)
+        exclude_terminated: Exclude terminated sandboxes (default: False)
+
+    Returns:
+        List of sandboxes with pagination info (sandboxes, total, page, per_page, has_next)
+    """
+    return await sandboxes.list_sandboxes(
+        team_id=team_id,
+        status=status,
+        labels=labels,
+        page=page,
+        per_page=per_page,
+        exclude_terminated=exclude_terminated,
+    )
+
+
+@mcp.tool()
+async def get_sandbox(sandbox_id: str) -> dict:
+    """Get detailed information about a specific sandbox.
+
+    Use this to check sandbox status before executing commands.
+    Sandbox must be in RUNNING status for command execution.
+
+    Args:
+        sandbox_id: Unique identifier of the sandbox
+
+    Returns:
+        Detailed sandbox information including:
+        - id, name, status
+        - docker_image, cpu_cores, memory_gb, disk_size_gb
+        - created_at, started_at, terminated_at
+        - labels, environment_vars
+    """
+    return await sandboxes.get_sandbox(sandbox_id)
+
+
+@mcp.tool()
+async def delete_sandbox(sandbox_id: str) -> dict:
+    """Delete/terminate a sandbox.
+
+    This will immediately terminate the sandbox and release resources.
+    Any unsaved data will be lost.
+
+    Args:
+        sandbox_id: Unique identifier of the sandbox to delete
+
+    Returns:
+        Deletion confirmation
+    """
+    return await sandboxes.delete_sandbox(sandbox_id)
+
+
+@mcp.tool()
+async def bulk_delete_sandboxes(
+    sandbox_ids: list[str] | None = None,
+    labels: list[str] | None = None,
+) -> dict:
+    """Bulk delete multiple sandboxes by IDs or labels.
+
+    Useful for cleanup operations. You must specify either sandbox_ids OR labels,
+    but not both.
+
+    Args:
+        sandbox_ids: List of sandbox IDs to delete
+        labels: Delete all sandboxes with ALL of these labels
+
+    Returns:
+        Results showing succeeded and failed deletions
+    """
+    return await sandboxes.bulk_delete_sandboxes(sandbox_ids=sandbox_ids, labels=labels)
+
+
+@mcp.tool()
+async def get_sandbox_logs(sandbox_id: str) -> dict:
+    """Get logs from a sandbox.
+
+    Returns container logs including stdout/stderr from the start command
+    and any executed commands.
+
+    Args:
+        sandbox_id: Unique identifier of the sandbox
+
+    Returns:
+        Sandbox logs as text
+    """
+    return await sandboxes.get_sandbox_logs(sandbox_id)
+
+
+@mcp.tool()
+async def execute_sandbox_command(
+    sandbox_id: str,
+    command: str,
+    working_dir: str | None = None,
+    env: dict[str, str] | None = None,
+    timeout: int = 300,
+) -> dict:
+    """Execute a command in a sandbox.
+
+    IMPORTANT: The sandbox must be in RUNNING status before executing commands.
+    Use get_sandbox() to check status first.
+
+    Args:
+        sandbox_id: Unique identifier of the sandbox
+        command: Shell command to execute (e.g., "python script.py", "ls -la")
+        working_dir: Working directory for the command (optional)
+        env: Additional environment variables (optional)
+        timeout: Command timeout in seconds (default: 300, max: 3600)
+
+    Returns:
+        Command result with:
+        - stdout: Standard output
+        - stderr: Standard error
+        - exit_code: Exit code (0 = success)
+    """
+    return await sandboxes.execute_command(
+        sandbox_id=sandbox_id,
+        command=command,
+        working_dir=working_dir,
+        env=env,
+        timeout=timeout,
+    )
+
+
+@mcp.tool()
+async def expose_sandbox_port(
+    sandbox_id: str,
+    port: int,
+    name: str | None = None,
+) -> dict:
+    """Expose an HTTP port from a sandbox to the internet.
+
+    Creates a public URL that routes traffic to the specified port.
+    Useful for web servers, APIs, Jupyter notebooks, Streamlit apps, etc.
+
+    Args:
+        sandbox_id: Unique identifier of the sandbox
+        port: Port number to expose (1-65535, e.g., 8080, 8888, 3000)
+        name: Optional friendly name for the exposure
+
+    Returns:
+        Exposure details including:
+        - exposure_id: ID to use for unexpose_sandbox_port()
+        - url: Public URL to access the service
+        - port: The exposed port number
+    """
+    return await sandboxes.expose_port(sandbox_id=sandbox_id, port=port, name=name)
+
+
+@mcp.tool()
+async def unexpose_sandbox_port(sandbox_id: str, exposure_id: str) -> dict:
+    """Remove a port exposure from a sandbox.
+
+    Args:
+        sandbox_id: Unique identifier of the sandbox
+        exposure_id: ID of the exposure to remove (from expose_sandbox_port result)
+
+    Returns:
+        Confirmation of removal
+    """
+    return await sandboxes.unexpose_port(sandbox_id=sandbox_id, exposure_id=exposure_id)
+
+
+@mcp.tool()
+async def list_sandbox_exposed_ports(sandbox_id: str) -> dict:
+    """List all exposed ports for a sandbox.
+
+    Args:
+        sandbox_id: Unique identifier of the sandbox
+
+    Returns:
+        List of exposed ports with their URLs and details
+    """
+    return await sandboxes.list_exposed_ports(sandbox_id)
+
+
+@mcp.tool()
+async def list_registry_credentials() -> dict:
+    """List available registry credentials for private Docker images.
+
+    Registry credentials allow you to pull images from private Docker registries
+    like GitHub Container Registry, AWS ECR, Google Container Registry, etc.
+
+    Returns:
+        List of registry credentials (id, name, server - no secrets)
+    """
+    return await sandboxes.list_registry_credentials()
+
+
+@mcp.tool()
+async def check_docker_image(
+    image: str,
+    registry_credentials_id: str | None = None,
+) -> dict:
+    """Check if a Docker image is accessible before creating a sandbox.
+
+    Validates that the image exists and can be pulled. Useful for:
+    - Verifying public images exist
+    - Testing private registry credentials
+
+    Args:
+        image: Docker image name (e.g., "python:3.11-slim", "ghcr.io/org/image:tag")
+        registry_credentials_id: Optional credentials ID for private registries
+
+    Returns:
+        - accessible: Whether the image can be pulled
+        - details: Additional information or error message
+    """
+    return await sandboxes.check_docker_image(
+        image=image, registry_credentials_id=registry_credentials_id
+    )
 
 
 if __name__ == "__main__":

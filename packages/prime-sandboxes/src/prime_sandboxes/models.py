@@ -54,6 +54,7 @@ class Sandbox(BaseModel):
     user_id: Optional[str] = Field(None, alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
     kubernetes_job_id: Optional[str] = Field(None, alias="kubernetesJobId")
+    registry_credentials_id: Optional[str] = Field(default=None, alias="registryCredentialsId")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -87,6 +88,7 @@ class CreateSandboxRequest(BaseModel):
     labels: List[str] = Field(default_factory=list)
     team_id: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
+    registry_credentials_id: Optional[str] = None
 
 
 class UpdateSandboxRequest(BaseModel):
@@ -101,6 +103,7 @@ class UpdateSandboxRequest(BaseModel):
     gpu_count: Optional[int] = None
     timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
+    registry_credentials_id: Optional[str] = None
     secrets: Optional[Dict[str, str]] = None
     network_access: Optional[bool] = None
 
@@ -149,6 +152,25 @@ class BulkDeleteSandboxResponse(BaseModel):
     succeeded: List[str]
     failed: List[Dict[str, str]]
     message: str
+
+
+class RegistryCredentialSummary(BaseModel):
+    """Summary of registry credential data (no secrets)."""
+
+    id: str
+    name: str
+    server: str
+    created_at: datetime = Field(..., alias="createdAt")
+    updated_at: datetime = Field(..., alias="updatedAt")
+    user_id: Optional[str] = Field(default=None, alias="userId")
+    team_id: Optional[str] = Field(default=None, alias="teamId")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class DockerImageCheckResponse(BaseModel):
+    accessible: bool
+    details: str
 
 
 class ExposePortRequest(BaseModel):

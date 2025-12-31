@@ -990,9 +990,17 @@ def expose_port(
             if exposed.name:
                 console.print(f"[bold green]Name:[/bold green] {exposed.name}")
             console.print(f"[bold green]URL:[/bold green] {exposed.url}")
-            if protocol in ("TCP", "UDP") and exposed.external_port:
-                console.print(f"[bold green]External Port:[/bold green] {exposed.external_port}")
-            console.print(f"[bold green]TLS Socket:[/bold green] {exposed.tls_socket}")
+            if protocol in ("TCP", "UDP"):
+                if exposed.external_port:
+                    console.print(
+                        f"[bold green]External Port:[/bold green] {exposed.external_port}"
+                    )
+                if exposed.external_endpoint:
+                    console.print(
+                        f"[bold green]External Endpoint:[/bold green] {exposed.external_endpoint}"
+                    )
+            else:
+                console.print(f"[bold green]TLS Socket:[/bold green] {exposed.tls_socket}")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")

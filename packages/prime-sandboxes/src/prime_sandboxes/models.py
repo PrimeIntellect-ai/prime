@@ -192,6 +192,7 @@ class ExposedPort(BaseModel):
     tls_socket: str
     protocol: Optional[str] = None
     external_port: Optional[int] = None  # For TCP/UDP exposures
+    external_endpoint: Optional[str] = None  # For TCP/UDP: host:port endpoint
     created_at: Optional[str] = None
 
 
@@ -209,7 +210,7 @@ class SSHSession(BaseModel):
     sandbox_id: str
     host: str
     port: int
-    tls_socket: str
+    external_endpoint: str
     expires_at: datetime
     ttl_seconds: int
     gateway_url: str

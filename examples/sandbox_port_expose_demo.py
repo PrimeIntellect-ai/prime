@@ -22,11 +22,11 @@ def verify_http(url: str) -> bool:
         return False
 
 
-def verify_tcp(tls_socket: str, test_message: bytes = b"Hello") -> bool:
+def verify_tcp(endpoint: str, test_message: bytes = b"Hello") -> bool:
     """Verify TCP endpoint is accessible and echoes back data."""
     try:
-        # Parse host:port from socket address
-        host, port_str = tls_socket.rsplit(":", 1)
+        # Parse host:port from endpoint address
+        host, port_str = endpoint.rsplit(":", 1)
         port = int(port_str)
 
         # Connect with raw TCP
@@ -141,14 +141,14 @@ while True:
         )
         print("TCP port exposed!")
         print(f"  Exposure ID: {tcp_exposure.exposure_id}")
-        print(f"  TLS Socket: {tcp_exposure.tls_socket}")
+        print(f"  External Endpoint: {tcp_exposure.external_endpoint}")
         if tcp_exposure.external_port:
             print(f"  External Port: {tcp_exposure.external_port}")
         time.sleep(120)
 
         # Verify TCP endpoint is accessible
         print("  Verifying TCP endpoint...")
-        if verify_tcp(tcp_exposure.tls_socket):
+        if verify_tcp(tcp_exposure.external_endpoint):
             print("  TCP verification: SUCCESS (echo server responded correctly)")
         else:
             print("  TCP verification: FAILED")
@@ -163,12 +163,12 @@ while True:
             if port.protocol == "HTTP":
                 print(f"    URL: {port.url}")
             else:
-                print(f"    TLS Socket: {port.tls_socket}")
+                print(f"    External Endpoint: {port.external_endpoint}")
 
         # Usage instructions
         print("\n--- How to Connect ---")
         print(f"HTTP: curl {http_exposure.url}")
-        print("TCP:  Use the TLS socket address with a TCP client")
+        print(f"TCP:  Connect to {tcp_exposure.external_endpoint} with a TCP client")
 
         # Clean up exposures
         print("\n--- Cleanup ---")

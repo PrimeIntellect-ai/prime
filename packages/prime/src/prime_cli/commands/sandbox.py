@@ -1179,9 +1179,12 @@ def ssh_connect(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     try:
-        # Check if ssh command is available
+        # Check if ssh and ssh-keygen commands are available
         if not shutil.which("ssh"):
             console.print("[red]Error:[/red] SSH client not found. Please install OpenSSH.")
+            raise typer.Exit(1)
+        if not shutil.which("ssh-keygen"):
+            console.print("[red]Error:[/red] ssh-keygen not found. Please install OpenSSH.")
             raise typer.Exit(1)
 
         base_client = APIClient()

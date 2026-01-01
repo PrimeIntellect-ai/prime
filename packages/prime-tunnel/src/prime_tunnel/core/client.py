@@ -154,7 +154,7 @@ class TunnelClient:
             subdomain=registration.subdomain,
             url=registration.url,
             frp_token=registration.frp_token,
-            server_addr=registration.server_addr,
+            server_host=registration.server_host,
             server_port=registration.server_port,
             expires_at=registration.expires_at,
         )
@@ -189,7 +189,7 @@ class TunnelClient:
             subdomain=data["subdomain"],
             url=data["url"],
             frp_token="",  # Token not returned on status check
-            server_addr="",
+            server_host="",
             server_port=7000,
             expires_at=data["expires_at"],
         )
@@ -248,7 +248,7 @@ class TunnelClient:
                     subdomain=t["subdomain"],
                     url=t["url"],
                     frp_token="",
-                    server_addr="",
+                    server_host="",
                     server_port=7000,
                     expires_at=t["expires_at"],
                 )

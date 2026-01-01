@@ -92,7 +92,11 @@ class Tunnel:
             raise TunnelError(f"Failed to register tunnel: {e}") from e
 
         # 3. Generate frpc config
-        self._config_file = self._write_frpc_config()
+        try:
+            self._config_file = self._write_frpc_config()
+        except Exception as e:
+            await self._cleanup()
+            raise TunnelError(f"Failed to write frpc config: {e}") from e
 
         # 4. Start frpc process
         try:

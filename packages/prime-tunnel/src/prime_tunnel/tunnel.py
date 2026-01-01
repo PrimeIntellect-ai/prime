@@ -89,6 +89,7 @@ class Tunnel:
                 name=self.name,
             )
         except Exception as e:
+            await self._cleanup()
             raise TunnelError(f"Failed to register tunnel: {e}") from e
 
         # 3. Generate frpc config

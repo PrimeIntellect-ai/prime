@@ -26,7 +26,7 @@ class TunnelInfo(BaseModel):
     """Information about a registered tunnel."""
 
     tunnel_id: str = Field(..., description="Unique tunnel identifier")
-    subdomain: str = Field(..., description="Tunnel subdomain")
+    hostname: str = Field(..., description="Tunnel hostname")
     url: str = Field(..., description="Full HTTPS URL")
     frp_token: str = Field(..., description="Authentication token for frpc")
     server_host: str = Field(..., description="frps server hostname")
@@ -48,7 +48,7 @@ class TunnelRegistrationResponse(BaseModel):
     """Response from tunnel registration."""
 
     tunnel_id: str
-    subdomain: str
+    hostname: str
     url: str
     frp_token: str
     server_host: str

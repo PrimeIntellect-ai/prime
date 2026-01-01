@@ -121,7 +121,7 @@ def tunnel_status(
 
     console.print(f"[bold]Tunnel ID:[/bold] {tunnel.tunnel_id}")
     console.print(f"[bold]URL:[/bold] {tunnel.url}")
-    console.print(f"[bold]Subdomain:[/bold] {tunnel.subdomain}")
+    console.print(f"[bold]Hostname:[/bold] {tunnel.hostname}")
     console.print(f"[bold]Expires At:[/bold] {tunnel.expires_at}")
 
 

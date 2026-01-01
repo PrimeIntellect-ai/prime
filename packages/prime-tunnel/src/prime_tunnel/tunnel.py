@@ -53,9 +53,9 @@ class Tunnel:
         return self._tunnel_info.url if self._tunnel_info else None
 
     @property
-    def subdomain(self) -> Optional[str]:
-        """Get the tunnel subdomain."""
-        return self._tunnel_info.subdomain if self._tunnel_info else None
+    def hostname(self) -> Optional[str]:
+        """Get the tunnel hostname."""
+        return self._tunnel_info.hostname if self._tunnel_info else None
 
     @property
     def is_running(self) -> bool:
@@ -212,7 +212,13 @@ subdomain = "{self._tunnel_info.tunnel_id}"
         config_dir = Path(tempfile.gettempdir()) / "prime-tunnel"
         config_dir.mkdir(parents=True, exist_ok=True)
         config_file = config_dir / f"{self._tunnel_info.tunnel_id}.toml"
-        config_file.write_text(config)
+
+        # Create file with 0600 permissions
+        fd = os.open(str(config_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, config.encode())
+        finally:
+            os.close(fd)
 
         return config_file
 

@@ -151,7 +151,7 @@ class TunnelClient:
 
         return TunnelInfo(
             tunnel_id=registration.tunnel_id,
-            subdomain=registration.subdomain,
+            hostname=registration.hostname,
             url=registration.url,
             frp_token=registration.frp_token,
             server_host=registration.server_host,
@@ -186,7 +186,7 @@ class TunnelClient:
         data = await self._handle_response(response, "get tunnel")
         return TunnelInfo(
             tunnel_id=data["tunnel_id"],
-            subdomain=data["subdomain"],
+            hostname=data["hostname"],
             url=data["url"],
             frp_token="",  # Token not returned on status check
             server_host="",
@@ -245,7 +245,7 @@ class TunnelClient:
             tunnels.append(
                 TunnelInfo(
                     tunnel_id=t["tunnel_id"],
-                    subdomain=t["subdomain"],
+                    hostname=t["hostname"],
                     url=t["url"],
                     frp_token="",
                     server_host="",

@@ -147,6 +147,8 @@ class TunnelClient:
             raise TunnelError(f"Failed to connect to API: {e}") from e
 
         data = await self._handle_response(response, "create tunnel")
+        if not data:
+            raise TunnelError("Failed to create tunnel: unexpected empty response")
         registration = TunnelRegistrationResponse(**data)
 
         return TunnelInfo(

@@ -1,7 +1,5 @@
 import asyncio
-import fcntl
 import os
-import select
 import subprocess
 import tempfile
 import time
@@ -173,10 +171,8 @@ class Tunnel:
         if self._tunnel_info is None:
             raise TunnelError("Tunnel not registered")
 
-        # Parse server address
-        server_parts = self._tunnel_info.server_addr.split(":")
-        server_host = server_parts[0]
-        server_port = int(server_parts[1]) if len(server_parts) > 1 else 7000
+        server_host = self._tunnel_info.server_host
+        server_port = self._tunnel_info.server_port
 
         # Generate config content
         config = f"""# Prime Tunnel frpc configuration
@@ -232,7 +228,9 @@ subdomain = "{self._tunnel_info.tunnel_id}"
                 raise TunnelConnectionError(f"frpc exited with code {return_code}: {stderr}")
 
             if self._process.stderr:
-                if hasattr(select, "poll"):  # Check if on Unix
+                if os.name == "posix":
+                    import fcntl
+
                     fd = self._process.stderr.fileno()
                     fl = fcntl.fcntl(fd, fcntl.F_GETFL)
                     fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)

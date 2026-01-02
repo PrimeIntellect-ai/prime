@@ -175,6 +175,8 @@ async def execute_command(
         return {"error": "sandbox_id is required"}
     if not command:
         return {"error": "command is required"}
+    if timeout < 1:
+        return {"error": "timeout must be at least 1 second"}
     try:
         client = _get_sandbox_client()
         result = await client.execute_command(

@@ -1209,14 +1209,32 @@ def update_pyproject_version(pyproject_path: Path, new_version: str) -> None:
         f.write(updated_content)
 
 
-def get_install_command(tool: str, wheel_url: str) -> List[str]:
+def get_install_command(tool: str, wheel_url: str, use_system: bool = False) -> List[str]:
     """Generate install command for the specified tool."""
     if tool == "uv":
-        return ["uv", "pip", "install", "--upgrade", wheel_url]
+        cmd = ["uv", "pip", "install"]
+        if use_system:
+            cmd.append("--system")
+        cmd.append("--upgrade")
+        cmd.append(wheel_url)
+        return cmd
     elif tool == "pip":
         return ["pip", "install", "--upgrade", wheel_url]
     else:
         raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
+
+
+def _has_uv_environment() -> bool:
+    if os.environ.get("VIRTUAL_ENV") or os.environ.get("CONDA_PREFIX"):
+        return True
+    if os.environ.get("UV_PROJECT_ENVIRONMENT"):
+        return True
+
+    cwd = Path.cwd()
+    for parent in (cwd, *cwd.parents):
+        if (parent / ".venv").is_dir():
+            return True
+    return False
 
 
 @app.command(no_args_is_help=True)
@@ -1910,27 +1928,26 @@ def _build_install_command(
     simple_index_url: Optional[str],
     wheel_url: Optional[str],
     tool: str = "uv",
+    use_system: bool = False,
 ) -> Optional[List[str]]:
     """Build install command for an environment. Returns None if no install method available."""
     normalized_name = normalize_package_name(name)
 
     if simple_index_url:
         if tool == "uv":
+            base_cmd = ["uv", "pip", "install"]
+            if use_system:
+                base_cmd.append("--system")
+            base_cmd.append("--upgrade")
             if version and version != "latest":
                 return [
-                    "uv",
-                    "pip",
-                    "install",
-                    "--upgrade",
+                    *base_cmd,
                     f"{normalized_name}=={version}",
                     "--extra-index-url",
                     simple_index_url,
                 ]
             return [
-                "uv",
-                "pip",
-                "install",
-                "--upgrade",
+                *base_cmd,
                 normalized_name,
                 "--extra-index-url",
                 simple_index_url,
@@ -1955,7 +1972,7 @@ def _build_install_command(
             ]
     elif wheel_url:
         try:
-            return get_install_command(tool, wheel_url)
+            return get_install_command(tool, wheel_url, use_system=use_system)
         except ValueError:
             return None
 
@@ -1982,6 +1999,16 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
     simple_index_url = details.get("simple_index_url")
     wheel_url = process_wheel_url(details.get("wheel_url"))
 
+    use_system = False
+    if tool == "uv" and not _has_uv_environment():
+        use_system = True
+        console.print(
+            "[yellow]No virtual environment detected. Installing into system Python with `uv pip install --system`.[/yellow]"
+        )
+        console.print(
+            "[dim]Tip: run `uv venv` (or activate your venv) to install into a virtual environment.[/dim]"
+        )
+
     if not simple_index_url and not wheel_url:
         if details.get("visibility") == "PRIVATE":
             console.print(
@@ -1992,7 +2019,7 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
             console.print(f"[red]No installation method available for {env_slug}[/red]")
         return False
 
-    cmd_parts = _build_install_command(name, version, simple_index_url, wheel_url, tool)
+    cmd_parts = _build_install_command(name, version, simple_index_url, wheel_url, tool, use_system=use_system)
     if not cmd_parts:
         console.print(f"[red]Failed to build install command for {env_slug}[/red]")
         return False

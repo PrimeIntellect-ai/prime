@@ -83,8 +83,14 @@ def callback(
             console.print("[dim]Set PRIME_DISABLE_VERSION_CHECK=1 to disable this check[/dim]\n")
 
         config = Config()
-        if config.team_id and not os.getenv("PRIME_DISABLE_TEAM_NOTICE"):
-            team_display = config.team_name or config.team_id
+        if config.team_id and os.environ.get("PRIME_DISABLE_TEAM_NOTICE", "").lower() not in (
+            "1",
+            "true",
+            "yes",
+        ):
+            team_display = (
+                config.team_id if config.team_id_from_env else (config.team_name or config.team_id)
+            )
             suffix = " (from env var)" if config.team_id_from_env else ""
             console.print(f"[dim]Using team account: {team_display}{suffix}[/dim]\n")
 

@@ -1,3 +1,4 @@
+import os
 import sys
 from typing import Optional
 
@@ -56,8 +57,6 @@ def callback(
         raise typer.Exit()
 
     if context:
-        import os
-
         config = Config()
         # Check if the context exists
         if context.lower() != "production" and context not in config.list_environments():
@@ -84,15 +83,10 @@ def callback(
             console.print("[dim]Set PRIME_DISABLE_VERSION_CHECK=1 to disable this check[/dim]\n")
 
         config = Config()
-        if config.team_id:
-            if config.team_id_from_env:
-                console.print(
-                    f"[cyan]ℹ Using team account: {config.team_id} (from env var)[/cyan]\n"
-                )
-            elif config.team_name:
-                console.print(f"[cyan]ℹ Using team account: {config.team_name}[/cyan]\n")
-            else:
-                console.print(f"[cyan]ℹ Using team account: {config.team_id}[/cyan]\n")
+        if config.team_id and not os.getenv("PRIME_DISABLE_TEAM_NOTICE"):
+            team_display = config.team_name or config.team_id
+            suffix = " (from env var)" if config.team_id_from_env else ""
+            console.print(f"[dim]Using team account: {team_display}{suffix}[/dim]\n")
 
 
 def run() -> None:

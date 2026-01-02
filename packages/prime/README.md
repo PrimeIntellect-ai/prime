@@ -208,6 +208,15 @@ prime config set-ssh-key-path ~/.ssh/id_rsa.pub
 prime config view
 ```
 
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `PRIME_API_KEY` | API key for authentication |
+| `PRIME_TEAM_ID` | Team ID to use for all operations |
+| `PRIME_DISABLE_VERSION_CHECK` | Set to `1` to disable update notifications |
+| `PRIME_DISABLE_TEAM_NOTICE` | Set to `1` to disable the team account notice |
+
 ## Python SDK
 
 Prime also provides a Python SDK for programmatic access:

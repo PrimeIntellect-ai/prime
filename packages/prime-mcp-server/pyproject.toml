@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.25.0",
     "mcp>=1.0.0",
     "fastmcp>=0.2.0",
+    "prime-sandboxes>=0.2.8",
 ]
 keywords = ["mcp", "model-context-protocol"]
 classifiers = [
@@ -48,6 +49,9 @@ packages = ["src/prime_mcp"]
 
 [tool.hatch.version]
 path = "src/prime_mcp/__init__.py"
+
+[tool.uv.sources]
+prime-sandboxes = { workspace = true }
 
 [tool.ruff]
 line-length = 100

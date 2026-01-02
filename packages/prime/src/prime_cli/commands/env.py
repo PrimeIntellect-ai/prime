@@ -1224,17 +1224,68 @@ def get_install_command(tool: str, wheel_url: str, use_system: bool = False) -> 
         raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
 
 
-def _has_uv_environment() -> bool:
-    if os.environ.get("VIRTUAL_ENV") or os.environ.get("CONDA_PREFIX"):
-        return True
-    if os.environ.get("UV_PROJECT_ENVIRONMENT"):
-        return True
+def _venv_bin_dir(venv_path: Path) -> Path:
+    return venv_path / ("Scripts" if os.name == "nt" else "bin")
 
-    cwd = Path.cwd()
-    for parent in (cwd, *cwd.parents):
-        if (parent / ".venv").is_dir():
-            return True
-    return False
+
+def _build_venv_env(venv_path: Path) -> Dict[str, str]:
+    env = (uv_env.copy() if uv_env is not None else os.environ.copy())
+    env["VIRTUAL_ENV"] = str(venv_path)
+    bin_dir = _venv_bin_dir(venv_path)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    return env
+
+
+def _ensure_uv_venv(venv_path: Path) -> None:
+    venv_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg = venv_path / "pyvenv.cfg"
+    if cfg.exists():
+        return
+    console.print(f"[dim]Creating virtual environment at {venv_path}...[/dim]")
+    result = subprocess.run(
+        ["uv", "venv", str(venv_path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        msg = (result.stdout or result.stderr or "").strip()
+        raise Exception(f"Failed to create virtual environment at {venv_path}: {msg}")
+
+
+def _find_project_root(start: Path) -> Optional[Path]:
+    for parent in (start, *start.parents):
+        if (parent / "pyproject.toml").exists() or (parent / "uv.toml").exists():
+            return parent
+    return None
+
+
+def _resolve_uv_install_context(
+    install_target: str, project: Optional[Path]
+) -> tuple[bool, Optional[Dict[str, str]], Optional[Path], Optional[Path]]:
+    install_target = install_target.lower().strip()
+    if install_target == "system":
+        return True, None, None, None
+
+    if install_target == "prime":
+        config = Config()
+        venv_path = config.config_dir / "venvs" / "default"
+        _ensure_uv_venv(venv_path)
+        return False, _build_venv_env(venv_path), None, venv_path
+
+    if install_target == "project":
+        project_root = project or _find_project_root(Path.cwd())
+        if not project_root:
+            raise ValueError(
+                "No project directory with pyproject.toml or uv.toml found. "
+                "Use --project or --install-target prime|system."
+            )
+        venv_path = project_root / ".venv"
+        _ensure_uv_venv(venv_path)
+        return False, _build_venv_env(venv_path), project_root, venv_path
+
+    raise ValueError(
+        "Invalid install target. Use one of: prime, project, system."
+    )
 
 
 @app.command(no_args_is_help=True)
@@ -1391,7 +1442,14 @@ def process_wheel_url(wheel_url: Optional[str]) -> Optional[str]:
     return wheel_url
 
 
-def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str) -> None:
+def execute_install_command(
+    cmd: List[str],
+    env_id: str,
+    version: str,
+    tool: str,
+    env: Optional[Dict[str, str]] = None,
+    cwd: Optional[Path] = None,
+) -> None:
     """Execute the installation command with proper output handling.
 
     Args:
@@ -1413,6 +1471,8 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
         text=True,
         bufsize=1,
         universal_newlines=True,
+        env=env,
+        cwd=str(cwd) if cwd else None,
     )
 
     # Stream output line by line
@@ -1437,6 +1497,19 @@ def install(
         "uv",
         "--with",
         help="Package manager to use (uv or pip)",
+    ),
+    install_target: str = typer.Option(
+        "prime",
+        "--install-target",
+        help=(
+            "Where to install environments when using uv: prime (managed), "
+            "project (.venv), or system"
+        ),
+    ),
+    project: Optional[Path] = typer.Option(
+        None,
+        "--project",
+        help="Project directory to use with --install-target project",
     ),
 ) -> None:
     """Install a verifiers environment
@@ -1464,6 +1537,40 @@ def install(
 
         # De-dup environment IDs just in case
         env_ids = list(dict.fromkeys(env_ids))
+
+        install_target = install_target.lower().strip()
+        if install_target not in ["prime", "project", "system"]:
+            console.print(
+                "[red]Invalid install target. Use one of: prime, project, system.[/red]"
+            )
+            raise typer.Exit(1)
+
+        use_system = False
+        env_overrides: Optional[Dict[str, str]] = None
+        install_cwd: Optional[Path] = None
+        venv_path: Optional[Path] = None
+
+        if with_tool == "uv":
+            try:
+                use_system, env_overrides, install_cwd, venv_path = _resolve_uv_install_context(
+                    install_target, project
+                )
+            except ValueError as e:
+                console.print(f"[red]{e}[/red]")
+                raise typer.Exit(1)
+
+            if use_system:
+                console.print(
+                    "[yellow]Installing into system Python with `uv pip install --system`.[/yellow]"
+                )
+            elif venv_path:
+                label = "Prime managed" if install_target == "prime" else "Project"
+                console.print(f"[dim]{label} environment: {venv_path}[/dim]")
+        else:
+            if install_target != "system":
+                console.print(
+                    "[yellow]--install-target only applies to uv; pip will use the current Python environment.[/yellow]"
+                )
 
         use_system = False
         if with_tool == "uv" and not _has_uv_environment():
@@ -1560,7 +1667,7 @@ def install(
         )
         for cmd_parts, env_id, target_version, name in installable_envs:
             try:
-                execute_install_command(cmd_parts, env_id, target_version, with_tool)
+                execute_install_command(cmd_parts, env_id, target_version, with_tool, env=env_overrides, cwd=install_cwd)
                 installed_envs.append((env_id, target_version))
 
                 # Display usage instructions
@@ -1583,6 +1690,12 @@ def install(
             )
             for env_id, version in installed_envs:
                 console.print(f"[green]✓ {env_id}@{version}[/green]")
+
+        if venv_path and with_tool == "uv" and not use_system:
+            activate_path = _venv_bin_dir(venv_path) / ("activate.bat" if os.name == "nt" else "activate")
+            console.print(f"
+[dim]Installed into virtual environment: {venv_path}[/dim]")
+            console.print(f"[dim]Activate with: {activate_path}[/dim]")
 
         if install_failed_envs:
             console.print(
@@ -1658,6 +1771,19 @@ def uninstall(
         "uv",
         "--with",
         help="Package manager to use (uv or pip)",
+    ),
+    install_target: str = typer.Option(
+        "prime",
+        "--install-target",
+        help=(
+            "Where to install environments when using uv: prime (managed), "
+            "project (.venv), or system"
+        ),
+    ),
+    project: Optional[Path] = typer.Option(
+        None,
+        "--project",
+        help="Project directory to use with --install-target project",
     ),
 ) -> None:
     """Uninstall a verifiers environment
@@ -1907,14 +2033,26 @@ def delete(
         raise typer.Exit(1)
 
 
-def _is_environment_installed(env_name: str, required_version: Optional[str] = None) -> bool:
+def _is_environment_installed(
+    env_name: str,
+    required_version: Optional[str] = None,
+    use_system: bool = False,
+    env: Optional[Dict[str, str]] = None,
+    cwd: Optional[Path] = None,
+) -> bool:
     """Check if an environment package is installed."""
     try:
         pkg_name = normalize_package_name(env_name)
+        cmd = ["uv", "pip", "show"]
+        if use_system:
+            cmd.append("--system")
+        cmd.append(pkg_name)
         result = subprocess.run(
-            ["uv", "pip", "show", pkg_name],
+            cmd,
             capture_output=True,
             text=True,
+            env=env,
+            cwd=str(cwd) if cwd else None,
         )
 
         if result.returncode != 0:
@@ -1931,115 +2069,6 @@ def _is_environment_installed(env_name: str, required_version: Optional[str] = N
     except Exception:
         return False
 
-
-def _build_install_command(
-    name: str,
-    version: str,
-    simple_index_url: Optional[str],
-    wheel_url: Optional[str],
-    tool: str = "uv",
-    use_system: bool = False,
-) -> Optional[List[str]]:
-    """Build install command for an environment. Returns None if no install method available."""
-    normalized_name = normalize_package_name(name)
-
-    if simple_index_url:
-        if tool == "uv":
-            base_cmd = ["uv", "pip", "install"]
-            if use_system:
-                base_cmd.append("--system")
-            base_cmd.append("--upgrade")
-            if version and version != "latest":
-                return [
-                    *base_cmd,
-                    f"{normalized_name}=={version}",
-                    "--extra-index-url",
-                    simple_index_url,
-                ]
-            return [
-                *base_cmd,
-                normalized_name,
-                "--extra-index-url",
-                simple_index_url,
-            ]
-        else:  # pip
-            if version and version != "latest":
-                return [
-                    "pip",
-                    "install",
-                    "--upgrade",
-                    f"{normalized_name}=={version}",
-                    "--extra-index-url",
-                    simple_index_url,
-                ]
-            return [
-                "pip",
-                "install",
-                "--upgrade",
-                normalized_name,
-                "--extra-index-url",
-                simple_index_url,
-            ]
-    elif wheel_url:
-        try:
-            return get_install_command(tool, wheel_url, use_system=use_system)
-        except ValueError:
-            return None
-
-    return None
-
-
-def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
-    """Install a single environment from the hub. Returns True on success."""
-    try:
-        env_id, version = validate_env_id(env_slug)
-    except ValueError as e:
-        console.print(f"[red]Invalid environment format: {e}[/red]")
-        return False
-
-    owner, name = env_id.split("/")
-
-    try:
-        client = APIClient(require_auth=False)
-        details = fetch_environment_details(client, owner, name, version)
-    except APIError as e:
-        console.print(f"[red]Failed to find environment {env_slug}: {e}[/red]")
-        return False
-
-    simple_index_url = details.get("simple_index_url")
-    wheel_url = process_wheel_url(details.get("wheel_url"))
-
-    use_system = False
-    if tool == "uv" and not _has_uv_environment():
-        use_system = True
-        console.print(
-            "[yellow]No virtual environment detected. Installing into system Python with `uv pip install --system`.[/yellow]"
-        )
-        console.print(
-            "[dim]Tip: run `uv venv` (or activate your venv) to install into a virtual environment.[/dim]"
-        )
-
-    if not simple_index_url and not wheel_url:
-        if details.get("visibility") == "PRIVATE":
-            console.print(
-                f"[red]Cannot install private environment {env_slug}.[/red]\n"
-                "[yellow]Use 'prime env pull' to download and install locally.[/yellow]"
-            )
-        else:
-            console.print(f"[red]No installation method available for {env_slug}[/red]")
-        return False
-
-    cmd_parts = _build_install_command(name, version, simple_index_url, wheel_url, tool, use_system=use_system)
-    if not cmd_parts:
-        console.print(f"[red]Failed to build install command for {env_slug}[/red]")
-        return False
-
-    try:
-        execute_install_command(cmd_parts, env_id, version, tool)
-        return True
-    except Exception as e:
-        console.print(f"[red]Installation failed: {e}[/red]")
-        return False
 
 
 def run_eval(
@@ -2061,6 +2090,8 @@ def run_eval(
     api_base_url: Optional[str],
     skip_upload: bool,
     env_path: Optional[str],
+    install_target: str = "prime",
+    project: Optional[Path] = None,
 ) -> None:
     """
     Run verifiers' vf-eval with Prime Inference
@@ -2072,6 +2103,24 @@ def run_eval(
     upstream_owner = None
     upstream_name = None
     env_name_for_vf_eval = environment
+
+    install_target = install_target.lower().strip()
+    if install_target not in ["prime", "project", "system"]:
+        console.print(
+            "[red]Invalid install target. Use one of: prime, project, system.[/red]"
+        )
+        raise typer.Exit(1)
+
+    use_system, uv_env, uv_cwd, venv_path = _resolve_uv_install_context(
+        install_target, project
+    )
+    if use_system:
+        console.print(
+            "[yellow]Using system Python for environment discovery/installation.[/yellow]"
+        )
+    elif venv_path:
+        label = "Prime managed" if install_target == "prime" else "Project"
+        console.print(f"[dim]{label} environment: {venv_path}[/dim]")
 
     if is_slug:
         env_slug = environment
@@ -2087,9 +2136,20 @@ def run_eval(
                 f"[dim]Using upstream environment {upstream_owner}/{upstream_name}[/dim]\n"
             )
 
-            if not _is_environment_installed(upstream_name, requested_version):
+            if not _is_environment_installed(
+                upstream_name,
+                requested_version,
+                use_system=use_system,
+                env=uv_env,
+                cwd=uv_cwd,
+            ):
                 console.print(f"[cyan]Installing {environment}...[/cyan]")
-                if not _install_single_environment(environment):
+                if not _install_single_environment(
+                    environment,
+                    use_system=use_system,
+                    env=uv_env,
+                    cwd=uv_cwd,
+                ):
                     raise typer.Exit(1)
                 console.print()
 
@@ -2147,7 +2207,10 @@ def run_eval(
             )
             raise typer.Exit(1)
 
-    cmd = ["uv", "run", "vf-eval", env_name_for_vf_eval]
+    cmd = ["uv", "run"]
+    if uv_env is not None and not use_system:
+        cmd.append("--active")
+    cmd += ["vf-eval", env_name_for_vf_eval]
 
     # Add chosen inference url
     cmd += ["-b", inference_url]
@@ -2156,7 +2219,7 @@ def run_eval(
     cmd += ["-m", model]
 
     # Environment modification may be necessary for passing in API key
-    env = os.environ.copy()
+    env = (uv_env.copy() if uv_env is not None else os.environ.copy())
 
     # API key var: respect --api-key-var if provided to this command, else inject PRIME_API_KEY
     if api_key_var:
@@ -2209,7 +2272,7 @@ def run_eval(
 
     # Execute; stream output directly
     try:
-        result = subprocess.run(cmd, env=env)
+        result = subprocess.run(cmd, env=env, cwd=str(uv_cwd) if uv_cwd else None)
         if result.returncode != 0:
             raise typer.Exit(result.returncode)
     except KeyboardInterrupt:

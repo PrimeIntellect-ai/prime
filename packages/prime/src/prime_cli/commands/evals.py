@@ -582,6 +582,19 @@ def run_eval_cmd(
             "(used to locate .prime/.env-metadata.json for upstream resolution)"
         ),
     ),
+    install_target: str = typer.Option(
+        "prime",
+        "--install-target",
+        help=(
+            "Where to install environments with uv: prime (managed), "
+            "project (.venv), or system"
+        ),
+    ),
+    project: Optional[Path] = typer.Option(
+        None,
+        "--project",
+        help="Project directory to use with --install-target project",
+    ),
 ) -> None:
     """
     Run verifiers' vf-eval with Prime Inference.
@@ -609,4 +622,6 @@ def run_eval_cmd(
         api_base_url=api_base_url,
         skip_upload=skip_upload,
         env_path=env_path,
+        install_target=install_target,
+        project=project,
     )

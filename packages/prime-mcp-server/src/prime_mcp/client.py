@@ -11,24 +11,14 @@ async def make_prime_request(
     params: dict[str, Any] | None = None,
     json_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Make a request to the PrimeIntellect API with proper error handling.
-
-    Args:
-        method: HTTP method (GET, POST, DELETE, PATCH)
-        endpoint: API endpoint (e.g., "/pods", "availability/")
-        params: Query parameters for GET requests
-        json_data: JSON body for POST/PATCH requests
-
-    Returns:
-        API response as dictionary, or dict with "error" key on failure
-    """
+    """Make a request to the PrimeIntellect API with proper error handling."""
     try:
         if method == "GET":
             return await _client.get(endpoint, params=params)
         elif method == "POST":
             return await _client.post(endpoint, json=json_data)
         elif method == "DELETE":
-            return await _client.delete(endpoint)
+            return await _client.delete(endpoint, json=json_data)
         elif method == "PATCH":
             return await _client.patch(endpoint, json=json_data)
         else:

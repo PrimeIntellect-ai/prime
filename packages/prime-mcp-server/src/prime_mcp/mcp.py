@@ -261,10 +261,10 @@ async def create_sandbox(
     cpu_cores: int = 1,
     memory_gb: int = 2,
     disk_size_gb: int = 5,
-    gpu_count: int = 0,
     network_access: bool = True,
     timeout_minutes: int = 60,
     environment_vars: dict[str, str] | None = None,
+    secrets: dict[str, str] | None = None,
     labels: list[str] | None = None,
     team_id: str | None = None,
     registry_credentials_id: str | None = None,
@@ -289,13 +289,13 @@ async def create_sandbox(
         docker_image: Docker image to use (default: "python:3.11-slim")
             Popular options: python:3.11-slim, ubuntu:22.04, node:20-slim
         start_command: Command to run on startup (default: "tail -f /dev/null")
-        cpu_cores: Number of CPU cores (default: 1, min: 1)
-        memory_gb: Memory in GB (default: 2, min: 1)
-        disk_size_gb: Disk size in GB (default: 5, min: 1)
-        gpu_count: Number of GPUs (default: 0)
+        cpu_cores: Number of CPU cores (1-16, default: 1)
+        memory_gb: Memory in GB (1-64, default: 2)
+        disk_size_gb: Disk size in GB (1-1000, default: 5)
         network_access: Enable network access (default: True)
-        timeout_minutes: Auto-termination timeout (default: 60 minutes)
+        timeout_minutes: Auto-termination timeout (1-1440 minutes, default: 60)
         environment_vars: Environment variables as key-value pairs
+        secrets: Sensitive environment variables (e.g., API keys) - stored securely
         labels: Labels for organizing and filtering sandboxes
         team_id: Team ID for organization accounts
         registry_credentials_id: ID for private Docker registry credentials
@@ -310,10 +310,10 @@ async def create_sandbox(
         cpu_cores=cpu_cores,
         memory_gb=memory_gb,
         disk_size_gb=disk_size_gb,
-        gpu_count=gpu_count,
         network_access=network_access,
         timeout_minutes=timeout_minutes,
         environment_vars=environment_vars,
+        secrets=secrets,
         labels=labels,
         team_id=team_id,
         registry_credentials_id=registry_credentials_id,
@@ -464,24 +464,29 @@ async def expose_sandbox_port(
     sandbox_id: str,
     port: int,
     name: str | None = None,
+    protocol: str = "HTTP",
 ) -> dict:
-    """Expose an HTTP port from a sandbox to the internet.
+    """Expose a port from a sandbox to the internet.
 
     Creates a public URL that routes traffic to the specified port.
     Useful for web servers, APIs, Jupyter notebooks, Streamlit apps, etc.
 
     Args:
         sandbox_id: Unique identifier of the sandbox
-        port: Port number to expose (1-65535, e.g., 8080, 8888, 3000)
+        port: Port number to expose (22-9000, excluding 8080 which is reserved)
         name: Optional friendly name for the exposure
+        protocol: Protocol type - HTTP (default), TCP, or UDP
 
     Returns:
         Exposure details including:
         - exposure_id: ID to use for unexpose_sandbox_port()
-        - url: Public URL to access the service
-        - port: The exposed port number
+        - url: Public URL to access the service (for HTTP)
+        - tls_socket: TLS socket address
+        - external_port: External port (for TCP/UDP)
     """
-    return await sandboxes.expose_port(sandbox_id=sandbox_id, port=port, name=name)
+    return await sandboxes.expose_port(
+        sandbox_id=sandbox_id, port=port, name=name, protocol=protocol
+    )
 
 
 @mcp.tool()

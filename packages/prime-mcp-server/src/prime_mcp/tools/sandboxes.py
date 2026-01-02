@@ -1,6 +1,49 @@
 from typing import Any, Optional
 
+import httpx
+
 from prime_mcp.client import make_prime_request
+
+
+async def _get_sandbox_auth(sandbox_id: str) -> dict[str, Any]:
+    """Get gateway auth credentials (gateway_url, token, user_ns, job_id)."""
+    response = await make_prime_request("POST", f"sandbox/{sandbox_id}/auth")
+    if not response or "error" in response:
+        raise RuntimeError(f"Failed to get sandbox auth: {response}")
+    return response
+
+
+async def _gateway_request(
+    method: str,
+    gateway_url: str,
+    user_ns: str,
+    job_id: str,
+    endpoint: str,
+    token: str,
+    json_data: Optional[dict[str, Any]] = None,
+    timeout: int = 300,
+) -> dict[str, Any]:
+    """Make an authenticated request to the sandbox gateway."""
+    url = f"{gateway_url.rstrip('/')}/{user_ns}/{job_id}/{endpoint}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(timeout=timeout + 5) as client:
+        if method == "POST":
+            response = await client.post(url, json=json_data, headers=headers)
+        elif method == "GET":
+            response = await client.get(url, headers=headers)
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+
+        if response.status_code == 404:
+            raise RuntimeError("Sandbox not found or not running")
+        elif response.status_code == 408:
+            raise RuntimeError("Command timed out")
+        elif response.status_code == 503:
+            raise RuntimeError("Sandbox service unavailable")
+
+        response.raise_for_status()
+        return response.json()
 
 
 async def create_sandbox(
@@ -10,48 +53,23 @@ async def create_sandbox(
     cpu_cores: int = 1,
     memory_gb: int = 2,
     disk_size_gb: int = 5,
-    gpu_count: int = 0,
     network_access: bool = True,
     timeout_minutes: int = 60,
     environment_vars: Optional[dict[str, str]] = None,
+    secrets: Optional[dict[str, str]] = None,
     labels: Optional[list[str]] = None,
     team_id: Optional[str] = None,
     registry_credentials_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Create a new sandbox for isolated code execution.
-
-    A sandbox is a containerized environment where you can safely execute code,
-    run commands, and manage files in isolation.
-
-    Args:
-        name: Name for the sandbox (required)
-        docker_image: Docker image to use (default: "python:3.11-slim")
-        start_command: Command to run on startup (default: "tail -f /dev/null")
-        cpu_cores: Number of CPU cores (default: 1, min: 1)
-        memory_gb: Memory in GB (default: 2, min: 1)
-        disk_size_gb: Disk size in GB (default: 5, min: 1)
-        gpu_count: Number of GPUs (default: 0)
-        network_access: Enable network access (default: True)
-        timeout_minutes: Timeout before auto-termination (default: 60)
-        environment_vars: Environment variables as key-value pairs
-        labels: Labels for organizing and filtering sandboxes
-        team_id: Team ID for organization accounts
-        registry_credentials_id: ID of registry credentials for private images
-
-    Returns:
-        Created sandbox details including ID, status, and configuration
-    """
-    # Validate parameters
-    if cpu_cores < 1:
-        return {"error": "cpu_cores must be at least 1"}
-    if memory_gb < 1:
-        return {"error": "memory_gb must be at least 1"}
-    if disk_size_gb < 1:
-        return {"error": "disk_size_gb must be at least 1"}
-    if gpu_count < 0:
-        return {"error": "gpu_count cannot be negative"}
-    if timeout_minutes < 1:
-        return {"error": "timeout_minutes must be at least 1"}
+    """Create a new sandbox for isolated code execution."""
+    if cpu_cores < 1 or cpu_cores > 16:
+        return {"error": "cpu_cores must be between 1 and 16"}
+    if memory_gb < 1 or memory_gb > 64:
+        return {"error": "memory_gb must be between 1 and 64"}
+    if disk_size_gb < 1 or disk_size_gb > 1000:
+        return {"error": "disk_size_gb must be between 1 and 1000"}
+    if timeout_minutes < 1 or timeout_minutes > 1440:
+        return {"error": "timeout_minutes must be between 1 and 1440 (24 hours)"}
 
     request_body: dict[str, Any] = {
         "name": name,
@@ -59,7 +77,7 @@ async def create_sandbox(
         "cpu_cores": cpu_cores,
         "memory_gb": memory_gb,
         "disk_size_gb": disk_size_gb,
-        "gpu_count": gpu_count,
+        "gpu_count": 0,  # GPU support not yet available
         "network_access": network_access,
         "timeout_minutes": timeout_minutes,
     }
@@ -68,6 +86,8 @@ async def create_sandbox(
         request_body["start_command"] = start_command
     if environment_vars:
         request_body["environment_vars"] = environment_vars
+    if secrets:
+        request_body["secrets"] = secrets
     if labels:
         request_body["labels"] = labels
     if team_id:
@@ -91,19 +111,7 @@ async def list_sandboxes(
     per_page: int = 50,
     exclude_terminated: bool = False,
 ) -> dict[str, Any]:
-    """List all sandboxes in your account.
-
-    Args:
-        team_id: Filter by team ID
-        status: Filter by status (PENDING, PROVISIONING, RUNNING, STOPPED, ERROR, TERMINATED)
-        labels: Filter by labels
-        page: Page number for pagination (default: 1)
-        per_page: Results per page (default: 50, max: 100)
-        exclude_terminated: Exclude terminated sandboxes (default: False)
-
-    Returns:
-        List of sandboxes with pagination info
-    """
+    """List all sandboxes in your account."""
     params: dict[str, Any] = {"page": max(1, page), "per_page": min(100, max(1, per_page))}
 
     if team_id:
@@ -124,14 +132,7 @@ async def list_sandboxes(
 
 
 async def get_sandbox(sandbox_id: str) -> dict[str, Any]:
-    """Get detailed information about a specific sandbox.
-
-    Args:
-        sandbox_id: Unique identifier of the sandbox
-
-    Returns:
-        Detailed sandbox information including status, configuration, and timestamps
-    """
+    """Get detailed information about a specific sandbox."""
     if not sandbox_id:
         return {"error": "sandbox_id is required"}
 
@@ -144,14 +145,7 @@ async def get_sandbox(sandbox_id: str) -> dict[str, Any]:
 
 
 async def delete_sandbox(sandbox_id: str) -> dict[str, Any]:
-    """Delete/terminate a sandbox.
-
-    Args:
-        sandbox_id: Unique identifier of the sandbox to delete
-
-    Returns:
-        Deletion confirmation
-    """
+    """Delete/terminate a sandbox."""
     if not sandbox_id:
         return {"error": "sandbox_id is required"}
 
@@ -167,17 +161,7 @@ async def bulk_delete_sandboxes(
     sandbox_ids: Optional[list[str]] = None,
     labels: Optional[list[str]] = None,
 ) -> dict[str, Any]:
-    """Bulk delete multiple sandboxes by IDs or labels.
-
-    You must specify either sandbox_ids OR labels, but not both.
-
-    Args:
-        sandbox_ids: List of sandbox IDs to delete
-        labels: Delete all sandboxes with these labels
-
-    Returns:
-        Results showing succeeded and failed deletions
-    """
+    """Bulk delete multiple sandboxes by IDs or labels."""
     if not sandbox_ids and not labels:
         return {"error": "Must specify either sandbox_ids or labels"}
     if sandbox_ids and labels:
@@ -198,14 +182,7 @@ async def bulk_delete_sandboxes(
 
 
 async def get_sandbox_logs(sandbox_id: str) -> dict[str, Any]:
-    """Get logs from a sandbox.
-
-    Args:
-        sandbox_id: Unique identifier of the sandbox
-
-    Returns:
-        Sandbox logs as text
-    """
+    """Get logs from a sandbox."""
     if not sandbox_id:
         return {"error": "sandbox_id is required"}
 
@@ -224,21 +201,7 @@ async def execute_command(
     env: Optional[dict[str, str]] = None,
     timeout: int = 300,
 ) -> dict[str, Any]:
-    """Execute a command in a sandbox.
-
-    IMPORTANT: The sandbox must be in RUNNING status before executing commands.
-    Use get_sandbox() to check status first.
-
-    Args:
-        sandbox_id: Unique identifier of the sandbox
-        command: Command to execute (shell command)
-        working_dir: Working directory for the command (optional)
-        env: Additional environment variables (optional)
-        timeout: Command timeout in seconds (default: 300)
-
-    Returns:
-        Command result with stdout, stderr, and exit_code
-    """
+    """Execute a command in a sandbox via the gateway."""
     if not sandbox_id:
         return {"error": "sandbox_id is required"}
     if not command:
@@ -246,52 +209,68 @@ async def execute_command(
     if timeout < 1:
         return {"error": "timeout must be at least 1 second"}
 
-    request_body: dict[str, Any] = {
-        "command": command,
-        "timeout": timeout,
-    }
+    try:
+        auth = await _get_sandbox_auth(sandbox_id)
 
-    if working_dir:
-        request_body["working_dir"] = working_dir
-    if env:
-        request_body["env"] = env
+        gateway_url = auth.get("gateway_url")
+        token = auth.get("token")
+        user_ns = auth.get("user_ns")
+        job_id = auth.get("job_id")
 
-    # Note: Command execution goes through the gateway, not the main API
-    # The MCP client needs to handle this specially - for now we route through backend
-    response = await make_prime_request(
-        "POST", f"sandbox/{sandbox_id}/exec", json_data=request_body
-    )
+        if not all([gateway_url, token, user_ns, job_id]):
+            return {"error": "Invalid auth response from sandbox"}
 
-    if not response:
-        return {"error": f"Unable to execute command in sandbox: {sandbox_id}"}
+        request_body: dict[str, Any] = {
+            "command": command,
+            "timeout": timeout,
+            "sandbox_id": sandbox_id,
+            "env": env or {},
+        }
 
-    return response
+        if working_dir:
+            request_body["working_dir"] = working_dir
+
+        response = await _gateway_request(
+            method="POST",
+            gateway_url=gateway_url,
+            user_ns=user_ns,
+            job_id=job_id,
+            endpoint="exec",
+            token=token,
+            json_data=request_body,
+            timeout=timeout,
+        )
+
+        return response
+
+    except httpx.TimeoutException:
+        return {"error": f"Command timed out after {timeout} seconds"}
+    except httpx.HTTPStatusError as e:
+        return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
+    except RuntimeError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Failed to execute command: {str(e)}"}
 
 
 async def expose_port(
     sandbox_id: str,
     port: int,
     name: Optional[str] = None,
+    protocol: str = "HTTP",
 ) -> dict[str, Any]:
-    """Expose an HTTP port from a sandbox to the internet.
+    """Expose a port from a sandbox to the internet."""
 
-    Creates a public URL that routes traffic to the specified port in the sandbox.
-    Useful for web servers, APIs, Jupyter notebooks, etc.
-
-    Args:
-        sandbox_id: Unique identifier of the sandbox
-        port: Port number to expose (e.g., 8080, 8888)
-        name: Optional friendly name for the exposure
-
-    Returns:
-        Exposure details including the public URL
-    """
     if not sandbox_id:
         return {"error": "sandbox_id is required"}
-    if not port or port < 1 or port > 65535:
-        return {"error": "port must be between 1 and 65535"}
+    if not port or port < 22 or port > 9000:
+        return {"error": "port must be between 22 and 9000"}
+    if port == 8080:
+        return {"error": "port 8080 is reserved and cannot be exposed"}
+    if protocol.upper() not in ("HTTP", "TCP", "UDP"):
+        return {"error": "protocol must be HTTP, TCP, or UDP"}
 
-    request_body: dict[str, Any] = {"port": port}
+    request_body: dict[str, Any] = {"port": port, "protocol": protocol.upper()}
     if name:
         request_body["name"] = name
 
@@ -306,15 +285,7 @@ async def expose_port(
 
 
 async def unexpose_port(sandbox_id: str, exposure_id: str) -> dict[str, Any]:
-    """Remove a port exposure from a sandbox.
-
-    Args:
-        sandbox_id: Unique identifier of the sandbox
-        exposure_id: ID of the exposure to remove
-
-    Returns:
-        Confirmation of removal
-    """
+    """Remove a port exposure from a sandbox."""
     if not sandbox_id:
         return {"error": "sandbox_id is required"}
     if not exposure_id:
@@ -329,14 +300,7 @@ async def unexpose_port(sandbox_id: str, exposure_id: str) -> dict[str, Any]:
 
 
 async def list_exposed_ports(sandbox_id: str) -> dict[str, Any]:
-    """List all exposed ports for a sandbox.
-
-    Args:
-        sandbox_id: Unique identifier of the sandbox
-
-    Returns:
-        List of exposed ports with their URLs
-    """
+    """List all exposed ports for a sandbox."""
     if not sandbox_id:
         return {"error": "sandbox_id is required"}
 
@@ -349,11 +313,7 @@ async def list_exposed_ports(sandbox_id: str) -> dict[str, Any]:
 
 
 async def list_registry_credentials() -> dict[str, Any]:
-    """List available registry credentials for private Docker images.
-
-    Returns:
-        List of registry credentials (without secrets)
-    """
+    """List available registry credentials for private Docker images."""
     response = await make_prime_request("GET", "template/registry-credentials")
 
     if not response:
@@ -366,15 +326,7 @@ async def check_docker_image(
     image: str,
     registry_credentials_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Check if a Docker image is accessible.
-
-    Args:
-        image: Docker image name (e.g., "python:3.11-slim", "ghcr.io/org/image:tag")
-        registry_credentials_id: Optional credentials ID for private registries
-
-    Returns:
-        Whether the image is accessible and any details
-    """
+    """Check if a Docker image is accessible."""
     if not image:
         return {"error": "image is required"}
 

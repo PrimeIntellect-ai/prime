@@ -110,8 +110,8 @@ class AsyncAPIClient:
     async def patch(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return await self.request("PATCH", endpoint, json=json)
 
-    async def delete(self, endpoint: str) -> Dict[str, Any]:
-        return await self.request("DELETE", endpoint)
+    async def delete(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return await self.request("DELETE", endpoint, json=json)
 
     async def aclose(self) -> None:
         await self.client.aclose()

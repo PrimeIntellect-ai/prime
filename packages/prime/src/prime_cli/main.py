@@ -17,6 +17,7 @@ from .commands.pods import app as pods_app
 from .commands.registry import app as registry_app
 from .commands.sandbox import app as sandbox_app
 from .commands.teams import app as teams_app
+from .commands.tunnel import app as tunnel_app
 from .commands.whoami import app as whoami_app
 from .core import Config
 from .utils.version_check import check_for_update
@@ -40,6 +41,7 @@ app.add_typer(images_app, name="images")
 app.add_typer(inference_app, name="inference")
 app.add_typer(whoami_app, name="whoami")
 app.add_typer(teams_app, name="teams")
+app.add_typer(tunnel_app, name="tunnel")
 app.add_typer(evals_app, name="eval")
 
 

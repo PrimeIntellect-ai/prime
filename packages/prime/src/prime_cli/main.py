@@ -1,3 +1,4 @@
+import os
 import sys
 from typing import Optional
 
@@ -60,8 +61,6 @@ def callback(
         raise typer.Exit()
 
     if context:
-        import os
-
         config = Config()
         # Check if the context exists
         if context.lower() != "production" and context not in config.list_environments():
@@ -76,15 +75,28 @@ def callback(
 
     # Check for updates (only when a subcommand is being executed)
     if ctx.invoked_subcommand is not None:
+        console = Console(stderr=True, force_terminal=sys.stderr.isatty())
+
         update_available, latest = check_for_update()
         if update_available and latest:
-            console = Console(stderr=True, force_terminal=sys.stderr.isatty())
             console.print(
                 f"[yellow]A new version of prime is available: {latest} "
                 f"(installed: {__version__})[/yellow]"
             )
             console.print("[dim]Run: uv pip install --upgrade prime or uv tool upgrade prime[/dim]")
             console.print("[dim]Set PRIME_DISABLE_VERSION_CHECK=1 to disable this check[/dim]\n")
+
+        config = Config()
+        if config.team_id and os.environ.get("PRIME_DISABLE_TEAM_NOTICE", "").lower() not in (
+            "1",
+            "true",
+            "yes",
+        ):
+            team_display = (
+                config.team_id if config.team_id_from_env else (config.team_name or config.team_id)
+            )
+            suffix = " (from env var)" if config.team_id_from_env else ""
+            console.print(f"[dim]Using team account: {team_display}{suffix}[/dim]\n")
 
 
 def run() -> None:

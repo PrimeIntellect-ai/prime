@@ -1465,6 +1465,16 @@ def install(
         # De-dup environment IDs just in case
         env_ids = list(dict.fromkeys(env_ids))
 
+        use_system = False
+        if with_tool == "uv" and not _has_uv_environment():
+            use_system = True
+            console.print(
+                "[yellow]No virtual environment detected. Installing into system Python with `uv pip install --system`.[/yellow]"
+            )
+            console.print(
+                "[dim]Tip: run `uv venv` (or activate your venv) to install into a virtual environment.[/dim]"
+            )
+
         # Resolving and validating environments
         installable_envs = []
         failed_envs = []
@@ -1525,7 +1535,7 @@ def install(
             console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
 
             cmd_parts = _build_install_command(
-                name, target_version, simple_index_url, wheel_url, with_tool
+                name, target_version, simple_index_url, wheel_url, with_tool, use_system=use_system
             )
             if not cmd_parts:
                 skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))

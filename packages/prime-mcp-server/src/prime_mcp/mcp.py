@@ -464,9 +464,8 @@ async def expose_sandbox_port(
     sandbox_id: str,
     port: int,
     name: str | None = None,
-    protocol: str = "HTTP",
 ) -> dict:
-    """Expose a port from a sandbox to the internet.
+    """Expose an HTTP port from a sandbox to the internet.
 
     Creates a public URL that routes traffic to the specified port.
     Useful for web servers, APIs, Jupyter notebooks, Streamlit apps, etc.
@@ -475,18 +474,14 @@ async def expose_sandbox_port(
         sandbox_id: Unique identifier of the sandbox
         port: Port number to expose (22-9000, excluding 8080 which is reserved)
         name: Optional friendly name for the exposure
-        protocol: Protocol type - HTTP (default), TCP, or UDP
 
     Returns:
         Exposure details including:
         - exposure_id: ID to use for unexpose_sandbox_port()
-        - url: Public URL to access the service (for HTTP)
+        - url: Public URL to access the service
         - tls_socket: TLS socket address
-        - external_port: External port (for TCP/UDP)
     """
-    return await sandboxes.expose_port(
-        sandbox_id=sandbox_id, port=port, name=name, protocol=protocol
-    )
+    return await sandboxes.expose_port(sandbox_id=sandbox_id, port=port, name=name)
 
 
 @mcp.tool()

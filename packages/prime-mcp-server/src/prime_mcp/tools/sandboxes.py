@@ -87,7 +87,7 @@ async def list_sandboxes(
             labels=labels,
             page=page,
             per_page=per_page,
-            exclude_terminated=exclude_terminated if exclude_terminated else None,
+            exclude_terminated=exclude_terminated,
         )
         return {
             "sandboxes": [s.model_dump(by_alias=True) for s in response.sandboxes],
@@ -199,9 +199,8 @@ async def expose_port(
     sandbox_id: str,
     port: int,
     name: Optional[str] = None,
-    protocol: str = "HTTP",
 ) -> dict[str, Any]:
-    """Expose a port from a sandbox to the internet."""
+    """Expose an HTTP port from a sandbox to the internet."""
     if not sandbox_id:
         return {"error": "sandbox_id is required"}
     if not port or port < 22 or port > 9000:
@@ -210,7 +209,6 @@ async def expose_port(
         return {"error": "port 8080 is reserved and cannot be exposed"}
     try:
         client = _get_sandbox_client()
-        # Note: SDK ExposePortRequest doesn't have protocol yet, pass name only
         result = await client.expose(sandbox_id=sandbox_id, port=port, name=name)
         return result.model_dump()
     except APIError as e:

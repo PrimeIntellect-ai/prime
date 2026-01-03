@@ -14,11 +14,8 @@ from .commands.images import app as images_app
 from .commands.inference import app as inference_app
 from .commands.login import app as login_app
 from .commands.pods import app as pods_app
-<<<<<<< HEAD
-from .commands.rl import app as rl_app
-=======
 from .commands.registry import app as registry_app
->>>>>>> db0ab1d (prime registry support (#215))
+from .commands.rl import app as rl_app
 from .commands.sandbox import app as sandbox_app
 from .commands.teams import app as teams_app
 from .commands.whoami import app as whoami_app
@@ -48,7 +45,8 @@ app.add_typer(availability_app, name="availability", rich_help_panel="Compute")
 app.add_typer(disks_app, name="disks", rich_help_panel="Compute")
 app.add_typer(pods_app, name="pods", rich_help_panel="Compute")
 app.add_typer(sandbox_app, name="sandbox", rich_help_panel="Compute")
-app.add_typer(images_app, name="images")
+app.add_typer(images_app, name="images", rich_help_panel="Compute")
+app.add_typer(registry_app, name="registry", rich_help_panel="Compute")
 app.add_typer(inference_app, name="inference", rich_help_panel="Compute")
 
 

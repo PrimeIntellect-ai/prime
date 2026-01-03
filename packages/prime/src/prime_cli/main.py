@@ -15,6 +15,7 @@ from .commands.inference import app as inference_app
 from .commands.login import app as login_app
 from .commands.pods import app as pods_app
 from .commands.registry import app as registry_app
+from .commands.rl import app as rl_app
 from .commands.sandbox import app as sandbox_app
 from .commands.teams import app as teams_app
 from .commands.whoami import app as whoami_app
@@ -28,19 +29,25 @@ app = typer.Typer(
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 
-app.add_typer(availability_app, name="availability")
-app.add_typer(config_app, name="config")
-app.add_typer(disks_app, name="disks")
-app.add_typer(pods_app, name="pods")
-app.add_typer(sandbox_app, name="sandbox")
-app.add_typer(registry_app, name="registry")
-app.add_typer(login_app, name="login")
-app.add_typer(env_app, name="env")
-app.add_typer(images_app, name="images")
-app.add_typer(inference_app, name="inference")
-app.add_typer(whoami_app, name="whoami")
-app.add_typer(teams_app, name="teams")
-app.add_typer(evals_app, name="eval")
+# Account commands
+app.add_typer(login_app, name="login", rich_help_panel="Account")
+app.add_typer(whoami_app, name="whoami", rich_help_panel="Account")
+app.add_typer(config_app, name="config", rich_help_panel="Account")
+app.add_typer(teams_app, name="teams", rich_help_panel="Account")
+
+# Lab commands
+app.add_typer(env_app, name="env", rich_help_panel="Lab")
+app.add_typer(evals_app, name="eval", rich_help_panel="Lab")
+app.add_typer(rl_app, name="rl", rich_help_panel="Lab")
+
+# Compute commands
+app.add_typer(availability_app, name="availability", rich_help_panel="Compute")
+app.add_typer(disks_app, name="disks", rich_help_panel="Compute")
+app.add_typer(pods_app, name="pods", rich_help_panel="Compute")
+app.add_typer(sandbox_app, name="sandbox", rich_help_panel="Compute")
+app.add_typer(images_app, name="images", rich_help_panel="Compute")
+app.add_typer(registry_app, name="registry", rich_help_panel="Compute")
+app.add_typer(inference_app, name="inference", rich_help_panel="Compute")
 
 
 @app.callback(invoke_without_command=True)

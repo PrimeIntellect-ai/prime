@@ -1,6 +1,7 @@
 """Shared utilities for CLI commands."""
 
 # Re-export the most commonly used functions
+from .config import BaseConfig, load_toml
 from .display import build_table, output_data_as_json, status_color, validate_output_format
 from .formatters import (
     format_ip_display,
@@ -26,4 +27,6 @@ __all__ = [
     "format_price",
     "format_resources",
     "confirm_or_skip",
+    "load_toml",
+    "BaseConfig",
 ]

@@ -33,6 +33,7 @@ class RLRun(BaseModel):
     base_model: str = Field(..., alias="baseModel")
     environments: List[Dict[str, Any]] = Field(default_factory=list)
     run_config: Optional[Dict[str, Any]] = Field(None, alias="runConfig")
+    eval_config: Optional[Dict[str, Any]] = Field(None, alias="evalConfig")
 
     # Monitoring
     wandb_entity: Optional[str] = Field(None, alias="wandbEntity")
@@ -94,6 +95,7 @@ class RLClient:
         wandb_api_key: Optional[str] = None,
         team_id: Optional[str] = None,
         run_config: Optional[Dict[str, Any]] = None,
+        eval_config: Optional[Dict[str, Any]] = None,
     ) -> RLRun:
         """Create a new RL training run."""
         try:
@@ -131,6 +133,9 @@ class RLClient:
             if run_config:
                 payload["run_config"] = run_config
 
+            if eval_config:
+                payload["eval"] = eval_config
+
             response = self.client.post("/rft/runs", json=payload)
             return RLRun.model_validate(response.get("run"))
         except Exception as e:
@@ -157,3 +162,14 @@ class RLClient:
                 raise APIError(f"Failed to delete RL run: {e.response.text}")
             raise APIError(f"Failed to delete RL run: {str(e)}")
 
+    def get_logs(self, run_id: str, tail_lines: int = 1000) -> str:
+        """Get logs for an RL run."""
+        try:
+            response = self.client.get(
+                f"/rft/runs/{run_id}/logs", params={"tail_lines": tail_lines}
+            )
+            return response.get("logs", "")
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to get RL run logs: {e.response.text}")
+            raise APIError(f"Failed to get RL run logs: {str(e)}")

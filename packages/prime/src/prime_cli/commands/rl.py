@@ -1,6 +1,8 @@
 """RL (Reinforcement Learning) training commands."""
 
 import json
+import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -22,11 +24,56 @@ console = Console()
 # Default model for RL training
 DEFAULT_RL_MODEL = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
 
+# ANSI escape code pattern
+ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+# Progress bar pattern (tqdm-style progress bars)
+PROGRESS_BAR = re.compile(r".*\|[█▏▎▍▌▋▊▉ ]{10,}\|.*")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    return ANSI_ESCAPE.sub("", text)
+
+
+def filter_progress_bars(text: str) -> str:
+    """Filter out progress bar updates, keeping only 100% completion lines.
+
+    Progress bars from tqdm often appear as multiple updates on the same line
+    (due to carriage return handling). This extracts just the final 100% part.
+    """
+    lines = text.splitlines()
+    filtered = []
+    for line in lines:
+        # Check if line contains progress bars
+        if PROGRESS_BAR.search(line) or re.search(r"\d+%\|", line):
+            # If it has 100%, extract just that part
+            if "100%" in line:
+                # Find the last 100% progress bar and extract it
+                # Pattern: text before + "100%|...bars...|" + stats after
+                match = re.search(r"([^|]*100%\|[█▏▎▍▌▋▊▉ ]+\|[^\n]*?)(?=\d+%\||$)", line)
+                if match:
+                    filtered.append(match.group(1).strip())
+                else:
+                    # Fallback: just include the line
+                    filtered.append(line)
+            # Skip lines with only non-100% progress
+            continue
+        # Keep non-progress-bar lines, but skip empty lines
+        if line.strip():
+            filtered.append(line)
+    return "\n".join(filtered)
+
+
+def clean_logs(text: str) -> str:
+    """Clean logs by stripping ANSI codes and filtering progress bars."""
+    return filter_progress_bars(strip_ansi(text))
+
 
 def generate_rl_config_template(environment: str | None = None) -> str:
     """Generate a TOML config template for RL training."""
     env_value = environment or "your-username/your-environment"
-    
+
     return f'''\
 model = "{DEFAULT_RL_MODEL}"
 environments = ["{env_value}"]
@@ -43,6 +90,7 @@ seq_len = 4096    # max tokens per response
 # name = "experiment-1"
 '''
 
+
 class WandbConfig(BaseModel):
     """Weights & Biases configuration."""
 
@@ -50,6 +98,16 @@ class WandbConfig(BaseModel):
     project: str | None = None
     name: str | None = None
     api_key: str | None = None
+
+
+class EvalConfig(BaseModel):
+    """Evaluation configuration."""
+
+    environments: list[str] = Field(default_factory=list)
+    interval: int | None = None
+    num_examples: int | None = None
+    rollouts_per_example: int | None = None
+    base_model: bool | None = None  # whether to evaluate the base model before training
 
 
 class RLRunConfig(BaseConfig):
@@ -63,6 +121,7 @@ class RLRunConfig(BaseConfig):
     max_steps: int = 100
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     run_config: Optional[Dict[str, Any]] = Field(default=None)
+    eval: EvalConfig = Field(default_factory=EvalConfig)
 
 
 class DefaultGroup(TyperGroup):
@@ -111,8 +170,7 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     """Format run data for display (both table and JSON)."""
     created_at = run.created_at.strftime("%Y-%m-%d %H:%M") if run.created_at else ""
     env_names = [
-        env.get("slug") or env.get("name") or env.get("id") or "?"
-        for env in run.environments
+        env.get("slug") or env.get("name") or env.get("id") or "?" for env in run.environments
     ]
     envs_display = ", ".join(env_names[:3])
     if len(env_names) > 3:
@@ -149,9 +207,7 @@ def list_models(
 
         if not models:
             console.print("[yellow]No models available for RL training.[/yellow]")
-            console.print(
-                "[dim]This could mean no healthy RL clusters are running.[/dim]"
-            )
+            console.print("[dim]This could mean no healthy RL clusters are running.[/dim]")
             return
 
         table = Table(title="Prime RL — Models")
@@ -255,9 +311,7 @@ def delete_run(
     """Delete an RL training run."""
     try:
         if not force:
-            confirm = typer.confirm(
-                f"Are you sure you want to permanently delete run {run_id}?"
-            )
+            confirm = typer.confirm(f"Are you sure you want to permanently delete run {run_id}?")
             if not confirm:
                 console.print("Cancelled.")
                 raise typer.Exit(0)
@@ -273,15 +327,81 @@ def delete_run(
         raise typer.Exit(1)
 
 
+@subcommands_app.command("logs")
+def get_logs(
+    run_id: str = typer.Argument(..., help="Run ID to get logs for"),
+    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+) -> None:
+    """Get logs for an RL training run."""
+    try:
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+
+        if follow:
+            console.print(f"[dim]Watching logs for run {run_id}... (Ctrl+C to stop)[/dim]\n")
+            last_logs = ""
+            consecutive_errors = 0
+
+            while True:
+                try:
+                    logs = clean_logs(rl_client.get_logs(run_id, tail_lines=tail))
+                    consecutive_errors = 0
+
+                    if logs != last_logs:
+                        old_lines = last_logs.splitlines() if last_logs else []
+                        new_lines = logs.splitlines()
+
+                        if not last_logs:
+                            # First fetch, print everything
+                            for line in new_lines:
+                                console.print(line)
+                        else:
+                            # Find overlap between end of old_lines and start of new_lines
+                            # This handles both growth and rotation cases
+                            overlap = 0
+                            max_overlap = min(len(old_lines), len(new_lines))
+                            for i in range(1, max_overlap + 1):
+                                if old_lines[-i:] == new_lines[:i]:
+                                    overlap = i
+                            # Print lines after the overlap
+                            for line in new_lines[overlap:]:
+                                console.print(line)
+
+                        last_logs = logs
+                except APIError as e:
+                    consecutive_errors += 1
+                    if "429" in str(e):
+                        if consecutive_errors >= 3:
+                            console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
+                            time.sleep(30)
+                        else:
+                            time.sleep(10)
+                        continue
+                    raise
+
+                time.sleep(5)  # Poll every 5 seconds to avoid rate limits
+        else:
+            logs = clean_logs(rl_client.get_logs(run_id, tail_lines=tail))
+            if logs:
+                console.print(logs)
+            else:
+                console.print("[yellow]No logs available yet.[/yellow]")
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped watching logs.[/dim]")
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
 @subcommands_app.command("init")
 def init_config(
     output: str = typer.Argument(
         "configs/rl.toml",
         help="Output path for the config file",
     ),
-    force: bool = typer.Option(
-        False, "--force", "-f", help="Overwrite existing file"
-    ),
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing file"),
 ) -> None:
     """Generate a template TOML config file for RL training.
 
@@ -343,9 +463,7 @@ def create_run(
         None,
         help="Environment slugs to train on (e.g., 'owner/env-name')",
     ),
-    model: Optional[str] = typer.Option(
-        None, "-m", "--model", help="Model to fine-tune"
-    ),
+    model: Optional[str] = typer.Option(None, "-m", "--model", help="Model to fine-tune"),
     name: Optional[str] = typer.Option(
         None, "-n", "--name", help="Run name (auto-generated if not provided)"
     ),
@@ -383,11 +501,34 @@ def create_run(
         None,
         "--run-config",
         hidden=True,
-        help="Additional run configuration as JSON (admin only), e.g. '{\"key\": \"value\"}'",
+        help='Additional run configuration as JSON (admin only), e.g. \'{"key": "value"}\'',
     ),
-    output: str = typer.Option(
-        "table", "--output", "-o", help="Output format: table or json"
+    eval_envs: Optional[List[str]] = typer.Option(
+        None,
+        "--eval-envs",
+        help="Environments to evaluate on (e.g., 'owner/env-name')",
     ),
+    eval_interval: Optional[int] = typer.Option(
+        None,
+        "--eval-interval",
+        help="Evaluate every N training steps [default: 100]",
+    ),
+    eval_num_examples: Optional[int] = typer.Option(
+        None,
+        "--eval-num-examples",
+        help="Number of examples per eval environment (-1 for all) [default: -1]",
+    ),
+    eval_rollouts: Optional[int] = typer.Option(
+        None,
+        "--eval-rollouts",
+        help="Rollouts per example for evaluation [default: 1]",
+    ),
+    eval_base_model: Optional[bool] = typer.Option(
+        None,
+        "--eval-base-model/--no-eval-base-model",
+        help="Evaluate base model before training [default: True]",
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Configuration can be provided via CLI options, a TOML config file, or both.
     CLI options take precedence over config file values.
@@ -424,7 +565,7 @@ def create_run(
         except json.JSONDecodeError as e:
             console.print(
                 f"[red]Error:[/red] Invalid JSON in --run-config: {e}\n"
-                "  Expected format: --run-config '{\"key\": \"value\"}'"
+                '  Expected format: --run-config \'{"key": "value"}\''
             )
             raise typer.Exit(1)
 
@@ -447,7 +588,42 @@ def create_run(
         wandb_name=wandb_name,
         wandb_api_key=wandb_api_key,
         run_config=parsed_run_config,
+        # Eval options (underscore prefix maps to nested eval.* fields)
+        eval_environments=eval_envs or None,
+        eval_interval=eval_interval,
+        eval_num_examples=eval_num_examples,
+        eval_rollouts_per_example=eval_rollouts,
+        eval_base_model=eval_base_model,
     )
+
+    # Build eval config for API from merged cfg.eval
+    parsed_eval_config: Optional[Dict[str, Any]] = None
+    has_eval_options = any(
+        x is not None
+        for x in [
+            cfg.eval.interval,
+            cfg.eval.num_examples,
+            cfg.eval.rollouts_per_example,
+            cfg.eval.base_model,
+        ]
+    )
+    if has_eval_options and not cfg.eval.environments:
+        console.print(
+            "[yellow]Warning:[/yellow] Eval options require eval environments to take effect.\n"
+            "  Use --eval-envs or set [eval] environments in config file."
+        )
+    if cfg.eval.environments:
+        parsed_eval_config = {
+            "environments": [{"id": env} for env in cfg.eval.environments],
+        }
+        if cfg.eval.interval is not None:
+            parsed_eval_config["interval"] = cfg.eval.interval
+        if cfg.eval.num_examples is not None:
+            parsed_eval_config["num_examples"] = cfg.eval.num_examples
+        if cfg.eval.rollouts_per_example is not None:
+            parsed_eval_config["rollouts_per_example"] = cfg.eval.rollouts_per_example
+        if cfg.eval.base_model is not None:
+            parsed_eval_config["eval_base_model"] = cfg.eval.base_model
 
     # Validate required fields
     if not cfg.environments:
@@ -456,10 +632,26 @@ def create_run(
         )
         raise typer.Exit(1)
 
+    # Validate environment slug format
+    for env_slug in cfg.environments:
+        if "/" not in env_slug:
+            console.print(
+                f"[red]Error:[/red] Invalid environment format: '{env_slug}'. "
+                "Expected 'owner/name' format."
+            )
+            raise typer.Exit(1)
+
+    # Validate eval environment slug format
+    for env_slug in cfg.eval.environments:
+        if "/" not in env_slug:
+            console.print(
+                f"[red]Error:[/red] Invalid eval environment format: '{env_slug}'. "
+                "Expected 'owner/name' format."
+            )
+            raise typer.Exit(1)
+
     if not cfg.model:
-        console.print(
-            "[red]Error:[/red] No model specified. Use --model or set 'model' in config."
-        )
+        console.print("[red]Error:[/red] No model specified. Use --model or set 'model' in config.")
         raise typer.Exit(1)
 
     # Warn if wandb is configured but no API key is provided
@@ -476,15 +668,6 @@ def create_run(
 
         console.print("[bold]Creating RL training run...[/bold]\n")
 
-        # Validate environment slug format
-        for env_slug in cfg.environments:
-            if "/" not in env_slug:
-                console.print(
-                    f"[red]Error:[/red] Invalid environment format: '{env_slug}'. "
-                    "Expected 'owner/name' format."
-                )
-                raise typer.Exit(1)
-
         # Show configuration
         console.print("[bold]Configuration:[/bold]")
         if cfg.name:
@@ -498,6 +681,11 @@ def create_run(
             console.print(f"  W&B Project: {cfg.wandb.project}")
         if app_config.team_id:
             console.print(f"  Team: {app_config.team_id}")
+        if parsed_eval_config:
+            eval_env_ids = [e["id"] for e in parsed_eval_config.get("environments", [])]
+            console.print(f"  Eval Environments: {', '.join(eval_env_ids)}")
+            if "interval" in parsed_eval_config:
+                console.print(f"  Eval Interval: {parsed_eval_config['interval']}")
         console.print()
 
         # Create the run
@@ -514,6 +702,7 @@ def create_run(
             wandb_api_key=cfg.wandb.api_key,
             team_id=app_config.team_id,
             run_config=cfg.run_config,
+            eval_config=parsed_eval_config,
         )
 
         if output == "json":

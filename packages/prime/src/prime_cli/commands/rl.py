@@ -107,7 +107,7 @@ class EvalConfig(BaseModel):
     interval: int | None = None
     num_examples: int | None = None
     rollouts_per_example: int | None = None
-    eval_base_model: bool | None = None
+    base_model: bool | None = None  # whether to evaluate the base model before training
 
 
 class RLRunConfig(BaseConfig):
@@ -506,7 +506,7 @@ def create_run(
     eval_envs: Optional[List[str]] = typer.Option(
         None,
         "--eval-envs",
-        help="Environments to evaluate on (e.g., 'reverse-text' or 'owner/env')",
+        help="Environments to evaluate on (e.g., 'owner/env-name')",
     ),
     eval_interval: Optional[int] = typer.Option(
         None,
@@ -588,49 +588,42 @@ def create_run(
         wandb_name=wandb_name,
         wandb_api_key=wandb_api_key,
         run_config=parsed_run_config,
+        # Eval options (underscore prefix maps to nested eval.* fields)
+        eval_environments=eval_envs or None,
+        eval_interval=eval_interval,
+        eval_num_examples=eval_num_examples,
+        eval_rollouts_per_example=eval_rollouts,
+        eval_base_model=eval_base_model,
     )
 
-    # Build eval config: merge CLI options with config file (CLI takes precedence)
+    # Build eval config for API from merged cfg.eval
     parsed_eval_config: Optional[Dict[str, Any]] = None
-    # Get eval environments from CLI or config file
-    final_eval_envs = eval_envs or cfg.eval.environments
     has_eval_options = any(
-        x is not None for x in [eval_interval, eval_num_examples, eval_rollouts, eval_base_model]
-    )
-    has_config_eval_options = any(
         x is not None
         for x in [
             cfg.eval.interval,
             cfg.eval.num_examples,
             cfg.eval.rollouts_per_example,
-            cfg.eval.eval_base_model,
+            cfg.eval.base_model,
         ]
     )
-    if (has_eval_options or has_config_eval_options) and not final_eval_envs:
+    if has_eval_options and not cfg.eval.environments:
         console.print(
             "[yellow]Warning:[/yellow] Eval options require eval environments to take effect.\n"
             "  Use --eval-envs or set [eval] environments in config file."
         )
-    if final_eval_envs:
+    if cfg.eval.environments:
         parsed_eval_config = {
-            "environments": [{"id": env} for env in final_eval_envs],
+            "environments": [{"id": env} for env in cfg.eval.environments],
         }
-        # CLI options take precedence over config file
-        interval = eval_interval if eval_interval is not None else cfg.eval.interval
-        num_examples = eval_num_examples if eval_num_examples is not None else cfg.eval.num_examples
-        rollouts_per_ex = (
-            eval_rollouts if eval_rollouts is not None else cfg.eval.rollouts_per_example
-        )
-        base_model = eval_base_model if eval_base_model is not None else cfg.eval.eval_base_model
-
-        if interval is not None:
-            parsed_eval_config["interval"] = interval
-        if num_examples is not None:
-            parsed_eval_config["num_examples"] = num_examples
-        if rollouts_per_ex is not None:
-            parsed_eval_config["rollouts_per_example"] = rollouts_per_ex
-        if base_model is not None:
-            parsed_eval_config["eval_base_model"] = base_model
+        if cfg.eval.interval is not None:
+            parsed_eval_config["interval"] = cfg.eval.interval
+        if cfg.eval.num_examples is not None:
+            parsed_eval_config["num_examples"] = cfg.eval.num_examples
+        if cfg.eval.rollouts_per_example is not None:
+            parsed_eval_config["rollouts_per_example"] = cfg.eval.rollouts_per_example
+        if cfg.eval.base_model is not None:
+            parsed_eval_config["eval_base_model"] = cfg.eval.base_model
 
     # Validate required fields
     if not cfg.environments:
@@ -644,6 +637,15 @@ def create_run(
         if "/" not in env_slug:
             console.print(
                 f"[red]Error:[/red] Invalid environment format: '{env_slug}'. "
+                "Expected 'owner/name' format."
+            )
+            raise typer.Exit(1)
+
+    # Validate eval environment slug format
+    for env_slug in cfg.eval.environments:
+        if "/" not in env_slug:
+            console.print(
+                f"[red]Error:[/red] Invalid eval environment format: '{env_slug}'. "
                 "Expected 'owner/name' format."
             )
             raise typer.Exit(1)

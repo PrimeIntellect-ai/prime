@@ -94,9 +94,9 @@ async def stop_rl_run(run_id: str) -> dict[str, Any]:
 async def delete_rl_run(run_id: str) -> dict[str, Any]:
     """Delete an RL training run."""
     response_data = await make_prime_request("DELETE", f"rft/runs/{run_id}")
-    if not response_data:
-        return {"error": f"Unable to delete RL run: {run_id}"}
-    return response_data
+    if response_data is not None and not response_data.get("error"):
+        return {"success": True, "run_id": run_id}
+    return response_data or {"error": f"Unable to delete RL run: {run_id}"}
 
 
 async def get_rl_run_logs(run_id: str, tail_lines: int = 1000) -> dict[str, Any]:
@@ -131,6 +131,6 @@ async def get_rl_adapter(adapter_id: str) -> dict[str, Any]:
 async def delete_rl_adapter(adapter_id: str) -> dict[str, Any]:
     """Delete an adapter by ID."""
     response_data = await make_prime_request("DELETE", f"rft/adapters/{adapter_id}")
-    if not response_data:
-        return {"error": f"Unable to delete adapter: {adapter_id}"}
-    return response_data
+    if response_data is not None and not response_data.get("error"):
+        return {"success": True, "adapter_id": adapter_id}
+    return response_data or {"error": f"Unable to delete adapter: {adapter_id}"}

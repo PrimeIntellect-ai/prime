@@ -22,14 +22,22 @@ console = Console()
 
 # ANSI escape code pattern
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+# Progress bar pattern (tqdm-style progress bars)
 PROGRESS_BAR = re.compile(r".*\|[█▏▎▍▌▋▊▉ ]{10,}\|.*")
 
 
 def strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
     return ANSI_ESCAPE.sub("", text)
 
 
 def filter_progress_bars(text: str) -> str:
+    """Filter out progress bar updates, keeping only 100% completion lines.
+
+    Progress bars from tqdm often appear as multiple updates on the same line
+    (due to carriage return handling). This extracts just the final 100% part.
+    """
     lines = text.splitlines()
     filtered = []
     for line in lines:
@@ -47,10 +55,12 @@ def filter_progress_bars(text: str) -> str:
 
 
 def clean_logs(text: str) -> str:
+    """Clean logs by stripping ANSI codes and filtering progress bars."""
     return filter_progress_bars(strip_ansi(text))
 
 
 def generate_rl_config_template(environment: str | None = None) -> str:
+    """Generate a TOML config template for RL training."""
     env_value = environment or "primeintellect/your-environment"
 
     return f'''\
@@ -60,10 +70,7 @@ max_steps = 100
 # Training
 batch_size = 128
 rollouts_per_example = 8
-
-# Optional: LoRA hyperparameters
-# lr = 1e-5
-# rank = 32
+# trajectory_strategy = "interleaved"  # or "branching"
 
 [sampling]
 max_tokens = 2048
@@ -123,8 +130,7 @@ class RLConfig(BaseModel):
     max_steps: int = 100
     batch_size: int = 128
     rollouts_per_example: int = 8
-    lr: float | None = None
-    rank: int | None = None
+    trajectory_strategy: str | None = None
     env: List[EnvConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
@@ -266,10 +272,6 @@ def create_run(
         console.print(f"  Rollouts per Example: {cfg.rollouts_per_example}")
         if cfg.sampling.max_tokens:
             console.print(f"  Max Tokens: {cfg.sampling.max_tokens}")
-        if cfg.lr:
-            console.print(f"  Learning Rate: {cfg.lr}")
-        if cfg.rank:
-            console.print(f"  LoRA Rank: {cfg.rank}")
         if cfg.wandb.project:
             console.print(f"  W&B Project: {cfg.wandb.project}")
         if cfg.eval.env:
@@ -277,17 +279,6 @@ def create_run(
         if app_config.team_id:
             console.print(f"  Team: {app_config.team_id}")
         console.print()
-
-        # Build run_config for additional parameters
-        run_config: Dict[str, Any] = {}
-        if cfg.sampling.max_tokens:
-            run_config["max_tokens"] = cfg.sampling.max_tokens
-        if cfg.lr:
-            run_config["lr"] = cfg.lr
-        if cfg.rank:
-            run_config["rank"] = cfg.rank
-        if cfg.batch_size != 128:
-            run_config["batch_size"] = cfg.batch_size
 
         # Build eval config if provided
         eval_config = None
@@ -310,12 +301,14 @@ def create_run(
             environments=[{"id": e.id, "name": e.name, "args": e.args} for e in cfg.env],
             rollouts_per_example=cfg.rollouts_per_example,
             max_steps=cfg.max_steps,
+            max_tokens=cfg.sampling.max_tokens,
+            batch_size=cfg.batch_size,
+            trajectory_strategy=cfg.trajectory_strategy,
             wandb_entity=cfg.wandb.entity,
             wandb_project=cfg.wandb.project,
             wandb_run_name=cfg.wandb.name,
             wandb_api_key=wandb_api_key,
             team_id=app_config.team_id,
-            run_config=run_config if run_config else None,
             eval_config=eval_config,
         )
 

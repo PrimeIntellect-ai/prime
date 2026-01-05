@@ -1,0 +1,19 @@
+{
+    "$schema": "https://mintlify.com/docs.json",
+    "navigation": [
+        {
+            "group": "CLI",
+            "pages": [
+                "index",
+                "installation",
+                "configuration",
+                "cli",
+                "environments",
+                "sandboxes",
+                "evals",
+                "mcp"
+            ]
+        }
+    ]
+}
+

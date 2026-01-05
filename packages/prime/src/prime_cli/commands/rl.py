@@ -230,6 +230,15 @@ def create_run(
             )
             raise typer.Exit(1)
 
+    # Validate eval environment IDs
+    for env in cfg.eval.env:
+        if "/" not in env.id:
+            console.print(
+                f"[red]Error:[/red] Invalid eval environment format: '{env.id}'. "
+                "Expected 'owner/name' format."
+            )
+            raise typer.Exit(1)
+
     if not cfg.model:
         console.print("[red]Error:[/red] No model specified.")
         raise typer.Exit(1)
@@ -283,16 +292,15 @@ def create_run(
         # Build eval config if provided
         eval_config = None
         if cfg.eval.env:
-            eval_config = {
-                "environments": [
-                    {
-                        "id": e.id,
-                        "num_examples": e.num_examples,
-                        "rollouts_per_example": e.rollouts_per_example,
-                    }
-                    for e in cfg.eval.env
-                ],
-            }
+            eval_environments = []
+            for e in cfg.eval.env:
+                env_cfg: Dict[str, Any] = {"id": e.id}
+                if e.num_examples is not None:
+                    env_cfg["num_examples"] = e.num_examples
+                if e.rollouts_per_example is not None:
+                    env_cfg["rollouts_per_example"] = e.rollouts_per_example
+                eval_environments.append(env_cfg)
+            eval_config = {"environments": eval_environments}
             if cfg.eval.interval is not None:
                 eval_config["interval"] = cfg.eval.interval
 

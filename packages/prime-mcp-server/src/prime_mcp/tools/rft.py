@@ -125,8 +125,8 @@ async def create_rft_run(
     if name:
         request_body["name"] = name
 
-    # Build secrets list
-    all_secrets = secrets or []
+    # Build secrets list (copy to avoid mutating caller's list)
+    all_secrets = list(secrets) if secrets else []
     if wandb_api_key:
         all_secrets.append({"key": "WANDB_API_KEY", "value": wandb_api_key})
 

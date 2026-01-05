@@ -572,4 +572,4 @@ def init_config(
     path.write_text(template)
 
     console.print(f"[green]✓[/green] Created {output_path}")
-    console.print(f"\n[dim]Run with:[/dim] prime rl run @ {output_path}")
+    console.print(f"\n[dim]Run with:[/dim] prime rl run @{output_path}")

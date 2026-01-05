@@ -27,6 +27,8 @@ async def make_prime_request(
             return await _client.get(endpoint, params=params)
         elif method == "POST":
             return await _client.post(endpoint, json=json_data)
+        elif method == "PUT":
+            return await _client.put(endpoint, json=json_data)
         elif method == "DELETE":
             return await _client.delete(endpoint)
         elif method == "PATCH":

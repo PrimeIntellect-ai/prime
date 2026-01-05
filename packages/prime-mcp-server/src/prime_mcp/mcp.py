@@ -1,6 +1,6 @@
 from mcp.server.fastmcp import FastMCP
 
-from prime_mcp.tools import availability, pods, ssh
+from prime_mcp.tools import availability, pods, rft, ssh
 
 mcp = FastMCP("primeintellect")
 
@@ -251,6 +251,233 @@ async def manage_ssh_keys(
         SSH key operation result
     """
     return await ssh.manage_ssh_keys(action, key_name, public_key, key_id, offset, limit)
+
+
+@mcp.tool()
+async def list_rft_models() -> dict:
+    """List all available RFT models for training.
+
+    Returns models from healthy RFT clusters that are ready to accept training jobs.
+    Check this before creating a run to see which models are available.
+
+    Returns:
+        List of available RFT models with their names
+    """
+    return await rft.list_rft_models()
+
+
+@mcp.tool()
+async def list_rft_runs(team_id: str | None = None) -> dict:
+    """List RFT training runs for the authenticated user.
+
+    If team_id is provided, returns runs for that team only (requires team membership).
+    If team_id is None, returns user's personal runs AND all runs from teams they're in.
+
+    Args:
+        team_id: Optional team ID to filter runs by team
+
+    Returns:
+        List of RFT runs with status, configuration, and progress information
+    """
+    return await rft.list_rft_runs(team_id)
+
+
+@mcp.tool()
+async def get_rft_run(run_id: str) -> dict:
+    """Get detailed information about a specific RFT training run.
+
+    Args:
+        run_id: Unique identifier of the RFT run
+
+    Returns:
+        Detailed run information including:
+        - status: QUEUED, PENDING, RUNNING, COMPLETED, FAILED, STOPPED
+        - configuration: model, environments, hyperparameters
+        - progress: current step, started_at, completed_at
+        - error_message: if run failed
+    """
+    return await rft.get_rft_run(run_id)
+
+
+@mcp.tool()
+async def create_rft_run(
+    model_name: str,
+    environments: list[dict],
+    rollouts_per_example: int,
+    seq_len: int,
+    max_steps: int,
+    name: str | None = None,
+    eval_config: dict | None = None,
+    wandb_entity: str | None = None,
+    wandb_project: str | None = None,
+    wandb_run_name: str | None = None,
+    wandb_api_key: str | None = None,
+    secrets: list[dict] | None = None,
+    team_id: str | None = None,
+) -> dict:
+    """Create a new RFT (Reinforcement Fine-Tuning) training run.
+
+    WORKFLOW:
+    1. First check available models with list_rft_models()
+    2. Configure your training environments
+    3. Optionally set up W&B monitoring with your API key
+    4. Create the run - it will be queued and start automatically
+
+    Args:
+        model_name: Model to fine-tune (e.g., "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B").
+            Use list_rft_models() to see available models.
+        environments: Training environments list. Each environment dict should have:
+            - id (required): Environment ID like "reverse-text" or hub slug "primeintellect/vf-math"
+            - name (optional): Display name for this environment
+            - args (optional): Dict of environment-specific arguments
+        rollouts_per_example: Number of rollouts per training example.
+            MUST be one of: 1, 2, 4, 8, 16, 32, 64, 128 (must divide batch size 128 evenly)
+        seq_len: Sequence length for training (context window size)
+        max_steps: Maximum number of training steps
+        name: Optional run name (auto-generated if not provided)
+        eval_config: Optional evaluation configuration dict with:
+            - environments: List of eval environments (same format as training)
+            - interval: Evaluate every N steps (default: 100)
+            - num_examples: Examples per environment (-1 for all)
+            - rollouts_per_example: Rollouts per eval example (default: 1)
+            - eval_base_model: Whether to eval base model first (default: True)
+        wandb_entity: W&B entity (username or team name) for metrics logging
+        wandb_project: W&B project name - REQUIRED if you want monitoring
+        wandb_run_name: W&B run name (optional)
+        wandb_api_key: Your W&B API key - REQUIRED for W&B monitoring
+        secrets: Additional secrets as list of {"key": "NAME", "value": "secret"} dicts
+        team_id: Team ID to create run for (requires team membership)
+
+    Returns:
+        Created RFT run details including run ID and initial status (QUEUED)
+
+    Example:
+        create_rft_run(
+            model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+            environments=[{"id": "reverse-text"}],
+            rollouts_per_example=8,
+            seq_len=2048,
+            max_steps=1000,
+            wandb_project="my-rft-project",
+            wandb_api_key="your-wandb-key"
+        )
+    """
+    return await rft.create_rft_run(
+        model_name=model_name,
+        environments=environments,
+        rollouts_per_example=rollouts_per_example,
+        seq_len=seq_len,
+        max_steps=max_steps,
+        name=name,
+        eval_config=eval_config,
+        wandb_entity=wandb_entity,
+        wandb_project=wandb_project,
+        wandb_run_name=wandb_run_name,
+        wandb_api_key=wandb_api_key,
+        secrets=secrets,
+        team_id=team_id,
+    )
+
+
+@mcp.tool()
+async def stop_rft_run(run_id: str) -> dict:
+    """Stop/abort a running RFT training run.
+
+    Can only stop runs that are in QUEUED, PENDING, or RUNNING status.
+    The run will save any adapter weights produced so far before stopping.
+
+    Args:
+        run_id: Unique identifier of the RFT run to stop
+
+    Returns:
+        Updated run details with STOPPED status
+    """
+    return await rft.stop_rft_run(run_id)
+
+
+@mcp.tool()
+async def delete_rft_run(run_id: str) -> dict:
+    """Delete an RFT training run.
+
+    This will:
+    - Cleanup Kubernetes resources if still running
+    - Delete the run record from the database
+    - Note: Adapter weights from completed runs are preserved separately
+
+    Args:
+        run_id: Unique identifier of the RFT run to delete
+
+    Returns:
+        Deletion confirmation with run_id and success status
+    """
+    return await rft.delete_rft_run(run_id)
+
+
+@mcp.tool()
+async def get_rft_run_logs(run_id: str, tail_lines: int = 1000) -> dict:
+    """Get training logs for an RFT run.
+
+    Fetches logs from the orchestrator pod running the training job.
+    Useful for debugging failed runs or monitoring progress.
+
+    Args:
+        run_id: Unique identifier of the RFT run
+        tail_lines: Number of lines to return from the end of logs (default: 1000)
+
+    Returns:
+        Log content as a string
+    """
+    return await rft.get_rft_run_logs(run_id, tail_lines)
+
+
+@mcp.tool()
+async def list_rft_adapters(team_id: str | None = None) -> dict:
+    """List trained adapters (LoRA weights) from completed RFT runs.
+
+    Adapters are the output of successful RFT training - they contain the
+    fine-tuned LoRA weights that can be used for inference.
+
+    Args:
+        team_id: Optional team ID to filter adapters by team
+
+    Returns:
+        List of adapters with:
+        - id: Adapter ID for use with inference
+        - display_name: Optional friendly name
+        - base_model: The base model these weights are for
+        - rft_run_id: The training run that produced this adapter
+        - status: PENDING, READY, or FAILED
+    """
+    return await rft.list_rft_adapters(team_id)
+
+
+@mcp.tool()
+async def get_rft_adapter(adapter_id: str) -> dict:
+    """Get detailed information about a specific adapter.
+
+    Args:
+        adapter_id: Unique identifier of the adapter
+
+    Returns:
+        Adapter details including base model, status, and source run
+    """
+    return await rft.get_rft_adapter(adapter_id)
+
+
+@mcp.tool()
+async def delete_rft_adapter(adapter_id: str) -> dict:
+    """Delete an adapter.
+
+    Removes the adapter record from the database.
+    Note: This deletes the database record but storage files may be retained.
+
+    Args:
+        adapter_id: Unique identifier of the adapter to delete
+
+    Returns:
+        Deletion confirmation with adapter_id and success status
+    """
+    return await rft.delete_rft_adapter(adapter_id)
 
 
 if __name__ == "__main__":

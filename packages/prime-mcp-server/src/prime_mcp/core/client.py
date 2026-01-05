@@ -113,6 +113,9 @@ class AsyncAPIClient:
     async def delete(self, endpoint: str) -> Dict[str, Any]:
         return await self.request("DELETE", endpoint)
 
+    async def put(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return await self.request("PUT", endpoint, json=json)
+
     async def aclose(self) -> None:
         await self.client.aclose()
 

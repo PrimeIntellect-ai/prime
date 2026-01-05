@@ -86,7 +86,6 @@ class RLClient:
         model_name: str,
         environments: List[Dict[str, Any]],
         rollouts_per_example: int = 8,
-        seq_len: int = 4096,
         max_steps: int = 100,
         name: Optional[str] = None,
         wandb_entity: Optional[str] = None,
@@ -109,7 +108,6 @@ class RLClient:
                 "model": {"name": model_name},
                 "environments": environments,
                 "rollouts_per_example": rollouts_per_example,
-                "seq_len": seq_len,
                 "max_steps": max_steps,
                 "secrets": secrets,
             }

@@ -1,155 +1,152 @@
 """RL (Reinforcement Learning) training commands."""
 
-import json
 import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import toml
 import typer
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.table import Table
-from typer.core import TyperGroup
 
 from prime_cli.core import Config
 
 from ..api.rl import RLClient, RLRun
 from ..client import APIClient, APIError
-from ..utils import BaseConfig, output_data_as_json, validate_output_format
+from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 
 console = Console()
 
-# Default model for RL training
-DEFAULT_RL_MODEL = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
-
 # ANSI escape code pattern
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-
-# Progress bar pattern (tqdm-style progress bars)
 PROGRESS_BAR = re.compile(r".*\|[█▏▎▍▌▋▊▉ ]{10,}\|.*")
 
 
 def strip_ansi(text: str) -> str:
-    """Remove ANSI escape codes from text."""
     return ANSI_ESCAPE.sub("", text)
 
 
 def filter_progress_bars(text: str) -> str:
-    """Filter out progress bar updates, keeping only 100% completion lines.
-
-    Progress bars from tqdm often appear as multiple updates on the same line
-    (due to carriage return handling). This extracts just the final 100% part.
-    """
     lines = text.splitlines()
     filtered = []
     for line in lines:
-        # Check if line contains progress bars
         if PROGRESS_BAR.search(line) or re.search(r"\d+%\|", line):
-            # If it has 100%, extract just that part
             if "100%" in line:
-                # Find the last 100% progress bar and extract it
-                # Pattern: text before + "100%|...bars...|" + stats after
                 match = re.search(r"([^|]*100%\|[█▏▎▍▌▋▊▉ ]+\|[^\n]*?)(?=\d+%\||$)", line)
                 if match:
                     filtered.append(match.group(1).strip())
                 else:
-                    # Fallback: just include the line
                     filtered.append(line)
-            # Skip lines with only non-100% progress
             continue
-        # Keep non-progress-bar lines, but skip empty lines
         if line.strip():
             filtered.append(line)
     return "\n".join(filtered)
 
 
 def clean_logs(text: str) -> str:
-    """Clean logs by stripping ANSI codes and filtering progress bars."""
     return filter_progress_bars(strip_ansi(text))
 
 
 def generate_rl_config_template(environment: str | None = None) -> str:
-    """Generate a TOML config template for RL training."""
-    env_value = environment or "your-username/your-environment"
+    env_value = environment or "primeintellect/your-environment"
 
     return f'''\
-model = "{DEFAULT_RL_MODEL}"
-environments = ["{env_value}"]
+model = "meta-llama/Llama-3.1-8B-Instruct"
+max_steps = 100
 
-rollouts = 8      # number of attempts per prompt/example
-max_steps = 100   # total training iterations
-seq_len = 4096    # max tokens per response
+# Training
+batch_size = 128
+rollouts_per_example = 8
 
-# name = "my-experiment"
+# Optional: LoRA hyperparameters
+# lr = 1e-5
+# rank = 32
 
+[sampling]
+max_tokens = 2048
+
+[[env]]
+id = "{env_value}"
+
+# [[env]]
+# id = "primeintellect/another-env"
+# args = {{ split = "train", max_examples = 1000 }}
+
+# Optional: W&B logging
 # [wandb]
-# entity = "my-team"
 # project = "my-project"
-# name = "experiment-1"
+# entity = "my-team"
+
+# Optional: online evaluation
+# [eval]
+# interval = 100
+#
+# [[eval.env]]
+# id = "primeintellect/eval-env"
+# num_examples = 30
+# rollouts_per_example = 4
 '''
 
 
-class WandbConfig(BaseModel):
-    """Weights & Biases configuration."""
-
-    entity: str | None = None
-    project: str | None = None
+class EnvConfig(BaseModel):
+    id: str
     name: str | None = None
-    api_key: str | None = None
+    args: Dict[str, Any] = Field(default_factory=dict)
+
+
+class EvalEnvConfig(BaseModel):
+    id: str
+    num_examples: int | None = None
+    rollouts_per_example: int | None = None
+
+
+class SamplingConfig(BaseModel):
+    max_tokens: int | None = None
 
 
 class EvalConfig(BaseModel):
-    """Evaluation configuration."""
-
-    environments: list[str] = Field(default_factory=list)
     interval: int | None = None
-    num_examples: int | None = None
-    rollouts_per_example: int | None = None
-    base_model: bool | None = None  # whether to evaluate the base model before training
+    env: List[EvalEnvConfig] = Field(default_factory=list)
 
 
-class RLRunConfig(BaseConfig):
-    """Configuration for an RL training run."""
-
-    model: str | None = None
-    environments: list[str] = Field(default_factory=list)
+class WandbConfig(BaseModel):
+    entity: str | None = None
+    project: str | None = None
     name: str | None = None
-    rollouts: int = 8
-    seq_len: int = 4096
+
+
+class RLConfig(BaseModel):
+    model: str | None = None
     max_steps: int = 100
-    wandb: WandbConfig = Field(default_factory=WandbConfig)
-    run_config: Optional[Dict[str, Any]] = Field(default=None)
+    batch_size: int = 128
+    rollouts_per_example: int = 8
+    lr: float | None = None
+    rank: int | None = None
+    env: List[EnvConfig] = Field(default_factory=list)
+    sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
+    wandb: WandbConfig = Field(default_factory=WandbConfig)
 
 
-class DefaultGroup(TyperGroup):
-    def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.default_cmd_name = default_cmd_name
+def load_config(path: str) -> RLConfig:
+    """Load config from TOML file."""
+    p = Path(path)
+    if not p.exists():
+        console.print(f"[red]Error:[/red] Config file not found: {path}")
+        raise typer.Exit(1)
+    try:
+        data = toml.load(p)
+        return RLConfig.model_validate(data)
+    except toml.TomlDecodeError as e:
+        console.print(f"[red]Error:[/red] Invalid TOML in {path}: {e}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] Invalid config: {e}")
+        raise typer.Exit(1)
 
-    def parse_args(self, ctx, args):
-        if not args:
-            return super().parse_args(ctx, args)
-
-        if args[0] in ("--help", "-h"):
-            return super().parse_args(ctx, args)
-
-        if args[0] in self.commands:
-            return super().parse_args(ctx, args)
-
-        args = [self.default_cmd_name] + list(args)
-        return super().parse_args(ctx, args)
-
-    def format_usage(self, ctx, formatter):
-        formatter.write_usage(
-            ctx.command_path,
-            "[OPTIONS] ENVIRONMENTS... | COMMAND [ARGS]...",
-        )
-
-
-subcommands_app = typer.Typer()
 
 # Status color mapping
 RUN_STATUS_COLORS = {
@@ -162,12 +159,10 @@ RUN_STATUS_COLORS = {
 
 
 def _get_status_color(status: str) -> str:
-    """Get color for run status."""
     return RUN_STATUS_COLORS.get(status.upper(), "white")
 
 
 def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
-    """Format run data for display (both table and JSON)."""
     created_at = run.created_at.strftime("%Y-%m-%d %H:%M") if run.created_at else ""
     env_names = [
         env.get("slug") or env.get("name") or env.get("id") or "?" for env in run.environments
@@ -188,7 +183,150 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     }
 
 
-@subcommands_app.command("models")
+app = typer.Typer(
+    help="Manage hosted RL training runs.",
+    no_args_is_help=True,
+)
+
+
+@app.command("run")
+def create_run(
+    config_path: str = typer.Argument(
+        ...,
+        help="Path to TOML config file (e.g., @ rl.toml)",
+    ),
+    wandb_api_key: Optional[str] = typer.Option(
+        None,
+        "--wandb-api-key",
+        help="Weights & Biases API key (or set WANDB_API_KEY env var)",
+        envvar="WANDB_API_KEY",
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Start an RL training run from a config file.
+
+    Example:
+
+        prime rl run @ rl.toml
+    """
+    validate_output_format(output, console)
+
+    # Handle @ prefix
+    path = config_path[1:].strip() if config_path.startswith("@") else config_path
+
+    console.print(f"[dim]Loading config from {path}[/dim]\n")
+    cfg = load_config(path)
+
+    # Validate required fields
+    if not cfg.env:
+        console.print("[red]Error:[/red] No environments specified. Add [[env]] sections.")
+        raise typer.Exit(1)
+
+    for env in cfg.env:
+        if "/" not in env.id:
+            console.print(
+                f"[red]Error:[/red] Invalid environment format: '{env.id}'. "
+                "Expected 'owner/name' format."
+            )
+            raise typer.Exit(1)
+
+    if not cfg.model:
+        console.print("[red]Error:[/red] No model specified.")
+        raise typer.Exit(1)
+
+    # Warn if wandb is configured but no API key
+    if (cfg.wandb.entity or cfg.wandb.project) and not wandb_api_key:
+        console.print(
+            "[yellow]Warning:[/yellow] W&B config detected but no API key provided.\n"
+            "  Set via: --wandb-api-key or WANDB_API_KEY env var\n"
+        )
+
+    try:
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+        app_config = Config()
+
+        console.print("[bold]Creating RL training run...[/bold]\n")
+
+        # Show configuration
+        console.print("[bold]Configuration:[/bold]")
+        console.print(f"  Model: {cfg.model}")
+        console.print(f"  Environments: {', '.join(e.id for e in cfg.env)}")
+        console.print(f"  Max Steps: {cfg.max_steps}")
+        console.print(f"  Batch Size: {cfg.batch_size}")
+        console.print(f"  Rollouts per Example: {cfg.rollouts_per_example}")
+        if cfg.sampling.max_tokens:
+            console.print(f"  Max Tokens: {cfg.sampling.max_tokens}")
+        if cfg.lr:
+            console.print(f"  Learning Rate: {cfg.lr}")
+        if cfg.rank:
+            console.print(f"  LoRA Rank: {cfg.rank}")
+        if cfg.wandb.project:
+            console.print(f"  W&B Project: {cfg.wandb.project}")
+        if cfg.eval.env:
+            console.print(f"  Eval Environments: {', '.join(e.id for e in cfg.eval.env)}")
+        if app_config.team_id:
+            console.print(f"  Team: {app_config.team_id}")
+        console.print()
+
+        # Build run_config for additional parameters
+        run_config: Dict[str, Any] = {}
+        if cfg.sampling.max_tokens:
+            run_config["max_tokens"] = cfg.sampling.max_tokens
+        if cfg.lr:
+            run_config["lr"] = cfg.lr
+        if cfg.rank:
+            run_config["rank"] = cfg.rank
+        if cfg.batch_size != 128:
+            run_config["batch_size"] = cfg.batch_size
+
+        # Build eval config if provided
+        eval_config = None
+        if cfg.eval.env:
+            eval_config = {
+                "environments": [
+                    {
+                        "id": e.id,
+                        "num_examples": e.num_examples,
+                        "rollouts_per_example": e.rollouts_per_example,
+                    }
+                    for e in cfg.eval.env
+                ],
+            }
+            if cfg.eval.interval is not None:
+                eval_config["interval"] = cfg.eval.interval
+
+        # Create the run
+        run = rl_client.create_run(
+            model_name=cfg.model,
+            environments=[{"id": e.id, "name": e.name, "args": e.args} for e in cfg.env],
+            rollouts_per_example=cfg.rollouts_per_example,
+            max_steps=cfg.max_steps,
+            wandb_entity=cfg.wandb.entity,
+            wandb_project=cfg.wandb.project,
+            wandb_run_name=cfg.wandb.name,
+            wandb_api_key=wandb_api_key,
+            team_id=app_config.team_id,
+            run_config=run_config if run_config else None,
+            eval_config=eval_config,
+        )
+
+        if output == "json":
+            output_data_as_json({"run": run.model_dump()}, console)
+            return
+
+        console.print("[green]✓ Run created successfully![/green]")
+
+        dashboard_url = f"{app_config.frontend_url}/dashboard/training/{run.id}"
+        console.print("\n[cyan]Monitor run at:[/cyan]")
+        console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command("models")
 def list_models(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
@@ -223,7 +361,7 @@ def list_models(
         raise typer.Exit(1)
 
 
-@subcommands_app.command("list")
+@app.command("list")
 def list_runs(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
@@ -236,7 +374,6 @@ def list_runs(
         rl_client = RLClient(api_client)
         config = Config()
 
-        # Use provided team or default from config
         team_id = team or config.team_id
 
         runs = rl_client.list_runs(team_id=team_id)
@@ -277,7 +414,7 @@ def list_runs(
         raise typer.Exit(1)
 
 
-@subcommands_app.command("stop")
+@app.command("stop")
 def stop_run(
     run_id: str = typer.Argument(..., help="Run ID to stop"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
@@ -303,7 +440,7 @@ def stop_run(
         raise typer.Exit(1)
 
 
-@subcommands_app.command("delete")
+@app.command("delete")
 def delete_run(
     run_id: str = typer.Argument(..., help="Run ID to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
@@ -327,7 +464,7 @@ def delete_run(
         raise typer.Exit(1)
 
 
-@subcommands_app.command("logs")
+@app.command("logs")
 def get_logs(
     run_id: str = typer.Argument(..., help="Run ID to get logs for"),
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
@@ -353,18 +490,14 @@ def get_logs(
                         new_lines = logs.splitlines()
 
                         if not last_logs:
-                            # First fetch, print everything
                             for line in new_lines:
                                 console.print(line)
                         else:
-                            # Find overlap between end of old_lines and start of new_lines
-                            # This handles both growth and rotation cases
                             overlap = 0
                             max_overlap = min(len(old_lines), len(new_lines))
                             for i in range(1, max_overlap + 1):
                                 if old_lines[-i:] == new_lines[:i]:
                                     overlap = i
-                            # Print lines after the overlap
                             for line in new_lines[overlap:]:
                                 console.print(line)
 
@@ -380,7 +513,7 @@ def get_logs(
                         continue
                     raise
 
-                time.sleep(5)  # Poll every 5 seconds to avoid rate limits
+                time.sleep(5)
         else:
             logs = clean_logs(rl_client.get_logs(run_id, tail_lines=tail))
             if logs:
@@ -395,35 +528,29 @@ def get_logs(
         raise typer.Exit(1)
 
 
-@subcommands_app.command("init")
+@app.command("init")
 def init_config(
-    output: str = typer.Argument(
-        "configs/rl.toml",
+    output_path: str = typer.Argument(
+        "rl.toml",
         help="Output path for the config file",
     ),
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing file"),
 ) -> None:
-    """Generate a template TOML config file for RL training.
-
-    Auto-detects the environment if run inside an environment directory
-    (looks for .prime/.env-metadata.json).
+    """Generate a template config file for RL training.
 
     Example:
 
-        prime rl init                     # Creates configs/rl.toml
+        prime rl init              # Creates rl.toml
 
-        prime rl init my-experiment.toml  # Custom path
-
-        prime rl init -f                  # Overwrite existing
+        prime rl init my-config.toml
     """
-    output_path = Path(output)
+    path = Path(output_path)
 
-    # Check if file exists
-    if output_path.exists() and not force:
-        console.print(f"[red]Error:[/red] {output} already exists. Use --force to overwrite.")
+    if path.exists() and not force:
+        console.print(f"[red]Error:[/red] {output_path} already exists. Use --force to overwrite.")
         raise typer.Exit(1)
 
-    # Try to auto-detect environment from .env-metadata.json
+    # Auto-detect environment
     environment: str | None = None
     metadata = find_environment_metadata()
     if metadata:
@@ -433,289 +560,10 @@ def init_config(
             environment = f"{owner}/{name}"
             console.print(f"[dim]Detected environment: {environment}[/dim]")
 
-    # Create parent directories if needed
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write template
     template = generate_rl_config_template(environment)
-    output_path.write_text(template)
+    path.write_text(template)
 
-    console.print(f"[green]✓[/green] Created {output}")
-    console.print(f"\n[dim]Run with:[/dim] prime rl -c {output}")
-
-
-app = typer.Typer(
-    cls=DefaultGroup,
-    help=(
-        "Manage hosted RL training runs.\n\n"
-        "By default, 'prime rl <environments>' runs 'prime rl run <environments>'."
-    ),
-    no_args_is_help=True,
-)
-
-app.add_typer(subcommands_app, name="")
-
-
-@app.command("run", help="Create and start an RL training run [default]")
-def create_run(
-    ctx: typer.Context,
-    environments: Optional[List[str]] = typer.Argument(
-        None,
-        help="Environment slugs to train on (e.g., 'owner/env-name')",
-    ),
-    model: Optional[str] = typer.Option(None, "-m", "--model", help="Model to fine-tune"),
-    name: Optional[str] = typer.Option(
-        None, "-n", "--name", help="Run name (auto-generated if not provided)"
-    ),
-    rollouts: Optional[int] = typer.Option(
-        None, "-r", "--rollouts", help="Number of rollouts per example [default: 8]"
-    ),
-    seq_len: Optional[int] = typer.Option(
-        None, "-s", "--seq-len", help="Sequence length [default: 4096]"
-    ),
-    max_steps: Optional[int] = typer.Option(
-        None, "--max-steps", help="Maximum training steps [default: 100]"
-    ),
-    wandb_entity: Optional[str] = typer.Option(
-        None, "--wandb-entity", help="Weights & Biases entity (username or team name)"
-    ),
-    wandb_project: Optional[str] = typer.Option(
-        None, "--wandb-project", help="Weights & Biases project name"
-    ),
-    wandb_name: Optional[str] = typer.Option(
-        None, "--wandb-name", help="Weights & Biases run name"
-    ),
-    wandb_api_key: Optional[str] = typer.Option(
-        None,
-        "--wandb-api-key",
-        help="Weights & Biases API key (or set WANDB_API_KEY env var)",
-        envvar="WANDB_API_KEY",
-    ),
-    config_file: Optional[str] = typer.Option(
-        None,
-        "--config",
-        "-c",
-        help="Path to TOML config file (CLI options override config file values)",
-    ),
-    run_config: Optional[str] = typer.Option(
-        None,
-        "--run-config",
-        hidden=True,
-        help='Additional run configuration as JSON (admin only), e.g. \'{"key": "value"}\'',
-    ),
-    eval_envs: Optional[List[str]] = typer.Option(
-        None,
-        "--eval-envs",
-        help="Environments to evaluate on (e.g., 'owner/env-name')",
-    ),
-    eval_interval: Optional[int] = typer.Option(
-        None,
-        "--eval-interval",
-        help="Evaluate every N training steps [default: 100]",
-    ),
-    eval_num_examples: Optional[int] = typer.Option(
-        None,
-        "--eval-num-examples",
-        help="Number of examples per eval environment (-1 for all) [default: -1]",
-    ),
-    eval_rollouts: Optional[int] = typer.Option(
-        None,
-        "--eval-rollouts",
-        help="Rollouts per example for evaluation [default: 1]",
-    ),
-    eval_base_model: Optional[bool] = typer.Option(
-        None,
-        "--eval-base-model/--no-eval-base-model",
-        help="Evaluate base model before training [default: True]",
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """Configuration can be provided via CLI options, a TOML config file, or both.
-    CLI options take precedence over config file values.
-
-    Example TOML config (rl-config.toml):
-
-        model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
-        environments = ["primeintellect/gpqa"]
-        rollouts = 16
-        max_steps = 200
-
-        [wandb]
-        project = "my-project"
-
-    Example usage:
-
-        prime rl run owner/env1 owner/env2 -m model-name
-
-        prime rl --config rl-config.toml
-
-        prime rl --config rl-config.toml --max-steps 500
-    """
-    # Show help if no meaningful input provided
-    if not environments and not config_file and not model:
-        console.print(ctx.get_help())
-        raise typer.Exit(0)
-
-    validate_output_format(output, console)
-
-    parsed_run_config: Optional[Dict[str, Any]] = None
-    if run_config:
-        try:
-            parsed_run_config = json.loads(run_config)
-        except json.JSONDecodeError as e:
-            console.print(
-                f"[red]Error:[/red] Invalid JSON in --run-config: {e}\n"
-                '  Expected format: --run-config \'{"key": "value"}\''
-            )
-            raise typer.Exit(1)
-
-    # Load and merge config: CLI > TOML > defaults
-    if config_file:
-        console.print(f"[dim]Loading config from {config_file}[/dim]\n")
-
-    cfg = RLRunConfig.from_sources(
-        toml_path=config_file,
-        console=console,
-        # Pass CLI args (None values are ignored)
-        model=model,
-        environments=environments or None,  # Convert empty list to None
-        name=name,
-        rollouts=rollouts,
-        seq_len=seq_len,
-        max_steps=max_steps,
-        wandb_entity=wandb_entity,
-        wandb_project=wandb_project,
-        wandb_name=wandb_name,
-        wandb_api_key=wandb_api_key,
-        run_config=parsed_run_config,
-        # Eval options (underscore prefix maps to nested eval.* fields)
-        eval_environments=eval_envs or None,
-        eval_interval=eval_interval,
-        eval_num_examples=eval_num_examples,
-        eval_rollouts_per_example=eval_rollouts,
-        eval_base_model=eval_base_model,
-    )
-
-    # Build eval config for API from merged cfg.eval
-    parsed_eval_config: Optional[Dict[str, Any]] = None
-    has_eval_options = any(
-        x is not None
-        for x in [
-            cfg.eval.interval,
-            cfg.eval.num_examples,
-            cfg.eval.rollouts_per_example,
-            cfg.eval.base_model,
-        ]
-    )
-    if has_eval_options and not cfg.eval.environments:
-        console.print(
-            "[yellow]Warning:[/yellow] Eval options require eval environments to take effect.\n"
-            "  Use --eval-envs or set [eval] environments in config file."
-        )
-    if cfg.eval.environments:
-        parsed_eval_config = {
-            "environments": [{"id": env} for env in cfg.eval.environments],
-        }
-        if cfg.eval.interval is not None:
-            parsed_eval_config["interval"] = cfg.eval.interval
-        if cfg.eval.num_examples is not None:
-            parsed_eval_config["num_examples"] = cfg.eval.num_examples
-        if cfg.eval.rollouts_per_example is not None:
-            parsed_eval_config["rollouts_per_example"] = cfg.eval.rollouts_per_example
-        if cfg.eval.base_model is not None:
-            parsed_eval_config["eval_base_model"] = cfg.eval.base_model
-
-    # Validate required fields
-    if not cfg.environments:
-        console.print(
-            "[red]Error:[/red] No environments specified. Provide via CLI or config file."
-        )
-        raise typer.Exit(1)
-
-    # Validate environment slug format
-    for env_slug in cfg.environments:
-        if "/" not in env_slug:
-            console.print(
-                f"[red]Error:[/red] Invalid environment format: '{env_slug}'. "
-                "Expected 'owner/name' format."
-            )
-            raise typer.Exit(1)
-
-    # Validate eval environment slug format
-    for env_slug in cfg.eval.environments:
-        if "/" not in env_slug:
-            console.print(
-                f"[red]Error:[/red] Invalid eval environment format: '{env_slug}'. "
-                "Expected 'owner/name' format."
-            )
-            raise typer.Exit(1)
-
-    if not cfg.model:
-        console.print("[red]Error:[/red] No model specified. Use --model or set 'model' in config.")
-        raise typer.Exit(1)
-
-    # Warn if wandb is configured but no API key is provided
-    if (cfg.wandb.entity or cfg.wandb.project) and not cfg.wandb.api_key:
-        console.print(
-            "[yellow]Warning:[/yellow] W&B config detected but no API key provided.\n"
-            "  Set via: --wandb-api-key or WANDB_API_KEY env var\n"
-        )
-
-    try:
-        api_client = APIClient()
-        rl_client = RLClient(api_client)
-        app_config = Config()
-
-        console.print("[bold]Creating RL training run...[/bold]\n")
-
-        # Show configuration
-        console.print("[bold]Configuration:[/bold]")
-        if cfg.name:
-            console.print(f"  Name: {cfg.name}")
-        console.print(f"  Model: {cfg.model}")
-        console.print(f"  Environments: {', '.join(cfg.environments)}")
-        console.print(f"  Max Steps: {cfg.max_steps}")
-        console.print(f"  Rollouts per Example: {cfg.rollouts}")
-        console.print(f"  Sequence Length: {cfg.seq_len}")
-        if cfg.wandb.project:
-            console.print(f"  W&B Project: {cfg.wandb.project}")
-        if app_config.team_id:
-            console.print(f"  Team: {app_config.team_id}")
-        if parsed_eval_config:
-            eval_env_ids = [e["id"] for e in parsed_eval_config.get("environments", [])]
-            console.print(f"  Eval Environments: {', '.join(eval_env_ids)}")
-            if "interval" in parsed_eval_config:
-                console.print(f"  Eval Interval: {parsed_eval_config['interval']}")
-        console.print()
-
-        # Create the run
-        run = rl_client.create_run(
-            model_name=cfg.model,
-            environments=[{"id": slug} for slug in cfg.environments],
-            rollouts_per_example=cfg.rollouts,
-            seq_len=cfg.seq_len,
-            max_steps=cfg.max_steps,
-            name=cfg.name,
-            wandb_entity=cfg.wandb.entity,
-            wandb_project=cfg.wandb.project,
-            wandb_run_name=cfg.wandb.name,
-            wandb_api_key=cfg.wandb.api_key,
-            team_id=app_config.team_id,
-            run_config=cfg.run_config,
-            eval_config=parsed_eval_config,
-        )
-
-        if output == "json":
-            output_data_as_json({"run": run.model_dump()}, console)
-            return
-
-        console.print("[green]✓ Run created successfully![/green]")
-
-        # Show dashboard link
-        dashboard_url = f"{app_config.frontend_url}/dashboard/training/{run.id}"
-        console.print("\n[cyan]Monitor run at:[/cyan]")
-        console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
-
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+    console.print(f"[green]✓[/green] Created {output_path}")
+    console.print(f"\n[dim]Run with:[/dim] prime rl run @ {output_path}")

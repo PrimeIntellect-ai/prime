@@ -74,6 +74,7 @@ rollouts_per_example = 8
 
 [sampling]
 max_tokens = 2048
+# temperature = 0.7
 
 [[env]]
 id = "{env_value}"
@@ -112,6 +113,7 @@ class EvalEnvConfig(BaseModel):
 
 class SamplingConfig(BaseModel):
     max_tokens: int | None = None
+    temperature: float | None = None
 
 
 class EvalConfig(BaseModel):
@@ -272,6 +274,8 @@ def create_run(
         console.print(f"  Rollouts per Example: {cfg.rollouts_per_example}")
         if cfg.sampling.max_tokens:
             console.print(f"  Max Tokens: {cfg.sampling.max_tokens}")
+        if cfg.sampling.temperature is not None:
+            console.print(f"  Temperature: {cfg.sampling.temperature}")
         if cfg.wandb.project:
             console.print(f"  W&B Project: {cfg.wandb.project}")
         if cfg.eval.env:
@@ -302,6 +306,7 @@ def create_run(
             rollouts_per_example=cfg.rollouts_per_example,
             max_steps=cfg.max_steps,
             max_tokens=cfg.sampling.max_tokens,
+            temperature=cfg.sampling.temperature,
             batch_size=cfg.batch_size,
             trajectory_strategy=cfg.trajectory_strategy,
             wandb_entity=cfg.wandb.entity,

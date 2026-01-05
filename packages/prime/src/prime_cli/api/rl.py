@@ -91,6 +91,7 @@ class RLClient:
         rollouts_per_example: int = 8,
         max_steps: int = 100,
         max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
         batch_size: int = 128,
         trajectory_strategy: Optional[str] = None,
         name: Optional[str] = None,
@@ -139,6 +140,9 @@ class RLClient:
 
             if max_tokens:
                 payload["max_tokens"] = max_tokens
+
+            if temperature is not None:
+                payload["temperature"] = temperature
 
             if eval_config:
                 payload["eval"] = eval_config

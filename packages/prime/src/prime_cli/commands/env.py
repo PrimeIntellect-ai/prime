@@ -1103,7 +1103,7 @@ def fork(
 
         fork_data: Dict[str, Any] = {}
         if team:
-            fork_data["team_id"] = team
+            fork_data["team_slug"] = team
 
         try:
             response = client.post(f"/environments/{env_id}/fork", json=fork_data)

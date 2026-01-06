@@ -1078,6 +1078,68 @@ def pull(
         raise typer.Exit(1)
 
 
+@app.command(no_args_is_help=True)
+def fork(
+    env_id: str = typer.Argument(..., help="Environment ID to fork (owner/name)"),
+    team: Optional[str] = typer.Option(
+        None,
+        "--team",
+        "-t",
+        help="Team slug for team ownership of the fork",
+    ),
+) -> None:
+    """Fork an environment to create your own copy that you can modify and push"""
+    try:
+        client = APIClient()
+
+        parts = env_id.split("/")
+        if len(parts) != 2:
+            console.print("[red]Error: Invalid environment ID format. Expected: owner/name[/red]")
+            raise typer.Exit(1)
+
+        owner, name = parts
+
+        console.print(f"Forking {env_id}...")
+
+        fork_data: Dict[str, Any] = {}
+        if team:
+            fork_data["team_id"] = team
+
+        try:
+            response = client.post(f"/environments/{env_id}/fork", json=fork_data)
+
+            if "data" in response:
+                fork_response = response["data"]
+            else:
+                fork_response = response
+
+            success = fork_response.get("success", False)
+            message = fork_response.get("message", "")
+            forked_env_id = fork_response.get("environment_id", "")
+
+            if success:
+                console.print(f"[green]✓ Successfully forked {env_id}[/green]")
+                console.print(f"[dim]New environment ID: {forked_env_id}[/dim]")
+                console.print("\n[cyan]Next steps:[/cyan]")
+                console.print(f"  prime env pull {forked_env_id}")
+                console.print("  # Make your changes")
+                console.print("  prime env push")
+            else:
+                console.print(f"[red]Fork failed: {message}[/red]")
+                raise typer.Exit(1)
+
+        except APIError as e:
+            console.print(f"[red]Failed to fork environment: {e}[/red]")
+            raise typer.Exit(1)
+
+    except APIError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        raise typer.Exit(1)
+
+
 def validate_env_id(env_id: str) -> Tuple[str, str]:
     """Validate and parse environment ID.
 

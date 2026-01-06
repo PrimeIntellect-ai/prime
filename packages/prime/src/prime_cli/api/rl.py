@@ -30,6 +30,9 @@ class RLRun(BaseModel):
     rollouts_per_example: int = Field(..., alias="rolloutsPerExample")
     seq_len: int = Field(..., alias="seqLen")
     max_steps: int = Field(..., alias="maxSteps")
+    max_tokens: Optional[int] = Field(None, alias="maxTokens")
+    batch_size: int = Field(..., alias="batchSize")
+    trajectory_strategy: Optional[str] = Field(None, alias="trajectoryStrategy")
     base_model: str = Field(..., alias="baseModel")
     environments: List[Dict[str, Any]] = Field(default_factory=list)
     run_config: Optional[Dict[str, Any]] = Field(None, alias="runConfig")
@@ -86,15 +89,17 @@ class RLClient:
         model_name: str,
         environments: List[Dict[str, Any]],
         rollouts_per_example: int = 8,
-        seq_len: int = 4096,
         max_steps: int = 100,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        batch_size: int = 128,
+        trajectory_strategy: Optional[str] = None,
         name: Optional[str] = None,
         wandb_entity: Optional[str] = None,
         wandb_project: Optional[str] = None,
         wandb_run_name: Optional[str] = None,
         wandb_api_key: Optional[str] = None,
         team_id: Optional[str] = None,
-        run_config: Optional[Dict[str, Any]] = None,
         eval_config: Optional[Dict[str, Any]] = None,
     ) -> RLRun:
         """Create a new RL training run."""
@@ -109,10 +114,13 @@ class RLClient:
                 "model": {"name": model_name},
                 "environments": environments,
                 "rollouts_per_example": rollouts_per_example,
-                "seq_len": seq_len,
                 "max_steps": max_steps,
+                "batch_size": batch_size,
                 "secrets": secrets,
             }
+
+            if trajectory_strategy:
+                payload["trajectory_strategy"] = trajectory_strategy
 
             if name:
                 payload["name"] = name
@@ -130,8 +138,11 @@ class RLClient:
             if team_id:
                 payload["team_id"] = team_id
 
-            if run_config:
-                payload["run_config"] = run_config
+            if max_tokens:
+                payload["max_tokens"] = max_tokens
+
+            if temperature is not None:
+                payload["temperature"] = temperature
 
             if eval_config:
                 payload["eval"] = eval_config

@@ -30,6 +30,7 @@ class RLRun(BaseModel):
     rollouts_per_example: int = Field(..., alias="rolloutsPerExample")
     seq_len: int = Field(..., alias="seqLen")
     max_steps: int = Field(..., alias="maxSteps")
+    save_steps: Optional[int] = Field(None, alias="saveSteps")
     base_model: str = Field(..., alias="baseModel")
     environments: List[Dict[str, Any]] = Field(default_factory=list)
     run_config: Optional[Dict[str, Any]] = Field(None, alias="runConfig")
@@ -88,6 +89,7 @@ class RLClient:
         rollouts_per_example: int = 8,
         seq_len: int = 4096,
         max_steps: int = 100,
+        save_steps: Optional[int] = None,
         name: Optional[str] = None,
         wandb_entity: Optional[str] = None,
         wandb_project: Optional[str] = None,
@@ -113,6 +115,9 @@ class RLClient:
                 "max_steps": max_steps,
                 "secrets": secrets,
             }
+
+            if save_steps is not None:
+                payload["save_steps"] = save_steps
 
             if name:
                 payload["name"] = name

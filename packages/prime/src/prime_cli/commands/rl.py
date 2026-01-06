@@ -81,6 +81,7 @@ environments = ["{env_value}"]
 rollouts = 8      # number of attempts per prompt/example
 max_steps = 100   # total training iterations
 seq_len = 4096    # max tokens per response
+save_steps = 50   # checkpoint save interval
 
 # name = "my-experiment"
 
@@ -119,6 +120,7 @@ class RLRunConfig(BaseConfig):
     rollouts: int = 8
     seq_len: int = 4096
     max_steps: int = 100
+    save_steps: int | None = None
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     run_config: Optional[Dict[str, Any]] = Field(default=None)
     eval: EvalConfig = Field(default_factory=EvalConfig)
@@ -476,6 +478,9 @@ def create_run(
     max_steps: Optional[int] = typer.Option(
         None, "--max-steps", help="Maximum training steps [default: 100]"
     ),
+    save_steps: Optional[int] = typer.Option(
+        None, "--save-steps", help="Checkpoint save interval [default: 50]"
+    ),
     wandb_entity: Optional[str] = typer.Option(
         None, "--wandb-entity", help="Weights & Biases entity (username or team name)"
     ),
@@ -583,6 +588,7 @@ def create_run(
         rollouts=rollouts,
         seq_len=seq_len,
         max_steps=max_steps,
+        save_steps=save_steps,
         wandb_entity=wandb_entity,
         wandb_project=wandb_project,
         wandb_name=wandb_name,
@@ -675,6 +681,8 @@ def create_run(
         console.print(f"  Model: {cfg.model}")
         console.print(f"  Environments: {', '.join(cfg.environments)}")
         console.print(f"  Max Steps: {cfg.max_steps}")
+        if cfg.save_steps:
+            console.print(f"  Save Steps: {cfg.save_steps}")
         console.print(f"  Rollouts per Example: {cfg.rollouts}")
         console.print(f"  Sequence Length: {cfg.seq_len}")
         if cfg.wandb.project:
@@ -695,6 +703,7 @@ def create_run(
             rollouts_per_example=cfg.rollouts,
             seq_len=cfg.seq_len,
             max_steps=cfg.max_steps,
+            save_steps=cfg.save_steps,
             name=cfg.name,
             wandb_entity=cfg.wandb.entity,
             wandb_project=cfg.wandb.project,

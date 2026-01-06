@@ -1,0 +1,14 @@
+model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
+environments = ["will/wordle"]
+
+rollouts = 8      # number of attempts per prompt/example
+max_steps = 10    # total training iterations
+seq_len = 4096    # max tokens per response
+save_steps = 5    # checkpoint save interval
+
+# name = "my-experiment"
+
+# [wandb]
+# entity = "my-team"
+# project = "my-project"
+# name = "experiment-1"

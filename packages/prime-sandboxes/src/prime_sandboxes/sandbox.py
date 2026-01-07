@@ -471,7 +471,7 @@ class SandboxClient:
         stdout_log_file_quoted = shlex.quote(job.stdout_log_file)
         stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
 
-        check = self.execute_command(sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=10)
+        check = self.execute_command(sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30)
 
         if not check.stdout.strip():
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
@@ -1016,7 +1016,7 @@ class AsyncSandboxClient:
         stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
 
         check = await self.execute_command(
-            sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=10
+            sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30
         )
 
         if not check.stdout.strip():

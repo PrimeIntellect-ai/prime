@@ -63,10 +63,10 @@ def clean_logs(text: str) -> str:
 
 def generate_rl_config_template(environment: str | None = None) -> str:
     """Generate a TOML config template for RL training."""
-    env_value = environment or "primeintellect/your-environment"
+    env_value = environment or "primeintellect/reverse-text"
 
     return f'''\
-model = "meta-llama/Llama-3.1-8B-Instruct"
+model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
 max_steps = 100
 
 # Training

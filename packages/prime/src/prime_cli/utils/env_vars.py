@@ -121,22 +121,19 @@ def parse_env_arg(
 def collect_env_vars(
     env_args: Optional[List[str]] = None,
     env_files: Optional[List[str]] = None,
-    config_env_vars: Optional[Dict[str, str]] = None,
     overrides: Optional[Dict[str, str]] = None,
     on_warning: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, str]:
     """Collect environment variables from various sources.
 
     Priority (later sources override earlier):
-    1. config_env_vars (e.g., from TOML [secrets] section)
-    2. env_files (--env-file arguments)
-    3. env_args (-e/--env arguments)
-    4. overrides (explicit overrides, highest priority)
+    1. env_files (--env-file arguments)
+    2. env_args (-e/--env-var arguments)
+    3. overrides (explicit overrides, highest priority)
 
     Args:
-        env_args: List of -e/--env argument values
+        env_args: List of -e/--env-var argument values
         env_files: List of --env-file paths
-        config_env_vars: Dict from config file
         overrides: Dict of explicit overrides (highest priority)
         on_warning: Optional callback for warning messages
 
@@ -147,9 +144,6 @@ def collect_env_vars(
         EnvParseError: If a file is not found or parsing fails
     """
     result: Dict[str, str] = {}
-
-    if config_env_vars:
-        result.update(config_env_vars)
 
     if env_files:
         for file_path in env_files:

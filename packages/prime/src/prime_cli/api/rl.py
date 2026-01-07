@@ -98,17 +98,16 @@ class RLClient:
         wandb_entity: Optional[str] = None,
         wandb_project: Optional[str] = None,
         wandb_run_name: Optional[str] = None,
-        wandb_api_key: Optional[str] = None,
+        secrets: Optional[Dict[str, str]] = None,
         team_id: Optional[str] = None,
         eval_config: Optional[Dict[str, Any]] = None,
     ) -> RLRun:
         """Create a new RL training run."""
         try:
-            secrets: List[Dict[str, str]] = []
-
-            # Add W&B API key as a secret if provided
-            if wandb_api_key:
-                secrets.append({"key": "WANDB_API_KEY", "value": wandb_api_key})
+            secrets_list: List[Dict[str, str]] = []
+            if secrets:
+                for key, value in secrets.items():
+                    secrets_list.append({"key": key, "value": value})
 
             payload: Dict[str, Any] = {
                 "model": {"name": model_name},
@@ -116,7 +115,7 @@ class RLClient:
                 "rollouts_per_example": rollouts_per_example,
                 "max_steps": max_steps,
                 "batch_size": batch_size,
-                "secrets": secrets,
+                "secrets": secrets_list,
             }
 
             if trajectory_strategy:

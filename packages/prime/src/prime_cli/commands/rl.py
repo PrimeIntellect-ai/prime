@@ -10,6 +10,7 @@ import typer
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.table import Table
+from typer.core import TyperGroup
 
 from prime_cli.core import Config
 
@@ -17,6 +18,7 @@ from ..api.rl import RLClient, RLRun
 from ..client import APIClient, APIError
 from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
+from ..utils.env_vars import EnvParseError, collect_env_vars
 
 console = Console()
 
@@ -191,7 +193,28 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     }
 
 
+class DefaultGroup(TyperGroup):
+    """Makes 'run' the default command when a config file is passed."""
+
+    def parse_args(self, ctx, args):
+        if not args:
+            return super().parse_args(ctx, args)
+        if args[0] in ("--help", "-h"):
+            return super().parse_args(ctx, args)
+        if args[0] in self.commands:
+            return super().parse_args(ctx, args)
+        args = ["run"] + list(args)
+        return super().parse_args(ctx, args)
+
+    def format_usage(self, ctx, formatter):
+        formatter.write_usage(
+            ctx.command_path,
+            "[OPTIONS] CONFIG_PATH [ARGS]... | COMMAND [ARGS]...",
+        )
+
+
 app = typer.Typer(
+    cls=DefaultGroup,
     help="Manage hosted RL training runs.",
     no_args_is_help=True,
 )
@@ -201,7 +224,22 @@ app = typer.Typer(
 def create_run(
     config_path: str = typer.Argument(
         ...,
-        help="Path to TOML config file (e.g., @ rl.toml)",
+        help="Path to TOML config file (e.g., rl.toml)",
+    ),
+    env: Optional[List[str]] = typer.Option(
+        None,
+        "-e",
+        "--env",
+        help=(
+            "Environment variable/secret to pass to the training container. "
+            "Accepts: KEY=VALUE (direct value), KEY (reads from $KEY), "
+            "or path/to/file.env (loads env file)."
+        ),
+    ),
+    env_file: Optional[List[str]] = typer.Option(
+        None,
+        "--env-file",
+        help="Path to .env file containing secrets.",
     ),
     wandb_api_key: Optional[str] = typer.Option(
         None,
@@ -215,34 +253,31 @@ def create_run(
 
     Example:
 
-        prime rl run @ rl.toml
+        prime rl run rl.toml
     """
     validate_output_format(output, console)
 
-    # Handle @ prefix
-    path = config_path[1:].strip() if config_path.startswith("@") else config_path
-
-    console.print(f"[dim]Loading config from {path}[/dim]\n")
-    cfg = load_config(path)
+    console.print(f"[dim]Loading config from {config_path}[/dim]\n")
+    cfg = load_config(config_path)
 
     # Validate required fields
     if not cfg.env:
         console.print("[red]Error:[/red] No environments specified. Add [[env]] sections.")
         raise typer.Exit(1)
 
-    for env in cfg.env:
-        if "/" not in env.id:
+    for train_env in cfg.env:
+        if "/" not in train_env.id:
             console.print(
-                f"[red]Error:[/red] Invalid environment format: '{env.id}'. "
+                f"[red]Error:[/red] Invalid environment format: '{train_env.id}'. "
                 "Expected 'owner/name' format."
             )
             raise typer.Exit(1)
 
     # Validate eval environment IDs
-    for env in cfg.eval.env:
-        if "/" not in env.id:
+    for eval_env in cfg.eval.env:
+        if "/" not in eval_env.id:
             console.print(
-                f"[red]Error:[/red] Invalid eval environment format: '{env.id}'. "
+                f"[red]Error:[/red] Invalid eval environment format: '{eval_env.id}'. "
                 "Expected 'owner/name' format."
             )
             raise typer.Exit(1)
@@ -251,11 +286,26 @@ def create_run(
         console.print("[red]Error:[/red] No model specified.")
         raise typer.Exit(1)
 
+    # Collect secrets from all sources
+    def warn(msg: str) -> None:
+        console.print(f"[yellow]Warning:[/yellow] {msg}")
+
+    try:
+        secrets = collect_env_vars(
+            env_args=env,
+            env_files=env_file,
+            overrides={"WANDB_API_KEY": wandb_api_key} if wandb_api_key else None,
+            on_warning=warn,
+        )
+    except EnvParseError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
     # Warn if wandb is configured but no API key
-    if (cfg.wandb.entity or cfg.wandb.project) and not wandb_api_key:
+    if (cfg.wandb.entity or cfg.wandb.project) and "WANDB_API_KEY" not in secrets:
         console.print(
             "[yellow]Warning:[/yellow] W&B config detected but no API key provided.\n"
-            "  Set via: --wandb-api-key or WANDB_API_KEY env var\n"
+            "  Set via: --wandb-api-key, -e WANDB_API_KEY, or WANDB_API_KEY env var\n"
         )
 
     try:
@@ -280,6 +330,8 @@ def create_run(
             console.print(f"  W&B Project: {cfg.wandb.project}")
         if cfg.eval.env:
             console.print(f"  Eval Environments: {', '.join(e.id for e in cfg.eval.env)}")
+        if secrets:
+            console.print(f"  Secrets: {', '.join(secrets.keys())}")
         if app_config.team_id:
             console.print(f"  Team: {app_config.team_id}")
         console.print()
@@ -312,7 +364,7 @@ def create_run(
             wandb_entity=cfg.wandb.entity,
             wandb_project=cfg.wandb.project,
             wandb_run_name=cfg.wandb.name,
-            wandb_api_key=wandb_api_key,
+            secrets=secrets if secrets else None,
             team_id=app_config.team_id,
             eval_config=eval_config,
         )
@@ -572,4 +624,4 @@ def init_config(
     path.write_text(template)
 
     console.print(f"[green]✓[/green] Created {output_path}")
-    console.print(f"\n[dim]Run with:[/dim] prime rl run @{output_path}")
+    console.print(f"\n[dim]Run with:[/dim] prime rl {output_path}")

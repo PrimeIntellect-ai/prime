@@ -121,20 +121,20 @@ def parse_env_arg(
 def collect_env_vars(
     env_args: Optional[List[str]] = None,
     env_files: Optional[List[str]] = None,
-    overrides: Optional[Dict[str, str]] = None,
+    defaults: Optional[Dict[str, str]] = None,
     on_warning: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, str]:
     """Collect environment variables from various sources.
 
     Priority (later sources override earlier):
-    1. env_files (--env-file arguments)
-    2. env_args (-e/--env-var arguments)
-    3. overrides (explicit overrides, highest priority)
+    1. defaults (e.g., from CLI envvar, lowest priority)
+    2. env_files (--env-file arguments)
+    3. env_args (-e/--env-var arguments, highest priority)
 
     Args:
         env_args: List of -e/--env-var argument values
         env_files: List of --env-file paths
-        overrides: Dict of explicit overrides (highest priority)
+        defaults: Dict of default values (lowest priority, typically from CLI envvar)
         on_warning: Optional callback for warning messages
 
     Returns:
@@ -144,6 +144,9 @@ def collect_env_vars(
         EnvParseError: If a file is not found or parsing fails
     """
     result: Dict[str, str] = {}
+
+    if defaults:
+        result.update(defaults)
 
     if env_files:
         for file_path in env_files:
@@ -155,9 +158,6 @@ def collect_env_vars(
     if env_args:
         for arg in env_args:
             result.update(parse_env_arg(arg, on_warning=on_warning))
-
-    if overrides:
-        result.update(overrides)
 
     return result
 

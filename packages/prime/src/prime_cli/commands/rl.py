@@ -294,7 +294,7 @@ def create_run(
         secrets = collect_env_vars(
             env_args=env,
             env_files=env_file,
-            overrides={"WANDB_API_KEY": wandb_api_key} if wandb_api_key else None,
+            defaults={"WANDB_API_KEY": wandb_api_key} if wandb_api_key else None,
             on_warning=warn,
         )
     except EnvParseError as e:

@@ -74,6 +74,9 @@ batch_size = 128
 rollouts_per_example = 8
 # trajectory_strategy = "interleaved"  # or "branching"
 
+# Optional: environment variable files
+# env_file = ["secrets.env"]
+
 [sampling]
 max_tokens = 2048
 # temperature = 0.7
@@ -90,9 +93,6 @@ id = "{env_value}"
 # project = "my-project"
 # entity = "my-team"
 # name = "my-run-name"
-
-# Optional: environment variable files
-# env_file = ["secrets.env", "another.env"]
 
 # Optional: online evaluation
 # [eval]
@@ -289,8 +289,14 @@ def create_run(
     def warn(msg: str) -> None:
         console.print(f"[yellow]Warning:[/yellow] {msg}")
 
+    # Resolve config env_file paths relative to config file directory
+    config_dir = Path(config_path).parent
+    resolved_config_env_files = [
+        str(config_dir / env_file_path) for env_file_path in cfg.env_file
+    ]
+
     # Merge config and CLI env files (CLI takes precedence)
-    env_files = cfg.env_file + (env_file or [])
+    env_files = resolved_config_env_files + (env_file or [])
 
     try:
         secrets = collect_env_vars(

@@ -89,6 +89,7 @@ id = "{env_value}"
 # [wandb]
 # project = "my-project"
 # entity = "my-team"
+# name = "my-run-name"
 
 # Optional: online evaluation
 # [eval]
@@ -241,12 +242,6 @@ def create_run(
         "--env-file",
         help="Path to .env file containing secrets.",
     ),
-    wandb_api_key: Optional[str] = typer.Option(
-        None,
-        "--wandb-api-key",
-        help="Weights & Biases API key (or set WANDB_API_KEY env var)",
-        envvar="WANDB_API_KEY",
-    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Start an RL training run from a config file.
@@ -294,7 +289,6 @@ def create_run(
         secrets = collect_env_vars(
             env_args=env,
             env_files=env_file,
-            defaults={"WANDB_API_KEY": wandb_api_key} if wandb_api_key else None,
             on_warning=warn,
         )
     except EnvParseError as e:
@@ -305,7 +299,7 @@ def create_run(
     if (cfg.wandb.entity or cfg.wandb.project) and "WANDB_API_KEY" not in secrets:
         console.print(
             "[yellow]Warning:[/yellow] W&B config detected but no API key provided.\n"
-            "  Set via: --wandb-api-key, -e WANDB_API_KEY, or WANDB_API_KEY env var\n"
+            "  Set via: -e WANDB_API_KEY=... or --env-file\n"
         )
 
     try:
@@ -624,4 +618,4 @@ def init_config(
     path.write_text(template)
 
     console.print(f"[green]✓[/green] Created {output_path}")
-    console.print(f"\n[dim]Run with:[/dim] prime rl {output_path}")
+    console.print(f"\n[dim]Run with:[/dim] prime rl run {output_path}")

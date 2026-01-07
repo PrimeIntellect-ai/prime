@@ -229,7 +229,7 @@ def create_run(
     env: Optional[List[str]] = typer.Option(
         None,
         "-e",
-        "--env",
+        "--env-var",
         help=(
             "Environment variable/secret to pass to the training container. "
             "Accepts: KEY=VALUE (direct value), KEY (reads from $KEY), "

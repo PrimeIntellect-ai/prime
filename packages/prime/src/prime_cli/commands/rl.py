@@ -91,6 +91,9 @@ id = "{env_value}"
 # entity = "my-team"
 # name = "my-run-name"
 
+# Optional: environment variable files
+# env_file = ["secrets.env", "another.env"]
+
 # Optional: online evaluation
 # [eval]
 # interval = 100
@@ -140,6 +143,7 @@ class RLConfig(BaseModel):
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
+    env_file: List[str] = Field(default_factory=list)
 
 
 def load_config(path: str) -> RLConfig:
@@ -285,10 +289,13 @@ def create_run(
     def warn(msg: str) -> None:
         console.print(f"[yellow]Warning:[/yellow] {msg}")
 
+    # Merge config and CLI env files (CLI takes precedence)
+    env_files = cfg.env_file + (env_file or [])
+
     try:
         secrets = collect_env_vars(
             env_args=env,
-            env_files=env_file,
+            env_files=env_files if env_files else None,
             on_warning=warn,
         )
     except EnvParseError as e:

@@ -591,7 +591,7 @@ def list_runs(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List your RL training runs (alias: ls)."""
+    """List your runs (alias: ls)."""
     _list_runs_impl(team, output)
 
 
@@ -600,7 +600,7 @@ def get_run(
     run_id: str = typer.Argument(..., help="Run ID to get details for"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Get details of a specific RL training run.
+    """Get details of a specific run.
 
     Example:
 
@@ -655,7 +655,7 @@ def stop_run(
     run_id: str = typer.Argument(..., help="Run ID to stop"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
 ) -> None:
-    """Stop an RL training run."""
+    """Stop a run."""
     try:
         if not force:
             confirm = typer.confirm(f"Are you sure you want to stop run {run_id}?")
@@ -681,7 +681,7 @@ def delete_run(
     run_id: str = typer.Argument(..., help="Run ID to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
 ) -> None:
-    """Delete an RL training run."""
+    """Delete a run."""
     try:
         if not force:
             confirm = typer.confirm(f"Are you sure you want to permanently delete run {run_id}?")
@@ -706,7 +706,7 @@ def get_logs(
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
 ) -> None:
-    """Get logs for an RL training run."""
+    """Get logs for a run."""
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
@@ -772,7 +772,7 @@ def init_config(
     ),
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing file"),
 ) -> None:
-    """Generate a template config file for RL training.
+    """Generate a template config file for a training run.
 
     Example:
 
@@ -812,7 +812,7 @@ def get_metrics(
     max_step: Optional[int] = typer.Option(None, "--max-step", help="Maximum step (inclusive)"),
     limit: Optional[int] = typer.Option(None, "--limit", "-n", help="Maximum number of records"),
 ) -> None:
-    """Get training metrics for an RL run (JSON output).
+    """Get training metrics for a run.
 
     Example:
 
@@ -847,7 +847,7 @@ def get_rollouts(
     page: int = typer.Option(1, "--page", "-p", help="Page number (1-indexed)"),
     limit: int = typer.Option(100, "--limit", "-n", help="Number of samples per page"),
 ) -> None:
-    """Get rollout samples for an RL run (JSON output).
+    """Get rollout samples for a run.
 
     Example:
 
@@ -877,7 +877,7 @@ def get_rollouts(
 def get_progress(
     run_id: str = typer.Argument(..., help="Run ID to get progress for"),
 ) -> None:
-    """Get progress information for an RL run (JSON output).
+    """Get progress information, including which steps have samples and distributions.
 
     Example:
 
@@ -906,7 +906,7 @@ def get_distributions(
     ),
     step: Optional[int] = typer.Option(None, "--step", "-s", help="Step number (defaults to latest)"),
 ) -> None:
-    """Get reward/advantage distribution histogram for an RL run (JSON output).
+    """Get reward/advantage distribution histogram for a run.
 
     Example:
 

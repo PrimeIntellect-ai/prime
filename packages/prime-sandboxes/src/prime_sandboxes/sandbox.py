@@ -24,7 +24,11 @@ from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
+    SandboxError,
+    SandboxImagePullError,
     SandboxNotRunningError,
+    SandboxOOMError,
+    SandboxTimeoutError,
     UploadTimeoutError,
 )
 from .models import (
@@ -488,6 +492,22 @@ class SandboxClient:
             stderr=stderr_logs.stdout,
         )
 
+    def _raise_for_sandbox_error(self, sandbox: Sandbox) -> None:
+        """Raise appropriate exception based on sandbox error type."""
+        error_type = sandbox.error_type
+        error_message = sandbox.error_message
+
+        if error_type == "OOM_KILLED":
+            raise SandboxOOMError(sandbox.id, sandbox.status, error_type, error_message)
+        elif error_type == "TIMEOUT":
+            raise SandboxTimeoutError(sandbox.id, sandbox.status, error_type, error_message)
+        elif error_type == "IMAGE_PULL_FAILED":
+            raise SandboxImagePullError(sandbox.id, sandbox.status, error_type, error_message)
+        elif error_type:
+            raise SandboxError(sandbox.id, sandbox.status, error_type, error_message)
+        else:
+            raise SandboxNotRunningError(sandbox.id, sandbox.status)
+
     def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
     ) -> None:
@@ -513,7 +533,7 @@ class SandboxClient:
                     # Reset counter if check fails
                     consecutive_successes = 0
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
-                raise SandboxNotRunningError(sandbox_id, sandbox.status)
+                self._raise_for_sandbox_error(sandbox)
 
             # Aggressive polling for first 5 attempts (5 seconds), then back off
             sleep_time = 1 if attempt < 5 else 2

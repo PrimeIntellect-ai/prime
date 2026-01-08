@@ -16,7 +16,11 @@ from .core import (
 from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
+    SandboxError,
+    SandboxImagePullError,
     SandboxNotRunningError,
+    SandboxOOMError,
+    SandboxTimeoutError,
     UploadTimeoutError,
 )
 from .models import (
@@ -82,6 +86,10 @@ __all__ = [
     "PaymentRequiredError",
     "APITimeoutError",
     "TimeoutError",  # Deprecated alias
+    "SandboxError",
+    "SandboxOOMError",
+    "SandboxTimeoutError",
+    "SandboxImagePullError",
     "SandboxNotRunningError",
     "CommandTimeoutError",
     "UploadTimeoutError",

@@ -75,6 +75,10 @@ max_steps = 100
 batch_size = 128
 rollouts_per_example = 8
 # trajectory_strategy = "interleaved"  # or "branching"
+# learning_rate = 1e-6
+# lora_alpha = 16
+# oversampling_factor = 1.0
+# max_async_level = 4
 
 [sampling]
 max_tokens = 2048
@@ -97,8 +101,8 @@ id = "{env_value}"
 # [eval]
 # interval = 100
 # # optional: default for all environments
-# num_examples = -1 
-# rollouts_per_example = 1  
+# num_examples = -1
+# rollouts_per_example = 1
 # eval_base_model = true
 #
 # [[eval.env]]
@@ -107,6 +111,23 @@ id = "{env_value}"
 # # environment-specific overrides
 # num_examples = 30
 # rollouts_per_example = 4
+
+# Optional: validation during training
+# [val]
+# num_examples = 64
+# rollouts_per_example = 1
+# interval = 5
+
+# Optional: buffer configuration for difficulty filtering
+# [buffer]
+# easy_threshold = 0.8
+# hard_threshold = 0.2
+# easy_fraction = 0.0
+# hard_fraction = 0.0
+# online_difficulty_filtering = false
+# env_ratios = [0.5, 0.5]
+# skip_verification = false
+# seed = 42
 '''
 
 
@@ -137,6 +158,23 @@ class EvalConfig(BaseModel):
     env: List[EvalEnvConfig] = Field(default_factory=list)
 
 
+class ValConfig(BaseModel):
+    num_examples: int | None = None
+    rollouts_per_example: int | None = None
+    interval: int | None = None
+
+
+class BufferConfig(BaseModel):
+    easy_threshold: float | None = None
+    hard_threshold: float | None = None
+    easy_fraction: float | None = None
+    hard_fraction: float | None = None
+    online_difficulty_filtering: bool | None = None
+    env_ratios: List[float] | None = None
+    skip_verification: bool | None = None
+    seed: int | None = None
+
+
 class WandbConfig(BaseModel):
     entity: str | None = None
     project: str | None = None
@@ -150,9 +188,15 @@ class RLConfig(BaseModel):
     batch_size: int = 128
     rollouts_per_example: int = 8
     trajectory_strategy: str | None = None
+    learning_rate: float | None = None
+    lora_alpha: int | None = None
+    oversampling_factor: float | None = None
+    max_async_level: int | None = None
     env: List[EnvConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
+    val: ValConfig = Field(default_factory=ValConfig)
+    buffer: BufferConfig = Field(default_factory=BufferConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     env_file: List[str] = Field(default_factory=list)
 
@@ -302,9 +346,7 @@ def create_run(
 
     # Resolve config env_file paths relative to config file directory
     config_dir = Path(config_path).parent
-    resolved_config_env_files = [
-        str(config_dir / env_file_path) for env_file_path in cfg.env_file
-    ]
+    resolved_config_env_files = [str(config_dir / env_file_path) for env_file_path in cfg.env_file]
 
     # Merge config and CLI env files (CLI takes precedence)
     env_files = resolved_config_env_files + (env_file or [])
@@ -344,10 +386,20 @@ def create_run(
             console.print(f"  Max Tokens: {cfg.sampling.max_tokens}")
         if cfg.sampling.temperature is not None:
             console.print(f"  Temperature: {cfg.sampling.temperature}")
+        if cfg.learning_rate is not None:
+            console.print(f"  Learning Rate: {cfg.learning_rate}")
+        if cfg.lora_alpha is not None:
+            console.print(f"  LoRA Alpha: {cfg.lora_alpha}")
+        if cfg.oversampling_factor is not None:
+            console.print(f"  Oversampling Factor: {cfg.oversampling_factor}")
+        if cfg.max_async_level is not None:
+            console.print(f"  Max Async Level: {cfg.max_async_level}")
         if cfg.wandb.project:
             console.print(f"  W&B Project: {cfg.wandb.project}")
         if cfg.eval.env:
             console.print(f"  Eval Environments: {', '.join(e.id for e in cfg.eval.env)}")
+        if cfg.val.num_examples is not None:
+            console.print(f"  Val Examples: {cfg.val.num_examples}")
         if secrets:
             console.print(f"  Secrets: {', '.join(secrets.keys())}")
         if app_config.team_id:
@@ -379,6 +431,37 @@ def create_run(
             if cfg.eval.eval_base_model is not None:
                 eval_config["eval_base_model"] = cfg.eval.eval_base_model
 
+        # Build val config if provided
+        val_config = None
+        has_val_config = (
+            cfg.val.num_examples is not None
+            or cfg.val.rollouts_per_example is not None
+            or cfg.val.interval is not None
+        )
+        if has_val_config:
+            val_config = {}
+            if cfg.val.num_examples is not None:
+                val_config["num_examples"] = cfg.val.num_examples
+            if cfg.val.rollouts_per_example is not None:
+                val_config["rollouts_per_example"] = cfg.val.rollouts_per_example
+            if cfg.val.interval is not None:
+                val_config["interval"] = cfg.val.interval
+
+        # Build buffer config if provided
+        buffer_config = None
+        buffer_fields = [
+            ("easy_threshold", cfg.buffer.easy_threshold),
+            ("hard_threshold", cfg.buffer.hard_threshold),
+            ("easy_fraction", cfg.buffer.easy_fraction),
+            ("hard_fraction", cfg.buffer.hard_fraction),
+            ("online_difficulty_filtering", cfg.buffer.online_difficulty_filtering),
+            ("env_ratios", cfg.buffer.env_ratios),
+            ("skip_verification", cfg.buffer.skip_verification),
+            ("seed", cfg.buffer.seed),
+        ]
+        if any(v is not None for _, v in buffer_fields):
+            buffer_config = {k: v for k, v in buffer_fields if v is not None}
+
         # Create the run
         run = rl_client.create_run(
             model_name=cfg.model,
@@ -396,6 +479,12 @@ def create_run(
             secrets=secrets if secrets else None,
             team_id=app_config.team_id,
             eval_config=eval_config,
+            val_config=val_config,
+            buffer_config=buffer_config,
+            learning_rate=cfg.learning_rate,
+            lora_alpha=cfg.lora_alpha,
+            oversampling_factor=cfg.oversampling_factor,
+            max_async_level=cfg.max_async_level,
         )
 
         if output == "json":

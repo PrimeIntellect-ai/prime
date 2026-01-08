@@ -17,6 +17,7 @@ from .commands.pods import app as pods_app
 from .commands.registry import app as registry_app
 from .commands.rl import app as rl_app
 from .commands.sandbox import app as sandbox_app
+from .commands.lab import app as lab_app
 from .commands.teams import app as teams_app
 from .commands.whoami import app as whoami_app
 from .core import Config
@@ -39,6 +40,7 @@ app.add_typer(teams_app, name="teams", rich_help_panel="Account")
 app.add_typer(env_app, name="env", rich_help_panel="Lab")
 app.add_typer(evals_app, name="eval", rich_help_panel="Lab")
 app.add_typer(rl_app, name="rl", rich_help_panel="Lab")
+app.add_typer(lab_app, name="lab", rich_help_panel="Lab")
 
 # Compute commands
 app.add_typer(availability_app, name="availability", rich_help_panel="Compute")

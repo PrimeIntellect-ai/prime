@@ -1,5 +1,6 @@
 from pathlib import Path
 
+
 def init_sandbox_environment(name: str, path: str) -> Path:
     env_id_underscore = name.replace("-", "_")
     local_dir = Path(path) / env_id_underscore
@@ -39,7 +40,7 @@ The last command in setup.sh should start your long-running process.
 '''
     (local_dir / "README.md").write_text(readme_content)
 
-    env_py_content = f'''from pathlib import Path
+    env_py_content = '''from pathlib import Path
 from verifiers.envs.experimental.remote_envs import RemoteEnv
 
 
@@ -111,7 +112,7 @@ Edit `sandbox/src/index.ts` to define your tools and rewards.
 '''
     (local_dir / "README.md").write_text(readme_content)
 
-    env_py_content = f'''from pathlib import Path
+    env_py_content = '''from pathlib import Path
 from verifiers.envs.experimental.remote_envs import TypeScriptEnv
 
 
@@ -172,7 +173,13 @@ function add(args: z.infer<typeof AddArgs>): string {
   return String(args.x + args.y);
 }
 
-const tools: Record<string, { description: string; schema: z.ZodObject<any>; fn: (args: any) => string }> = {
+type ToolDef = {
+  description: string;
+  schema: z.ZodObject<any>;
+  fn: (args: any) => string;
+};
+
+const tools: Record<string, ToolDef> = {
   echo: {
     description: "Echoes back the input message",
     schema: EchoArgs,
@@ -195,7 +202,12 @@ function correctness(prompt: any, completion: any, answer: any, state: any): num
   return content.includes(answer) ? 1.0 : 0.0;
 }
 
-const rewards: Record<string, { weight: number; fn: (prompt: any, completion: any, answer: any, state: any) => number }> = {
+type RewardDef = {
+  weight: number;
+  fn: (prompt: any, completion: any, answer: any, state: any) => number;
+};
+
+const rewards: Record<string, RewardDef> = {
   correctness: {
     weight: 1.0,
     fn: correctness,

@@ -909,14 +909,18 @@ def init(
 
         if sandbox:
             created_path = init_sandbox_environment(name, path)
-            console.print(f"[green]✓ Created sandbox environment template in {created_path}/[/green]")
+            console.print(f"""
+            [green]✓ Created sandbox environment template in {created_path}/[/green]
+            """)
             console.print("\nNext steps:")
             console.print(f"  cd {created_path}")
             console.print("  # Edit sandbox/setup.sh to configure your environment")
             console.print("  prime env push")
         elif ts:
             created_path = init_ts_environment(name, path)
-            console.print(f"[green]✓ Created TypeScript environment template in {created_path}/[/green]")
+            console.print(f"""
+            [green]✓ Created TypeScript environment template in {created_path}/[/green]
+            """)
             console.print("\nNext steps:")
             console.print(f"  cd {created_path}")
             console.print("  # Edit sandbox/src/index.ts to define your tools and rewards")

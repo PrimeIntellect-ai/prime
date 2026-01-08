@@ -280,7 +280,7 @@ app = typer.Typer(
 )
 
 
-@app.command("run")
+@app.command("run", rich_help_panel="Commands")
 def create_run(
     config_path: str = typer.Argument(
         ...,
@@ -505,7 +505,7 @@ def create_run(
         raise typer.Exit(1)
 
 
-@app.command("models")
+@app.command("models", rich_help_panel="Commands")
 def list_models(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
@@ -540,13 +540,8 @@ def list_models(
         raise typer.Exit(1)
 
 
-@app.command("list")
-def list_runs(
-    team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
-    num: int = typer.Option(20, "--num", "-n", help="Number of most recent runs to show"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """List your RL training runs."""
+def _list_runs_impl(team: Optional[str], num: int, output: str) -> None:
+    """Implementation for listing RL training runs."""
     validate_output_format(output, console)
 
     if num < 1:
@@ -612,7 +607,73 @@ def list_runs(
         raise typer.Exit(1)
 
 
-@app.command("stop")
+@app.command("list", rich_help_panel="Commands")
+@app.command("ls", rich_help_panel="Commands", hidden=True)
+def list_runs(
+    team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
+    num: int = typer.Option(20, "--num", "-n", help="Number of most recent runs to show"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List your RL training runs (alias: ls)."""
+    _list_runs_impl(team, num, output)
+
+
+@app.command("get", rich_help_panel="Commands")
+def get_run(
+    run_id: str = typer.Argument(..., help="Run ID to get details for"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Get details of a specific RL training run.
+
+    Example:
+
+        prime rl get <run_id>
+
+        prime rl get <run_id> -o json
+    """
+    validate_output_format(output, console)
+
+    try:
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+
+        run = rl_client.get_run(run_id)
+
+        if output == "json":
+            output_data_as_json({"run": run.model_dump()}, console)
+            return
+
+        # Display run details
+        formatted = _format_run_for_display(run)
+        status_color = _get_status_color(run.status)
+
+        console.print(f"[bold]Run {run_id}[/bold]\n")
+        console.print(f"  Status: [{status_color}]{run.status}[/{status_color}]")
+        console.print(f"  Model: [magenta]{run.base_model}[/magenta]")
+        console.print(f"  Environments: [green]{formatted['environments']}[/green]")
+        console.print(f"  Max Steps: {run.max_steps}")
+        console.print(f"  Batch Size: {run.batch_size}")
+        console.print(f"  Rollouts per Example: {run.rollouts_per_example}")
+        if run.max_tokens:
+            console.print(f"  Max Tokens: {run.max_tokens}")
+        if run.wandb_project:
+            console.print(f"  W&B: {run.wandb_entity or ''}/{run.wandb_project}")
+        if run.team_id:
+            console.print(f"  Team: {run.team_id}")
+        console.print(f"  Created: [dim]{formatted['created_at']}[/dim]")
+        if run.started_at:
+            console.print(f"  Started: [dim]{run.started_at.strftime('%Y-%m-%d %H:%M')}[/dim]")
+        if run.completed_at:
+            console.print(f"  Completed: [dim]{run.completed_at.strftime('%Y-%m-%d %H:%M')}[/dim]")
+        if run.error_message:
+            console.print(f"  Error: [red]{run.error_message}[/red]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command("stop", rich_help_panel="Commands")
 def stop_run(
     run_id: str = typer.Argument(..., help="Run ID to stop"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
@@ -638,7 +699,7 @@ def stop_run(
         raise typer.Exit(1)
 
 
-@app.command("delete")
+@app.command("delete", rich_help_panel="Commands")
 def delete_run(
     run_id: str = typer.Argument(..., help="Run ID to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
@@ -662,7 +723,7 @@ def delete_run(
         raise typer.Exit(1)
 
 
-@app.command("logs")
+@app.command("logs", rich_help_panel="Monitoring")
 def get_logs(
     run_id: str = typer.Argument(..., help="Run ID to get logs for"),
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
@@ -726,7 +787,7 @@ def get_logs(
         raise typer.Exit(1)
 
 
-@app.command("init")
+@app.command("init", rich_help_panel="Commands")
 def init_config(
     output_path: str = typer.Argument(
         "rl.toml",
@@ -765,3 +826,129 @@ def init_config(
 
     console.print(f"[green]✓[/green] Created {output_path}")
     console.print(f"\n[dim]Run with:[/dim] prime rl run {output_path}")
+
+
+@app.command("metrics", rich_help_panel="Monitoring")
+def get_metrics(
+    run_id: str = typer.Argument(..., help="Run ID to get metrics for"),
+    min_step: Optional[int] = typer.Option(None, "--min-step", help="Minimum step (inclusive)"),
+    max_step: Optional[int] = typer.Option(None, "--max-step", help="Maximum step (inclusive)"),
+    limit: Optional[int] = typer.Option(None, "--limit", "-n", help="Maximum number of records"),
+) -> None:
+    """Get training metrics for an RL run (JSON output).
+
+    Example:
+
+        prime rl metrics <run_id>
+
+        prime rl metrics <run_id> --min-step 10 --max-step 50
+
+        prime rl metrics <run_id> | jq '.metrics[0]'
+    """
+    try:
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+
+        metrics = rl_client.get_metrics(
+            run_id,
+            min_step=min_step,
+            max_step=max_step,
+            limit=limit,
+        )
+
+        output_data_as_json({"metrics": metrics}, console)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command("rollouts", rich_help_panel="Monitoring")
+def get_rollouts(
+    run_id: str = typer.Argument(..., help="Run ID to get rollouts for"),
+    step: int = typer.Option(..., "--step", "-s", help="Step number to get rollouts for"),
+    page: int = typer.Option(1, "--page", "-p", help="Page number (1-indexed)"),
+    limit: int = typer.Option(100, "--limit", "-n", help="Number of samples per page"),
+) -> None:
+    """Get rollout samples for an RL run (JSON output).
+
+    Example:
+
+        prime rl rollouts <run_id> --step 10
+
+        prime rl rollouts <run_id> -s 50 --limit 100 | jq '.samples[0]'
+    """
+    try:
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+
+        result = rl_client.get_rollouts(
+            run_id,
+            step=step,
+            page=page,
+            limit=limit,
+        )
+
+        output_data_as_json(result, console)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command("progress", rich_help_panel="Monitoring")
+def get_progress(
+    run_id: str = typer.Argument(..., help="Run ID to get progress for"),
+) -> None:
+    """Get progress information for an RL run (JSON output).
+
+    Example:
+
+        prime rl progress <run_id>
+
+        prime rl progress <run_id> | jq '.latest_step'
+    """
+    try:
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+
+        progress = rl_client.get_progress(run_id)
+
+        output_data_as_json(progress, console)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command("distributions", rich_help_panel="Monitoring")
+def get_distributions(
+    run_id: str = typer.Argument(..., help="Run ID to get distributions for"),
+    distribution_type: Optional[str] = typer.Option(
+        None, "--type", "-t", help="Distribution type (defaults to all)"
+    ),
+    step: Optional[int] = typer.Option(None, "--step", "-s", help="Step number (defaults to latest)"),
+) -> None:
+    """Get reward/advantage distribution histogram for an RL run (JSON output).
+
+    Example:
+
+        prime rl distributions <run_id>
+
+        prime rl distributions <run_id> --type rewards --step 50
+    """
+    try:
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+
+        result = rl_client.get_distributions(
+            run_id,
+            distribution_type=distribution_type,
+            step=step,
+        )
+
+        output_data_as_json(result, console)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)

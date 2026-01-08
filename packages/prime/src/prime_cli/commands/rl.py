@@ -69,13 +69,12 @@ def generate_rl_config_template(environment: str | None = None) -> str:
 model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
 max_steps = 100
 
+# env_file = ["secrets.env"] # optional file(s) for keys/secrets
+
 # Training
 batch_size = 128
 rollouts_per_example = 8
 # trajectory_strategy = "interleaved"  # or "branching"
-
-# Optional: environment variable files
-# env_file = ["secrets.env"]
 
 [sampling]
 max_tokens = 2048
@@ -84,7 +83,7 @@ max_tokens = 2048
 [[env]]
 id = "{env_value}"
 
-# [[env]]
+# [[env]] # add multiple [[env]] sections for multi-env training
 # id = "primeintellect/another-env"
 # args = {{ split = "train", max_examples = 1000 }}
 
@@ -97,9 +96,15 @@ id = "{env_value}"
 # Optional: online evaluation
 # [eval]
 # interval = 100
+# # optional: default for all environments
+# num_examples = -1 
+# rollouts_per_example = 1  
+# eval_base_model = true
 #
 # [[eval.env]]
 # id = "primeintellect/eval-env"
+# args = {{ split = "test" }}
+# # environment-specific overrides
 # num_examples = 30
 # rollouts_per_example = 4
 '''
@@ -113,6 +118,8 @@ class EnvConfig(BaseModel):
 
 class EvalEnvConfig(BaseModel):
     id: str
+    name: str | None = None
+    args: Dict[str, Any] = Field(default_factory=dict)
     num_examples: int | None = None
     rollouts_per_example: int | None = None
 
@@ -124,6 +131,9 @@ class SamplingConfig(BaseModel):
 
 class EvalConfig(BaseModel):
     interval: int | None = None
+    num_examples: int | None = None
+    rollouts_per_example: int | None = None
+    eval_base_model: bool | None = None
     env: List[EvalEnvConfig] = Field(default_factory=list)
 
 
@@ -134,6 +144,7 @@ class WandbConfig(BaseModel):
 
 
 class RLConfig(BaseModel):
+    name: str | None = None
     model: str | None = None
     max_steps: int = 100
     batch_size: int = 128
@@ -349,6 +360,10 @@ def create_run(
             eval_environments = []
             for e in cfg.eval.env:
                 env_cfg: Dict[str, Any] = {"id": e.id}
+                if e.name is not None:
+                    env_cfg["name"] = e.name
+                if e.args:
+                    env_cfg["args"] = e.args
                 if e.num_examples is not None:
                     env_cfg["num_examples"] = e.num_examples
                 if e.rollouts_per_example is not None:
@@ -357,6 +372,12 @@ def create_run(
             eval_config = {"environments": eval_environments}
             if cfg.eval.interval is not None:
                 eval_config["interval"] = cfg.eval.interval
+            if cfg.eval.num_examples is not None:
+                eval_config["num_examples"] = cfg.eval.num_examples
+            if cfg.eval.rollouts_per_example is not None:
+                eval_config["rollouts_per_example"] = cfg.eval.rollouts_per_example
+            if cfg.eval.eval_base_model is not None:
+                eval_config["eval_base_model"] = cfg.eval.eval_base_model
 
         # Create the run
         run = rl_client.create_run(
@@ -368,6 +389,7 @@ def create_run(
             temperature=cfg.sampling.temperature,
             batch_size=cfg.batch_size,
             trajectory_strategy=cfg.trajectory_strategy,
+            name=cfg.name,
             wandb_entity=cfg.wandb.entity,
             wandb_project=cfg.wandb.project,
             wandb_run_name=cfg.wandb.name,

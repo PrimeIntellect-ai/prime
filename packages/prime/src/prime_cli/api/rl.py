@@ -37,6 +37,12 @@ class RLRun(BaseModel):
     environments: List[Dict[str, Any]] = Field(default_factory=list)
     run_config: Optional[Dict[str, Any]] = Field(None, alias="runConfig")
     eval_config: Optional[Dict[str, Any]] = Field(None, alias="evalConfig")
+    val_config: Optional[Dict[str, Any]] = Field(None, alias="valConfig")
+    buffer_config: Optional[Dict[str, Any]] = Field(None, alias="bufferConfig")
+    learning_rate: Optional[float] = Field(None, alias="learningRate")
+    lora_alpha: Optional[int] = Field(None, alias="loraAlpha")
+    oversampling_factor: Optional[float] = Field(None, alias="oversamplingFactor")
+    max_async_level: Optional[int] = Field(None, alias="maxAsyncLevel")
 
     # Monitoring
     wandb_entity: Optional[str] = Field(None, alias="wandbEntity")
@@ -101,6 +107,12 @@ class RLClient:
         secrets: Optional[Dict[str, str]] = None,
         team_id: Optional[str] = None,
         eval_config: Optional[Dict[str, Any]] = None,
+        val_config: Optional[Dict[str, Any]] = None,
+        buffer_config: Optional[Dict[str, Any]] = None,
+        learning_rate: Optional[float] = None,
+        lora_alpha: Optional[int] = None,
+        oversampling_factor: Optional[float] = None,
+        max_async_level: Optional[int] = None,
     ) -> RLRun:
         """Create a new RL training run."""
         try:
@@ -145,6 +157,24 @@ class RLClient:
 
             if eval_config:
                 payload["eval"] = eval_config
+
+            if val_config:
+                payload["val"] = val_config
+
+            if buffer_config:
+                payload["buffer"] = buffer_config
+
+            if learning_rate is not None:
+                payload["learning_rate"] = learning_rate
+
+            if lora_alpha is not None:
+                payload["lora_alpha"] = lora_alpha
+
+            if oversampling_factor is not None:
+                payload["oversampling_factor"] = oversampling_factor
+
+            if max_async_level is not None:
+                payload["max_async_level"] = max_async_level
 
             response = self.client.post("/rft/runs", json=payload)
             return RLRun.model_validate(response.get("run"))

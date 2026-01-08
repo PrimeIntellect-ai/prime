@@ -927,7 +927,9 @@ def get_distributions(
     distribution_type: Optional[str] = typer.Option(
         None, "--type", "-t", help="Distribution type (defaults to all)"
     ),
-    step: Optional[int] = typer.Option(None, "--step", "-s", help="Step number (defaults to latest)"),
+    step: Optional[int] = typer.Option(
+        None, "--step", "-s", help="Step number (defaults to latest)"
+    ),
 ) -> None:
     """Get reward/advantage distribution histogram for a run.
 

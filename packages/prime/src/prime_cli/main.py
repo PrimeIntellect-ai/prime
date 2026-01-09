@@ -19,7 +19,6 @@ from .commands.registry import app as registry_app
 from .commands.rl import app as rl_app
 from .commands.sandbox import app as sandbox_app
 from .commands.teams import app as teams_app
-from .commands.tui import app as tui_app
 from .commands.whoami import app as whoami_app
 from .core import Config
 from .utils.version_check import check_for_update
@@ -42,7 +41,6 @@ app.add_typer(env_app, name="env", rich_help_panel="Lab")
 app.add_typer(evals_app, name="eval", rich_help_panel="Lab")
 app.add_typer(lab_app, name="lab", rich_help_panel="Lab")
 app.add_typer(rl_app, name="rl", rich_help_panel="Lab")
-app.add_typer(tui_app, name="tui", rich_help_panel="Lab")
 
 # Compute commands
 app.add_typer(availability_app, name="availability", rich_help_panel="Compute")

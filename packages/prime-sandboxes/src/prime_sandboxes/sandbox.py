@@ -503,7 +503,7 @@ class SandboxClient:
         elif error_type == "IMAGE_PULL_FAILED":
             raise SandboxImagePullError(sandbox.id, sandbox.status, error_type, error_message)
         else:
-            raise SandboxNotRunningError(sandbox.id, sandbox.status)
+            raise SandboxNotRunningError(sandbox.id, sandbox.status, error_type, error_message)
 
     def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2

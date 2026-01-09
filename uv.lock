@@ -1691,7 +1691,7 @@ requires-dist = [
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.0a6" },
     { name = "typer", specifier = ">=0.9.0" },
     { name = "types-toml", marker = "extra == 'dev'", specifier = ">=0.10.0" },
-    { name = "verifiers", specifier = ">=0.1.9" },
+    { name = "verifiers", specifier = ">=0.1.9.post0" },
 ]
 provides-extras = ["dev"]
 
@@ -2744,7 +2744,7 @@ wheels = [
 
 [[package]]
 name = "verifiers"
-version = "0.1.9"
+version = "0.1.9.post0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "datasets" },
@@ -2764,9 +2764,9 @@ dependencies = [
     { name = "typing-extensions", marker = "python_full_version < '3.12'" },
     { name = "wget" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/60/1d/81d9154ad37edda03de473e57e2d06b0b7e2a6f623bb30b0b43124dc85ef/verifiers-0.1.9.tar.gz", hash = "sha256:3140b16eefdc14f911acd6d3410529207a1ea6772340d620b08598830627d674", size = 186788, upload-time = "2026-01-08T21:23:50.806Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/ef/02094cf940da0f4c995d7e70af9db58c70ecc262d83a72113d03b9511134/verifiers-0.1.9.post0.tar.gz", hash = "sha256:dd25116aa7085a86c19f52e8b9919d4ecc95e18f5d3f9117f5fc8547b5d996b7", size = 186896, upload-time = "2026-01-08T22:02:12.885Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/57/5e/6da706f87ea03d69b277a7a75d6c5549bae7550b8a25c954b4e14f9fafce/verifiers-0.1.9-py3-none-any.whl", hash = "sha256:740c19ce74a86ff1f2f05ac0697760080f01e08d42354d597dbaf525daa80ac1", size = 163511, upload-time = "2026-01-08T21:23:48.976Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/29/1eca23230d30f5356dc1d7cee494598777dfec07b648112edfde0d1fd1fc/verifiers-0.1.9.post0-py3-none-any.whl", hash = "sha256:8a7e952ede8e1975ffad028ad7f32cfac77df4f5ec4b262244ef4da8b7b6fe5b", size = 163709, upload-time = "2026-01-08T22:02:14.134Z" },
 ]
 
 [[package]]

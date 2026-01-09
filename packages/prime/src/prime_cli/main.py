@@ -12,12 +12,12 @@ from .commands.env import app as env_app
 from .commands.evals import app as evals_app
 from .commands.images import app as images_app
 from .commands.inference import app as inference_app
+from .commands.lab import app as lab_app
 from .commands.login import app as login_app
 from .commands.pods import app as pods_app
 from .commands.registry import app as registry_app
 from .commands.rl import app as rl_app
 from .commands.sandbox import app as sandbox_app
-from .commands.lab import app as lab_app
 from .commands.teams import app as teams_app
 from .commands.whoami import app as whoami_app
 from .core import Config

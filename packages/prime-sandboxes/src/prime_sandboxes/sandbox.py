@@ -24,7 +24,6 @@ from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
-    SandboxError,
     SandboxImagePullError,
     SandboxNotRunningError,
     SandboxOOMError,
@@ -503,8 +502,6 @@ class SandboxClient:
             raise SandboxTimeoutError(sandbox.id, sandbox.status, error_type, error_message)
         elif error_type == "IMAGE_PULL_FAILED":
             raise SandboxImagePullError(sandbox.id, sandbox.status, error_type, error_message)
-        elif error_type:
-            raise SandboxError(sandbox.id, sandbox.status, error_type, error_message)
         else:
             raise SandboxNotRunningError(sandbox.id, sandbox.status)
 

@@ -1209,12 +1209,26 @@ def update_pyproject_version(pyproject_path: Path, new_version: str) -> None:
         f.write(updated_content)
 
 
-def get_install_command(tool: str, wheel_url: str) -> List[str]:
-    """Generate install command for the specified tool."""
+def get_install_command(tool: str, wheel_url: str, no_upgrade: bool = False) -> List[str]:
+    """Generate install command for the specified tool.
+
+    Args:
+        tool: Package manager to use ('uv' or 'pip')
+        wheel_url: URL to the wheel file
+        no_upgrade: If True, don't include --upgrade flag (preserves locked dependencies)
+    """
     if tool == "uv":
-        return ["uv", "pip", "install", "--upgrade", wheel_url]
+        cmd = ["uv", "pip", "install"]
+        if not no_upgrade:
+            cmd.append("--upgrade")
+        cmd.append(wheel_url)
+        return cmd
     elif tool == "pip":
-        return ["pip", "install", "--upgrade", wheel_url]
+        cmd = ["pip", "install"]
+        if not no_upgrade:
+            cmd.append("--upgrade")
+        cmd.append(wheel_url)
+        return cmd
     else:
         raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
 
@@ -1428,6 +1442,11 @@ def install(
         "-p",
         help="Path to local environments directory (for local installs)",
     ),
+    no_upgrade: bool = typer.Option(
+        False,
+        "--no-upgrade",
+        help="Don't upgrade existing packages. Useful with locked dependencies (uv.lock).",
+    ),
 ) -> None:
     """Install a verifiers environment
 
@@ -1437,6 +1456,7 @@ def install(
         prime env install owner/environment      # install from Prime Hub
         prime env install owner/environment@0.2.3
         prime env install owner/environment --with pip
+        prime env install owner/environment --no-upgrade
         prime env install owner/environment1 owner/environment2 owner/environment3
     """
     try:
@@ -1538,7 +1558,7 @@ def install(
             console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
 
             cmd_parts = _build_install_command(
-                name, target_version, simple_index_url, wheel_url, with_tool
+                name, target_version, simple_index_url, wheel_url, with_tool, no_upgrade
             )
             if not cmd_parts:
                 skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
@@ -1941,52 +1961,44 @@ def _build_install_command(
     simple_index_url: Optional[str],
     wheel_url: Optional[str],
     tool: str = "uv",
+    no_upgrade: bool = False,
 ) -> Optional[List[str]]:
-    """Build install command for an environment. Returns None if no install method available."""
+    """Build install command for an environment. Returns None if no install method available.
+
+    Args:
+        name: Package name
+        version: Package version
+        simple_index_url: Simple index URL for the package
+        wheel_url: Direct wheel URL
+        tool: Package manager to use ('uv' or 'pip')
+        no_upgrade: If True, don't include --upgrade flag (preserves locked dependencies)
+    """
     normalized_name = normalize_package_name(name)
 
     if simple_index_url:
         if tool == "uv":
+            cmd = ["uv", "pip", "install"]
+            if not no_upgrade:
+                cmd.append("--upgrade")
             if version and version != "latest":
-                return [
-                    "uv",
-                    "pip",
-                    "install",
-                    "--upgrade",
-                    f"{normalized_name}=={version}",
-                    "--extra-index-url",
-                    simple_index_url,
-                ]
-            return [
-                "uv",
-                "pip",
-                "install",
-                "--upgrade",
-                normalized_name,
-                "--extra-index-url",
-                simple_index_url,
-            ]
+                cmd.append(f"{normalized_name}=={version}")
+            else:
+                cmd.append(normalized_name)
+            cmd.extend(["--extra-index-url", simple_index_url])
+            return cmd
         else:  # pip
+            cmd = ["pip", "install"]
+            if not no_upgrade:
+                cmd.append("--upgrade")
             if version and version != "latest":
-                return [
-                    "pip",
-                    "install",
-                    "--upgrade",
-                    f"{normalized_name}=={version}",
-                    "--extra-index-url",
-                    simple_index_url,
-                ]
-            return [
-                "pip",
-                "install",
-                "--upgrade",
-                normalized_name,
-                "--extra-index-url",
-                simple_index_url,
-            ]
+                cmd.append(f"{normalized_name}=={version}")
+            else:
+                cmd.append(normalized_name)
+            cmd.extend(["--extra-index-url", simple_index_url])
+            return cmd
     elif wheel_url:
         try:
-            return get_install_command(tool, wheel_url)
+            return get_install_command(tool, wheel_url, no_upgrade)
         except ValueError:
             return None
 

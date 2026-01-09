@@ -1055,6 +1055,20 @@ class AsyncSandboxClient:
             stderr=stderr_logs.stdout,
         )
 
+    def _raise_for_sandbox_error(self, sandbox: Sandbox) -> None:
+        """Raise appropriate exception based on sandbox error type."""
+        error_type = sandbox.error_type
+        error_message = sandbox.error_message
+
+        if error_type == "OOM_KILLED":
+            raise SandboxOOMError(sandbox.id, sandbox.status, error_type, error_message)
+        elif error_type == "TIMEOUT":
+            raise SandboxTimeoutError(sandbox.id, sandbox.status, error_type, error_message)
+        elif error_type == "IMAGE_PULL_FAILED":
+            raise SandboxImagePullError(sandbox.id, sandbox.status, error_type, error_message)
+        else:
+            raise SandboxNotRunningError(sandbox.id, sandbox.status, error_type, error_message)
+
     async def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
     ) -> None:
@@ -1081,7 +1095,7 @@ class AsyncSandboxClient:
                     # Reset counter if check fails
                     consecutive_successes = 0
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
-                raise SandboxNotRunningError(sandbox_id, sandbox.status)
+                self._raise_for_sandbox_error(sandbox)
 
             sleep_time = 1 if attempt < 5 else 2
             await asyncio.sleep(sleep_time)

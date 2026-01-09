@@ -654,3 +654,5 @@ def init_config(
 
     console.print(f"[green]✓[/green] Created {output_path}")
     console.print(f"\n[dim]Run with:[/dim] prime rl run {output_path}")
+
+

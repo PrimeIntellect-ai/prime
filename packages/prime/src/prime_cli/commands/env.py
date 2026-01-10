@@ -1414,17 +1414,27 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
 
 @app.command(no_args_is_help=True)
 def install(
-    env_ids: List[str] = typer.Argument(..., help="Environment ID(s) to install (owner/name)"),
+    env_ids: List[str] = typer.Argument(
+        ..., help="Environment ID(s) to install (owner/name or local name)"
+    ),
     with_tool: str = typer.Option(
         "uv",
         "--with",
         help="Package manager to use (uv or pip)",
     ),
+    path: str = typer.Option(
+        "./environments",
+        "--path",
+        "-p",
+        help="Path to local environments directory (for local installs)",
+    ),
 ) -> None:
     """Install a verifiers environment
 
     Examples:
-        prime env install owner/environment
+        prime env install gsm8k                  # local editable install from ./environments
+        prime env install gsm8k -p /path/to/envs # local install from custom path
+        prime env install owner/environment      # install from Prime Hub
         prime env install owner/environment@0.2.3
         prime env install owner/environment --with pip
         prime env install owner/environment1 owner/environment2 owner/environment3
@@ -1457,7 +1467,28 @@ def install(
             f"environment{'s' if len(env_ids) != 1 else ''}...[/bold]"
         )
         for env_id in env_ids:
-            # Validate environment ID format
+            # Check if this is a local environment (no "/" in the name)
+            local_name = env_id.split("@")[0]
+            if "/" not in local_name:
+                if not local_name or not local_name.strip():
+                    skipped_envs.append((env_id, "Empty environment name"))
+                    console.print("[yellow]⚠ Skipping: Empty environment name[/yellow]")
+                    continue
+                env_folder = local_name.replace("-", "_")
+                env_path = Path(path) / env_folder
+                if env_path.exists():
+                    if with_tool == "uv":
+                        cmd_parts = ["uv", "pip", "install", "-e", str(env_path)]
+                    else:
+                        cmd_parts = ["pip", "install", "-e", str(env_path)]
+                    installable_envs.append((cmd_parts, local_name, "local", local_name))
+                    console.print(f"[green]✓ Found local environment: {env_path}[/green]")
+                else:
+                    failed_envs.append((local_name, f"Local path not found: {env_path}"))
+                    console.print(f"[red]✗ Local environment not found: {env_path}[/red]")
+                continue
+
+            # Validate environment ID format (owner/name)
             try:
                 env_id, target_version = validate_env_id(env_id)
             except ValueError as e:

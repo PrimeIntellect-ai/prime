@@ -19,6 +19,7 @@ from .commands.registry import app as registry_app
 from .commands.rl import app as rl_app
 from .commands.sandbox import app as sandbox_app
 from .commands.teams import app as teams_app
+from .commands.upgrade import app as upgrade_app
 from .commands.whoami import app as whoami_app
 from .core import Config
 from .utils.version_check import check_for_update
@@ -35,6 +36,7 @@ app.add_typer(login_app, name="login", rich_help_panel="Account")
 app.add_typer(whoami_app, name="whoami", rich_help_panel="Account")
 app.add_typer(config_app, name="config", rich_help_panel="Account")
 app.add_typer(teams_app, name="teams", rich_help_panel="Account")
+app.add_typer(upgrade_app, name="upgrade", rich_help_panel="Account")
 
 # Lab commands
 app.add_typer(env_app, name="env", rich_help_panel="Lab")
@@ -92,7 +94,7 @@ def callback(
                 f"[yellow]A new version of prime is available: {latest} "
                 f"(installed: {__version__})[/yellow]"
             )
-            console.print("[dim]Run: uv pip install --upgrade prime or uv tool upgrade prime[/dim]")
+            console.print("[dim]Run: prime upgrade[/dim]")
             console.print("[dim]Set PRIME_DISABLE_VERSION_CHECK=1 to disable this check[/dim]\n")
 
 

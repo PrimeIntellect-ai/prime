@@ -1468,8 +1468,12 @@ def install(
         )
         for env_id in env_ids:
             # Check if this is a local environment (no "/" in the name)
-            if "/" not in env_id.split("@")[0]:
-                local_name = env_id.split("@")[0]  # ignore version for local installs
+            local_name = env_id.split("@")[0]
+            if "/" not in local_name:
+                if not local_name or not local_name.strip():
+                    skipped_envs.append((env_id, "Empty environment name"))
+                    console.print("[yellow]⚠ Skipping: Empty environment name[/yellow]")
+                    continue
                 env_folder = local_name.replace("-", "_")
                 env_path = Path(path) / env_folder
                 if env_path.exists():

@@ -2195,7 +2195,7 @@ def run_eval(
         cmd += ["-N"]
     if state_columns:
         cmd += ["-C", state_columns]
-    if save_results:
+    if save_results or not skip_upload:
         cmd += ["-s"]
     if save_every is not None:
         cmd += ["-f", str(save_every)]

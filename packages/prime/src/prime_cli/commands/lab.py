@@ -14,8 +14,15 @@ def setup(
         "--skip-agents-md",
         help="Skip downloading AGENTS.md, CLAUDE.md, and environments/AGENTS.md",
     ),
+    skip_install: bool = typer.Option(
+        False,
+        "--skip-install",
+        help="Skip uv project initialization and verifiers installation",
+    ),
 ) -> None:
     """Setup verifiers training workspace (passthrough to vf-setup)."""
     from verifiers.scripts.setup import run_setup
 
-    run_setup(prime_rl=prime_rl, vf_rl=vf_rl, skip_agents_md=skip_agents_md)
+    run_setup(
+        prime_rl=prime_rl, vf_rl=vf_rl, skip_agents_md=skip_agents_md, skip_install=skip_install
+    )

@@ -549,6 +549,10 @@ def list_runs(
     """List your RL training runs."""
     validate_output_format(output, console)
 
+    if num < 1:
+        console.print("[red]Error:[/red] --num must be at least 1")
+        raise typer.Exit(1)
+
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)

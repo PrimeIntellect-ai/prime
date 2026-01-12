@@ -497,6 +497,9 @@ def create_run(
         console.print("\n[cyan]Monitor run at:[/cyan]")
         console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
 
+        console.print("\n[dim]View logs with:[/dim]")
+        console.print(f"  prime rl logs {run.id} -f")
+
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

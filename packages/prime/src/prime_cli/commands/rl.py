@@ -543,6 +543,7 @@ def list_models(
 @app.command("list")
 def list_runs(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
+    num: int = typer.Option(20, "--num", "-n", help="Number of most recent runs to show"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List your RL training runs."""
@@ -555,10 +556,17 @@ def list_runs(
 
         team_id = team or config.team_id
 
-        runs = rl_client.list_runs(team_id=team_id)
+        all_runs = rl_client.list_runs(team_id=team_id)
+        total_count = len(all_runs)
+
+        # Sort by created_at descending and limit
+        all_runs.sort(key=lambda r: r.created_at, reverse=True)
+        runs = all_runs[:num]
 
         if output == "json":
-            output_data_as_json({"runs": [r.model_dump() for r in runs]}, console)
+            output_data_as_json(
+                {"runs": [r.model_dump() for r in runs], "total": total_count}, console
+            )
             return
 
         if not runs:
@@ -586,7 +594,14 @@ def list_runs(
             )
 
         console.print(table)
-        console.print(f"\n[dim]Total: {len(runs)} run(s)[/dim]")
+
+        if total_count > num:
+            console.print(
+                f"\n[dim]Showing {len(runs)} of {total_count} runs. "
+                "Use --num (-n) to see more.[/dim]"
+            )
+        else:
+            console.print(f"\n[dim]Total: {total_count} run(s)[/dim]")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

@@ -11,7 +11,7 @@ import httpx
 from prime_tunnel.core.config import Config
 from prime_tunnel.exceptions import BinaryDownloadError
 
-FRPC_VERSION = "0.65.0"
+FRPC_VERSION = "0.66.0"
 FRPC_URLS = {
     (
         "Darwin",

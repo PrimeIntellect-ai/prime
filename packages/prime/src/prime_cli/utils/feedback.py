@@ -153,7 +153,9 @@ def prompt_for_feedback() -> tuple[Optional[str], str, str, Optional[str]]:
     # Run ID prompt (only for hosted rl)
     run_id = None
     if product == "hosted rl":
-        console.print("\n[dim]If this is related to a specific run, enter the Run ID (or press Enter to skip)[/dim]")
+        console.print(
+            "\n[dim]If related to a specific run, enter Run ID (or Enter to skip)[/dim]"
+        )
         try:
             run_id = typer.prompt("Run ID", default="", show_default=False).strip() or None
         except (KeyboardInterrupt, typer.Abort):
@@ -227,7 +229,7 @@ def run_feedback_command(
         # Prompt for run ID if hosted rl and not provided
         if product == "hosted rl" and run_id is None:
             console.print(
-                "\n[dim]If this is related to a specific run, enter the Run ID (or press Enter to skip)[/dim]"
+                "\n[dim]If related to a specific run, enter Run ID (or Enter to skip)[/dim]"
             )
             try:
                 run_id = typer.prompt("Run ID", default="", show_default=False).strip() or None
@@ -247,10 +249,12 @@ def run_feedback_command(
             run_id = prompted_run_id
 
     with console.status("Submitting...", spinner="dots"):
-        success = send_feedback(message, product, category, run_id)
+        success = send_feedback(message, product, category or "general", run_id)
 
     if success:
         console.print("[green]Feedback submitted. Thanks![/green]")
     else:
-        console.print("[red]Failed to send. Please try again or email support@primeintellect.ai[/red]")
+        console.print(
+            "[red]Failed to send. Please try again or email support@primeintellect.ai[/red]"
+        )
         raise typer.Exit(1)

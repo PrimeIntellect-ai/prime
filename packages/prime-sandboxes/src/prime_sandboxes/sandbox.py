@@ -944,7 +944,7 @@ class AsyncSandboxClient:
                     return {"status": None, "error_type": None, "error_message": None}
 
             ctx, cached_at = cached
-            if now - cached_at < self._ERROR_CONTEXT_CACHE_TTL:
+            if now - cached_at < 5.0:
                 return ctx
 
         async def do_fetch() -> dict:

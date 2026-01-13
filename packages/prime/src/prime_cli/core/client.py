@@ -107,7 +107,7 @@ class APIClient:
                 raise UnauthorizedError(
                     "API key unauthorized. "
                     "Please check that your API key has the correct permissions, "
-                    "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
+                    "generate a new one at https://app.primeintellect.ai/dashboard/tokens "
                     "or run 'prime login' to configure a new API key."
                 ) from e
             if e.response.status_code == 402:
@@ -228,7 +228,7 @@ class AsyncAPIClient:
                 raise UnauthorizedError(
                     "API key unauthorized. "
                     "Please check that your API key has the correct permissions, "
-                    "generate a new one at https://app.primeintellect.ai/dashboard/tokens, "
+                    "generate a new one at https://app.primeintellect.ai/dashboard/tokens "
                     "or run 'prime login' to configure a new API key."
                 ) from e
             if e.response.status_code == 402:

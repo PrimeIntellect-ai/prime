@@ -184,4 +184,4 @@ def push_eval_results_to_hub(
     frontend_url = api_client.config.frontend_url
     eval_url = f"{frontend_url}/dashboard/evaluations/{eval_id}"
     console.print("\n[green]View results at:[/green]")
-    console.print(eval_url)
+    console.print(f"  [link={eval_url}]{eval_url}[/link]")

@@ -530,6 +530,11 @@ def delete(
 
                 if not sandbox_ids:
                     console.print("[yellow]No sandboxes to delete[/yellow]")
+                    if only_mine and all_sandboxes:
+                        console.print(
+                            "\n[dim]Note: --all only deletes your own sandboxes by default. "
+                            "Use --all-users to delete sandboxes from all team members.[/dim]"
+                        )
                     return
         else:
             parsed_ids = []

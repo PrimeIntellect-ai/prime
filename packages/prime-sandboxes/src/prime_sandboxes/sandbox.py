@@ -102,8 +102,9 @@ def _build_terminated_message(command: str, ctx: dict) -> str:
         parts.append("The sandbox failed to start due to image pull failure.")
     elif status == "TERMINATED":
         parts.append("The sandbox was terminated.")
-    elif error_message:
-        parts.append(f"Error: {error_message}")
+
+    if error_message:
+        parts.append(f"Details: {error_message}")
 
     return " ".join(parts)
 
@@ -114,6 +115,38 @@ def _build_unresponsive_message(command: str, timeout: int) -> str:
     msg = f"Command '{cmd_preview}' timed out after {timeout}s."
 
     return msg
+
+
+def _raise_not_running_error(
+    sandbox_id: str,
+    ctx: dict,
+    command: str | None = None,
+    cause: BaseException | None = None,
+) -> None:
+    """Raise appropriate SandboxNotRunningError subclass based on error_type."""
+    error_type = ctx.get("error_type")
+    status = ctx.get("status")
+
+    if command:
+        message = _build_terminated_message(command, ctx)
+    elif ctx.get("error_message"):
+        message = f"Sandbox {sandbox_id} failed ({error_type}): {ctx['error_message']}"
+    else:
+        message = None
+
+    kwargs = {"command": command, "message": message}
+    if error_type == "OOM_KILLED":
+        exc = SandboxOOMError(sandbox_id, status, error_type, **kwargs)
+    elif error_type == "TIMEOUT":
+        exc = SandboxTimeoutError(sandbox_id, status, error_type, **kwargs)
+    elif error_type == "IMAGE_PULL_FAILED":
+        exc = SandboxImagePullError(sandbox_id, status, error_type, **kwargs)
+    else:
+        exc = SandboxNotRunningError(sandbox_id, status, error_type, **kwargs)
+
+    if cause:
+        raise exc from cause
+    raise exc
 
 
 class SandboxAuthCache:
@@ -423,13 +456,7 @@ class SandboxClient:
         except httpx.TimeoutException as e:
             ctx = self._get_sandbox_error_context(sandbox_id)
             if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                raise SandboxNotRunningError(
-                    sandbox_id=sandbox_id,
-                    status=ctx["status"],
-                    error_type=ctx["error_type"],
-                    command=command,
-                    message=_build_terminated_message(command, ctx),
-                ) from e
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
             raise SandboxUnresponsiveError(
                 sandbox_id=sandbox_id,
                 command=command,
@@ -442,24 +469,12 @@ class SandboxClient:
 
             if status == 409:
                 ctx = self._get_sandbox_error_context(sandbox_id)
-                raise SandboxNotRunningError(
-                    sandbox_id=sandbox_id,
-                    status=ctx["status"],
-                    error_type=ctx["error_type"],
-                    command=command,
-                    message=_build_terminated_message(command, ctx),
-                ) from e
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
 
             if status == 408:
                 ctx = self._get_sandbox_error_context(sandbox_id)
                 if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                    raise SandboxNotRunningError(
-                        sandbox_id=sandbox_id,
-                        status=ctx["status"],
-                        error_type=ctx["error_type"],
-                        command=command,
-                        message=_build_terminated_message(command, ctx),
-                    ) from e
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
                 raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
 
             req = getattr(e, "request", None)
@@ -571,23 +586,6 @@ class SandboxClient:
             stderr=stderr_logs.stdout,
         )
 
-    def _raise_for_sandbox_error(self, sandbox: Sandbox) -> None:
-        """Raise appropriate exception based on sandbox error type."""
-        error_type = sandbox.error_type
-        if sandbox.error_message:
-            message = f"Sandbox {sandbox.id} failed ({error_type}): {sandbox.error_message}"
-        else:
-            message = None
-
-        if error_type == "OOM_KILLED":
-            raise SandboxOOMError(sandbox.id, sandbox.status, error_type, message=message)
-        elif error_type == "TIMEOUT":
-            raise SandboxTimeoutError(sandbox.id, sandbox.status, error_type, message=message)
-        elif error_type == "IMAGE_PULL_FAILED":
-            raise SandboxImagePullError(sandbox.id, sandbox.status, error_type, message=message)
-        else:
-            raise SandboxNotRunningError(sandbox.id, sandbox.status, error_type, message=message)
-
     def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
     ) -> None:
@@ -613,7 +611,12 @@ class SandboxClient:
                     # Reset counter if check fails
                     consecutive_successes = 0
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
-                self._raise_for_sandbox_error(sandbox)
+                ctx = {
+                    "status": sandbox.status,
+                    "error_type": sandbox.error_type,
+                    "error_message": sandbox.error_message,
+                }
+                _raise_not_running_error(sandbox.id, ctx)
 
             # Aggressive polling for first 5 attempts (5 seconds), then back off
             sleep_time = 1 if attempt < 5 else 2
@@ -1032,13 +1035,7 @@ class AsyncSandboxClient:
             # Timeout could mean: (1) command slow, (2) sidecar dead
             ctx = await self._get_sandbox_error_context(sandbox_id)
             if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                raise SandboxNotRunningError(
-                    sandbox_id=sandbox_id,
-                    status=ctx["status"],
-                    error_type=ctx["error_type"],
-                    command=command,
-                    message=_build_terminated_message(command, ctx),
-                ) from e
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
             # Sandbox appears running but unresponsive
             raise SandboxUnresponsiveError(
                 sandbox_id=sandbox_id,
@@ -1052,24 +1049,12 @@ class AsyncSandboxClient:
 
             if status == 409:
                 ctx = await self._get_sandbox_error_context(sandbox_id)
-                raise SandboxNotRunningError(
-                    sandbox_id=sandbox_id,
-                    status=ctx["status"],
-                    error_type=ctx["error_type"],
-                    command=command,
-                    message=_build_terminated_message(command, ctx),
-                ) from e
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
 
             if status == 408:
                 ctx = await self._get_sandbox_error_context(sandbox_id)
                 if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                    raise SandboxNotRunningError(
-                        sandbox_id=sandbox_id,
-                        status=ctx["status"],
-                        error_type=ctx["error_type"],
-                        command=command,
-                        message=_build_terminated_message(command, ctx),
-                    ) from e
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
                 raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
 
             req = getattr(e, "request", None)
@@ -1187,23 +1172,6 @@ class AsyncSandboxClient:
             stderr=stderr_logs.stdout,
         )
 
-    def _raise_for_sandbox_error(self, sandbox: Sandbox) -> None:
-        """Raise appropriate exception based on sandbox error type."""
-        error_type = sandbox.error_type
-        if sandbox.error_message:
-            message = f"Sandbox {sandbox.id} failed ({error_type}): {sandbox.error_message}"
-        else:
-            message = None
-
-        if error_type == "OOM_KILLED":
-            raise SandboxOOMError(sandbox.id, sandbox.status, error_type, message=message)
-        elif error_type == "TIMEOUT":
-            raise SandboxTimeoutError(sandbox.id, sandbox.status, error_type, message=message)
-        elif error_type == "IMAGE_PULL_FAILED":
-            raise SandboxImagePullError(sandbox.id, sandbox.status, error_type, message=message)
-        else:
-            raise SandboxNotRunningError(sandbox.id, sandbox.status, error_type, message=message)
-
     async def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
     ) -> None:
@@ -1230,7 +1198,12 @@ class AsyncSandboxClient:
                     # Reset counter if check fails
                     consecutive_successes = 0
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
-                self._raise_for_sandbox_error(sandbox)
+                ctx = {
+                    "status": sandbox.status,
+                    "error_type": sandbox.error_type,
+                    "error_message": sandbox.error_message,
+                }
+                _raise_not_running_error(sandbox.id, ctx)
 
             sleep_time = 1 if attempt < 5 else 2
             await asyncio.sleep(sleep_time)

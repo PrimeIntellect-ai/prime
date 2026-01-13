@@ -2,7 +2,7 @@ import json
 import re
 from functools import wraps
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
@@ -630,13 +630,24 @@ def run_eval_cmd(
             "(used to locate .prime/.env-metadata.json for upstream resolution)"
         ),
     ),
+    endpoints_path: Optional[str] = typer.Option(
+        None,
+        "--endpoints-path",
+        "-e",
+        help="Path to endpoints.py file with custom endpoint configurations",
+    ),
+    header: Optional[List[str]] = typer.Option(
+        None,
+        "--header",
+        help="Extra HTTP header for inference API ('Name: Value'). Repeatable.",
+    ),
 ) -> None:
     """
     Run verifiers' vf-eval with Prime Inference.
 
     Examples:
-       prime eval primeintellect/wordle -m openai/gpt-4.1-mini -n 5
-       prime eval wordle -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
+       prime eval run primeintellect/wordle -m openai/gpt-4.1-mini -n 5
+       prime eval run wordle -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
     """
     run_eval(
         environment=environment,
@@ -664,4 +675,6 @@ def run_eval_cmd(
         api_base_url=api_base_url,
         skip_upload=skip_upload,
         env_path=env_path,
+        endpoints_path=endpoints_path,
+        headers=header,
     )

@@ -2074,6 +2074,8 @@ def run_eval(
     api_base_url: Optional[str],
     skip_upload: bool,
     env_path: Optional[str],
+    endpoints_path: Optional[str] = None,
+    headers: Optional[List[str]] = None,
 ) -> None:
     """
     Run verifiers' vf-eval with Prime Inference
@@ -2217,6 +2219,11 @@ def run_eval(
         cmd += ["-H"]
     if hf_hub_dataset_name:
         cmd += ["-D", hf_hub_dataset_name]
+    if endpoints_path:
+        cmd += ["-e", endpoints_path]
+    if headers:
+        for header in headers:
+            cmd += ["--header", header]
 
     # Generate job_id for end-to-end tracing of eval runs
     eval_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2414,4 +2421,6 @@ def eval_env(
         api_base_url=api_base_url,
         skip_upload=skip_upload,
         env_path=env_path,
+        endpoints_path=None,
+        headers=None,
     )

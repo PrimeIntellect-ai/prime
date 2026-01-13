@@ -302,6 +302,7 @@ class SandboxClient:
             self.client.config.config_dir / "sandbox_auth_cache.json",
             self.client,
         )
+        self._error_context_cache: Dict[str, tuple[dict, float]] = {}
 
     @staticmethod
     @_gateway_retry
@@ -339,15 +340,25 @@ class SandboxClient:
 
     def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
         """Fetch sandbox status to understand why an operation failed."""
+        now = time.monotonic()
+
+        if sandbox_id in self._error_context_cache:
+            ctx, cached_at = self._error_context_cache[sandbox_id]
+            if now - cached_at < 5.0:
+                return ctx
+
         try:
             sandbox = self.get(sandbox_id)
-            return {
+            ctx = {
                 "status": sandbox.status,
                 "error_type": sandbox.error_type,
                 "error_message": sandbox.error_message,
             }
         except Exception:
-            return {"status": None, "error_type": None, "error_message": None}
+            ctx = {"status": None, "error_type": None, "error_message": None}
+
+        self._error_context_cache[sandbox_id] = (ctx, now)
+        return ctx
 
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
@@ -863,6 +874,7 @@ class AsyncSandboxClient:
         # Shared httpx client for gateway operations (upload/download/execute)
         # Initialized lazily to allow connection pooling and reuse
         self._gateway_client: Optional[httpx.AsyncClient] = None
+        self._error_context_cache: Dict[str, tuple[dict, float]] = {}
 
     def _get_gateway_client(self) -> httpx.AsyncClient:
         """Get or create the shared gateway client for connection pooling
@@ -918,15 +930,25 @@ class AsyncSandboxClient:
 
     async def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
         """Fetch sandbox status to understand why an operation failed."""
+        now = time.monotonic()
+
+        if sandbox_id in self._error_context_cache:
+            ctx, cached_at = self._error_context_cache[sandbox_id]
+            if now - cached_at < 5.0:
+                return ctx
+
         try:
             sandbox = await self.get(sandbox_id)
-            return {
+            ctx = {
                 "status": sandbox.status,
                 "error_type": sandbox.error_type,
                 "error_message": sandbox.error_message,
             }
         except Exception:
-            return {"status": None, "error_type": None, "error_message": None}
+            ctx = {"status": None, "error_type": None, "error_message": None}
+
+        self._error_context_cache[sandbox_id] = (ctx, now)
+        return ctx
 
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""

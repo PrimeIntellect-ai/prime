@@ -29,6 +29,7 @@ class TunnelInfo(BaseModel):
     hostname: str = Field(..., description="Tunnel hostname")
     url: str = Field(..., description="Full HTTPS URL")
     frp_token: str = Field(..., description="Authentication token for frpc")
+    binding_secret: str = Field("", description="Per-tunnel secret for frpc metadata")
     server_host: str = Field(..., description="frps server hostname")
     server_port: int = Field(7000, description="frps server port")
     expires_at: datetime = Field(..., description="Token expiration time")
@@ -51,6 +52,7 @@ class TunnelRegistrationResponse(BaseModel):
     hostname: str
     url: str
     frp_token: str
+    binding_secret: str
     server_host: str
     server_port: int
     expires_at: datetime

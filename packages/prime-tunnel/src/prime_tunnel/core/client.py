@@ -156,6 +156,7 @@ class TunnelClient:
             hostname=registration.hostname,
             url=registration.url,
             frp_token=registration.frp_token,
+            binding_secret=registration.binding_secret,
             server_host=registration.server_host,
             server_port=registration.server_port,
             expires_at=registration.expires_at,

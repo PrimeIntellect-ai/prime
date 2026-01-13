@@ -41,6 +41,7 @@ class Tunnel:
         self._tunnel_info: Optional[TunnelInfo] = None
         self._config_file: Optional[Path] = None
         self._started = False
+        self._output_lines: list[str] = []
 
     @property
     def tunnel_id(self) -> Optional[str]:
@@ -191,6 +192,9 @@ user = "{self._tunnel_info.tunnel_id}"
 auth.method = "token"
 auth.token = "{self._tunnel_info.frp_token}"
 
+# Per-tunnel binding secret
+metadatas.binding_secret = "{self._tunnel_info.binding_secret}"
+
 # Transport settings
 transport.tcpMux = true
 transport.tcpMuxKeepaliveInterval = 30
@@ -226,6 +230,7 @@ subdomain = "{self._tunnel_info.tunnel_id}"
     async def _wait_for_connection(self) -> None:
         """Wait for frpc to establish connection."""
         start_time = time.time()
+        self._output_lines = []
 
         while time.time() - start_time < self.connection_timeout:
             if self._process is None:
@@ -233,26 +238,46 @@ subdomain = "{self._tunnel_info.tunnel_id}"
 
             return_code = self._process.poll()
             if return_code is not None:
-                stderr = ""
+                remaining_output = []
+                if self._process.stdout:
+                    remaining_output.extend(self._process.stdout.readlines())
                 if self._process.stderr:
-                    stderr = self._process.stderr.read()
-                raise TunnelConnectionError(f"frpc exited with code {return_code}: {stderr}")
+                    remaining_output.extend(self._process.stderr.readlines())
+                self._output_lines.extend(line.strip() for line in remaining_output if line.strip())
 
-            if self._process.stderr:
+                # Build detailed error message
+                output_text = (
+                    "\n".join(self._output_lines) if self._output_lines else "(no output captured)"
+                )
+                raise TunnelConnectionError(
+                    f"frpc exited with code {return_code}\n"
+                    f"--- frpc output ---\n{output_text}\n-------------------"
+                )
+
+            if self._process.stdout:
                 if os.name == "posix":
                     import fcntl
 
-                    fd = self._process.stderr.fileno()
+                    fd = self._process.stdout.fileno()
                     fl = fcntl.fcntl(fd, fcntl.F_GETFL)
                     fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
 
                     try:
-                        line = self._process.stderr.readline()
-                        if line:
-                            if "start proxy success" in line.lower():
-                                return
-                            if "login failed" in line.lower():
-                                raise TunnelConnectionError(f"frpc login failed: {line.strip()}")
+                        while True:
+                            line = self._process.stdout.readline()
+                            if not line:
+                                break
+                            line = line.strip()
+                            if line:
+                                self._output_lines.append(line)
+                                if "start proxy success" in line.lower():
+                                    return
+                                if "login failed" in line.lower():
+                                    raise TunnelConnectionError(f"frpc login failed: {line}")
+                                if "authorization failed" in line.lower():
+                                    raise TunnelConnectionError(
+                                        f"frpc authorization failed: {line}"
+                                    )
                     except (BlockingIOError, IOError):
                         pass
                     finally:
@@ -260,7 +285,14 @@ subdomain = "{self._tunnel_info.tunnel_id}"
 
             await asyncio.sleep(0.1)
 
-        raise TunnelTimeoutError(f"Tunnel connection timed out after {self.connection_timeout}s")
+        # Timeout - include any captured output
+        output_text = (
+            "\n".join(self._output_lines) if self._output_lines else "(no output captured)"
+        )
+        raise TunnelTimeoutError(
+            f"Tunnel connection timed out after {self.connection_timeout}s\n"
+            f"--- frpc output ---\n{output_text}\n-------------------"
+        )
 
     async def __aenter__(self) -> "Tunnel":
         """Async context manager entry."""

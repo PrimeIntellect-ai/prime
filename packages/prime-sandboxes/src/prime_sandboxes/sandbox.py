@@ -1032,11 +1032,9 @@ class AsyncSandboxClient:
             response.raise_for_status()
             return CommandResponse.model_validate(response.json())
         except httpx.TimeoutException as e:
-            # Timeout could mean: (1) command slow, (2) sidecar dead
             ctx = await self._get_sandbox_error_context(sandbox_id)
             if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                 _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-            # Sandbox appears running but unresponsive
             raise SandboxUnresponsiveError(
                 sandbox_id=sandbox_id,
                 command=command,

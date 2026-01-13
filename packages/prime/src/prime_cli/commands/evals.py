@@ -657,14 +657,56 @@ def run_eval_cmd(
         "--header",
         help="Extra HTTP header for inference API ('Name: Value'). Repeatable.",
     ),
+    hosted: bool = typer.Option(
+        False,
+        "--hosted",
+        help="Run evaluation on the platform instead of locally",
+    ),
+    poll_interval: float = typer.Option(
+        10.0,
+        "--poll-interval",
+        help="Polling interval in seconds for hosted evaluation status",
+    ),
+    no_stream_logs: bool = typer.Option(
+        False,
+        "--no-stream-logs",
+        help="Disable log streaming for hosted evaluations",
+    ),
+    timeout_minutes: Optional[int] = typer.Option(
+        None,
+        "--timeout-minutes",
+        help="Timeout in minutes for hosted evaluation (default: 120, max: 1440)",
+    ),
+    allow_sandbox_access: bool = typer.Option(
+        False,
+        "--allow-sandbox-access",
+        help="Allow sandbox read/write access for hosted evaluations",
+    ),
+    allow_instances_access: bool = typer.Option(
+        False,
+        "--allow-instances-access",
+        help="Allow pod/instance creation and management for hosted evaluations",
+    ),
+    custom_secrets: Optional[str] = typer.Option(
+        None,
+        "--custom-secrets",
+        help='Custom secrets for hosted eval as JSON (e.g., \'{"API_KEY": "xxx"}\')',
+    ),
+    eval_name: Optional[str] = typer.Option(
+        None,
+        "--eval-name",
+        help="Custom name for the hosted evaluation",
+    ),
 ) -> None:
     """
-    Run verifiers' vf-eval with Prime Inference.
+    Run verifiers' vf-eval with Prime Inference (local) or on the platform (--hosted).
 
     \b
     Examples:
         prime eval run primeintellect/wordle -m openai/gpt-4.1-mini -n 5
         prime eval run wordle -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
+        prime eval run primeintellect/gsm8k --hosted -m openai/gpt-4.1-mini -n 10
+        prime eval run primeintellect/gsm8k --hosted -f  # Follow logs until completion
     """
     run_eval(
         environment=environment,
@@ -694,4 +736,12 @@ def run_eval_cmd(
         env_path=env_path,
         endpoints_path=endpoints_path,
         headers=header,
+        hosted=hosted,
+        poll_interval=poll_interval,
+        no_stream_logs=no_stream_logs,
+        timeout_minutes=timeout_minutes,
+        allow_sandbox_access=allow_sandbox_access,
+        allow_instances_access=allow_instances_access,
+        custom_secrets=custom_secrets,
+        eval_name=eval_name,
     )

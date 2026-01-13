@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import os
@@ -33,6 +34,11 @@ from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
+from ..utils.hosted_eval import (
+    HostedEvalConfig,
+    print_hosted_result,
+    run_hosted_evaluation,
+)
 from ..utils.time_utils import format_time_ago, iso_timestamp
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
@@ -2848,9 +2854,17 @@ def run_eval(
     env_path: Optional[str],
     endpoints_path: Optional[str] = None,
     headers: Optional[List[str]] = None,
+    hosted: bool = False,
+    poll_interval: float = 10.0,
+    no_stream_logs: bool = False,
+    timeout_minutes: Optional[int] = None,
+    allow_sandbox_access: bool = False,
+    allow_instances_access: bool = False,
+    custom_secrets: Optional[str] = None,
+    eval_name: Optional[str] = None,
 ) -> None:
     """
-    Run verifiers' vf-eval with Prime Inference
+    Run verifiers' vf-eval with Prime Inference (local) or as a hosted evaluation on the platform.
     """
     is_slug = (
         "/" in environment and not environment.startswith("./") and not environment.startswith("/")
@@ -2859,10 +2873,11 @@ def run_eval(
     upstream_owner = None
     upstream_name = None
     env_name_for_vf_eval = environment
+    environment_id = None
+    requested_version = "latest"
 
     if is_slug:
         env_slug = environment
-        requested_version = "latest"
         if "@" in environment:
             env_slug, requested_version = environment.rsplit("@", 1)
 
@@ -2870,20 +2885,103 @@ def run_eval(
         if len(parts) == 2 and parts[0] and parts[1]:
             upstream_owner, upstream_name = parts
             env_name_for_vf_eval = upstream_name
-            console.print(
-                f"[dim]Using upstream environment {upstream_owner}/{upstream_name}[/dim]\n"
-            )
-
-            if not _is_environment_installed(upstream_name, requested_version):
-                console.print(f"[cyan]Installing {environment}...[/cyan]")
-                if not _install_single_environment(environment):
-                    raise typer.Exit(1)
-                console.print()
-
-            is_resolved = True
         else:
             console.print(f"[red]Invalid environment slug format: {environment}[/red]")
             raise typer.Exit(1)
+
+    if hosted:
+        if not is_slug or not upstream_owner or not upstream_name:
+            console.print(
+                "[red]Error: Hosted evaluations require environment slug (owner/name).[/red]"
+            )
+            console.print(f"[dim]Example: prime eval primeintellect/{environment} --hosted[/dim]")
+            raise typer.Exit(1)
+
+        client = APIClient(require_auth=False)
+        try:
+            env_details = fetch_environment_details(
+                client, upstream_owner, upstream_name, requested_version
+            )
+            environment_id = env_details.get("id")
+        except APIError as e:
+            console.print(f"[red]Error: Environment '{environment}' not found on the hub.[/red]")
+            console.print(f"[dim]{e}[/dim]")
+            console.print()
+            console.print("[dim]To publish your environment, run:[/dim]")
+            console.print("  prime env push")
+            raise typer.Exit(1)
+
+        if not environment_id:
+            console.print(f"[red]Error: Could not get environment ID for '{environment}'[/red]")
+            raise typer.Exit(1)
+
+        console.print(f"[dim]Using environment {upstream_owner}/{upstream_name}[/dim]\n")
+
+        # Parse env_args JSON if provided
+        parsed_env_args = None
+        if env_args:
+            try:
+                parsed_env_args = json.loads(env_args)
+            except json.JSONDecodeError as e:
+                console.print(f"[red]Error parsing --env-args: {e}[/red]")
+                raise typer.Exit(1)
+
+        # Parse custom_secrets JSON if provided
+        parsed_custom_secrets = None
+        if custom_secrets:
+            try:
+                parsed_custom_secrets = json.loads(custom_secrets)
+            except json.JSONDecodeError as e:
+                console.print(f"[red]Error parsing --custom-secrets: {e}[/red]")
+                raise typer.Exit(1)
+
+        # Create hosted eval config
+        hosted_config = HostedEvalConfig(
+            environment_id=environment_id,
+            inference_model=model,
+            num_examples=num_examples if num_examples is not None else 5,
+            rollouts_per_example=rollouts_per_example if rollouts_per_example is not None else 3,
+            env_args=parsed_env_args,
+            name=eval_name,
+            timeout_minutes=timeout_minutes,
+            allow_sandbox_access=allow_sandbox_access,
+            allow_instances_access=allow_instances_access,
+            custom_secrets=parsed_custom_secrets,
+        )
+
+        try:
+            result = asyncio.run(
+                run_hosted_evaluation(
+                    config=hosted_config,
+                    poll_interval=poll_interval,
+                    stream_logs=not no_stream_logs,
+                )
+            )
+            print_hosted_result(result)
+
+            if result.status != "COMPLETED":
+                raise typer.Exit(1)
+        except APIError as e:
+            console.print(f"[red]Hosted evaluation failed: {e}[/red]")
+            raise typer.Exit(1)
+
+        return
+
+    # Continue with local evaluation logic
+    if is_slug:
+        console.print(f"[dim]Using upstream environment {upstream_owner}/{upstream_name}[/dim]\n")
+
+        requested_version = "latest"
+        if "@" in environment:
+            _, requested_version = environment.rsplit("@", 1)
+
+        if not _is_environment_installed(env_name_for_vf_eval, requested_version):
+            console.print(f"[cyan]Installing {environment}...[/cyan]")
+            if not _install_single_environment(environment):
+                raise typer.Exit(1)
+            console.print()
+
+        is_resolved = True
     else:
         check_path = Path(env_path) if env_path else Path.cwd()
         is_resolved = display_upstream_environment_info(
@@ -3165,6 +3263,11 @@ def eval_env(
             "(used to locate .prime/.env-metadata.json for upstream resolution)"
         ),
     ),
+    hosted: bool = typer.Option(
+        False,
+        "--hosted",
+        help="Run evaluation on the Prime Intellect platform instead of locally",
+    ),
 ) -> None:
     """Use 'prime eval' instead."""
 
@@ -3196,4 +3299,5 @@ def eval_env(
         env_path=env_path,
         endpoints_path=None,
         headers=None,
+        hosted=hosted,
     )

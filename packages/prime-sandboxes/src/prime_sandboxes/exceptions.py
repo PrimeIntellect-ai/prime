@@ -9,15 +9,16 @@ class SandboxNotRunningError(RuntimeError):
         sandbox_id: str,
         status: str | None = None,
         error_type: str | None = None,
-        error_message: str | None = None,
+        command: str | None = None,
+        message: str | None = None,
     ):
         self.sandbox_id = sandbox_id
         self.status = status
         self.error_type = error_type
-        self.error_message = error_message
+        self.command = command
 
-        if error_type and error_message:
-            msg = f"Sandbox {sandbox_id} failed ({error_type}): {error_message}"
+        if message:
+            msg = message
         elif error_type:
             msg = f"Sandbox {sandbox_id} failed ({error_type})"
         elif status:
@@ -67,3 +68,19 @@ class SandboxImagePullError(SandboxNotRunningError):
     """Raised when Docker image cannot be pulled."""
 
     pass
+
+
+class SandboxUnresponsiveError(RuntimeError):
+    """Raised when sandbox appears running but commands time out unexpectedly."""
+
+    def __init__(
+        self,
+        sandbox_id: str,
+        command: str,
+        message: str,
+        sandbox_status: str | None = None,
+    ):
+        self.sandbox_id = sandbox_id
+        self.command = command
+        self.sandbox_status = sandbox_status
+        super().__init__(message)

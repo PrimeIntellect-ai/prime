@@ -20,6 +20,7 @@ from .exceptions import (
     SandboxNotRunningError,
     SandboxOOMError,
     SandboxTimeoutError,
+    SandboxUnresponsiveError,
     UploadTimeoutError,
 )
 from .models import (
@@ -89,6 +90,7 @@ __all__ = [
     "SandboxTimeoutError",
     "SandboxImagePullError",
     "SandboxNotRunningError",
+    "SandboxUnresponsiveError",
     "CommandTimeoutError",
     "UploadTimeoutError",
     "DownloadTimeoutError",

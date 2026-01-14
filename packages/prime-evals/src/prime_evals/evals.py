@@ -98,9 +98,9 @@ class EvalsClient:
             # Handle string inputs (convert to dict format)
             if isinstance(env, str):
                 env = {"slug": env} if "/" in env else {"name": env}
-            
+
             resolved_env = env.copy() if isinstance(env, dict) else {}
-            
+
             # Handle different identifier types explicitly
             # Check for explicit "slug" or "name" keys first
             try:
@@ -163,7 +163,7 @@ class EvalsClient:
         resolved_environments = None
         if environments:
             resolved_environments = self._resolve_environments(environments)
-            
+
             # Validate that we have at least one resolved environment if run_id is not provided
             # This check happens AFTER resolution to catch cases where all environments were invalid
             if not resolved_environments and not run_id:
@@ -197,12 +197,25 @@ class EvalsClient:
         response = self.client.request("POST", "/evaluations/", json=payload)
         return response
 
-    def push_samples(self, evaluation_id: str, samples: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Push evaluation samples"""
-        payload = {"samples": samples}
-        response = self.client.request(
-            "POST", f"/evaluations/{evaluation_id}/samples", json=payload
-        )
+    def push_samples(
+        self,
+        evaluation_id: str,
+        samples: List[Dict[str, Any]],
+        batch_size: int = 512,
+    ) -> Dict[str, Any]:
+        """Push evaluation samples in batches to avoid request size limits."""
+        if not samples:
+            return {}
+
+        response: Dict[str, Any] = {}
+
+        for i in range(0, len(samples), batch_size):
+            batch = samples[i : i + batch_size]
+            payload = {"samples": batch}
+            response = self.client.request(
+                "POST", f"/evaluations/{evaluation_id}/samples", json=payload
+            )
+
         return response
 
     def finalize_evaluation(
@@ -346,11 +359,12 @@ class AsyncEvalsClient:
         """
         Resolve a list of environments from various identifier formats to database IDs.
         """
+
         async def resolve_env(env: Union[str, Dict[str, str]]) -> Optional[Dict[str, str]]:
             # Handle string inputs (convert to dict format)
             if isinstance(env, str):
                 env = {"slug": env} if "/" in env else {"name": env}
-            
+
             resolved_env = env.copy() if isinstance(env, dict) else {}
             # Handle different identifier types explicitly
             # Check for explicit "slug" or "name" keys first
@@ -421,7 +435,7 @@ class AsyncEvalsClient:
         resolved_environments = None
         if environments:
             resolved_environments = await self._resolve_environments(environments)
-            
+
             # Validate that we have at least one resolved environment if run_id is not provided
             # This check happens AFTER resolution to catch cases where all environments were invalid
             if not resolved_environments and not run_id:
@@ -456,13 +470,24 @@ class AsyncEvalsClient:
         return response
 
     async def push_samples(
-        self, evaluation_id: str, samples: List[Dict[str, Any]]
+        self,
+        evaluation_id: str,
+        samples: List[Dict[str, Any]],
+        batch_size: int = 512,
     ) -> Dict[str, Any]:
-        """Push evaluation samples"""
-        payload = {"samples": samples}
-        response = await self.client.request(
-            "POST", f"/evaluations/{evaluation_id}/samples", json=payload
-        )
+        """Push evaluation samples in batches."""
+        if not samples:
+            return {}
+
+        response: Dict[str, Any] = {}
+
+        for i in range(0, len(samples), batch_size):
+            batch = samples[i : i + batch_size]
+            payload = {"samples": batch}
+            response = await self.client.request(
+                "POST", f"/evaluations/{evaluation_id}/samples", json=payload
+            )
+
         return response
 
     async def finalize_evaluation(

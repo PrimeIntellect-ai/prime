@@ -302,7 +302,6 @@ class SandboxClient:
             self.client.config.config_dir / "sandbox_auth_cache.json",
             self.client,
         )
-        self._error_context_cache: Dict[str, tuple[dict, float]] = {}
 
     @staticmethod
     @_gateway_retry
@@ -337,28 +336,6 @@ class SandboxClient:
             return True
         except Exception:
             return False
-
-    def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
-        """Fetch sandbox status to understand why an operation failed."""
-        now = time.monotonic()
-
-        if sandbox_id in self._error_context_cache:
-            ctx, cached_at = self._error_context_cache[sandbox_id]
-            if now - cached_at < 5.0:
-                return ctx
-
-        try:
-            sandbox = self.get(sandbox_id)
-            ctx = {
-                "status": sandbox.status,
-                "error_type": sandbox.error_type,
-                "error_message": sandbox.error_message,
-            }
-        except Exception:
-            ctx = {"status": None, "error_type": None, "error_message": None}
-
-        self._error_context_cache[sandbox_id] = (ctx, now)
-        return ctx
 
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
@@ -465,27 +442,31 @@ class SandboxClient:
             response.raise_for_status()
             return CommandResponse.model_validate(response.json())
         except httpx.TimeoutException as e:
-            ctx = self._get_sandbox_error_context(sandbox_id)
-            if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
             raise SandboxUnresponsiveError(
                 sandbox_id=sandbox_id,
                 command=command,
                 message=_build_unresponsive_message(command, effective_timeout),
-                sandbox_status=ctx["status"],
+                sandbox_status=None,
             ) from e
         except httpx.HTTPStatusError as e:
             resp = getattr(e, "response", None)
             status = getattr(resp, "status_code", "?")
 
             if status == 409:
-                ctx = self._get_sandbox_error_context(sandbox_id)
+                ctx = {"status": None, "error_type": None, "error_message": None}
+                try:
+                    error_data = resp.json()
+                    if "sandbox_status" in error_data:
+                        ctx = {
+                            "status": error_data.get("sandbox_status"),
+                            "error_type": error_data.get("error_type"),
+                            "error_message": error_data.get("error_message"),
+                        }
+                except (json.JSONDecodeError, KeyError, AttributeError):
+                    pass
                 _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
 
             if status == 408:
-                ctx = self._get_sandbox_error_context(sandbox_id)
-                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
                 raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
 
             req = getattr(e, "request", None)
@@ -874,8 +855,6 @@ class AsyncSandboxClient:
         # Shared httpx client for gateway operations (upload/download/execute)
         # Initialized lazily to allow connection pooling and reuse
         self._gateway_client: Optional[httpx.AsyncClient] = None
-        # Stores Task while fetch is in-flight, then replaces with result tuple
-        self._error_context_cache: Dict[str, asyncio.Task[dict] | tuple[dict, float]] = {}
 
     def _get_gateway_client(self) -> httpx.AsyncClient:
         """Get or create the shared gateway client for connection pooling
@@ -928,45 +907,6 @@ class AsyncSandboxClient:
             return True
         except Exception:
             return False
-
-    async def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
-        """Fetch sandbox status to understand why an operation failed."""
-        now = time.monotonic()
-
-        # Check cache first
-        cached = self._error_context_cache.get(sandbox_id)
-        if cached is not None:
-            # If it's a Task, another coroutine is fetching the context
-            if isinstance(cached, asyncio.Task):
-                try:
-                    return await cached
-                except Exception:
-                    return {"status": None, "error_type": None, "error_message": None}
-
-            ctx, cached_at = cached
-            if now - cached_at < 5.0:
-                return ctx
-
-        async def do_fetch() -> dict:
-            sandbox = await self.get(sandbox_id)
-            return {
-                "status": sandbox.status,
-                "error_type": sandbox.error_type,
-                "error_message": sandbox.error_message,
-            }
-
-        # Create task and store it before awaiting
-        task = asyncio.create_task(do_fetch())
-        self._error_context_cache[sandbox_id] = task
-
-        try:
-            ctx = await task
-        except Exception:
-            ctx = {"status": None, "error_type": None, "error_message": None}
-
-        # Replace task with result tuple
-        self._error_context_cache[sandbox_id] = (ctx, time.monotonic())
-        return ctx
 
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
@@ -1072,27 +1012,31 @@ class AsyncSandboxClient:
             response.raise_for_status()
             return CommandResponse.model_validate(response.json())
         except httpx.TimeoutException as e:
-            ctx = await self._get_sandbox_error_context(sandbox_id)
-            if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
             raise SandboxUnresponsiveError(
                 sandbox_id=sandbox_id,
                 command=command,
                 message=_build_unresponsive_message(command, effective_timeout),
-                sandbox_status=ctx["status"],
+                sandbox_status=None,
             ) from e
         except httpx.HTTPStatusError as e:
             resp = getattr(e, "response", None)
             status = getattr(resp, "status_code", "?")
 
             if status == 409:
-                ctx = await self._get_sandbox_error_context(sandbox_id)
+                ctx = {"status": None, "error_type": None, "error_message": None}
+                try:
+                    error_data = resp.json()
+                    if "sandbox_status" in error_data:
+                        ctx = {
+                            "status": error_data.get("sandbox_status"),
+                            "error_type": error_data.get("error_type"),
+                            "error_message": error_data.get("error_message"),
+                        }
+                except (json.JSONDecodeError, KeyError, AttributeError):
+                    pass
                 _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
 
             if status == 408:
-                ctx = await self._get_sandbox_error_context(sandbox_id)
-                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
                 raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
 
             req = getattr(e, "request", None)

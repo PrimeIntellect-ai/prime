@@ -206,6 +206,8 @@ class EvalsClient:
         """Push evaluation samples in batches to avoid request size limits."""
         if not samples:
             return {}
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
 
         total_samples_pushed = 0
         for i in range(0, len(samples), batch_size):
@@ -476,6 +478,8 @@ class AsyncEvalsClient:
         """Push evaluation samples in batches."""
         if not samples:
             return {}
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
 
         total_samples_pushed = 0
         for i in range(0, len(samples), batch_size):

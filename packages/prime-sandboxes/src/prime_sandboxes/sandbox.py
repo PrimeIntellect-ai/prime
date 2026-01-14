@@ -441,7 +441,7 @@ class SandboxClient:
         # Start detached process with separate stdout and stderr log files
         bg_cmd = (
             f"nohup sh -c {quoted_sh_command} "
-            f"> {stdout_log_file_quoted} 2> {stderr_log_file_quoted} &"
+            f"< /dev/null > {stdout_log_file_quoted} 2> {stderr_log_file_quoted} &"
         )
         self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
@@ -985,7 +985,7 @@ class AsyncSandboxClient:
         # Start detached process with separate stdout and stderr log files
         bg_cmd = (
             f"nohup sh -c {quoted_sh_command} "
-            f"> {stdout_log_file_quoted} 2> {stderr_log_file_quoted} &"
+            f"< /dev/null > {stdout_log_file_quoted} 2> {stderr_log_file_quoted} &"
         )
         await self.execute_command(sandbox_id, bg_cmd, timeout=10)
 

@@ -1,5 +1,7 @@
 import asyncio
+import json
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Union
 
 from .core import APIError, AsyncAPIClient
@@ -201,22 +203,63 @@ class EvalsClient:
         self,
         evaluation_id: str,
         samples: List[Dict[str, Any]],
-        batch_size: int = 256,
+        max_payload_bytes: int = 512 * 1024,
+        max_workers: int = 4,
     ) -> Dict[str, Any]:
-        """Push evaluation samples in batches to avoid request size limits."""
+        """Push evaluation samples in adaptive batches with concurrent uploads."""
         if not samples:
-            return {}
-        if batch_size < 1:
-            raise ValueError("batch_size must be at least 1")
+            return {"samples_pushed": 0}
 
+        batches = self._build_batches(samples, max_payload_bytes)
         total_samples_pushed = 0
-        for i in range(0, len(samples), batch_size):
-            batch = samples[i : i + batch_size]
-            payload = {"samples": batch}
-            self.client.request("POST", f"/evaluations/{evaluation_id}/samples", json=payload)
-            total_samples_pushed += len(batch)
+        errors = []
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._upload_batch, evaluation_id, b): i
+                for i, b in enumerate(batches)
+            }
+            for future in as_completed(futures):
+                try:
+                    total_samples_pushed += future.result()
+                except Exception as e:
+                    errors.append(f"Batch {futures[future] + 1}: {e}")
+
+        if errors:
+            raise EvalsAPIError(f"Failed to push samples: {'; '.join(errors)}")
 
         return {"samples_pushed": total_samples_pushed}
+
+    def _upload_batch(self, evaluation_id: str, batch: List[Dict[str, Any]]) -> int:
+        """Upload a single batch of samples."""
+        self.client.request(
+            "POST", f"/evaluations/{evaluation_id}/samples", json={"samples": batch}
+        )
+        return len(batch)
+
+    def _build_batches(
+        self, samples: List[Dict[str, Any]], max_payload_bytes: int
+    ) -> List[List[Dict[str, Any]]]:
+        """Build batches that fit within payload size limit."""
+        batches: List[List[Dict[str, Any]]] = []
+        current_batch: List[Dict[str, Any]] = []
+        current_bytes = 20
+
+        for sample in samples:
+            sample_size = len(json.dumps(sample)) + 1
+
+            if current_bytes + sample_size > max_payload_bytes and current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_bytes = 20
+
+            current_batch.append(sample)
+            current_bytes += sample_size
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
 
     def finalize_evaluation(
         self, evaluation_id: str, metrics: Optional[Dict[str, Any]] = None
@@ -473,22 +516,58 @@ class AsyncEvalsClient:
         self,
         evaluation_id: str,
         samples: List[Dict[str, Any]],
-        batch_size: int = 256,
+        max_payload_bytes: int = 512 * 1024,
+        max_concurrent: int = 4,
     ) -> Dict[str, Any]:
-        """Push evaluation samples in batches."""
+        """Push evaluation samples in adaptive batches with concurrent uploads."""
         if not samples:
-            return {}
-        if batch_size < 1:
-            raise ValueError("batch_size must be at least 1")
+            return {"samples_pushed": 0}
 
-        total_samples_pushed = 0
-        for i in range(0, len(samples), batch_size):
-            batch = samples[i : i + batch_size]
-            payload = {"samples": batch}
-            await self.client.request("POST", f"/evaluations/{evaluation_id}/samples", json=payload)
-            total_samples_pushed += len(batch)
+        batches = self._build_batches(samples, max_payload_bytes)
+        semaphore = asyncio.Semaphore(max_concurrent)
+        errors: List[str] = []
 
-        return {"samples_pushed": total_samples_pushed}
+        async def upload_batch(idx: int, batch: List[Dict[str, Any]]) -> int:
+            async with semaphore:
+                try:
+                    await self.client.request(
+                        "POST", f"/evaluations/{evaluation_id}/samples", json={"samples": batch}
+                    )
+                    return len(batch)
+                except Exception as e:
+                    errors.append(f"Batch {idx + 1}: {e}")
+                    return 0
+
+        results = await asyncio.gather(*[upload_batch(i, b) for i, b in enumerate(batches)])
+
+        if errors:
+            raise EvalsAPIError(f"Failed to push samples: {'; '.join(errors)}")
+
+        return {"samples_pushed": sum(results)}
+
+    def _build_batches(
+        self, samples: List[Dict[str, Any]], max_payload_bytes: int
+    ) -> List[List[Dict[str, Any]]]:
+        """Build batches that fit within payload size limit."""
+        batches: List[List[Dict[str, Any]]] = []
+        current_batch: List[Dict[str, Any]] = []
+        current_bytes = 20
+
+        for sample in samples:
+            sample_size = len(json.dumps(sample)) + 1
+
+            if current_bytes + sample_size > max_payload_bytes and current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_bytes = 20
+
+            current_batch.append(sample)
+            current_bytes += sample_size
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
 
     async def finalize_evaluation(
         self, evaluation_id: str, metrics: Optional[Dict[str, Any]] = None

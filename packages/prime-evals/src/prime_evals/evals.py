@@ -201,22 +201,20 @@ class EvalsClient:
         self,
         evaluation_id: str,
         samples: List[Dict[str, Any]],
-        batch_size: int = 512,
+        batch_size: int = 256,
     ) -> Dict[str, Any]:
         """Push evaluation samples in batches to avoid request size limits."""
         if not samples:
             return {}
 
-        response: Dict[str, Any] = {}
-
+        total_samples_pushed = 0
         for i in range(0, len(samples), batch_size):
             batch = samples[i : i + batch_size]
             payload = {"samples": batch}
-            response = self.client.request(
-                "POST", f"/evaluations/{evaluation_id}/samples", json=payload
-            )
+            self.client.request("POST", f"/evaluations/{evaluation_id}/samples", json=payload)
+            total_samples_pushed += len(batch)
 
-        return response
+        return {"samples_pushed": total_samples_pushed}
 
     def finalize_evaluation(
         self, evaluation_id: str, metrics: Optional[Dict[str, Any]] = None
@@ -473,22 +471,20 @@ class AsyncEvalsClient:
         self,
         evaluation_id: str,
         samples: List[Dict[str, Any]],
-        batch_size: int = 512,
+        batch_size: int = 256,
     ) -> Dict[str, Any]:
         """Push evaluation samples in batches."""
         if not samples:
             return {}
 
-        response: Dict[str, Any] = {}
-
+        total_samples_pushed = 0
         for i in range(0, len(samples), batch_size):
             batch = samples[i : i + batch_size]
             payload = {"samples": batch}
-            response = await self.client.request(
-                "POST", f"/evaluations/{evaluation_id}/samples", json=payload
-            )
+            await self.client.request("POST", f"/evaluations/{evaluation_id}/samples", json=payload)
+            total_samples_pushed += len(batch)
 
-        return response
+        return {"samples_pushed": total_samples_pushed}
 
     async def finalize_evaluation(
         self, evaluation_id: str, metrics: Optional[Dict[str, Any]] = None

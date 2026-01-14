@@ -209,6 +209,8 @@ class EvalsClient:
         """Push evaluation samples in adaptive batches with concurrent uploads."""
         if not samples:
             return {"samples_pushed": 0}
+        if max_workers < 1:
+            raise ValueError("max_workers must be at least 1")
 
         batches = self._build_batches(samples, max_payload_bytes)
         total_samples_pushed = 0
@@ -522,6 +524,8 @@ class AsyncEvalsClient:
         """Push evaluation samples in adaptive batches with concurrent uploads."""
         if not samples:
             return {"samples_pushed": 0}
+        if max_concurrent < 1:
+            raise ValueError("max_concurrent must be at least 1")
 
         batches = self._build_batches(samples, max_payload_bytes)
         semaphore = asyncio.Semaphore(max_concurrent)

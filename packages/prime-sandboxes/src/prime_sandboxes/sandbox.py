@@ -302,7 +302,6 @@ class SandboxClient:
             self.client.config.config_dir / "sandbox_auth_cache.json",
             self.client,
         )
-        self._error_context_cache: Dict[str, tuple[dict, float]] = {}
 
     @staticmethod
     @_gateway_retry
@@ -339,26 +338,16 @@ class SandboxClient:
             return False
 
     def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
-        """Fetch sandbox status to understand why an operation failed."""
-        now = time.monotonic()
-
-        if sandbox_id in self._error_context_cache:
-            ctx, cached_at = self._error_context_cache[sandbox_id]
-            if now - cached_at < 5.0:
-                return ctx
-
+        """Fetch sandbox error context from the lightweight server endpoint."""
         try:
-            sandbox = self.get(sandbox_id)
-            ctx = {
-                "status": sandbox.status,
-                "error_type": sandbox.error_type,
-                "error_message": sandbox.error_message,
+            response = self.client.request("GET", f"/sandbox/{sandbox_id}/error-context")
+            return {
+                "status": response.get("status"),
+                "error_type": response.get("errorType") or response.get("error_type"),
+                "error_message": response.get("errorMessage") or response.get("error_message"),
             }
         except Exception:
-            ctx = {"status": None, "error_type": None, "error_message": None}
-
-        self._error_context_cache[sandbox_id] = (ctx, now)
-        return ctx
+            return {"status": None, "error_type": None, "error_message": None}
 
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
@@ -874,8 +863,6 @@ class AsyncSandboxClient:
         # Shared httpx client for gateway operations (upload/download/execute)
         # Initialized lazily to allow connection pooling and reuse
         self._gateway_client: Optional[httpx.AsyncClient] = None
-        # Stores Task while fetch is in-flight, then replaces with result tuple
-        self._error_context_cache: Dict[str, asyncio.Task[dict] | tuple[dict, float]] = {}
 
     def _get_gateway_client(self) -> httpx.AsyncClient:
         """Get or create the shared gateway client for connection pooling
@@ -930,43 +917,16 @@ class AsyncSandboxClient:
             return False
 
     async def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
-        """Fetch sandbox status to understand why an operation failed."""
-        now = time.monotonic()
-
-        # Check cache first
-        cached = self._error_context_cache.get(sandbox_id)
-        if cached is not None:
-            # If it's a Task, another coroutine is fetching the context
-            if isinstance(cached, asyncio.Task):
-                try:
-                    return await cached
-                except Exception:
-                    return {"status": None, "error_type": None, "error_message": None}
-
-            ctx, cached_at = cached
-            if now - cached_at < 5.0:
-                return ctx
-
-        async def do_fetch() -> dict:
-            sandbox = await self.get(sandbox_id)
-            return {
-                "status": sandbox.status,
-                "error_type": sandbox.error_type,
-                "error_message": sandbox.error_message,
-            }
-
-        # Create task and store it before awaiting
-        task = asyncio.create_task(do_fetch())
-        self._error_context_cache[sandbox_id] = task
-
+        """Fetch sandbox error context from the lightweight server endpoint."""
         try:
-            ctx = await task
+            response = await self.client.request("GET", f"/sandbox/{sandbox_id}/error-context")
+            return {
+                "status": response.get("status"),
+                "error_type": response.get("errorType") or response.get("error_type"),
+                "error_message": response.get("errorMessage") or response.get("error_message"),
+            }
         except Exception:
-            ctx = {"status": None, "error_type": None, "error_message": None}
-
-        # Replace task with result tuple
-        self._error_context_cache[sandbox_id] = (ctx, time.monotonic())
-        return ctx
+            return {"status": None, "error_type": None, "error_message": None}
 
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""

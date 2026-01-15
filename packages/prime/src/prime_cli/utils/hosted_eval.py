@@ -1,12 +1,10 @@
 import asyncio
-import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
-from rich.spinner import Spinner
 from rich.text import Text
 
 from prime_cli.core import APIError, AsyncAPIClient
@@ -70,7 +68,7 @@ async def create_hosted_evaluation(
     if config.name:
         payload["name"] = config.name
 
-    return await client.post("/hosted-evals/evaluations", json=payload)
+    return await client.post("/hosted-evaluations", json=payload)
 
 
 async def get_evaluation(client: AsyncAPIClient, evaluation_id: str) -> dict[str, Any]:
@@ -79,7 +77,7 @@ async def get_evaluation(client: AsyncAPIClient, evaluation_id: str) -> dict[str
 
 async def get_evaluation_logs(client: AsyncAPIClient, evaluation_id: str) -> str:
     try:
-        response = await client.get(f"/hosted-evals/evaluations/{evaluation_id}/logs")
+        response = await client.get(f"/hosted-evaluations/{evaluation_id}/logs")
         return response.get("logs", "")
     except APIError:
         return ""
@@ -116,7 +114,7 @@ async def run_hosted_evaluation(
         with Live(
             Panel(
                 Text.assemble(
-                    (Spinner("dots").render(time.time()), "cyan"),
+                    "[cyan]⠋[/cyan]",
                     " Waiting for evaluation to start...",
                 ),
                 title="[bold]Hosted Evaluation[/bold]",

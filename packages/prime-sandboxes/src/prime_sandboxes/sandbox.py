@@ -24,7 +24,11 @@ from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
+    SandboxImagePullError,
     SandboxNotRunningError,
+    SandboxOOMError,
+    SandboxTimeoutError,
+    SandboxUnresponsiveError,
     UploadTimeoutError,
 )
 from .models import (
@@ -79,6 +83,71 @@ def _validate_env_key(key: str) -> str:
     if not _ENV_VAR_PATTERN.fullmatch(key):
         raise ValueError(f"Invalid environment variable name: {key!r}")
     return key
+
+
+def _build_terminated_message(command: str, ctx: dict) -> str:
+    """Build helpful error message for terminated sandbox."""
+    cmd_preview = command[:50] + "..." if len(command) > 50 else command
+    parts = [f"Command '{cmd_preview}' failed: sandbox is no longer running."]
+
+    error_type = ctx.get("error_type")
+    error_message = ctx.get("error_message")
+    status = ctx.get("status")
+
+    if error_type == "OOM_KILLED":
+        parts.append("The sandbox was terminated due to out-of-memory (OOM).")
+        parts.append("Consider requesting more memory or optimizing memory usage.")
+    elif error_type == "TIMEOUT":
+        parts.append("The sandbox exceeded its maximum runtime and was terminated.")
+    elif error_type == "IMAGE_PULL_FAILED":
+        parts.append("The sandbox failed to start due to image pull failure.")
+    elif status == "TERMINATED":
+        parts.append("The sandbox was terminated.")
+
+    if error_message:
+        parts.append(f"Details: {error_message}")
+
+    return " ".join(parts)
+
+
+def _build_unresponsive_message(command: str, timeout: int) -> str:
+    """Build helpful error message for unresponsive sandbox."""
+    cmd_preview = command[:50] + "..." if len(command) > 50 else command
+    msg = f"Command '{cmd_preview}' timed out after {timeout}s."
+
+    return msg
+
+
+def _raise_not_running_error(
+    sandbox_id: str,
+    ctx: dict,
+    command: str | None = None,
+    cause: BaseException | None = None,
+) -> None:
+    """Raise appropriate SandboxNotRunningError subclass based on error_type."""
+    error_type = ctx.get("error_type")
+    status = ctx.get("status")
+
+    if command:
+        message = _build_terminated_message(command, ctx)
+    elif ctx.get("error_message"):
+        message = f"Sandbox {sandbox_id} failed ({error_type}): {ctx['error_message']}"
+    else:
+        message = None
+
+    kwargs = {"command": command, "message": message}
+    if error_type == "OOM_KILLED":
+        exc = SandboxOOMError(sandbox_id, status, error_type, **kwargs)
+    elif error_type == "TIMEOUT":
+        exc = SandboxTimeoutError(sandbox_id, status, error_type, **kwargs)
+    elif error_type == "IMAGE_PULL_FAILED":
+        exc = SandboxImagePullError(sandbox_id, status, error_type, **kwargs)
+    else:
+        exc = SandboxNotRunningError(sandbox_id, status, error_type, **kwargs)
+
+    if cause:
+        raise exc from cause
+    raise exc
 
 
 class SandboxAuthCache:
@@ -269,6 +338,18 @@ class SandboxClient:
         except Exception:
             return False
 
+    def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
+        """Fetch sandbox error context from the lightweight server endpoint."""
+        try:
+            response = self.client.request("GET", f"/sandbox/{sandbox_id}/error-context")
+            return {
+                "status": response.get("status"),
+                "error_type": response.get("errorType") or response.get("error_type"),
+                "error_message": response.get("errorMessage") or response.get("error_message"),
+            }
+        except Exception:
+            return {"status": None, "error_type": None, "error_message": None}
+
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
         self._auth_cache.clear()
@@ -374,16 +455,33 @@ class SandboxClient:
             response.raise_for_status()
             return CommandResponse.model_validate(response.json())
         except httpx.TimeoutException as e:
-            raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+            ctx = self._get_sandbox_error_context(sandbox_id)
+            if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+            raise SandboxUnresponsiveError(
+                sandbox_id=sandbox_id,
+                command=command,
+                message=_build_unresponsive_message(command, effective_timeout),
+                sandbox_status=ctx["status"],
+            ) from e
         except httpx.HTTPStatusError as e:
-            req = getattr(e, "request", None)
             resp = getattr(e, "response", None)
+            status = getattr(resp, "status_code", "?")
+
+            if status == 409:
+                ctx = self._get_sandbox_error_context(sandbox_id)
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+
+            if status == 408:
+                ctx = self._get_sandbox_error_context(sandbox_id)
+                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+
+            req = getattr(e, "request", None)
             method = getattr(req, "method", "?")
             u = getattr(req, "url", "?")
-            status = getattr(resp, "status_code", "?")
             text = getattr(resp, "text", "")
-            if status == 408:
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
             raise APIError(f"HTTP {status} {method} {u}: {text}") from e
         except httpx.RequestError as e:
             req = getattr(e, "request", None)
@@ -472,7 +570,7 @@ class SandboxClient:
         stdout_log_file_quoted = shlex.quote(job.stdout_log_file)
         stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
 
-        check = self.execute_command(sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=10)
+        check = self.execute_command(sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30)
 
         if not check.stdout.strip():
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
@@ -514,7 +612,12 @@ class SandboxClient:
                     # Reset counter if check fails
                     consecutive_successes = 0
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
-                raise SandboxNotRunningError(sandbox_id, sandbox.status)
+                ctx = {
+                    "status": sandbox.status,
+                    "error_type": sandbox.error_type,
+                    "error_message": sandbox.error_message,
+                }
+                _raise_not_running_error(sandbox.id, ctx)
 
             # Aggressive polling for first 5 attempts (5 seconds), then back off
             sleep_time = 1 if attempt < 5 else 2
@@ -840,6 +943,18 @@ class AsyncSandboxClient:
         except Exception:
             return False
 
+    async def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
+        """Fetch sandbox error context from the lightweight server endpoint."""
+        try:
+            response = await self.client.request("GET", f"/sandbox/{sandbox_id}/error-context")
+            return {
+                "status": response.get("status"),
+                "error_type": response.get("errorType") or response.get("error_type"),
+                "error_message": response.get("errorMessage") or response.get("error_message"),
+            }
+        except Exception:
+            return {"status": None, "error_type": None, "error_message": None}
+
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
         self._auth_cache.clear()
@@ -944,16 +1059,33 @@ class AsyncSandboxClient:
             response.raise_for_status()
             return CommandResponse.model_validate(response.json())
         except httpx.TimeoutException as e:
-            raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+            ctx = await self._get_sandbox_error_context(sandbox_id)
+            if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+            raise SandboxUnresponsiveError(
+                sandbox_id=sandbox_id,
+                command=command,
+                message=_build_unresponsive_message(command, effective_timeout),
+                sandbox_status=ctx["status"],
+            ) from e
         except httpx.HTTPStatusError as e:
-            req = getattr(e, "request", None)
             resp = getattr(e, "response", None)
+            status = getattr(resp, "status_code", "?")
+
+            if status == 409:
+                ctx = await self._get_sandbox_error_context(sandbox_id)
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+
+            if status == 408:
+                ctx = await self._get_sandbox_error_context(sandbox_id)
+                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+
+            req = getattr(e, "request", None)
             method = getattr(req, "method", "?")
             u = getattr(req, "url", "?")
-            status = getattr(resp, "status_code", "?")
             text = getattr(resp, "text", "")
-            if status == 408:
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
             raise APIError(f"HTTP {status} {method} {u}: {text}") from e
         except httpx.RequestError as e:
             req = getattr(e, "request", None)
@@ -1043,7 +1175,7 @@ class AsyncSandboxClient:
         stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
 
         check = await self.execute_command(
-            sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=10
+            sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30
         )
 
         if not check.stdout.strip():
@@ -1091,7 +1223,12 @@ class AsyncSandboxClient:
                     # Reset counter if check fails
                     consecutive_successes = 0
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
-                raise SandboxNotRunningError(sandbox_id, sandbox.status)
+                ctx = {
+                    "status": sandbox.status,
+                    "error_type": sandbox.error_type,
+                    "error_message": sandbox.error_message,
+                }
+                _raise_not_running_error(sandbox.id, ctx)
 
             sleep_time = 1 if attempt < 5 else 2
             await asyncio.sleep(sleep_time)

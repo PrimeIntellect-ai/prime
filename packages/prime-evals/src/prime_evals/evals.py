@@ -1,11 +1,17 @@
 import asyncio
 import json
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Union
 
+import httpx
+
 from .core import APIError, AsyncAPIClient
 from .exceptions import EvalsAPIError, InvalidEvaluationError
+
+MAX_RETRIES = 5
+INITIAL_BACKOFF = 1.0
 
 
 def _build_user_agent() -> str:
@@ -234,9 +240,34 @@ class EvalsClient:
 
     def _upload_batch(self, evaluation_id: str, batch: List[Dict[str, Any]]) -> int:
         """Upload a single batch of samples."""
-        self.client.request(
-            "POST", f"/evaluations/{evaluation_id}/samples", json={"samples": batch}
-        )
+        base_url = self.client.config.base_url
+        url = f"{base_url}/api/v1/evaluations/{evaluation_id}/samples"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.client.config.api_key}",
+            "User-Agent": _build_user_agent(),
+        }
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = httpx.post(
+                    url,
+                    json={"samples": batch},
+                    headers=headers,
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+                return len(batch)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429 and attempt < MAX_RETRIES - 1:
+                    time.sleep(INITIAL_BACKOFF * (2**attempt))
+                    continue
+                raise EvalsAPIError(f"HTTP {e.response.status_code}: {e.response.text}") from e
+            except httpx.RequestError as e:
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(INITIAL_BACKOFF * (2**attempt))
+                    continue
+                raise EvalsAPIError(f"Request failed: {e}") from e
         return len(batch)
 
     def _build_batches(
@@ -531,16 +562,37 @@ class AsyncEvalsClient:
         semaphore = asyncio.Semaphore(max_concurrent)
         errors: List[str] = []
 
+        base_url = self.client.config.base_url
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.client.config.api_key}",
+            "User-Agent": _build_user_agent(),
+        }
+
         async def upload_batch(idx: int, batch: List[Dict[str, Any]]) -> int:
+            url = f"{base_url}/api/v1/evaluations/{evaluation_id}/samples"
             async with semaphore:
-                try:
-                    await self.client.request(
-                        "POST", f"/evaluations/{evaluation_id}/samples", json={"samples": batch}
-                    )
-                    return len(batch)
-                except Exception as e:
-                    errors.append(f"Batch {idx + 1}: {e}")
-                    return 0
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        async with httpx.AsyncClient(timeout=30.0) as client:
+                            response = await client.post(
+                                url, json={"samples": batch}, headers=headers
+                            )
+                            response.raise_for_status()
+                            return len(batch)
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code == 429 and attempt < MAX_RETRIES - 1:
+                            await asyncio.sleep(INITIAL_BACKOFF * (2**attempt))
+                            continue
+                        errors.append(f"Batch {idx + 1}: HTTP {e.response.status_code}")
+                        return 0
+                    except httpx.RequestError as e:
+                        if attempt < MAX_RETRIES - 1:
+                            await asyncio.sleep(INITIAL_BACKOFF * (2**attempt))
+                            continue
+                        errors.append(f"Batch {idx + 1}: {e}")
+                        return 0
+                return 0
 
         results = await asyncio.gather(*[upload_batch(i, b) for i, b in enumerate(batches)])
 

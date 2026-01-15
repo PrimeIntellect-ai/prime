@@ -1,17 +1,20 @@
 import asyncio
 import json
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Union
 
 import httpx
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from .core import APIError, AsyncAPIClient
 from .exceptions import EvalsAPIError, InvalidEvaluationError
 
-MAX_RETRIES = 5
-INITIAL_BACKOFF = 1.0
+
+def _is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429
+    return isinstance(exc, httpx.RequestError)
 
 
 def _build_user_agent() -> str:
@@ -239,7 +242,7 @@ class EvalsClient:
         return {"samples_pushed": total_samples_pushed}
 
     def _upload_batch(self, evaluation_id: str, batch: List[Dict[str, Any]]) -> int:
-        """Upload a single batch of samples."""
+        """Upload a single batch of samples with retry on rate limit."""
         base_url = self.client.config.base_url
         url = f"{base_url}/api/v1/evaluations/{evaluation_id}/samples"
         headers = {
@@ -248,27 +251,23 @@ class EvalsClient:
             "User-Agent": _build_user_agent(),
         }
 
-        for attempt in range(MAX_RETRIES):
-            try:
-                response = httpx.post(
-                    url,
-                    json={"samples": batch},
-                    headers=headers,
-                    timeout=30.0,
-                )
-                response.raise_for_status()
-                return len(batch)
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429 and attempt < MAX_RETRIES - 1:
-                    time.sleep(INITIAL_BACKOFF * (2**attempt))
-                    continue
-                raise EvalsAPIError(f"HTTP {e.response.status_code}: {e.response.text}") from e
-            except httpx.RequestError as e:
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(INITIAL_BACKOFF * (2**attempt))
-                    continue
-                raise EvalsAPIError(f"Request failed: {e}") from e
-        return len(batch)
+        @retry(
+            retry=retry_if_exception(_is_retryable),
+            stop=stop_after_attempt(5),
+            wait=wait_exponential(multiplier=1, min=1, max=16),
+            reraise=True,
+        )
+        def do_upload() -> int:
+            response = httpx.post(url, json={"samples": batch}, headers=headers, timeout=30.0)
+            response.raise_for_status()
+            return len(batch)
+
+        try:
+            return do_upload()
+        except httpx.HTTPStatusError as e:
+            raise EvalsAPIError(f"HTTP {e.response.status_code}: {e.response.text}") from e
+        except httpx.RequestError as e:
+            raise EvalsAPIError(f"Request failed: {e}") from e
 
     def _build_batches(
         self, samples: List[Dict[str, Any]], max_payload_bytes: int
@@ -571,28 +570,28 @@ class AsyncEvalsClient:
 
         async def upload_batch(idx: int, batch: List[Dict[str, Any]]) -> int:
             url = f"{base_url}/api/v1/evaluations/{evaluation_id}/samples"
+
+            @retry(
+                retry=retry_if_exception(_is_retryable),
+                stop=stop_after_attempt(5),
+                wait=wait_exponential(multiplier=1, min=1, max=16),
+                reraise=True,
+            )
+            async def do_upload() -> int:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(url, json={"samples": batch}, headers=headers)
+                    response.raise_for_status()
+                    return len(batch)
+
             async with semaphore:
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        async with httpx.AsyncClient(timeout=30.0) as client:
-                            response = await client.post(
-                                url, json={"samples": batch}, headers=headers
-                            )
-                            response.raise_for_status()
-                            return len(batch)
-                    except httpx.HTTPStatusError as e:
-                        if e.response.status_code == 429 and attempt < MAX_RETRIES - 1:
-                            await asyncio.sleep(INITIAL_BACKOFF * (2**attempt))
-                            continue
-                        errors.append(f"Batch {idx + 1}: HTTP {e.response.status_code}")
-                        return 0
-                    except httpx.RequestError as e:
-                        if attempt < MAX_RETRIES - 1:
-                            await asyncio.sleep(INITIAL_BACKOFF * (2**attempt))
-                            continue
-                        errors.append(f"Batch {idx + 1}: {e}")
-                        return 0
-                return 0
+                try:
+                    return await do_upload()
+                except httpx.HTTPStatusError as e:
+                    errors.append(f"Batch {idx + 1}: HTTP {e.response.status_code}")
+                    return 0
+                except httpx.RequestError as e:
+                    errors.append(f"Batch {idx + 1}: {e}")
+                    return 0
 
         results = await asyncio.gather(*[upload_batch(i, b) for i, b in enumerate(batches)])
 

@@ -24,7 +24,7 @@ def shared_sandbox(sandbox_client):
             )
         )
         print(f"[SETUP] Created: {sandbox.id}")
-        sandbox_client.wait_for_creation(sandbox.id)
+        sandbox_client.wait_for_creation(sandbox.id, max_attempts=120)
         print("[SETUP] Sandbox ready!")
         yield sandbox
     finally:

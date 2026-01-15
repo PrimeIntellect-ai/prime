@@ -82,6 +82,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "created_at": iso_timestamp(sandbox.created_at),
         "user_id": sandbox.user_id,
         "team_id": sandbox.team_id,
+        "registry_credentials_id": getattr(sandbox, "registry_credentials_id", None),
     }
 
     if sandbox.started_at:
@@ -101,6 +102,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
 
 
 @app.command("list")
+@app.command("ls", hidden=True)
 def list_sandboxes_cmd(
     team_id: Optional[str] = typer.Option(
         None, help="Filter by team ID (uses config team_id if not specified)"
@@ -117,7 +119,7 @@ def list_sandboxes_cmd(
     all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List your sandboxes (excludes terminated by default)"""
+    """List your sandboxes (shortcut: ls)"""
     validate_output_format(output, console)
 
     try:
@@ -279,6 +281,11 @@ def get(
 
             table.add_row("User ID", sandbox_data["user_id"] or "N/A")
             table.add_row("Team ID", sandbox_data["team_id"] or "Personal")
+            if sandbox_data.get("registry_credentials_id"):
+                table.add_row(
+                    "Registry Credentials",
+                    sandbox_data["registry_credentials_id"],
+                )
 
             if "environment_vars" in sandbox_data:
                 env_vars = json.dumps(sandbox_data["environment_vars"], indent=2)
@@ -332,6 +339,11 @@ def create(
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
+    ),
+    registry_credentials_id: Optional[str] = typer.Option(
+        None,
+        "--registry-credentials-id",
+        help="Registry credentials ID for pulling private images",
     ),
     env: Optional[List[str]] = typer.Option(
         None,
@@ -401,6 +413,7 @@ def create(
             secrets=secrets_vars if secrets_vars else None,
             labels=labels if labels else [],
             team_id=team_id,
+            registry_credentials_id=registry_credentials_id,
         )
 
         # Show configuration summary
@@ -415,6 +428,8 @@ def create(
         console.print(f"Network Access: {network_status}")
         console.print(f"Timeout: {timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
+        if registry_credentials_id:
+            console.print(f"Registry Credentials: {registry_credentials_id}")
         if labels:
             console.print(f"Labels: {', '.join(labels)}")
         if env_vars:
@@ -517,6 +532,11 @@ def delete(
 
                 if not sandbox_ids:
                     console.print("[yellow]No sandboxes to delete[/yellow]")
+                    if only_mine and all_sandboxes:
+                        console.print(
+                            "\n[dim]Note: --all only deletes your own sandboxes by default. "
+                            "Use --all-users to delete sandboxes from all team members.[/dim]"
+                        )
                     return
         else:
             parsed_ids = []
@@ -723,8 +743,15 @@ def run(
                 key, value = env_var.split("=", 1)
                 env_vars[key] = value
 
-        # Join command list into a single string, preserving quoting for arguments with spaces
-        command_str = shlex.join(command)
+        # Handle case where user passes entire command as a quoted string (e.g., "ls /home")
+        # We need to parse it properly to handle both:
+        # - "ls /home" -> should become: ls /home
+        # - "./my script.sh" -> should become: './my script.sh' (properly quoted)
+        if len(command) == 1:
+            # Parse the single string as shell tokens, then re-join properly
+            command_str = shlex.join(shlex.split(command[0]))
+        else:
+            command_str = shlex.join(command)
 
         console.print(f"[bold blue]Executing command:[/bold blue] {command_str}")
         if working_dir:

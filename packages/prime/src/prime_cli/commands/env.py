@@ -1209,12 +1209,26 @@ def update_pyproject_version(pyproject_path: Path, new_version: str) -> None:
         f.write(updated_content)
 
 
-def get_install_command(tool: str, wheel_url: str) -> List[str]:
-    """Generate install command for the specified tool."""
+def get_install_command(tool: str, wheel_url: str, no_upgrade: bool = False) -> List[str]:
+    """Generate install command for the specified tool.
+
+    Args:
+        tool: Package manager to use ('uv' or 'pip')
+        wheel_url: URL to the wheel file
+        no_upgrade: If True, don't include --upgrade flag (preserves locked dependencies)
+    """
     if tool == "uv":
-        return ["uv", "pip", "install", "--upgrade", wheel_url]
+        cmd = ["uv", "pip", "install"]
+        if not no_upgrade:
+            cmd.append("--upgrade")
+        cmd.append(wheel_url)
+        return cmd
     elif tool == "pip":
-        return ["pip", "install", "--upgrade", wheel_url]
+        cmd = ["pip", "install"]
+        if not no_upgrade:
+            cmd.append("--upgrade")
+        cmd.append(wheel_url)
+        return cmd
     else:
         raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
 
@@ -1414,19 +1428,35 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
 
 @app.command(no_args_is_help=True)
 def install(
-    env_ids: List[str] = typer.Argument(..., help="Environment ID(s) to install (owner/name)"),
+    env_ids: List[str] = typer.Argument(
+        ..., help="Environment ID(s) to install (owner/name or local name)"
+    ),
     with_tool: str = typer.Option(
         "uv",
         "--with",
         help="Package manager to use (uv or pip)",
     ),
+    path: str = typer.Option(
+        "./environments",
+        "--path",
+        "-p",
+        help="Path to local environments directory (for local installs)",
+    ),
+    no_upgrade: bool = typer.Option(
+        False,
+        "--no-upgrade",
+        help="Don't upgrade existing packages. Useful with locked dependencies (uv.lock).",
+    ),
 ) -> None:
     """Install a verifiers environment
 
     Examples:
-        prime env install owner/environment
+        prime env install gsm8k                  # local editable install from ./environments
+        prime env install gsm8k -p /path/to/envs # local install from custom path
+        prime env install owner/environment      # install from Prime Hub
         prime env install owner/environment@0.2.3
         prime env install owner/environment --with pip
+        prime env install owner/environment --no-upgrade
         prime env install owner/environment1 owner/environment2 owner/environment3
     """
     try:
@@ -1457,7 +1487,28 @@ def install(
             f"environment{'s' if len(env_ids) != 1 else ''}...[/bold]"
         )
         for env_id in env_ids:
-            # Validate environment ID format
+            # Check if this is a local environment (no "/" in the name)
+            local_name = env_id.split("@")[0]
+            if "/" not in local_name:
+                if not local_name or not local_name.strip():
+                    skipped_envs.append((env_id, "Empty environment name"))
+                    console.print("[yellow]⚠ Skipping: Empty environment name[/yellow]")
+                    continue
+                env_folder = local_name.replace("-", "_")
+                env_path = Path(path) / env_folder
+                if env_path.exists():
+                    if with_tool == "uv":
+                        cmd_parts = ["uv", "pip", "install", "-e", str(env_path)]
+                    else:
+                        cmd_parts = ["pip", "install", "-e", str(env_path)]
+                    installable_envs.append((cmd_parts, local_name, "local", local_name))
+                    console.print(f"[green]✓ Found local environment: {env_path}[/green]")
+                else:
+                    failed_envs.append((local_name, f"Local path not found: {env_path}"))
+                    console.print(f"[red]✗ Local environment not found: {env_path}[/red]")
+                continue
+
+            # Validate environment ID format (owner/name)
             try:
                 env_id, target_version = validate_env_id(env_id)
             except ValueError as e:
@@ -1506,57 +1557,10 @@ def install(
 
             console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
 
-            # Generate install command preferring simple index over wheel URL
-            normalized_name = normalize_package_name(name)
-
-            if simple_index_url:
-                # Prefer simple index approach
-                if with_tool == "uv":
-                    if target_version and target_version != "latest":
-                        cmd_parts = [
-                            "uv",
-                            "pip",
-                            "install",
-                            f"{normalized_name}=={target_version}",
-                            "--extra-index-url",
-                            simple_index_url,
-                        ]
-                    else:
-                        cmd_parts = [
-                            "uv",
-                            "pip",
-                            "install",
-                            normalized_name,
-                            "--extra-index-url",
-                            simple_index_url,
-                        ]
-                else:  # pip
-                    if target_version and target_version != "latest":
-                        cmd_parts = [
-                            "pip",
-                            "install",
-                            f"{normalized_name}=={target_version}",
-                            "--extra-index-url",
-                            simple_index_url,
-                        ]
-                    else:
-                        cmd_parts = [
-                            "pip",
-                            "install",
-                            normalized_name,
-                            "--extra-index-url",
-                            simple_index_url,
-                        ]
-            elif wheel_url:
-                # Fall back to wheel URL if simple index not available
-                try:
-                    cmd_parts = get_install_command(with_tool, wheel_url)
-                except ValueError as e:
-                    skipped_envs.append((f"{env_id}@{target_version}", str(e)))
-                    console.print(f"[yellow]⚠ Skipping {env_id}@{target_version}: {e}[/yellow]")
-                    continue
-            else:
-                # Should not reach here due to earlier checks, but just in case
+            cmd_parts = _build_install_command(
+                name, target_version, simple_index_url, wheel_url, with_tool, no_upgrade
+            )
+            if not cmd_parts:
                 skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
                 console.print(
                     f"[yellow]⚠ Skipping {env_id}@{target_version}: No installation method[/yellow]"
@@ -1926,102 +1930,199 @@ def delete(
         raise typer.Exit(1)
 
 
-@app.command(
-    "eval",
-    no_args_is_help=True,
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-)
-def eval_env(
-    ctx: typer.Context,
-    environment: str = typer.Argument(
-        ...,
-        help="Installed Verifiers environment name (e.g. 'wordle')",
-    ),
-    model: str = typer.Option(
-        "openai/gpt-4.1-mini",
-        "--model",
-        "-m",
-        help=(
-            "Model to use (e.g. 'openai/gpt-4.1-mini', 'prime-intellect/intellect-3', "
-            "see 'prime inference models' for available models)"
-        ),
-    ),
-    # --- vf-eval options ---
-    num_examples: Optional[int] = typer.Option(
-        5, "--num-examples", "-n", help="Number of examples"
-    ),
-    rollouts_per_example: Optional[int] = typer.Option(
-        3, "--rollouts-per-example", "-r", help="Rollouts per example"
-    ),
-    max_concurrent: Optional[int] = typer.Option(
-        32, "--max-concurrent", "-c", help="Max concurrent requests"
-    ),
-    max_tokens: Optional[int] = typer.Option(
-        None, "--max-tokens", "-t", help="Max tokens to generate (unset → model default)"
-    ),
-    temperature: Optional[float] = typer.Option(None, "--temperature", "-T", help="Temperature"),
-    sampling_args: Optional[str] = typer.Option(
-        None,
-        "--sampling-args",
-        "-S",
-        help='Sampling args as JSON, e.g. \'{"enable_thinking": false, "max_tokens": 256}\'',
-    ),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
-    save_results: bool = typer.Option(True, "--save-results", "-s", help="Save results to disk"),
-    save_every: int = typer.Option(1, "--save-every", "-f", help="Save dataset every n rollouts"),
-    save_to_hf_hub: bool = typer.Option(False, "--save-to-hf-hub", "-H", help="Save to HF Hub"),
-    hf_hub_dataset_name: Optional[str] = typer.Option(
-        None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
-    ),
-    env_args: Optional[str] = typer.Option(
-        None, "--env-args", "-a", help='Environment args as JSON, e.g. \'{"key":"value"}\''
-    ),
-    api_key_var: Optional[str] = typer.Option(
-        None, "--api-key-var", "-k", help="override api key variable instead of using PRIME_API_KEY"
-    ),
-    api_base_url: Optional[str] = typer.Option(
-        None,
-        "--api-base-url",
-        "-b",
-        help=(
-            "override api base url variable instead of using prime inference url, "
-            "should end in '/v1'"
-        ),
-    ),
-    skip_upload: bool = typer.Option(
-        False,
-        "--skip-upload",
-        help="Skip uploading results to Prime Evals Hub (results are uploaded by default)",
-    ),
-    env_path: Optional[str] = typer.Option(
-        None,
-        "--env-path",
-        help=(
-            "Path to the environment directory "
-            "(used to locate .prime/.env-metadata.json for upstream resolution)"
-        ),
-    ),
+def _is_environment_installed(env_name: str, required_version: Optional[str] = None) -> bool:
+    """Check if an environment package is installed."""
+    try:
+        pkg_name = normalize_package_name(env_name)
+        result = subprocess.run(
+            ["uv", "pip", "show", pkg_name],
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            return False
+
+        if required_version and required_version != "latest":
+            for line in result.stdout.splitlines():
+                if line.startswith("Version:"):
+                    installed_version = line.split(":", 1)[1].strip()
+                    return installed_version == required_version
+            return False
+
+        return True
+    except Exception:
+        return False
+
+
+def _build_install_command(
+    name: str,
+    version: str,
+    simple_index_url: Optional[str],
+    wheel_url: Optional[str],
+    tool: str = "uv",
+    no_upgrade: bool = False,
+) -> Optional[List[str]]:
+    """Build install command for an environment. Returns None if no install method available.
+
+    Args:
+        name: Package name
+        version: Package version
+        simple_index_url: Simple index URL for the package
+        wheel_url: Direct wheel URL
+        tool: Package manager to use ('uv' or 'pip')
+        no_upgrade: If True, don't include --upgrade flag (preserves locked dependencies)
+    """
+    normalized_name = normalize_package_name(name)
+
+    if simple_index_url:
+        if tool == "uv":
+            cmd = ["uv", "pip", "install"]
+            if not no_upgrade:
+                cmd.append("--upgrade")
+            if version and version != "latest":
+                cmd.append(f"{normalized_name}=={version}")
+            else:
+                cmd.append(normalized_name)
+            cmd.extend(["--extra-index-url", simple_index_url])
+            return cmd
+        else:  # pip
+            cmd = ["pip", "install"]
+            if not no_upgrade:
+                cmd.append("--upgrade")
+            if version and version != "latest":
+                cmd.append(f"{normalized_name}=={version}")
+            else:
+                cmd.append(normalized_name)
+            cmd.extend(["--extra-index-url", simple_index_url])
+            return cmd
+    elif wheel_url:
+        try:
+            return get_install_command(tool, wheel_url, no_upgrade)
+        except ValueError:
+            return None
+
+    return None
+
+
+def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
+    """Install a single environment from the hub. Returns True on success."""
+    try:
+        env_id, version = validate_env_id(env_slug)
+    except ValueError as e:
+        console.print(f"[red]Invalid environment format: {e}[/red]")
+        return False
+
+    owner, name = env_id.split("/")
+
+    try:
+        client = APIClient(require_auth=False)
+        details = fetch_environment_details(client, owner, name, version)
+    except APIError as e:
+        console.print(f"[red]Failed to find environment {env_slug}: {e}[/red]")
+        return False
+
+    simple_index_url = details.get("simple_index_url")
+    wheel_url = process_wheel_url(details.get("wheel_url"))
+
+    if not simple_index_url and not wheel_url:
+        if details.get("visibility") == "PRIVATE":
+            console.print(
+                f"[red]Cannot install private environment {env_slug}.[/red]\n"
+                "[yellow]Use 'prime env pull' to download and install locally.[/yellow]"
+            )
+        else:
+            console.print(f"[red]No installation method available for {env_slug}[/red]")
+        return False
+
+    cmd_parts = _build_install_command(name, version, simple_index_url, wheel_url, tool)
+    if not cmd_parts:
+        console.print(f"[red]Failed to build install command for {env_slug}[/red]")
+        return False
+
+    try:
+        execute_install_command(cmd_parts, env_id, version, tool)
+        return True
+    except Exception as e:
+        console.print(f"[red]Installation failed: {e}[/red]")
+        return False
+
+
+def run_eval(
+    environment: str,
+    model: str,
+    num_examples: Optional[int],
+    rollouts_per_example: Optional[int],
+    max_concurrent: Optional[int],
+    max_concurrent_generation: Optional[int],
+    max_concurrent_scoring: Optional[int],
+    max_tokens: Optional[int],
+    temperature: Optional[float],
+    sampling_args: Optional[str],
+    verbose: bool,
+    no_interleave_scoring: bool,
+    state_columns: Optional[str],
+    save_results: bool,
+    save_every: int,
+    independent_scoring: bool,
+    save_to_hf_hub: bool,
+    hf_hub_dataset_name: Optional[str],
+    env_args: Optional[str],
+    extra_env_kwargs: Optional[str],
+    env_dir_path: Optional[str],
+    api_key_var: Optional[str],
+    api_base_url: Optional[str],
+    skip_upload: bool,
+    env_path: Optional[str],
+    endpoints_path: Optional[str] = None,
+    headers: Optional[List[str]] = None,
 ) -> None:
     """
     Run verifiers' vf-eval with Prime Inference
-
-    Example:
-       prime env eval meow -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
-       All extra args are forwarded unchanged to vf-eval.
     """
-
-    # Determine the path to check for upstream metadata
-    check_path = Path(env_path) if env_path else Path.cwd()
-    # Display upstream environment info if metadata exists
-    is_resolved = display_upstream_environment_info(
-        env_path=check_path, environment_name=environment
+    is_slug = (
+        "/" in environment and not environment.startswith("./") and not environment.startswith("/")
     )
-    if not is_resolved and not skip_upload:
-        console.print(
-            "[yellow]Evaluation results will not be uploaded or viewable on the platform "
-            "without a specified upstream environment. Use `prime env push` "
-            "to set an upstream.[/yellow]"
+
+    upstream_owner = None
+    upstream_name = None
+    env_name_for_vf_eval = environment
+
+    if is_slug:
+        env_slug = environment
+        requested_version = "latest"
+        if "@" in environment:
+            env_slug, requested_version = environment.rsplit("@", 1)
+
+        parts = env_slug.split("/")
+        if len(parts) == 2 and parts[0] and parts[1]:
+            upstream_owner, upstream_name = parts
+            env_name_for_vf_eval = upstream_name
+            console.print(
+                f"[dim]Using upstream environment {upstream_owner}/{upstream_name}[/dim]\n"
+            )
+
+            if not _is_environment_installed(upstream_name, requested_version):
+                console.print(f"[cyan]Installing {environment}...[/cyan]")
+                if not _install_single_environment(environment):
+                    raise typer.Exit(1)
+                console.print()
+
+            is_resolved = True
+        else:
+            console.print(f"[red]Invalid environment slug format: {environment}[/red]")
+            raise typer.Exit(1)
+    else:
+        check_path = Path(env_path) if env_path else Path.cwd()
+        is_resolved = display_upstream_environment_info(
+            env_path=check_path, environment_name=environment
         )
+        if not is_resolved and not skip_upload:
+            console.print(
+                "[yellow]Evaluation results will not be uploaded or viewable on the platform "
+                "without a specified upstream environment. Use `prime env push` "
+                "to set an upstream.[/yellow]"
+            )
 
     config = Config()
 
@@ -2061,7 +2162,7 @@ def eval_env(
             )
             raise typer.Exit(1)
 
-    cmd = ["uv", "run", "vf-eval", environment]
+    cmd = ["uv", "run", "vf-eval", env_name_for_vf_eval]
 
     # Add chosen inference url
     cmd += ["-b", inference_url]
@@ -2082,12 +2183,20 @@ def eval_env(
     # Forward vf-eval options if provided here
     if env_args:
         cmd += ["-a", env_args]
+    if extra_env_kwargs:
+        cmd += ["-x", extra_env_kwargs]
+    if env_dir_path:
+        cmd += ["-p", env_dir_path]
     if num_examples is not None:
         cmd += ["-n", str(num_examples)]
     if rollouts_per_example is not None:
         cmd += ["-r", str(rollouts_per_example)]
     if max_concurrent is not None:
         cmd += ["-c", str(max_concurrent)]
+    if max_concurrent_generation is not None:
+        cmd += ["--max-concurrent-generation", str(max_concurrent_generation)]
+    if max_concurrent_scoring is not None:
+        cmd += ["--max-concurrent-scoring", str(max_concurrent_scoring)]
     if max_tokens is not None:
         cmd += ["-t", str(max_tokens)]
     if temperature is not None:
@@ -2096,19 +2205,30 @@ def eval_env(
         cmd += ["-S", sampling_args]
     if verbose:
         cmd += ["-v"]
-    if save_results:
+    if no_interleave_scoring:
+        cmd += ["-N"]
+    if state_columns:
+        cmd += ["-C", state_columns]
+    if save_results or not skip_upload:
         cmd += ["-s"]
     if save_every is not None:
         cmd += ["-f", str(save_every)]
+    if independent_scoring:
+        cmd += ["-R"]
     if save_to_hf_hub:
         cmd += ["-H"]
     if hf_hub_dataset_name:
         cmd += ["-D", hf_hub_dataset_name]
+    if endpoints_path:
+        cmd += ["-e", endpoints_path]
+    if headers:
+        for header in headers:
+            cmd += ["--header", header]
 
     # Generate job_id for end-to-end tracing of eval runs
     eval_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     job_uuid = str(uuid.uuid4())[:8]
-    sanitized_env = environment.replace("-", "_").replace("/", "_")
+    sanitized_env = env_name_for_vf_eval.replace("-", "_").replace("/", "_")
     sanitized_model = model.replace("/", "_").replace("-", "_")
     job_id = f"{sanitized_env}_{sanitized_model}_{eval_timestamp}_{job_uuid}"
 
@@ -2136,12 +2256,22 @@ def eval_env(
     if not skip_upload:
         if is_resolved:
             try:
-                push_eval_results_to_hub(
-                    env_name=environment,
-                    model=model,
-                    job_id=job_id,
-                    env_path=check_path,
-                )
+                if is_slug and upstream_owner and upstream_name:
+                    push_eval_results_to_hub(
+                        env_name=env_name_for_vf_eval,
+                        model=model,
+                        job_id=job_id,
+                        env_path=Path(env_path) if env_path else None,
+                        upstream_slug=f"{upstream_owner}/{upstream_name}",
+                    )
+                else:
+                    check_path = Path(env_path) if env_path else Path.cwd()
+                    push_eval_results_to_hub(
+                        env_name=env_name_for_vf_eval,
+                        model=model,
+                        job_id=job_id,
+                        env_path=check_path,
+                    )
             except Exception as e:
                 console.print(f"[red]Failed to push results to hub:[/red] {e}")
                 console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
@@ -2155,3 +2285,142 @@ def eval_env(
             )
     else:
         console.print("[dim]Skipped uploading evaluation results[/dim]")
+
+
+@app.command(
+    "eval",
+    no_args_is_help=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    deprecated=True,
+)
+def eval_env(
+    ctx: typer.Context,
+    environment: str = typer.Argument(
+        ...,
+        help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/wordle')",
+    ),
+    model: str = typer.Option(
+        "openai/gpt-4.1-mini",
+        "--model",
+        "-m",
+        help=(
+            "Model to use (e.g. 'openai/gpt-4.1-mini', 'prime-intellect/intellect-3', "
+            "see 'prime inference models' for available models)"
+        ),
+    ),
+    num_examples: Optional[int] = typer.Option(
+        None, "--num-examples", "-n", help="Number of examples"
+    ),
+    rollouts_per_example: Optional[int] = typer.Option(
+        None, "--rollouts-per-example", "-r", help="Rollouts per example"
+    ),
+    max_concurrent: Optional[int] = typer.Option(
+        32, "--max-concurrent", "-c", help="Max concurrent requests"
+    ),
+    max_concurrent_generation: Optional[int] = typer.Option(
+        None, "--max-concurrent-generation", help="Max concurrent generation requests"
+    ),
+    max_concurrent_scoring: Optional[int] = typer.Option(
+        None, "--max-concurrent-scoring", help="Max concurrent scoring requests"
+    ),
+    max_tokens: Optional[int] = typer.Option(
+        None, "--max-tokens", "-t", help="Max tokens to generate (unset → model default)"
+    ),
+    temperature: Optional[float] = typer.Option(None, "--temperature", "-T", help="Temperature"),
+    sampling_args: Optional[str] = typer.Option(
+        None,
+        "--sampling-args",
+        "-S",
+        help='Sampling args as JSON, e.g. \'{"enable_thinking": false, "max_tokens": 256}\'',
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    no_interleave_scoring: bool = typer.Option(
+        False, "--no-interleave-scoring", "-N", help="Disable interleaving of scoring"
+    ),
+    state_columns: Optional[str] = typer.Option(
+        None,
+        "--state-columns",
+        "-C",
+        help="Comma-separated list of state columns to save (e.g., 'turn,timing')",
+    ),
+    save_results: bool = typer.Option(False, "--save-results", "-s", help="Save results to disk"),
+    save_every: int = typer.Option(-1, "--save-every", "-f", help="Save dataset every n rollouts"),
+    independent_scoring: bool = typer.Option(
+        False,
+        "--independent-scoring",
+        "-R",
+        help="Score each rollout individually instead of scoring by group",
+    ),
+    save_to_hf_hub: bool = typer.Option(False, "--save-to-hf-hub", "-H", help="Save to HF Hub"),
+    hf_hub_dataset_name: Optional[str] = typer.Option(
+        None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
+    ),
+    env_args: Optional[str] = typer.Option(
+        None, "--env-args", "-a", help='Environment args as JSON, e.g. \'{"key":"value"}\''
+    ),
+    extra_env_kwargs: Optional[str] = typer.Option(
+        None,
+        "--extra-env-kwargs",
+        "-x",
+        help='Extra environment kwargs as JSON, e.g. \'{"key":"value"}\'',
+    ),
+    env_dir_path: Optional[str] = typer.Option(
+        None, "--env-dir-path", "-p", help="Path to environments directory"
+    ),
+    api_key_var: Optional[str] = typer.Option(
+        None, "--api-key-var", "-k", help="Override api key variable instead of using PRIME_API_KEY"
+    ),
+    api_base_url: Optional[str] = typer.Option(
+        None,
+        "--api-base-url",
+        "-b",
+        help=(
+            "Override api base url variable instead of using prime inference url, "
+            "should end in '/v1'"
+        ),
+    ),
+    skip_upload: bool = typer.Option(
+        False,
+        "--skip-upload",
+        help="Skip uploading results to Prime Evals Hub (results are uploaded by default)",
+    ),
+    env_path: Optional[str] = typer.Option(
+        None,
+        "--env-path",
+        help=(
+            "Path to the environment directory "
+            "(used to locate .prime/.env-metadata.json for upstream resolution)"
+        ),
+    ),
+) -> None:
+    """Use 'prime eval' instead."""
+
+    run_eval(
+        environment=environment,
+        model=model,
+        num_examples=num_examples,
+        rollouts_per_example=rollouts_per_example,
+        max_concurrent=max_concurrent,
+        max_concurrent_generation=max_concurrent_generation,
+        max_concurrent_scoring=max_concurrent_scoring,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        sampling_args=sampling_args,
+        verbose=verbose,
+        no_interleave_scoring=no_interleave_scoring,
+        state_columns=state_columns,
+        save_results=save_results,
+        save_every=save_every,
+        independent_scoring=independent_scoring,
+        save_to_hf_hub=save_to_hf_hub,
+        hf_hub_dataset_name=hf_hub_dataset_name,
+        env_args=env_args,
+        extra_env_kwargs=extra_env_kwargs,
+        env_dir_path=env_dir_path,
+        api_key_var=api_key_var,
+        api_base_url=api_base_url,
+        skip_upload=skip_upload,
+        env_path=env_path,
+        endpoints_path=None,
+        headers=None,
+    )

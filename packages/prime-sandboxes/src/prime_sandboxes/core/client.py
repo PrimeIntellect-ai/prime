@@ -4,8 +4,24 @@ import sys
 from typing import Any, Dict, Optional
 
 import httpx
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from .config import Config
+
+# Retry configuration for transient connection errors
+# These errors occur when the server closes idle connections in the pool
+# or when we fail to establish/maintain a connection
+# Note: ReadTimeout is NOT included because the request may have been processed
+RETRYABLE_EXCEPTIONS = (
+    httpx.RemoteProtocolError,  # Server disconnected unexpectedly
+    httpx.ConnectError,  # Connection refused/failed
+    httpx.PoolTimeout,  # No connection available in pool
+)
 
 
 def _default_user_agent() -> str:
@@ -69,6 +85,23 @@ class APIClient:
                 "No API key configured. Set PRIME_API_KEY environment variable.",
             )
 
+    @retry(
+        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
+        reraise=True,
+    )
+    def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        json: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+    ) -> httpx.Response:
+        """Make HTTP request with retry on transient connection errors."""
+        return self.client.request(method, url, params=params, json=json, timeout=timeout)
+
     def request(
         self,
         method: str,
@@ -88,7 +121,9 @@ class APIClient:
         url = f"{self.base_url}{endpoint}"
 
         try:
-            response = self.client.request(method, url, params=params, json=json, timeout=timeout)
+            response = self._request_with_retry(
+                method, url, params=params, json=json, timeout=timeout
+            )
             response.raise_for_status()
 
             result = response.json()
@@ -161,6 +196,23 @@ class AsyncAPIClient:
                 "No API key configured. Set PRIME_API_KEY environment variable.",
             )
 
+    @retry(
+        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
+        reraise=True,
+    )
+    async def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        json: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+    ) -> httpx.Response:
+        """Make async HTTP request with retry on transient connection errors."""
+        return await self.client.request(method, url, params=params, json=json, timeout=timeout)
+
     async def request(
         self,
         method: str,
@@ -180,7 +232,7 @@ class AsyncAPIClient:
         url = f"{self.base_url}{endpoint}"
 
         try:
-            response = await self.client.request(
+            response = await self._request_with_retry(
                 method, url, params=params, json=json, timeout=timeout
             )
             response.raise_for_status()

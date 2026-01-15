@@ -13,12 +13,22 @@ from typing import Any, Dict, List, Optional
 
 import aiofiles
 import httpx
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
+    SandboxImagePullError,
     SandboxNotRunningError,
+    SandboxOOMError,
+    SandboxTimeoutError,
+    SandboxUnresponsiveError,
     UploadTimeoutError,
 )
 from .models import (
@@ -28,14 +38,33 @@ from .models import (
     BulkDeleteSandboxResponse,
     CommandResponse,
     CreateSandboxRequest,
+    DockerImageCheckResponse,
     ExposedPort,
     ExposePortRequest,
     FileUploadResponse,
     ListExposedPortsResponse,
+    RegistryCredentialSummary,
     Sandbox,
     SandboxListResponse,
     SandboxLogsResponse,
 )
+
+# Retry configuration for transient connection errors on gateway requests
+# Note: ReadTimeout is NOT included because the request may have been processed
+GATEWAY_RETRYABLE_EXCEPTIONS = (
+    httpx.RemoteProtocolError,  # Server disconnected unexpectedly
+    httpx.ConnectError,  # Connection refused/failed
+    httpx.PoolTimeout,  # No connection available in pool
+)
+
+# Retry decorator for gateway requests
+_gateway_retry = retry(
+    retry=retry_if_exception_type(GATEWAY_RETRYABLE_EXCEPTIONS),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
+    reraise=True,
+)
+
 
 _ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -53,6 +82,71 @@ def _validate_env_key(key: str) -> str:
     if not _ENV_VAR_PATTERN.fullmatch(key):
         raise ValueError(f"Invalid environment variable name: {key!r}")
     return key
+
+
+def _build_terminated_message(command: str, ctx: dict) -> str:
+    """Build helpful error message for terminated sandbox."""
+    cmd_preview = command[:50] + "..." if len(command) > 50 else command
+    parts = [f"Command '{cmd_preview}' failed: sandbox is no longer running."]
+
+    error_type = ctx.get("error_type")
+    error_message = ctx.get("error_message")
+    status = ctx.get("status")
+
+    if error_type == "OOM_KILLED":
+        parts.append("The sandbox was terminated due to out-of-memory (OOM).")
+        parts.append("Consider requesting more memory or optimizing memory usage.")
+    elif error_type == "TIMEOUT":
+        parts.append("The sandbox exceeded its maximum runtime and was terminated.")
+    elif error_type == "IMAGE_PULL_FAILED":
+        parts.append("The sandbox failed to start due to image pull failure.")
+    elif status == "TERMINATED":
+        parts.append("The sandbox was terminated.")
+
+    if error_message:
+        parts.append(f"Details: {error_message}")
+
+    return " ".join(parts)
+
+
+def _build_unresponsive_message(command: str, timeout: int) -> str:
+    """Build helpful error message for unresponsive sandbox."""
+    cmd_preview = command[:50] + "..." if len(command) > 50 else command
+    msg = f"Command '{cmd_preview}' timed out after {timeout}s."
+
+    return msg
+
+
+def _raise_not_running_error(
+    sandbox_id: str,
+    ctx: dict,
+    command: str | None = None,
+    cause: BaseException | None = None,
+) -> None:
+    """Raise appropriate SandboxNotRunningError subclass based on error_type."""
+    error_type = ctx.get("error_type")
+    status = ctx.get("status")
+
+    if command:
+        message = _build_terminated_message(command, ctx)
+    elif ctx.get("error_message"):
+        message = f"Sandbox {sandbox_id} failed ({error_type}): {ctx['error_message']}"
+    else:
+        message = None
+
+    kwargs = {"command": command, "message": message}
+    if error_type == "OOM_KILLED":
+        exc = SandboxOOMError(sandbox_id, status, error_type, **kwargs)
+    elif error_type == "TIMEOUT":
+        exc = SandboxTimeoutError(sandbox_id, status, error_type, **kwargs)
+    elif error_type == "IMAGE_PULL_FAILED":
+        exc = SandboxImagePullError(sandbox_id, status, error_type, **kwargs)
+    else:
+        exc = SandboxNotRunningError(sandbox_id, status, error_type, **kwargs)
+
+    if cause:
+        raise exc from cause
+    raise exc
 
 
 class SandboxAuthCache:
@@ -209,6 +303,32 @@ class SandboxClient:
             self.client,
         )
 
+    @staticmethod
+    @_gateway_retry
+    def _gateway_post(
+        url: str,
+        headers: Dict[str, str],
+        timeout: float,
+        json: Optional[Dict[str, Any]] = None,
+        files: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> httpx.Response:
+        """Make a POST request to the gateway with retry on transient errors."""
+        with httpx.Client(timeout=timeout) as client:
+            return client.post(url, json=json, files=files, params=params, headers=headers)
+
+    @staticmethod
+    @_gateway_retry
+    def _gateway_get(
+        url: str,
+        headers: Dict[str, str],
+        params: Dict[str, Any],
+        timeout: float,
+    ) -> httpx.Response:
+        """Make a GET request to the gateway with retry on transient errors."""
+        with httpx.Client(timeout=timeout) as client:
+            return client.get(url, params=params, headers=headers)
+
     def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
         """Test if a sandbox is reachable by executing a simple echo command"""
         try:
@@ -216,6 +336,18 @@ class SandboxClient:
             return True
         except Exception:
             return False
+
+    def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
+        """Fetch sandbox error context from the lightweight server endpoint."""
+        try:
+            response = self.client.request("GET", f"/sandbox/{sandbox_id}/error-context")
+            return {
+                "status": response.get("status"),
+                "error_type": response.get("errorType") or response.get("error_type"),
+                "error_message": response.get("errorMessage") or response.get("error_message"),
+            }
+        except Exception:
+            return {"status": None, "error_type": None, "error_message": None}
 
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
@@ -316,25 +448,39 @@ class SandboxClient:
 
         try:
             client_timeout = effective_timeout + 2
-            with httpx.Client(timeout=client_timeout) as client:
-                response = client.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                )
-                response.raise_for_status()
-                return CommandResponse.model_validate(response.json())
+            response = self._gateway_post(
+                url, headers=headers, timeout=client_timeout, json=payload
+            )
+            response.raise_for_status()
+            return CommandResponse.model_validate(response.json())
         except httpx.TimeoutException as e:
-            raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+            ctx = self._get_sandbox_error_context(sandbox_id)
+            if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+            raise SandboxUnresponsiveError(
+                sandbox_id=sandbox_id,
+                command=command,
+                message=_build_unresponsive_message(command, effective_timeout),
+                sandbox_status=ctx["status"],
+            ) from e
         except httpx.HTTPStatusError as e:
-            req = getattr(e, "request", None)
             resp = getattr(e, "response", None)
+            status = getattr(resp, "status_code", "?")
+
+            if status == 409:
+                ctx = self._get_sandbox_error_context(sandbox_id)
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+
+            if status == 408:
+                ctx = self._get_sandbox_error_context(sandbox_id)
+                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+
+            req = getattr(e, "request", None)
             method = getattr(req, "method", "?")
             u = getattr(req, "url", "?")
-            status = getattr(resp, "status_code", "?")
             text = getattr(resp, "text", "")
-            if status == 408:
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
             raise APIError(f"HTTP {status} {method} {u}: {text}") from e
         except httpx.RequestError as e:
             req = getattr(e, "request", None)
@@ -423,7 +569,7 @@ class SandboxClient:
         stdout_log_file_quoted = shlex.quote(job.stdout_log_file)
         stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
 
-        check = self.execute_command(sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=10)
+        check = self.execute_command(sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30)
 
         if not check.stdout.strip():
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
@@ -465,7 +611,12 @@ class SandboxClient:
                     # Reset counter if check fails
                     consecutive_successes = 0
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
-                raise SandboxNotRunningError(sandbox_id, sandbox.status)
+                ctx = {
+                    "status": sandbox.status,
+                    "error_type": sandbox.error_type,
+                    "error_message": sandbox.error_message,
+                }
+                _raise_not_running_error(sandbox.id, ctx)
 
             # Aggressive polling for first 5 attempts (5 seconds), then back off
             sleep_time = 1 if attempt < 5 else 2
@@ -549,29 +700,31 @@ class SandboxClient:
         effective_timeout = timeout if timeout is not None else 300
 
         with open(local_file_path, "rb") as f:
-            files = {"file": (os.path.basename(local_file_path), f)}
-            params = {"path": file_path, "sandbox_id": sandbox_id}
+            file_content = f.read()
 
-            try:
-                with httpx.Client(timeout=effective_timeout) as client:
-                    response = client.post(url, files=files, params=params, headers=headers)
-                    response.raise_for_status()
-                    return FileUploadResponse.model_validate(response.json())
-            except httpx.TimeoutException as e:
-                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
-            except httpx.HTTPStatusError as e:
-                error_details = (
-                    f"HTTP {e.response.status_code} {e.request.method} "
-                    f"{e.request.url}: {e.response.text}"
-                )
-                raise APIError(f"Upload failed: {error_details}") from e
-            except httpx.RequestError as e:
-                req = getattr(e, "request", None)
-                method = getattr(req, "method", "?")
-                u = getattr(req, "url", "?")
-                raise APIError(f"Upload failed: {e.__class__.__name__} at {method} {u}: {e}") from e
-            except Exception as e:
-                raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
+        try:
+            files = {"file": (os.path.basename(local_file_path), file_content)}
+            params = {"path": file_path, "sandbox_id": sandbox_id}
+            response = self._gateway_post(
+                url, headers=headers, timeout=effective_timeout, files=files, params=params
+            )
+            response.raise_for_status()
+            return FileUploadResponse.model_validate(response.json())
+        except httpx.TimeoutException as e:
+            raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
+        except httpx.HTTPStatusError as e:
+            error_details = (
+                f"HTTP {e.response.status_code} {e.request.method} "
+                f"{e.request.url}: {e.response.text}"
+            )
+            raise APIError(f"Upload failed: {error_details}") from e
+        except httpx.RequestError as e:
+            req = getattr(e, "request", None)
+            method = getattr(req, "method", "?")
+            u = getattr(req, "url", "?")
+            raise APIError(f"Upload failed: {e.__class__.__name__} at {method} {u}: {e}") from e
+        except Exception as e:
+            raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
 
     def upload_bytes(
         self,
@@ -601,10 +754,11 @@ class SandboxClient:
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
         try:
-            with httpx.Client(timeout=effective_timeout) as client:
-                response = client.post(url, files=files, params=params, headers=headers)
-                response.raise_for_status()
-                return FileUploadResponse.model_validate(response.json())
+            response = self._gateway_post(
+                url, headers=headers, timeout=effective_timeout, files=files, params=params
+            )
+            response.raise_for_status()
+            return FileUploadResponse.model_validate(response.json())
         except httpx.TimeoutException:
             raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
         except httpx.HTTPStatusError as e:
@@ -630,16 +784,17 @@ class SandboxClient:
         effective_timeout = timeout if timeout is not None else 300
 
         try:
-            with httpx.Client(timeout=effective_timeout) as client:
-                response = client.get(url, params=params, headers=headers)
-                response.raise_for_status()
+            response = self._gateway_get(
+                url, headers=headers, params=params, timeout=effective_timeout
+            )
+            response.raise_for_status()
 
-                dir_path = os.path.dirname(local_file_path)
-                if dir_path:
-                    os.makedirs(dir_path, exist_ok=True)
+            dir_path = os.path.dirname(local_file_path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
 
-                with open(local_file_path, "wb") as f:
-                    f.write(response.content)
+            with open(local_file_path, "wb") as f:
+                f.write(response.content)
         except httpx.TimeoutException as e:
             raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
         except httpx.HTTPStatusError as e:
@@ -731,6 +886,34 @@ class AsyncSandboxClient:
             )
         return self._gateway_client
 
+    @_gateway_retry
+    async def _gateway_post(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        timeout: float,
+        json: Optional[Dict[str, Any]] = None,
+        files: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> httpx.Response:
+        """Make a POST request to the gateway with retry on transient errors."""
+        gateway_client = self._get_gateway_client()
+        return await gateway_client.post(
+            url, json=json, files=files, params=params, headers=headers, timeout=timeout
+        )
+
+    @_gateway_retry
+    async def _gateway_get(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        params: Dict[str, Any],
+        timeout: float,
+    ) -> httpx.Response:
+        """Make a GET request to the gateway with retry on transient errors."""
+        gateway_client = self._get_gateway_client()
+        return await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
+
     async def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
         """Test if a sandbox is reachable by executing a simple echo command"""
         try:
@@ -738,6 +921,18 @@ class AsyncSandboxClient:
             return True
         except Exception:
             return False
+
+    async def _get_sandbox_error_context(self, sandbox_id: str) -> dict:
+        """Fetch sandbox error context from the lightweight server endpoint."""
+        try:
+            response = await self.client.request("GET", f"/sandbox/{sandbox_id}/error-context")
+            return {
+                "status": response.get("status"),
+                "error_type": response.get("errorType") or response.get("error_type"),
+                "error_message": response.get("errorMessage") or response.get("error_message"),
+            }
+        except Exception:
+            return {"status": None, "error_type": None, "error_message": None}
 
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
@@ -837,23 +1032,39 @@ class AsyncSandboxClient:
 
         try:
             client_timeout = effective_timeout + 2
-            gateway_client = self._get_gateway_client()
-            response = await gateway_client.post(
-                url, json=payload, headers=headers, timeout=client_timeout
+            response = await self._gateway_post(
+                url, headers=headers, timeout=client_timeout, json=payload
             )
             response.raise_for_status()
             return CommandResponse.model_validate(response.json())
         except httpx.TimeoutException as e:
-            raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+            ctx = await self._get_sandbox_error_context(sandbox_id)
+            if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+            raise SandboxUnresponsiveError(
+                sandbox_id=sandbox_id,
+                command=command,
+                message=_build_unresponsive_message(command, effective_timeout),
+                sandbox_status=ctx["status"],
+            ) from e
         except httpx.HTTPStatusError as e:
-            req = getattr(e, "request", None)
             resp = getattr(e, "response", None)
+            status = getattr(resp, "status_code", "?")
+
+            if status == 409:
+                ctx = await self._get_sandbox_error_context(sandbox_id)
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+
+            if status == 408:
+                ctx = await self._get_sandbox_error_context(sandbox_id)
+                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+
+            req = getattr(e, "request", None)
             method = getattr(req, "method", "?")
             u = getattr(req, "url", "?")
-            status = getattr(resp, "status_code", "?")
             text = getattr(resp, "text", "")
-            if status == 408:
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
             raise APIError(f"HTTP {status} {method} {u}: {text}") from e
         except httpx.RequestError as e:
             req = getattr(e, "request", None)
@@ -943,7 +1154,7 @@ class AsyncSandboxClient:
         stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
 
         check = await self.execute_command(
-            sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=10
+            sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30
         )
 
         if not check.stdout.strip():
@@ -991,7 +1202,12 @@ class AsyncSandboxClient:
                     # Reset counter if check fails
                     consecutive_successes = 0
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
-                raise SandboxNotRunningError(sandbox_id, sandbox.status)
+                ctx = {
+                    "status": sandbox.status,
+                    "error_type": sandbox.error_type,
+                    "error_message": sandbox.error_message,
+                }
+                _raise_not_running_error(sandbox.id, ctx)
 
             sleep_time = 1 if attempt < 5 else 2
             await asyncio.sleep(sleep_time)
@@ -1091,10 +1307,9 @@ class AsyncSandboxClient:
             file_content = await f.read()
 
         try:
-            gateway_client = self._get_gateway_client()
             files = {"file": (os.path.basename(local_file_path), file_content)}
-            response = await gateway_client.post(
-                url, files=files, params=params, headers=headers, timeout=effective_timeout
+            response = await self._gateway_post(
+                url, headers=headers, timeout=effective_timeout, files=files, params=params
             )
             response.raise_for_status()
             return FileUploadResponse.model_validate(response.json())
@@ -1141,10 +1356,9 @@ class AsyncSandboxClient:
         effective_timeout = timeout if timeout is not None else 300
 
         try:
-            gateway_client = self._get_gateway_client()
             files = {"file": (filename, file_bytes)}
-            response = await gateway_client.post(
-                url, files=files, params=params, headers=headers, timeout=effective_timeout
+            response = await self._gateway_post(
+                url, headers=headers, timeout=effective_timeout, files=files, params=params
             )
             response.raise_for_status()
             return FileUploadResponse.model_validate(response.json())
@@ -1174,9 +1388,8 @@ class AsyncSandboxClient:
         effective_timeout = timeout if timeout is not None else 300
 
         try:
-            gateway_client = self._get_gateway_client()
-            response = await gateway_client.get(
-                url, params=params, headers=headers, timeout=effective_timeout
+            response = await self._gateway_get(
+                url, headers=headers, params=params, timeout=effective_timeout
             )
             response.raise_for_status()
             content = response.content
@@ -1247,3 +1460,65 @@ class AsyncSandboxClient:
         """List all exposed ports across all sandboxes for the current user"""
         response = await self.client.request("GET", "/sandbox/expose/all")
         return ListExposedPortsResponse.model_validate(response)
+
+
+class TemplateClient:
+    """Client for template/registry helper APIs."""
+
+    def __init__(self, api_client: Optional[APIClient] = None):
+        self.client = api_client or APIClient()
+
+    def list_registry_credentials(self) -> List[RegistryCredentialSummary]:
+        response = self.client.request("GET", "/template/registry-credentials")
+        credentials = response.get("credentials", [])
+        return [RegistryCredentialSummary.model_validate(item) for item in credentials]
+
+    def check_docker_image(
+        self, image: str, registry_credentials_id: Optional[str] = None
+    ) -> DockerImageCheckResponse:
+        payload: Dict[str, Any] = {"image": image}
+        if registry_credentials_id:
+            payload["registry_credentials_id"] = registry_credentials_id
+        response = self.client.request(
+            "POST",
+            "/template/check-docker-image",
+            json=payload,
+        )
+        return DockerImageCheckResponse.model_validate(response)
+
+
+class AsyncTemplateClient:
+    """Async client for template/registry helper APIs."""
+
+    def __init__(self, api_client: Optional[AsyncAPIClient] = None):
+        self.client = api_client or AsyncAPIClient()
+
+    async def list_registry_credentials(self) -> List[RegistryCredentialSummary]:
+        response = await self.client.request("GET", "/template/registry-credentials")
+        credentials = response.get("credentials", [])
+        return [RegistryCredentialSummary.model_validate(item) for item in credentials]
+
+    async def check_docker_image(
+        self, image: str, registry_credentials_id: Optional[str] = None
+    ) -> DockerImageCheckResponse:
+        payload: Dict[str, Any] = {"image": image}
+        if registry_credentials_id:
+            payload["registry_credentials_id"] = registry_credentials_id
+        response = await self.client.request(
+            "POST",
+            "/template/check-docker-image",
+            json=payload,
+        )
+        return DockerImageCheckResponse.model_validate(response)
+
+    async def aclose(self) -> None:
+        """Close the async client"""
+        await self.client.aclose()
+
+    async def __aenter__(self) -> "AsyncTemplateClient":
+        """Async context manager entry"""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager exit"""
+        await self.aclose()

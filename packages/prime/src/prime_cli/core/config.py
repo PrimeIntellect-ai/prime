@@ -10,6 +10,8 @@ from pydantic import BaseModel, ConfigDict
 class ConfigModel(BaseModel):
     api_key: str = ""
     team_id: str | None = None
+    team_name: str | None = None
+    team_role: str | None = None
     user_id: str | None = None
     base_url: str = "https://api.primeintellect.ai"
     frontend_url: str = "https://app.primeintellect.ai"
@@ -87,14 +89,30 @@ class Config:
     @property
     def team_id(self) -> Optional[str]:
         """Get team ID with precedence: env > file > None."""
-        team_id = os.getenv("PRIME_TEAM_ID")
-        if team_id is not None:
-            return team_id
-        return self.config.get("team_id") or None
+        return os.getenv("PRIME_TEAM_ID") or self.config.get("team_id") or None
 
-    def set_team_id(self, value: str | None) -> None:
-        """Set team ID in config file"""
-        self.config["team_id"] = value if value else None
+    @property
+    def team_id_from_env(self) -> bool:
+        """Check if team ID is set via environment variable."""
+        return bool(os.getenv("PRIME_TEAM_ID"))
+
+    @property
+    def team_name(self) -> Optional[str]:
+        """Get team name from config file (only valid if team_id not from env)."""
+        return self.config.get("team_name") or None
+
+    @property
+    def team_role(self) -> Optional[str]:
+        """Get team role from config file (only valid if team_id not from env)."""
+        return self.config.get("team_role") or None
+
+    def set_team(
+        self, value: str | None, team_name: str | None = None, team_role: str | None = None
+    ) -> None:
+        """Set team ID, name, and role in config file."""
+        self.config["team_id"] = value or None
+        self.config["team_name"] = team_name if value else None
+        self.config["team_role"] = team_role if value else None
         self._save_config(self.config)
 
     @property
@@ -194,6 +212,8 @@ class Config:
         return {
             "api_key": self.api_key,
             "team_id": self.team_id,
+            "team_name": self.team_name,
+            "team_role": self.team_role,
             "user_id": self.user_id,
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
@@ -212,6 +232,8 @@ class Config:
         env_config = {
             "api_key": self.api_key,
             "team_id": self.team_id,
+            "team_name": None if self.team_id_from_env else self.team_name,
+            "team_role": None if self.team_id_from_env else self.team_role,
             "user_id": self.user_id,
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
@@ -235,13 +257,15 @@ class Config:
                 self.set_base_url(self.DEFAULT_BASE_URL)
                 self.set_frontend_url(self.DEFAULT_FRONTEND_URL)
                 self.set_inference_url(self.DEFAULT_INFERENCE_URL)
-                self.set_team_id(None)  # Production defaults to personal account
+                self.set_team(None)  # Production defaults to personal account
                 self.set_current_environment("production")
             else:
                 self.config["base_url"] = self.DEFAULT_BASE_URL
                 self.config["frontend_url"] = self.DEFAULT_FRONTEND_URL
                 self.config["inference_url"] = self.DEFAULT_INFERENCE_URL
                 self.config["team_id"] = None
+                self.config["team_name"] = None
+                self.config["team_role"] = None
                 self.config["current_environment"] = "production"
             return True
 
@@ -257,8 +281,12 @@ class Config:
                 if persist:
                     if "api_key" in env_config:
                         self.set_api_key(env_config["api_key"])
-                    # Set team_id from environment, defaulting to empty string
-                    self.set_team_id(env_config.get("team_id", None))
+                    # Set team_id, team_name, and team_role from environment
+                    self.set_team(
+                        env_config.get("team_id", None),
+                        team_name=env_config.get("team_name", None),
+                        team_role=env_config.get("team_role", None),
+                    )
                     # Set user_id from environment
                     self.set_user_id(env_config.get("user_id", None))
                     self.set_base_url(env_config.get("base_url", self.DEFAULT_BASE_URL))
@@ -272,6 +300,8 @@ class Config:
                     if "api_key" in env_config:
                         self.config["api_key"] = env_config["api_key"]
                     self.config["team_id"] = env_config.get("team_id", None)
+                    self.config["team_name"] = env_config.get("team_name", None)
+                    self.config["team_role"] = env_config.get("team_role", None)
                     self.config["user_id"] = env_config.get("user_id", None)
                     # Normalize URLs the same way set_* methods do
                     base_url = env_config.get("base_url", self.DEFAULT_BASE_URL)
@@ -298,6 +328,8 @@ class Config:
                     env_config = {
                         "api_key": self.api_key,
                         "team_id": self.team_id,
+                        "team_name": None if self.team_id_from_env else self.team_name,
+                        "team_role": None if self.team_id_from_env else self.team_role,
                         "user_id": self.user_id,
                         "base_url": self.base_url,
                         "frontend_url": self.frontend_url,

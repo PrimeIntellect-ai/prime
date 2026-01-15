@@ -243,11 +243,12 @@ class EvalsClient:
     def _upload_batch(self, evaluation_id: str, batch: List[Dict[str, Any]]) -> int:
         """Upload a single batch of samples with retry on rate limit."""
         url = f"{self.client.base_url}/api/v1/evaluations/{evaluation_id}/samples"
-        headers = {
+        headers: Dict[str, str] = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.client.api_key}",
             "User-Agent": _build_user_agent(),
         }
+        if self.client.api_key:
+            headers["Authorization"] = f"Bearer {self.client.api_key}"
 
         @retry(
             retry=retry_if_exception(_is_retryable),
@@ -560,11 +561,12 @@ class AsyncEvalsClient:
         errors: List[str] = []
 
         base_url = self.client.base_url
-        headers = {
+        headers: Dict[str, str] = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.client.api_key}",
             "User-Agent": _build_user_agent(),
         }
+        if self.client.api_key:
+            headers["Authorization"] = f"Bearer {self.client.api_key}"
 
         async def upload_batch(idx: int, batch: List[Dict[str, Any]]) -> int:
             url = f"{base_url}/api/v1/evaluations/{evaluation_id}/samples"

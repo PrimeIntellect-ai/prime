@@ -18,7 +18,6 @@ def _is_retryable(exc: BaseException) -> bool:
 
 
 def _build_user_agent() -> str:
-    """Build User-Agent string for prime-evals"""
     from prime_evals import __version__
 
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -243,11 +242,10 @@ class EvalsClient:
 
     def _upload_batch(self, evaluation_id: str, batch: List[Dict[str, Any]]) -> int:
         """Upload a single batch of samples with retry on rate limit."""
-        base_url = self.client.config.base_url
-        url = f"{base_url}/api/v1/evaluations/{evaluation_id}/samples"
+        url = f"{self.client.base_url}/api/v1/evaluations/{evaluation_id}/samples"
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.client.config.api_key}",
+            "Authorization": f"Bearer {self.client.api_key}",
             "User-Agent": _build_user_agent(),
         }
 
@@ -561,10 +559,10 @@ class AsyncEvalsClient:
         semaphore = asyncio.Semaphore(max_concurrent)
         errors: List[str] = []
 
-        base_url = self.client.config.base_url
+        base_url = self.client.base_url
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.client.config.api_key}",
+            "Authorization": f"Bearer {self.client.api_key}",
             "User-Agent": _build_user_agent(),
         }
 

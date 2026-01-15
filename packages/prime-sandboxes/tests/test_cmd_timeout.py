@@ -25,7 +25,7 @@ def test_command_timeout():
         print(f"✓ Created: {sandbox.id}")
 
         print("\nWaiting for sandbox to be ready...")
-        sandbox_client.wait_for_creation(sandbox.id)
+        sandbox_client.wait_for_creation(sandbox.id, max_attempts=120)
         print("✓ Sandbox is running!")
 
         print("\nExecuting command...")

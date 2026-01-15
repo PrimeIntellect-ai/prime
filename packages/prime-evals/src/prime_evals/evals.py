@@ -276,8 +276,14 @@ class EvalsClient:
         current_batch: List[Dict[str, Any]] = []
         current_bytes = 20
 
-        for sample in samples:
+        for idx, sample in enumerate(samples):
             sample_size = len(json.dumps(sample)) + 1
+
+            if sample_size + 20 > max_payload_bytes:
+                raise EvalsAPIError(
+                    f"Sample {idx} exceeds maximum payload size "
+                    f"({sample_size} bytes > {max_payload_bytes - 20} bytes limit)"
+                )
 
             if current_bytes + sample_size > max_payload_bytes and current_batch:
                 batches.append(current_batch)
@@ -608,8 +614,14 @@ class AsyncEvalsClient:
         current_batch: List[Dict[str, Any]] = []
         current_bytes = 20
 
-        for sample in samples:
+        for idx, sample in enumerate(samples):
             sample_size = len(json.dumps(sample)) + 1
+
+            if sample_size + 20 > max_payload_bytes:
+                raise EvalsAPIError(
+                    f"Sample {idx} exceeds maximum payload size "
+                    f"({sample_size} bytes > {max_payload_bytes - 20} bytes limit)"
+                )
 
             if current_bytes + sample_size > max_payload_bytes and current_batch:
                 batches.append(current_batch)

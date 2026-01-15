@@ -41,11 +41,12 @@ from .models import (
     Sandbox,
     SandboxListResponse,
     SandboxStatus,
+    SSHSession,
     UpdateSandboxRequest,
 )
 from .sandbox import AsyncSandboxClient, AsyncTemplateClient, SandboxClient, TemplateClient
 
-__version__ = "0.2.9"
+__version__ = "0.2.10"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -80,6 +81,7 @@ __all__ = [
     "ExposePortRequest",
     "ExposedPort",
     "ListExposedPortsResponse",
+    "SSHSession",
     # Exceptions
     "APIError",
     "UnauthorizedError",

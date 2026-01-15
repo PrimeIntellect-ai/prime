@@ -965,7 +965,7 @@ def expose_port(
         "HTTP",
         "--protocol",
         "-p",
-        help="Protocol: HTTP or TCP/UDP",
+        help="Protocol: HTTP or TCP",
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
@@ -974,8 +974,8 @@ def expose_port(
 
     # Validate protocol
     protocol = protocol.upper()
-    if protocol not in ("HTTP", "TCP", "UDP"):
-        console.print(f"[red]Error:[/red] Invalid protocol '{protocol}'. Use HTTP, TCP, or UDP.")
+    if protocol not in ("HTTP", "TCP"):
+        console.print(f"[red]Error:[/red] Invalid protocol '{protocol}'. Use HTTP or TCP.")
         raise typer.Exit(1)
 
     try:
@@ -995,7 +995,7 @@ def expose_port(
             if exposed.name:
                 console.print(f"[bold green]Name:[/bold green] {exposed.name}")
             console.print(f"[bold green]URL:[/bold green] {exposed.url}")
-            if protocol in ("TCP", "UDP"):
+            if protocol == "TCP":
                 if exposed.external_port:
                     console.print(
                         f"[bold green]External Port:[/bold green] {exposed.external_port}"

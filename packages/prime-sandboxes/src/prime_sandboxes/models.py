@@ -180,7 +180,7 @@ class ExposePortRequest(BaseModel):
 
     port: int
     name: Optional[str] = None
-    protocol: str = "HTTP"  # HTTP or TCP/UDP
+    protocol: str = "HTTP"  # HTTP or TCP
 
 
 class ExposedPort(BaseModel):
@@ -193,8 +193,8 @@ class ExposedPort(BaseModel):
     url: str
     tls_socket: str
     protocol: Optional[str] = None
-    external_port: Optional[int] = None  # For TCP/UDP exposures
-    external_endpoint: Optional[str] = None  # For TCP/UDP: host:port endpoint
+    external_port: Optional[int] = None  # For TCP exposures
+    external_endpoint: Optional[str] = None  # For TCP: host:port endpoint
     created_at: Optional[str] = None
 
 

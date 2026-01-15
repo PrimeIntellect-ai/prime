@@ -70,7 +70,7 @@ class SandboxImagePullError(SandboxNotRunningError):
     pass
 
 
-class SandboxUnresponsiveError(RuntimeError):
+class SandboxUnresponsiveError(CommandTimeoutError):
     """Raised when sandbox appears running but commands time out unexpectedly."""
 
     def __init__(
@@ -83,4 +83,4 @@ class SandboxUnresponsiveError(RuntimeError):
         self.sandbox_id = sandbox_id
         self.command = command
         self.sandbox_status = sandbox_status
-        super().__init__(message)
+        RuntimeError.__init__(self, message)

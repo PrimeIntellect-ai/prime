@@ -36,12 +36,6 @@ def push_image(
         click_type=click.Choice(["linux/amd64", "linux/arm64"]),
         help="Target platform (defaults to linux/amd64 for Kubernetes compatibility)",
     ),
-    team_id: str = typer.Option(
-        None,
-        "--team-id",
-        "-t",
-        help="Team ID to associate the image with (for team billing and limits)",
-    ),
 ):
     """
     Build and push a Docker image to Prime Intellect registry.
@@ -50,7 +44,6 @@ def push_image(
         prime images push myapp:v1.0.0
         prime images push myapp:latest --dockerfile custom.Dockerfile
         prime images push myapp:v1 --platform linux/arm64
-        prime images push myapp:v1 --team-id my-team-id
     """
     try:
         # Parse image reference
@@ -63,6 +56,8 @@ def push_image(
         console.print(
             f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
         )
+        if config.team_id:
+            console.print(f"[dim]Team: {config.team_id}[/dim]")
         console.print()
 
         # Initialize API client
@@ -96,8 +91,8 @@ def push_image(
                     "dockerfile_path": dockerfile,
                     "platform": platform,
                 }
-                if team_id:
-                    build_payload["team_id"] = team_id
+                if config.team_id:
+                    build_payload["team_id"] = config.team_id
 
                 build_response = client.request(
                     "POST",
@@ -283,12 +278,6 @@ def delete_image(
         ..., help="Image reference to delete (e.g., 'myapp:v1.0.0')"
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-    team_id: str = typer.Option(
-        None,
-        "--team-id",
-        "-t",
-        help="Team ID if deleting a team image",
-    ),
 ):
     """
     Delete an image from your registry.
@@ -296,7 +285,6 @@ def delete_image(
     Examples:
         prime images delete myapp:v1.0.0
         prime images delete myapp:latest --yes
-        prime images delete myapp:v1 --team-id my-team-id
     """
     try:
         # Parse image reference
@@ -308,7 +296,7 @@ def delete_image(
 
         image_name, image_tag = image_reference.rsplit(":", 1)
 
-        context = f" (team: {team_id})" if team_id else ""
+        context = f" (team: {config.team_id})" if config.team_id else ""
         if not yes:
             msg = f"Are you sure you want to delete {image_name}:{image_tag}{context}?"
             confirm = typer.confirm(msg)
@@ -319,8 +307,8 @@ def delete_image(
         client = APIClient()
 
         params = {}
-        if team_id:
-            params["teamId"] = team_id
+        if config.team_id:
+            params["teamId"] = config.team_id
 
         client.request("DELETE", f"/images/{image_name}/{image_tag}", params=params)
         console.print(f"[green]✓[/green] Deleted {image_name}:{image_tag}{context}")

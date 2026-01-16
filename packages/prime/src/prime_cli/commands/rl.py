@@ -70,7 +70,7 @@ def generate_rl_config_template(environment: str | None = None) -> str:
 model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
 max_steps = 100
 
-# env_files = ["secrets.env"] # optional file(s) for keys/secrets
+# env_file = ["secrets.env"] # optional file(s) for keys/secrets
 
 # Training
 batch_size = 128
@@ -281,7 +281,7 @@ class RLConfig(BaseModel):
     val: ValConfig = Field(default_factory=ValConfig)
     buffer: BufferConfig = Field(default_factory=BufferConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
-    env_files: List[str] = Field(default_factory=list)
+    env_file: List[str] = Field(default_factory=list)
 
 
 def _format_validation_errors(errors: list[dict]) -> list[str]:
@@ -298,15 +298,7 @@ def _format_validation_errors(errors: list[dict]) -> list[str]:
 
 
 def load_config(path: str) -> RLConfig:
-    """Load and validate config from TOML file.
-
-    Validates:
-    - TOML syntax
-    - Field types and constraints (e.g., max_steps >= 1)
-    - Unknown fields (typos are caught via extra="forbid")
-    - Cross-field rules (e.g., batch_size divisible by rollouts_per_example)
-    - Environment ID format (owner/name)
-    """
+    """Load config from TOML file."""
     p = Path(path)
     if not p.exists():
         console.print(f"[red]Error:[/red] Config file not found: {path}")
@@ -427,17 +419,17 @@ def create_run(
     def warn(msg: str) -> None:
         console.print(f"[yellow]Warning:[/yellow] {msg}")
 
-    # Resolve config env_files paths relative to config file directory
+    # Resolve config env_file paths relative to config file directory
     config_dir = Path(config_path).parent
-    resolved_config_env_files = [str(config_dir / env_file_path) for env_file_path in cfg.env_files]
+    resolved_config_env_files = [str(config_dir / p) for p in cfg.env_file]
 
     # Merge config and CLI env files (CLI takes precedence)
-    env_files = resolved_config_env_files + (env_file or [])
+    all_env_files = resolved_config_env_files + (env_file or [])
 
     try:
         secrets = collect_env_vars(
             env_args=env,
-            env_files=env_files if env_files else None,
+            env_files=all_env_files if all_env_files else None,
             on_warning=warn,
         )
     except EnvParseError as e:

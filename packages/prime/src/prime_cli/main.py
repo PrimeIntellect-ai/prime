@@ -18,6 +18,7 @@ from .commands.pods import app as pods_app
 from .commands.registry import app as registry_app
 from .commands.rl import app as rl_app
 from .commands.sandbox import app as sandbox_app
+from .commands.ssh_keys import app as ssh_keys_app
 from .commands.teams import app as teams_app
 from .commands.upgrade import app as upgrade_app
 from .commands.whoami import app as whoami_app
@@ -36,6 +37,7 @@ app.add_typer(login_app, name="login", rich_help_panel="Account")
 app.add_typer(whoami_app, name="whoami", rich_help_panel="Account")
 app.add_typer(config_app, name="config", rich_help_panel="Account")
 app.add_typer(teams_app, name="teams", rich_help_panel="Account")
+app.add_typer(ssh_keys_app, name="ssh-keys", rich_help_panel="Account")
 app.add_typer(upgrade_app, name="upgrade", rich_help_panel="Account")
 
 # Lab commands

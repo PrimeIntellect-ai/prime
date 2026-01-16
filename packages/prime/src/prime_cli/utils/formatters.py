@@ -39,9 +39,9 @@ def format_price(value: float) -> str:
     return f"${value:.2f}"
 
 
-def format_resources(cpu_cores: int, memory_gb: int, gpu_count: int = 0) -> str:
+def format_resources(cpu_cores: float, memory_gb: float, gpu_count: int = 0) -> str:
     """Format resource specifications as compact string."""
-    resources = f"{cpu_cores}CPU/{memory_gb}GB"
+    resources = f"{cpu_cores:g}CPU/{memory_gb:g}GB"
     if gpu_count > 0:
         resources += f"/{gpu_count}GPU"
     return resources

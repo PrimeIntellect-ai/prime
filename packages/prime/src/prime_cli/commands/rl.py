@@ -447,7 +447,9 @@ def create_run(
         console.print("  - env_files in your config: env_files = [\"secrets.env\"]")
         console.print("  - CLI flag: --env-file secrets.env")
         console.print("  - CLI flag: -e WANDB_API_KEY=your-key")
-        console.print("  - Environment variable: export WANDB_API_KEY=your-key && prime rl run ... -e WANDB_API_KEY")
+        console.print(
+            "  - Environment variable: export WANDB_API_KEY=... && prime rl ... -e WANDB_API_KEY"
+        )
         raise typer.Exit(1)
 
     try:

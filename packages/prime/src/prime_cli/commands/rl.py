@@ -3,11 +3,11 @@
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 import toml
 import typer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from rich.console import Console
 from rich.table import Table
 from typer.core import TyperGroup
@@ -132,66 +132,243 @@ id = "{env_value}"
 
 
 class EnvConfig(BaseModel):
-    id: str
+    """Training environment configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: Annotated[str, Field(description="Environment ID in owner/name format")]
     name: str | None = None
     args: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("id")
+    @classmethod
+    def validate_env_id_format(cls, v: str) -> str:
+        if "/" not in v:
+            raise ValueError(f"expected 'owner/name' format, got '{v}'")
+        return v
+
+    def to_api_dict(self) -> Dict[str, Any]:
+        """Convert to API payload format, excluding None values."""
+        result: Dict[str, Any] = {"id": self.id}
+        if self.name is not None:
+            result["name"] = self.name
+        if self.args:
+            result["args"] = self.args
+        return result
 
 
 class EvalEnvConfig(BaseModel):
-    id: str
+    """Evaluation environment configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: Annotated[str, Field(description="Environment ID in owner/name format")]
     name: str | None = None
     args: Dict[str, Any] = Field(default_factory=dict)
-    num_examples: int | None = None
-    rollouts_per_example: int | None = None
+    num_examples: Annotated[
+        int | None, Field(description="Number of examples to evaluate (-1 for all)")
+    ] = None
+    rollouts_per_example: Annotated[
+        int | None, Field(ge=1, description="Rollouts per example")
+    ] = None
+
+    @field_validator("id")
+    @classmethod
+    def validate_env_id_format(cls, v: str) -> str:
+        if "/" not in v:
+            raise ValueError(f"expected 'owner/name' format, got '{v}'")
+        return v
+
+    def to_api_dict(self) -> Dict[str, Any]:
+        """Convert to API payload format, excluding None values."""
+        result: Dict[str, Any] = {"id": self.id}
+        if self.name is not None:
+            result["name"] = self.name
+        if self.args:
+            result["args"] = self.args
+        if self.num_examples is not None:
+            result["num_examples"] = self.num_examples
+        if self.rollouts_per_example is not None:
+            result["rollouts_per_example"] = self.rollouts_per_example
+        return result
 
 
 class SamplingConfig(BaseModel):
-    max_tokens: int | None = None
-    temperature: float | None = None
+    """Sampling configuration for token generation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_tokens: Annotated[
+        int | None, Field(ge=1, description="Maximum output tokens per turn")
+    ] = None
+    temperature: Annotated[float | None, Field(ge=0, description="Sampling temperature")] = None
 
 
 class EvalConfig(BaseModel):
-    interval: int | None = None
-    num_examples: int | None = None
-    rollouts_per_example: int | None = None
+    """Online evaluation configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    interval: Annotated[
+        int | None, Field(ge=1, description="Evaluation interval in steps")
+    ] = None
+    num_examples: Annotated[
+        int | None, Field(ge=-1, description="Number of examples to evaluate")
+    ] = None
+    rollouts_per_example: Annotated[
+        int | None, Field(ge=1, description="Rollouts per example")
+    ] = None
     eval_base_model: bool | None = None
     env: List[EvalEnvConfig] = Field(default_factory=list)
 
+    def to_api_dict(self) -> Dict[str, Any] | None:
+        """Convert to API payload format. Returns None if no eval envs configured."""
+        if not self.env:
+            return None
+        result: Dict[str, Any] = {"environments": [e.to_api_dict() for e in self.env]}
+        if self.interval is not None:
+            result["interval"] = self.interval
+        if self.num_examples is not None:
+            result["num_examples"] = self.num_examples
+        if self.rollouts_per_example is not None:
+            result["rollouts_per_example"] = self.rollouts_per_example
+        if self.eval_base_model is not None:
+            result["eval_base_model"] = self.eval_base_model
+        return result
+
 
 class ValConfig(BaseModel):
-    num_examples: int | None = None
-    rollouts_per_example: int | None = None
-    interval: int | None = None
+    """Validation configuration during training."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    num_examples: Annotated[
+        int | None, Field(ge=1, description="Number of validation examples")
+    ] = None
+    rollouts_per_example: Annotated[
+        int | None, Field(ge=1, description="Rollouts per example")
+    ] = None
+    interval: Annotated[
+        int | None, Field(ge=1, description="Validation interval in steps")
+    ] = None
+
+    def to_api_dict(self) -> Dict[str, Any] | None:
+        """Convert to API payload format. Returns None if no val config set."""
+        result: Dict[str, Any] = {}
+        if self.num_examples is not None:
+            result["num_examples"] = self.num_examples
+        if self.rollouts_per_example is not None:
+            result["rollouts_per_example"] = self.rollouts_per_example
+        if self.interval is not None:
+            result["interval"] = self.interval
+        return result if result else None
 
 
 class BufferConfig(BaseModel):
-    easy_threshold: float | None = None
-    hard_threshold: float | None = None
-    easy_fraction: float | None = None
-    hard_fraction: float | None = None
+    """Buffer configuration for difficulty filtering."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    easy_threshold: Annotated[
+        float | None, Field(ge=0, le=1, description="Threshold for easy classification")
+    ] = None
+    hard_threshold: Annotated[
+        float | None, Field(ge=0, le=1, description="Threshold for hard classification")
+    ] = None
+    easy_fraction: Annotated[
+        float | None,
+        Field(ge=0, le=1, description="Fraction of easy problems to convert to normal"),
+    ] = None
+    hard_fraction: Annotated[
+        float | None,
+        Field(ge=0, le=1, description="Fraction of hard problems to convert to normal"),
+    ] = None
     online_difficulty_filtering: bool | None = None
     env_ratios: List[float] | None = None
     skip_verification: bool | None = None
     seed: int | None = None
 
+    @model_validator(mode="after")
+    def validate_thresholds(self):
+        if self.easy_threshold is not None and self.hard_threshold is not None:
+            if self.easy_threshold <= self.hard_threshold:
+                raise ValueError("easy_threshold must be greater than hard_threshold")
+        return self
+
+    @model_validator(mode="after")
+    def validate_env_ratios(self):
+        if self.env_ratios is not None:
+            if not all(ratio > 0 for ratio in self.env_ratios):
+                raise ValueError("all env_ratios must be positive")
+        return self
+
+    def to_api_dict(self) -> Dict[str, Any] | None:
+        """Convert to API payload format. Returns None if no buffer config set."""
+        result: Dict[str, Any] = {}
+        if self.easy_threshold is not None:
+            result["easy_threshold"] = self.easy_threshold
+        if self.hard_threshold is not None:
+            result["hard_threshold"] = self.hard_threshold
+        if self.easy_fraction is not None:
+            result["easy_fraction"] = self.easy_fraction
+        if self.hard_fraction is not None:
+            result["hard_fraction"] = self.hard_fraction
+        if self.online_difficulty_filtering is not None:
+            result["online_difficulty_filtering"] = self.online_difficulty_filtering
+        if self.env_ratios is not None:
+            result["env_ratios"] = self.env_ratios
+        if self.skip_verification is not None:
+            result["skip_verification"] = self.skip_verification
+        if self.seed is not None:
+            result["seed"] = self.seed
+        return result if result else None
+
 
 class WandbConfig(BaseModel):
+    """Weights & Biases logging configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
     entity: str | None = None
     project: str | None = None
     name: str | None = None
 
+    @model_validator(mode="after")
+    def validate_required_fields(self):
+        """Require entity and project together (name is optional, auto-generated by W&B)."""
+        required = {"entity": self.entity, "project": self.project}
+        set_fields = {k for k, v in required.items() if v is not None}
+        missing_fields = {k for k, v in required.items() if v is None}
+
+        if set_fields and missing_fields:
+            raise ValueError(
+                f"wandb config is incomplete: got {', '.join(sorted(set_fields))} "
+                f"but missing {', '.join(sorted(missing_fields))}"
+            )
+        return self
+
+    def is_enabled(self) -> bool:
+        """Check if wandb logging is configured."""
+        return self.entity is not None and self.project is not None
+
 
 class RLConfig(BaseModel):
+    """RL training run configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
     name: str | None = None
-    model: str | None = None
-    max_steps: int = 100
-    batch_size: int = 128
-    rollouts_per_example: int = 8
-    trajectory_strategy: str | None = None
-    learning_rate: float | None = None
-    lora_alpha: int | None = None
-    oversampling_factor: float | None = None
-    max_async_level: int | None = None
+    model: Annotated[str | None, Field(description="HuggingFace model name")] = None
+    max_steps: Annotated[int, Field(ge=1, description="Maximum training steps")] = 100
+    batch_size: Annotated[int, Field(ge=1, description="Training batch size")] = 128
+    rollouts_per_example: Annotated[int, Field(ge=1, description="Rollouts per example")] = 8
+    trajectory_strategy: Literal["interleaved", "branching"] | None = None
+    learning_rate: Annotated[float | None, Field(gt=0, description="Learning rate")] = None
+    lora_alpha: Annotated[int | None, Field(ge=1, description="LoRA alpha value")] = None
+    oversampling_factor: Annotated[
+        float | None, Field(ge=1, description="Oversampling factor")
+    ] = None
+    max_async_level: Annotated[int | None, Field(ge=1, description="Maximum async level")] = None
     env: List[EnvConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
@@ -200,21 +377,66 @@ class RLConfig(BaseModel):
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     env_file: List[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def validate_batch_size_divisibility(self):
+        if self.batch_size % self.rollouts_per_example != 0:
+            raise ValueError(
+                f"batch_size ({self.batch_size}) must be divisible by "
+                f"rollouts_per_example ({self.rollouts_per_example})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_env_ratios_length(self):
+        if self.buffer.env_ratios is not None and len(self.env) > 0:
+            if len(self.buffer.env_ratios) != len(self.env):
+                raise ValueError(
+                    f"buffer.env_ratios length ({len(self.buffer.env_ratios)}) "
+                    f"must match number of environments ({len(self.env)})"
+                )
+        return self
+
+
+def _format_validation_errors(errors: list[dict]) -> list[str]:
+    """Format Pydantic validation errors into user-friendly messages."""
+    messages = []
+    for error in errors:
+        loc = ".".join(str(x) for x in error["loc"])
+        msg = error["msg"]
+        # Clean up common Pydantic message prefixes
+        if msg.startswith("Value error, "):
+            msg = msg[len("Value error, ") :]
+        messages.append(f"{loc}: {msg}")
+    return messages
+
 
 def load_config(path: str) -> RLConfig:
-    """Load config from TOML file."""
+    """Load and validate config from TOML file.
+
+    Validates:
+    - TOML syntax
+    - Field types and constraints (e.g., max_steps >= 1)
+    - Unknown fields (typos are caught via extra="forbid")
+    - Cross-field rules (e.g., batch_size divisible by rollouts_per_example)
+    - Environment ID format (owner/name)
+    """
     p = Path(path)
     if not p.exists():
         console.print(f"[red]Error:[/red] Config file not found: {path}")
         raise typer.Exit(1)
     try:
         data = toml.load(p)
-        return RLConfig.model_validate(data)
     except toml.TomlDecodeError as e:
         console.print(f"[red]Error:[/red] Invalid TOML in {path}: {e}")
         raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Error:[/red] Invalid config: {e}")
+
+    try:
+        return RLConfig.model_validate(data)
+    except ValidationError as e:
+        console.print(f"[red]Error:[/red] Invalid config in {path}:\n")
+        for msg in _format_validation_errors(e.errors()):
+            console.print(f"  [red]•[/red] {msg}")
+        console.print()
         raise typer.Exit(1)
 
 
@@ -311,33 +533,16 @@ def create_run(
     """
     validate_output_format(output, console)
 
-    console.print(f"[dim]Loading config from {config_path}[/dim]\n")
+    console.print(f"[dim]Loading config from {config_path}[/dim]")
     cfg = load_config(config_path)
 
-    # Validate required fields
+    # Validate required fields for running (optional in schema, required for execution)
     if not cfg.env:
-        console.print("[red]Error:[/red] No environments specified. Add [[env]] sections.")
+        console.print("[red]Error:[/red] No environments specified. Add \\[\\[env]] sections.")
         raise typer.Exit(1)
 
-    for train_env in cfg.env:
-        if "/" not in train_env.id:
-            console.print(
-                f"[red]Error:[/red] Invalid environment format: '{train_env.id}'. "
-                "Expected 'owner/name' format."
-            )
-            raise typer.Exit(1)
-
-    # Validate eval environment IDs
-    for eval_env in cfg.eval.env:
-        if "/" not in eval_env.id:
-            console.print(
-                f"[red]Error:[/red] Invalid eval environment format: '{eval_env.id}'. "
-                "Expected 'owner/name' format."
-            )
-            raise typer.Exit(1)
-
     if not cfg.model:
-        console.print("[red]Error:[/red] No model specified.")
+        console.print("[red]Error:[/red] No model specified. Add 'model = \"...\"'.")
         raise typer.Exit(1)
 
     # Collect secrets from all sources
@@ -361,111 +566,85 @@ def create_run(
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
-    # Warn if wandb is configured but no API key
-    if (cfg.wandb.entity or cfg.wandb.project) and "WANDB_API_KEY" not in secrets:
+    # Require WANDB_API_KEY if wandb is configured
+    if cfg.wandb.is_enabled() and "WANDB_API_KEY" not in secrets:
         console.print(
-            "[yellow]Warning:[/yellow] W&B config detected but no API key provided.\n"
-            "  Set via: -e WANDB_API_KEY=... or --env-file\n"
+            "[red]Error:[/red] W&B is configured but WANDB_API_KEY is not set.\n"
+            "  Set via: -e WANDB_API_KEY=... or --env-file or env_file in config\n"
         )
+        raise typer.Exit(1)
 
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
         app_config = Config()
 
-        console.print("[bold]Creating RL training run...[/bold]\n")
+        console.print("[dim]Creating RL training run[/dim]\n")
 
-        # Show configuration
-        console.print("[bold]Configuration:[/bold]")
-        console.print(f"  Model: {cfg.model}")
+        # Show configuration in organized sections
+        console.print("[white]Configuration:[/white]\n")
+
+        # Model & Environment
+        console.print("[cyan]Model & Environment[/cyan]")
+        console.print(f"  Model:        {cfg.model}")
         console.print(f"  Environments: {', '.join(e.id for e in cfg.env)}")
-        console.print(f"  Max Steps: {cfg.max_steps}")
-        console.print(f"  Batch Size: {cfg.batch_size}")
+        if app_config.team_id:
+            console.print(f"  Team:         {app_config.team_id}")
+
+        # Training
+        console.print("\n[cyan]Training[/cyan]")
+        console.print(f"  Max Steps:           {cfg.max_steps}")
+        console.print(f"  Batch Size:          {cfg.batch_size}")
         console.print(f"  Rollouts per Example: {cfg.rollouts_per_example}")
-        if cfg.sampling.max_tokens:
-            console.print(f"  Max Tokens: {cfg.sampling.max_tokens}")
-        if cfg.sampling.temperature is not None:
-            console.print(f"  Temperature: {cfg.sampling.temperature}")
         if cfg.learning_rate is not None:
-            console.print(f"  Learning Rate: {cfg.learning_rate}")
+            console.print(f"  Learning Rate:       {cfg.learning_rate}")
         if cfg.lora_alpha is not None:
-            console.print(f"  LoRA Alpha: {cfg.lora_alpha}")
+            console.print(f"  LoRA Alpha:          {cfg.lora_alpha}")
         if cfg.oversampling_factor is not None:
             console.print(f"  Oversampling Factor: {cfg.oversampling_factor}")
         if cfg.max_async_level is not None:
-            console.print(f"  Max Async Level: {cfg.max_async_level}")
-        if cfg.wandb.project:
-            console.print(f"  W&B Project: {cfg.wandb.project}")
+            console.print(f"  Max Async Level:     {cfg.max_async_level}")
+
+        # Sampling
+        if cfg.sampling.max_tokens or cfg.sampling.temperature is not None:
+            console.print("\n[cyan]Sampling[/cyan]")
+            if cfg.sampling.max_tokens:
+                console.print(f"  Max Tokens:  {cfg.sampling.max_tokens}")
+            if cfg.sampling.temperature is not None:
+                console.print(f"  Temperature: {cfg.sampling.temperature}")
+
+        # W&B
+        if cfg.wandb.is_enabled():
+            console.print("\n[cyan]Weights & Biases[/cyan]")
+            console.print(f"  Project: {cfg.wandb.entity}/{cfg.wandb.project}")
+            if cfg.wandb.name:
+                console.print(f"  Run Name: {cfg.wandb.name}")
+
+        # Eval
         if cfg.eval.env:
-            console.print(f"  Eval Environments: {', '.join(e.id for e in cfg.eval.env)}")
+            console.print("\n[cyan]Evaluation[/cyan]")
+            console.print(f"  Environments: {', '.join(e.id for e in cfg.eval.env)}")
+            if cfg.eval.interval:
+                console.print(f"  Interval:     {cfg.eval.interval}")
+
+        # Validation
         if cfg.val.num_examples is not None:
-            console.print(f"  Val Examples: {cfg.val.num_examples}")
+            console.print("\n[cyan]Validation[/cyan]")
+            console.print(f"  Num Examples: {cfg.val.num_examples}")
+            if cfg.val.interval:
+                console.print(f"  Interval:     {cfg.val.interval}")
+
+        # Secrets
         if secrets:
-            console.print(f"  Secrets: {', '.join(secrets.keys())}")
-        if app_config.team_id:
-            console.print(f"  Team: {app_config.team_id}")
+            console.print("\n[cyan]Secrets[/cyan]")
+            console.print(f"  Keys: {', '.join(secrets.keys())}")
+
         console.print()
-
-        # Build eval config if provided
-        eval_config = None
-        if cfg.eval.env:
-            eval_environments = []
-            for e in cfg.eval.env:
-                env_cfg: Dict[str, Any] = {"id": e.id}
-                if e.name is not None:
-                    env_cfg["name"] = e.name
-                if e.args:
-                    env_cfg["args"] = e.args
-                if e.num_examples is not None:
-                    env_cfg["num_examples"] = e.num_examples
-                if e.rollouts_per_example is not None:
-                    env_cfg["rollouts_per_example"] = e.rollouts_per_example
-                eval_environments.append(env_cfg)
-            eval_config = {"environments": eval_environments}
-            if cfg.eval.interval is not None:
-                eval_config["interval"] = cfg.eval.interval
-            if cfg.eval.num_examples is not None:
-                eval_config["num_examples"] = cfg.eval.num_examples
-            if cfg.eval.rollouts_per_example is not None:
-                eval_config["rollouts_per_example"] = cfg.eval.rollouts_per_example
-            if cfg.eval.eval_base_model is not None:
-                eval_config["eval_base_model"] = cfg.eval.eval_base_model
-
-        # Build val config if provided
-        val_config = None
-        has_val_config = (
-            cfg.val.num_examples is not None
-            or cfg.val.rollouts_per_example is not None
-            or cfg.val.interval is not None
-        )
-        if has_val_config:
-            val_config = {}
-            if cfg.val.num_examples is not None:
-                val_config["num_examples"] = cfg.val.num_examples
-            if cfg.val.rollouts_per_example is not None:
-                val_config["rollouts_per_example"] = cfg.val.rollouts_per_example
-            if cfg.val.interval is not None:
-                val_config["interval"] = cfg.val.interval
-
-        # Build buffer config if provided
-        buffer_config = None
-        buffer_fields = [
-            ("easy_threshold", cfg.buffer.easy_threshold),
-            ("hard_threshold", cfg.buffer.hard_threshold),
-            ("easy_fraction", cfg.buffer.easy_fraction),
-            ("hard_fraction", cfg.buffer.hard_fraction),
-            ("online_difficulty_filtering", cfg.buffer.online_difficulty_filtering),
-            ("env_ratios", cfg.buffer.env_ratios),
-            ("skip_verification", cfg.buffer.skip_verification),
-            ("seed", cfg.buffer.seed),
-        ]
-        if any(v is not None for _, v in buffer_fields):
-            buffer_config = {k: v for k, v in buffer_fields if v is not None}
 
         # Create the run
         run = rl_client.create_run(
             model_name=cfg.model,
-            environments=[{"id": e.id, "name": e.name, "args": e.args} for e in cfg.env],
+            environments=[e.to_api_dict() for e in cfg.env],
             rollouts_per_example=cfg.rollouts_per_example,
             max_steps=cfg.max_steps,
             max_tokens=cfg.sampling.max_tokens,
@@ -478,9 +657,9 @@ def create_run(
             wandb_run_name=cfg.wandb.name,
             secrets=secrets if secrets else None,
             team_id=app_config.team_id,
-            eval_config=eval_config,
-            val_config=val_config,
-            buffer_config=buffer_config,
+            eval_config=cfg.eval.to_api_dict(),
+            val_config=cfg.val.to_api_dict(),
+            buffer_config=cfg.buffer.to_api_dict(),
             learning_rate=cfg.learning_rate,
             lora_alpha=cfg.lora_alpha,
             oversampling_factor=cfg.oversampling_factor,

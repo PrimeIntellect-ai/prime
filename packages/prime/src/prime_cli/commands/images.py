@@ -56,6 +56,8 @@ def push_image(
         console.print(
             f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
         )
+        if config.team_id:
+            console.print(f"[dim]Team: {config.team_id}[/dim]")
         console.print()
 
         # Initialize API client
@@ -83,15 +85,19 @@ def push_image(
             # Initialize build
             console.print("[cyan]Initiating build...[/cyan]")
             try:
+                build_payload = {
+                    "image_name": image_name,
+                    "image_tag": image_tag,
+                    "dockerfile_path": dockerfile,
+                    "platform": platform,
+                }
+                if config.team_id:
+                    build_payload["team_id"] = config.team_id
+
                 build_response = client.request(
                     "POST",
                     "/images/build",
-                    json={
-                        "image_name": image_name,
-                        "image_tag": image_tag,
-                        "dockerfile_path": dockerfile,
-                        "platform": platform,
-                    },
+                    json=build_payload,
                 )
             except UnauthorizedError:
                 console.print(
@@ -276,9 +282,6 @@ def delete_image(
     """
     Delete an image from your registry.
 
-    Note: This removes the database record but does not delete the actual
-    image from Google Artifact Registry.
-
     Examples:
         prime images delete myapp:v1.0.0
         prime images delete myapp:latest --yes
@@ -293,16 +296,22 @@ def delete_image(
 
         image_name, image_tag = image_reference.rsplit(":", 1)
 
+        context = f" (team: {config.team_id})" if config.team_id else ""
         if not yes:
-            confirm = typer.confirm(f"Are you sure you want to delete {image_name}:{image_tag}?")
+            msg = f"Are you sure you want to delete {image_name}:{image_tag}{context}?"
+            confirm = typer.confirm(msg)
             if not confirm:
                 console.print("[yellow]Cancelled[/yellow]")
                 raise typer.Exit(0)
 
         client = APIClient()
 
-        client.request("DELETE", f"/images/{image_name}/{image_tag}")
-        console.print(f"[green]✓[/green] Deleted {image_name}:{image_tag}")
+        params = {}
+        if config.team_id:
+            params["teamId"] = config.team_id
+
+        client.request("DELETE", f"/images/{image_name}/{image_tag}", params=params)
+        console.print(f"[green]✓[/green] Deleted {image_name}:{image_tag}{context}")
 
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
@@ -310,6 +319,8 @@ def delete_image(
     except APIError as e:
         if "404" in str(e):
             console.print(f"[red]Error: Image {image_reference} not found[/red]")
+        elif "403" in str(e):
+            console.print("[red]Error: You don't have permission to delete this image[/red]")
         else:
             console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)

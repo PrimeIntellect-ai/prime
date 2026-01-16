@@ -436,6 +436,20 @@ def create_run(
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
+    # Validate WANDB_API_KEY is present when W&B monitoring is configured
+    wandb_configured = cfg.wandb.entity or cfg.wandb.project
+    if wandb_configured and (not secrets or "WANDB_API_KEY" not in secrets):
+        console.print("[red]Configuration Error:[/red]")
+        console.print(
+            "  WANDB_API_KEY is required when W&B monitoring is configured.\n"
+        )
+        console.print("Provide it via:")
+        console.print("  - env_files in your config: env_files = [\"secrets.env\"]")
+        console.print("  - CLI flag: --env-file secrets.env")
+        console.print("  - CLI flag: -e WANDB_API_KEY=your-key")
+        console.print("  - Environment variable: export WANDB_API_KEY=your-key && prime rl run ... -e WANDB_API_KEY")
+        raise typer.Exit(1)
+
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
@@ -545,9 +559,14 @@ def create_run(
         console.print("[red]Configuration Error:[/red]")
         for err in e.errors:
             loc = err.get("loc", [])
-            path = ".".join(str(x) for x in loc if x != "body")
+            path = ".".join(str(x) for x in loc if x and x != "body")
             msg = err.get("msg", "")
-            console.print(f"  [yellow]{path}[/yellow]: {msg}")
+            if msg.startswith("Value error, "):
+                msg = msg[len("Value error, ") :]
+            if path:
+                console.print(f"  [yellow]{path}[/yellow]: {msg}")
+            else:
+                console.print(f"  {msg}")
         raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

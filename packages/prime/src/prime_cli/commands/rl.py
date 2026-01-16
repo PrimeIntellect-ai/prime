@@ -266,7 +266,7 @@ class RLConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
-    model: str | None = None
+    model: str
     max_steps: int = 100
     batch_size: int = 128
     rollouts_per_example: int = 8

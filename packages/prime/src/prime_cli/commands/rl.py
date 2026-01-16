@@ -259,9 +259,6 @@ class WandbConfig(BaseModel):
     project: str | None = None
     name: str | None = None
 
-    def is_enabled(self) -> bool:
-        return self.entity is not None and self.project is not None
-
 
 class RLConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -479,9 +476,9 @@ def create_run(
                 console.print(f"  Temperature: {cfg.sampling.temperature}")
 
         # W&B
-        if cfg.wandb.is_enabled():
+        if cfg.wandb.entity or cfg.wandb.project:
             console.print("\n[cyan]Weights & Biases[/cyan]")
-            console.print(f"  Project: {cfg.wandb.entity}/{cfg.wandb.project}")
+            console.print(f"  Project: {cfg.wandb.entity or '?'}/{cfg.wandb.project or '?'}")
             if cfg.wandb.name:
                 console.print(f"  Run Name: {cfg.wandb.name}")
 

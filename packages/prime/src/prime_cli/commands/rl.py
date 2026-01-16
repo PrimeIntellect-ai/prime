@@ -70,7 +70,7 @@ def generate_rl_config_template(environment: str | None = None) -> str:
 model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
 max_steps = 100
 
-# env_file = ["secrets.env"] # optional file(s) for keys/secrets
+# env_files = ["secrets.env"] # optional file(s) for secrets
 
 # Training
 batch_size = 128
@@ -281,7 +281,8 @@ class RLConfig(BaseModel):
     val: ValConfig = Field(default_factory=ValConfig)
     buffer: BufferConfig = Field(default_factory=BufferConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
-    env_file: List[str] = Field(default_factory=list)
+    env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
+    env_files: List[str] = Field(default_factory=list)
 
 
 def _format_validation_errors(errors: list[dict]) -> list[str]:
@@ -419,9 +420,10 @@ def create_run(
     def warn(msg: str) -> None:
         console.print(f"[yellow]Warning:[/yellow] {msg}")
 
-    # Resolve config env_file paths relative to config file directory
+    # Resolve config env file paths relative to config file directory
     config_dir = Path(config_path).parent
-    resolved_config_env_files = [str(config_dir / p) for p in cfg.env_file]
+    config_env_files = cfg.env_files + cfg.env_file  # support both, prefer env_files
+    resolved_config_env_files = [str(config_dir / p) for p in config_env_files]
 
     # Merge config and CLI env files (CLI takes precedence)
     all_env_files = resolved_config_env_files + (env_file or [])

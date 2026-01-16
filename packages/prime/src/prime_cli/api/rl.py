@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from prime_cli.core import APIClient, APIError
+from prime_cli.core import APIClient, APIError, ValidationError
 
 
 class RLModel(BaseModel):
@@ -178,6 +178,8 @@ class RLClient:
 
             response = self.client.post("/rft/runs", json=payload)
             return RLRun.model_validate(response.get("run"))
+        except ValidationError:
+            raise  # Let ValidationError pass through for proper CLI handling
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to create RL run: {e.response.text}")

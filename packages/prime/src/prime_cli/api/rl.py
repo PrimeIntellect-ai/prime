@@ -136,15 +136,15 @@ class RLClient:
             if name:
                 payload["name"] = name
 
-            # Add monitoring config if W&B is specified
-            if wandb_entity or wandb_project:
-                payload["monitoring"] = {
-                    "wandb": {
-                        "entity": wandb_entity,
-                        "project": wandb_project,
-                        "name": wandb_run_name,
-                    }
+            # Add monitoring config if W&B is fully configured
+            if wandb_entity and wandb_project:
+                wandb_config: Dict[str, Any] = {
+                    "entity": wandb_entity,
+                    "project": wandb_project,
                 }
+                if wandb_run_name:
+                    wandb_config["name"] = wandb_run_name
+                payload["monitoring"] = {"wandb": wandb_config}
 
             if team_id:
                 payload["team_id"] = team_id

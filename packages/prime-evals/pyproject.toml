@@ -12,6 +12,7 @@ authors = [
 dependencies = [
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
+    "tenacity>=9.1.2",
 ]
 keywords = ["evals", "evaluations"]
 classifiers = [

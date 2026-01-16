@@ -1,6 +1,6 @@
 import typer
 
-app = typer.Typer(help="Lab commands for verifiers development")
+app = typer.Typer(help="Lab commands for verifiers development", no_args_is_help=True)
 
 
 @app.command()

@@ -69,7 +69,7 @@ def generate_rl_config_template(environment: str | None = None) -> str:
 model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
 max_steps = 100
 
-# env_file = ["secrets.env"] # optional file(s) for keys/secrets
+# env_files = ["secrets.env"] # optional file(s) for keys/secrets
 
 # Training
 batch_size = 128
@@ -322,7 +322,7 @@ class RLConfig(BaseModel):
     val: ValConfig = Field(default_factory=ValConfig)
     buffer: BufferConfig = Field(default_factory=BufferConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
-    env_file: List[str] = Field(default_factory=list)
+    env_files: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_batch_size_divisibility(self):
@@ -480,25 +480,25 @@ def create_run(
     """
     validate_output_format(output, console)
 
-    console.print(f"[dim]Loading config from {config_path}[/dim]")
+    console.print(f"[dim]Loading config from {config_path}[/dim]\n")
     cfg = load_config(config_path)
 
     # Validate required fields for running (optional in schema, required for execution)
     if not cfg.env:
-        console.print("[red]Error:[/red] No environments specified. Add \\[\\[env]] sections.")
+        console.print("[red]Error:[/red] No environments specified. Add \\[\\[env]] sections to the config file.")
         raise typer.Exit(1)
 
     if not cfg.model:
-        console.print("[red]Error:[/red] No model specified. Add 'model = \"...\"'.")
+        console.print("[red]Error:[/red] No model specified. Add 'model = \"...\"' to the config file.")
         raise typer.Exit(1)
 
     # Collect secrets from all sources
     def warn(msg: str) -> None:
         console.print(f"[yellow]Warning:[/yellow] {msg}")
 
-    # Resolve config env_file paths relative to config file directory
+    # Resolve config env_files paths relative to config file directory
     config_dir = Path(config_path).parent
-    resolved_config_env_files = [str(config_dir / env_file_path) for env_file_path in cfg.env_file]
+    resolved_config_env_files = [str(config_dir / env_file_path) for env_file_path in cfg.env_files]
 
     # Merge config and CLI env files (CLI takes precedence)
     env_files = resolved_config_env_files + (env_file or [])
@@ -517,7 +517,10 @@ def create_run(
     if cfg.wandb.is_enabled() and "WANDB_API_KEY" not in secrets:
         console.print(
             "[red]Error:[/red] W&B is configured but WANDB_API_KEY is not set.\n"
-            "  Set via: -e WANDB_API_KEY=... or --env-file or env_file in config\n"
+            "Set via one of:\n"
+            "  - [cyan]-e WANDB_API_KEY=...[/cyan]\n"
+            "  - [cyan]--env-file[/cyan]\n"
+            "  - [cyan]env_files[/cyan] in config"
         )
         raise typer.Exit(1)
 

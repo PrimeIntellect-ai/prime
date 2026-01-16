@@ -146,12 +146,11 @@ class EnvConfig(BaseModel):
         return v
 
     def to_api_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"id": self.id}
-        if self.name is not None:
-            result["name"] = self.name
-        if self.args:
-            result["args"] = self.args
-        return result
+        return {
+            "id": self.id,
+            "name": self.name,
+            "args": self.args,
+        }
 
 
 class EvalEnvConfig(BaseModel):
@@ -160,7 +159,7 @@ class EvalEnvConfig(BaseModel):
     id: str
     name: str | None = None
     args: Dict[str, Any] = Field(default_factory=dict)
-    num_examples: int | None = None
+    num_examples: Annotated[int | None, Field(ge=-1)] = None
     rollouts_per_example: Annotated[int | None, Field(ge=1)] = None
 
     @field_validator("id")
@@ -171,11 +170,11 @@ class EvalEnvConfig(BaseModel):
         return v
 
     def to_api_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"id": self.id}
-        if self.name is not None:
-            result["name"] = self.name
-        if self.args:
-            result["args"] = self.args
+        result: Dict[str, Any] = {
+            "id": self.id,
+            "name": self.name,
+            "args": self.args,
+        }
         if self.num_examples is not None:
             result["num_examples"] = self.num_examples
         if self.rollouts_per_example is not None:
@@ -485,11 +484,17 @@ def create_run(
 
     # Validate required fields for running (optional in schema, required for execution)
     if not cfg.env:
-        console.print("[red]Error:[/red] No environments specified. Add \\[\\[env]] sections to the config file.")
+        console.print(
+            "[red]Error:[/red] No environments specified. "
+            "Add \\[\\[env]] sections to the config file."
+        )
         raise typer.Exit(1)
 
     if not cfg.model:
-        console.print("[red]Error:[/red] No model specified. Add 'model = \"...\"' to the config file.")
+        console.print(
+            "[red]Error:[/red] No model specified. "
+            "Add 'model = \"...\"' to the config file."
+        )
         raise typer.Exit(1)
 
     # Collect secrets from all sources

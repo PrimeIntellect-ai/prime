@@ -132,11 +132,9 @@ id = "{env_value}"
 
 
 class EnvConfig(BaseModel):
-    """Training environment configuration."""
-
     model_config = ConfigDict(extra="forbid")
 
-    id: Annotated[str, Field(description="Environment ID in owner/name format")]
+    id: str
     name: str | None = None
     args: Dict[str, Any] = Field(default_factory=dict)
 
@@ -148,7 +146,6 @@ class EnvConfig(BaseModel):
         return v
 
     def to_api_dict(self) -> Dict[str, Any]:
-        """Convert to API payload format, excluding None values."""
         result: Dict[str, Any] = {"id": self.id}
         if self.name is not None:
             result["name"] = self.name
@@ -158,19 +155,13 @@ class EnvConfig(BaseModel):
 
 
 class EvalEnvConfig(BaseModel):
-    """Evaluation environment configuration."""
-
     model_config = ConfigDict(extra="forbid")
 
-    id: Annotated[str, Field(description="Environment ID in owner/name format")]
+    id: str
     name: str | None = None
     args: Dict[str, Any] = Field(default_factory=dict)
-    num_examples: Annotated[
-        int | None, Field(description="Number of examples to evaluate (-1 for all)")
-    ] = None
-    rollouts_per_example: Annotated[
-        int | None, Field(ge=1, description="Rollouts per example")
-    ] = None
+    num_examples: int | None = None
+    rollouts_per_example: Annotated[int | None, Field(ge=1)] = None
 
     @field_validator("id")
     @classmethod
@@ -180,7 +171,6 @@ class EvalEnvConfig(BaseModel):
         return v
 
     def to_api_dict(self) -> Dict[str, Any]:
-        """Convert to API payload format, excluding None values."""
         result: Dict[str, Any] = {"id": self.id}
         if self.name is not None:
             result["name"] = self.name
@@ -194,35 +184,22 @@ class EvalEnvConfig(BaseModel):
 
 
 class SamplingConfig(BaseModel):
-    """Sampling configuration for token generation."""
-
     model_config = ConfigDict(extra="forbid")
 
-    max_tokens: Annotated[
-        int | None, Field(ge=1, description="Maximum output tokens per turn")
-    ] = None
-    temperature: Annotated[float | None, Field(ge=0, description="Sampling temperature")] = None
+    max_tokens: Annotated[int | None, Field(ge=1)] = None
+    temperature: Annotated[float | None, Field(ge=0)] = None
 
 
 class EvalConfig(BaseModel):
-    """Online evaluation configuration."""
-
     model_config = ConfigDict(extra="forbid")
 
-    interval: Annotated[
-        int | None, Field(ge=1, description="Evaluation interval in steps")
-    ] = None
-    num_examples: Annotated[
-        int | None, Field(ge=-1, description="Number of examples to evaluate")
-    ] = None
-    rollouts_per_example: Annotated[
-        int | None, Field(ge=1, description="Rollouts per example")
-    ] = None
+    interval: Annotated[int | None, Field(ge=1)] = None
+    num_examples: Annotated[int | None, Field(ge=-1)] = None
+    rollouts_per_example: Annotated[int | None, Field(ge=1)] = None
     eval_base_model: bool | None = None
     env: List[EvalEnvConfig] = Field(default_factory=list)
 
     def to_api_dict(self) -> Dict[str, Any] | None:
-        """Convert to API payload format. Returns None if no eval envs configured."""
         if not self.env:
             return None
         result: Dict[str, Any] = {"environments": [e.to_api_dict() for e in self.env]}
@@ -238,22 +215,13 @@ class EvalConfig(BaseModel):
 
 
 class ValConfig(BaseModel):
-    """Validation configuration during training."""
-
     model_config = ConfigDict(extra="forbid")
 
-    num_examples: Annotated[
-        int | None, Field(ge=1, description="Number of validation examples")
-    ] = None
-    rollouts_per_example: Annotated[
-        int | None, Field(ge=1, description="Rollouts per example")
-    ] = None
-    interval: Annotated[
-        int | None, Field(ge=1, description="Validation interval in steps")
-    ] = None
+    num_examples: Annotated[int | None, Field(ge=1)] = None
+    rollouts_per_example: Annotated[int | None, Field(ge=1)] = None
+    interval: Annotated[int | None, Field(ge=1)] = None
 
     def to_api_dict(self) -> Dict[str, Any] | None:
-        """Convert to API payload format. Returns None if no val config set."""
         result: Dict[str, Any] = {}
         if self.num_examples is not None:
             result["num_examples"] = self.num_examples
@@ -265,24 +233,12 @@ class ValConfig(BaseModel):
 
 
 class BufferConfig(BaseModel):
-    """Buffer configuration for difficulty filtering."""
-
     model_config = ConfigDict(extra="forbid")
 
-    easy_threshold: Annotated[
-        float | None, Field(ge=0, le=1, description="Threshold for easy classification")
-    ] = None
-    hard_threshold: Annotated[
-        float | None, Field(ge=0, le=1, description="Threshold for hard classification")
-    ] = None
-    easy_fraction: Annotated[
-        float | None,
-        Field(ge=0, le=1, description="Fraction of easy problems to convert to normal"),
-    ] = None
-    hard_fraction: Annotated[
-        float | None,
-        Field(ge=0, le=1, description="Fraction of hard problems to convert to normal"),
-    ] = None
+    easy_threshold: Annotated[float | None, Field(ge=0, le=1)] = None
+    hard_threshold: Annotated[float | None, Field(ge=0, le=1)] = None
+    easy_fraction: Annotated[float | None, Field(ge=0, le=1)] = None
+    hard_fraction: Annotated[float | None, Field(ge=0, le=1)] = None
     online_difficulty_filtering: bool | None = None
     env_ratios: List[float] | None = None
     skip_verification: bool | None = None
@@ -303,7 +259,6 @@ class BufferConfig(BaseModel):
         return self
 
     def to_api_dict(self) -> Dict[str, Any] | None:
-        """Convert to API payload format. Returns None if no buffer config set."""
         result: Dict[str, Any] = {}
         if self.easy_threshold is not None:
             result["easy_threshold"] = self.easy_threshold
@@ -325,8 +280,6 @@ class BufferConfig(BaseModel):
 
 
 class WandbConfig(BaseModel):
-    """Weights & Biases logging configuration."""
-
     model_config = ConfigDict(extra="forbid")
 
     entity: str | None = None
@@ -335,7 +288,6 @@ class WandbConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_required_fields(self):
-        """Require entity and project together (name is optional, auto-generated by W&B)."""
         required = {"entity": self.entity, "project": self.project}
         set_fields = {k for k, v in required.items() if v is not None}
         missing_fields = {k for k, v in required.items() if v is None}
@@ -348,27 +300,22 @@ class WandbConfig(BaseModel):
         return self
 
     def is_enabled(self) -> bool:
-        """Check if wandb logging is configured."""
         return self.entity is not None and self.project is not None
 
 
 class RLConfig(BaseModel):
-    """RL training run configuration."""
-
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
-    model: Annotated[str | None, Field(description="HuggingFace model name")] = None
-    max_steps: Annotated[int, Field(ge=1, description="Maximum training steps")] = 100
-    batch_size: Annotated[int, Field(ge=1, description="Training batch size")] = 128
-    rollouts_per_example: Annotated[int, Field(ge=1, description="Rollouts per example")] = 8
+    model: str | None = None
+    max_steps: Annotated[int, Field(ge=1)] = 100
+    batch_size: Annotated[int, Field(ge=1)] = 128
+    rollouts_per_example: Annotated[int, Field(ge=1)] = 8
     trajectory_strategy: Literal["interleaved", "branching"] | None = None
-    learning_rate: Annotated[float | None, Field(gt=0, description="Learning rate")] = None
-    lora_alpha: Annotated[int | None, Field(ge=1, description="LoRA alpha value")] = None
-    oversampling_factor: Annotated[
-        float | None, Field(ge=1, description="Oversampling factor")
-    ] = None
-    max_async_level: Annotated[int | None, Field(ge=1, description="Maximum async level")] = None
+    learning_rate: Annotated[float | None, Field(gt=0)] = None
+    lora_alpha: Annotated[int | None, Field(ge=1)] = None
+    oversampling_factor: Annotated[float | None, Field(ge=1)] = None
+    max_async_level: Annotated[int | None, Field(ge=1)] = None
     env: List[EnvConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)

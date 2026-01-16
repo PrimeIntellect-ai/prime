@@ -140,11 +140,12 @@ class EnvConfig(BaseModel):
     args: Dict[str, Any] = Field(default_factory=dict)
 
     def to_api_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "args": self.args,
-        }
+        result: Dict[str, Any] = {"id": self.id}
+        if self.name is not None:
+            result["name"] = self.name
+        if self.args:
+            result["args"] = self.args
+        return result
 
 
 class EvalEnvConfig(BaseModel):
@@ -157,11 +158,11 @@ class EvalEnvConfig(BaseModel):
     rollouts_per_example: int | None = None
 
     def to_api_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
-            "id": self.id,
-            "name": self.name,
-            "args": self.args,
-        }
+        result: Dict[str, Any] = {"id": self.id}
+        if self.name is not None:
+            result["name"] = self.name
+        if self.args:
+            result["args"] = self.args
         if self.num_examples is not None:
             result["num_examples"] = self.num_examples
         if self.rollouts_per_example is not None:

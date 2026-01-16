@@ -423,7 +423,7 @@ def create_run(
 
     # Resolve config env file paths relative to config file directory
     config_dir = Path(config_path).parent
-    config_env_files = cfg.env_files + cfg.env_file  # support both, prefer env_files
+    config_env_files = cfg.env_file + cfg.env_files  # support both, env_files takes precedence
     resolved_config_env_files = [str(config_dir / p) for p in config_env_files]
 
     # Merge config and CLI env files (CLI takes precedence)

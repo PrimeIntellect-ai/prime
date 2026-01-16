@@ -388,6 +388,9 @@ def create(
     team_id: Optional[str] = typer.Option(
         None, help="Team ID to use for the pod (uses config team_id if not specified)"
     ),
+    ssh_key_id: Optional[str] = typer.Option(
+        None, help="SSH key ID to use for the pod (use 'prime ssh-keys list' to get IDs)"
+    ),
     disks: Optional[List[str]] = typer.Option(
         None,
         help="Attach existing disk IDs to the pod. Repeat option for multiple disks.",
@@ -705,6 +708,7 @@ def create(
                 "jupyterPassword": None,
                 "autoRestart": False,
                 "customTemplateId": custom_template_id,
+                "sshKeyId": ssh_key_id,
                 "envVars": env_vars,
             },
             "provider": {"type": selected_gpu.provider} if selected_gpu.provider else {},

@@ -36,6 +36,12 @@ def push_image(
         click_type=click.Choice(["linux/amd64", "linux/arm64"]),
         help="Target platform (defaults to linux/amd64 for Kubernetes compatibility)",
     ),
+    team_id: str = typer.Option(
+        None,
+        "--team-id",
+        "-t",
+        help="Team ID to associate the image with (for team billing and limits)",
+    ),
 ):
     """
     Build and push a Docker image to Prime Intellect registry.
@@ -44,6 +50,7 @@ def push_image(
         prime images push myapp:v1.0.0
         prime images push myapp:latest --dockerfile custom.Dockerfile
         prime images push myapp:v1 --platform linux/arm64
+        prime images push myapp:v1 --team-id my-team-id
     """
     try:
         # Parse image reference
@@ -83,15 +90,19 @@ def push_image(
             # Initialize build
             console.print("[cyan]Initiating build...[/cyan]")
             try:
+                build_payload = {
+                    "image_name": image_name,
+                    "image_tag": image_tag,
+                    "dockerfile_path": dockerfile,
+                    "platform": platform,
+                }
+                if team_id:
+                    build_payload["team_id"] = team_id
+
                 build_response = client.request(
                     "POST",
                     "/images/build",
-                    json={
-                        "image_name": image_name,
-                        "image_tag": image_tag,
-                        "dockerfile_path": dockerfile,
-                        "platform": platform,
-                    },
+                    json=build_payload,
                 )
             except UnauthorizedError:
                 console.print(

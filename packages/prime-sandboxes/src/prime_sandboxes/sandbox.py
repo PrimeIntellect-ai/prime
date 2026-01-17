@@ -55,6 +55,7 @@ GATEWAY_RETRYABLE_EXCEPTIONS = (
     httpx.RemoteProtocolError,  # Server disconnected unexpectedly
     httpx.ConnectError,  # Connection refused/failed
     httpx.PoolTimeout,  # No connection available in pool
+    httpx.ReadError,  # Connection broken while reading response
 )
 
 # Retry decorator for gateway requests

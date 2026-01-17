@@ -2058,7 +2058,11 @@ def _build_install_command(
             return cmd
     elif wheel_url:
         try:
-            return get_install_command(tool, wheel_url, no_upgrade)
+            cmd = get_install_command(tool, wheel_url, no_upgrade)
+            # Add URL dependencies for wheel-only installs too
+            if url_dependencies:
+                cmd.extend(url_dependencies)
+            return cmd
         except ValueError:
             return None
 

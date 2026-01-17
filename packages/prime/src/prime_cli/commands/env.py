@@ -2088,6 +2088,7 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
 
     simple_index_url = details.get("simple_index_url")
     wheel_url = process_wheel_url(details.get("wheel_url"))
+    url_dependencies = details.get("url_dependencies", [])
 
     if not simple_index_url and not wheel_url:
         if details.get("visibility") == "PRIVATE":
@@ -2099,7 +2100,9 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
             console.print(f"[red]No installation method available for {env_slug}[/red]")
         return False
 
-    cmd_parts = _build_install_command(name, version, simple_index_url, wheel_url, tool)
+    cmd_parts = _build_install_command(
+        name, version, simple_index_url, wheel_url, tool, url_dependencies=url_dependencies
+    )
     if not cmd_parts:
         console.print(f"[red]Failed to build install command for {env_slug}[/red]")
         return False

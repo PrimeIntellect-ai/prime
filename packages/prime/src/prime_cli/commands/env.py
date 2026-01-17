@@ -10,6 +10,8 @@ import tempfile
 import uuid
 import zipfile
 from datetime import datetime
+
+# Wheel METADATA files use RFC 822 format (PEP 566), same as email headers
 from email.parser import Parser as EmailParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple

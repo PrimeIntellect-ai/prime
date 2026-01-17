@@ -561,7 +561,7 @@ def create_run(
         console.print("[red]Configuration Error:[/red]")
         for err in e.errors:
             loc = err.get("loc", [])
-            path = ".".join(str(x) for x in loc if x and x != "body")
+            path = ".".join(str(x) for x in loc if x != "body")
             msg = err.get("msg", "")
             if msg.startswith("Value error, "):
                 msg = msg[len("Value error, ") :]

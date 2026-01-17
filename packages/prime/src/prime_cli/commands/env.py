@@ -8,7 +8,9 @@ import sys
 import tarfile
 import tempfile
 import uuid
+import zipfile
 from datetime import datetime
+from email.parser import Parser as EmailParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -553,6 +555,9 @@ def push(
 
             unique_wheel_name = wheel_path.name
 
+            # Extract Requires-Dist from wheel METADATA (includes URL dependencies)
+            requires_dist = extract_requires_dist_from_wheel(wheel_path)
+
             wheel_data = {
                 "content_hash": content_hash,
                 "filename": unique_wheel_name,
@@ -566,6 +571,7 @@ def push(
                     "dependencies": project_metadata.get("dependencies", []),
                     "python_requires": project_metadata.get("requires-python", ">=3.8"),
                     "original_filename": wheel_path.name,
+                    "requires_dist": requires_dist,  # Include full dependency specs from wheel
                 },
             }
 
@@ -1126,6 +1132,43 @@ def normalize_package_name(name: str) -> str:
     return name.replace("-", "_").lower()
 
 
+def extract_requires_dist_from_wheel(wheel_path: Path) -> List[str]:
+    """Extract Requires-Dist entries from a wheel's METADATA file.
+
+    A wheel is a zip file containing a .dist-info directory with a METADATA file.
+    This function extracts all Requires-Dist entries which include dependencies.
+
+    Args:
+        wheel_path: Path to the wheel file
+
+    Returns:
+        List of Requires-Dist entries (e.g., ["requests>=2.0", "tau2@ git+https://..."])
+    """
+    requires_dist = []
+    try:
+        with zipfile.ZipFile(wheel_path, "r") as whl:
+            # Find the METADATA file in the .dist-info directory
+            metadata_files = [
+                name for name in whl.namelist() if name.endswith(".dist-info/METADATA")
+            ]
+            if not metadata_files:
+                return requires_dist
+
+            metadata_content = whl.read(metadata_files[0]).decode("utf-8")
+
+            # Parse the METADATA file (RFC 822 format)
+            parser = EmailParser()
+            metadata = parser.parsestr(metadata_content)
+
+            # Get all Requires-Dist entries
+            requires_dist = metadata.get_all("Requires-Dist") or []
+
+    except (zipfile.BadZipFile, KeyError, UnicodeDecodeError) as e:
+        console.print(f"[yellow]Warning: Could not extract metadata from wheel: {e}[/yellow]")
+
+    return requires_dist
+
+
 def bump_version(version: str) -> str:
     """Bump patch version (e.g., 1.2.3 -> 1.2.4)."""
     parts = version.split(".")
@@ -1529,6 +1572,7 @@ def install(
             # Get both simple index URL and wheel URL
             simple_index_url = details.get("simple_index_url")
             wheel_url = process_wheel_url(details.get("wheel_url"))
+            url_dependencies = details.get("url_dependencies", [])
 
             # Check if this is a private environment
             if not simple_index_url and not wheel_url and details.get("visibility") == "PRIVATE":
@@ -1558,7 +1602,13 @@ def install(
             console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
 
             cmd_parts = _build_install_command(
-                name, target_version, simple_index_url, wheel_url, with_tool, no_upgrade
+                name,
+                target_version,
+                simple_index_url,
+                wheel_url,
+                with_tool,
+                no_upgrade,
+                url_dependencies,
             )
             if not cmd_parts:
                 skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
@@ -1962,6 +2012,7 @@ def _build_install_command(
     wheel_url: Optional[str],
     tool: str = "uv",
     no_upgrade: bool = False,
+    url_dependencies: Optional[List[str]] = None,
 ) -> Optional[List[str]]:
     """Build install command for an environment. Returns None if no install method available.
 
@@ -1972,6 +2023,7 @@ def _build_install_command(
         wheel_url: Direct wheel URL
         tool: Package manager to use ('uv' or 'pip')
         no_upgrade: If True, don't include --upgrade flag (preserves locked dependencies)
+        url_dependencies: List of URL dependencies to install as direct requirements
     """
     normalized_name = normalize_package_name(name)
 
@@ -1984,6 +2036,9 @@ def _build_install_command(
                 cmd.append(f"{normalized_name}=={version}")
             else:
                 cmd.append(normalized_name)
+            # Add URL dependencies as direct requirements (uv requires this)
+            if url_dependencies:
+                cmd.extend(url_dependencies)
             cmd.extend(["--extra-index-url", simple_index_url])
             return cmd
         else:  # pip
@@ -1994,6 +2049,9 @@ def _build_install_command(
                 cmd.append(f"{normalized_name}=={version}")
             else:
                 cmd.append(normalized_name)
+            # Add URL dependencies for consistency
+            if url_dependencies:
+                cmd.extend(url_dependencies)
             cmd.extend(["--extra-index-url", simple_index_url])
             return cmd
     elif wheel_url:

@@ -1,13 +1,23 @@
 import asyncio
+import json
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Union
+
+import httpx
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from .core import APIError, AsyncAPIClient
 from .exceptions import EvalsAPIError, InvalidEvaluationError
 
 
+def _is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429
+    return isinstance(exc, httpx.RequestError)
+
+
 def _build_user_agent() -> str:
-    """Build User-Agent string for prime-evals"""
     from prime_evals import __version__
 
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -98,9 +108,9 @@ class EvalsClient:
             # Handle string inputs (convert to dict format)
             if isinstance(env, str):
                 env = {"slug": env} if "/" in env else {"name": env}
-            
+
             resolved_env = env.copy() if isinstance(env, dict) else {}
-            
+
             # Handle different identifier types explicitly
             # Check for explicit "slug" or "name" keys first
             try:
@@ -163,7 +173,7 @@ class EvalsClient:
         resolved_environments = None
         if environments:
             resolved_environments = self._resolve_environments(environments)
-            
+
             # Validate that we have at least one resolved environment if run_id is not provided
             # This check happens AFTER resolution to catch cases where all environments were invalid
             if not resolved_environments and not run_id:
@@ -197,13 +207,96 @@ class EvalsClient:
         response = self.client.request("POST", "/evaluations/", json=payload)
         return response
 
-    def push_samples(self, evaluation_id: str, samples: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Push evaluation samples"""
-        payload = {"samples": samples}
-        response = self.client.request(
-            "POST", f"/evaluations/{evaluation_id}/samples", json=payload
+    def push_samples(
+        self,
+        evaluation_id: str,
+        samples: List[Dict[str, Any]],
+        max_payload_bytes: int = 512 * 1024,
+        max_workers: int = 4,
+    ) -> Dict[str, Any]:
+        """Push evaluation samples in adaptive batches with concurrent uploads."""
+        if not samples:
+            return {"samples_pushed": 0}
+        if max_workers < 1:
+            raise ValueError("max_workers must be at least 1")
+
+        batches = self._build_batches(samples, max_payload_bytes)
+        total_samples_pushed = 0
+        errors = []
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._upload_batch, evaluation_id, b): i
+                for i, b in enumerate(batches)
+            }
+            for future in as_completed(futures):
+                try:
+                    total_samples_pushed += future.result()
+                except Exception as e:
+                    errors.append(f"Batch {futures[future] + 1}: {e}")
+
+        if errors:
+            raise EvalsAPIError(f"Failed to push samples: {'; '.join(errors)}")
+
+        return {"samples_pushed": total_samples_pushed}
+
+    def _upload_batch(self, evaluation_id: str, batch: List[Dict[str, Any]]) -> int:
+        """Upload a single batch of samples with retry on rate limit."""
+        url = f"{self.client.base_url}/api/v1/evaluations/{evaluation_id}/samples"
+        headers: Dict[str, str] = {
+            "Content-Type": "application/json",
+            "User-Agent": _build_user_agent(),
+        }
+        if self.client.api_key:
+            headers["Authorization"] = f"Bearer {self.client.api_key}"
+
+        @retry(
+            retry=retry_if_exception(_is_retryable),
+            stop=stop_after_attempt(5),
+            wait=wait_exponential(multiplier=1, min=1, max=16),
+            reraise=True,
         )
-        return response
+        def do_upload() -> int:
+            response = httpx.post(url, json={"samples": batch}, headers=headers, timeout=30.0)
+            response.raise_for_status()
+            return len(batch)
+
+        try:
+            return do_upload()
+        except httpx.HTTPStatusError as e:
+            raise EvalsAPIError(f"HTTP {e.response.status_code}: {e.response.text}") from e
+        except httpx.RequestError as e:
+            raise EvalsAPIError(f"Request failed: {e}") from e
+
+    def _build_batches(
+        self, samples: List[Dict[str, Any]], max_payload_bytes: int
+    ) -> List[List[Dict[str, Any]]]:
+        """Build batches that fit within payload size limit."""
+        batches: List[List[Dict[str, Any]]] = []
+        current_batch: List[Dict[str, Any]] = []
+        current_bytes = 20
+
+        for idx, sample in enumerate(samples):
+            sample_size = len(json.dumps(sample)) + 1
+
+            if sample_size + 20 > max_payload_bytes:
+                raise EvalsAPIError(
+                    f"Sample {idx} exceeds maximum payload size "
+                    f"({sample_size} bytes > {max_payload_bytes - 20} bytes limit)"
+                )
+
+            if current_bytes + sample_size > max_payload_bytes and current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_bytes = 20
+
+            current_batch.append(sample)
+            current_bytes += sample_size
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
 
     def finalize_evaluation(
         self, evaluation_id: str, metrics: Optional[Dict[str, Any]] = None
@@ -346,11 +439,12 @@ class AsyncEvalsClient:
         """
         Resolve a list of environments from various identifier formats to database IDs.
         """
+
         async def resolve_env(env: Union[str, Dict[str, str]]) -> Optional[Dict[str, str]]:
             # Handle string inputs (convert to dict format)
             if isinstance(env, str):
                 env = {"slug": env} if "/" in env else {"name": env}
-            
+
             resolved_env = env.copy() if isinstance(env, dict) else {}
             # Handle different identifier types explicitly
             # Check for explicit "slug" or "name" keys first
@@ -421,7 +515,7 @@ class AsyncEvalsClient:
         resolved_environments = None
         if environments:
             resolved_environments = await self._resolve_environments(environments)
-            
+
             # Validate that we have at least one resolved environment if run_id is not provided
             # This check happens AFTER resolution to catch cases where all environments were invalid
             if not resolved_environments and not run_id:
@@ -456,14 +550,91 @@ class AsyncEvalsClient:
         return response
 
     async def push_samples(
-        self, evaluation_id: str, samples: List[Dict[str, Any]]
+        self,
+        evaluation_id: str,
+        samples: List[Dict[str, Any]],
+        max_payload_bytes: int = 512 * 1024,
+        max_concurrent: int = 4,
     ) -> Dict[str, Any]:
-        """Push evaluation samples"""
-        payload = {"samples": samples}
-        response = await self.client.request(
-            "POST", f"/evaluations/{evaluation_id}/samples", json=payload
-        )
-        return response
+        """Push evaluation samples in adaptive batches with concurrent uploads."""
+        if not samples:
+            return {"samples_pushed": 0}
+        if max_concurrent < 1:
+            raise ValueError("max_concurrent must be at least 1")
+
+        batches = self._build_batches(samples, max_payload_bytes)
+        semaphore = asyncio.Semaphore(max_concurrent)
+        errors: List[str] = []
+
+        base_url = self.client.base_url
+        headers: Dict[str, str] = {
+            "Content-Type": "application/json",
+            "User-Agent": _build_user_agent(),
+        }
+        if self.client.api_key:
+            headers["Authorization"] = f"Bearer {self.client.api_key}"
+
+        async def upload_batch(idx: int, batch: List[Dict[str, Any]]) -> int:
+            url = f"{base_url}/api/v1/evaluations/{evaluation_id}/samples"
+
+            @retry(
+                retry=retry_if_exception(_is_retryable),
+                stop=stop_after_attempt(5),
+                wait=wait_exponential(multiplier=1, min=1, max=16),
+                reraise=True,
+            )
+            async def do_upload() -> int:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(url, json={"samples": batch}, headers=headers)
+                    response.raise_for_status()
+                    return len(batch)
+
+            async with semaphore:
+                try:
+                    return await do_upload()
+                except httpx.HTTPStatusError as e:
+                    errors.append(f"Batch {idx + 1}: HTTP {e.response.status_code}")
+                    return 0
+                except httpx.RequestError as e:
+                    errors.append(f"Batch {idx + 1}: {e}")
+                    return 0
+
+        results = await asyncio.gather(*[upload_batch(i, b) for i, b in enumerate(batches)])
+
+        if errors:
+            raise EvalsAPIError(f"Failed to push samples: {'; '.join(errors)}")
+
+        return {"samples_pushed": sum(results)}
+
+    def _build_batches(
+        self, samples: List[Dict[str, Any]], max_payload_bytes: int
+    ) -> List[List[Dict[str, Any]]]:
+        """Build batches that fit within payload size limit."""
+        batches: List[List[Dict[str, Any]]] = []
+        current_batch: List[Dict[str, Any]] = []
+        current_bytes = 20
+
+        for idx, sample in enumerate(samples):
+            sample_size = len(json.dumps(sample)) + 1
+
+            if sample_size + 20 > max_payload_bytes:
+                raise EvalsAPIError(
+                    f"Sample {idx} exceeds maximum payload size "
+                    f"({sample_size} bytes > {max_payload_bytes - 20} bytes limit)"
+                )
+
+            if current_bytes + sample_size > max_payload_bytes and current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_bytes = 20
+
+            current_batch.append(sample)
+            current_bytes += sample_size
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
 
     async def finalize_evaluation(
         self, evaluation_id: str, metrics: Optional[Dict[str, Any]] = None

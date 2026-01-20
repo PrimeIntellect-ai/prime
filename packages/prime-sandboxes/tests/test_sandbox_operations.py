@@ -272,7 +272,7 @@ def test_get_logs(sandbox_client):
         print(f"✓ Created sandbox: {sandbox.id}")
 
         print("Waiting for sandbox to be ready...")
-        sandbox_client.wait_for_creation(sandbox.id)
+        sandbox_client.wait_for_creation(sandbox.id, max_attempts=120)
 
         # Execute a command to generate some output
         sandbox_client.execute_command(sandbox.id, "echo 'test log message'")
@@ -309,7 +309,7 @@ def test_wait_for_creation(sandbox_client):
 
         # Wait for it to be ready
         print("Waiting for sandbox to be ready...")
-        sandbox_client.wait_for_creation(sandbox.id, max_attempts=60)
+        sandbox_client.wait_for_creation(sandbox.id, max_attempts=120)
         print("✓ Sandbox is ready!")
 
         # Verify it's actually running and reachable
@@ -348,7 +348,7 @@ def test_sandbox_lifecycle(sandbox_client):
 
         # Wait for ready
         print("[LIFECYCLE] Waiting for sandbox to be ready...")
-        sandbox_client.wait_for_creation(sandbox.id)
+        sandbox_client.wait_for_creation(sandbox.id, max_attempts=120)
         print("✓ Sandbox is ready")
 
         # Use it

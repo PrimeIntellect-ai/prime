@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from prime_cli.core import APIClient, APIError
+from prime_cli.core import APIClient, APIError, ValidationError
 
 
 class RLModel(BaseModel):
@@ -136,15 +136,16 @@ class RLClient:
             if name:
                 payload["name"] = name
 
-            # Add monitoring config if W&B is specified
-            if wandb_entity or wandb_project:
-                payload["monitoring"] = {
-                    "wandb": {
-                        "entity": wandb_entity,
-                        "project": wandb_project,
-                        "name": wandb_run_name,
-                    }
-                }
+            # Add monitoring config if any W&B field is set (backend validates completeness)
+            if wandb_entity or wandb_project or wandb_run_name:
+                wandb_config: Dict[str, Any] = {}
+                if wandb_entity:
+                    wandb_config["entity"] = wandb_entity
+                if wandb_project:
+                    wandb_config["project"] = wandb_project
+                if wandb_run_name:
+                    wandb_config["name"] = wandb_run_name
+                payload["monitoring"] = {"wandb": wandb_config}
 
             if team_id:
                 payload["team_id"] = team_id
@@ -178,6 +179,8 @@ class RLClient:
 
             response = self.client.post("/rft/runs", json=payload)
             return RLRun.model_validate(response.get("run"))
+        except ValidationError:
+            raise  # Let ValidationError pass through for proper CLI handling
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to create RL run: {e.response.text}")

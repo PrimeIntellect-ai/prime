@@ -7,6 +7,7 @@ from prime_cli.core import (
     AsyncAPIClient,
     PaymentRequiredError,
     UnauthorizedError,
+    ValidationError,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "APITimeoutError",
     "PaymentRequiredError",
     "UnauthorizedError",
+    "ValidationError",
 ]

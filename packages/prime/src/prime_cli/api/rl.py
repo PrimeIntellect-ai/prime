@@ -113,6 +113,7 @@ class RLClient:
         lora_alpha: Optional[int] = None,
         oversampling_factor: Optional[float] = None,
         max_async_level: Optional[int] = None,
+        run_config: Optional[Dict[str, Any]] = None,
     ) -> RLRun:
         """Create a new RL training run."""
         try:
@@ -176,6 +177,9 @@ class RLClient:
 
             if max_async_level is not None:
                 payload["max_async_level"] = max_async_level
+
+            if run_config:
+                payload["run_config"] = run_config
 
             response = self.client.post("/rft/runs", json=payload)
             return RLRun.model_validate(response.get("run"))
@@ -311,9 +315,7 @@ class RLClient:
             if step is not None:
                 params["step"] = step
 
-            response = self.client.get(
-                f"/rft/runs/{run_id}/distributions", params=params
-            )
+            response = self.client.get(f"/rft/runs/{run_id}/distributions", params=params)
             return {
                 "bins": response.get("bins", []),
                 "step": response.get("step"),

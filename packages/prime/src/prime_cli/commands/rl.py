@@ -129,6 +129,10 @@ id = "{env_value}"
 # env_ratios = [0.5, 0.5]
 # skip_verification = false
 # seed = 42
+
+# Optional: advanced run configuration (admin only)
+# [run_config]
+# custom_key = "custom_value"
 '''
 
 
@@ -281,6 +285,7 @@ class RLConfig(BaseModel):
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
+    run_config: Dict[str, Any] = Field(default_factory=dict)  # advanced config (admin only)
 
 
 def _format_validation_errors(errors: list[dict]) -> list[str]:
@@ -440,11 +445,9 @@ def create_run(
     wandb_configured = cfg.wandb.entity or cfg.wandb.project
     if wandb_configured and (not secrets or "WANDB_API_KEY" not in secrets):
         console.print("[red]Configuration Error:[/red]")
-        console.print(
-            "  WANDB_API_KEY is required when W&B monitoring is configured.\n"
-        )
+        console.print("  WANDB_API_KEY is required when W&B monitoring is configured.\n")
         console.print("Provide it via:")
-        console.print("  - env_files in your config: env_files = [\"secrets.env\"]")
+        console.print('  - env_files in your config: env_files = ["secrets.env"]')
         console.print("  - CLI flag: --env-file secrets.env")
         console.print("  - CLI flag: -e WANDB_API_KEY=your-key")
         console.print(
@@ -542,6 +545,7 @@ def create_run(
             lora_alpha=cfg.lora_alpha,
             oversampling_factor=cfg.oversampling_factor,
             max_async_level=cfg.max_async_level,
+            run_config=cfg.run_config if cfg.run_config else None,
         )
 
         if output == "json":

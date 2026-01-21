@@ -1701,6 +1701,7 @@ source = { editable = "packages/prime-evals" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
+    { name = "tenacity" },
 ]
 
 [package.optional-dependencies]
@@ -1715,6 +1716,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.13.1" },
+    { name = "tenacity", specifier = ">=9.1.2" },
 ]
 provides-extras = ["dev"]
 

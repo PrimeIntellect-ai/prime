@@ -202,6 +202,16 @@ class RLClient:
                 raise APIError(f"Failed to delete RL run: {e.response.text}")
             raise APIError(f"Failed to delete RL run: {str(e)}")
 
+    def get_run(self, run_id: str) -> RLRun:
+        """Get details of a specific RL run."""
+        try:
+            response = self.client.get(f"/rft/runs/{run_id}")
+            return RLRun.model_validate(response.get("run"))
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to get RL run: {e.response.text}")
+            raise APIError(f"Failed to get RL run: {str(e)}")
+
     def get_logs(self, run_id: str, tail_lines: int = 1000) -> str:
         """Get logs for an RL run."""
         try:
@@ -213,3 +223,99 @@ class RLClient:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to get RL run logs: {e.response.text}")
             raise APIError(f"Failed to get RL run logs: {str(e)}")
+
+    def get_metrics(
+        self,
+        run_id: str,
+        min_step: Optional[int] = None,
+        max_step: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get metrics for an RL run."""
+        try:
+            params: Dict[str, Any] = {}
+            if min_step is not None:
+                params["min_step"] = min_step
+            if max_step is not None:
+                params["max_step"] = max_step
+            if limit is not None:
+                params["limit"] = limit
+
+            response = self.client.get(
+                f"/rft/runs/{run_id}/metrics", params=params if params else None
+            )
+            return response.get("metrics", [])
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to get RL run metrics: {e.response.text}")
+            raise APIError(f"Failed to get RL run metrics: {str(e)}")
+
+    def get_rollouts(
+        self,
+        run_id: str,
+        step: int,
+        page: int = 1,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Get rollout samples for an RL run."""
+        try:
+            params: Dict[str, Any] = {
+                "page": page,
+                "limit": limit,
+                "step": step,
+            }
+
+            response = self.client.get(f"/rft/runs/{run_id}/samples", params=params)
+            return {
+                "run_id": response.get("run_id", run_id),
+                "samples": response.get("samples", []),
+                "total": response.get("total", 0),
+                "page": response.get("page", page),
+                "limit": response.get("limit", limit),
+                "total_pages": response.get("total_pages", 0),
+            }
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to get RL run rollouts: {e.response.text}")
+            raise APIError(f"Failed to get RL run rollouts: {str(e)}")
+
+    def get_progress(self, run_id: str) -> Dict[str, Any]:
+        """Get progress information for an RL run."""
+        try:
+            response = self.client.get(f"/rft/runs/{run_id}/progress")
+            return {
+                "latest_step": response.get("latestStep"),
+                "steps_with_samples": response.get("stepsWithSamples", []),
+                "steps_with_distributions": response.get("stepsWithDistributions", []),
+                "last_updated_at": response.get("lastUpdatedAt"),
+            }
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to get RL run progress: {e.response.text}")
+            raise APIError(f"Failed to get RL run progress: {str(e)}")
+
+    def get_distributions(
+        self,
+        run_id: str,
+        distribution_type: Optional[str] = None,
+        step: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Get reward/advantage distribution histogram for an RL run."""
+        try:
+            params: Dict[str, Any] = {}
+            if distribution_type is not None:
+                params["type"] = distribution_type
+            if step is not None:
+                params["step"] = step
+
+            response = self.client.get(
+                f"/rft/runs/{run_id}/distributions", params=params
+            )
+            return {
+                "bins": response.get("bins", []),
+                "step": response.get("step"),
+            }
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to get RL run distributions: {e.response.text}")
+            raise APIError(f"Failed to get RL run distributions: {str(e)}")

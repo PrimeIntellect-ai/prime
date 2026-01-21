@@ -144,7 +144,7 @@ while True:
         print(f"  External Endpoint: {tcp_exposure.external_endpoint}")
         if tcp_exposure.external_port:
             print(f"  External Port: {tcp_exposure.external_port}")
-        time.sleep(120)
+        time.sleep(10)
 
         # Verify TCP endpoint is accessible
         print("  Verifying TCP endpoint...")

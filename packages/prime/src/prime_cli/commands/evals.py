@@ -51,6 +51,8 @@ def handle_errors(func):
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except typer.Exit:
+            raise
         except EvalsAPIError as e:
             console.print(f"[red]Error:[/red] {e}")
             raise typer.Exit(1)
@@ -189,7 +191,7 @@ def get_samples(
     format_output(data, output)
 
 
-def _load_verifiers_format(directory: Path) -> dict:
+def _load_eval_directory(directory: Path) -> dict:
     with open(directory / "metadata.json") as f:
         metadata = json.load(f)
 
@@ -200,8 +202,9 @@ def _load_verifiers_format(directory: Path) -> dict:
         )
 
     results = []
+    skipped_lines = []
     with open(directory / "results.jsonl") as f:
-        for line in f:
+        for line_num, line in enumerate(f, start=1):
             if line := line.strip():
                 try:
                     sample = json.loads(line)
@@ -209,7 +212,15 @@ def _load_verifiers_format(directory: Path) -> dict:
                         sample["example_id"] = sample["id"]
                     results.append(sample)
                 except json.JSONDecodeError:
-                    continue
+                    skipped_lines.append(line_num)
+
+    if skipped_lines:
+        lines_preview = skipped_lines[:5]
+        suffix = "..." if len(skipped_lines) > 5 else ""
+        console.print(
+            f"[yellow]Warning: Skipped {len(skipped_lines)} invalid JSON "
+            f"line(s) in results.jsonl: {lines_preview}{suffix}[/yellow]"
+        )
 
     avg_pattern = re.compile(r"^avg_(.+)$")
     metrics = {}
@@ -230,19 +241,41 @@ def _load_verifiers_format(directory: Path) -> dict:
     }
 
 
-def _has_verifiers_files(directory: Path) -> bool:
+def _has_eval_files(directory: Path) -> bool:
     return (directory / "metadata.json").exists() and (directory / "results.jsonl").exists()
 
 
-def _detect_format(path_str: str) -> tuple[str, Path]:
+def _validate_eval_path(path_str: str) -> Path:
+    """Validate and return the evaluation directory path."""
     path = Path(path_str)
 
     if path.is_file():
-        return ("json", path)
+        # Auto-correct: if user passed metadata.json or results.jsonl, use parent directory
+        if path.name in ("metadata.json", "results.jsonl"):
+            parent = path.parent
+            if _has_eval_files(parent):
+                return parent
+            raise ValueError(
+                f"Directory '{parent}' must contain both metadata.json and results.jsonl"
+            )
+        raise ValueError(
+            f"Expected a directory path, but got file: {path}\n"
+            f"Pass a directory containing metadata.json and results.jsonl"
+        )
+
     if path.is_dir():
-        if _has_verifiers_files(path):
-            return ("verifiers", path)
-        raise ValueError(f"Directory {path} missing metadata.json or results.jsonl")
+        if _has_eval_files(path):
+            return path
+
+        has_metadata = (path / "metadata.json").exists()
+        has_results = (path / "results.jsonl").exists()
+        if has_metadata and not has_results:
+            raise ValueError(f"Directory '{path}' is missing results.jsonl")
+        elif has_results and not has_metadata:
+            raise ValueError(f"Directory '{path}' is missing metadata.json")
+        else:
+            raise ValueError(f"Directory '{path}' is missing both metadata.json and results.jsonl")
+
     raise FileNotFoundError(f"Path not found: {path}")
 
 
@@ -256,7 +289,7 @@ def _discover_eval_outputs() -> list[Path]:
         if not env_dir.is_dir():
             continue
         for run_dir in env_dir.iterdir():
-            if run_dir.is_dir() and _has_verifiers_files(run_dir):
+            if run_dir.is_dir() and _has_eval_files(run_dir):
                 eval_dirs.append(run_dir)
 
     return sorted(eval_dirs)
@@ -268,15 +301,9 @@ def _push_single_eval(
     run_id: Optional[str],
     eval_id: Optional[str],
 ) -> str:
-    format_type, path = _detect_format(config_path)
-
-    if format_type == "json":
-        with open(path, "r") as f:
-            eval_data = json.load(f)
-        console.print(f"[blue]✓ Loaded eval data (JSON format):[/blue] {path}")
-    else:
-        eval_data = _load_verifiers_format(path)
-        console.print(f"[blue]✓ Loaded eval data (verifiers format):[/blue] {path}")
+    path = _validate_eval_path(config_path)
+    eval_data = _load_eval_directory(path)
+    console.print(f"[blue]✓ Loaded eval data:[/blue] {path}")
 
     detected_env = eval_data.get("env_id") or eval_data.get("env")
     if not env_slug and detected_env and not run_id and not eval_id:
@@ -387,7 +414,7 @@ def push_eval(
     config_path: Optional[str] = typer.Argument(
         None,
         help=(
-            "Path to eval config JSON file or directory with metadata.json/results.jsonl. "
+            "Path to eval directory containing metadata.json and results.jsonl. "
             "If not provided, auto-discovers from outputs/evals/"
         ),
     ),
@@ -414,14 +441,13 @@ def push_eval(
 ) -> None:
     """Push evaluation data to Prime Evals.
 
-    Supports JSON format, verifiers format directory, or auto-discovery.
+    The directory must contain metadata.json and results.jsonl files.
 
     Examples:
         prime eval push                                    # Push current dir or auto-discover
         prime eval push outputs/evals/gsm8k--gpt-4/abc123  # Push specific directory
-        prime eval push eval.json --run-id abc123          # Push JSON file with run_id
-        prime eval push eval.json --eval xyz789            # Push to existing evaluation
-        prime eval push --env gsm8k                        # Push with environment
+        prime eval push --env gsm8k                        # Push with environment override
+        prime eval push --eval xyz789                      # Push to existing evaluation
     """
     try:
         if config_path is None and eval_id:
@@ -434,7 +460,7 @@ def push_eval(
 
         if config_path is None:
             current_dir = Path(".")
-            if _has_verifiers_files(current_dir):
+            if _has_eval_files(current_dir):
                 result_eval_id = _push_single_eval(".", env_id, run_id, eval_id)
                 if output == "json":
                     console.print()
@@ -446,7 +472,7 @@ def push_eval(
                 console.print("[red]Error:[/red] No evaluation outputs found")
                 console.print(
                     "[yellow]Hint:[/yellow] Run from a directory with "
-                    "metadata.json/results.jsonl or outputs/evals/"
+                    "metadata.json and results.jsonl, or from a directory containing outputs/evals/"
                 )
                 raise typer.Exit(1)
 
@@ -491,7 +517,10 @@ def push_eval(
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
     except json.JSONDecodeError as e:
-        console.print(f"[red]Error:[/red] Invalid JSON: {e}")
+        console.print(f"[red]Error:[/red] Invalid JSON in metadata.json: {e}")
+        raise typer.Exit(1)
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
     except InvalidEvaluationError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -500,11 +529,13 @@ def push_eval(
         console.print("  --eval <eval_id>     (to update an existing evaluation)")
         console.print("  --run-id <run_id>    (to link to an existing training run)")
         console.print("  --env <env>          (environment name, e.g., 'gsm8k' or 'owner/gsm8k')")
-        console.print("  [or use verifiers format with 'env' in metadata.json for auto-detection]")
+        console.print("  [or ensure 'env' or 'env_id' is set in metadata.json]")
         raise typer.Exit(1)
     except KeyError as e:
-        console.print(f"[red]Error:[/red] Missing required field in config: {e}")
-        console.print("[yellow]Hint:[/yellow] See examples/eval_example.json for required fields")
+        console.print(f"[red]Error:[/red] Missing required field: {e}")
+        console.print(
+            "[yellow]Hint:[/yellow] metadata.json must contain 'env' (or 'env_id') and 'model'"
+        )
         raise typer.Exit(1)
     except EvalsAPIError as e:
         console.print(f"[red]API Error:[/red] {e}")

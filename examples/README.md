@@ -2,16 +2,13 @@
 
 This directory contains example scripts and demos for using the Prime CLI.
 
-## Evals Example
+## Evals
 
-Prime CLI supports two modes for pushing evaluation results:
-
-2. **Verifiers Format**: Directory with `metadata.json` and `results.jsonl`
-1. **JSON Format**: Single JSON file with all evaluation data
+Push evaluation results to the Environments Hub. Expects the [verifiers](https://github.com/PrimeIntellect-ai/verifiers) output format, a directory containing `metadata.json` and `results.jsonl`.
 
 ### Pushing Evals
 
-1. **Push from current directory** (if it contains metadata.json/results.jsonl):
+1. **Push from current directory** (if it contains metadata.json and results.jsonl):
    ```bash
    cd outputs/evals/gsm8k--gpt-4/abc123
    prime eval push
@@ -24,17 +21,17 @@ Prime CLI supports two modes for pushing evaluation results:
 
 3. **Push specific directory**:
    ```bash
-   prime eval push examples/verifiers_example
+   prime eval push outputs/evals/gsm8k--gpt-4/abc123
    ```
 
-4. **Push from JSON file with environment**:
+4. **Push with environment override**:
    ```bash
-   prime eval push examples/eval_example.json --env gsm8k
+   prime eval push outputs/evals/gsm8k--gpt-4/abc123 --env primeintellect/gsm8k
    ```
 
-5. **Push with run ID** (link to existing training run):
+5. **Push to existing evaluation**:
    ```bash
-   prime eval push examples/eval_example.json --run-id abc123
+   prime eval push outputs/evals/gsm8k--gpt-4/abc123 --eval <eval_id>
    ```
 
 6. **List all evals**:

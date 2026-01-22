@@ -1268,6 +1268,11 @@ def ssh_connect(
         console.print(f"[bold green]Connecting to:[/bold green] {session.session_id}@{ssh_host}")
         console.print(f"[bold green]Port:[/bold green] {ssh_port}")
         console.print()
+
+        # Wait for TCP exposure to propagate through the load balancer
+        with console.status("[bold blue]Waiting for connection to be ready...", spinner="dots"):
+            time.sleep(5)
+
         console.print("[dim]Press Ctrl+D or type 'exit' to disconnect[/dim]")
         console.print()
 
@@ -1277,6 +1282,7 @@ def ssh_connect(
         # Disable strict host key checking for dynamic hosts
         ssh_cmd.extend(["-o", "StrictHostKeyChecking=no"])
         ssh_cmd.extend(["-o", "UserKnownHostsFile=/dev/null"])
+        ssh_cmd.extend(["-o", "LogLevel=ERROR"])
 
         # Add identity file if specified
         if key_path:

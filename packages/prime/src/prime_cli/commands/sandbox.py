@@ -1150,21 +1150,17 @@ def list_ports(
 @app.command("ssh", no_args_is_help=True)
 def ssh_connect(
     sandbox_id: str = typer.Argument(..., help="Sandbox ID to SSH into"),
-    identity: Optional[str] = typer.Option(
-        None, "--identity", "-i", help="Path to SSH private key file (will be authorized)"
-    ),
     ssh_args: Optional[List[str]] = typer.Argument(
         None, help="Additional SSH arguments (e.g., -- -v for verbose)"
     ),
 ) -> None:
     """Connect to a sandbox via SSH.
 
-    This command creates a SSH session, authorizes your key, and cleans up the exposure.
+    This command creates a SSH session with an ephemeral key and cleans up on disconnect.
 
     Examples:\n
         prime sandbox ssh sb_abc123\n
-        prime sandbox ssh sb_abc123 -i ~/.ssh/my_key\n
-        prime sandbox ssh sb_abc123 -- -v -L 8080:localhost:8080\n
+        prime sandbox ssh sb_abc123 -- -L 3000:localhost:3000\n
     """
     session_id: Optional[str] = None
     sandbox_client: Optional[SandboxClient] = None
@@ -1206,36 +1202,16 @@ def ssh_connect(
             )
             raise typer.Exit(1)
 
-        # Prepare SSH key (use provided identity or generate ephemeral)
-        def load_public_key_from_identity(path: str) -> str:
-            pub_path = f"{path}.pub"
-            if os.path.exists(pub_path):
-                with open(pub_path, "r") as f:
-                    return f.read().strip()
-            result = subprocess.run(
-                ["ssh-keygen", "-y", "-f", path],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            return result.stdout.strip()
-
-        if identity:
-            key_path = os.path.expanduser(identity)
-            if not os.path.exists(key_path):
-                console.print(f"[red]Error:[/red] Identity file not found: {key_path}")
-                raise typer.Exit(1)
-            public_key = load_public_key_from_identity(key_path)
-        else:
-            temp_dir = tempfile.mkdtemp(prefix="prime-ssh-")
-            key_path = os.path.join(temp_dir, "id_ed25519")
-            subprocess.run(
-                ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", key_path],
-                check=True,
-                capture_output=True,
-            )
-            with open(f"{key_path}.pub", "r") as f:
-                public_key = f.read().strip()
+        # Generate ephemeral SSH key
+        temp_dir = tempfile.mkdtemp(prefix="prime-ssh-")
+        key_path = os.path.join(temp_dir, "id_ed25519")
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", key_path],
+            check=True,
+            capture_output=True,
+        )
+        with open(f"{key_path}.pub", "r") as f:
+            public_key = f.read().strip()
 
         # Create SSH session
         console.print("[bold blue]Creating SSH session...[/bold blue]")

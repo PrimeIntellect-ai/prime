@@ -38,13 +38,6 @@ class TunnelInfo(BaseModel):
         from_attributes = True
 
 
-class TunnelRegistrationRequest(BaseModel):
-    """Request to register a new tunnel."""
-
-    name: Optional[str] = None
-    local_port: int = 8765
-
-
 class TunnelRegistrationResponse(BaseModel):
     """Response from tunnel registration."""
 

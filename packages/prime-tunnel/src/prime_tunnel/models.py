@@ -1,17 +1,7 @@
 from datetime import datetime
-from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field
-
-
-class TunnelStatus(str, Enum):
-    """Tunnel connection status."""
-
-    PENDING = "pending"
-    CONNECTED = "connected"
-    DISCONNECTED = "disconnected"
-    EXPIRED = "expired"
 
 
 class TunnelConfig(BaseModel):

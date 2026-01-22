@@ -9,7 +9,7 @@ from prime_tunnel.exceptions import (
     TunnelError,
     TunnelTimeoutError,
 )
-from prime_tunnel.models import TunnelConfig, TunnelInfo, TunnelStatus
+from prime_tunnel.models import TunnelConfig, TunnelInfo
 from prime_tunnel.tunnel import Tunnel
 
 __all__ = [
@@ -22,7 +22,6 @@ __all__ = [
     # Models
     "TunnelConfig",
     "TunnelInfo",
-    "TunnelStatus",
     # Exceptions
     "TunnelError",
     "TunnelAuthError",

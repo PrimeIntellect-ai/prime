@@ -72,12 +72,9 @@ def _download_frpc(dest: Path) -> None:
         try:
             with httpx.stream("GET", url, follow_redirects=True, timeout=120.0) as response:
                 response.raise_for_status()
-                downloaded = 0
-
                 with open(archive_path, "wb") as f:
                     for chunk in response.iter_bytes(chunk_size=8192):
                         f.write(chunk)
-                        downloaded += len(chunk)
 
         except httpx.HTTPError as e:
             raise BinaryDownloadError(f"Failed to download frpc: {e}") from e

@@ -23,7 +23,6 @@ class Tunnel:
         name: Optional[str] = None,
         connection_timeout: float = 30.0,
         log_level: str = "info",
-        log_file: Optional[str] = None,
     ):
         """
         Initialize a tunnel.
@@ -34,14 +33,12 @@ class Tunnel:
             name: Optional friendly name for the tunnel
             connection_timeout: Timeout for establishing connection (seconds)
             log_level: frpc log level (trace, debug, info, warn, error)
-            log_file: Path to write frpc logs (default: console)
         """
         self.local_port = local_port
         self.local_addr = local_addr
         self.name = name
         self.connection_timeout = connection_timeout
         self.log_level = log_level
-        self.log_file = log_file
 
         self._client = TunnelClient()
         self._process: Optional[subprocess.Popen] = None
@@ -244,8 +241,8 @@ transport.tcpMux = true
 transport.tcpMuxKeepaliveInterval = 30
 transport.poolCount = 5
 
-# Logging
-log.to = "{self.log_file or "console"}"
+# Logging - always use console so we can detect connection via stdout
+log.to = "console"
 log.level = "{self.log_level}"
 
 # HTTP proxy configuration

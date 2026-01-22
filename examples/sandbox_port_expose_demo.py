@@ -42,6 +42,9 @@ def verify_tcp(endpoint: str, test_message: bytes = b"Hello") -> bool:
 
 def main() -> None:
     """Demonstrate HTTP and TCP port exposure"""
+    sandbox = None
+    sandbox_client = None
+
     try:
         client = APIClient()
         sandbox_client = SandboxClient(client)
@@ -170,18 +173,7 @@ while True:
         print(f"HTTP: curl {http_exposure.url}")
         print(f"TCP:  Connect to {tcp_exposure.external_endpoint} with a TCP client")
 
-        # Clean up exposures
-        print("\n--- Cleanup ---")
-        print("Removing port exposures...")
-        sandbox_client.unexpose(sandbox.id, http_exposure.exposure_id)
-        print(f"  Removed HTTP exposure: {http_exposure.exposure_id}")
-        sandbox_client.unexpose(sandbox.id, tcp_exposure.exposure_id)
-        print(f"  Removed TCP exposure: {tcp_exposure.exposure_id}")
-
-        # Delete sandbox
-        print(f"\nDeleting sandbox {sandbox.name}...")
-        sandbox_client.delete(sandbox.id)
-        print("Done!")
+        print("\nDemo completed successfully!")
 
     except APIError as e:
         print(f"API Error: {e}")
@@ -189,6 +181,14 @@ while True:
     except Exception as e:
         print(f"Error: {e}")
         raise
+    finally:
+        if sandbox and sandbox_client:
+            print(f"\nCleaning up sandbox {sandbox.id}...")
+            try:
+                sandbox_client.delete(sandbox.id)
+                print("Sandbox deleted.")
+            except Exception as e:
+                print(f"Warning: Failed to delete sandbox: {e}")
 
 
 if __name__ == "__main__":

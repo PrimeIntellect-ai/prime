@@ -1,4 +1,5 @@
 import hashlib
+import os
 import platform
 import shutil
 import stat
@@ -106,8 +107,22 @@ def _download_frpc(dest: Path) -> None:
             raise BinaryDownloadError("frpc binary not found after extraction")
 
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(extracted_path, dest)
-        dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+        # Set executable permissions on extracted file before moving
+        extracted_path.chmod(
+            extracted_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+        )
+
+        # Copy to temp file in same directory, then rename
+        # This prevents corruption if multiple processes download simultaneously
+        temp_dest = dest.parent / f".frpc.{os.getpid()}.tmp"
+        try:
+            shutil.copy2(extracted_path, temp_dest)
+            os.replace(temp_dest, dest)  # Atomic on POSIX
+        finally:
+            # Clean up temp file if rename failed
+            if temp_dest.exists():
+                temp_dest.unlink()
 
 
 def _compute_sha256(path: Path) -> str:
@@ -130,6 +145,14 @@ def get_frpc_path() -> Path:
                 return frpc_path
 
     _download_frpc(frpc_path)
-    version_file.write_text(FRPC_VERSION)
+
+    # Write to temp file in same directory, then rename to prevent partial reads
+    temp_version = version_file.parent / f".frpc_version.{os.getpid()}.tmp"
+    try:
+        temp_version.write_text(FRPC_VERSION)
+        os.replace(temp_version, version_file)
+    finally:
+        if temp_version.exists():
+            temp_version.unlink()
 
     return frpc_path

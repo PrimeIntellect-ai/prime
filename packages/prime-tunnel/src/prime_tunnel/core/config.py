@@ -23,7 +23,7 @@ class Config:
         if self.config_file.exists():
             try:
                 config_data = json.loads(self.config_file.read_text())
-                self.config = config_data
+                self.config = config_data if isinstance(config_data, dict) else {}
             except (json.JSONDecodeError, IOError):
                 self.config = {}
         else:

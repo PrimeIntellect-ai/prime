@@ -2,6 +2,7 @@ import asyncio
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -48,6 +49,7 @@ class Tunnel:
         self._config_file: Optional[Path] = None
         self._started = False
         self._output_lines: list[str] = []
+        self._drain_thread: Optional[threading.Thread] = None
 
     @property
     def tunnel_id(self) -> Optional[str]:
@@ -87,7 +89,7 @@ class Tunnel:
             raise TunnelError("Tunnel is already started")
 
         # 1. Get frpc binary
-        frpc_path = get_frpc_path()
+        frpc_path = await asyncio.to_thread(get_frpc_path)
 
         # 2. Register tunnel with backend
         try:
@@ -125,6 +127,9 @@ class Tunnel:
             await self._cleanup()
             raise
 
+        # 6. Start background thread to drain pipes (prevents buffer exhaustion)
+        self._start_pipe_drain()
+
         self._started = True
 
         return self.url
@@ -139,7 +144,7 @@ class Tunnel:
 
     async def _cleanup(self) -> None:
         """Clean up tunnel resources."""
-        # Stop frpc process
+        # Stop frpc process (this will cause drain threads to exit via EOF)
         if self._process is not None:
             try:
                 self._process.terminate()
@@ -152,6 +157,7 @@ class Tunnel:
                 pass
             finally:
                 self._process = None
+                self._drain_thread = None  # Thread exits when process pipes close
 
         # Delete tunnel registration
         if self._tunnel_info is not None:
@@ -177,6 +183,38 @@ class Tunnel:
             await self._client.close()
         except Exception:
             pass
+
+    def _start_pipe_drain(self) -> None:
+        """Start background threads to drain subprocess pipes.
+
+        This prevents the pipe buffer from filling up and blocking frpc
+        when it produces output (logs, reconnection attempts, etc.).
+        """
+        if self._process is None:
+            return
+
+        def drain_pipe(pipe):
+            """Read and discard output from a pipe until EOF."""
+            if pipe is None:
+                return
+            try:
+                for _ in pipe:
+                    pass  # Discard all output
+            except (OSError, ValueError):
+                pass  # Pipe closed
+
+        # Use separate threads for stdout/stderr to avoid blocking on one
+        stdout_thread = threading.Thread(
+            target=drain_pipe, args=(self._process.stdout,), daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=drain_pipe, args=(self._process.stderr,), daemon=True
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        # Store one thread for join during cleanup (both will exit when process dies)
+        self._drain_thread = stdout_thread
 
     def _write_frpc_config(self) -> Path:
         """Generate and write frpc configuration file."""

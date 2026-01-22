@@ -94,15 +94,19 @@ class Tunnel:
                 local_port=self.local_port,
                 name=self.name,
             )
-        except Exception as e:
+        except BaseException as e:
             await self._cleanup()
+            if isinstance(e, asyncio.CancelledError):
+                raise
             raise TunnelError(f"Failed to register tunnel: {e}") from e
 
         # 3. Generate frpc config
         try:
             self._config_file = self._write_frpc_config()
-        except Exception as e:
+        except BaseException as e:
             await self._cleanup()
+            if isinstance(e, asyncio.CancelledError):
+                raise
             raise TunnelError(f"Failed to write frpc config: {e}") from e
 
         # 4. Start frpc process
@@ -113,14 +117,16 @@ class Tunnel:
                 stderr=subprocess.PIPE,
                 text=True,
             )
-        except Exception as e:
+        except BaseException as e:
             await self._cleanup()
+            if isinstance(e, asyncio.CancelledError):
+                raise
             raise TunnelConnectionError(f"Failed to start frpc: {e}") from e
 
         # 5. Wait for connection
         try:
             await self._wait_for_connection()
-        except Exception:
+        except BaseException:
             await self._cleanup()
             raise
 

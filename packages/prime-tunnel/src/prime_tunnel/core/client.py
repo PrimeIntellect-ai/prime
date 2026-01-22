@@ -111,6 +111,9 @@ class TunnelClient:
                 error_detail = response.text
             raise TunnelError(f"Failed to {operation}: {error_detail}")
 
+        if response.status_code == 204:
+            return {}
+
         return response.json()
 
     async def create_tunnel(

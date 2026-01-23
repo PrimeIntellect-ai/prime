@@ -15,9 +15,7 @@ from rich.table import Table
 
 from ..utils import validate_output_format
 
-app = typer.Typer(
-    help="Manage Docker images in Prime Intellect registry [closed beta]", no_args_is_help=True
-)
+app = typer.Typer(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = Console()
 
 config = Config()
@@ -188,19 +186,31 @@ def push_image(
 @app.command("list")
 def list_images(
     output: str = typer.Option("table", "--output", "-o", help="Output format (table or json)"),
+    all_images: bool = typer.Option(
+        False, "--all", "-a", help="Show all accessible images (personal + team)"
+    ),
 ):
     """
     List all images you've pushed to Prime Intellect registry.
 
+    By default, shows images in the current context (personal or team).
+    Use --all to show all accessible images including team images.
+
     Examples:
         prime images list
+        prime images list --all
         prime images list --output json
     """
     validate_output_format(output, console)
     try:
         client = APIClient()
 
-        response = client.request("GET", "/images")
+        # Build query params
+        params = {}
+        if config.team_id and not all_images:
+            params["teamId"] = config.team_id
+
+        response = client.request("GET", "/images", params=params if params else None)
         images = response.get("data", [])
 
         if not images:
@@ -213,8 +223,15 @@ def list_images(
             return
 
         # Table output
-        table = Table(title="Your Docker Images")
+        title = "Your Docker Images"
+        if config.team_id and not all_images:
+            title = f"Team Docker Images (team: {config.team_id})"
+        elif all_images:
+            title = "All Accessible Docker Images"
+
+        table = Table(title=title)
         table.add_column("Image Reference", style="cyan")
+        table.add_column("Owner", justify="center")
         table.add_column("Status", justify="center")
         table.add_column("Size", justify="right")
         table.add_column("Created", style="dim")
@@ -235,6 +252,13 @@ def list_images(
             else:
                 status_display = f"[dim]{status}[/dim]"
 
+            # Owner type
+            owner_type = img.get("ownerType", "personal")
+            if owner_type == "team":
+                owner_display = "[blue]Team[/blue]"
+            else:
+                owner_display = "[dim]Personal[/dim]"
+
             # Size
             size_mb = ""
             if img.get("sizeBytes"):
@@ -250,13 +274,14 @@ def list_images(
             except Exception:
                 date_str = img.get("pushedAt") or img.get("createdAt", "")
 
-            # Image reference
+            # Image reference - prefer displayRef for user-friendly format
             image_ref = (
-                img.get("fullImagePath")
+                img.get("displayRef")
+                or img.get("fullImagePath")
                 or f"{img.get('imageName', 'unknown')}:{img.get('imageTag', 'latest')}"
             )
 
-            table.add_row(image_ref, status_display, size_mb, date_str)
+            table.add_row(image_ref, owner_display, status_display, size_mb, date_str)
 
         console.print()
         console.print(table)
@@ -275,16 +300,21 @@ def list_images(
 @app.command("delete")
 def delete_image(
     image_reference: str = typer.Argument(
-        ..., help="Image reference to delete (e.g., 'myapp:v1.0.0')"
+        ...,
+        help="Image reference to delete (e.g., 'myapp:v1.0.0' or 'team-{teamId}/myapp:v1.0.0')",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ):
     """
     Delete an image from your registry.
 
+    For team images, you can use the team-prefixed format directly.
+    Only the image creator or team admins can delete team images.
+
     Examples:
         prime images delete myapp:v1.0.0
         prime images delete myapp:latest --yes
+        prime images delete team-abc123/myapp:v1.0.0
     """
     try:
         # Parse image reference
@@ -294,9 +324,18 @@ def delete_image(
             )
             raise typer.Exit(1)
 
+        # Check for team-prefixed format: team-{teamId}/imagename:tag
+        team_id = config.team_id
+        if "/" in image_reference:
+            namespace, rest = image_reference.split("/", 1)
+            if namespace.startswith("team-"):
+                # Extract team ID from the reference
+                team_id = namespace[5:]  # Remove "team-" prefix
+                image_reference = rest
+
         image_name, image_tag = image_reference.rsplit(":", 1)
 
-        context = f" (team: {config.team_id})" if config.team_id else ""
+        context = f" (team: {team_id})" if team_id else ""
         if not yes:
             msg = f"Are you sure you want to delete {image_name}:{image_tag}{context}?"
             confirm = typer.confirm(msg)
@@ -307,8 +346,8 @@ def delete_image(
         client = APIClient()
 
         params = {}
-        if config.team_id:
-            params["teamId"] = config.team_id
+        if team_id:
+            params["teamId"] = team_id
 
         client.request("DELETE", f"/images/{image_name}/{image_tag}", params=params)
         console.print(f"[green]✓[/green] Deleted {image_name}:{image_tag}{context}")
@@ -320,7 +359,10 @@ def delete_image(
         if "404" in str(e):
             console.print(f"[red]Error: Image {image_reference} not found[/red]")
         elif "403" in str(e):
-            console.print("[red]Error: You don't have permission to delete this image[/red]")
+            console.print(
+                "[red]Error: You don't have permission to delete this image. "
+                "Only the image creator or team admins can delete team images.[/red]"
+            )
         else:
             console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)

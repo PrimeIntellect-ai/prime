@@ -316,14 +316,10 @@ def delete_image(
         prime images delete myapp:latest --yes
         prime images delete team-abc123/myapp:v1.0.0
     """
-    try:
-        # Parse image reference
-        if ":" not in image_reference:
-            console.print(
-                "[red]Error: Image reference must include a tag (e.g., myapp:latest)[/red]"
-            )
-            raise typer.Exit(1)
+    # Store original input for error messages
+    original_reference = image_reference
 
+    try:
         # Check for team-prefixed format: team-{teamId}/imagename:tag
         team_id = config.team_id
         if "/" in image_reference:
@@ -332,6 +328,13 @@ def delete_image(
                 # Extract team ID from the reference
                 team_id = namespace[5:]  # Remove "team-" prefix
                 image_reference = rest
+
+        # Validate image reference has a tag (after team-prefix parsing)
+        if ":" not in image_reference:
+            console.print(
+                "[red]Error: Image reference must include a tag (e.g., myapp:latest)[/red]"
+            )
+            raise typer.Exit(1)
 
         image_name, image_tag = image_reference.rsplit(":", 1)
 
@@ -345,9 +348,7 @@ def delete_image(
 
         client = APIClient()
 
-        params = {}
-        if team_id:
-            params["teamId"] = team_id
+        params = {"teamId": team_id} if team_id else None
 
         client.request("DELETE", f"/images/{image_name}/{image_tag}", params=params)
         console.print(f"[green]✓[/green] Deleted {image_name}:{image_tag}{context}")
@@ -357,7 +358,7 @@ def delete_image(
         raise typer.Exit(1)
     except APIError as e:
         if "404" in str(e):
-            console.print(f"[red]Error: Image {image_reference} not found[/red]")
+            console.print(f"[red]Error: Image {original_reference} not found[/red]")
         elif "403" in str(e):
             console.print(
                 "[red]Error: You don't have permission to delete this image. "

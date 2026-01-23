@@ -202,6 +202,30 @@ class TestLoadEvalDirectory:
         assert "Warning" in captured.out
         assert "Skipped" in captured.out
 
+    def test_skips_non_dict_jsonl_lines_with_warning(self, tmp_path, capsys):
+        """Skips non-dict JSON values in results.jsonl and warns"""
+        metadata = {"env": "test", "model": "test-model"}
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+
+        # Valid JSON but non-dict values (int, null, bool, string)
+        results_content = (
+            '{"id": 0, "reward": 1.0}\n123\nnull\ntrue\n"string"\n{"id": 1, "reward": 0.5}'
+        )
+        (tmp_path / "results.jsonl").write_text(results_content)
+
+        data = _load_eval_directory(tmp_path)
+
+        # Should only have 2 valid dict results
+        assert len(data["results"]) == 2
+        assert data["results"][0]["example_id"] == 0
+        assert data["results"][1]["example_id"] == 1
+
+        # Should print a warning about non-dict values
+        captured = capsys.readouterr()
+        assert "Warning" in captured.out
+        assert "Skipped 4" in captured.out
+        assert "expected dict" in captured.out
+
     def test_converts_id_to_example_id(self, tmp_path):
         """Converts 'id' field to 'example_id' in results"""
         metadata = {"env": "test", "model": "test-model"}

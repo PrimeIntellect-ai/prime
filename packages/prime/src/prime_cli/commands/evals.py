@@ -13,6 +13,7 @@ from typer.core import TyperGroup
 
 from ..client import APIClient
 from ..utils import output_data_as_json
+from ..utils.eval_push import load_results_jsonl
 from .env import run_eval
 
 console = Console()
@@ -201,26 +202,11 @@ def _load_eval_directory(directory: Path) -> dict:
             f"Missing required 'env_id' or 'model' field in {directory / 'metadata.json'}"
         )
 
-    results = []
-    skipped_lines = []
-    with open(directory / "results.jsonl") as f:
-        for line_num, line in enumerate(f, start=1):
-            if line := line.strip():
-                try:
-                    sample = json.loads(line)
-                    if "id" in sample and "example_id" not in sample:
-                        sample["example_id"] = sample["id"]
-                    results.append(sample)
-                except json.JSONDecodeError:
-                    skipped_lines.append(line_num)
+    results = load_results_jsonl(directory / "results.jsonl")
 
-    if skipped_lines:
-        lines_preview = skipped_lines[:5]
-        suffix = "..." if len(skipped_lines) > 5 else ""
-        console.print(
-            f"[yellow]Warning: Skipped {len(skipped_lines)} invalid JSON "
-            f"line(s) in results.jsonl: {lines_preview}{suffix}[/yellow]"
-        )
+    for sample in results:
+        if "id" in sample and "example_id" not in sample:
+            sample["example_id"] = sample["id"]
 
     avg_pattern = re.compile(r"^avg_(.+)$")
     metrics = {}

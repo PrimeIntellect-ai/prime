@@ -518,11 +518,13 @@ def delete(
 
                 if only_mine:
                     current_user_id = config.user_id
-                    sandboxes_to_delete = [
-                        s
-                        for s in all_sandboxes
-                        if (not current_user_id or not s.user_id or s.user_id == current_user_id)
-                    ]
+                    if not current_user_id:
+                        console.print(
+                            "[red]Error:[/red] Cannot filter by user - no user_id configured. "
+                            "Use --all-users to delete all sandboxes, or configure your user_id."
+                        )
+                        raise typer.Exit(1)
+                    sandboxes_to_delete = [s for s in all_sandboxes if s.user_id == current_user_id]
                 else:
                     sandboxes_to_delete = all_sandboxes
 

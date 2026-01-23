@@ -13,6 +13,43 @@ from .env_metadata import find_environment_metadata
 console = Console()
 
 
+def load_results_jsonl(path: Path) -> list[dict]:
+    """
+    Load and parse a results.jsonl file, skipping invalid lines with warnings.
+
+    Args:
+        path: Path to the results.jsonl file
+
+    Returns:
+        List of valid dict samples from the file
+    """
+    results = []
+    skipped = []
+
+    with open(path, encoding="utf-8") as f:
+        for line_num, line in enumerate(f, start=1):
+            if not line.strip():
+                continue
+            try:
+                sample = json.loads(line)
+                if not isinstance(sample, dict):
+                    skipped.append((line_num, f"expected dict, got {type(sample).__name__}"))
+                    continue
+                results.append(sample)
+            except json.JSONDecodeError:
+                skipped.append((line_num, "invalid JSON"))
+
+    if skipped:
+        preview = [f"line {num}: {reason}" for num, reason in skipped[:5]]
+        suffix = ", ..." if len(skipped) > 5 else ""
+        console.print(
+            f"[yellow]Warning: Skipped {len(skipped)} invalid lines in results.jsonl "
+            f"({', '.join(preview)}{suffix})[/yellow]"
+        )
+
+    return results
+
+
 def push_eval_results_to_hub(
     env_name: str,
     model: str,
@@ -69,11 +106,7 @@ def push_eval_results_to_hub(
     with open(metadata_path, encoding="utf-8") as f:
         metadata = json.load(f)
 
-    results_samples = []
-    with open(results_path, encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                results_samples.append(json.loads(line))
+    results_samples = load_results_jsonl(results_path)
 
     resolved_env_slug = None
     resolved_env_id = None

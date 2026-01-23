@@ -45,7 +45,7 @@ prime availability list
 ## Features
 
 - **Environments** - Access hundreds of verified environments on our community hub
-- **Evaluations** - Push and manage evaluation results (supports JSON and verifiers format)
+- **Evaluations** - Push and manage evaluation results
 - **GPU Resource Management** - Query and filter available GPU resources
 - **Pod Management** - Create, monitor, and terminate compute pods
 - **Sandboxes** - Easily run AI-generated code in the cloud
@@ -164,14 +164,14 @@ prime pods ssh <pod-id>
 
 ### Evaluations
 
-Push and manage evaluation results to the Environments hub. Supports verifiers format and JSON format.
+Push and manage evaluation results to the Environments Hub.
 
 ```bash
 # Auto-discover and push evaluations from current directory
 prime eval push
 
-# Push specific directory
-prime eval push examples/verifiers_example
+# Push specific eval directory (verifiers format)
+prime eval push outputs/evals/gsm8k--gpt-4/abc123
 
 # List all evaluations
 prime eval list
@@ -182,8 +182,6 @@ prime eval get <eval-id>
 # View evaluation samples
 prime eval samples <eval-id>
 ```
-
-See [examples/README.md](./examples/README.md) for detailed format documentation.
 
 ### Team Management
 

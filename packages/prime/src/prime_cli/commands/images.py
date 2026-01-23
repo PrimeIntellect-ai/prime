@@ -326,8 +326,23 @@ def delete_image(
             namespace, rest = image_reference.split("/", 1)
             if namespace.startswith("team-"):
                 # Extract team ID from the reference
-                team_id = namespace[5:]  # Remove "team-" prefix
+                extracted_team_id = namespace[5:]  # Remove "team-" prefix
+                if not extracted_team_id:
+                    console.print(
+                        "[red]Error: Invalid team image reference. "
+                        "Expected format: team-{teamId}/imagename:tag[/red]"
+                    )
+                    raise typer.Exit(1)
+                team_id = extracted_team_id
                 image_reference = rest
+            else:
+                # Unrecognized namespace (not team-prefixed)
+                console.print(
+                    f"[red]Error: Unrecognized image namespace '{namespace}'. "
+                    "Use 'imagename:tag' for personal images or "
+                    "'team-{{teamId}}/imagename:tag' for team images.[/red]"
+                )
+                raise typer.Exit(1)
 
         # Validate image reference has a tag (after team-prefix parsing)
         if ":" not in image_reference:

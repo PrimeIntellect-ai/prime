@@ -1126,8 +1126,6 @@ class AsyncSandboxClient:
             except Exception as e:
                 raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
-        # Should not reach here, but handle edge case
-
     async def start_background_job(
         self,
         sandbox_id: str,

@@ -58,8 +58,8 @@ GATEWAY_RETRYABLE_EXCEPTIONS = (
 )
 
 # Max retries for transient 409 errors
-MAX_409_RETRIES = 3
-RETRY_409_BASE_DELAY = 0.15  # 150ms, 300ms, 600ms with exponential backoff
+MAX_409_RETRIES = 4
+RETRY_409_BASE_DELAY = 0.25  # 250ms, 500ms, 1000ms, 2000ms with exponential backoff
 
 # Retry decorator for gateway requests
 _gateway_retry = retry(
@@ -362,12 +362,18 @@ class SandboxClient:
     ) -> bool:
         """Check if a 409 error should be retried.
 
-        Returns True and sleeps if should retry, raises SandboxNotRunningError otherwise.
+        Returns True and sleeps if should retry, raises appropriate error otherwise.
         """
         ctx = self._get_sandbox_error_context(sandbox_id)
-        if ctx["status"] == "RUNNING" and attempt < MAX_409_RETRIES - 1:
-            time.sleep(RETRY_409_BASE_DELAY * (2**attempt))
-            return True
+        if ctx["status"] == "RUNNING":
+            if attempt < MAX_409_RETRIES - 1:
+                time.sleep(RETRY_409_BASE_DELAY * (2**attempt))
+                return True
+            raise APIError(
+                f"Sandbox {sandbox_id} returned 409 after {MAX_409_RETRIES} retries. "
+                "This may be a transient DNS or gateway issue. Please retry."
+            ) from error
+        # Sandbox is not running
         _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
 
     def clear_auth_cache(self) -> None:
@@ -975,12 +981,18 @@ class AsyncSandboxClient:
     ) -> bool:
         """Check if a 409 error should be retried (async).
 
-        Returns True and sleeps if should retry, raises SandboxNotRunningError otherwise.
+        Returns True and sleeps if should retry, raises appropriate error otherwise.
         """
         ctx = await self._get_sandbox_error_context(sandbox_id)
-        if ctx["status"] == "RUNNING" and attempt < MAX_409_RETRIES - 1:
-            await asyncio.sleep(RETRY_409_BASE_DELAY * (2**attempt))
-            return True
+        if ctx["status"] == "RUNNING":
+            if attempt < MAX_409_RETRIES - 1:
+                await asyncio.sleep(RETRY_409_BASE_DELAY * (2**attempt))
+                return True
+            raise APIError(
+                f"Sandbox {sandbox_id} returned 409 after {MAX_409_RETRIES} retries. "
+                "This may be a transient DNS or gateway issue. Please retry."
+            ) from error
+        # Sandbox is not running
         _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
 
     def clear_auth_cache(self) -> None:

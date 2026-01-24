@@ -361,14 +361,14 @@ class SandboxClient:
         command: Optional[str] = None,
     ) -> bool:
         """Check if a 409 error should be retried.
-        Returns True if should retry, raises SandboxNotRunningError if not.
+
+        Returns True and sleeps if should retry, raises SandboxNotRunningError otherwise.
         """
         ctx = self._get_sandbox_error_context(sandbox_id)
         if ctx["status"] == "RUNNING" and attempt < MAX_409_RETRIES - 1:
             time.sleep(RETRY_409_BASE_DELAY * (2**attempt))
             return True
         _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
-        return False
 
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
@@ -513,8 +513,6 @@ class SandboxClient:
                 ) from e
             except Exception as e:
                 raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
-
-        raise APIError("Unexpected error in execute_command retry loop")
 
     def start_background_job(
         self,
@@ -756,8 +754,6 @@ class SandboxClient:
             except Exception as e:
                 raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
 
-        raise APIError("Unexpected error in upload_file retry loop")
-
     def upload_bytes(
         self,
         sandbox_id: str,
@@ -801,8 +797,6 @@ class SandboxClient:
                 raise APIError(f"Upload failed: {error_details}")
             except Exception as e:
                 raise APIError(f"Upload failed: {str(e)}")
-
-        raise APIError("Unexpected error in upload_bytes retry loop")
 
     def download_file(
         self,
@@ -980,14 +974,14 @@ class AsyncSandboxClient:
         command: Optional[str] = None,
     ) -> bool:
         """Check if a 409 error should be retried (async).
-        Returns True if should retry, raises SandboxNotRunningError if not.
+
+        Returns True and sleeps if should retry, raises SandboxNotRunningError otherwise.
         """
         ctx = await self._get_sandbox_error_context(sandbox_id)
         if ctx["status"] == "RUNNING" and attempt < MAX_409_RETRIES - 1:
             await asyncio.sleep(RETRY_409_BASE_DELAY * (2**attempt))
             return True
         _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
-        return False
 
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
@@ -1133,7 +1127,6 @@ class AsyncSandboxClient:
                 raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
         # Should not reach here, but handle edge case
-        raise APIError("Unexpected error in execute_command retry loop")
 
     async def start_background_job(
         self,
@@ -1394,8 +1387,6 @@ class AsyncSandboxClient:
             except Exception as e:
                 raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
 
-        raise APIError("Unexpected error in upload_file retry loop")
-
     async def upload_bytes(
         self,
         sandbox_id: str,
@@ -1440,8 +1431,6 @@ class AsyncSandboxClient:
                 raise APIError(f"Upload failed: {error_details}")
             except Exception as e:
                 raise APIError(f"Upload failed: {str(e)}")
-
-        raise APIError("Unexpected error in upload_bytes retry loop")
 
     async def download_file(
         self,

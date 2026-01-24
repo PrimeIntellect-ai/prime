@@ -1530,18 +1530,27 @@ def install(
             simple_index_url = details.get("simple_index_url")
             wheel_url = process_wheel_url(details.get("wheel_url"))
 
-            # Check if this is a private environment
+            # Check if this is a private environment - pull, build, and install from cache
             if not simple_index_url and not wheel_url and details.get("visibility") == "PRIVATE":
-                skipped_envs.append((f"{env_id}@{target_version}", "Private"))
-                console.print(
-                    f"[yellow]⚠ Skipping {env_id}@{target_version}: Private environment[/yellow]"
-                )
-                console.print(
-                    "[dim]  Direct installation not available for private environments.[/dim]\n"
-                    "[dim]  Please use one of these alternatives:[/dim]\n"
-                    "   1. Use 'prime env pull' to download and install locally\n"
-                    "   2. Make the environment public to enable direct installation"
-                )
+                console.print("[dim]Private environment detected, pulling and building...[/dim]")
+                try:
+                    wheel_path = _pull_and_build_private_env(
+                        client, owner, name, target_version, details
+                    )
+                    if with_tool == "uv":
+                        cmd_parts = ["uv", "pip", "install", str(wheel_path)]
+                    else:
+                        cmd_parts = ["pip", "install", str(wheel_path)]
+                    if not no_upgrade:
+                        cmd_parts.insert(-1, "--upgrade")
+                    installable_envs.append((cmd_parts, env_id, target_version, name))
+                    console.print(f"[green]✓ Built {env_id}@{target_version}[/green]")
+                except Exception as e:
+                    failed_envs.append((f"{env_id}@{target_version}", f"Failed to build: {e}"))
+                    console.print(
+                        f"[red]✗ Failed to build private environment {env_id}@{target_version}: "
+                        f"{e}[/red]"
+                    )
                 continue
             elif not simple_index_url and not wheel_url:
                 skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
@@ -1928,6 +1937,126 @@ def delete(
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
         raise typer.Exit(1)
+
+
+def _get_env_cache_dir() -> Path:
+    """Get the cache directory for private environments."""
+    cache_dir = Path.home() / ".prime" / "envs"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _pull_and_build_private_env(
+    client: APIClient,
+    owner: str,
+    name: str,
+    version: str,
+    details: Dict[str, Any],
+) -> Path:
+    """Pull a private environment, build it, and return the wheel path.
+
+    Args:
+        client: API client with authentication
+        owner: Environment owner
+        name: Environment name
+        version: Environment version
+        details: Environment details from API
+
+    Returns:
+        Path to the built wheel file
+
+    Raises:
+        Exception: If download, extraction, or build fails
+    """
+    download_url = details.get("package_url")
+    if not download_url:
+        raise ValueError("No downloadable package found for private environment")
+
+    # Create versioned cache path: ~/.prime/envs/{owner}/{name}/{version}
+    cache_dir = _get_env_cache_dir()
+    env_cache_path = cache_dir / owner / name / version
+    wheel_cache_path = env_cache_path / "dist"
+
+    # Check if wheel already exists in cache
+    if wheel_cache_path.exists():
+        existing_wheels = list(wheel_cache_path.glob("*.whl"))
+        if existing_wheels:
+            console.print(f"[dim]Using cached wheel at {existing_wheels[0]}[/dim]")
+            return existing_wheels[0]
+
+    # Create the directory
+    env_cache_path.mkdir(parents=True, exist_ok=True)
+
+    # Download with authentication
+    temp_file_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+            temp_file_path = tmp.name
+            headers = {}
+            if client.api_key:
+                headers["Authorization"] = f"Bearer {client.api_key}"
+
+            with httpx.stream("GET", download_url, headers=headers, timeout=60.0) as resp:
+                resp.raise_for_status()
+                with open(tmp.name, "wb") as f:
+                    for chunk in resp.iter_bytes(chunk_size=8192):
+                        f.write(chunk)
+
+            # Extract to cache path
+            with tarfile.open(tmp.name, "r:gz") as tar:
+                tar.extractall(env_cache_path)
+
+    finally:
+        if temp_file_path and Path(temp_file_path).exists():
+            Path(temp_file_path).unlink()
+
+    # Build the wheel
+    console.print("[dim]Building wheel...[/dim]")
+    try:
+        if shutil.which("uv"):
+            subprocess.run(
+                ["uv", "build", "--wheel", "--out-dir", "dist"],
+                cwd=env_cache_path,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        else:
+            subprocess.run(
+                [sys.executable, "-m", "build", "--wheel", str(env_cache_path)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to build wheel: {e.stderr}") from e
+
+    # Find the built wheel
+    wheels = list(wheel_cache_path.glob("*.whl"))
+    if not wheels:
+        raise RuntimeError("No wheel file found after build")
+
+    wheel_path = wheels[0]
+
+    # Create metadata file for tracking
+    try:
+        prime_dir = env_cache_path / ".prime"
+        prime_dir.mkdir(exist_ok=True)
+        metadata_path = prime_dir / ".env-metadata.json"
+        env_metadata = {
+            "environment_id": details.get("id"),
+            "owner": owner,
+            "name": name,
+            "version": version,
+            "cached_at": datetime.now().isoformat(),
+            "wheel_path": str(wheel_path),
+        }
+        with open(metadata_path, "w") as f:
+            json.dump(env_metadata, f, indent=2)
+    except Exception:
+        pass  # Non-critical if metadata save fails
+
+    return wheel_path
 
 
 def _is_environment_installed(env_name: str, required_version: Optional[str] = None) -> bool:

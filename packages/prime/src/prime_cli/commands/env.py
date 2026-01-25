@@ -1534,8 +1534,12 @@ def install(
             if not simple_index_url and not wheel_url and details.get("visibility") == "PRIVATE":
                 console.print("[dim]Private environment detected, pulling and building...[/dim]")
                 try:
+                    # Resolve "latest" to actual version from API response
+                    resolved_version = (
+                        details.get("semantic_version") or details.get("version") or target_version
+                    )
                     wheel_path = _pull_and_build_private_env(
-                        client, owner, name, target_version, details
+                        client, owner, name, resolved_version, details
                     )
                     if with_tool == "uv":
                         cmd_parts = ["uv", "pip", "install", str(wheel_path)]
@@ -1543,8 +1547,8 @@ def install(
                         cmd_parts = ["pip", "install", str(wheel_path)]
                     if not no_upgrade:
                         cmd_parts.insert(-1, "--upgrade")
-                    installable_envs.append((cmd_parts, env_id, target_version, name))
-                    console.print(f"[green]✓ Built {env_id}@{target_version}[/green]")
+                    installable_envs.append((cmd_parts, env_id, resolved_version, name))
+                    console.print(f"[green]✓ Built {env_id}@{resolved_version}[/green]")
                 except Exception as e:
                     failed_envs.append((f"{env_id}@{target_version}", f"Failed to build: {e}"))
                     console.print(

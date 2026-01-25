@@ -1943,6 +1943,38 @@ def delete(
         raise typer.Exit(1)
 
 
+def _safe_tar_extract(tar: tarfile.TarFile, dest_path: Path) -> None:
+    """Safely extract tar archive, preventing path traversal attacks.
+
+    Args:
+        tar: Open tarfile object
+        dest_path: Destination directory for extraction
+
+    Raises:
+        ValueError: If archive contains unsafe paths (absolute or with ..)
+    """
+    dest_path = dest_path.resolve()
+
+    for member in tar.getmembers():
+        member_path = Path(member.name)
+
+        # Block absolute paths
+        if member_path.is_absolute():
+            raise ValueError(f"Refusing to extract absolute path: {member.name}")
+
+        # Block path traversal
+        if ".." in member_path.parts:
+            raise ValueError(f"Refusing to extract path with '..': {member.name}")
+
+        # Verify resolved path is within destination
+        target_path = (dest_path / member_path).resolve()
+        if not target_path.is_relative_to(dest_path):
+            raise ValueError(f"Path escapes destination directory: {member.name}")
+
+    # All members validated, safe to extract
+    tar.extractall(dest_path)
+
+
 def _get_env_cache_dir() -> Path:
     """Get the cache directory for private environments."""
     cache_dir = Path.home() / ".prime" / "envs"
@@ -2006,9 +2038,9 @@ def _pull_and_build_private_env(
                     for chunk in resp.iter_bytes(chunk_size=8192):
                         f.write(chunk)
 
-            # Extract to cache path
+            # Extract to cache path (with path traversal protection)
             with tarfile.open(tmp.name, "r:gz") as tar:
-                tar.extractall(env_cache_path)
+                _safe_tar_extract(tar, env_cache_path)
 
     finally:
         if temp_file_path and Path(temp_file_path).exists():

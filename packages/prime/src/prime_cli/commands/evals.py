@@ -547,10 +547,8 @@ app.add_typer(subcommands_app, name="")
     "run",
     help="Run an evaluation with API models (default provider = Prime Inference)",
     no_args_is_help=True,
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def run_eval_cmd(
-    ctx: typer.Context,
     environment: str = typer.Argument(
         ...,
         help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/wordle')",

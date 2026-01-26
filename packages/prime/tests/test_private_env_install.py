@@ -25,8 +25,10 @@ def temp_home(tmp_path: Path):
         capture_output=True,
     )
 
-    # Restore HOME
-    if original_home:
+    # Restore HOME to original state
+    if original_home is None:
+        del os.environ["HOME"]
+    else:
         os.environ["HOME"] = original_home
 
 

@@ -169,6 +169,21 @@ def compute_content_hash(env_path: Path) -> str:
     return content_hasher.hexdigest()
 
 
+def _format_ci_status(status: Optional[str]) -> Text:
+    """Format CI status with color coding."""
+    if not status:
+        return Text("-", style="dim")
+    status_colors = {
+        "SUCCESS": "green",
+        "FAILED": "red",
+        "RUNNING": "yellow",
+        "PENDING": "yellow",
+        "CANCELLED": "dim",
+    }
+    color = status_colors.get(status.upper(), "white")
+    return Text(status, style=color)
+
+
 @app.command("list")
 def list_cmd(
     limit: int = typer.Option(
@@ -180,9 +195,40 @@ def list_cmd(
         None, "--visibility", help="Filter by visibility (PUBLIC/PRIVATE)"
     ),
     output: str = typer.Option("table", "--output", help="Output format: table or json"),
+    search: Optional[str] = typer.Option(
+        None, "--search", "-s", help="Search by name or description"
+    ),
+    tag: Optional[List[str]] = typer.Option(
+        None, "--tag", "-t", help="Filter by tag (repeatable)"
+    ),
+    ci_status: Optional[str] = typer.Option(
+        None, "--ci-status", help="Filter by CI status (SUCCESS/FAILED/RUNNING/PENDING)"
+    ),
+    sort: str = typer.Option(
+        "created_at", "--sort", help="Sort by: name, created_at, updated_at"
+    ),
+    order: str = typer.Option("desc", "--order", help="Sort order: asc, desc"),
+    show_ci: bool = typer.Option(False, "--show-ci", help="Show CI status column"),
 ) -> None:
-    """List available verifiers environments"""
+    """List available verifiers environments
+
+    Examples:
+        prime env list --search "test"
+        prime env list --ci-status SUCCESS --show-ci
+        prime env list --tag ml --tag nlp
+        prime env list --sort name --order asc
+    """
     validate_output_format(output, console)
+
+    # Validate sort and order
+    if sort not in ("name", "created_at", "updated_at"):
+        console.print(
+            "[red]Error: --sort must be one of: name, created_at, updated_at[/red]"
+        )
+        raise typer.Exit(1)
+    if order.lower() not in ("asc", "desc"):
+        console.print("[red]Error: --order must be one of: asc, desc[/red]")
+        raise typer.Exit(1)
 
     try:
         client = APIClient(require_auth=False)
@@ -191,11 +237,21 @@ def list_cmd(
             "include_teams": True,
             "limit": limit,
             "offset": offset,
+            "sort_by": sort,
+            "sort_order": order,
         }
         if owner:
             params["owner"] = owner
         if visibility:
             params["visibility"] = visibility
+        if search:
+            params["search"] = search
+        if tag:
+            params["tags"] = tag
+        if ci_status:
+            params["ci_status"] = ci_status
+        if show_ci or ci_status:
+            params["include_ci_status"] = True
 
         result = client.get("/environmentshub/", params=params)
 
@@ -217,13 +273,17 @@ def list_cmd(
             for env in environments:
                 owner_name = env["owner"]["name"]
                 env_name = env["name"]
-                env_data.append(
-                    {
-                        "environment": f"{owner_name}/{env_name}",
-                        "description": env.get("description", ""),
-                        "visibility": env.get("visibility", ""),
-                    }
-                )
+                env_entry = {
+                    "environment": f"{owner_name}/{env_name}",
+                    "description": env.get("description", ""),
+                    "visibility": env.get("visibility", ""),
+                }
+                if show_ci or ci_status:
+                    env_entry["ci_status"] = env.get("latest_ci_status")
+                    env_entry["version"] = env.get("latest_version")
+                if env.get("tags"):
+                    env_entry["tags"] = env.get("tags")
+                env_data.append(env_entry)
 
             output_data = {
                 "environments": env_data,
@@ -238,14 +298,23 @@ def list_cmd(
             table.add_column("Environment", style="cyan")
             table.add_column("Description", style="green")
             table.add_column("Visibility", style="magenta")
+            if show_ci or ci_status:
+                table.add_column("Version", style="blue")
+                table.add_column("CI Status")
 
             for env in environments:
                 owner_name = env["owner"]["name"]
                 env_name = env["name"]
                 env_id = f"{owner_name}/{env_name}"
                 description = env.get("description", "")
-                visibility = env.get("visibility", "")
-                table.add_row(env_id, description, visibility)
+                vis = env.get("visibility", "")
+
+                if show_ci or ci_status:
+                    version = env.get("latest_version") or "-"
+                    ci_text = _format_ci_status(env.get("latest_ci_status"))
+                    table.add_row(env_id, description, vis, version, ci_text)
+                else:
+                    table.add_row(env_id, description, vis)
 
             console.print(table)
 
@@ -255,6 +324,151 @@ def list_cmd(
                 console.print(
                     f"\n[dim]Use --offset {next_offset} to see the next environments.[/dim]"
                 )
+
+    except APIError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+def _format_time_ago(dt: Optional[datetime]) -> str:
+    """Format a datetime as a human-readable time ago string."""
+    if not dt:
+        return "-"
+    now = datetime.utcnow()
+    if isinstance(dt, str):
+        # Parse ISO format string
+        dt = datetime.fromisoformat(dt.replace("Z", "+00:00").replace("+00:00", ""))
+    diff = now - dt
+    seconds = diff.total_seconds()
+    if seconds < 60:
+        return "just now"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{int(minutes)}m ago"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{int(hours)}h ago"
+    days = hours / 24
+    if days < 30:
+        return f"{int(days)}d ago"
+    return dt.strftime("%Y-%m-%d")
+
+
+def _format_duration(start: Optional[datetime], end: Optional[datetime]) -> str:
+    """Format duration between two datetimes."""
+    if not start:
+        return "-"
+    if not end:
+        return "running..."
+    if isinstance(start, str):
+        start = datetime.fromisoformat(start.replace("Z", "+00:00").replace("+00:00", ""))
+    if isinstance(end, str):
+        end = datetime.fromisoformat(end.replace("Z", "+00:00").replace("+00:00", ""))
+    diff = end - start
+    seconds = diff.total_seconds()
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{int(minutes)}m {int(seconds % 60)}s"
+    hours = minutes / 60
+    return f"{int(hours)}h {int(minutes % 60)}m"
+
+
+@app.command("status")
+def status_cmd(
+    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
+    output: str = typer.Option("table", "--output", help="Output format: table or json"),
+    job_limit: int = typer.Option(5, "--jobs", "-j", help="Number of recent jobs to show"),
+) -> None:
+    """Show CI/test status for an environment
+
+    Examples:
+        prime env status owner/my-env
+        prime env status owner/my-env --jobs 10
+        prime env status owner/my-env --output json
+    """
+    validate_output_format(output, console)
+
+    # Parse env_id
+    if "/" not in env_id:
+        console.print("[red]Error: Environment ID must be in format owner/name[/red]")
+        raise typer.Exit(1)
+
+    parts = env_id.split("/", 1)
+    if len(parts) != 2:
+        console.print("[red]Error: Environment ID must be in format owner/name[/red]")
+        raise typer.Exit(1)
+
+    owner_name, env_name = parts
+
+    try:
+        client = APIClient(require_auth=False)
+
+        result = client.get(
+            f"/environmentshub/{owner_name}/{env_name}/status",
+            params={"job_limit": job_limit},
+        )
+
+        data = result.get("data", result)
+
+        if output == "json":
+            output_data_as_json(data, console)
+        else:
+            # Header
+            console.print(f"\n[bold cyan]Environment:[/bold cyan] {owner_name}/{data.get('name', env_name)}")
+            if data.get("description"):
+                console.print(f"[dim]Description:[/dim] {data['description']}")
+            console.print(f"[dim]Visibility:[/dim] {data.get('visibility', 'UNKNOWN')}")
+
+            # Latest Version section
+            console.print("\n[bold]Latest Version:[/bold]")
+            latest_version = data.get("latest_version")
+            if latest_version:
+                version_str = latest_version.get("semantic_version") or latest_version.get("content_hash", "")[:8]
+                console.print(f"  Version: {version_str}")
+                console.print(f"  Hash: {latest_version.get('content_hash', '-')[:12]}")
+                ci_status = latest_version.get("ci_status")
+                ci_text = _format_ci_status(ci_status) if ci_status else Text("-", style="dim")
+                created_at = latest_version.get("created_at")
+                time_ago = _format_time_ago(datetime.fromisoformat(created_at.replace("Z", "+00:00").replace("+00:00", "")) if created_at else None)
+                console.print(f"  CI Status: ", end="")
+                console.print(ci_text, end="")
+                console.print(f" ({time_ago})")
+            else:
+                console.print("  [dim]No versions found[/dim]")
+
+            # Recent Jobs section
+            console.print("\n[bold]Recent Jobs:[/bold]")
+            recent_jobs = data.get("recent_jobs", [])
+            if recent_jobs:
+                job_table = Table(show_header=True, header_style="bold")
+                job_table.add_column("ID", style="dim", max_width=10)
+                job_table.add_column("Type")
+                job_table.add_column("Status")
+                job_table.add_column("Started")
+                job_table.add_column("Duration")
+
+                for job in recent_jobs:
+                    job_id = job.get("id", "")[:10] + "..."
+                    job_type = job.get("job_type", "-")
+                    status_text = _format_ci_status(job.get("status"))
+                    started_at = job.get("started_at")
+                    started_str = _format_time_ago(datetime.fromisoformat(started_at.replace("Z", "+00:00").replace("+00:00", "")) if started_at else None)
+                    duration = _format_duration(
+                        datetime.fromisoformat(started_at.replace("Z", "+00:00").replace("+00:00", "")) if started_at else None,
+                        datetime.fromisoformat(job.get("completed_at").replace("Z", "+00:00").replace("+00:00", "")) if job.get("completed_at") else None,
+                    )
+                    job_table.add_row(job_id, job_type, status_text, started_str, duration)
+
+                console.print(job_table)
+            else:
+                console.print("  [dim]No jobs found[/dim]")
+
+            console.print()
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")

@@ -1534,18 +1534,9 @@ def install(
             if not simple_index_url and not wheel_url and details.get("visibility") == "PRIVATE":
                 console.print("[dim]Private environment detected, pulling and building...[/dim]")
                 try:
-                    # Resolve "latest" to actual version from API response
-                    # Try multiple possible fields where version might be stored
-                    metadata = details.get("metadata") or {}
-                    resolved_version = (
-                        details.get("semantic_version")
-                        or details.get("version")
-                        or metadata.get("semantic_version")
-                        or metadata.get("version")
-                        or target_version
-                    )
-                    wheel_path = _pull_and_build_private_env(
-                        client, owner, name, resolved_version, details
+                    # Pull, build, and get actual version (resolves "latest" from pyproject.toml)
+                    wheel_path, resolved_version = _pull_and_build_private_env(
+                        client, owner, name, target_version, details
                     )
                     if with_tool == "uv":
                         cmd_parts = ["uv", "pip", "install", str(wheel_path)]
@@ -2023,24 +2014,36 @@ def _validate_path_component(component: str, component_name: str) -> None:
         raise ValueError(f"{component_name} cannot contain null bytes")
 
 
+def _get_version_from_pyproject(env_path: Path) -> Optional[str]:
+    """Extract version from pyproject.toml in the environment directory."""
+    pyproject_path = env_path / "pyproject.toml"
+    if not pyproject_path.exists():
+        return None
+    try:
+        pyproject_data = toml.load(pyproject_path)
+        return pyproject_data.get("project", {}).get("version")
+    except Exception:
+        return None
+
+
 def _pull_and_build_private_env(
     client: APIClient,
     owner: str,
     name: str,
     version: str,
     details: Dict[str, Any],
-) -> Path:
-    """Pull a private environment, build it, and return the wheel path.
+) -> Tuple[Path, str]:
+    """Pull a private environment, build it, and return the wheel path and resolved version.
 
     Args:
         client: API client with authentication
         owner: Environment owner
         name: Environment name
-        version: Environment version
+        version: Environment version (may be "latest")
         details: Environment details from API
 
     Returns:
-        Path to the built wheel file
+        Tuple of (wheel_path, resolved_version)
 
     Raises:
         Exception: If download, extraction, or build fails
@@ -2054,29 +2057,27 @@ def _pull_and_build_private_env(
     if not download_url:
         raise ValueError("No downloadable package found for private environment")
 
-    # Create versioned cache path: ~/.prime/wheel_cache/{owner}/{name}/{version}
     cache_dir = _get_env_cache_dir()
-    env_cache_path = cache_dir / owner / name / version
 
-    # Final safety check: ensure resolved path is within cache directory
-    if not env_cache_path.resolve().is_relative_to(cache_dir.resolve()):
-        raise ValueError("Cache path escapes cache directory")
+    # If version is not "latest", check cache directly
+    if version != "latest":
+        env_cache_path = cache_dir / owner / name / version
+        if not env_cache_path.resolve().is_relative_to(cache_dir.resolve()):
+            raise ValueError("Cache path escapes cache directory")
+        wheel_cache_path = env_cache_path / "dist"
+        if wheel_cache_path.exists():
+            existing_wheels = list(wheel_cache_path.glob("*.whl"))
+            if existing_wheels:
+                console.print(f"[dim]Using cached wheel at {existing_wheels[0]}[/dim]")
+                return existing_wheels[0], version
 
-    wheel_cache_path = env_cache_path / "dist"
-
-    # Check if wheel already exists in cache
-    if wheel_cache_path.exists():
-        existing_wheels = list(wheel_cache_path.glob("*.whl"))
-        if existing_wheels:
-            console.print(f"[dim]Using cached wheel at {existing_wheels[0]}[/dim]")
-            return existing_wheels[0]
-
-    # Create the directory
-    env_cache_path.mkdir(parents=True, exist_ok=True)
-
-    # Download with authentication
+    # Download to temp directory first to determine actual version
+    temp_extract_dir = None
     temp_file_path = None
     try:
+        temp_extract_dir = tempfile.mkdtemp(prefix="prime_env_")
+        temp_extract_path = Path(temp_extract_dir)
+
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             temp_file_path = tmp.name
             headers = {}
@@ -2089,13 +2090,36 @@ def _pull_and_build_private_env(
                     for chunk in resp.iter_bytes(chunk_size=8192):
                         f.write(chunk)
 
-            # Extract to cache path (with path traversal protection)
+            # Extract to temp path (with path traversal protection)
             with tarfile.open(tmp.name, "r:gz") as tar:
-                _safe_tar_extract(tar, env_cache_path)
+                _safe_tar_extract(tar, temp_extract_path)
+
+        # Get actual version from pyproject.toml
+        actual_version = _get_version_from_pyproject(temp_extract_path) or version
+        _validate_path_component(actual_version, "version")
+
+        # Now we know the real version - check if it's already cached
+        env_cache_path = cache_dir / owner / name / actual_version
+        if not env_cache_path.resolve().is_relative_to(cache_dir.resolve()):
+            raise ValueError("Cache path escapes cache directory")
+        wheel_cache_path = env_cache_path / "dist"
+
+        if wheel_cache_path.exists():
+            existing_wheels = list(wheel_cache_path.glob("*.whl"))
+            if existing_wheels:
+                console.print(f"[dim]Using cached wheel at {existing_wheels[0]}[/dim]")
+                return existing_wheels[0], actual_version
+
+        # Move extracted content to final cache location
+        env_cache_path.mkdir(parents=True, exist_ok=True)
+        for item in temp_extract_path.iterdir():
+            shutil.move(str(item), str(env_cache_path / item.name))
 
     finally:
         if temp_file_path and Path(temp_file_path).exists():
             Path(temp_file_path).unlink()
+        if temp_extract_dir and Path(temp_extract_dir).exists():
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
 
     # Build the wheel
     console.print("[dim]Building wheel...[/dim]")
@@ -2134,7 +2158,7 @@ def _pull_and_build_private_env(
             "environment_id": details.get("id"),
             "owner": owner,
             "name": name,
-            "version": version,
+            "version": actual_version,
             "cached_at": datetime.now().isoformat(),
             "wheel_path": str(wheel_path),
         }
@@ -2143,7 +2167,7 @@ def _pull_and_build_private_env(
     except Exception:
         pass  # Non-critical if metadata save fails
 
-    return wheel_path
+    return wheel_path, actual_version
 
 
 def _is_environment_installed(env_name: str, required_version: Optional[str] = None) -> bool:

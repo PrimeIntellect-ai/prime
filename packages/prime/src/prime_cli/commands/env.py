@@ -1950,19 +1950,28 @@ def delete(
 
 
 def _safe_tar_extract(tar: tarfile.TarFile, dest_path: Path) -> None:
-    """Safely extract tar archive, preventing path traversal attacks.
+    """Safely extract tar archive, preventing path traversal and symlink attacks.
 
     Args:
         tar: Open tarfile object
         dest_path: Destination directory for extraction
 
     Raises:
-        ValueError: If archive contains unsafe paths (absolute or with ..)
+        ValueError: If archive contains unsafe paths, symlinks, or hardlinks
     """
     dest_path = dest_path.resolve()
 
     for member in tar.getmembers():
         member_path = Path(member.name)
+
+        # Block symlinks - they can be used to write outside destination
+        # (e.g., symlink "evil" -> "/tmp", then file "evil/malicious.txt")
+        if member.issym():
+            raise ValueError(f"Refusing to extract symlink: {member.name}")
+
+        # Block hardlinks - they can also be used for attacks
+        if member.islnk():
+            raise ValueError(f"Refusing to extract hardlink: {member.name}")
 
         # Block absolute paths
         if member_path.is_absolute():
@@ -1988,6 +1997,32 @@ def _get_env_cache_dir() -> Path:
     return cache_dir
 
 
+def _validate_path_component(component: str, component_name: str) -> None:
+    """Validate a path component doesn't contain traversal sequences.
+
+    Args:
+        component: The path component to validate (owner, name, or version)
+        component_name: Name of the component for error messages
+
+    Raises:
+        ValueError: If component contains unsafe characters
+    """
+    if not component:
+        raise ValueError(f"{component_name} cannot be empty")
+
+    # Block path traversal sequences
+    if ".." in component:
+        raise ValueError(f"{component_name} cannot contain '..'")
+
+    # Block path separators
+    if "/" in component or "\\" in component:
+        raise ValueError(f"{component_name} cannot contain path separators")
+
+    # Block null bytes
+    if "\x00" in component:
+        raise ValueError(f"{component_name} cannot contain null bytes")
+
+
 def _pull_and_build_private_env(
     client: APIClient,
     owner: str,
@@ -2010,6 +2045,11 @@ def _pull_and_build_private_env(
     Raises:
         Exception: If download, extraction, or build fails
     """
+    # Validate path components to prevent directory traversal
+    _validate_path_component(owner, "owner")
+    _validate_path_component(name, "name")
+    _validate_path_component(version, "version")
+
     download_url = details.get("package_url")
     if not download_url:
         raise ValueError("No downloadable package found for private environment")
@@ -2017,6 +2057,11 @@ def _pull_and_build_private_env(
     # Create versioned cache path: ~/.prime/envs/{owner}/{name}/{version}
     cache_dir = _get_env_cache_dir()
     env_cache_path = cache_dir / owner / name / version
+
+    # Final safety check: ensure resolved path is within cache directory
+    if not env_cache_path.resolve().is_relative_to(cache_dir.resolve()):
+        raise ValueError("Cache path escapes cache directory")
+
     wheel_cache_path = env_cache_path / "dist"
 
     # Check if wheel already exists in cache

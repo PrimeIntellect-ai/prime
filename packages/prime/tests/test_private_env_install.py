@@ -216,6 +216,55 @@ except Exception as e:
         assert wheel_mtime_1 == wheel_mtime_2, "Wheel was rebuilt instead of reusing cache"
 
 
+class TestPathComponentValidation:
+    """Tests for path component validation (prevents cache directory escape)."""
+
+    def test_validate_blocks_double_dot(self):
+        """Test that '..' in path components is rejected."""
+        from prime_cli.commands.env import _validate_path_component
+
+        with pytest.raises(ValueError, match="cannot contain '\\.\\.'"):
+            _validate_path_component("..", "owner")
+
+        with pytest.raises(ValueError, match="cannot contain '\\.\\.'"):
+            _validate_path_component("foo/../bar", "name")
+
+    def test_validate_blocks_path_separators(self):
+        """Test that path separators in components are rejected."""
+        from prime_cli.commands.env import _validate_path_component
+
+        with pytest.raises(ValueError, match="path separators"):
+            _validate_path_component("foo/bar", "version")
+
+        with pytest.raises(ValueError, match="path separators"):
+            _validate_path_component("foo\\bar", "version")
+
+    def test_validate_blocks_empty(self):
+        """Test that empty components are rejected."""
+        from prime_cli.commands.env import _validate_path_component
+
+        with pytest.raises(ValueError, match="cannot be empty"):
+            _validate_path_component("", "owner")
+
+    def test_validate_blocks_null_bytes(self):
+        """Test that null bytes in components are rejected."""
+        from prime_cli.commands.env import _validate_path_component
+
+        with pytest.raises(ValueError, match="null bytes"):
+            _validate_path_component("foo\x00bar", "name")
+
+    def test_validate_allows_normal_components(self):
+        """Test that normal path components are allowed."""
+        from prime_cli.commands.env import _validate_path_component
+
+        # These should not raise
+        _validate_path_component("primeintellect", "owner")
+        _validate_path_component("my-environment", "name")
+        _validate_path_component("1.0.0", "version")
+        _validate_path_component("latest", "version")
+        _validate_path_component("v2.3.4-beta.1", "version")
+
+
 class TestSafeTarExtract:
     """Tests for tar extraction security (tar-slip prevention)."""
 
@@ -286,3 +335,47 @@ class TestSafeTarExtract:
 
         assert (dest / "file.txt").exists()
         assert (dest / "subdir" / "nested.txt").exists()
+
+    def test_safe_extract_blocks_symlinks(self, tmp_path: Path):
+        """Test that symlinks in tarball are rejected (prevents symlink attacks)."""
+        import tarfile
+
+        from prime_cli.commands.env import _safe_tar_extract
+
+        # Create a tarball with a symlink
+        tar_path = tmp_path / "malicious.tar.gz"
+        with tarfile.open(tar_path, "w:gz") as tar:
+            # Add a symlink pointing outside
+            info = tarfile.TarInfo(name="evil_link")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/tmp"
+            tar.addfile(info)
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+
+        with tarfile.open(tar_path, "r:gz") as tar:
+            with pytest.raises(ValueError, match="symlink"):
+                _safe_tar_extract(tar, dest)
+
+    def test_safe_extract_blocks_hardlinks(self, tmp_path: Path):
+        """Test that hardlinks in tarball are rejected."""
+        import tarfile
+
+        from prime_cli.commands.env import _safe_tar_extract
+
+        # Create a tarball with a hardlink
+        tar_path = tmp_path / "malicious.tar.gz"
+        with tarfile.open(tar_path, "w:gz") as tar:
+            # Add a hardlink
+            info = tarfile.TarInfo(name="evil_hardlink")
+            info.type = tarfile.LNKTYPE
+            info.linkname = "/etc/passwd"
+            tar.addfile(info)
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+
+        with tarfile.open(tar_path, "r:gz") as tar:
+            with pytest.raises(ValueError, match="hardlink"):
+                _safe_tar_extract(tar, dest)

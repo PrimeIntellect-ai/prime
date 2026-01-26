@@ -12,21 +12,12 @@ ENV_NAME = "private-reverse-text"
 
 
 @pytest.fixture
-def temp_prime_home(tmp_path: Path):
-    """Create a temporary .prime directory for cache isolation."""
-    prime_home = tmp_path / ".prime"
-    prime_home.mkdir()
-    return prime_home
-
-
-@pytest.fixture
-def clean_env_install(temp_prime_home: Path):
-    """Fixture that installs the private env and cleans up after."""
-    # Patch HOME so cache goes to temp directory
+def temp_home(tmp_path: Path):
+    """Temporarily set HOME to a temp directory for cache isolation."""
     original_home = os.environ.get("HOME")
-    os.environ["HOME"] = str(temp_prime_home.parent)
+    os.environ["HOME"] = str(tmp_path)
 
-    yield temp_prime_home
+    yield tmp_path
 
     # Cleanup: uninstall after tests
     subprocess.run(
@@ -46,10 +37,8 @@ class TestPrivateEnvInstall:
         not os.environ.get("PRIME_API_KEY"),
         reason="PRIME_API_KEY not set - required for private env access",
     )
-    def test_install_private_env_creates_cache(self, clean_env_install: Path):
+    def test_install_private_env_creates_cache(self, temp_home: Path):
         """Test that installing a private env creates the correct cache structure."""
-        temp_prime_home = clean_env_install
-
         # Install the private environment
         result = subprocess.run(
             ["uv", "run", "prime", "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
@@ -58,7 +47,7 @@ class TestPrivateEnvInstall:
             timeout=300,
             env={
                 **os.environ,
-                "HOME": str(temp_prime_home.parent),
+                "HOME": str(temp_home),
                 "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", ""),
             },
         )
@@ -68,9 +57,9 @@ class TestPrivateEnvInstall:
 
         assert result.returncode == 0, f"Install failed: {result.stderr}\n{result.stdout}"
 
-        # Verify cache structure: ~/.prime/envs/{owner}/{name}/{version}/
-        envs_cache = temp_prime_home / "envs"
-        assert envs_cache.exists(), "Cache directory ~/.prime/envs/ not created"
+        # Verify cache structure: ~/.prime/wheel_cache/{owner}/{name}/{version}/
+        envs_cache = temp_home / ".prime" / "wheel_cache"
+        assert envs_cache.exists(), "Cache directory ~/.prime/wheel_cache/ not created"
 
         owner_dir = envs_cache / ENV_OWNER
         assert owner_dir.exists(), f"Owner directory not created: {owner_dir}"
@@ -101,10 +90,8 @@ class TestPrivateEnvInstall:
         not os.environ.get("PRIME_API_KEY"),
         reason="PRIME_API_KEY not set - required for private env access",
     )
-    def test_installed_private_env_can_be_loaded(self, clean_env_install: Path):
+    def test_installed_private_env_can_be_loaded(self, temp_home: Path):
         """Test that an installed private env can be loaded by verifiers."""
-        temp_prime_home = clean_env_install
-
         # First install the environment
         install_result = subprocess.run(
             ["uv", "run", "prime", "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
@@ -113,7 +100,7 @@ class TestPrivateEnvInstall:
             timeout=300,
             env={
                 **os.environ,
-                "HOME": str(temp_prime_home.parent),
+                "HOME": str(temp_home),
                 "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", ""),
             },
         )
@@ -146,7 +133,7 @@ except Exception as e:
             timeout=60,
             env={
                 **os.environ,
-                "HOME": str(temp_prime_home.parent),
+                "HOME": str(temp_home),
                 "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", ""),
             },
         )
@@ -163,10 +150,8 @@ except Exception as e:
         not os.environ.get("PRIME_API_KEY"),
         reason="PRIME_API_KEY not set - required for private env access",
     )
-    def test_cached_wheel_is_reused(self, clean_env_install: Path):
+    def test_cached_wheel_is_reused(self, temp_home: Path):
         """Test that subsequent installs reuse the cached wheel."""
-        temp_prime_home = clean_env_install
-
         # First install
         result1 = subprocess.run(
             ["uv", "run", "prime", "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
@@ -175,14 +160,14 @@ except Exception as e:
             timeout=300,
             env={
                 **os.environ,
-                "HOME": str(temp_prime_home.parent),
+                "HOME": str(temp_home),
                 "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", ""),
             },
         )
         assert result1.returncode == 0, f"First install failed: {result1.stderr}"
 
         # Get the wheel modification time
-        envs_cache = temp_prime_home / "envs" / ENV_OWNER / ENV_NAME
+        envs_cache = temp_home / ".prime" / "wheel_cache" / ENV_OWNER / ENV_NAME
         version_dirs = list(envs_cache.iterdir())
         assert len(version_dirs) > 0, f"No version dirs in {envs_cache}"
         wheel_files = list((version_dirs[0] / "dist").glob("*.whl"))
@@ -197,7 +182,7 @@ except Exception as e:
             timeout=300,
             env={
                 **os.environ,
-                "HOME": str(temp_prime_home.parent),
+                "HOME": str(temp_home),
                 "PRIME_API_KEY": os.environ.get("PRIME_API_KEY", ""),
             },
         )

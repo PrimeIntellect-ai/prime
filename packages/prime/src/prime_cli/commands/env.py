@@ -1991,8 +1991,8 @@ def _safe_tar_extract(tar: tarfile.TarFile, dest_path: Path) -> None:
 
 
 def _get_env_cache_dir() -> Path:
-    """Get the cache directory for private environments."""
-    cache_dir = Path.home() / ".prime" / "envs"
+    """Get the cache directory for private environment wheels."""
+    cache_dir = Path.home() / ".prime" / "wheel_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
@@ -2054,7 +2054,7 @@ def _pull_and_build_private_env(
     if not download_url:
         raise ValueError("No downloadable package found for private environment")
 
-    # Create versioned cache path: ~/.prime/envs/{owner}/{name}/{version}
+    # Create versioned cache path: ~/.prime/wheel_cache/{owner}/{name}/{version}
     cache_dir = _get_env_cache_dir()
     env_cache_path = cache_dir / owner / name / version
 

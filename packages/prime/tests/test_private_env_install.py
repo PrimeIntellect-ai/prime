@@ -7,11 +7,8 @@ from pathlib import Path
 import pytest
 
 # Test with a known private environment
-TEST_PRIVATE_ENV = "prime-cli-test/private-reverse-text"
-TEST_PRIVATE_ENV_OWNER = "prime-cli-test"
-TEST_PRIVATE_ENV_NAME = "private-reverse-text"
-# Module name comes from the wheel (reverse_text-0.1.4), not the env name
-TEST_PRIVATE_ENV_MODULE = "reverse_text"
+ENV_OWNER = "prime-cli-test"
+ENV_NAME = "private-reverse-text"
 
 
 @pytest.fixture
@@ -33,7 +30,7 @@ def clean_env_install(temp_prime_home: Path):
 
     # Cleanup: uninstall after tests
     subprocess.run(
-        ["uv", "pip", "uninstall", TEST_PRIVATE_ENV_MODULE, "-y"],
+        ["uv", "pip", "uninstall", ENV_NAME.replace("-", "_"), "-y"],
         capture_output=True,
     )
 
@@ -55,7 +52,7 @@ class TestPrivateEnvInstall:
 
         # Install the private environment
         result = subprocess.run(
-            ["uv", "run", "prime", "env", "install", TEST_PRIVATE_ENV],
+            ["uv", "run", "prime", "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
             capture_output=True,
             text=True,
             timeout=300,
@@ -75,10 +72,10 @@ class TestPrivateEnvInstall:
         envs_cache = temp_prime_home / "envs"
         assert envs_cache.exists(), "Cache directory ~/.prime/envs/ not created"
 
-        owner_dir = envs_cache / TEST_PRIVATE_ENV_OWNER
+        owner_dir = envs_cache / ENV_OWNER
         assert owner_dir.exists(), f"Owner directory not created: {owner_dir}"
 
-        name_dir = owner_dir / TEST_PRIVATE_ENV_NAME
+        name_dir = owner_dir / ENV_NAME
         assert name_dir.exists(), f"Environment directory not created: {name_dir}"
 
         # Should have at least one version directory
@@ -110,7 +107,7 @@ class TestPrivateEnvInstall:
 
         # First install the environment
         install_result = subprocess.run(
-            ["uv", "run", "prime", "env", "install", TEST_PRIVATE_ENV],
+            ["uv", "run", "prime", "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
             capture_output=True,
             text=True,
             timeout=300,
@@ -130,8 +127,8 @@ class TestPrivateEnvInstall:
 import sys
 try:
     from verifiers import load_environment
-    env = load_environment('{TEST_PRIVATE_ENV_MODULE}')
-    env = load_environment('{TEST_PRIVATE_ENV_OWNER}/{TEST_PRIVATE_ENV_NAME}')
+    env = load_environment('{ENV_NAME.replace("-", "_")}')
+    env = load_environment('{ENV_OWNER}/{ENV_NAME}')
     print(f"Successfully loaded: {{type(env).__name__}}")
     sys.exit(0)
 except ImportError as e:
@@ -172,7 +169,7 @@ except Exception as e:
 
         # First install
         result1 = subprocess.run(
-            ["uv", "run", "prime", "env", "install", TEST_PRIVATE_ENV],
+            ["uv", "run", "prime", "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
             capture_output=True,
             text=True,
             timeout=300,
@@ -185,7 +182,7 @@ except Exception as e:
         assert result1.returncode == 0, f"First install failed: {result1.stderr}"
 
         # Get the wheel modification time
-        envs_cache = temp_prime_home / "envs" / TEST_PRIVATE_ENV_OWNER / TEST_PRIVATE_ENV_NAME
+        envs_cache = temp_prime_home / "envs" / ENV_OWNER / ENV_NAME
         version_dirs = list(envs_cache.iterdir())
         assert len(version_dirs) > 0, f"No version dirs in {envs_cache}"
         wheel_files = list((version_dirs[0] / "dist").glob("*.whl"))
@@ -194,7 +191,7 @@ except Exception as e:
 
         # Second install (should reuse cache)
         result2 = subprocess.run(
-            ["uv", "run", "prime", "env", "install", TEST_PRIVATE_ENV],
+            ["uv", "run", "prime", "env", "install", f"{ENV_OWNER}/{ENV_NAME}"],
             capture_output=True,
             text=True,
             timeout=300,

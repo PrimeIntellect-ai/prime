@@ -1535,8 +1535,14 @@ def install(
                 console.print("[dim]Private environment detected, pulling and building...[/dim]")
                 try:
                     # Resolve "latest" to actual version from API response
+                    # Try multiple possible fields where version might be stored
+                    metadata = details.get("metadata") or {}
                     resolved_version = (
-                        details.get("semantic_version") or details.get("version") or target_version
+                        details.get("semantic_version")
+                        or details.get("version")
+                        or metadata.get("semantic_version")
+                        or metadata.get("version")
+                        or target_version
                     )
                     wheel_path = _pull_and_build_private_env(
                         client, owner, name, resolved_version, details

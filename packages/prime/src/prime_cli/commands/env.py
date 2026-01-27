@@ -184,7 +184,7 @@ def _format_ci_status(status: Optional[str]) -> Text:
     return Text(status, style=color)
 
 
-@app.command("list")
+@app.command("list", rich_help_panel="Explore")
 def list_cmd(
     limit: int = typer.Option(
         DEFAULT_LIST_LIMIT, "--limit", "-l", help="Number of environments to show"
@@ -378,13 +378,13 @@ def _format_duration(start: Optional[datetime], end: Optional[datetime]) -> str:
     return f"{int(hours)}h {int(minutes % 60)}m"
 
 
-@app.command("status")
+@app.command("status", rich_help_panel="Explore")
 def status_cmd(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     output: str = typer.Option("table", "--output", help="Output format: table or json"),
     job_limit: int = typer.Option(5, "--jobs", "-j", help="Number of recent jobs to show"),
 ) -> None:
-    """Show CI/test status for an environment
+    """Show CI/action status for an environment
 
     Examples:
         prime env status owner/my-env
@@ -478,7 +478,7 @@ def status_cmd(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(rich_help_panel="Manage")
 def push(
     path: str = typer.Option(".", "--path", "-p", help="Path to environment directory"),
     name: Optional[str] = typer.Option(
@@ -1106,7 +1106,7 @@ def push(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def init(
     name: str = typer.Argument(..., help="Name of the new environment"),
     path: str = typer.Option(
@@ -1141,7 +1141,7 @@ def init(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def pull(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name or owner/name@version)"),
     target: Optional[str] = typer.Option(None, "--target", "-t", help="Target directory"),
@@ -1496,7 +1496,7 @@ def get_install_command(
         raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Explore")
 def info(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     version: str = typer.Option("latest", "--version", "-v", help="Version to show"),
@@ -1689,7 +1689,7 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
     console.print(f"\n[green]✓ Successfully installed {env_id}@{version}[/green]")
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def install(
     env_ids: List[str] = typer.Argument(
         ..., help="Environment ID(s) to install (owner/name or local name)"
@@ -1959,7 +1959,7 @@ def execute_uninstall_command(cmd: List[str], env_name: str, tool: str) -> None:
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def uninstall(
     env_name: str = typer.Argument(..., help="Environment name to uninstall"),
     with_tool: str = typer.Option(
@@ -2020,7 +2020,7 @@ def uninstall(
 
 
 version_app = typer.Typer(help="Manage environment versions", no_args_is_help=True)
-app.add_typer(version_app, name="version")
+app.add_typer(version_app, name="version", rich_help_panel="Manage")
 
 
 @version_app.command("list", no_args_is_help=True)
@@ -2176,7 +2176,7 @@ def delete_version(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def delete(
     env_id: str = typer.Argument(..., help="Environment ID to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
@@ -2823,6 +2823,7 @@ def run_eval(
     no_args_is_help=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     deprecated=True,
+    rich_help_panel="Deprecated",
 )
 def eval_env(
     ctx: typer.Context,

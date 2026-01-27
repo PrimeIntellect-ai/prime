@@ -529,7 +529,8 @@ def create_run(
             failed_envs = []
 
             for env_config in hub_envs:
-                owner, name = env_config.id.split("/", 1)
+                env_id_base = env_config.id.split("@")[0]
+                owner, name = env_id_base.split("/", 1)
                 try:
                     status_resp = rl_client.get_environment_status(owner, name)
                     action = status_resp.get("action") or {}
@@ -552,7 +553,8 @@ def create_run(
             if failed_envs:
                 console.print("\n[red]Error: Action failed for environments:[/red]\n")
                 for env_id in failed_envs:
-                    owner, name = env_id.split("/", 1)
+                    env_id_base = env_id.split("@")[0]
+                    owner, name = env_id_base.split("/", 1)
                     url = f"{app_config.frontend_url}/dashboard/environments/{owner}/{name}/actions"
                     console.print(f"  [red]✗[/red] {env_id}")
                     console.print(f"    [link={url}]{url}[/link]\n")

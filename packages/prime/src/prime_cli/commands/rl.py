@@ -541,7 +541,9 @@ def create_run(
                     elif action_status == "SUCCESS":
                         console.print(f"  [green]✓[/green] {env_config.id} [dim](success)[/dim]")
                     elif action_status in ("RUNNING", "PENDING"):
-                        console.print(f"  [yellow]○[/yellow] {env_config.id} [dim](in progress)[/dim]")
+                        console.print(
+                            f"  [yellow]○[/yellow] {env_config.id} [dim](in progress)[/dim]"
+                        )
                     else:
                         console.print(f"  [dim]-[/dim] {env_config.id} [dim](no action)[/dim]")
                 except APIError:
@@ -555,7 +557,11 @@ def create_run(
                     console.print(f"  [red]✗[/red] {env_id}")
                     console.print(f"    [link={url}]{url}[/link]\n")
 
-                console.print("[yellow]This usually means the environment doesn't compile or run, or is using an unsupported version of verifiers, so the training run will fail.[/yellow]")
+                console.print(
+                    "[yellow]This usually means the environment doesn't compile or run, "
+                    "or is using an unsupported version of verifiers, so the training run "
+                    "will fail.[/yellow]"
+                )
                 console.print("[dim]To proceed anyway, use --skip-action-check[/dim]")
                 raise typer.Exit(1)
 

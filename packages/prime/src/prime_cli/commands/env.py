@@ -1254,18 +1254,22 @@ def update_pyproject_version(pyproject_path: Path, new_version: str) -> None:
         f.write(updated_content)
 
 
-def get_install_command(tool: str, wheel_url: str, no_upgrade: bool = False) -> List[str]:
+def get_install_command(
+    tool: str, wheel_url: str, package_name: str, no_upgrade: bool = False
+) -> List[str]:
     """Generate install command for the specified tool.
 
     Args:
         tool: Package manager to use ('uv' or 'pip')
         wheel_url: URL to the wheel file
-        no_upgrade: If True, don't include --upgrade flag (preserves locked dependencies)
+        package_name: Package name for targeted upgrade with -P flag (uv only)
+        no_upgrade: If True, don't include upgrade flags (preserves locked dependencies)
     """
     if tool == "uv":
         cmd = ["uv", "pip", "install"]
         if not no_upgrade:
-            cmd.append("--upgrade")
+            # Use -P to only upgrade this package, not its dependencies
+            cmd.extend(["-P", package_name])
         cmd.append(wheel_url)
         return cmd
     elif tool == "pip":
@@ -1584,12 +1588,17 @@ def install(
                     wheel_path, resolved_version = _pull_and_build_private_env(
                         client, owner, name, target_version, details
                     )
+                    normalized_name = normalize_package_name(name)
                     if with_tool == "uv":
-                        cmd_parts = ["uv", "pip", "install", str(wheel_path)]
+                        cmd_parts = ["uv", "pip", "install"]
+                        if not no_upgrade:
+                            # Use -P to only upgrade this package, not its dependencies
+                            cmd_parts.extend(["-P", normalized_name])
+                        cmd_parts.append(str(wheel_path))
                     else:
                         cmd_parts = ["pip", "install", str(wheel_path)]
-                    if not no_upgrade:
-                        cmd_parts.insert(-1, "--upgrade")
+                        if not no_upgrade:
+                            cmd_parts.append("--upgrade")
                     installable_envs.append((cmd_parts, env_id, resolved_version, name))
                     console.print(f"[green]✓ Built {env_id}@{resolved_version}[/green]")
                 except Exception as e:
@@ -2264,7 +2273,7 @@ def _build_install_command(
         simple_index_url: Simple index URL for the package
         wheel_url: Direct wheel URL
         tool: Package manager to use ('uv' or 'pip')
-        no_upgrade: If True, don't include --upgrade flag (preserves locked dependencies)
+        no_upgrade: If True, don't include upgrade flags (preserves locked dependencies)
         url_dependencies: List of URL dependencies to install as direct requirements
     """
     normalized_name = normalize_package_name(name)
@@ -2273,7 +2282,8 @@ def _build_install_command(
         if tool == "uv":
             cmd = ["uv", "pip", "install"]
             if not no_upgrade:
-                cmd.append("--upgrade")
+                # Use -P to only upgrade this package, not its dependencies
+                cmd.extend(["-P", normalized_name])
             if version and version != "latest":
                 cmd.append(f"{normalized_name}=={version}")
             else:
@@ -2298,7 +2308,7 @@ def _build_install_command(
             return cmd
     elif wheel_url:
         try:
-            cmd = get_install_command(tool, wheel_url, no_upgrade)
+            cmd = get_install_command(tool, wheel_url, normalized_name, no_upgrade)
             # Add URL dependencies for wheel-only installs too
             if url_dependencies:
                 cmd.extend(url_dependencies)

@@ -44,9 +44,9 @@ DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 
-# Actions subcommand app
-actions_app = typer.Typer(help="Manage environment actions (CI jobs)", no_args_is_help=True)
-app.add_typer(actions_app, name="actions")
+# Action subcommand app
+action_app = typer.Typer(help="Manage environment actions (CI jobs)", no_args_is_help=True)
+app.add_typer(action_app, name="action", rich_help_panel="Manage")
 
 # Log cleaning pattern
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -83,7 +83,7 @@ def _parse_environment_slug(environment: str) -> Tuple[str, str]:
     return parts[0], parts[1]
 
 
-@actions_app.command("list")
+@action_app.command("list")
 def actions_list(
     environment: str = typer.Argument(
         ...,
@@ -180,7 +180,7 @@ def actions_list(
         raise typer.Exit(1)
 
 
-@actions_app.command("logs")
+@action_app.command("logs")
 def actions_logs(
     environment: str = typer.Argument(
         ...,
@@ -263,7 +263,7 @@ def actions_logs(
         raise typer.Exit(1)
 
 
-@actions_app.command("retry")
+@action_app.command("retry")
 def actions_retry(
     environment: str = typer.Argument(
         ...,
@@ -310,7 +310,7 @@ def actions_retry(
             console.print(f"[dim]Version: {data.get('version_id')}[/dim]")
             job_id = data.get('job_id')
             console.print(
-                f"\n[dim]Use 'prime env actions logs {environment} {job_id}' to view logs[/dim]"
+                f"\n[dim]Use 'prime env action logs {environment} {job_id}' to view logs[/dim]"
             )
         else:
             console.print(f"[red]Retry failed:[/red] {data.get('message', 'Unknown error')}")

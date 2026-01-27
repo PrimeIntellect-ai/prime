@@ -226,6 +226,28 @@ def test_start_background_job(sandbox_client, shared_sandbox):
     print(f"✓ Background execution completed: {status.stdout.strip()}")
 
 
+def test_start_background_job_returns_immediately(sandbox_client, shared_sandbox):
+    """Test that start_background_job returns immediately without waiting for the job."""
+    print("\nTesting start_background_job returns immediately...")
+
+    start_time = time.time()
+    job = sandbox_client.start_background_job(
+        shared_sandbox.id,
+        "sleep 30 && echo done",
+    )
+    elapsed = time.time() - start_time
+
+    assert job.job_id is not None
+    # Should return in under 5 seconds, not 30
+    assert elapsed < 5, f"start_background_job took {elapsed:.1f}s, expected < 5s"
+    print(f"✓ Job started in {elapsed:.2f}s (sleep 30 is running in background)")
+
+    # Verify job is still running (not completed yet)
+    status = sandbox_client.get_background_job(shared_sandbox.id, job)
+    assert not status.completed, "Job should still be running"
+    print("✓ Job correctly running in background")
+
+
 def test_start_background_job_with_working_dir(sandbox_client, shared_sandbox):
     """Test start_background_job with working directory"""
     sandbox_client.execute_command(shared_sandbox.id, "mkdir -p /tmp/bgtest")

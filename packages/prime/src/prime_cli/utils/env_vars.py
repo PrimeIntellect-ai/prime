@@ -35,8 +35,7 @@ def parse_env_file(
             if "=" not in line:
                 if on_warning:
                     on_warning(
-                        f"Skipping invalid line {line_num} in {file_path}: "
-                        f"missing '=' separator"
+                        f"Skipping invalid line {line_num} in {file_path}: missing '=' separator"
                     )
                 continue
             key, _, value = line.partition("=")
@@ -112,8 +111,7 @@ def parse_env_arg(
     value = os.environ.get(key)
     if value is None:
         raise EnvParseError(
-            f"Environment variable '{key}' is not set. "
-            f"Either set it or use KEY=VALUE syntax."
+            f"Environment variable '{key}' is not set. Either set it or use KEY=VALUE syntax."
         )
     return {key: value}
 
@@ -154,4 +152,3 @@ def collect_env_vars(
             result.update(parse_env_arg(arg, on_warning=on_warning))
 
     return result
-

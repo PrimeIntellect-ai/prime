@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import uuid
 import zipfile
 from datetime import datetime
@@ -32,6 +33,7 @@ from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
+from ..utils.time_utils import format_time_ago
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
 console = Console()
@@ -41,6 +43,282 @@ MAX_FILES_TO_SHOW = 10
 DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
+
+# Actions subcommand app
+actions_app = typer.Typer(help="Manage environment actions (CI jobs)", no_args_is_help=True)
+app.add_typer(actions_app, name="actions")
+
+# Log cleaning pattern
+ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    return ANSI_ESCAPE.sub("", text)
+
+
+def _parse_environment_slug(environment: str) -> Tuple[str, str]:
+    """Parse owner/name from an environment slug.
+
+    Args:
+        environment: Environment slug in format 'owner/name'
+
+    Returns:
+        Tuple of (owner, name)
+
+    Raises:
+        typer.Exit: If the slug is invalid
+    """
+    if "/" not in environment:
+        console.print(f"[red]Invalid environment format: {environment}[/red]")
+        console.print("[dim]Use format: owner/environment-name[/dim]")
+        raise typer.Exit(1)
+
+    parts = environment.split("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        console.print(f"[red]Invalid environment format: {environment}[/red]")
+        console.print("[dim]Use format: owner/environment-name[/dim]")
+        raise typer.Exit(1)
+
+    return parts[0], parts[1]
+
+
+@actions_app.command("list")
+def actions_list(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    version_id: Optional[str] = typer.Option(
+        None,
+        "--version-id",
+        "-v",
+        help="Filter by version ID",
+    ),
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        "-l",
+        help="Maximum number of actions to show",
+    ),
+    offset: int = typer.Option(
+        0,
+        "--offset",
+        help="Offset for pagination",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """List actions (CI jobs) for an environment."""
+    validate_output_format(output, console)
+
+    owner, env_name = _parse_environment_slug(environment)
+
+    try:
+        client = APIClient()
+        params = {
+            "limit": limit,
+            "offset": offset,
+        }
+        if version_id:
+            params["version_id"] = version_id
+
+        response = client.get(f"/environmentshub/{owner}/{env_name}/actions", params=params)
+        data = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(data, console)
+            return
+
+        actions = data.get("actions", [])
+        total = data.get("total", 0)
+
+        if not actions:
+            console.print("[yellow]No actions found for this environment.[/yellow]")
+            return
+
+        table = Table(title=f"Actions for {owner}/{env_name}")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Name", style="blue")
+        table.add_column("Status", style="yellow")
+        table.add_column("Version", style="dim")
+        table.add_column("Trigger", style="dim")
+        table.add_column("Created", style="dim")
+
+        for action in actions:
+            action_id = action.get("id", "")
+            name = action.get("name") or action.get("job_type", "")
+            status = action.get("status", "")
+
+            # Color the status
+            status_color = {
+                "SUCCESS": "[green]SUCCESS[/green]",
+                "FAILED": "[red]FAILED[/red]",
+                "RUNNING": "[yellow]RUNNING[/yellow]",
+                "PENDING": "[dim]PENDING[/dim]",
+                "CANCELLED": "[dim]CANCELLED[/dim]",
+            }.get(status, status)
+
+            version = action.get("version", {})
+            version_str = version.get("semantic_version") or version.get("content_hash", "")[:8]
+            trigger = action.get("trigger", "")
+            created = action.get("created_at", "")
+            if created:
+                created = format_time_ago(created)
+
+            table.add_row(action_id, name, status_color, version_str, trigger, created)
+
+        console.print(table)
+        console.print(f"[dim]Showing {len(actions)} of {total} actions[/dim]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@actions_app.command("logs")
+def actions_logs(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    action_id: str = typer.Argument(
+        ...,
+        help="Action/job ID to get logs for",
+    ),
+    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+) -> None:
+    """Get logs for a specific action."""
+    owner, env_name = _parse_environment_slug(environment)
+
+    try:
+        client = APIClient()
+
+        if follow:
+            console.print(f"[dim]Watching logs for action {action_id}... (Ctrl+C to stop)[/dim]\n")
+            last_logs = ""
+            consecutive_errors = 0
+
+            while True:
+                try:
+                    response = client.get(
+                        f"/environmentshub/{owner}/{env_name}/actions/{action_id}/logs",
+                        params={"tail_lines": tail},
+                    )
+                    data = response.get("data", {})
+                    logs = _strip_ansi(data.get("logs", ""))
+                    consecutive_errors = 0
+
+                    if logs != last_logs:
+                        old_lines = last_logs.splitlines() if last_logs else []
+                        new_lines = logs.splitlines()
+
+                        if not last_logs:
+                            for line in new_lines:
+                                console.print(line)
+                        else:
+                            overlap = 0
+                            max_overlap = min(len(old_lines), len(new_lines))
+                            for i in range(1, max_overlap + 1):
+                                if old_lines[-i:] == new_lines[:i]:
+                                    overlap = i
+                            for line in new_lines[overlap:]:
+                                console.print(line)
+
+                        last_logs = logs
+                except APIError as e:
+                    consecutive_errors += 1
+                    if "429" in str(e):
+                        if consecutive_errors >= 3:
+                            console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
+                            time.sleep(30)
+                        else:
+                            time.sleep(10)
+                        continue
+                    raise
+
+                time.sleep(5)
+        else:
+            response = client.get(
+                f"/environmentshub/{owner}/{env_name}/actions/{action_id}/logs",
+                params={"tail_lines": tail},
+            )
+            data = response.get("data", {})
+            logs = _strip_ansi(data.get("logs", ""))
+
+            if logs:
+                console.print(logs)
+            else:
+                console.print("[yellow]No logs available yet.[/yellow]")
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped watching logs.[/dim]")
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@actions_app.command("retry")
+def actions_retry(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    action_id: Optional[str] = typer.Argument(
+        None,
+        help="Action ID to retry (retries latest action if not provided)",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """Retry an action (integration test) for an environment.
+
+    If no action ID is provided, retries the latest action.
+    """
+    validate_output_format(output, console)
+
+    owner, env_name = _parse_environment_slug(environment)
+
+    try:
+        client = APIClient()
+        payload = {}
+        if action_id:
+            payload["action_id"] = action_id
+
+        response = client.post(
+            f"/environmentshub/{owner}/{env_name}/actions/retry",
+            json=payload,
+        )
+        data = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(data, console)
+            return
+
+        if data.get("success"):
+            console.print("[green]Successfully triggered retry[/green]")
+            console.print(f"[dim]Job ID: {data.get('job_id')}[/dim]")
+            console.print(f"[dim]Version: {data.get('version_id')}[/dim]")
+            job_id = data.get('job_id')
+            console.print(
+                f"\n[dim]Use 'prime env actions logs {environment} {job_id}' to view logs[/dim]"
+            )
+        else:
+            console.print(f"[red]Retry failed:[/red] {data.get('message', 'Unknown error')}")
+            raise typer.Exit(1)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
 
 def display_upstream_environment_info(
@@ -169,8 +447,8 @@ def compute_content_hash(env_path: Path) -> str:
     return content_hasher.hexdigest()
 
 
-def _format_ci_status(status: Optional[str]) -> Text:
-    """Format CI status with color coding."""
+def _format_action_status(status: Optional[str]) -> Text:
+    """Format action status with color coding."""
     if not status:
         return Text("-", style="dim")
     status_colors = {
@@ -201,20 +479,20 @@ def list_cmd(
     tag: Optional[List[str]] = typer.Option(
         None, "--tag", "-t", help="Filter by tag (repeatable)"
     ),
-    ci_status: Optional[str] = typer.Option(
-        None, "--ci-status", help="Filter by CI status (SUCCESS/FAILED/RUNNING/PENDING)"
+    action_status: Optional[str] = typer.Option(
+        None, "--action-status", help="Filter by action status (SUCCESS/FAILED/RUNNING/PENDING)"
     ),
     sort: str = typer.Option(
         "created_at", "--sort", help="Sort by: name, created_at, updated_at"
     ),
     order: str = typer.Option("desc", "--order", help="Sort order: asc, desc"),
-    show_ci: bool = typer.Option(False, "--show-ci", help="Show CI status column"),
+    show_actions: bool = typer.Option(False, "--show-actions", help="Show action status column"),
 ) -> None:
     """List available verifiers environments
 
     Examples:
         prime env list --search "test"
-        prime env list --ci-status SUCCESS --show-ci
+        prime env list --action-status SUCCESS --show-actions
         prime env list --tag ml --tag nlp
         prime env list --sort name --order asc
     """
@@ -248,9 +526,9 @@ def list_cmd(
             params["search"] = search
         if tag:
             params["tags"] = tag
-        if ci_status:
-            params["ci_status"] = ci_status
-        if show_ci or ci_status:
+        if action_status:
+            params["ci_status"] = action_status
+        if show_actions or action_status:
             params["include_ci_status"] = True
 
         result = client.get("/environmentshub/", params=params)
@@ -278,8 +556,8 @@ def list_cmd(
                     "description": env.get("description", ""),
                     "visibility": env.get("visibility", ""),
                 }
-                if show_ci or ci_status:
-                    env_entry["ci_status"] = env.get("latest_ci_status")
+                if show_actions or action_status:
+                    env_entry["action_status"] = env.get("latest_ci_status")
                     env_entry["version"] = env.get("latest_version")
                 if env.get("tags"):
                     env_entry["tags"] = env.get("tags")
@@ -298,9 +576,9 @@ def list_cmd(
             table.add_column("Environment", style="cyan")
             table.add_column("Description", style="green")
             table.add_column("Visibility", style="magenta")
-            if show_ci or ci_status:
+            if show_actions or action_status:
                 table.add_column("Version", style="blue")
-                table.add_column("CI Status")
+                table.add_column("Action Status")
 
             for env in environments:
                 owner_name = env["owner"]["name"]
@@ -309,10 +587,10 @@ def list_cmd(
                 description = env.get("description", "")
                 vis = env.get("visibility", "")
 
-                if show_ci or ci_status:
+                if show_actions or action_status:
                     version = env.get("latest_version") or "-"
-                    ci_text = _format_ci_status(env.get("latest_ci_status"))
-                    table.add_row(env_id, description, vis, version, ci_text)
+                    action_text = _format_action_status(env.get("latest_ci_status"))
+                    table.add_row(env_id, description, vis, version, action_text)
                 else:
                     table.add_row(env_id, description, vis)
 
@@ -333,62 +611,15 @@ def list_cmd(
         raise typer.Exit(1)
 
 
-def _format_time_ago(dt: Optional[datetime]) -> str:
-    """Format a datetime as a human-readable time ago string."""
-    if not dt:
-        return "-"
-    now = datetime.utcnow()
-    if isinstance(dt, str):
-        # Parse ISO format string
-        dt = datetime.fromisoformat(dt.replace("Z", "+00:00").replace("+00:00", ""))
-    diff = now - dt
-    seconds = diff.total_seconds()
-    if seconds < 60:
-        return "just now"
-    minutes = seconds / 60
-    if minutes < 60:
-        return f"{int(minutes)}m ago"
-    hours = minutes / 60
-    if hours < 24:
-        return f"{int(hours)}h ago"
-    days = hours / 24
-    if days < 30:
-        return f"{int(days)}d ago"
-    return dt.strftime("%Y-%m-%d")
-
-
-def _format_duration(start: Optional[datetime], end: Optional[datetime]) -> str:
-    """Format duration between two datetimes."""
-    if not start:
-        return "-"
-    if not end:
-        return "running..."
-    if isinstance(start, str):
-        start = datetime.fromisoformat(start.replace("Z", "+00:00").replace("+00:00", ""))
-    if isinstance(end, str):
-        end = datetime.fromisoformat(end.replace("Z", "+00:00").replace("+00:00", ""))
-    diff = end - start
-    seconds = diff.total_seconds()
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    minutes = seconds / 60
-    if minutes < 60:
-        return f"{int(minutes)}m {int(seconds % 60)}s"
-    hours = minutes / 60
-    return f"{int(hours)}h {int(minutes % 60)}m"
-
-
 @app.command("status", rich_help_panel="Explore")
 def status_cmd(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     output: str = typer.Option("table", "--output", help="Output format: table or json"),
-    job_limit: int = typer.Option(5, "--jobs", "-j", help="Number of recent jobs to show"),
 ) -> None:
-    """Show CI/action status for an environment
+    """Show action status for an environment
 
     Examples:
         prime env status owner/my-env
-        prime env status owner/my-env --jobs 10
         prime env status owner/my-env --output json
     """
     validate_output_format(output, console)
@@ -410,7 +641,6 @@ def status_cmd(
 
         result = client.get(
             f"/environmentshub/{owner_name}/{env_name}/status",
-            params={"job_limit": job_limit},
         )
 
         data = result.get("data", result)
@@ -431,42 +661,21 @@ def status_cmd(
                 version_str = latest_version.get("semantic_version") or latest_version.get("content_hash", "")[:8]
                 console.print(f"  Version: {version_str}")
                 console.print(f"  Hash: {latest_version.get('content_hash', '-')[:12]}")
-                ci_status = latest_version.get("ci_status")
-                ci_text = _format_ci_status(ci_status) if ci_status else Text("-", style="dim")
                 created_at = latest_version.get("created_at")
-                time_ago = _format_time_ago(datetime.fromisoformat(created_at.replace("Z", "+00:00").replace("+00:00", "")) if created_at else None)
-                console.print(f"  CI Status: ", end="")
-                console.print(ci_text, end="")
-                console.print(f" ({time_ago})")
+                console.print(f"  Created: {format_time_ago(created_at)}")
             else:
                 console.print("  [dim]No versions found[/dim]")
 
-            # Recent Jobs section
-            console.print("\n[bold]Recent Jobs:[/bold]")
-            recent_jobs = data.get("recent_jobs", [])
-            if recent_jobs:
-                job_table = Table(show_header=True, header_style="bold")
-                job_table.add_column("ID", style="dim", max_width=10)
-                job_table.add_column("Type")
-                job_table.add_column("Status")
-                job_table.add_column("Started")
-                job_table.add_column("Duration")
-
-                for job in recent_jobs:
-                    job_id = job.get("id", "")[:10] + "..."
-                    job_type = job.get("job_type", "-")
-                    status_text = _format_ci_status(job.get("status"))
-                    started_at = job.get("started_at")
-                    started_str = _format_time_ago(datetime.fromisoformat(started_at.replace("Z", "+00:00").replace("+00:00", "")) if started_at else None)
-                    duration = _format_duration(
-                        datetime.fromisoformat(started_at.replace("Z", "+00:00").replace("+00:00", "")) if started_at else None,
-                        datetime.fromisoformat(job.get("completed_at").replace("Z", "+00:00").replace("+00:00", "")) if job.get("completed_at") else None,
-                    )
-                    job_table.add_row(job_id, job_type, status_text, started_str, duration)
-
-                console.print(job_table)
-            else:
-                console.print("  [dim]No jobs found[/dim]")
+            # Action status section
+            action_data = data.get("action")
+            if action_data:
+                console.print("\n[bold]Action Status:[/bold]")
+                action_status_value = action_data.get("status")
+                action_text = _format_action_status(action_status_value)
+                console.print(f"  Status: ", end="")
+                console.print(action_text)
+                if action_data.get("job_id"):
+                    console.print(f"  Job ID: [dim]{action_data.get('job_id')}[/dim]")
 
             console.print()
 

@@ -557,7 +557,7 @@ def create_run(
                     owner, name = env_id_base.split("/", 1)
                     url = f"{app_config.frontend_url}/dashboard/environments/{owner}/{name}/actions"
                     console.print(f"  [red]✗[/red] {env_id}")
-                    console.print(f"    [dim]Details: prime env action logs {env_id_base}[/dim]")
+                    console.print(f"    [dim]Details: prime env action list {env_id_base}[/dim]")
                     console.print(f"    [dim]View at: [link={url}]{url}[/link][/dim]\n")
 
                 console.print(

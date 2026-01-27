@@ -33,7 +33,7 @@ from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
-from ..utils.time_utils import format_time_ago
+from ..utils.time_utils import format_time_ago, iso_timestamp
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
 console = Console()
@@ -163,8 +163,8 @@ def actions_list(
                 "CANCELLED": "[dim]CANCELLED[/dim]",
             }.get(status, status)
 
-            version = action.get("version", {})
-            version_str = version.get("semantic_version") or version.get("content_hash", "")[:8]
+            version = action.get("version") or {}
+            version_str = version.get("semantic_version") or (version.get("content_hash") or "")[:8]
             trigger = action.get("trigger", "")
             created = action.get("created_at", "")
             if created:
@@ -211,7 +211,7 @@ def actions_logs(
                         params={"tail_lines": tail},
                     )
                     data = response.get("data", {})
-                    logs = _strip_ansi(data.get("logs", ""))
+                    logs = _strip_ansi(data.get("logs") or "")
                     consecutive_errors = 0
 
                     if logs != last_logs:
@@ -249,7 +249,7 @@ def actions_logs(
                 params={"tail_lines": tail},
             )
             data = response.get("data", {})
-            logs = _strip_ansi(data.get("logs", ""))
+            logs = _strip_ansi(data.get("logs") or "")
 
             if logs:
                 console.print(logs)
@@ -625,16 +625,7 @@ def status_cmd(
     validate_output_format(output, console)
 
     # Parse env_id
-    if "/" not in env_id:
-        console.print("[red]Error: Environment ID must be in format owner/name[/red]")
-        raise typer.Exit(1)
-
-    parts = env_id.split("/", 1)
-    if len(parts) != 2:
-        console.print("[red]Error: Environment ID must be in format owner/name[/red]")
-        raise typer.Exit(1)
-
-    owner_name, env_name = parts
+    owner_name, env_name = _parse_environment_slug(env_id)
 
     try:
         client = APIClient(require_auth=False)
@@ -649,7 +640,8 @@ def status_cmd(
             output_data_as_json(data, console)
         else:
             # Header
-            console.print(f"\n[bold cyan]Environment:[/bold cyan] {owner_name}/{data.get('name', env_name)}")
+            env_display_name = data.get("name", env_name)
+            console.print(f"\n[bold cyan]Environment:[/bold cyan] {owner_name}/{env_display_name}")
             if data.get("description"):
                 console.print(f"[dim]Description:[/dim] {data['description']}")
             console.print(f"[dim]Visibility:[/dim] {data.get('visibility', 'UNKNOWN')}")
@@ -658,9 +650,10 @@ def status_cmd(
             console.print("\n[bold]Latest Version:[/bold]")
             latest_version = data.get("latest_version")
             if latest_version:
-                version_str = latest_version.get("semantic_version") or latest_version.get("content_hash", "")[:8]
+                content_hash = latest_version.get("content_hash") or ""
+                version_str = latest_version.get("semantic_version") or content_hash[:8]
                 console.print(f"  Version: {version_str}")
-                console.print(f"  Hash: {latest_version.get('content_hash', '-')[:12]}")
+                console.print(f"  Hash: {(latest_version.get('content_hash') or '-')[:12]}")
                 created_at = latest_version.get("created_at")
                 console.print(f"  Created: {format_time_ago(created_at)}")
             else:
@@ -672,7 +665,7 @@ def status_cmd(
                 console.print("\n[bold]Action Status:[/bold]")
                 action_status_value = action_data.get("status")
                 action_text = _format_action_status(action_status_value)
-                console.print(f"  Status: ", end="")
+                console.print("  Status: ", end="")
                 console.print(action_text)
                 if action_data.get("job_id"):
                     console.print(f"  Job ID: [dim]{action_data.get('job_id')}[/dim]")
@@ -2287,8 +2280,7 @@ def list_versions(
                 # Format date nicely if it's a full timestamp
                 try:
                     if "T" in created_date:
-                        dt = datetime.fromisoformat(created_date.replace("Z", "+00:00"))
-                        created_date = dt.strftime("%Y-%m-%d %H:%M")
+                        created_date = iso_timestamp(created_date)
                 except Exception:
                     pass
 

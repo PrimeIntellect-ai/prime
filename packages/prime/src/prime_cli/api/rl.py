@@ -311,9 +311,7 @@ class RLClient:
             if step is not None:
                 params["step"] = step
 
-            response = self.client.get(
-                f"/rft/runs/{run_id}/distributions", params=params
-            )
+            response = self.client.get(f"/rft/runs/{run_id}/distributions", params=params)
             return {
                 "bins": response.get("bins", []),
                 "step": response.get("step"),

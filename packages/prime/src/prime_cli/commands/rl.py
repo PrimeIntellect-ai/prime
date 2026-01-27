@@ -440,11 +440,9 @@ def create_run(
     wandb_configured = cfg.wandb.entity or cfg.wandb.project
     if wandb_configured and (not secrets or "WANDB_API_KEY" not in secrets):
         console.print("[red]Configuration Error:[/red]")
-        console.print(
-            "  WANDB_API_KEY is required when W&B monitoring is configured.\n"
-        )
+        console.print("  WANDB_API_KEY is required when W&B monitoring is configured.\n")
         console.print("Provide it via:")
-        console.print("  - env_files in your config: env_files = [\"secrets.env\"]")
+        console.print('  - env_files in your config: env_files = ["secrets.env"]')
         console.print("  - CLI flag: --env-file secrets.env")
         console.print("  - CLI flag: -e WANDB_API_KEY=your-key")
         console.print(

@@ -82,8 +82,8 @@ def push_image(
             spec = _load_dockerignore(context)
 
             def tar_filter(tarinfo: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
-                rel_path = tarinfo.name.lstrip("./")
-                if not rel_path:
+                rel_path = tarinfo.name.removeprefix("./")
+                if not rel_path or rel_path == ".":
                     return tarinfo  # Keep root directory
                 if spec and spec.match_file(rel_path):
                     return None  # Exclude ignored files

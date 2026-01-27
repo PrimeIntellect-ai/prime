@@ -47,8 +47,8 @@ def _create_context_tarball(context_path: str) -> bytes:
 
         def tar_filter(tarinfo: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
             # Get path relative to context (strip leading ./)
-            rel_path = tarinfo.name.lstrip("./")
-            if not rel_path:
+            rel_path = tarinfo.name.removeprefix("./")
+            if not rel_path or rel_path == ".":
                 return tarinfo  # Keep root directory
             if spec and spec.match_file(rel_path):
                 return None  # Exclude ignored files

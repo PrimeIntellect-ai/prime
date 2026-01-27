@@ -127,20 +127,27 @@ class ImageClient:
         response = self.client.request("POST", "/images/build", json=build_request)
         build_response = ImageBuildResponse.model_validate(response)
 
+        # Check if cached image was found, construct Image directly without extra API call
         if build_response.cached:
-            return self._get_image_from_build_id(build_response.build_id)
+            return Image(
+                id=build_response.image_id,
+                image_ref=build_response.image_ref,
+                name=build_response.image_name,
+                tag=build_response.image_tag,
+                status=ImageBuildStatus.COMPLETED,
+                created_at=build_response.created_at,
+            )
 
-        # Upload build context if needed (only when context_path provided)
+        # Upload build context and start build
         if build_response.upload_url and context_path:
             context_bytes = _create_context_tarball(context_path)
             self._upload_context(build_response.upload_url, context_bytes)
 
-        # Start the build (always needed, whether fast path or upload path)
-        self.client.request(
-            "POST",
-            f"/images/build/{build_response.build_id}/start",
-            json={"context_uploaded": True},
-        )
+            self.client.request(
+                "POST",
+                f"/images/build/{build_response.build_id}/start",
+                json={"context_uploaded": True},
+            )
 
         if not wait:
             return self._get_image_from_build_id(build_response.build_id)
@@ -312,6 +319,7 @@ class AsyncImageClient:
         if team_id:
             build_request["team_id"] = team_id
 
+        # TODO: Use aiofiles or run_in_executor for file I/O to avoid blocking event loop
         # No context_path means read Dockerfile and send content directly
         if not context_path:
             if not os.path.exists(dockerfile_path):
@@ -326,20 +334,27 @@ class AsyncImageClient:
         response = await self.client.request("POST", "/images/build", json=build_request)
         build_response = ImageBuildResponse.model_validate(response)
 
+        # Check if cached image was found, construct Image directly without extra API call
         if build_response.cached:
-            return await self._get_image_from_build_id(build_response.build_id)
+            return Image(
+                id=build_response.image_id,
+                image_ref=build_response.image_ref,
+                name=build_response.image_name,
+                tag=build_response.image_tag,
+                status=ImageBuildStatus.COMPLETED,
+                created_at=build_response.created_at,
+            )
 
-        # Upload build context if needed (only when context_path provided)
+        # Upload build context and start build
         if build_response.upload_url and context_path:
             context_bytes = _create_context_tarball(context_path)
             await self._upload_context(build_response.upload_url, context_bytes)
 
-        # Start the build (always needed, whether fast path or upload path)
-        await self.client.request(
-            "POST",
-            f"/images/build/{build_response.build_id}/start",
-            json={"context_uploaded": True},
-        )
+            await self.client.request(
+                "POST",
+                f"/images/build/{build_response.build_id}/start",
+                json={"context_uploaded": True},
+            )
 
         if not wait:
             return await self._get_image_from_build_id(build_response.build_id)

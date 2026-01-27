@@ -292,7 +292,9 @@ class ImageBuildResponse(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    build_id: str = Field(..., alias="buildId", description="Build ID for tracking")
+    build_id: Optional[str] = Field(
+        default=None, alias="buildId", description="Build ID for tracking (None when cached)"
+    )
     upload_url: Optional[str] = Field(
         default=None, alias="uploadUrl", description="Presigned URL for context upload"
     )
@@ -301,3 +303,9 @@ class ImageBuildResponse(BaseModel):
     )
     image_ref: str = Field(..., alias="fullImagePath", description="Full image reference")
     cached: bool = Field(default=False, description="Whether a cached image was found")
+    image_id: Optional[str] = Field(default=None, alias="imageId", description="Image ID")
+    image_name: Optional[str] = Field(default=None, alias="imageName", description="Image name")
+    image_tag: Optional[str] = Field(default=None, alias="imageTag", description="Image tag")
+    created_at: Optional[datetime] = Field(
+        default=None, alias="createdAt", description="Creation timestamp"
+    )

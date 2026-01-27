@@ -322,3 +322,15 @@ class RLClient:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to get RL run distributions: {e.response.text}")
             raise APIError(f"Failed to get RL run distributions: {str(e)}")
+
+    def get_environment_status(self, owner: str, name: str) -> Dict[str, Any]:
+        """Get status for an environment including latest version and action info."""
+        try:
+            response = self.client.get(f"/environmentshub/{owner}/{name}/status")
+            return response.get("data", {})
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(
+                    f"Failed to get status for {owner}/{name}: {e.response.text}"
+                )
+            raise APIError(f"Failed to get status for {owner}/{name}: {str(e)}")

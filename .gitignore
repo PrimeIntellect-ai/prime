@@ -24,8 +24,3 @@ venv/
 ENV/
 test_env/
 .DS_Store
-my_*
-
-verifiers
-environments
-*.log

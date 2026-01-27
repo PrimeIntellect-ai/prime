@@ -438,8 +438,8 @@ class SandboxClient:
         }
 
         try:
-            # The + 2 is to account for connection creation and closing. Prevents any command which runs
-            # close to its `effective_timeout` from being killed prematurely
+            # The + 2 accounts for connection creation and closing. Prevents any command
+            # running close to its `effective_timeout` from being killed prematurely
             client_timeout = effective_timeout + 2
             response = self._gateway_post(
                 url, headers=headers, timeout=client_timeout, json=payload

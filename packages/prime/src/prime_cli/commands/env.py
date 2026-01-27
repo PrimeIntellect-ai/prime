@@ -2162,7 +2162,7 @@ def run_eval(
             )
             raise typer.Exit(1)
 
-    cmd = ["uv", "run", "vf-eval", env_name_for_vf_eval]
+    cmd = ["vf-eval", env_name_for_vf_eval]
 
     # Add chosen inference url
     cmd += ["-b", inference_url]

@@ -68,19 +68,3 @@ class SandboxImagePullError(SandboxNotRunningError):
     """Raised when Docker image cannot be pulled."""
 
     pass
-
-
-class SandboxUnresponsiveError(CommandTimeoutError):
-    """Raised when sandbox appears running but commands time out unexpectedly."""
-
-    def __init__(
-        self,
-        sandbox_id: str,
-        command: str,
-        message: str,
-        sandbox_status: str | None = None,
-    ):
-        self.sandbox_id = sandbox_id
-        self.command = command
-        self.sandbox_status = sandbox_status
-        RuntimeError.__init__(self, message)

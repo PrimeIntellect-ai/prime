@@ -28,7 +28,6 @@ from .exceptions import (
     SandboxNotRunningError,
     SandboxOOMError,
     SandboxTimeoutError,
-    SandboxUnresponsiveError,
     UploadTimeoutError,
 )
 from .models import (
@@ -107,14 +106,6 @@ def _build_terminated_message(command: str, ctx: dict) -> str:
         parts.append(f"Details: {error_message}")
 
     return " ".join(parts)
-
-
-def _build_unresponsive_message(command: str, timeout: int) -> str:
-    """Build helpful error message for unresponsive sandbox."""
-    cmd_preview = command[:50] + "..." if len(command) > 50 else command
-    msg = f"Command '{cmd_preview}' timed out after {timeout}s."
-
-    return msg
 
 
 def _raise_not_running_error(
@@ -447,9 +438,8 @@ class SandboxClient:
         }
 
         try:
-            client_timeout = effective_timeout + 2
             response = self._gateway_post(
-                url, headers=headers, timeout=client_timeout, json=payload
+                url, headers=headers, timeout=effective_timeout, json=payload
             )
             response.raise_for_status()
             return CommandResponse.model_validate(response.json())
@@ -457,12 +447,7 @@ class SandboxClient:
             ctx = self._get_sandbox_error_context(sandbox_id)
             if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                 _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-            raise SandboxUnresponsiveError(
-                sandbox_id=sandbox_id,
-                command=command,
-                message=_build_unresponsive_message(command, effective_timeout),
-                sandbox_status=ctx["status"],
-            ) from e
+            raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
         except httpx.HTTPStatusError as e:
             resp = getattr(e, "response", None)
             status = getattr(resp, "status_code", "?")
@@ -1035,12 +1020,7 @@ class AsyncSandboxClient:
             ctx = await self._get_sandbox_error_context(sandbox_id)
             if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                 _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-            raise SandboxUnresponsiveError(
-                sandbox_id=sandbox_id,
-                command=command,
-                message=_build_unresponsive_message(command, effective_timeout),
-                sandbox_status=ctx["status"],
-            ) from e
+            raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
         except httpx.HTTPStatusError as e:
             resp = getattr(e, "response", None)
             status = getattr(resp, "status_code", "?")

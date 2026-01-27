@@ -172,7 +172,7 @@ def compute_content_hash(env_path: Path) -> str:
 @app.command("list")
 def list_cmd(
     limit: int = typer.Option(
-        DEFAULT_LIST_LIMIT, "--limit", "-l", help="Number of environments to show"
+        DEFAULT_LIST_LIMIT, "--num", "-n", help="Number of environments to show"
     ),
     offset: int = typer.Option(0, "--offset", help="Number of environments to skip"),
     owner: Optional[str] = typer.Option(None, "--owner", help="Filter by owner name"),

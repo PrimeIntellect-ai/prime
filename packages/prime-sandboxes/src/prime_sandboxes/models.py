@@ -19,6 +19,36 @@ class SandboxStatus(str, Enum):
     TIMEOUT = "TIMEOUT"
 
 
+class ImageBuildStatus(str, Enum):
+    """Image build status enum"""
+
+    PENDING = "PENDING"
+    UPLOADING = "UPLOADING"
+    BUILDING = "BUILDING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class Image(BaseModel):
+    """Image model representing a built container image."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    image_ref: str = Field(..., alias="imageRef", description="Full image reference")
+    name: str = Field(..., alias="imageName", description="Image name")
+    tag: str = Field(..., alias="imageTag", description="Image tag")
+    status: ImageBuildStatus
+    size_bytes: Optional[int] = Field(default=None, alias="sizeBytes")
+    ephemeral: bool = Field(default=False, alias="isEphemeral")
+    dockerfile_hash: Optional[str] = Field(default=None, alias="dockerfileHash")
+    created_at: datetime = Field(..., alias="createdAt")
+    error_message: Optional[str] = Field(default=None, alias="errorMessage")
+    team_id: Optional[str] = Field(default=None, alias="teamId")
+    display_ref: Optional[str] = Field(default=None, alias="displayRef")
+
+
 class AdvancedConfigs(BaseModel):
     """Advanced configuration options for sandbox"""
 
@@ -77,7 +107,16 @@ class CreateSandboxRequest(BaseModel):
     """Create sandbox request model"""
 
     name: str
-    docker_image: str
+    docker_image: Optional[str] = Field(default=None, description="Pre-built image to use")
+    dockerfile: Optional[str] = Field(
+        default=None,
+        description="Path to Dockerfile for building image (e.g., './Dockerfile')",
+    )
+    build_context: Optional[str] = Field(
+        default=None,
+        description="Build context directory path. If not provided, only the "
+        "Dockerfile is used (no COPY/ADD support).",
+    )
     start_command: Optional[str] = "tail -f /dev/null"
     cpu_cores: int = 1
     memory_gb: int = 2
@@ -239,3 +278,26 @@ class BackgroundJobStatus(BaseModel):
     exit_code: Optional[int] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
+
+
+class ImageListResponse(BaseModel):
+    """Response model for listing images."""
+
+    images: List[Image]
+    total: int
+
+
+class ImageBuildResponse(BaseModel):
+    """Response model for image build initiation."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    build_id: str = Field(..., alias="buildId", description="Build ID for tracking")
+    upload_url: Optional[str] = Field(
+        default=None, alias="uploadUrl", description="Presigned URL for context upload"
+    )
+    expires_in: Optional[int] = Field(
+        default=None, alias="expiresIn", description="URL validity in seconds"
+    )
+    image_ref: str = Field(..., alias="fullImagePath", description="Full image reference")
+    cached: bool = Field(default=False, description="Whether a cached image was found")

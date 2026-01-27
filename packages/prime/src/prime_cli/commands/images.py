@@ -5,9 +5,10 @@ import tarfile
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
-import click
 import httpx
+import pathspec
 import typer
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
 from rich.console import Console
@@ -23,6 +24,16 @@ console = Console()
 config = Config()
 
 
+def _load_dockerignore(context_path: str) -> Optional[pathspec.PathSpec]:
+    """Load .dockerignore patterns if the file exists."""
+    dockerignore_path = Path(context_path) / ".dockerignore"
+    if not dockerignore_path.exists():
+        return None
+
+    patterns = dockerignore_path.read_text().splitlines()
+    return pathspec.PathSpec.from_lines("gitwildmatch", patterns)
+
+
 @app.command("push")
 def push_image(
     image_reference: str = typer.Argument(
@@ -30,12 +41,6 @@ def push_image(
     ),
     dockerfile: str = typer.Option("Dockerfile", "--dockerfile", "-f", help="Path to Dockerfile"),
     context: str = typer.Option(".", "--context", "-c", help="Build context directory"),
-    platform: str = typer.Option(
-        "linux/amd64",
-        "--platform",
-        click_type=click.Choice(["linux/amd64", "linux/arm64"]),
-        help="Target platform (defaults to linux/amd64 for Kubernetes compatibility)",
-    ),
 ):
     """
     Build and push a Docker image to Prime Intellect registry.
@@ -73,8 +78,19 @@ def push_image(
             tar_path = tmp_file.name
 
         try:
+            # Load .dockerignore if present
+            spec = _load_dockerignore(context)
+
+            def tar_filter(tarinfo: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
+                rel_path = tarinfo.name.lstrip("./")
+                if not rel_path:
+                    return tarinfo  # Keep root directory
+                if spec and spec.match_file(rel_path):
+                    return None  # Exclude ignored files
+                return tarinfo
+
             with tarfile.open(tar_path, "w:gz") as tar:
-                tar.add(context, arcname=".")
+                tar.add(context, arcname=".", filter=tar_filter)
 
             tar_size_mb = Path(tar_path).stat().st_size / (1024 * 1024)
             console.print(f"[green]✓[/green] Build context packaged ({tar_size_mb:.2f} MB)")
@@ -90,7 +106,6 @@ def push_image(
                         "image_name": image_name,
                         "image_tag": image_tag,
                         "dockerfile_path": dockerfile,
-                        "platform": platform,
                     },
                 )
             except UnauthorizedError:

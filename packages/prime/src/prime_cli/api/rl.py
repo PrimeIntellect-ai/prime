@@ -327,7 +327,7 @@ class RLClient:
         """Get status for an environment including latest version and action info."""
         try:
             response = self.client.get(f"/environmentshub/{owner}/{name}/status")
-            return response.get("data", {})
+            return response.get("data") or {}
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(

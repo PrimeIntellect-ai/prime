@@ -402,6 +402,11 @@ def create_run(
         help="Path to .env file containing secrets.",
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    skip_action_check: bool = typer.Option(
+        False,
+        "--skip-action-check",
+        help="Skip action status check and run even if environment action failed.",
+    ),
 ) -> None:
     """Start an RL training run from a config file.
 
@@ -456,8 +461,6 @@ def create_run(
         api_client = APIClient()
         rl_client = RLClient(api_client)
         app_config = Config()
-
-        console.print("[dim]Creating RL training run[/dim]\n")
 
         # Show configuration in organized sections
         console.print("[white]Configuration:[/white]\n")
@@ -518,6 +521,55 @@ def create_run(
             console.print(f"  Keys: {', '.join(secrets.keys())}")
 
         console.print()
+
+        # Check action status for hub environments
+        hub_envs = [e for e in cfg.env if "/" in e.id]
+        if hub_envs and not skip_action_check:
+            console.print("[dim]Checking Environment Actions...[/dim]")
+            failed_envs = []
+
+            for env_config in hub_envs:
+                env_id_base = env_config.id.split("@")[0]
+                owner, name = env_id_base.split("/", 1)
+                try:
+                    status_resp = rl_client.get_environment_status(owner, name)
+                    action = status_resp.get("action") or {}
+                    action_status = action.get("status")
+
+                    if action_status == "FAILED":
+                        console.print(f"  [red]✗[/red] {env_config.id} [dim](failed)[/dim]")
+                        failed_envs.append(env_config.id)
+                    elif action_status == "SUCCESS":
+                        console.print(f"  [green]✓[/green] {env_config.id} [dim](success)[/dim]")
+                    elif action_status in ("RUNNING", "PENDING"):
+                        console.print(
+                            f"  [yellow]○[/yellow] {env_config.id} [dim](in progress)[/dim]"
+                        )
+                    else:
+                        console.print(f"  [dim]-[/dim] {env_config.id} [dim](no action)[/dim]")
+                except APIError:
+                    console.print(f"  [dim]-[/dim] {env_config.id} [dim](could not check)[/dim]")
+
+            if failed_envs:
+                console.print("\n[red]Error: Action failed for environments:[/red]\n")
+                for env_id in failed_envs:
+                    env_id_base = env_id.split("@")[0]
+                    owner, name = env_id_base.split("/", 1)
+                    url = f"{app_config.frontend_url}/dashboard/environments/{owner}/{name}/actions"
+                    console.print(f"  [red]✗[/red] {env_id}")
+                    console.print(f"    [link={url}]{url}[/link]\n")
+
+                console.print(
+                    "[yellow]This usually means the environment doesn't compile or run, "
+                    "or is using an unsupported version of verifiers, so the training run "
+                    "will fail.[/yellow]"
+                )
+                console.print("[dim]To proceed anyway, use --skip-action-check[/dim]")
+                raise typer.Exit(1)
+
+            console.print()
+
+        console.print("[dim]Creating RL training run...[/dim]\n")
 
         # Create the run
         run = rl_client.create_run(

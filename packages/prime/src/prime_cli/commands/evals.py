@@ -181,7 +181,7 @@ def get_eval(
 def get_samples(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    limit: int = typer.Option(100, "--limit", "-l", help="Samples per page"),
+    limit: int = typer.Option(100, "--num", "-n", help="Samples per page"),
     output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
 ) -> None:
     _validate_output_format(output, ["json", "pretty"])

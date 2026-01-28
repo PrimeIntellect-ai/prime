@@ -12,6 +12,7 @@ class RLModel(BaseModel):
     """Model available for RL training."""
 
     name: str = Field(..., description="Model name")
+    at_capacity: bool = Field(False, alias="atCapacity")
 
     model_config = ConfigDict(populate_by_name=True)
 

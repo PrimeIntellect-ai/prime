@@ -58,6 +58,10 @@ GATEWAY_RETRYABLE_EXCEPTIONS = (
     httpx.PoolTimeout,  # No connection available in pool
 )
 
+# Max retries for transient 409 errors
+MAX_409_RETRIES = 4
+RETRY_409_BASE_DELAY = 0.25  # 250ms, 500ms, 1000ms, 2000ms with exponential backoff
+
 # Retry decorator for gateway requests
 _gateway_retry = retry(
     retry=retry_if_exception_type(GATEWAY_RETRYABLE_EXCEPTIONS),
@@ -350,6 +354,29 @@ class SandboxClient:
         except Exception:
             return {"status": None, "error_type": None, "error_message": None}
 
+    def _should_retry_409(
+        self,
+        sandbox_id: str,
+        error: httpx.HTTPStatusError,
+        attempt: int,
+        command: Optional[str] = None,
+    ) -> bool:
+        """Check if a 409 error should be retried.
+
+        Returns True and sleeps if should retry, raises appropriate error otherwise.
+        """
+        ctx = self._get_sandbox_error_context(sandbox_id)
+        if ctx["status"] == "RUNNING":
+            if attempt < MAX_409_RETRIES - 1:
+                time.sleep(RETRY_409_BASE_DELAY * (2**attempt))
+                return True
+            raise APIError(
+                f"Sandbox {sandbox_id} returned 409 after {MAX_409_RETRIES} retries. "
+                "This may be a transient DNS or gateway issue. Please retry."
+            ) from error
+        # Sandbox is not running
+        _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
+
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
         self._auth_cache.clear()
@@ -447,49 +474,52 @@ class SandboxClient:
             "timeout": effective_timeout,
         }
 
-        try:
-            client_timeout = effective_timeout + 2
-            response = self._gateway_post(
-                url, headers=headers, timeout=client_timeout, json=payload
-            )
-            response.raise_for_status()
-            return CommandResponse.model_validate(response.json())
-        except httpx.TimeoutException as e:
-            ctx = self._get_sandbox_error_context(sandbox_id)
-            if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-            raise SandboxUnresponsiveError(
-                sandbox_id=sandbox_id,
-                command=command,
-                message=_build_unresponsive_message(command, effective_timeout),
-                sandbox_status=ctx["status"],
-            ) from e
-        except httpx.HTTPStatusError as e:
-            resp = getattr(e, "response", None)
-            status = getattr(resp, "status_code", "?")
-
-            if status == 409:
-                ctx = self._get_sandbox_error_context(sandbox_id)
-                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-
-            if status == 408:
+        for attempt in range(MAX_409_RETRIES):
+            try:
+                client_timeout = effective_timeout + 2
+                response = self._gateway_post(
+                    url, headers=headers, timeout=client_timeout, json=payload
+                )
+                response.raise_for_status()
+                return CommandResponse.model_validate(response.json())
+            except httpx.TimeoutException as e:
                 ctx = self._get_sandbox_error_context(sandbox_id)
                 if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                     _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+                raise SandboxUnresponsiveError(
+                    sandbox_id=sandbox_id,
+                    command=command,
+                    message=_build_unresponsive_message(command, effective_timeout),
+                    sandbox_status=ctx["status"],
+                ) from e
+            except httpx.HTTPStatusError as e:
+                resp = getattr(e, "response", None)
+                status = getattr(resp, "status_code", "?")
 
-            req = getattr(e, "request", None)
-            method = getattr(req, "method", "?")
-            u = getattr(req, "url", "?")
-            text = getattr(resp, "text", "")
-            raise APIError(f"HTTP {status} {method} {u}: {text}") from e
-        except httpx.RequestError as e:
-            req = getattr(e, "request", None)
-            method = getattr(req, "method", "?")
-            u = getattr(req, "url", "?")
-            raise APIError(f"Request failed: {e.__class__.__name__} at {method} {u}: {e}") from e
-        except Exception as e:
-            raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
+                if status == 409:
+                    if self._should_retry_409(sandbox_id, e, attempt, command=command):
+                        continue
+
+                if status == 408:
+                    ctx = self._get_sandbox_error_context(sandbox_id)
+                    if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                        _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                    raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+
+                req = getattr(e, "request", None)
+                method = getattr(req, "method", "?")
+                u = getattr(req, "url", "?")
+                text = getattr(resp, "text", "")
+                raise APIError(f"HTTP {status} {method} {u}: {text}") from e
+            except httpx.RequestError as e:
+                req = getattr(e, "request", None)
+                method = getattr(req, "method", "?")
+                u = getattr(req, "url", "?")
+                raise APIError(
+                    f"Request failed: {e.__class__.__name__} at {method} {u}: {e}"
+                ) from e
+            except Exception as e:
+                raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
     def start_background_job(
         self,
@@ -703,29 +733,33 @@ class SandboxClient:
         with open(local_file_path, "rb") as f:
             file_content = f.read()
 
-        try:
-            files = {"file": (os.path.basename(local_file_path), file_content)}
-            params = {"path": file_path, "sandbox_id": sandbox_id}
-            response = self._gateway_post(
-                url, headers=headers, timeout=effective_timeout, files=files, params=params
-            )
-            response.raise_for_status()
-            return FileUploadResponse.model_validate(response.json())
-        except httpx.TimeoutException as e:
-            raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
-        except httpx.HTTPStatusError as e:
-            error_details = (
-                f"HTTP {e.response.status_code} {e.request.method} "
-                f"{e.request.url}: {e.response.text}"
-            )
-            raise APIError(f"Upload failed: {error_details}") from e
-        except httpx.RequestError as e:
-            req = getattr(e, "request", None)
-            method = getattr(req, "method", "?")
-            u = getattr(req, "url", "?")
-            raise APIError(f"Upload failed: {e.__class__.__name__} at {method} {u}: {e}") from e
-        except Exception as e:
-            raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
+        for attempt in range(MAX_409_RETRIES):
+            try:
+                files = {"file": (os.path.basename(local_file_path), file_content)}
+                params = {"path": file_path, "sandbox_id": sandbox_id}
+                response = self._gateway_post(
+                    url, headers=headers, timeout=effective_timeout, files=files, params=params
+                )
+                response.raise_for_status()
+                return FileUploadResponse.model_validate(response.json())
+            except httpx.TimeoutException as e:
+                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 409:
+                    if self._should_retry_409(sandbox_id, e, attempt):
+                        continue
+                error_details = (
+                    f"HTTP {e.response.status_code} {e.request.method} "
+                    f"{e.request.url}: {e.response.text}"
+                )
+                raise APIError(f"Upload failed: {error_details}") from e
+            except httpx.RequestError as e:
+                req = getattr(e, "request", None)
+                method = getattr(req, "method", "?")
+                u = getattr(req, "url", "?")
+                raise APIError(f"Upload failed: {e.__class__.__name__} at {method} {u}: {e}") from e
+            except Exception as e:
+                raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
 
     def upload_bytes(
         self,
@@ -751,22 +785,25 @@ class SandboxClient:
 
         effective_timeout = timeout if timeout is not None else 300
 
-        files = {"file": (filename, file_bytes)}
-        params = {"path": file_path, "sandbox_id": sandbox_id}
-
-        try:
-            response = self._gateway_post(
-                url, headers=headers, timeout=effective_timeout, files=files, params=params
-            )
-            response.raise_for_status()
-            return FileUploadResponse.model_validate(response.json())
-        except httpx.TimeoutException:
-            raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
-        except httpx.HTTPStatusError as e:
-            error_details = f"HTTP {e.response.status_code}: {e.response.text}"
-            raise APIError(f"Upload failed: {error_details}")
-        except Exception as e:
-            raise APIError(f"Upload failed: {str(e)}")
+        for attempt in range(MAX_409_RETRIES):
+            try:
+                files = {"file": (filename, file_bytes)}
+                params = {"path": file_path, "sandbox_id": sandbox_id}
+                response = self._gateway_post(
+                    url, headers=headers, timeout=effective_timeout, files=files, params=params
+                )
+                response.raise_for_status()
+                return FileUploadResponse.model_validate(response.json())
+            except httpx.TimeoutException:
+                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 409:
+                    if self._should_retry_409(sandbox_id, e, attempt):
+                        continue
+                error_details = f"HTTP {e.response.status_code}: {e.response.text}"
+                raise APIError(f"Upload failed: {error_details}")
+            except Exception as e:
+                raise APIError(f"Upload failed: {str(e)}")
 
     def download_file(
         self,
@@ -784,33 +821,40 @@ class SandboxClient:
 
         effective_timeout = timeout if timeout is not None else 300
 
-        try:
-            response = self._gateway_get(
-                url, headers=headers, params=params, timeout=effective_timeout
-            )
-            response.raise_for_status()
+        for attempt in range(MAX_409_RETRIES):
+            try:
+                response = self._gateway_get(
+                    url, headers=headers, params=params, timeout=effective_timeout
+                )
+                response.raise_for_status()
 
-            dir_path = os.path.dirname(local_file_path)
-            if dir_path:
-                os.makedirs(dir_path, exist_ok=True)
+                dir_path = os.path.dirname(local_file_path)
+                if dir_path:
+                    os.makedirs(dir_path, exist_ok=True)
 
-            with open(local_file_path, "wb") as f:
-                f.write(response.content)
-        except httpx.TimeoutException as e:
-            raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
-        except httpx.HTTPStatusError as e:
-            error_details = (
-                f"HTTP {e.response.status_code} {e.request.method} "
-                f"{e.request.url}: {e.response.text}"
-            )
-            raise APIError(f"Download failed: {error_details}") from e
-        except httpx.RequestError as e:
-            req = getattr(e, "request", None)
-            method = getattr(req, "method", "?")
-            u = getattr(req, "url", "?")
-            raise APIError(f"Download failed: {e.__class__.__name__} at {method} {u}: {e}") from e
-        except Exception as e:
-            raise APIError(f"Download failed: {e.__class__.__name__}: {e}") from e
+                with open(local_file_path, "wb") as f:
+                    f.write(response.content)
+                return
+            except httpx.TimeoutException as e:
+                raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 409:
+                    if self._should_retry_409(sandbox_id, e, attempt):
+                        continue
+                error_details = (
+                    f"HTTP {e.response.status_code} {e.request.method} "
+                    f"{e.request.url}: {e.response.text}"
+                )
+                raise APIError(f"Download failed: {error_details}") from e
+            except httpx.RequestError as e:
+                req = getattr(e, "request", None)
+                method = getattr(req, "method", "?")
+                u = getattr(req, "url", "?")
+                raise APIError(
+                    f"Download failed: {e.__class__.__name__} at {method} {u}: {e}"
+                ) from e
+            except Exception as e:
+                raise APIError(f"Download failed: {e.__class__.__name__}: {e}") from e
 
     def expose(
         self,
@@ -955,6 +999,29 @@ class AsyncSandboxClient:
         except Exception:
             return {"status": None, "error_type": None, "error_message": None}
 
+    async def _should_retry_409(
+        self,
+        sandbox_id: str,
+        error: httpx.HTTPStatusError,
+        attempt: int,
+        command: Optional[str] = None,
+    ) -> bool:
+        """Check if a 409 error should be retried (async).
+
+        Returns True and sleeps if should retry, raises appropriate error otherwise.
+        """
+        ctx = await self._get_sandbox_error_context(sandbox_id)
+        if ctx["status"] == "RUNNING":
+            if attempt < MAX_409_RETRIES - 1:
+                await asyncio.sleep(RETRY_409_BASE_DELAY * (2**attempt))
+                return True
+            raise APIError(
+                f"Sandbox {sandbox_id} returned 409 after {MAX_409_RETRIES} retries. "
+                "This may be a transient DNS or gateway issue. Please retry."
+            ) from error
+        # Sandbox is not running
+        _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
+
     def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
         self._auth_cache.clear()
@@ -1051,49 +1118,52 @@ class AsyncSandboxClient:
             "timeout": effective_timeout,
         }
 
-        try:
-            client_timeout = effective_timeout + 2
-            response = await self._gateway_post(
-                url, headers=headers, timeout=client_timeout, json=payload
-            )
-            response.raise_for_status()
-            return CommandResponse.model_validate(response.json())
-        except httpx.TimeoutException as e:
-            ctx = await self._get_sandbox_error_context(sandbox_id)
-            if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
-                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-            raise SandboxUnresponsiveError(
-                sandbox_id=sandbox_id,
-                command=command,
-                message=_build_unresponsive_message(command, effective_timeout),
-                sandbox_status=ctx["status"],
-            ) from e
-        except httpx.HTTPStatusError as e:
-            resp = getattr(e, "response", None)
-            status = getattr(resp, "status_code", "?")
-
-            if status == 409:
-                ctx = await self._get_sandbox_error_context(sandbox_id)
-                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-
-            if status == 408:
+        for attempt in range(MAX_409_RETRIES):
+            try:
+                client_timeout = effective_timeout + 2
+                response = await self._gateway_post(
+                    url, headers=headers, timeout=client_timeout, json=payload
+                )
+                response.raise_for_status()
+                return CommandResponse.model_validate(response.json())
+            except httpx.TimeoutException as e:
                 ctx = await self._get_sandbox_error_context(sandbox_id)
                 if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                     _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+                raise SandboxUnresponsiveError(
+                    sandbox_id=sandbox_id,
+                    command=command,
+                    message=_build_unresponsive_message(command, effective_timeout),
+                    sandbox_status=ctx["status"],
+                ) from e
+            except httpx.HTTPStatusError as e:
+                resp = getattr(e, "response", None)
+                status = getattr(resp, "status_code", "?")
 
-            req = getattr(e, "request", None)
-            method = getattr(req, "method", "?")
-            u = getattr(req, "url", "?")
-            text = getattr(resp, "text", "")
-            raise APIError(f"HTTP {status} {method} {u}: {text}") from e
-        except httpx.RequestError as e:
-            req = getattr(e, "request", None)
-            method = getattr(req, "method", "?")
-            u = getattr(req, "url", "?")
-            raise APIError(f"Request failed: {e.__class__.__name__} at {method} {u}: {e}") from e
-        except Exception as e:
-            raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
+                if status == 409:
+                    if await self._should_retry_409(sandbox_id, e, attempt, command=command):
+                        continue
+
+                if status == 408:
+                    ctx = await self._get_sandbox_error_context(sandbox_id)
+                    if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                        _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                    raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+
+                req = getattr(e, "request", None)
+                method = getattr(req, "method", "?")
+                u = getattr(req, "url", "?")
+                text = getattr(resp, "text", "")
+                raise APIError(f"HTTP {status} {method} {u}: {text}") from e
+            except httpx.RequestError as e:
+                req = getattr(e, "request", None)
+                method = getattr(req, "method", "?")
+                u = getattr(req, "url", "?")
+                raise APIError(
+                    f"Request failed: {e.__class__.__name__} at {method} {u}: {e}"
+                ) from e
+            except Exception as e:
+                raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
 
     async def start_background_job(
         self,
@@ -1327,28 +1397,32 @@ class AsyncSandboxClient:
         async with aiofiles.open(local_file_path, "rb") as f:
             file_content = await f.read()
 
-        try:
-            files = {"file": (os.path.basename(local_file_path), file_content)}
-            response = await self._gateway_post(
-                url, headers=headers, timeout=effective_timeout, files=files, params=params
-            )
-            response.raise_for_status()
-            return FileUploadResponse.model_validate(response.json())
-        except httpx.TimeoutException as e:
-            raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
-        except httpx.HTTPStatusError as e:
-            error_details = (
-                f"HTTP {e.response.status_code} {e.request.method} "
-                f"{e.request.url}: {e.response.text}"
-            )
-            raise APIError(f"Upload failed: {error_details}") from e
-        except httpx.RequestError as e:
-            req = getattr(e, "request", None)
-            method = getattr(req, "method", "?")
-            u = getattr(req, "url", "?")
-            raise APIError(f"Upload failed: {e.__class__.__name__} at {method} {u}: {e}") from e
-        except Exception as e:
-            raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
+        for attempt in range(MAX_409_RETRIES):
+            try:
+                files = {"file": (os.path.basename(local_file_path), file_content)}
+                response = await self._gateway_post(
+                    url, headers=headers, timeout=effective_timeout, files=files, params=params
+                )
+                response.raise_for_status()
+                return FileUploadResponse.model_validate(response.json())
+            except httpx.TimeoutException as e:
+                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 409:
+                    if await self._should_retry_409(sandbox_id, e, attempt):
+                        continue
+                error_details = (
+                    f"HTTP {e.response.status_code} {e.request.method} "
+                    f"{e.request.url}: {e.response.text}"
+                )
+                raise APIError(f"Upload failed: {error_details}") from e
+            except httpx.RequestError as e:
+                req = getattr(e, "request", None)
+                method = getattr(req, "method", "?")
+                u = getattr(req, "url", "?")
+                raise APIError(f"Upload failed: {e.__class__.__name__} at {method} {u}: {e}") from e
+            except Exception as e:
+                raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
 
     async def upload_bytes(
         self,
@@ -1376,20 +1450,24 @@ class AsyncSandboxClient:
 
         effective_timeout = timeout if timeout is not None else 300
 
-        try:
-            files = {"file": (filename, file_bytes)}
-            response = await self._gateway_post(
-                url, headers=headers, timeout=effective_timeout, files=files, params=params
-            )
-            response.raise_for_status()
-            return FileUploadResponse.model_validate(response.json())
-        except httpx.TimeoutException:
-            raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
-        except httpx.HTTPStatusError as e:
-            error_details = f"HTTP {e.response.status_code}: {e.response.text}"
-            raise APIError(f"Upload failed: {error_details}")
-        except Exception as e:
-            raise APIError(f"Upload failed: {str(e)}")
+        for attempt in range(MAX_409_RETRIES):
+            try:
+                files = {"file": (filename, file_bytes)}
+                response = await self._gateway_post(
+                    url, headers=headers, timeout=effective_timeout, files=files, params=params
+                )
+                response.raise_for_status()
+                return FileUploadResponse.model_validate(response.json())
+            except httpx.TimeoutException:
+                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 409:
+                    if await self._should_retry_409(sandbox_id, e, attempt):
+                        continue
+                error_details = f"HTTP {e.response.status_code}: {e.response.text}"
+                raise APIError(f"Upload failed: {error_details}")
+            except Exception as e:
+                raise APIError(f"Upload failed: {str(e)}")
 
     async def download_file(
         self,
@@ -1408,35 +1486,42 @@ class AsyncSandboxClient:
 
         effective_timeout = timeout if timeout is not None else 300
 
-        try:
-            response = await self._gateway_get(
-                url, headers=headers, params=params, timeout=effective_timeout
-            )
-            response.raise_for_status()
-            content = response.content
+        for attempt in range(MAX_409_RETRIES):
+            try:
+                response = await self._gateway_get(
+                    url, headers=headers, params=params, timeout=effective_timeout
+                )
+                response.raise_for_status()
+                content = response.content
 
-            dir_path = os.path.dirname(local_file_path)
-            if dir_path:
-                os.makedirs(dir_path, exist_ok=True)
+                dir_path = os.path.dirname(local_file_path)
+                if dir_path:
+                    os.makedirs(dir_path, exist_ok=True)
 
-            # Write file asynchronously (non-blocking I/O)
-            async with aiofiles.open(local_file_path, "wb") as f:
-                await f.write(content)
-        except httpx.TimeoutException as e:
-            raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
-        except httpx.HTTPStatusError as e:
-            error_details = (
-                f"HTTP {e.response.status_code} {e.request.method} "
-                f"{e.request.url}: {e.response.text}"
-            )
-            raise APIError(f"Download failed: {error_details}") from e
-        except httpx.RequestError as e:
-            req = getattr(e, "request", None)
-            method = getattr(req, "method", "?")
-            u = getattr(req, "url", "?")
-            raise APIError(f"Download failed: {e.__class__.__name__} at {method} {u}: {e}") from e
-        except Exception as e:
-            raise APIError(f"Download failed: {e.__class__.__name__}: {e}") from e
+                # Write file asynchronously (non-blocking I/O)
+                async with aiofiles.open(local_file_path, "wb") as f:
+                    await f.write(content)
+                return
+            except httpx.TimeoutException as e:
+                raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 409:
+                    if await self._should_retry_409(sandbox_id, e, attempt):
+                        continue
+                error_details = (
+                    f"HTTP {e.response.status_code} {e.request.method} "
+                    f"{e.request.url}: {e.response.text}"
+                )
+                raise APIError(f"Download failed: {error_details}") from e
+            except httpx.RequestError as e:
+                req = getattr(e, "request", None)
+                method = getattr(req, "method", "?")
+                u = getattr(req, "url", "?")
+                raise APIError(
+                    f"Download failed: {e.__class__.__name__} at {method} {u}: {e}"
+                ) from e
+            except Exception as e:
+                raise APIError(f"Download failed: {e.__class__.__name__}: {e}") from e
 
     async def aclose(self) -> None:
         """Close the async client and gateway client"""

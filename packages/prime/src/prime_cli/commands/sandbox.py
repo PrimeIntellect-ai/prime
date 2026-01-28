@@ -1,10 +1,15 @@
 import json
+import os
 import random
 import shlex
+import shutil
 import string
+import subprocess
+import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
+import httpx
 import typer
 from prime_sandboxes import (
     APIClient,
@@ -518,11 +523,13 @@ def delete(
 
                 if only_mine:
                     current_user_id = config.user_id
-                    sandboxes_to_delete = [
-                        s
-                        for s in all_sandboxes
-                        if (not current_user_id or not s.user_id or s.user_id == current_user_id)
-                    ]
+                    if not current_user_id:
+                        console.print(
+                            "[red]Error:[/red] Cannot filter by user - no user_id configured. "
+                            "Use --all-users to delete all sandboxes, or configure your user_id."
+                        )
+                        raise typer.Exit(1)
+                    sandboxes_to_delete = [s for s in all_sandboxes if s.user_id == current_user_id]
                 else:
                     sandboxes_to_delete = all_sandboxes
 
@@ -956,20 +963,29 @@ def expose_port(
     sandbox_id: str = typer.Argument(..., help="Sandbox ID to expose port from"),
     port: int = typer.Argument(..., help="Port number to expose"),
     name: Optional[str] = typer.Option(None, help="Optional name for the exposed port"),
+    protocol: str = typer.Option(
+        "HTTP",
+        "--protocol",
+        "-p",
+        help="Protocol: HTTP or TCP",
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Expose an HTTP port from a sandbox.
-
-    Currently only HTTP is supported. TCP, UDP, and SSH support coming soon.
-    """
+    """Expose a port from a sandbox."""
     validate_output_format(output, console)
+
+    # Validate protocol
+    protocol = protocol.upper()
+    if protocol not in ("HTTP", "TCP"):
+        console.print(f"[red]Error:[/red] Invalid protocol '{protocol}'. Use HTTP or TCP.")
+        raise typer.Exit(1)
 
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
         with console.status("[bold blue]Exposing port...", spinner="dots"):
-            exposed = sandbox_client.expose(sandbox_id, port, name)
+            exposed = sandbox_client.expose(sandbox_id, port, name, protocol)
 
         if output == "json":
             output_data_as_json(exposed.model_dump(), console)
@@ -977,10 +993,21 @@ def expose_port(
             console.print("[green]✓[/green] Port exposed successfully!")
             console.print(f"[bold green]Exposure ID:[/bold green] {exposed.exposure_id}")
             console.print(f"[bold green]Port:[/bold green] {exposed.port}")
+            console.print(f"[bold green]Protocol:[/bold green] {exposed.protocol or protocol}")
             if exposed.name:
                 console.print(f"[bold green]Name:[/bold green] {exposed.name}")
             console.print(f"[bold green]URL:[/bold green] {exposed.url}")
-            console.print(f"[bold green]TLS Socket:[/bold green] {exposed.tls_socket}")
+            if protocol == "TCP":
+                if exposed.external_port:
+                    console.print(
+                        f"[bold green]External Port:[/bold green] {exposed.external_port}"
+                    )
+                if exposed.external_endpoint:
+                    console.print(
+                        f"[bold green]External Endpoint:[/bold green] {exposed.external_endpoint}"
+                    )
+            else:
+                console.print(f"[bold green]TLS Socket:[/bold green] {exposed.tls_socket}")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
@@ -1022,50 +1049,96 @@ def unexpose_port(
         raise typer.Exit(1)
 
 
-@app.command("list-ports", no_args_is_help=True)
+@app.command("list-ports")
 def list_ports(
-    sandbox_id: str = typer.Argument(..., help="Sandbox ID"),
+    sandbox_id: Optional[str] = typer.Argument(
+        None, help="Sandbox ID (omit to list all exposed ports across all sandboxes)"
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List all exposed ports for a sandbox"""
+    """List exposed ports for a sandbox, or all sandboxes if no ID is provided"""
     validate_output_format(output, console)
 
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        with console.status("[bold blue]Fetching exposed ports...", spinner="dots"):
-            response = sandbox_client.list_exposed_ports(sandbox_id)
+        if sandbox_id:
+            # List ports for a specific sandbox
+            with console.status("[bold blue]Fetching exposed ports...", spinner="dots"):
+                response = sandbox_client.list_exposed_ports(sandbox_id)
 
-        if output == "json":
-            output_data_as_json(
-                {"exposures": [exp.model_dump() for exp in response.exposures]}, console
-            )
-        else:
-            if not response.exposures:
-                console.print(f"[yellow]No exposed ports for sandbox {sandbox_id}[/yellow]")
-            else:
-                table = build_table(
-                    f"Exposed Ports for Sandbox {sandbox_id}",
-                    [
-                        ("Exposure ID", "cyan"),
-                        ("Port", "blue"),
-                        ("Name", "green"),
-                        ("URL", "magenta"),
-                        ("TLS Socket", "yellow"),
-                    ],
+            if output == "json":
+                output_data_as_json(
+                    {"exposures": [exp.model_dump() for exp in response.exposures]}, console
                 )
-
-                for exp in response.exposures:
-                    table.add_row(
-                        exp.exposure_id,
-                        str(exp.port),
-                        exp.name or "N/A",
-                        exp.url,
-                        exp.tls_socket,
+            else:
+                if not response.exposures:
+                    console.print(f"[yellow]No exposed ports for sandbox {sandbox_id}[/yellow]")
+                else:
+                    table = build_table(
+                        f"Exposed Ports for Sandbox {sandbox_id}",
+                        [
+                            ("Exposure ID", "cyan"),
+                            ("Protocol", "white"),
+                            ("Port", "blue"),
+                            ("External", "blue"),
+                            ("Name", "green"),
+                            ("URL", "magenta"),
+                        ],
                     )
 
-                console.print(table)
+                    for exp in response.exposures:
+                        external_port = str(exp.external_port) if exp.external_port else "-"
+                        table.add_row(
+                            exp.exposure_id,
+                            exp.protocol or "HTTP",
+                            str(exp.port),
+                            external_port,
+                            exp.name or "-",
+                            exp.url,
+                        )
+
+                    console.print(table)
+        else:
+            # List all exposed ports across all sandboxes
+            with console.status("[bold blue]Fetching all exposed ports...", spinner="dots"):
+                response = sandbox_client.list_all_exposed_ports()
+
+            if output == "json":
+                output_data_as_json(
+                    {"exposures": [exp.model_dump() for exp in response.exposures]}, console
+                )
+            else:
+                if not response.exposures:
+                    console.print("[yellow]No exposed ports found[/yellow]")
+                else:
+                    table = build_table(
+                        "All Exposed Ports",
+                        [
+                            ("Sandbox ID", "yellow"),
+                            ("Exposure ID", "cyan"),
+                            ("Protocol", "white"),
+                            ("Port", "blue"),
+                            ("External", "blue"),
+                            ("Name", "green"),
+                            ("URL", "magenta"),
+                        ],
+                    )
+
+                    for exp in response.exposures:
+                        external_port = str(exp.external_port) if exp.external_port else "-"
+                        table.add_row(
+                            exp.sandbox_id,
+                            exp.exposure_id,
+                            exp.protocol or "HTTP",
+                            str(exp.port),
+                            external_port,
+                            exp.name or "-",
+                            exp.url,
+                        )
+
+                    console.print(table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
@@ -1073,4 +1146,151 @@ def list_ports(
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
+        raise typer.Exit(1)
+
+
+@app.command("ssh", no_args_is_help=True)
+def ssh_connect(
+    sandbox_id: str = typer.Argument(..., help="Sandbox ID to SSH into"),
+    ssh_args: Optional[List[str]] = typer.Argument(
+        None, help="Additional SSH arguments (e.g., -- -v for verbose)"
+    ),
+) -> None:
+    """Connect to a sandbox via SSH.
+
+    This command creates a SSH session with an ephemeral key and cleans up on disconnect.
+
+    Examples:\n
+        prime sandbox ssh sb_abc123\n
+        prime sandbox ssh sb_abc123 -- -L 3000:localhost:3000\n
+    """
+    session_id: Optional[str] = None
+    sandbox_client: Optional[SandboxClient] = None
+    temp_dir: Optional[str] = None
+    key_path: Optional[str] = None
+
+    def cleanup() -> None:
+        """Clean up the SSH session and temporary keys."""
+        if session_id and sandbox_client:
+            try:
+                console.print("\n[bold blue]Cleaning up SSH session...[/bold blue]")
+                sandbox_client.close_ssh_session(sandbox_id, session_id)
+                console.print("[green]✓[/green] SSH session closed")
+            except Exception:
+                pass
+        if temp_dir and os.path.isdir(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    try:
+        # Check if ssh and ssh-keygen commands are available
+        if not shutil.which("ssh"):
+            console.print("[red]Error:[/red] SSH client not found. Please install OpenSSH.")
+            raise typer.Exit(1)
+        if not shutil.which("ssh-keygen"):
+            console.print("[red]Error:[/red] ssh-keygen not found. Please install OpenSSH.")
+            raise typer.Exit(1)
+
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        # Check if sandbox is running
+        with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
+            sandbox = sandbox_client.get(sandbox_id)
+
+        if sandbox.status != "RUNNING":
+            console.print(f"[red]Error:[/red] Sandbox is not running (status: {sandbox.status})")
+            console.print(
+                f"[yellow]Tip:[/yellow] Check sandbox status with: prime sandbox get {sandbox_id}"
+            )
+            raise typer.Exit(1)
+
+        # Generate ephemeral SSH key
+        temp_dir = tempfile.mkdtemp(prefix="prime-ssh-")
+        key_path = os.path.join(temp_dir, "id_ed25519")
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", key_path],
+            check=True,
+            capture_output=True,
+        )
+        with open(f"{key_path}.pub", "r") as f:
+            public_key = f.read().strip()
+
+        # Create SSH session
+        console.print("[bold blue]Creating SSH session...[/bold blue]")
+        with console.status("[bold blue]Setting up SSH session...", spinner="dots"):
+            session = sandbox_client.create_ssh_session(sandbox_id)
+        session_id = session.session_id
+
+        # Authorize the key
+        authorize_url = (
+            f"{session.gateway_url.rstrip('/')}/{session.user_ns}/{session.job_id}/authorize"
+        )
+        headers = {"Authorization": f"Bearer {session.token}"}
+        payload = {
+            "session_id": session.session_id,
+            "public_key": public_key,
+            "ttl_seconds": session.ttl_seconds,
+        }
+        try:
+            with httpx.Client(timeout=30) as client:
+                client.post(authorize_url, json=payload, headers=headers).raise_for_status()
+        except Exception as e:
+            console.print(f"[red]Error:[/red] Failed to authorize SSH key: {e}")
+            cleanup()
+            raise typer.Exit(1)
+
+        ssh_host = session.host
+        ssh_port = session.port
+
+        console.print("[green]✓[/green] SSH session ready!")
+        console.print(f"[bold green]Connecting to:[/bold green] {session.session_id}@{ssh_host}")
+        console.print(f"[bold green]Port:[/bold green] {ssh_port}")
+        console.print()
+
+        # Wait for TCP exposure to propagate through the load balancer
+        with console.status("[bold blue]Waiting for connection to be ready...", spinner="dots"):
+            time.sleep(5)
+
+        console.print("[dim]Press Ctrl+D or type 'exit' to disconnect[/dim]")
+        console.print()
+
+        # Build SSH command
+        ssh_cmd = ["ssh", f"{session.session_id}@{ssh_host}", "-p", str(ssh_port)]
+
+        # Disable strict host key checking for dynamic hosts
+        ssh_cmd.extend(["-o", "StrictHostKeyChecking=no"])
+        ssh_cmd.extend(["-o", "UserKnownHostsFile=/dev/null"])
+        ssh_cmd.extend(["-o", "LogLevel=ERROR"])
+
+        # Add identity file if specified
+        if key_path:
+            ssh_cmd.extend(["-i", key_path])
+
+        # Add any additional SSH arguments
+        if ssh_args:
+            ssh_cmd.extend(ssh_args)
+
+        # Connect via SSH (this will be interactive)
+        result = subprocess.run(ssh_cmd)
+
+        # Check if SSH connection failed
+        if result.returncode != 0 and result.returncode != 255:
+            console.print(f"\n[yellow]SSH connection exited with code {result.returncode}[/yellow]")
+
+        cleanup()
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]SSH connection interrupted[/yellow]")
+        cleanup()
+        raise typer.Exit(130)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {str(e)}")
+        cleanup()
+        raise typer.Exit(1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
+        cleanup()
         raise typer.Exit(1)

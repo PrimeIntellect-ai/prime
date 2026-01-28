@@ -40,6 +40,7 @@ from .models import (
     Sandbox,
     SandboxListResponse,
     SandboxStatus,
+    SSHSession,
     UpdateSandboxRequest,
 )
 from .sandbox import AsyncSandboxClient, AsyncTemplateClient, SandboxClient, TemplateClient
@@ -79,6 +80,7 @@ __all__ = [
     "ExposePortRequest",
     "ExposedPort",
     "ListExposedPortsResponse",
+    "SSHSession",
     # Exceptions
     "APIError",
     "UnauthorizedError",

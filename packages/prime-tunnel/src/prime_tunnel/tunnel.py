@@ -47,7 +47,6 @@ class Tunnel:
         self._config_file: Optional[Path] = None
         self._started = False
         self._output_lines: list[str] = []
-        self._drain_thread: Optional[threading.Thread] = None
 
     @property
     def tunnel_id(self) -> Optional[str]:
@@ -167,7 +166,6 @@ class Tunnel:
                 pass
             finally:
                 self._process = None
-                self._drain_thread = None  # Thread exits when process pipes close
 
         # Delete tunnel registration
         if self._tunnel_info is not None:
@@ -222,9 +220,6 @@ class Tunnel:
         )
         stdout_thread.start()
         stderr_thread.start()
-
-        # Store one thread for join during cleanup (both will exit when process dies)
-        self._drain_thread = stdout_thread
 
     def _write_frpc_config(self) -> Path:
         """Generate and write frpc configuration file."""

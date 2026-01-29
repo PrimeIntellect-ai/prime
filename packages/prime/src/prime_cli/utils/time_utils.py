@@ -34,6 +34,42 @@ def human_age(created: datetime) -> str:
         return f"{days}d"
 
 
+def format_time_ago(dt: Union[datetime, str, None]) -> str:
+    """Format a datetime as a human-readable 'time ago' string.
+
+    Args:
+        dt: A datetime object, ISO format string, or None
+
+    Returns:
+        A human-readable string like "just now", "5m ago", "2h ago", "3d ago",
+        or the date in YYYY-MM-DD format for dates older than 30 days.
+        Returns "-" if dt is None.
+    """
+    if not dt:
+        return "-"
+
+    if isinstance(dt, str):
+        # Parse ISO format string, handling various formats
+        dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+
+    diff = now_utc() - to_utc(dt)
+    total_seconds = int(diff.total_seconds())
+
+    if total_seconds < 60:
+        return "just now"
+    elif total_seconds < 3600:
+        minutes = total_seconds // 60
+        return f"{minutes}m ago"
+    elif total_seconds < 86400:
+        hours = total_seconds // 3600
+        return f"{hours}h ago"
+    elif total_seconds < 2592000:  # 30 days
+        days = total_seconds // 86400
+        return f"{days}d ago"
+    else:
+        return to_utc(dt).strftime("%Y-%m-%d")
+
+
 def iso_timestamp(dt: Union[datetime, str]) -> str:
     """Convert datetime or ISO string to standardized timestamp format."""
     if isinstance(dt, str):

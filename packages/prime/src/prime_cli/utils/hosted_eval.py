@@ -1,4 +1,5 @@
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -10,6 +11,50 @@ from rich.text import Text
 from prime_cli.core import APIError, AsyncAPIClient
 
 console = Console()
+
+ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+PROGRESS_BAR = re.compile(r".*\|[█▏▎▍▌▋▊▉ ]{10,}\|.*")
+
+
+def strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE.sub("", text)
+
+
+def filter_progress_bars(text: str) -> str:
+    lines = text.splitlines()
+    filtered = []
+    for line in lines:
+        if PROGRESS_BAR.search(line) or re.search(r"\d+%\|", line):
+            if "100%" in line:
+                match = re.search(r"([^|]*100%\|[█▏▎▍▌▋▊▉ ]+\|[^\n]*?)(?=\d+%\||$)", line)
+                if match:
+                    filtered.append(match.group(1).strip())
+                else:
+                    filtered.append(line)
+            continue
+        if line.strip():
+            filtered.append(line)
+    return "\n".join(filtered)
+
+
+STATUS_MESSAGES = {
+    "Waiting for container to start...",
+    "No logs available",
+    "Unable to retrieve logs",
+    "Failed to fetch logs from sandbox",
+}
+
+
+def is_status_message(text: str) -> bool:
+    stripped = text.strip()
+    return any(stripped.startswith(msg) for msg in STATUS_MESSAGES)
+
+
+def clean_logs(text: str) -> str:
+    cleaned = filter_progress_bars(strip_ansi(text))
+    if is_status_message(cleaned):
+        return ""
+    return cleaned
 
 
 @dataclass
@@ -78,7 +123,7 @@ async def get_evaluation(client: AsyncAPIClient, evaluation_id: str) -> dict[str
 async def get_evaluation_logs(client: AsyncAPIClient, evaluation_id: str) -> str:
     try:
         response = await client.get(f"/hosted-evaluations/{evaluation_id}/logs")
-        return response.get("logs", "")
+        return response.get("logs") or ""
     except APIError:
         return ""
 
@@ -103,13 +148,14 @@ async def run_hosted_evaluation(
         evaluation_id = result.get("evaluation_id")
 
         if not evaluation_id:
-            raise APIError("Failed to get evaluation ID from response")
+            raise APIError(f"Failed to get evaluation ID from response. Response: {result}")
 
         console.print(f"[green]✓ Created hosted evaluation:[/green] {evaluation_id}")
         console.print()
 
-        last_log_length = 0
+        last_logs = ""
         terminal_statuses = {"COMPLETED", "FAILED", "TIMEOUT", "CANCELLED"}
+        consecutive_errors = 0
 
         with Live(
             Panel(
@@ -123,47 +169,80 @@ async def run_hosted_evaluation(
             refresh_per_second=4,
             console=console,
         ) as live:
+            first_poll = True
             while True:
-                await asyncio.sleep(poll_interval)
+                if not first_poll:
+                    await asyncio.sleep(poll_interval)
+                first_poll = False
 
-                eval_data = await get_evaluation(client, evaluation_id)
-                status = eval_data.get("status", "UNKNOWN")
+                try:
+                    eval_data = await get_evaluation(client, evaluation_id)
+                    status = eval_data.get("status", "UNKNOWN")
+                    consecutive_errors = 0
 
-                status_color = {
-                    "PENDING": "yellow",
-                    "RUNNING": "cyan",
-                    "COMPLETED": "green",
-                    "FAILED": "red",
-                    "TIMEOUT": "red",
-                    "CANCELLED": "yellow",
-                }.get(status, "white")
+                    status_color = {
+                        "PENDING": "yellow",
+                        "RUNNING": "cyan",
+                        "COMPLETED": "green",
+                        "FAILED": "red",
+                        "TIMEOUT": "red",
+                        "CANCELLED": "yellow",
+                    }.get(status, "white")
 
-                total_samples = eval_data.get("total_samples", 0)
-                status_text = Text.assemble(
-                    "Status: ",
-                    (status, status_color),
-                    f" | Samples: {total_samples}",
-                )
-                live.update(
-                    Panel(
-                        status_text,
-                        title="[bold]Hosted Evaluation[/bold]",
-                        border_style="blue",
+                    total_samples = eval_data.get("total_samples", 0)
+                    status_text = Text.assemble(
+                        "Status: ",
+                        (status, status_color),
+                        f" | Samples: {total_samples}",
                     )
-                )
+                    live.update(
+                        Panel(
+                            status_text,
+                            title="[bold]Hosted Evaluation[/bold]",
+                            border_style="blue",
+                        )
+                    )
 
-                if stream_logs and status in ("RUNNING", "COMPLETED", "FAILED"):
-                    logs = await get_evaluation_logs(client, evaluation_id)
-                    if logs and len(logs) > last_log_length:
+                    if stream_logs and status in ("RUNNING", "COMPLETED", "FAILED"):
+                        raw_logs = await get_evaluation_logs(client, evaluation_id)
+                        logs = clean_logs(raw_logs) if raw_logs else ""
+
+                        if logs and logs != last_logs:
+                            old_lines = last_logs.splitlines() if last_logs else []
+                            new_lines = logs.splitlines()
+
+                            # Calculate new lines to print (avoid duplicates)
+                            if not last_logs:
+                                lines_to_print = new_lines
+                            else:
+                                overlap = 0
+                                max_overlap = min(len(old_lines), len(new_lines))
+                                for i in range(1, max_overlap + 1):
+                                    if old_lines[-i:] == new_lines[:i]:
+                                        overlap = i
+                                lines_to_print = new_lines[overlap:]
+
+                            # Print new lines using console.out which doesn't interfere with Live
+                            if lines_to_print:
+                                for line in lines_to_print:
+                                    live.console.print(line)
+
+                            last_logs = logs
+
+                    if status in terminal_statuses:
                         live.stop()
-                        new_logs = logs[last_log_length:]
-                        console.print(new_logs, end="")
-                        last_log_length = len(logs)
-                        live.start()
+                        break
 
-                if status in terminal_statuses:
-                    live.stop()
-                    break
+                except APIError as e:
+                    consecutive_errors += 1
+                    if "429" in str(e):
+                        if consecutive_errors >= 3:
+                            live.console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
+                            await asyncio.sleep(30)
+                        else:
+                            await asyncio.sleep(10)
+                        continue
+                    raise
 
         eval_data = await get_evaluation(client, evaluation_id)
         final_logs = await get_evaluation_logs(client, evaluation_id)

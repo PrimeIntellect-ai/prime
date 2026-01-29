@@ -2891,10 +2891,24 @@ def run_eval(
 
     if hosted:
         if not is_slug or not upstream_owner or not upstream_name:
+            metadata = find_environment_metadata(
+                env_name=environment,
+                env_path=Path(env_path) if env_path else None,
+            )
+
             console.print(
                 "[red]Error: Hosted evaluations require environment slug (owner/name).[/red]"
             )
-            console.print(f"[dim]Example: prime eval primeintellect/{environment} --hosted[/dim]")
+
+            if metadata and metadata.get("owner") and metadata.get("name"):
+                suggested_slug = f"{metadata['owner']}/{metadata['name']}"
+                console.print("[yellow]Tip:[/yellow] Found local environment metadata.")
+                console.print(f"[dim]Try:[/dim] prime eval {suggested_slug} --hosted")
+            else:
+                console.print(
+                    f"[dim]Example: prime eval primeintellect/{environment} --hosted[/dim]"
+                )
+
             raise typer.Exit(1)
 
         client = APIClient(require_auth=False)
@@ -2907,9 +2921,58 @@ def run_eval(
             console.print(f"[red]Error: Environment '{environment}' not found on the hub.[/red]")
             console.print(f"[dim]{e}[/dim]")
             console.print()
-            console.print("[dim]To publish your environment, run:[/dim]")
-            console.print("  prime env push")
-            raise typer.Exit(1)
+
+            metadata = find_environment_metadata(
+                env_name=upstream_name, env_path=Path(env_path) if env_path else None
+            )
+
+            if metadata and metadata.get("owner") == upstream_owner:
+                console.print(
+                    "[yellow]Found local environment that hasn't been pushed yet.[/yellow]"
+                )
+                console.print()
+
+                should_push = typer.confirm(
+                    "Would you like to push this environment to the hub now?", default=True
+                )
+
+                if should_push:
+                    console.print()
+                    console.print("[cyan]Pushing environment to hub...[/cyan]")
+
+                    env_dir = env_path if env_path else Path.cwd()
+                    result = subprocess.run(
+                        ["prime", "env", "push"], cwd=env_dir, capture_output=False, text=True
+                    )
+
+                    if result.returncode != 0:
+                        console.print("[red]Failed to push environment.[/red]")
+                        raise typer.Exit(1)
+
+                    console.print()
+                    console.print("[green]✓ Environment pushed successfully![/green]")
+                    console.print("[cyan]Continuing with hosted evaluation...[/cyan]")
+                    console.print()
+
+                    try:
+                        env_details = fetch_environment_details(
+                            client, upstream_owner, upstream_name, requested_version
+                        )
+                        environment_id = env_details.get("id")
+                    except APIError as e2:
+                        console.print(
+                            f"[red]Error: Still couldn't find environment after push: {e2}[/red]"
+                        )
+                        raise typer.Exit(1)
+                else:
+                    console.print()
+                    console.print("[yellow]Cancelled. To push manually, run:[/yellow]")
+                    console.print("  prime env push")
+                    raise typer.Exit(1)
+            else:
+                console.print("[dim]To publish your environment, run:[/dim]")
+                console.print("  prime env push")
+                raise typer.Exit(1)
 
         if not environment_id:
             console.print(f"[red]Error: Could not get environment ID for '{environment}'[/red]")
@@ -2967,7 +3030,6 @@ def run_eval(
 
         return
 
-    # Continue with local evaluation logic
     if is_slug:
         console.print(f"[dim]Using upstream environment {upstream_owner}/{upstream_name}[/dim]\n")
 

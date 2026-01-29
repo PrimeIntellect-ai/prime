@@ -1,4 +1,3 @@
-import hashlib
 import os
 import platform
 import shutil
@@ -35,13 +34,6 @@ FRPC_URLS = {
         "arm64",
     ): f"https://github.com/fatedier/frp/releases/download/v{FRPC_VERSION}/frp_{FRPC_VERSION}_linux_arm64.tar.gz",
 }
-FRPC_CHECKSUMS = {
-    ("Darwin", "arm64"): None,  # TODO: Add checksums
-    ("Darwin", "x86_64"): None,
-    ("Linux", "x86_64"): None,
-    ("Linux", "aarch64"): None,
-    ("Linux", "arm64"): None,
-}
 
 
 def _get_platform_key() -> tuple[str, str]:
@@ -63,8 +55,6 @@ def _download_frpc(dest: Path) -> None:
     if not url:
         raise BinaryDownloadError(f"Unsupported platform: {platform_key[0]} {platform_key[1]}")
 
-    expected_checksum = FRPC_CHECKSUMS.get(platform_key)
-
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         archive_path = tmpdir_path / "frp.tar.gz"
@@ -78,13 +68,6 @@ def _download_frpc(dest: Path) -> None:
 
         except httpx.HTTPError as e:
             raise BinaryDownloadError(f"Failed to download frpc: {e}") from e
-
-        if expected_checksum:
-            actual_checksum = _compute_sha256(archive_path)
-            if actual_checksum != expected_checksum:
-                raise BinaryDownloadError(
-                    f"Checksum mismatch: expected {expected_checksum}, got {actual_checksum}"
-                )
 
         try:
             with tarfile.open(archive_path, "r:gz") as tar:
@@ -120,14 +103,6 @@ def _download_frpc(dest: Path) -> None:
             # Clean up temp file if rename failed
             if temp_dest.exists():
                 temp_dest.unlink()
-
-
-def _compute_sha256(path: Path) -> str:
-    sha256 = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            sha256.update(chunk)
-    return sha256.hexdigest()
 
 
 def get_frpc_path() -> Path:

@@ -39,6 +39,7 @@ class Sandbox(BaseModel):
     disk_size_gb: int = Field(..., alias="diskSizeGB")
     disk_mount_path: str = Field(..., alias="diskMountPath")
     gpu_count: int = Field(..., alias="gpuCount")
+    gpu_type: Optional[str] = Field(None, alias="gpuType")
     network_access: bool = Field(True, alias="networkAccess")
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
@@ -83,6 +84,7 @@ class CreateSandboxRequest(BaseModel):
     memory_gb: int = 2
     disk_size_gb: int = 5
     gpu_count: int = 0
+    gpu_type: Optional[str] = None
     network_access: bool = True
     timeout_minutes: int = 60
     environment_vars: Optional[Dict[str, str]] = None
@@ -103,6 +105,7 @@ class UpdateSandboxRequest(BaseModel):
     memory_gb: Optional[int] = None
     disk_size_gb: Optional[int] = None
     gpu_count: Optional[int] = None
+    gpu_type: Optional[str] = None
     timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
     registry_credentials_id: Optional[str] = None

@@ -79,6 +79,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "disk_size_gb": sandbox.disk_size_gb,
         "disk_mount_path": sandbox.disk_mount_path,
         "gpu_count": sandbox.gpu_count,
+        "gpu_type": sandbox.gpu_type,
         "network_access": sandbox.network_access,
         "timeout_minutes": sandbox.timeout_minutes,
         "labels": sandbox.labels,
@@ -263,6 +264,8 @@ def get(
             table.add_row("Disk Size (GB)", str(sandbox_data["disk_size_gb"]))
             table.add_row("Disk Mount Path", sandbox_data["disk_mount_path"])
             table.add_row("GPU Count", str(sandbox_data["gpu_count"]))
+            if sandbox_data.get("gpu_type"):
+                table.add_row("GPU Type", sandbox_data["gpu_type"].upper())
             network_display = Text(
                 "Enabled" if sandbox_data["network_access"] else "Disabled",
                 style="green" if sandbox_data["network_access"] else "yellow",
@@ -334,6 +337,9 @@ def create(
     memory_gb: int = typer.Option(2, help="Memory in GB"),
     disk_size_gb: int = typer.Option(10, help="Disk size in GB"),
     gpu_count: int = typer.Option(0, help="Number of GPUs"),
+    gpu_type: Optional[str] = typer.Option(
+        None, "--gpu-type", help="GPU type (h100). Required if gpu_count > 0"
+    ),
     network_access: bool = typer.Option(
         True,
         "--network-access/--no-network-access",
@@ -402,6 +408,23 @@ def create(
             suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
             name = f"{clean_image}-{suffix}"
 
+        # Validate gpu_type
+        if gpu_type:
+            gpu_type = gpu_type.lower()
+            if gpu_type != "h100":
+                console.print("[red]Error:[/red] gpu_type must be: h100")
+                raise typer.Exit(1)
+            if gpu_count == 0:
+                console.print(
+                    "[red]Error:[/red] gpu_type should not be specified when gpu_count is 0"
+                )
+                raise typer.Exit(1)
+        elif gpu_count > 0:
+            console.print(
+                "[red]Error:[/red] --gpu-type is required when --gpu-count > 0. Specify: h100"
+            )
+            raise typer.Exit(1)
+
         request = CreateSandboxRequest(
             name=name,
             docker_image=docker_image,
@@ -410,6 +433,7 @@ def create(
             memory_gb=memory_gb,
             disk_size_gb=disk_size_gb,
             gpu_count=gpu_count,
+            gpu_type=gpu_type,
             network_access=network_access,
             timeout_minutes=timeout_minutes,
             environment_vars=env_vars if env_vars else None,
@@ -426,7 +450,10 @@ def create(
         console.print(f"Start Command: {start_command or 'N/A'}")
         console.print(f"Resources: {cpu_cores} CPU, {memory_gb}GB RAM, {disk_size_gb}GB disk")
         if gpu_count > 0:
-            console.print(f"GPUs: {gpu_count}")
+            gpu_display = f"{gpu_count}"
+            if gpu_type:
+                gpu_display += f" x {gpu_type.upper()}"
+            console.print(f"GPUs: {gpu_display}")
         network_status = "[green]Enabled[/green]" if network_access else "[yellow]Disabled[/yellow]"
         console.print(f"Network Access: {network_status}")
         console.print(f"Timeout: {timeout_minutes} minutes")

@@ -483,25 +483,36 @@ def list_cmd(
         None, "--action-status", help="Filter by action status (SUCCESS/FAILED/RUNNING/PENDING)"
     ),
     sort: str = typer.Option(
-        "created_at", "--sort", help="Sort by: name, created_at, updated_at"
+        "created_at", "--sort", help="Sort by: name, created_at, updated_at, stars"
     ),
     order: str = typer.Option("desc", "--order", help="Sort order: asc, desc"),
     show_actions: bool = typer.Option(False, "--show-actions", help="Show action status column"),
+    starred: bool = typer.Option(
+        False, "--starred", help="Filter to only environments you have starred"
+    ),
+    mine: bool = typer.Option(
+        False, "--mine", help="Filter to only your own environments (personal + team)"
+    ),
 ) -> None:
-    """List available verifiers environments
+    """List environments from the hub.
 
+    By default, shows all public environments. If authenticated, also includes
+    private environments you have access to. Use --starred or --mine to filter.
+
+    \b
     Examples:
-        prime env list --search "test"
-        prime env list --action-status SUCCESS --show-actions
-        prime env list --tag ml --tag nlp
-        prime env list --sort name --order asc
+        prime env list                       # All public environments
+        prime env list --starred             # Your starred environments
+        prime env list --mine                # Your own environments
+        prime env list --search "math"       # Search by name/description
+        prime env list --sort stars          # Sort by most starred
     """
     validate_output_format(output, console)
 
     # Validate sort and order
-    if sort not in ("name", "created_at", "updated_at"):
+    if sort not in ("name", "created_at", "updated_at", "stars"):
         console.print(
-            "[red]Error: --sort must be one of: name, created_at, updated_at[/red]"
+            "[red]Error: --sort must be one of: name, created_at, updated_at, stars[/red]"
         )
         raise typer.Exit(1)
     if order.lower() not in ("asc", "desc"):
@@ -509,7 +520,9 @@ def list_cmd(
         raise typer.Exit(1)
 
     try:
-        client = APIClient(require_auth=False)
+        # Require auth if filtering by starred or mine
+        require_auth = starred or mine
+        client = APIClient(require_auth=require_auth)
 
         params: Dict[str, Any] = {
             "include_teams": True,
@@ -530,6 +543,10 @@ def list_cmd(
             params["ci_status"] = action_status
         if show_actions or action_status:
             params["include_ci_status"] = True
+        if starred:
+            params["starred_only"] = True
+        if mine:
+            params["mine_only"] = True
 
         result = client.get("/environmentshub/", params=params)
 
@@ -555,10 +572,12 @@ def list_cmd(
                     "environment": f"{owner_name}/{env_name}",
                     "description": env.get("description", ""),
                     "visibility": env.get("visibility", ""),
+                    "version": env.get("latest_version"),
+                    "stars": env.get("stars", 0),
+                    "updated_at": env.get("updated_at"),
                 }
                 if show_actions or action_status:
                     env_entry["action_status"] = env.get("latest_ci_status")
-                    env_entry["version"] = env.get("latest_version")
                 if env.get("tags"):
                     env_entry["tags"] = env.get("tags")
                 env_data.append(env_entry)
@@ -575,9 +594,10 @@ def list_cmd(
             table = Table(title=f"Environments (Total: {total})")
             table.add_column("Environment", style="cyan")
             table.add_column("Description", style="green")
-            table.add_column("Visibility", style="magenta")
+            table.add_column("Version", style="blue")
+            table.add_column("Stars", style="yellow", justify="right")
+            table.add_column("Updated", style="dim")
             if show_actions or action_status:
-                table.add_column("Version", style="blue")
                 table.add_column("Action Status")
 
             for env in environments:
@@ -585,14 +605,22 @@ def list_cmd(
                 env_name = env["name"]
                 env_id = f"{owner_name}/{env_name}"
                 description = env.get("description", "")
-                vis = env.get("visibility", "")
+                version = env.get("latest_version") or "-"
+                stars = str(env.get("stars", 0))
+                updated_at = env.get("updated_at", "")
+                if updated_at:
+                    # Format as short date
+                    try:
+                        dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                        updated_at = dt.strftime("%Y-%m-%d")
+                    except (ValueError, AttributeError):
+                        pass
 
                 if show_actions or action_status:
-                    version = env.get("latest_version") or "-"
                     action_text = _format_action_status(env.get("latest_ci_status"))
-                    table.add_row(env_id, description, vis, version, action_text)
+                    table.add_row(env_id, description, version, stars, updated_at, action_text)
                 else:
-                    table.add_row(env_id, description, vis)
+                    table.add_row(env_id, description, version, stars, updated_at)
 
             console.print(table)
 
@@ -616,8 +644,9 @@ def status_cmd(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     output: str = typer.Option("table", "--output", help="Output format: table or json"),
 ) -> None:
-    """Show action status for an environment
+    """Show action status for an environment.
 
+    \b
     Examples:
         prime env status owner/my-env
         prime env status owner/my-env --output json
@@ -1913,16 +1942,16 @@ def install(
         help="Don't upgrade existing packages. Useful with locked dependencies (uv.lock).",
     ),
 ) -> None:
-    """Install a verifiers environment
+    """Install a verifiers environment.
 
+    \b
     Examples:
-        prime env install gsm8k                  # local editable install from ./environments
-        prime env install gsm8k -p /path/to/envs # local install from custom path
-        prime env install owner/environment      # install from Prime Hub
-        prime env install owner/environment@0.2.3
+        prime env install gsm8k                    # local install from ./environments
+        prime env install gsm8k -p /path/to/envs   # local install from custom path
+        prime env install owner/environment        # install from Prime Hub
+        prime env install owner/environment@0.2.3  # specific version
         prime env install owner/environment --with pip
-        prime env install owner/environment --no-upgrade
-        prime env install owner/environment1 owner/environment2 owner/environment3
+        prime env install env1 env2 env3           # install multiple
     """
     try:
         client = APIClient(require_auth=False)
@@ -2170,8 +2199,9 @@ def uninstall(
         help="Package manager to use (uv or pip)",
     ),
 ) -> None:
-    """Uninstall a verifiers environment
+    """Uninstall a verifiers environment.
 
+    \b
     Examples:
         prime env uninstall environment
         prime env uninstall environment --with pip

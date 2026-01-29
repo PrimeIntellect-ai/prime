@@ -40,6 +40,7 @@ def push_image(
     """
     Build and push a Docker image to Prime Intellect registry.
 
+    \b
     Examples:
         prime images push myapp:v1.0.0
         prime images push myapp:latest --dockerfile custom.Dockerfile
@@ -186,6 +187,7 @@ def list_images(
     """
     List all images you've pushed to Prime Intellect registry.
 
+    \b
     Examples:
         prime images list
         prime images list --output json
@@ -279,6 +281,7 @@ def delete_image(
     Note: This removes the database record but does not delete the actual
     image from Google Artifact Registry.
 
+    \b
     Examples:
         prime images delete myapp:v1.0.0
         prime images delete myapp:latest --yes

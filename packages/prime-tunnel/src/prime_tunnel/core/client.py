@@ -11,7 +11,7 @@ from tenacity import (
 
 from prime_tunnel.core.config import Config
 from prime_tunnel.exceptions import TunnelAuthError, TunnelError, TunnelTimeoutError
-from prime_tunnel.models import TunnelInfo, TunnelRegistrationResponse
+from prime_tunnel.models import TunnelInfo
 
 # Retry configuration for transient connection errors
 RETRYABLE_EXCEPTIONS = (
@@ -152,18 +152,8 @@ class TunnelClient:
         data = await self._handle_response(response, "create tunnel")
         if not data:
             raise TunnelError("Failed to create tunnel: unexpected empty response")
-        registration = TunnelRegistrationResponse(**data)
 
-        return TunnelInfo(
-            tunnel_id=registration.tunnel_id,
-            hostname=registration.hostname,
-            url=registration.url,
-            frp_token=registration.frp_token,
-            binding_secret=registration.binding_secret,
-            server_host=registration.server_host,
-            server_port=registration.server_port,
-            expires_at=registration.expires_at,
-        )
+        return TunnelInfo(**data)
 
     async def get_tunnel(self, tunnel_id: str) -> Optional[TunnelInfo]:
         """

@@ -132,7 +132,13 @@ class Tunnel:
             raise
 
         # 6. Start background thread to drain pipes (prevents buffer exhaustion)
-        self._start_pipe_drain()
+        try:
+            self._start_pipe_drain()
+        except BaseException as e:
+            await self._cleanup()
+            if isinstance(e, asyncio.CancelledError):
+                raise
+            raise TunnelConnectionError(f"Failed to start pipe drain: {e}") from e
 
         self._started = True
 

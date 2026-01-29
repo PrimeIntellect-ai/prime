@@ -68,10 +68,3 @@ class Config:
         path = self.config_dir / "bin"
         path.mkdir(parents=True, exist_ok=True)
         return path
-
-    @property
-    def cache_dir(self) -> Path:
-        """Directory for cache files."""
-        path = self.config_dir / "cache"
-        path.mkdir(parents=True, exist_ok=True)
-        return path

@@ -1,4 +1,4 @@
-from prime_tunnel import Config, Tunnel, TunnelClient, TunnelConfig
+from prime_tunnel import Config, Tunnel, TunnelClient
 
 
 def test_tunnel_init():
@@ -15,22 +15,6 @@ def test_tunnel_init_with_name():
     tunnel = Tunnel(local_port=9000, name="my-tunnel")
     assert tunnel.local_port == 9000
     assert tunnel.name == "my-tunnel"
-
-
-def test_tunnel_config():
-    """Test TunnelConfig model."""
-    config = TunnelConfig(local_port=8888, local_addr="0.0.0.0", name="test")
-    assert config.local_port == 8888
-    assert config.local_addr == "0.0.0.0"
-    assert config.name == "test"
-
-
-def test_tunnel_config_defaults():
-    """Test TunnelConfig default values."""
-    config = TunnelConfig()
-    assert config.local_port == 8765
-    assert config.local_addr == "127.0.0.1"
-    assert config.name is None
 
 
 def test_config_default_base_url():

@@ -330,9 +330,9 @@ def create(
     start_command: Optional[str] = typer.Option(
         "tail -f /dev/null", help="Command to run in the container"
     ),
-    cpu_cores: int = typer.Option(1, help="Number of CPU cores"),
-    memory_gb: int = typer.Option(2, help="Memory in GB"),
-    disk_size_gb: int = typer.Option(10, help="Disk size in GB"),
+    cpu_cores: float = typer.Option(1.0, help="Number of CPU cores"),
+    memory_gb: float = typer.Option(2.0, help="Memory in GB"),
+    disk_size_gb: float = typer.Option(10.0, help="Disk size in GB"),
     gpu_count: int = typer.Option(0, help="Number of GPUs"),
     network_access: bool = typer.Option(
         True,

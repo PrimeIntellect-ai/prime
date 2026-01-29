@@ -1,4 +1,5 @@
 import asyncio
+import fcntl
 import os
 import subprocess
 import tempfile
@@ -301,34 +302,48 @@ subdomain = "{self._tunnel_info.tunnel_id}"
                     f"--- frpc output ---\n{output_text}\n-------------------"
                 )
 
-            if self._process.stdout:
-                if os.name == "posix":
-                    import fcntl
+            if os.name == "posix":
+                # Set both pipes to non-blocking mode to drain them without deadlock
+                pipes_to_drain = []
+                original_flags = {}
 
-                    fd = self._process.stdout.fileno()
-                    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-                    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+                for pipe in (self._process.stdout, self._process.stderr):
+                    if pipe:
+                        fd = pipe.fileno()
+                        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+                        original_flags[fd] = fl
+                        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+                        pipes_to_drain.append(pipe)
 
-                    try:
-                        while True:
-                            line = self._process.stdout.readline()
-                            if not line:
-                                break
-                            line = line.strip()
-                            if line:
-                                self._output_lines.append(line)
-                                if "start proxy success" in line.lower():
-                                    return
-                                if "login failed" in line.lower():
-                                    raise TunnelConnectionError(f"frpc login failed: {line}")
-                                if "authorization failed" in line.lower():
-                                    raise TunnelConnectionError(
-                                        f"frpc authorization failed: {line}"
-                                    )
-                    except (BlockingIOError, IOError):
-                        pass
-                    finally:
-                        fcntl.fcntl(fd, fcntl.F_SETFL, fl)
+                try:
+                    # Drain both stdout and stderr to prevent buffer exhaustion
+                    for pipe in pipes_to_drain:
+                        try:
+                            while True:
+                                line = pipe.readline()
+                                if not line:
+                                    break
+                                line = line.strip()
+                                if line:
+                                    self._output_lines.append(line)
+                                    # Check for success/failure indicators
+                                    if "start proxy success" in line.lower():
+                                        return
+                                    if "login failed" in line.lower():
+                                        raise TunnelConnectionError(f"frpc login failed: {line}")
+                                    if "authorization failed" in line.lower():
+                                        raise TunnelConnectionError(
+                                            f"frpc authorization failed: {line}"
+                                        )
+                        except (BlockingIOError, IOError):
+                            pass  # No more data available on this pipe
+                finally:
+                    # Restore original flags
+                    for fd, fl in original_flags.items():
+                        try:
+                            fcntl.fcntl(fd, fcntl.F_SETFL, fl)
+                        except (OSError, ValueError):
+                            pass  # Pipe may have closed
 
             await asyncio.sleep(0.1)
 

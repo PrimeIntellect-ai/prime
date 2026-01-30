@@ -2,14 +2,12 @@ name: CI
 
 permissions:
   contents: read
-  pull-requests: read
 
 on:
   push:
     branches: [ "main", "develop" ]
   pull_request:
     branches: [ "main", "develop" ]
-    types: [ opened, synchronize, reopened, labeled, unlabeled ]
 
 jobs:
   check-version-bump:
@@ -22,23 +20,11 @@ jobs:
 
     - name: Check for version bumps in non-release PRs
       env:
-        GH_TOKEN: ${{ github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
         BRANCH_NAME: ${{ github.head_ref }}
       run: |
-        # Check if this is a release PR (by label or branch name)
-        LABELS=$(gh pr view $PR_NUMBER --json labels -q '.labels[].name' 2>/dev/null || echo "")
-
-        IS_RELEASE=false
-        if echo "$LABELS" | grep -qiE "^release$"; then
-          IS_RELEASE=true
-          echo "✅ PR has 'release' label - version bumps allowed"
-        elif echo "$BRANCH_NAME" | grep -qE "^release/"; then
-          IS_RELEASE=true
+        # Check if this is a release PR (by branch name)
+        if echo "$BRANCH_NAME" | grep -qE "^release/"; then
           echo "✅ Branch matches 'release/*' pattern - version bumps allowed"
-        fi
-
-        if [ "$IS_RELEASE" = "true" ]; then
           exit 0
         fi
 
@@ -70,9 +56,7 @@ jobs:
           echo -e "$BUMPED_FILES"
           echo ""
           echo "Version bumps should only be done in release PRs."
-          echo "To mark this as a release PR, either:"
-          echo "  1. Add the 'release' label to this PR"
-          echo "  2. Use a branch name starting with 'release/'"
+          echo "Use a branch name starting with 'release/' for release PRs."
           exit 1
         fi
 

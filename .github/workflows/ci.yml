@@ -2,6 +2,7 @@ name: CI
 
 permissions:
   contents: read
+  pull-requests: read
 
 on:
   push:
@@ -10,6 +11,73 @@ on:
     branches: [ "main", "develop" ]
 
 jobs:
+  check-version-bump:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Check for version bumps in non-release PRs
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        BRANCH_NAME: ${{ github.head_ref }}
+      run: |
+        # Check if this is a release PR (by label or branch name)
+        LABELS=$(gh pr view $PR_NUMBER --json labels -q '.labels[].name' 2>/dev/null || echo "")
+
+        IS_RELEASE=false
+        if echo "$LABELS" | grep -qiE "^release$"; then
+          IS_RELEASE=true
+          echo "✅ PR has 'release' label - version bumps allowed"
+        elif echo "$BRANCH_NAME" | grep -qE "^release/"; then
+          IS_RELEASE=true
+          echo "✅ Branch matches 'release/*' pattern - version bumps allowed"
+        fi
+
+        if [ "$IS_RELEASE" = "true" ]; then
+          exit 0
+        fi
+
+        # Get the list of changed files
+        CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+
+        # Version files to check
+        VERSION_FILES=(
+          "packages/prime/src/prime_cli/__init__.py"
+          "packages/prime-sandboxes/src/prime_sandboxes/__init__.py"
+          "packages/prime-evals/src/prime_evals/__init__.py"
+          "packages/prime-mcp-server/src/prime_mcp/__init__.py"
+        )
+
+        BUMPED_FILES=""
+        for FILE in "${VERSION_FILES[@]}"; do
+          if echo "$CHANGED_FILES" | grep -q "^$FILE$"; then
+            # Check if __version__ was actually changed
+            if git diff origin/${{ github.base_ref }}...HEAD -- "$FILE" | grep -qE "^\+__version__"; then
+              BUMPED_FILES="$BUMPED_FILES\n  - $FILE"
+            fi
+          fi
+        done
+
+        if [ -n "$BUMPED_FILES" ]; then
+          echo "❌ Version bump detected in non-release PR!"
+          echo ""
+          echo "The following version files were modified:"
+          echo -e "$BUMPED_FILES"
+          echo ""
+          echo "Version bumps should only be done in release PRs."
+          echo "To mark this as a release PR, either:"
+          echo "  1. Add the 'release' label to this PR"
+          echo "  2. Use a branch name starting with 'release/'"
+          exit 1
+        fi
+
+        echo "✅ No version bumps detected - OK"
+
+
   lint-format:
     runs-on: ubuntu-latest
     steps:

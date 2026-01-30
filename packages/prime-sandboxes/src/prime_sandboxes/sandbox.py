@@ -605,30 +605,18 @@ class SandboxClient:
             stderr=stderr_logs.stdout,
         )
 
-    def wait_for_creation(
-        self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1
-    ) -> None:
+    def wait_for_creation(self, sandbox_id: str, max_attempts: int = 60) -> None:
         """Wait for sandbox to be running and stable.
 
         Args:
             sandbox_id: The sandbox ID to wait for
             max_attempts: Maximum polling attempts
-            stability_checks: Number of consecutive successful reachability checks required
         """
-        consecutive_successes = 0
         for attempt in range(max_attempts):
             sandbox = self.get(sandbox_id)
             if sandbox.status == "RUNNING":
                 if self._is_sandbox_reachable(sandbox_id):
-                    consecutive_successes += 1
-                    if consecutive_successes >= stability_checks:
-                        return
-                    # Small delay between stability checks
-                    time.sleep(0.5)
-                    continue
-                else:
-                    # Reset counter if check fails
-                    consecutive_successes = 0
+                    return
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
                 ctx = {
                     "status": sandbox.status,

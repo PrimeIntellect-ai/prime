@@ -107,6 +107,9 @@ class ImageClient:
         if team_id:
             build_request["team_id"] = team_id
 
+        if context_path and not os.path.isdir(context_path):
+            raise FileNotFoundError(f"Build context directory not found: {context_path}")
+
         # No context_path means read Dockerfile and send content directly
         if not context_path:
             if not os.path.exists(dockerfile_path):
@@ -311,6 +314,10 @@ class AsyncImageClient:
         }
         if team_id:
             build_request["team_id"] = team_id
+
+        # Validate context_path exists before making API call to avoid orphaned builds
+        if context_path and not os.path.isdir(context_path):
+            raise FileNotFoundError(f"Build context directory not found: {context_path}")
 
         # TODO: Use aiofiles or run_in_executor for file I/O to avoid blocking event loop
         # No context_path means read Dockerfile and send content directly

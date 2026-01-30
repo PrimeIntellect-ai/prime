@@ -606,7 +606,7 @@ class SandboxClient:
         )
 
     def wait_for_creation(
-        self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
+        self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1
     ) -> None:
         """Wait for sandbox to be running and stable.
 
@@ -1253,7 +1253,7 @@ class AsyncSandboxClient:
         )
 
     async def wait_for_creation(
-        self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 2
+        self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1
     ) -> None:
         """Wait for sandbox to be running and stable (async version).
 
@@ -1262,7 +1262,6 @@ class AsyncSandboxClient:
             max_attempts: Maximum polling attempts
             stability_checks: Number of consecutive successful reachability checks required
         """
-
         consecutive_successes = 0
         for attempt in range(max_attempts):
             sandbox = await self.get(sandbox_id)

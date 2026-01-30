@@ -8,7 +8,7 @@ from prime_tunnel.core.client import TunnelClient
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(help="Manage tunnels for exposing local services")
+app = typer.Typer(help="Manage tunnels for exposing local services", no_args_is_help=True)
 console = Console()
 
 

@@ -86,7 +86,7 @@ class ImageClient:
             tag: Image tag (default: "latest")
             context_path: Build context directory path. If not provided, only
                 the Dockerfile is sent to the server (fast path, no COPY/ADD support).
-            ephemeral: Auto-delete when linked sandbox terminates (default: False)
+            ephemeral: Auto-delete after 24 hours (default: False)
             team_id: Team ID for team images (optional)
             wait: Wait for build to complete (default: True)
             poll_interval: Seconds between status polls (default: 2.0)
@@ -294,7 +294,7 @@ class AsyncImageClient:
             tag: Image tag (default: "latest")
             context_path: Build context directory path. If not provided, only
                 the Dockerfile is sent to the server (fast path, no COPY/ADD support).
-            ephemeral: Auto-delete when linked sandbox terminates (default: False)
+            ephemeral: Auto-delete after 24 hours (default: False)
             team_id: Team ID for team images (optional)
             wait: Wait for build to complete (default: True)
             poll_interval: Seconds between status polls (default: 2.0)

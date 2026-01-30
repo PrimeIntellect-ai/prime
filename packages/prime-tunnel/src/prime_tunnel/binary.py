@@ -29,10 +29,6 @@ FRPC_URLS = {
         "Linux",
         "aarch64",
     ): f"https://github.com/fatedier/frp/releases/download/v{FRPC_VERSION}/frp_{FRPC_VERSION}_linux_arm64.tar.gz",
-    (
-        "Linux",
-        "arm64",
-    ): f"https://github.com/fatedier/frp/releases/download/v{FRPC_VERSION}/frp_{FRPC_VERSION}_linux_arm64.tar.gz",
 }
 
 

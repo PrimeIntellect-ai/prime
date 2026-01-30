@@ -10,6 +10,62 @@ on:
     branches: [ "main", "develop" ]
 
 jobs:
+  check-version-bump:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Fetch base branch
+      run: git fetch origin ${{ github.base_ref }}
+
+    - name: Check for version bumps in non-release PRs
+      env:
+        BRANCH_NAME: ${{ github.head_ref }}
+      run: |
+        # Check if this is a release PR (by branch name)
+        if echo "$BRANCH_NAME" | grep -qE "^release/"; then
+          echo "✅ Branch matches 'release/*' pattern - version bumps allowed"
+          exit 0
+        fi
+
+        # Get the list of changed files
+        CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+
+        # Version files to check
+        VERSION_FILES=(
+          "packages/prime/src/prime_cli/__init__.py"
+          "packages/prime-sandboxes/src/prime_sandboxes/__init__.py"
+          "packages/prime-evals/src/prime_evals/__init__.py"
+          "packages/prime-mcp-server/src/prime_mcp/__init__.py"
+        )
+
+        BUMPED_FILES=""
+        for FILE in "${VERSION_FILES[@]}"; do
+          if echo "$CHANGED_FILES" | grep -q "^$FILE$"; then
+            # Check if __version__ was actually changed
+            if git diff origin/${{ github.base_ref }}...HEAD -- "$FILE" | grep -qE "^\+__version__"; then
+              BUMPED_FILES="$BUMPED_FILES\n  - $FILE"
+            fi
+          fi
+        done
+
+        if [ -n "$BUMPED_FILES" ]; then
+          echo "❌ Version bump detected in non-release PR!"
+          echo ""
+          echo "The following version files were modified:"
+          echo -e "$BUMPED_FILES"
+          echo ""
+          echo "Version bumps should only be done in release PRs."
+          echo "Use a branch name starting with 'release/' for release PRs."
+          exit 1
+        fi
+
+        echo "✅ No version bumps detected - OK"
+
+
   lint-format:
     runs-on: ubuntu-latest
     steps:

@@ -12,6 +12,7 @@ class RLModel(BaseModel):
     """Model available for RL training."""
 
     name: str = Field(..., description="Model name")
+    at_capacity: bool = Field(False, alias="atCapacity")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -328,7 +329,5 @@ class RLClient:
             return response.get("data") or {}
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(
-                    f"Failed to get status for {owner}/{name}: {e.response.text}"
-                )
+                raise APIError(f"Failed to get status for {owner}/{name}: {e.response.text}")
             raise APIError(f"Failed to get status for {owner}/{name}: {str(e)}")

@@ -648,10 +648,15 @@ def list_models(
             return
 
         table = Table(title="Prime RL — Models")
-        table.add_column("id", style="cyan")
+        table.add_column("Model", style="cyan")
+        table.add_column("Status")
 
         for model in models:
-            table.add_row(model.name)
+            if model.at_capacity:
+                status = "[red]At Capacity[/red]"
+            else:
+                status = "[green]Available[/green]"
+            table.add_row(model.name, status)
 
         console.print(table)
 

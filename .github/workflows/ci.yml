@@ -18,6 +18,9 @@ jobs:
       with:
         fetch-depth: 0
 
+    - name: Fetch base branch
+      run: git fetch origin ${{ github.base_ref }}
+
     - name: Check for version bumps in non-release PRs
       env:
         BRANCH_NAME: ${{ github.head_ref }}

@@ -52,7 +52,7 @@ app.add_typer(pods_app, name="pods", rich_help_panel="Compute")
 app.add_typer(sandbox_app, name="sandbox", rich_help_panel="Compute")
 app.add_typer(images_app, name="images", rich_help_panel="Compute")
 app.add_typer(registry_app, name="registry", rich_help_panel="Compute")
-app.add_typer(tunnel_app, name="tunnel")
+app.add_typer(tunnel_app, name="tunnel", rich_help_panel="Compute")
 app.add_typer(inference_app, name="inference", rich_help_panel="Compute")
 
 

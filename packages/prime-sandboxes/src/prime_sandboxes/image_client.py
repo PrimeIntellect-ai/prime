@@ -1,7 +1,6 @@
 """Image client implementations for building and managing container images."""
 
 import asyncio
-import hashlib
 import io
 import os
 import tarfile
@@ -18,11 +17,6 @@ from .models import (
     ImageBuildStatus,
     ImageListResponse,
 )
-
-
-def _compute_dockerfile_hash(content: str) -> str:
-    """Compute SHA256 hash of Dockerfile content for caching."""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def _load_dockerignore(context_path: str) -> Optional[pathspec.PathSpec]:
@@ -122,7 +116,6 @@ class ImageClient:
                 dockerfile_content = f.read()
 
             build_request["dockerfile_content"] = dockerfile_content
-            build_request["dockerfile_hash"] = _compute_dockerfile_hash(dockerfile_content)
 
         response = self.client.request("POST", "/images/build", json=build_request)
         build_response = ImageBuildResponse.model_validate(response)
@@ -329,7 +322,6 @@ class AsyncImageClient:
                 dockerfile_content = f.read()
 
             build_request["dockerfile_content"] = dockerfile_content
-            build_request["dockerfile_hash"] = _compute_dockerfile_hash(dockerfile_content)
 
         response = await self.client.request("POST", "/images/build", json=build_request)
         build_response = ImageBuildResponse.model_validate(response)

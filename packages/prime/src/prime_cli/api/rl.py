@@ -312,9 +312,7 @@ class RLClient:
             if step is not None:
                 params["step"] = step
 
-            response = self.client.get(
-                f"/rft/runs/{run_id}/distributions", params=params
-            )
+            response = self.client.get(f"/rft/runs/{run_id}/distributions", params=params)
             return {
                 "bins": response.get("bins", []),
                 "step": response.get("step"),
@@ -331,7 +329,5 @@ class RLClient:
             return response.get("data") or {}
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(
-                    f"Failed to get status for {owner}/{name}: {e.response.text}"
-                )
+                raise APIError(f"Failed to get status for {owner}/{name}: {e.response.text}")
             raise APIError(f"Failed to get status for {owner}/{name}: {str(e)}")

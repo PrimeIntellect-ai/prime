@@ -1478,11 +1478,14 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
             name = env_id.split("/")[-1] if "/" in env_id else env_id
             if "-" in name:
                 normalized = normalize_package_name(name)
-                error_msg += (
-                    f"\n\n[yellow]Hint: pip normalizes package names (dashes become underscores).[/yellow]"
-                    f"\n[yellow]The package '{name}' is installed as '{normalized}'.[/yellow]"
+                hint = (
+                    "\n\n[yellow]Hint: pip normalizes package names "
+                    "(dashes become underscores).[/yellow]"
+                    f"\n[yellow]The package '{name}' is installed as "
+                    f"'{normalized}'.[/yellow]"
                     f"\n[yellow]Try: uv pip install {normalized}[/yellow]"
                 )
+                error_msg += hint
 
         raise Exception(error_msg)
 

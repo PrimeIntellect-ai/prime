@@ -429,6 +429,7 @@ def push_eval(
 
     The directory must contain metadata.json and results.jsonl files.
 
+    \b
     Examples:
         prime eval push                                    # Push current dir or auto-discover
         prime eval push outputs/evals/gsm8k--gpt-4/abc123  # Push specific directory
@@ -660,9 +661,10 @@ def run_eval_cmd(
     """
     Run verifiers' vf-eval with Prime Inference.
 
+    \b
     Examples:
-       prime eval run primeintellect/wordle -m openai/gpt-4.1-mini -n 5
-       prime eval run wordle -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
+        prime eval run primeintellect/wordle -m openai/gpt-4.1-mini -n 5
+        prime eval run wordle -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
     """
     run_eval(
         environment=environment,

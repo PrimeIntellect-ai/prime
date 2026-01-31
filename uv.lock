@@ -13,6 +13,7 @@ members = [
     "prime-evals",
     "prime-mcp-server",
     "prime-sandboxes",
+    "prime-tunnel",
 ]
 
 [manifest.dependency-groups]
@@ -1661,6 +1662,7 @@ dependencies = [
     { name = "httpx" },
     { name = "prime-evals" },
     { name = "prime-sandboxes" },
+    { name = "prime-tunnel" },
     { name = "pydantic" },
     { name = "rich" },
     { name = "toml" },
@@ -1683,6 +1685,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "prime-evals", editable = "packages/prime-evals" },
     { name = "prime-sandboxes", editable = "packages/prime-sandboxes" },
+    { name = "prime-tunnel", editable = "packages/prime-tunnel" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "rich", specifier = ">=13.3.1" },
@@ -1768,6 +1771,35 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiofiles", specifier = ">=23.0.0" },
+    { name = "httpx", specifier = ">=0.25.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
+    { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.0.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.13.1" },
+    { name = "tenacity", specifier = ">=8.0.0" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "prime-tunnel"
+source = { editable = "packages/prime-tunnel" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "tenacity" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },

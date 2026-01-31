@@ -19,6 +19,7 @@ from .commands.registry import app as registry_app
 from .commands.rl import app as rl_app
 from .commands.sandbox import app as sandbox_app
 from .commands.teams import app as teams_app
+from .commands.tunnel import app as tunnel_app
 from .commands.upgrade import app as upgrade_app
 from .commands.whoami import app as whoami_app
 from .core import Config
@@ -44,6 +45,7 @@ app.add_typer(pods_app, name="pods", rich_help_panel="Compute")
 app.add_typer(sandbox_app, name="sandbox", rich_help_panel="Compute")
 app.add_typer(images_app, name="images", rich_help_panel="Compute")
 app.add_typer(registry_app, name="registry", rich_help_panel="Compute")
+app.add_typer(tunnel_app, name="tunnel", rich_help_panel="Compute")
 app.add_typer(inference_app, name="inference", rich_help_panel="Compute")
 
 # Account commands

@@ -210,11 +210,11 @@ def push_eval_results_to_hub(
     if converted_results:
         evals_client.push_samples(eval_id, converted_results)
 
-    evals_client.finalize_evaluation(eval_id, metrics=metrics)
+    finalize_response = evals_client.finalize_evaluation(eval_id, metrics=metrics)
 
     console.print("[green]✓ Successfully uploaded evaluation results[/green]")
 
-    frontend_url = api_client.config.frontend_url
-    eval_url = f"{frontend_url}/dashboard/evaluations/{eval_id}"
-    console.print("\n[green]View results at:[/green]")
-    console.print(f"  [link={eval_url}]{eval_url}[/link]")
+    viewer_url = finalize_response.get("viewer_url")
+    if viewer_url:
+        console.print("\n[green]View results at:[/green]")
+        console.print(f"  [link={viewer_url}]{viewer_url}[/link]")

@@ -34,11 +34,8 @@ from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
-from ..utils.hosted_eval import (
-    HostedEvalConfig,
-    print_hosted_result,
-    run_hosted_evaluation,
-)
+from ..utils.hosted_eval import print_hosted_result, run_hosted_evaluation
+from ..utils.schemas import HostedEvalConfig
 from ..utils.time_utils import format_time_ago, iso_timestamp
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
@@ -2856,7 +2853,7 @@ def run_eval(
     headers: Optional[List[str]] = None,
     hosted: bool = False,
     poll_interval: float = 10.0,
-    no_stream_logs: bool = False,
+    follow: bool = False,
     timeout_minutes: Optional[int] = None,
     allow_sandbox_access: bool = False,
     allow_instances_access: bool = False,
@@ -3017,13 +3014,22 @@ def run_eval(
                 run_hosted_evaluation(
                     config=hosted_config,
                     poll_interval=poll_interval,
-                    stream_logs=not no_stream_logs,
+                    stream_logs=True,
+                    follow=follow,
                 )
             )
-            print_hosted_result(result)
 
-            if result.status != "COMPLETED":
-                raise typer.Exit(1)
+            if follow:
+                print_hosted_result(result)
+
+                if result.status != EvalStatus.COMPLETED:
+                    raise typer.Exit(1)
+            else:
+                console.print("[green]✓ Hosted evaluation started[/green]")
+                console.print(f"\n[cyan]Evaluation ID:[/cyan] {result.evaluation_id}")
+                console.print("\n[dim]View logs with:[/dim]")
+                console.print(f"  prime eval logs {result.evaluation_id} -f")
+
         except APIError as e:
             console.print(f"[red]Hosted evaluation failed: {e}[/red]")
             raise typer.Exit(1)

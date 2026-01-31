@@ -552,14 +552,14 @@ class SandboxClient:
         stderr_log_file_quoted = shlex.quote(stderr_log_file)
         # Wrap command in subshell so 'exit' terminates the subshell, not the outer shell.
         # This ensures 'echo $?' always runs to capture the exit code.
-        sh_command = f"({command_body}); echo $? > {exit_file_quoted}"
+        sh_command = (
+            f"({command_body}) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
+            f"echo $? > {exit_file_quoted}"
+        )
         quoted_sh_command = shlex.quote(sh_command)
 
-        # Start detached process with separate stdout and stderr log files
-        bg_cmd = (
-            f"nohup sh -c {quoted_sh_command} "
-            f"> {stdout_log_file_quoted} 2> {stderr_log_file_quoted} &"
-        )
+        # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
+        bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
         self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
         return BackgroundJob(
@@ -1193,14 +1193,14 @@ class AsyncSandboxClient:
         stderr_log_file_quoted = shlex.quote(stderr_log_file)
         # Wrap command in subshell so 'exit' terminates the subshell, not the outer shell.
         # This ensures 'echo $?' always runs to capture the exit code.
-        sh_command = f"({command_body}); echo $? > {exit_file_quoted}"
+        sh_command = (
+            f"({command_body}) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
+            f"echo $? > {exit_file_quoted}"
+        )
         quoted_sh_command = shlex.quote(sh_command)
 
-        # Start detached process with separate stdout and stderr log files
-        bg_cmd = (
-            f"nohup sh -c {quoted_sh_command} "
-            f"> {stdout_log_file_quoted} 2> {stderr_log_file_quoted} &"
-        )
+        # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
+        bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
         await self.execute_command(sandbox_id, bg_cmd, timeout=10)
 
         return BackgroundJob(

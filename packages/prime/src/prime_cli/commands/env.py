@@ -1460,7 +1460,6 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
         universal_newlines=True,
     )
 
-    # Stream output line by line
     while True:
         output = process.stdout.readline() if process.stdout else ""
         if output == "" and process.poll() is not None:
@@ -1555,6 +1554,17 @@ def install(
                 else:
                     failed_envs.append((local_name, f"Local path not found: {env_path}"))
                     console.print(f"[red]✗ Local environment not found: {env_path}[/red]")
+                    if "-" in local_name:
+                        alt_path = Path(path) / local_name
+                        if alt_path.exists():
+                            console.print(
+                                f"[yellow]  Hint: Found '{alt_path}' but expected "
+                                f"'{env_path}'[/yellow]"
+                            )
+                            console.print(
+                                "[yellow]  Python packages use underscores, not dashes. "
+                                f"Rename folder to '{env_folder}'[/yellow]"
+                            )
                 continue
 
             # Validate environment ID format (owner/name)

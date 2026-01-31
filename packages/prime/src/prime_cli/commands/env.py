@@ -1460,34 +1460,16 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
         universal_newlines=True,
     )
 
-    output_lines: List[str] = []
     while True:
         output = process.stdout.readline() if process.stdout else ""
         if output == "" and process.poll() is not None:
             break
         if output:
-            output_lines.append(output.rstrip())
             console.print(output.rstrip())
 
     return_code = process.poll()
     if return_code != 0:
-        full_output = "\n".join(output_lines).lower()
-        error_msg = f"Installation failed with exit code {return_code}"
-
-        if "no matching distribution" in full_output or "package not found" in full_output:
-            name = env_id.split("/")[-1] if "/" in env_id else env_id
-            if "-" in name:
-                normalized = normalize_package_name(name)
-                hint = (
-                    "\n\n[yellow]Hint: pip normalizes package names "
-                    "(dashes become underscores).[/yellow]"
-                    f"\n[yellow]The package '{name}' is installed as "
-                    f"'{normalized}'.[/yellow]"
-                    f"\n[yellow]Try: uv pip install {normalized}[/yellow]"
-                )
-                error_msg += hint
-
-        raise Exception(error_msg)
+        raise Exception(f"Installation failed with exit code {return_code}")
 
     console.print(f"\n[green]✓ Successfully installed {env_id}@{version}[/green]")
 
@@ -1572,6 +1554,17 @@ def install(
                 else:
                     failed_envs.append((local_name, f"Local path not found: {env_path}"))
                     console.print(f"[red]✗ Local environment not found: {env_path}[/red]")
+                    if "-" in local_name:
+                        alt_path = Path(path) / local_name
+                        if alt_path.exists():
+                            console.print(
+                                f"[yellow]  Hint: Found '{alt_path}' but expected "
+                                f"'{env_path}'[/yellow]"
+                            )
+                            console.print(
+                                "[yellow]  Python packages use underscores, not dashes. "
+                                f"Rename folder to '{env_folder}'[/yellow]"
+                            )
                 continue
 
             # Validate environment ID format (owner/name)

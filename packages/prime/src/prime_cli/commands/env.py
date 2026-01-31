@@ -32,6 +32,7 @@ from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
+from ..utils.remote_env import init_sandbox_environment, init_ts_environment
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
 console = Console()
@@ -901,20 +902,49 @@ def init(
     rewrite_readme: bool = typer.Option(
         False, "--rewrite-readme", help="Overwrite README.md with template if it already exists"
     ),
+    sandbox: bool = typer.Option(
+        False, "--sandbox", help="Create a remote sandbox environment template"
+    ),
+    ts: bool = typer.Option(
+        False, "--ts", help="Create a TypeScript sandbox environment template"
+    ),
 ) -> None:
     """Initialize a new verifiers environment from template"""
     try:
-        # this import is slow, so we do it inside the command
-        from verifiers.scripts.init import init_environment
+        if sandbox and ts:
+            console.print("[red]Error: Cannot use both --sandbox and --ts flags[/red]")
+            raise typer.Exit(1)
 
-        created_path = init_environment(name, path, rewrite_readme)
+        if sandbox:
+            created_path = init_sandbox_environment(name, path)
+            console.print(f"""
+            [green]✓ Created sandbox environment template in {created_path}/[/green]
+            """)
+            console.print("\nNext steps:")
+            console.print(f"  cd {created_path}")
+            console.print("  # Edit sandbox/setup.sh to configure your environment")
+            console.print("  prime env push")
+        elif ts:
+            created_path = init_ts_environment(name, path)
+            console.print(f"""
+            [green]✓ Created TypeScript environment template in {created_path}/[/green]
+            """)
+            console.print("\nNext steps:")
+            console.print(f"  cd {created_path}")
+            console.print("  # Edit sandbox/src/index.ts to define your tools and rewards")
+            console.print("  prime env push")
+        else:
+            # this import is slow, so we do it inside the command
+            from verifiers.scripts.init import init_environment
 
-        console.print(f"[green]✓ Created environment template in {created_path}/[/green]")
-        console.print("\nNext steps:")
-        console.print(f"  cd {created_path}")
-        filename = f"{name}.py".replace("-", "_")
-        console.print(f"  # Edit the {filename} file to implement your environment")
-        console.print("  prime env push")
+            created_path = init_environment(name, path, rewrite_readme)
+
+            console.print(f"[green]✓ Created environment template in {created_path}/[/green]")
+            console.print("\nNext steps:")
+            console.print(f"  cd {created_path}")
+            filename = f"{name}.py".replace("-", "_")
+            console.print(f"  # Edit the {filename} file to implement your environment")
+            console.print("  prime env push")
 
     except FileNotFoundError as e:
         console.print(f"[red]File not found: {e}[/red]")

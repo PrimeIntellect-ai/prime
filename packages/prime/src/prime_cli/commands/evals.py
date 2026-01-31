@@ -1,5 +1,7 @@
+import asyncio
 import json
 import re
+import time
 from functools import wraps
 from pathlib import Path
 from typing import List, Optional
@@ -12,7 +14,14 @@ from rich.table import Table
 from typer.core import TyperGroup
 
 from ..client import APIClient
+from ..core import APIError, AsyncAPIClient
 from ..utils import output_data_as_json
+from ..utils.hosted_eval import (
+    clean_logs,
+    get_evaluation_logs,
+    get_new_log_lines,
+    stop_hosted_evaluation,
+)
 from .env import run_eval
 
 console = Console()
@@ -113,7 +122,7 @@ def list_evals(
             return
 
         table = Table(title="Evaluations")
-        table.add_column("ID", style="cyan")
+        table.add_column("Id", style="cyan")
         table.add_column("Environment", style="blue")
         table.add_column("Model", style="magenta")
         table.add_column("Status", style="yellow")
@@ -162,7 +171,7 @@ def list_evals(
 @subcommands_app.command("get")
 @handle_errors
 def get_eval(
-    eval_id: str = typer.Argument(..., help="The ID of the evaluation to retrieve"),
+    eval_id: str = typer.Argument(..., help="The id of the evaluation to retrieve"),
     output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
 ) -> None:
     _validate_output_format(output, ["json", "pretty"])
@@ -176,7 +185,7 @@ def get_eval(
 @subcommands_app.command("samples")
 @handle_errors
 def get_samples(
-    eval_id: str = typer.Argument(..., help="The ID of the evaluation"),
+    eval_id: str = typer.Argument(..., help="The id of the evaluation"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     limit: int = typer.Option(100, "--limit", "-l", help="Samples per page"),
     output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
@@ -187,6 +196,66 @@ def get_samples(
     client = EvalsClient(api_client)
     data = client.get_samples(eval_id, page=page, limit=limit)
     format_output(data, output)
+
+
+def _fetch_logs(eval_id: str) -> str:
+    async def _fetch():
+        async with AsyncAPIClient() as client:
+            return await get_evaluation_logs(client, eval_id)
+
+    return asyncio.run(_fetch())
+
+
+def _display_logs(eval_id: str, tail: int, follow: bool) -> None:
+    try:
+        if follow:
+            console.print(
+                f"[dim]Watching logs for evaluation {eval_id}... (Ctrl+C to stop)[/dim]\n"
+            )
+            last_logs = ""
+            consecutive_errors = 0
+
+            while True:
+                try:
+                    raw_logs = _fetch_logs(eval_id)
+                    logs = clean_logs(raw_logs) if raw_logs else ""
+                    consecutive_errors = 0
+
+                    if logs != last_logs:
+                        for line in get_new_log_lines(last_logs, logs):
+                            console.print(line)
+                        last_logs = logs
+                except APIError as e:
+                    consecutive_errors += 1
+                    if "429" in str(e):
+                        if consecutive_errors >= 3:
+                            console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
+                            time.sleep(30)
+                        else:
+                            time.sleep(10)
+                        continue
+                    raise
+
+                time.sleep(5)
+        else:
+            raw_logs = _fetch_logs(eval_id)
+            logs = clean_logs(raw_logs) if raw_logs else ""
+
+            if logs:
+                lines = logs.splitlines()
+                if len(lines) > tail:
+                    lines = lines[-tail:]
+                for line in lines:
+                    console.print(line)
+            else:
+                console.print("[yellow]No logs available yet.[/yellow]")
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped watching logs. Evaluation continues running.[/dim]")
+        console.print(f"[dim]To stop the evaluation: prime eval stop {eval_id}[/dim]")
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
 
 def _load_verifiers_format(directory: Path) -> dict:
@@ -336,7 +405,7 @@ def _push_single_eval(
 
         eval_id = create_response.get("evaluation_id")
         if not eval_id:
-            raise ValueError("Failed to get evaluation ID from response")
+            raise ValueError("Failed to get evaluation id from response")
 
         console.print(f"[green]✓ Created evaluation:[/green] {eval_id}")
         console.print()
@@ -349,14 +418,20 @@ def _push_single_eval(
         console.print()
 
     console.print("[blue]Finalizing evaluation...[/blue]")
-    client.finalize_evaluation(eval_id, metrics=eval_data.get("metrics"))
+    finalize_response = client.finalize_evaluation(eval_id, metrics=eval_data.get("metrics"))
     console.print("[green]✓ Evaluation finalized[/green]")
     console.print()
 
     console.print("[green]✓ Success[/green]")
-    console.print(f"[blue]Evaluation ID:[/blue] {eval_id}")
+    console.print(f"[blue]Evaluation id:[/blue] {eval_id}")
     console.print()
-    console.print("[dim]View your evaluation:[/dim]")
+
+    viewer_url = finalize_response.get("viewer_url")
+    if viewer_url:
+        console.print(f"[green]View results at:[/green] {viewer_url}")
+        console.print()
+
+    console.print("[dim]CLI commands:[/dim]")
     console.print(f"  prime eval get {eval_id}")
     console.print(f"  prime eval samples {eval_id}")
 
@@ -526,6 +601,24 @@ app = typer.Typer(
 app.add_typer(subcommands_app, name="")
 
 
+@app.command("logs", no_args_is_help=True)
+def logs_cmd(
+    eval_id: str = typer.Argument(..., help="Evaluation id to get logs for"),
+    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+) -> None:
+    """Get logs for a hosted evaluation."""
+    _display_logs(eval_id, tail, follow)
+
+
+@app.command("stop", no_args_is_help=True)
+def stop_cmd(
+    eval_id: str = typer.Argument(..., help="Evaluation id to stop"),
+) -> None:
+    """Stop a running hosted evaluation."""
+    stop_hosted_evaluation(eval_id)
+
+
 @app.command(
     "run",
     help="Run an evaluation with API models (default provider = Prime Inference)",
@@ -651,10 +744,10 @@ def run_eval_cmd(
         "--poll-interval",
         help="Polling interval in seconds for hosted evaluation status",
     ),
-    no_stream_logs: bool = typer.Option(
+    follow: bool = typer.Option(
         False,
-        "--no-stream-logs",
-        help="Disable log streaming for hosted evaluations",
+        "--follow",
+        help="Follow hosted evaluation and stream logs until completion",
     ),
     timeout_minutes: Optional[int] = typer.Option(
         None,
@@ -689,6 +782,7 @@ def run_eval_cmd(
        prime eval run primeintellect/wordle -m openai/gpt-4.1-mini -n 5
        prime eval run wordle -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
        prime eval run primeintellect/gsm8k --hosted -m openai/gpt-4.1-mini -n 10
+       prime eval run primeintellect/gsm8k --hosted -f  # Follow logs until completion
     """
     run_eval(
         environment=environment,
@@ -720,7 +814,7 @@ def run_eval_cmd(
         headers=header,
         hosted=hosted,
         poll_interval=poll_interval,
-        no_stream_logs=no_stream_logs,
+        follow=follow,
         timeout_minutes=timeout_minutes,
         allow_sandbox_access=allow_sandbox_access,
         allow_instances_access=allow_instances_access,

@@ -1,7 +1,6 @@
 import asyncio
 import re
-from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from rich.console import Console
 from rich.live import Live
@@ -9,6 +8,12 @@ from rich.panel import Panel
 from rich.text import Text
 
 from prime_cli.core import APIError, AsyncAPIClient
+from prime_cli.utils.schemas import (
+    EvalStatus,
+    HostedEvalConfig,
+    HostedEvalCreationResult,
+    HostedEvalResult,
+)
 
 console = Console()
 
@@ -57,31 +62,26 @@ def clean_logs(text: str) -> str:
     return cleaned
 
 
-@dataclass
-class HostedEvalConfig:
-    environment_id: str
-    inference_model: str
-    num_examples: int
-    rollouts_per_example: int
-    env_args: Optional[dict[str, str]] = None
-    name: Optional[str] = None
-    timeout_minutes: Optional[int] = None
-    allow_sandbox_access: bool = False
-    allow_instances_access: bool = False
-    custom_secrets: Optional[dict[str, str]] = None
+def get_new_log_lines(old_logs: str, new_logs: str) -> list[str]:
+    old_lines = old_logs.splitlines() if old_logs else []
+    new_lines = new_logs.splitlines()
+
+    if not old_logs:
+        return new_lines
+
+    overlap = 0
+    max_overlap = min(len(old_lines), len(new_lines))
+    for i in range(1, max_overlap + 1):
+        if old_lines[-i:] == new_lines[:i]:
+            overlap = i
+    return new_lines[overlap:]
 
 
-@dataclass
-class HostedEvalResult:
-    evaluation_id: str
-    status: str
-    viewer_url: Optional[str]
-    total_samples: int
-    avg_score: Optional[float]
-    min_score: Optional[float]
-    max_score: Optional[float]
-    error_message: Optional[str] = None
-    logs: Optional[str] = None
+def parse_eval_status(status_str: str) -> EvalStatus | None:
+    try:
+        return EvalStatus(status_str)
+    except ValueError:
+        return None
 
 
 async def create_hosted_evaluation(
@@ -128,11 +128,9 @@ async def get_evaluation_logs(client: AsyncAPIClient, evaluation_id: str) -> str
         return ""
 
 
-async def run_hosted_evaluation(
+async def create_and_return_hosted_evaluation(
     config: HostedEvalConfig,
-    poll_interval: float = 10.0,
-    stream_logs: bool = True,
-) -> HostedEvalResult:
+) -> HostedEvalCreationResult:
     async with AsyncAPIClient() as client:
         console.print(
             f"[cyan]Creating hosted evaluation for environment {config.environment_id}[/cyan]"
@@ -150,11 +148,19 @@ async def run_hosted_evaluation(
         if not evaluation_id:
             raise APIError(f"Failed to get evaluation ID from response. Response: {result}")
 
-        console.print(f"[green]✓ Created hosted evaluation:[/green] {evaluation_id}")
-        console.print()
+        return HostedEvalCreationResult(
+            evaluation_id=evaluation_id,
+            viewer_url=result.get("viewer_url"),
+        )
 
+
+async def follow_hosted_evaluation(
+    evaluation_id: str,
+    poll_interval: float = 10.0,
+    stream_logs: bool = True,
+) -> HostedEvalResult:
+    async with AsyncAPIClient() as client:
         last_logs = ""
-        terminal_statuses = {"COMPLETED", "FAILED", "TIMEOUT", "CANCELLED"}
         consecutive_errors = 0
 
         with Live(
@@ -177,22 +183,15 @@ async def run_hosted_evaluation(
 
                 try:
                     eval_data = await get_evaluation(client, evaluation_id)
-                    status = eval_data.get("status", "UNKNOWN")
+                    status_str = eval_data.get("status", "UNKNOWN")
+                    status = parse_eval_status(status_str)
                     consecutive_errors = 0
 
-                    status_color = {
-                        "PENDING": "yellow",
-                        "RUNNING": "cyan",
-                        "COMPLETED": "green",
-                        "FAILED": "red",
-                        "TIMEOUT": "red",
-                        "CANCELLED": "yellow",
-                    }.get(status, "white")
-
+                    status_color = status.color if status else "white"
                     total_samples = eval_data.get("total_samples", 0)
                     status_text = Text.assemble(
                         "Status: ",
-                        (status, status_color),
+                        (status_str, status_color),
                         f" | Samples: {total_samples}",
                     )
                     live.update(
@@ -203,33 +202,16 @@ async def run_hosted_evaluation(
                         )
                     )
 
-                    if stream_logs and status in ("RUNNING", "COMPLETED", "FAILED"):
+                    if stream_logs and status in EvalStatus.has_logs_statuses():
                         raw_logs = await get_evaluation_logs(client, evaluation_id)
                         logs = clean_logs(raw_logs) if raw_logs else ""
 
                         if logs and logs != last_logs:
-                            old_lines = last_logs.splitlines() if last_logs else []
-                            new_lines = logs.splitlines()
-
-                            # Calculate new lines to print (avoid duplicates)
-                            if not last_logs:
-                                lines_to_print = new_lines
-                            else:
-                                overlap = 0
-                                max_overlap = min(len(old_lines), len(new_lines))
-                                for i in range(1, max_overlap + 1):
-                                    if old_lines[-i:] == new_lines[:i]:
-                                        overlap = i
-                                lines_to_print = new_lines[overlap:]
-
-                            # Print new lines using console.out which doesn't interfere with Live
-                            if lines_to_print:
-                                for line in lines_to_print:
-                                    live.console.print(line)
-
+                            for line in get_new_log_lines(last_logs, logs):
+                                live.console.print(line)
                             last_logs = logs
 
-                    if status in terminal_statuses:
+                    if status in EvalStatus.terminal_statuses():
                         live.stop()
                         break
 
@@ -246,10 +228,11 @@ async def run_hosted_evaluation(
 
         eval_data = await get_evaluation(client, evaluation_id)
         final_logs = await get_evaluation_logs(client, evaluation_id)
+        final_status = parse_eval_status(eval_data.get("status", "")) or EvalStatus.FAILED
 
         return HostedEvalResult(
             evaluation_id=evaluation_id,
-            status=eval_data.get("status", "UNKNOWN"),
+            status=final_status,
             viewer_url=eval_data.get("viewer_url"),
             total_samples=eval_data.get("total_samples", 0),
             avg_score=eval_data.get("avg_score"),
@@ -260,19 +243,46 @@ async def run_hosted_evaluation(
         )
 
 
+async def run_hosted_evaluation(
+    config: HostedEvalConfig,
+    poll_interval: float = 10.0,
+    stream_logs: bool = True,
+    follow: bool = True,
+) -> HostedEvalResult:
+    creation_result = await create_and_return_hosted_evaluation(config)
+    evaluation_id = creation_result.evaluation_id
+
+    console.print(f"[green]✓ Created hosted evaluation:[/green] {evaluation_id}")
+    console.print()
+
+    if not follow:
+        return HostedEvalResult(
+            evaluation_id=evaluation_id,
+            status=EvalStatus.PENDING,
+            viewer_url=creation_result.viewer_url,
+            total_samples=0,
+            avg_score=None,
+            min_score=None,
+            max_score=None,
+            error_message=None,
+            logs=None,
+        )
+
+    return await follow_hosted_evaluation(
+        evaluation_id=evaluation_id,
+        poll_interval=poll_interval,
+        stream_logs=stream_logs,
+    )
+
+
 def print_hosted_result(result: HostedEvalResult) -> None:
     console.print()
     console.rule("[bold]Hosted Evaluation Results[/bold]")
     console.print()
     console.print(f"[cyan]Evaluation ID:[/cyan] {result.evaluation_id}")
 
-    status_color = {
-        "COMPLETED": "green",
-        "FAILED": "red",
-        "TIMEOUT": "red",
-        "CANCELLED": "yellow",
-    }.get(result.status, "white")
-    console.print(f"[cyan]Status:[/cyan] [{status_color}]{result.status}[/{status_color}]")
+    status_color = result.status.color
+    console.print(f"[cyan]Status:[/cyan] [{status_color}]{result.status.value}[/{status_color}]")
     console.print(f"[cyan]Total samples:[/cyan] {result.total_samples}")
 
     if result.avg_score is not None:
@@ -291,3 +301,17 @@ def print_hosted_result(result: HostedEvalResult) -> None:
         console.print(f"\n[red]Error:[/red] {result.error_message}")
 
     console.print()
+
+
+def stop_hosted_evaluation(eval_id: str) -> None:
+    try:
+
+        async def do_stop():
+            async with AsyncAPIClient() as client:
+                return await client.post(f"/hosted-evaluations/{eval_id}/cancel")
+
+        asyncio.run(do_stop())
+        console.print(f"[green]✓ Stopped evaluation {eval_id}[/green]")
+    except APIError as e:
+        console.print(f"[red]Error stopping evaluation:[/red] {e}")
+        raise SystemExit(1)

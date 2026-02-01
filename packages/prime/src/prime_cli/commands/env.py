@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import uuid
 import zipfile
 from datetime import datetime
@@ -32,6 +33,7 @@ from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
+from ..utils.time_utils import format_time_ago, iso_timestamp
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
 console = Console()
@@ -41,6 +43,282 @@ MAX_FILES_TO_SHOW = 10
 DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
+
+# Action subcommand app
+action_app = typer.Typer(help="Manage environment actions (CI jobs)", no_args_is_help=True)
+app.add_typer(action_app, name="action", rich_help_panel="Manage")
+
+# Log cleaning pattern
+ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    return ANSI_ESCAPE.sub("", text)
+
+
+def _parse_environment_slug(environment: str) -> Tuple[str, str]:
+    """Parse owner/name from an environment slug.
+
+    Args:
+        environment: Environment slug in format 'owner/name'
+
+    Returns:
+        Tuple of (owner, name)
+
+    Raises:
+        typer.Exit: If the slug is invalid
+    """
+    if "/" not in environment:
+        console.print(f"[red]Invalid environment format: {environment}[/red]")
+        console.print("[dim]Use format: owner/environment-name[/dim]")
+        raise typer.Exit(1)
+
+    parts = environment.split("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        console.print(f"[red]Invalid environment format: {environment}[/red]")
+        console.print("[dim]Use format: owner/environment-name[/dim]")
+        raise typer.Exit(1)
+
+    return parts[0], parts[1]
+
+
+@action_app.command("list")
+def actions_list(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    version_id: Optional[str] = typer.Option(
+        None,
+        "--version-id",
+        "-v",
+        help="Filter by version ID",
+    ),
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        "-l",
+        help="Maximum number of actions to show",
+    ),
+    offset: int = typer.Option(
+        0,
+        "--offset",
+        help="Offset for pagination",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """List actions (CI jobs) for an environment."""
+    validate_output_format(output, console)
+
+    owner, env_name = _parse_environment_slug(environment)
+
+    try:
+        client = APIClient()
+        params = {
+            "limit": limit,
+            "offset": offset,
+        }
+        if version_id:
+            params["version_id"] = version_id
+
+        response = client.get(f"/environmentshub/{owner}/{env_name}/actions", params=params)
+        data = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(data, console)
+            return
+
+        actions = data.get("actions", [])
+        total = data.get("total", 0)
+
+        if not actions:
+            console.print("[yellow]No actions found for this environment.[/yellow]")
+            return
+
+        table = Table(title=f"Actions for {owner}/{env_name}")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Name", style="blue")
+        table.add_column("Status", style="yellow")
+        table.add_column("Version", style="dim")
+        table.add_column("Trigger", style="dim")
+        table.add_column("Created", style="dim")
+
+        for action in actions:
+            action_id = action.get("id", "")
+            name = action.get("name") or action.get("job_type", "")
+            status = action.get("status", "")
+
+            # Color the status
+            status_color = {
+                "SUCCESS": "[green]SUCCESS[/green]",
+                "FAILED": "[red]FAILED[/red]",
+                "RUNNING": "[yellow]RUNNING[/yellow]",
+                "PENDING": "[dim]PENDING[/dim]",
+                "CANCELLED": "[dim]CANCELLED[/dim]",
+            }.get(status, status)
+
+            version = action.get("version") or {}
+            version_str = version.get("semantic_version") or (version.get("content_hash") or "")[:8]
+            trigger = action.get("trigger", "")
+            created = action.get("created_at", "")
+            if created:
+                created = format_time_ago(created)
+
+            table.add_row(action_id, name, status_color, version_str, trigger, created)
+
+        console.print(table)
+        console.print(f"[dim]Showing {len(actions)} of {total} actions[/dim]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@action_app.command("logs")
+def actions_logs(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    action_id: str = typer.Argument(
+        ...,
+        help="Action/job ID to get logs for",
+    ),
+    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+) -> None:
+    """Get logs for a specific action."""
+    owner, env_name = _parse_environment_slug(environment)
+
+    try:
+        client = APIClient()
+
+        if follow:
+            console.print(f"[dim]Watching logs for action {action_id}... (Ctrl+C to stop)[/dim]\n")
+            last_logs = ""
+            consecutive_errors = 0
+
+            while True:
+                try:
+                    response = client.get(
+                        f"/environmentshub/{owner}/{env_name}/actions/{action_id}/logs",
+                        params={"tail_lines": tail},
+                    )
+                    data = response.get("data", {})
+                    logs = _strip_ansi(data.get("logs") or "")
+                    consecutive_errors = 0
+
+                    if logs != last_logs:
+                        old_lines = last_logs.splitlines() if last_logs else []
+                        new_lines = logs.splitlines()
+
+                        if not last_logs:
+                            for line in new_lines:
+                                console.print(line)
+                        else:
+                            overlap = 0
+                            max_overlap = min(len(old_lines), len(new_lines))
+                            for i in range(1, max_overlap + 1):
+                                if old_lines[-i:] == new_lines[:i]:
+                                    overlap = i
+                            for line in new_lines[overlap:]:
+                                console.print(line)
+
+                        last_logs = logs
+                except APIError as e:
+                    consecutive_errors += 1
+                    if "429" in str(e):
+                        if consecutive_errors >= 3:
+                            console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
+                            time.sleep(30)
+                        else:
+                            time.sleep(10)
+                        continue
+                    raise
+
+                time.sleep(5)
+        else:
+            response = client.get(
+                f"/environmentshub/{owner}/{env_name}/actions/{action_id}/logs",
+                params={"tail_lines": tail},
+            )
+            data = response.get("data", {})
+            logs = _strip_ansi(data.get("logs") or "")
+
+            if logs:
+                console.print(logs)
+            else:
+                console.print("[yellow]No logs available yet.[/yellow]")
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped watching logs.[/dim]")
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@action_app.command("retry")
+def actions_retry(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    action_id: Optional[str] = typer.Argument(
+        None,
+        help="Action ID to retry (retries latest action if not provided)",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """Retry an action (integration test) for an environment.
+
+    If no action ID is provided, retries the latest action.
+    """
+    validate_output_format(output, console)
+
+    owner, env_name = _parse_environment_slug(environment)
+
+    try:
+        client = APIClient()
+        payload = {}
+        if action_id:
+            payload["action_id"] = action_id
+
+        response = client.post(
+            f"/environmentshub/{owner}/{env_name}/actions/retry",
+            json=payload,
+        )
+        data = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(data, console)
+            return
+
+        if data.get("success"):
+            console.print("[green]Successfully triggered retry[/green]")
+            console.print(f"[dim]Job ID: {data.get('job_id')}[/dim]")
+            console.print(f"[dim]Version: {data.get('version_id')}[/dim]")
+            job_id = data.get('job_id')
+            console.print(
+                f"\n[dim]Use 'prime env action logs {environment} {job_id}' to view logs[/dim]"
+            )
+        else:
+            console.print(f"[red]Retry failed:[/red] {data.get('message', 'Unknown error')}")
+            raise typer.Exit(1)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
 
 def display_upstream_environment_info(
@@ -169,7 +447,22 @@ def compute_content_hash(env_path: Path) -> str:
     return content_hasher.hexdigest()
 
 
-@app.command("list")
+def _format_action_status(status: Optional[str]) -> Text:
+    """Format action status with color coding."""
+    if not status:
+        return Text("-", style="dim")
+    status_colors = {
+        "SUCCESS": "green",
+        "FAILED": "red",
+        "RUNNING": "yellow",
+        "PENDING": "yellow",
+        "CANCELLED": "dim",
+    }
+    color = status_colors.get(status.upper(), "white")
+    return Text(status, style=color)
+
+
+@app.command("list", rich_help_panel="Explore")
 def list_cmd(
     limit: int = typer.Option(
         DEFAULT_LIST_LIMIT, "--num", "-n", help="Number of environments to show"
@@ -180,22 +473,80 @@ def list_cmd(
         None, "--visibility", help="Filter by visibility (PUBLIC/PRIVATE)"
     ),
     output: str = typer.Option("table", "--output", help="Output format: table or json"),
+    search: Optional[str] = typer.Option(
+        None, "--search", "-s", help="Search by name or description"
+    ),
+    tag: Optional[List[str]] = typer.Option(
+        None, "--tag", "-t", help="Filter by tag (repeatable)"
+    ),
+    action_status: Optional[str] = typer.Option(
+        None, "--action-status", help="Filter by action status (SUCCESS/FAILED/RUNNING/PENDING)"
+    ),
+    sort: str = typer.Option(
+        "created_at", "--sort", help="Sort by: name, created_at, updated_at, stars"
+    ),
+    order: str = typer.Option("desc", "--order", help="Sort order: asc, desc"),
+    show_actions: bool = typer.Option(False, "--show-actions", help="Show action status column"),
+    starred: bool = typer.Option(
+        False, "--starred", help="Filter to only environments you have starred"
+    ),
+    mine: bool = typer.Option(
+        False, "--mine", help="Filter to only your own environments (personal + team)"
+    ),
 ) -> None:
-    """List available verifiers environments"""
+    """List environments from the hub.
+
+    By default, shows all public environments. If authenticated, also includes
+    private environments you have access to. Use --starred or --mine to filter.
+
+    \b
+    Examples:
+        prime env list                       # All public environments
+        prime env list --starred             # Your starred environments
+        prime env list --mine                # Your own environments
+        prime env list --search "math"       # Search by name/description
+        prime env list --sort stars          # Sort by most starred
+    """
     validate_output_format(output, console)
 
+    # Validate sort and order
+    if sort not in ("name", "created_at", "updated_at", "stars"):
+        console.print(
+            "[red]Error: --sort must be one of: name, created_at, updated_at, stars[/red]"
+        )
+        raise typer.Exit(1)
+    if order.lower() not in ("asc", "desc"):
+        console.print("[red]Error: --order must be one of: asc, desc[/red]")
+        raise typer.Exit(1)
+
     try:
-        client = APIClient(require_auth=False)
+        # Require auth if filtering by starred or mine
+        require_auth = starred or mine
+        client = APIClient(require_auth=require_auth)
 
         params: Dict[str, Any] = {
             "include_teams": True,
             "limit": limit,
             "offset": offset,
+            "sort_by": sort,
+            "sort_order": order,
         }
         if owner:
             params["owner"] = owner
         if visibility:
             params["visibility"] = visibility
+        if search:
+            params["search"] = search
+        if tag:
+            params["tags"] = tag
+        if action_status:
+            params["ci_status"] = action_status
+        if show_actions or action_status:
+            params["include_ci_status"] = True
+        if starred:
+            params["starred_only"] = True
+        if mine:
+            params["mine_only"] = True
 
         result = client.get("/environmentshub/", params=params)
 
@@ -217,13 +568,19 @@ def list_cmd(
             for env in environments:
                 owner_name = env["owner"]["name"]
                 env_name = env["name"]
-                env_data.append(
-                    {
-                        "environment": f"{owner_name}/{env_name}",
-                        "description": env.get("description", ""),
-                        "visibility": env.get("visibility", ""),
-                    }
-                )
+                env_entry = {
+                    "environment": f"{owner_name}/{env_name}",
+                    "description": env.get("description", ""),
+                    "visibility": env.get("visibility", ""),
+                    "version": env.get("latest_version"),
+                    "stars": env.get("stars", 0),
+                    "updated_at": env.get("updated_at"),
+                }
+                if show_actions or action_status:
+                    env_entry["action_status"] = env.get("latest_ci_status")
+                if env.get("tags"):
+                    env_entry["tags"] = env.get("tags")
+                env_data.append(env_entry)
 
             output_data = {
                 "environments": env_data,
@@ -237,15 +594,33 @@ def list_cmd(
             table = Table(title=f"Environments (Total: {total})")
             table.add_column("Environment", style="cyan")
             table.add_column("Description", style="green")
-            table.add_column("Visibility", style="magenta")
+            table.add_column("Version", style="blue")
+            table.add_column("Stars", style="yellow", justify="right")
+            table.add_column("Updated", style="dim")
+            if show_actions or action_status:
+                table.add_column("Action Status")
 
             for env in environments:
                 owner_name = env["owner"]["name"]
                 env_name = env["name"]
                 env_id = f"{owner_name}/{env_name}"
                 description = env.get("description", "")
-                visibility = env.get("visibility", "")
-                table.add_row(env_id, description, visibility)
+                version = env.get("latest_version") or "-"
+                stars = str(env.get("stars", 0))
+                updated_at = env.get("updated_at", "")
+                if updated_at:
+                    # Format as short date
+                    try:
+                        dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                        updated_at = dt.strftime("%Y-%m-%d")
+                    except (ValueError, AttributeError):
+                        pass
+
+                if show_actions or action_status:
+                    action_text = _format_action_status(env.get("latest_ci_status"))
+                    table.add_row(env_id, description, version, stars, updated_at, action_text)
+                else:
+                    table.add_row(env_id, description, version, stars, updated_at)
 
             console.print(table)
 
@@ -264,7 +639,77 @@ def list_cmd(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command("status", rich_help_panel="Explore")
+def status_cmd(
+    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
+    output: str = typer.Option("table", "--output", help="Output format: table or json"),
+) -> None:
+    """Show action status for an environment.
+
+    \b
+    Examples:
+        prime env status owner/my-env
+        prime env status owner/my-env --output json
+    """
+    validate_output_format(output, console)
+
+    # Parse env_id
+    owner_name, env_name = _parse_environment_slug(env_id)
+
+    try:
+        client = APIClient(require_auth=False)
+
+        result = client.get(
+            f"/environmentshub/{owner_name}/{env_name}/status",
+        )
+
+        data = result.get("data", result)
+
+        if output == "json":
+            output_data_as_json(data, console)
+        else:
+            # Header
+            env_display_name = data.get("name", env_name)
+            console.print(f"\n[bold cyan]Environment:[/bold cyan] {owner_name}/{env_display_name}")
+            if data.get("description"):
+                console.print(f"[dim]Description:[/dim] {data['description']}")
+            console.print(f"[dim]Visibility:[/dim] {data.get('visibility', 'UNKNOWN')}")
+
+            # Latest Version section
+            console.print("\n[bold]Latest Version:[/bold]")
+            latest_version = data.get("latest_version")
+            if latest_version:
+                content_hash = latest_version.get("content_hash") or ""
+                version_str = latest_version.get("semantic_version") or content_hash[:8]
+                console.print(f"  Version: {version_str}")
+                console.print(f"  Hash: {(latest_version.get('content_hash') or '-')[:12]}")
+                created_at = latest_version.get("created_at")
+                console.print(f"  Created: {format_time_ago(created_at)}")
+            else:
+                console.print("  [dim]No versions found[/dim]")
+
+            # Action status section
+            action_data = data.get("action")
+            if action_data:
+                console.print("\n[bold]Action Status:[/bold]")
+                action_status_value = action_data.get("status")
+                action_text = _format_action_status(action_status_value)
+                console.print("  Status: ", end="")
+                console.print(action_text)
+                if action_data.get("job_id"):
+                    console.print(f"  Job ID: [dim]{action_data.get('job_id')}[/dim]")
+
+            console.print()
+
+    except APIError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command(rich_help_panel="Manage")
 def push(
     path: str = typer.Option(".", "--path", "-p", help="Path to environment directory"),
     name: Optional[str] = typer.Option(
@@ -892,7 +1337,7 @@ def push(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def init(
     name: str = typer.Argument(..., help="Name of the new environment"),
     path: str = typer.Option(
@@ -927,7 +1372,7 @@ def init(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def pull(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name or owner/name@version)"),
     target: Optional[str] = typer.Option(None, "--target", "-t", help="Target directory"),
@@ -1282,7 +1727,7 @@ def get_install_command(
         raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Explore")
 def info(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     version: str = typer.Option("latest", "--version", "-v", help="Version to show"),
@@ -1474,7 +1919,7 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
     console.print(f"\n[green]✓ Successfully installed {env_id}@{version}[/green]")
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def install(
     env_ids: List[str] = typer.Argument(
         ..., help="Environment ID(s) to install (owner/name or local name)"
@@ -1496,16 +1941,16 @@ def install(
         help="Don't upgrade existing packages. Useful with locked dependencies (uv.lock).",
     ),
 ) -> None:
-    """Install a verifiers environment
+    """Install a verifiers environment.
 
+    \b
     Examples:
-        prime env install gsm8k                  # local editable install from ./environments
-        prime env install gsm8k -p /path/to/envs # local install from custom path
-        prime env install owner/environment      # install from Prime Hub
-        prime env install owner/environment@0.2.3
+        prime env install gsm8k                    # local install from ./environments
+        prime env install gsm8k -p /path/to/envs   # local install from custom path
+        prime env install owner/environment        # install from Prime Hub
+        prime env install owner/environment@0.2.3  # specific version
         prime env install owner/environment --with pip
-        prime env install owner/environment --no-upgrade
-        prime env install owner/environment1 owner/environment2 owner/environment3
+        prime env install env1 env2 env3           # install multiple
     """
     try:
         client = APIClient(require_auth=False)
@@ -1755,7 +2200,7 @@ def execute_uninstall_command(cmd: List[str], env_name: str, tool: str) -> None:
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def uninstall(
     env_name: str = typer.Argument(..., help="Environment name to uninstall"),
     with_tool: str = typer.Option(
@@ -1764,8 +2209,9 @@ def uninstall(
         help="Package manager to use (uv or pip)",
     ),
 ) -> None:
-    """Uninstall a verifiers environment
+    """Uninstall a verifiers environment.
 
+    \b
     Examples:
         prime env uninstall environment
         prime env uninstall environment --with pip
@@ -1816,7 +2262,7 @@ def uninstall(
 
 
 version_app = typer.Typer(help="Manage environment versions", no_args_is_help=True)
-app.add_typer(version_app, name="version")
+app.add_typer(version_app, name="version", rich_help_panel="Manage")
 
 
 @version_app.command("list", no_args_is_help=True)
@@ -1874,8 +2320,7 @@ def list_versions(
                 # Format date nicely if it's a full timestamp
                 try:
                     if "T" in created_date:
-                        dt = datetime.fromisoformat(created_date.replace("Z", "+00:00"))
-                        created_date = dt.strftime("%Y-%m-%d %H:%M")
+                        created_date = iso_timestamp(created_date)
                 except Exception:
                     pass
 
@@ -1972,7 +2417,7 @@ def delete_version(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def delete(
     env_id: str = typer.Argument(..., help="Environment ID to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
@@ -2619,6 +3064,7 @@ def run_eval(
     no_args_is_help=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     deprecated=True,
+    rich_help_panel="Deprecated",
 )
 def eval_env(
     ctx: typer.Context,

@@ -1160,9 +1160,10 @@ def ssh_connect(
 
     This command creates a SSH session with an ephemeral key and cleans up on disconnect.
 
-    Examples:\n
-        prime sandbox ssh sb_abc123\n
-        prime sandbox ssh sb_abc123 -- -L 3000:localhost:3000\n
+    \b
+    Examples:
+        prime sandbox ssh sb_abc123
+        prime sandbox ssh sb_abc123 -- -L 3000:localhost:3000
     """
     session_id: Optional[str] = None
     sandbox_client: Optional[SandboxClient] = None

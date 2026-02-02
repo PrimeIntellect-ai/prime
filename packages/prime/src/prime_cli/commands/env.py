@@ -48,6 +48,10 @@ MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 action_app = typer.Typer(help="Manage environment actions (CI jobs)", no_args_is_help=True)
 app.add_typer(action_app, name="action", rich_help_panel="Manage")
 
+# Secret subcommand app
+secret_app = typer.Typer(help="Manage environment secrets", no_args_is_help=True)
+app.add_typer(secret_app, name="secret", rich_help_panel="Manage")
+
 # Log cleaning pattern
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
@@ -308,7 +312,7 @@ def actions_retry(
             console.print("[green]Successfully triggered retry[/green]")
             console.print(f"[dim]Job ID: {data.get('job_id')}[/dim]")
             console.print(f"[dim]Version: {data.get('version_id')}[/dim]")
-            job_id = data.get('job_id')
+            job_id = data.get("job_id")
             console.print(
                 f"\n[dim]Use 'prime env action logs {environment} {job_id}' to view logs[/dim]"
             )
@@ -476,9 +480,7 @@ def list_cmd(
     search: Optional[str] = typer.Option(
         None, "--search", "-s", help="Search by name or description"
     ),
-    tag: Optional[List[str]] = typer.Option(
-        None, "--tag", "-t", help="Filter by tag (repeatable)"
-    ),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", "-t", help="Filter by tag (repeatable)"),
     action_status: Optional[str] = typer.Option(
         None, "--action-status", help="Filter by action status (SUCCESS/FAILED/RUNNING/PENDING)"
     ),
@@ -3197,3 +3199,381 @@ def eval_env(
         endpoints_path=None,
         headers=None,
     )
+
+
+def _get_environment_id(client: APIClient, owner: str, env_name: str) -> str:
+    """Resolve environment slug to environment ID using the detail endpoint."""
+    response = client.get(f"/environmentshub/{owner}/{env_name}/@latest")
+    data = response.get("data", {})
+    env_id = data.get("id")
+    if not env_id:
+        raise APIError(f"Environment {owner}/{env_name} not found")
+    return env_id
+
+
+@secret_app.command("list")
+def secret_list(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """List all secrets for an environment."""
+    validate_output_format(output, console)
+    owner, env_name = _parse_environment_slug(environment)
+
+    try:
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+        response = client.get(f"/environmentshub/{env_id}/secrets")
+        secrets = response.get("data", [])
+
+        if output == "json":
+            output_data_as_json({"secrets": secrets}, console)
+            return
+
+        if not secrets:
+            console.print("[yellow]No secrets found for this environment.[/yellow]")
+            return
+
+        table = Table(title=f"Secrets for {owner}/{env_name}")
+        table.add_column("ID", style="dim", no_wrap=True)
+        table.add_column("Name", style="cyan")
+        table.add_column("Source", style="blue")
+        table.add_column("Description", style="dim")
+        table.add_column("Created", style="dim")
+
+        for secret in secrets:
+            secret_id = secret.get("id", "")[:8]
+            name = secret.get("name", "")
+            source = secret.get("source", "")
+            description = secret.get("description") or ""
+            created = secret.get("createdAt", "")
+            if created:
+                created = format_time_ago(created)
+            table.add_row(secret_id, name, source, description, created)
+
+        console.print(table)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@secret_app.command("create")
+def secret_create(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    name: str = typer.Option(
+        ...,
+        "--name",
+        "-n",
+        help="Secret name (must be uppercase with underscores, e.g., MY_SECRET)",
+    ),
+    value: str = typer.Option(
+        ...,
+        "--value",
+        "-v",
+        help="Secret value",
+    ),
+    description: Optional[str] = typer.Option(
+        None,
+        "--description",
+        "-d",
+        help="Secret description",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """Create an environment-specific secret."""
+    validate_output_format(output, console)
+    owner, env_name = _parse_environment_slug(environment)
+
+    try:
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+
+        payload: Dict[str, Any] = {"name": name, "value": value}
+        if description:
+            payload["description"] = description
+
+        response = client.post(f"/environmentshub/{env_id}/secrets", json=payload)
+        secret = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(secret, console)
+            return
+
+        console.print(f"[green]✓ Created secret '{name}' for {owner}/{env_name}[/green]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@secret_app.command("update")
+def secret_update(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    secret_id: str = typer.Argument(
+        ...,
+        help="Secret ID to update",
+    ),
+    name: Optional[str] = typer.Option(
+        None,
+        "--name",
+        "-n",
+        help="New secret name",
+    ),
+    value: Optional[str] = typer.Option(
+        None,
+        "--value",
+        "-v",
+        help="New secret value",
+    ),
+    description: Optional[str] = typer.Option(
+        None,
+        "--description",
+        "-d",
+        help="New secret description",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """Update an environment-specific secret."""
+    validate_output_format(output, console)
+    owner, env_name = _parse_environment_slug(environment)
+
+    if not any([name, value, description]):
+        console.print(
+            "[red]Error: At least one of --name, --value, or --description is required[/red]"
+        )
+        raise typer.Exit(1)
+
+    try:
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+
+        payload: Dict[str, Any] = {}
+        if name:
+            payload["name"] = name
+        if value:
+            payload["value"] = value
+        if description is not None:
+            payload["description"] = description
+
+        response = client.patch(f"/environmentshub/{env_id}/secrets/{secret_id}", json=payload)
+        secret = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(secret, console)
+            return
+
+        console.print(f"[green]✓ Updated secret for {owner}/{env_name}[/green]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@secret_app.command("delete")
+def secret_delete(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    secret_id: str = typer.Argument(
+        ...,
+        help="Secret ID to delete",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation prompt",
+    ),
+) -> None:
+    """Delete an environment-specific secret."""
+    owner, env_name = _parse_environment_slug(environment)
+
+    if not yes:
+        confirm = typer.confirm(f"Delete secret {secret_id} from {owner}/{env_name}?")
+        if not confirm:
+            console.print("[dim]Cancelled.[/dim]")
+            raise typer.Exit()
+
+    try:
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+        client.delete(f"/environmentshub/{env_id}/secrets/{secret_id}")
+        console.print(f"[green]✓ Deleted secret from {owner}/{env_name}[/green]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@secret_app.command("link")
+def secret_link(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    global_secret_id: str = typer.Argument(
+        ...,
+        help="Global secret ID to link",
+    ),
+    env_var_name: Optional[str] = typer.Option(
+        None,
+        "--name",
+        "-n",
+        help="Override environment variable name (defaults to global secret name)",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """Link a global secret to an environment."""
+    validate_output_format(output, console)
+    owner, env_name = _parse_environment_slug(environment)
+
+    try:
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+
+        payload: Dict[str, Any] = {}
+        if env_var_name:
+            payload["envVarName"] = env_var_name
+
+        response = client.post(
+            f"/environmentshub/{env_id}/secrets/link/{global_secret_id}",
+            json=payload,
+        )
+        linked = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(linked, console)
+            return
+
+        secret_name = linked.get("secretName", global_secret_id)
+        console.print(
+            f"[green]✓ Linked global secret '{secret_name}' to {owner}/{env_name}[/green]"
+        )
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@secret_app.command("unlink")
+def secret_unlink(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    global_secret_id: str = typer.Argument(
+        ...,
+        help="Global secret ID to unlink",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation prompt",
+    ),
+) -> None:
+    """Unlink a global secret from an environment."""
+    owner, env_name = _parse_environment_slug(environment)
+
+    if not yes:
+        confirm = typer.confirm(f"Unlink global secret {global_secret_id} from {owner}/{env_name}?")
+        if not confirm:
+            console.print("[dim]Cancelled.[/dim]")
+            raise typer.Exit()
+
+    try:
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+        client.delete(f"/environmentshub/{env_id}/secrets/link/{global_secret_id}")
+        console.print(f"[green]✓ Unlinked global secret from {owner}/{env_name}[/green]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@secret_app.command("settings")
+def secret_settings(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    auto_apply: Optional[bool] = typer.Option(
+        None,
+        "--auto-apply/--no-auto-apply",
+        help="Enable/disable auto-applying global secrets",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """View or update environment secret settings."""
+    validate_output_format(output, console)
+    owner, env_name = _parse_environment_slug(environment)
+
+    try:
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+
+        if auto_apply is not None:
+            response = client.patch(
+                f"/environmentshub/{env_id}/settings",
+                json={"autoApplyGlobalSecrets": auto_apply},
+            )
+            settings_data = response.get("data", {})
+            if output == "json":
+                output_data_as_json(settings_data, console)
+                return
+            status = "enabled" if auto_apply else "disabled"
+            console.print(
+                f"[green]✓ Auto-apply global secrets {status} for {owner}/{env_name}[/green]"
+            )
+        else:
+            response = client.get(f"/environmentshub/{env_id}/settings")
+            settings_data = response.get("data", {})
+            if output == "json":
+                output_data_as_json(settings_data, console)
+                return
+            auto_apply_status = settings_data.get("autoApplyGlobalSecrets", False)
+            status_text = "[green]enabled[/green]" if auto_apply_status else "[dim]disabled[/dim]"
+            console.print(f"\n[bold]Settings for {owner}/{env_name}[/bold]")
+            console.print(f"  Auto-apply global secrets: {status_text}")
+            console.print()
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)

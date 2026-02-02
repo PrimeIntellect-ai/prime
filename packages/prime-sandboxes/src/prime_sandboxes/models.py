@@ -87,6 +87,8 @@ class Sandbox(BaseModel):
     team_id: Optional[str] = Field(None, alias="teamId")
     kubernetes_job_id: Optional[str] = Field(None, alias="kubernetesJobId")
     registry_credentials_id: Optional[str] = Field(default=None, alias="registryCredentialsId")
+    image_build_id: Optional[str] = Field(default=None, alias="imageBuildId")
+    image_build_status: Optional[str] = Field(default=None, alias="imageBuildStatus")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -111,11 +113,6 @@ class CreateSandboxRequest(BaseModel):
     dockerfile: Optional[str] = Field(
         default=None,
         description="Path to Dockerfile for building image (e.g., './Dockerfile')",
-    )
-    build_context: Optional[str] = Field(
-        default=None,
-        description="Build context directory path. If not provided, only the "
-        "Dockerfile is used (no COPY/ADD support).",
     )
     start_command: Optional[str] = "tail -f /dev/null"
     cpu_cores: int = 1

@@ -92,6 +92,25 @@ def _parse_environment_slug(environment: str) -> Tuple[str, str]:
     return parts[0], parts[1]
 
 
+def _resolve_environment(environment: Optional[str]) -> Tuple[str, str]:
+    """Resolve environment slug from argument or auto-detect from current directory."""
+    if environment:
+        return _parse_environment_slug(environment)
+
+    metadata = find_environment_metadata()
+    if metadata:
+        owner = metadata.get("owner")
+        name = metadata.get("name")
+        if owner and name:
+            console.print(f"[dim]Using environment: {owner}/{name}[/dim]")
+            return owner, name
+
+    console.print(
+        "[red]Error: No environment specified and none detected in current directory[/red]"
+    )
+    raise typer.Exit(1)
+
+
 @action_app.command("list")
 def actions_list(
     environment: str = typer.Argument(
@@ -3224,9 +3243,9 @@ def _fetch_env_secrets(client: APIClient, env_id: str) -> List[Dict[str, Any]]:
 
 @secrets_app.command("list")
 def env_secret_list(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
     output: str = typer.Option(
         "table",
@@ -3237,7 +3256,7 @@ def env_secret_list(
 ) -> None:
     """List all secrets for an environment."""
     validate_output_format(output, console)
-    owner, env_name = _parse_environment_slug(environment)
+    owner, env_name = _resolve_environment(environment)
 
     try:
         client = APIClient()
@@ -3279,9 +3298,9 @@ def env_secret_list(
 
 @secrets_app.command("create")
 def env_secret_create(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
     name: Optional[str] = typer.Option(
         None,
@@ -3310,7 +3329,7 @@ def env_secret_create(
 ) -> None:
     """Create an environment-specific secret."""
     validate_output_format(output, console)
-    owner, env_name = _parse_environment_slug(environment)
+    owner, env_name = _resolve_environment(environment)
 
     try:
         if not name:
@@ -3355,12 +3374,13 @@ def env_secret_create(
 
 @secrets_app.command("update")
 def env_secret_update(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
-    ),
-    secret_id: Optional[str] = typer.Argument(
+    environment: Optional[str] = typer.Argument(
         None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
+    ),
+    secret_id: Optional[str] = typer.Option(
+        None,
+        "--id",
         help="Secret ID to update (interactive selection if not provided)",
     ),
     name: Optional[str] = typer.Option(
@@ -3390,7 +3410,7 @@ def env_secret_update(
 ) -> None:
     """Update an environment-specific secret."""
     validate_output_format(output, console)
-    owner, env_name = _parse_environment_slug(environment)
+    owner, env_name = _resolve_environment(environment)
 
     try:
         client = APIClient()
@@ -3448,12 +3468,13 @@ def env_secret_update(
 
 @secrets_app.command("delete")
 def env_secret_delete(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
-    ),
-    secret_id: Optional[str] = typer.Argument(
+    environment: Optional[str] = typer.Argument(
         None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
+    ),
+    secret_id: Optional[str] = typer.Option(
+        None,
+        "--id",
         help="Secret ID to delete (interactive selection if not provided)",
     ),
     yes: bool = typer.Option(
@@ -3464,7 +3485,7 @@ def env_secret_delete(
     ),
 ) -> None:
     """Delete an environment-specific secret."""
-    owner, env_name = _parse_environment_slug(environment)
+    owner, env_name = _resolve_environment(environment)
 
     try:
         client = APIClient()
@@ -3507,13 +3528,15 @@ def env_secret_delete(
 
 @secrets_app.command("link")
 def env_secret_link(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
-    ),
     global_secret_id: str = typer.Argument(
         ...,
         help="Global secret ID to link",
+    ),
+    environment: Optional[str] = typer.Option(
+        None,
+        "--env",
+        "-e",
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
     env_var_name: Optional[str] = typer.Option(
         None,
@@ -3530,7 +3553,7 @@ def env_secret_link(
 ) -> None:
     """Link a global secret to an environment."""
     validate_output_format(output, console)
-    owner, env_name = _parse_environment_slug(environment)
+    owner, env_name = _resolve_environment(environment)
 
     try:
         client = APIClient()
@@ -3562,13 +3585,15 @@ def env_secret_link(
 
 @secrets_app.command("unlink")
 def env_secret_unlink(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
-    ),
     global_secret_id: str = typer.Argument(
         ...,
         help="Global secret ID to unlink",
+    ),
+    environment: Optional[str] = typer.Option(
+        None,
+        "--env",
+        "-e",
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
     yes: bool = typer.Option(
         False,
@@ -3578,7 +3603,7 @@ def env_secret_unlink(
     ),
 ) -> None:
     """Unlink a global secret from an environment."""
-    owner, env_name = _parse_environment_slug(environment)
+    owner, env_name = _resolve_environment(environment)
 
     if not yes:
         confirm = typer.confirm(f"Unlink global secret {global_secret_id} from {owner}/{env_name}?")
@@ -3599,9 +3624,9 @@ def env_secret_unlink(
 
 @secrets_app.command("settings")
 def env_secret_settings(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
     auto_apply: Optional[bool] = typer.Option(
         None,
@@ -3617,7 +3642,7 @@ def env_secret_settings(
 ) -> None:
     """View or update environment secret settings."""
     validate_output_format(output, console)
-    owner, env_name = _parse_environment_slug(environment)
+    owner, env_name = _resolve_environment(environment)
 
     try:
         client = APIClient()
@@ -3655,9 +3680,9 @@ def env_secret_settings(
 
 @var_app.command("list")
 def var_list(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
     output: str = typer.Option(
         "table",
@@ -3668,7 +3693,7 @@ def var_list(
 ) -> None:
     """List all variables for an environment."""
     validate_output_format(output, console)
-    owner, env_name = _parse_environment_slug(environment)
+    owner, env_name = _resolve_environment(environment)
 
     try:
         client = APIClient()
@@ -3712,9 +3737,9 @@ def var_list(
 
 @var_app.command("create")
 def var_create(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
     name: str = typer.Option(
         ...,
@@ -3743,7 +3768,7 @@ def var_create(
 ) -> None:
     """Create an environment variable."""
     validate_output_format(output, console)
-    owner, env_name = _parse_environment_slug(environment)
+    owner, env_name = _resolve_environment(environment)
 
     try:
         client = APIClient()
@@ -3770,13 +3795,15 @@ def var_create(
 
 @var_app.command("update")
 def var_update(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
-    ),
     var_id: str = typer.Argument(
         ...,
         help="Variable ID to update",
+    ),
+    environment: Optional[str] = typer.Option(
+        None,
+        "--env",
+        "-e",
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
     name: Optional[str] = typer.Option(
         None,
@@ -3812,7 +3839,7 @@ def var_update(
         )
         raise typer.Exit(1)
 
-    owner, env_name = _parse_environment_slug(environment)
+    owner, env_name = _resolve_environment(environment)
 
     try:
         client = APIClient()
@@ -3845,13 +3872,15 @@ def var_update(
 
 @var_app.command("delete")
 def var_delete(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
-    ),
     var_id: str = typer.Argument(
         ...,
         help="Variable ID to delete",
+    ),
+    environment: Optional[str] = typer.Option(
+        None,
+        "--env",
+        "-e",
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
     yes: bool = typer.Option(
         False,
@@ -3861,13 +3890,13 @@ def var_delete(
     ),
 ) -> None:
     """Delete an environment variable."""
-    if not yes:
-        confirm = typer.confirm(f"Delete variable {var_id}?")
-        if not confirm:
-            console.print("[dim]Cancelled.[/dim]")
-            raise typer.Exit()
+    owner, env_name = _resolve_environment(environment)
 
-    owner, env_name = _parse_environment_slug(environment)
+    if not yes:
+        confirm = typer.confirm(f"Delete variable {var_id} from {owner}/{env_name}?")
+        if not confirm:
+            console.print("\n[dim]Cancelled.[/dim]")
+            raise typer.Exit()
 
     try:
         client = APIClient()

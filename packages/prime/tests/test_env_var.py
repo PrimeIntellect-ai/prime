@@ -228,8 +228,9 @@ class TestEnvVarUpdate:
                 "env",
                 "var",
                 "update",
-                "testuser/test-env",
                 "var-id-1234567890",
+                "--env",
+                "testuser/test-env",
                 "-n",
                 "RENAMED_VAR",
             ],
@@ -246,8 +247,9 @@ class TestEnvVarUpdate:
                 "env",
                 "var",
                 "update",
-                "testuser/test-env",
                 "var-id-1234567890",
+                "--env",
+                "testuser/test-env",
                 "-v",
                 "new-value",
             ],
@@ -260,7 +262,7 @@ class TestEnvVarUpdate:
         """Test that update fails when no changes are provided."""
         result = runner.invoke(
             app,
-            ["env", "var", "update", "testuser/test-env", "var-id-1234567890"],
+            ["env", "var", "update", "var-id-1234567890", "--env", "testuser/test-env"],
         )
 
         assert result.exit_code == 1
@@ -274,8 +276,9 @@ class TestEnvVarUpdate:
                 "env",
                 "var",
                 "update",
-                "testuser/test-env",
                 "var-id-1234567890",
+                "--env",
+                "testuser/test-env",
                 "-n",
                 "NEW_NAME",
                 "-o",
@@ -295,7 +298,7 @@ class TestEnvVarDelete:
         """Test deleting a variable with confirmation."""
         result = runner.invoke(
             app,
-            ["env", "var", "delete", "testuser/test-env", "var-id-1234567890", "-y"],
+            ["env", "var", "delete", "var-id-1234567890", "--env", "testuser/test-env", "-y"],
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -305,7 +308,7 @@ class TestEnvVarDelete:
         """Test cancelling variable deletion."""
         result = runner.invoke(
             app,
-            ["env", "var", "delete", "testuser/test-env", "var-id-1234567890"],
+            ["env", "var", "delete", "var-id-1234567890", "--env", "testuser/test-env"],
             input="n\n",
         )
 

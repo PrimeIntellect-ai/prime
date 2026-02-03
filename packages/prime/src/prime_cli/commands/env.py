@@ -7,8 +7,13 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import uuid
+import zipfile
 from datetime import datetime
+
+# Wheel METADATA files use RFC 822 format (PEP 566), same as email headers
+from email.parser import Parser as EmailParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -28,6 +33,7 @@ from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
+from ..utils.time_utils import format_time_ago, iso_timestamp
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
 console = Console()
@@ -37,6 +43,282 @@ MAX_FILES_TO_SHOW = 10
 DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
+
+# Action subcommand app
+action_app = typer.Typer(help="Manage environment actions (CI jobs)", no_args_is_help=True)
+app.add_typer(action_app, name="action", rich_help_panel="Manage")
+
+# Log cleaning pattern
+ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    return ANSI_ESCAPE.sub("", text)
+
+
+def _parse_environment_slug(environment: str) -> Tuple[str, str]:
+    """Parse owner/name from an environment slug.
+
+    Args:
+        environment: Environment slug in format 'owner/name'
+
+    Returns:
+        Tuple of (owner, name)
+
+    Raises:
+        typer.Exit: If the slug is invalid
+    """
+    if "/" not in environment:
+        console.print(f"[red]Invalid environment format: {environment}[/red]")
+        console.print("[dim]Use format: owner/environment-name[/dim]")
+        raise typer.Exit(1)
+
+    parts = environment.split("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        console.print(f"[red]Invalid environment format: {environment}[/red]")
+        console.print("[dim]Use format: owner/environment-name[/dim]")
+        raise typer.Exit(1)
+
+    return parts[0], parts[1]
+
+
+@action_app.command("list")
+def actions_list(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    version_id: Optional[str] = typer.Option(
+        None,
+        "--version-id",
+        "-v",
+        help="Filter by version ID",
+    ),
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        "-l",
+        help="Maximum number of actions to show",
+    ),
+    offset: int = typer.Option(
+        0,
+        "--offset",
+        help="Offset for pagination",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """List actions (CI jobs) for an environment."""
+    validate_output_format(output, console)
+
+    owner, env_name = _parse_environment_slug(environment)
+
+    try:
+        client = APIClient()
+        params = {
+            "limit": limit,
+            "offset": offset,
+        }
+        if version_id:
+            params["version_id"] = version_id
+
+        response = client.get(f"/environmentshub/{owner}/{env_name}/actions", params=params)
+        data = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(data, console)
+            return
+
+        actions = data.get("actions", [])
+        total = data.get("total", 0)
+
+        if not actions:
+            console.print("[yellow]No actions found for this environment.[/yellow]")
+            return
+
+        table = Table(title=f"Actions for {owner}/{env_name}")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Name", style="blue")
+        table.add_column("Status", style="yellow")
+        table.add_column("Version", style="dim")
+        table.add_column("Trigger", style="dim")
+        table.add_column("Created", style="dim")
+
+        for action in actions:
+            action_id = action.get("id", "")
+            name = action.get("name") or action.get("job_type", "")
+            status = action.get("status", "")
+
+            # Color the status
+            status_color = {
+                "SUCCESS": "[green]SUCCESS[/green]",
+                "FAILED": "[red]FAILED[/red]",
+                "RUNNING": "[yellow]RUNNING[/yellow]",
+                "PENDING": "[dim]PENDING[/dim]",
+                "CANCELLED": "[dim]CANCELLED[/dim]",
+            }.get(status, status)
+
+            version = action.get("version") or {}
+            version_str = version.get("semantic_version") or (version.get("content_hash") or "")[:8]
+            trigger = action.get("trigger", "")
+            created = action.get("created_at", "")
+            if created:
+                created = format_time_ago(created)
+
+            table.add_row(action_id, name, status_color, version_str, trigger, created)
+
+        console.print(table)
+        console.print(f"[dim]Showing {len(actions)} of {total} actions[/dim]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@action_app.command("logs")
+def actions_logs(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    action_id: str = typer.Argument(
+        ...,
+        help="Action/job ID to get logs for",
+    ),
+    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+) -> None:
+    """Get logs for a specific action."""
+    owner, env_name = _parse_environment_slug(environment)
+
+    try:
+        client = APIClient()
+
+        if follow:
+            console.print(f"[dim]Watching logs for action {action_id}... (Ctrl+C to stop)[/dim]\n")
+            last_logs = ""
+            consecutive_errors = 0
+
+            while True:
+                try:
+                    response = client.get(
+                        f"/environmentshub/{owner}/{env_name}/actions/{action_id}/logs",
+                        params={"tail_lines": tail},
+                    )
+                    data = response.get("data", {})
+                    logs = _strip_ansi(data.get("logs") or "")
+                    consecutive_errors = 0
+
+                    if logs != last_logs:
+                        old_lines = last_logs.splitlines() if last_logs else []
+                        new_lines = logs.splitlines()
+
+                        if not last_logs:
+                            for line in new_lines:
+                                console.print(line)
+                        else:
+                            overlap = 0
+                            max_overlap = min(len(old_lines), len(new_lines))
+                            for i in range(1, max_overlap + 1):
+                                if old_lines[-i:] == new_lines[:i]:
+                                    overlap = i
+                            for line in new_lines[overlap:]:
+                                console.print(line)
+
+                        last_logs = logs
+                except APIError as e:
+                    consecutive_errors += 1
+                    if "429" in str(e):
+                        if consecutive_errors >= 3:
+                            console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
+                            time.sleep(30)
+                        else:
+                            time.sleep(10)
+                        continue
+                    raise
+
+                time.sleep(5)
+        else:
+            response = client.get(
+                f"/environmentshub/{owner}/{env_name}/actions/{action_id}/logs",
+                params={"tail_lines": tail},
+            )
+            data = response.get("data", {})
+            logs = _strip_ansi(data.get("logs") or "")
+
+            if logs:
+                console.print(logs)
+            else:
+                console.print("[yellow]No logs available yet.[/yellow]")
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped watching logs.[/dim]")
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@action_app.command("retry")
+def actions_retry(
+    environment: str = typer.Argument(
+        ...,
+        help="Environment slug (e.g., 'owner/environment-name')",
+    ),
+    action_id: Optional[str] = typer.Argument(
+        None,
+        help="Action ID to retry (retries latest action if not provided)",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """Retry an action (integration test) for an environment.
+
+    If no action ID is provided, retries the latest action.
+    """
+    validate_output_format(output, console)
+
+    owner, env_name = _parse_environment_slug(environment)
+
+    try:
+        client = APIClient()
+        payload = {}
+        if action_id:
+            payload["action_id"] = action_id
+
+        response = client.post(
+            f"/environmentshub/{owner}/{env_name}/actions/retry",
+            json=payload,
+        )
+        data = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(data, console)
+            return
+
+        if data.get("success"):
+            console.print("[green]Successfully triggered retry[/green]")
+            console.print(f"[dim]Job ID: {data.get('job_id')}[/dim]")
+            console.print(f"[dim]Version: {data.get('version_id')}[/dim]")
+            job_id = data.get('job_id')
+            console.print(
+                f"\n[dim]Use 'prime env action logs {environment} {job_id}' to view logs[/dim]"
+            )
+        else:
+            console.print(f"[red]Retry failed:[/red] {data.get('message', 'Unknown error')}")
+            raise typer.Exit(1)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
 
 def display_upstream_environment_info(
@@ -165,10 +447,25 @@ def compute_content_hash(env_path: Path) -> str:
     return content_hasher.hexdigest()
 
 
-@app.command("list")
+def _format_action_status(status: Optional[str]) -> Text:
+    """Format action status with color coding."""
+    if not status:
+        return Text("-", style="dim")
+    status_colors = {
+        "SUCCESS": "green",
+        "FAILED": "red",
+        "RUNNING": "yellow",
+        "PENDING": "yellow",
+        "CANCELLED": "dim",
+    }
+    color = status_colors.get(status.upper(), "white")
+    return Text(status, style=color)
+
+
+@app.command("list", rich_help_panel="Explore")
 def list_cmd(
     limit: int = typer.Option(
-        DEFAULT_LIST_LIMIT, "--limit", "-l", help="Number of environments to show"
+        DEFAULT_LIST_LIMIT, "--num", "-n", help="Number of environments to show"
     ),
     offset: int = typer.Option(0, "--offset", help="Number of environments to skip"),
     owner: Optional[str] = typer.Option(None, "--owner", help="Filter by owner name"),
@@ -176,22 +473,80 @@ def list_cmd(
         None, "--visibility", help="Filter by visibility (PUBLIC/PRIVATE)"
     ),
     output: str = typer.Option("table", "--output", help="Output format: table or json"),
+    search: Optional[str] = typer.Option(
+        None, "--search", "-s", help="Search by name or description"
+    ),
+    tag: Optional[List[str]] = typer.Option(
+        None, "--tag", "-t", help="Filter by tag (repeatable)"
+    ),
+    action_status: Optional[str] = typer.Option(
+        None, "--action-status", help="Filter by action status (SUCCESS/FAILED/RUNNING/PENDING)"
+    ),
+    sort: str = typer.Option(
+        "created_at", "--sort", help="Sort by: name, created_at, updated_at, stars"
+    ),
+    order: str = typer.Option("desc", "--order", help="Sort order: asc, desc"),
+    show_actions: bool = typer.Option(False, "--show-actions", help="Show action status column"),
+    starred: bool = typer.Option(
+        False, "--starred", help="Filter to only environments you have starred"
+    ),
+    mine: bool = typer.Option(
+        False, "--mine", help="Filter to only your own environments (personal + team)"
+    ),
 ) -> None:
-    """List available verifiers environments"""
+    """List environments from the hub.
+
+    By default, shows all public environments. If authenticated, also includes
+    private environments you have access to. Use --starred or --mine to filter.
+
+    \b
+    Examples:
+        prime env list                       # All public environments
+        prime env list --starred             # Your starred environments
+        prime env list --mine                # Your own environments
+        prime env list --search "math"       # Search by name/description
+        prime env list --sort stars          # Sort by most starred
+    """
     validate_output_format(output, console)
 
+    # Validate sort and order
+    if sort not in ("name", "created_at", "updated_at", "stars"):
+        console.print(
+            "[red]Error: --sort must be one of: name, created_at, updated_at, stars[/red]"
+        )
+        raise typer.Exit(1)
+    if order.lower() not in ("asc", "desc"):
+        console.print("[red]Error: --order must be one of: asc, desc[/red]")
+        raise typer.Exit(1)
+
     try:
-        client = APIClient(require_auth=False)
+        # Require auth if filtering by starred or mine
+        require_auth = starred or mine
+        client = APIClient(require_auth=require_auth)
 
         params: Dict[str, Any] = {
             "include_teams": True,
             "limit": limit,
             "offset": offset,
+            "sort_by": sort,
+            "sort_order": order,
         }
         if owner:
             params["owner"] = owner
         if visibility:
             params["visibility"] = visibility
+        if search:
+            params["search"] = search
+        if tag:
+            params["tags"] = tag
+        if action_status:
+            params["ci_status"] = action_status
+        if show_actions or action_status:
+            params["include_ci_status"] = True
+        if starred:
+            params["starred_only"] = True
+        if mine:
+            params["mine_only"] = True
 
         result = client.get("/environmentshub/", params=params)
 
@@ -213,13 +568,19 @@ def list_cmd(
             for env in environments:
                 owner_name = env["owner"]["name"]
                 env_name = env["name"]
-                env_data.append(
-                    {
-                        "environment": f"{owner_name}/{env_name}",
-                        "description": env.get("description", ""),
-                        "visibility": env.get("visibility", ""),
-                    }
-                )
+                env_entry = {
+                    "environment": f"{owner_name}/{env_name}",
+                    "description": env.get("description", ""),
+                    "visibility": env.get("visibility", ""),
+                    "version": env.get("latest_version"),
+                    "stars": env.get("stars", 0),
+                    "updated_at": env.get("updated_at"),
+                }
+                if show_actions or action_status:
+                    env_entry["action_status"] = env.get("latest_ci_status")
+                if env.get("tags"):
+                    env_entry["tags"] = env.get("tags")
+                env_data.append(env_entry)
 
             output_data = {
                 "environments": env_data,
@@ -233,15 +594,33 @@ def list_cmd(
             table = Table(title=f"Environments (Total: {total})")
             table.add_column("Environment", style="cyan")
             table.add_column("Description", style="green")
-            table.add_column("Visibility", style="magenta")
+            table.add_column("Version", style="blue")
+            table.add_column("Stars", style="yellow", justify="right")
+            table.add_column("Updated", style="dim")
+            if show_actions or action_status:
+                table.add_column("Action Status")
 
             for env in environments:
                 owner_name = env["owner"]["name"]
                 env_name = env["name"]
                 env_id = f"{owner_name}/{env_name}"
                 description = env.get("description", "")
-                visibility = env.get("visibility", "")
-                table.add_row(env_id, description, visibility)
+                version = env.get("latest_version") or "-"
+                stars = str(env.get("stars", 0))
+                updated_at = env.get("updated_at", "")
+                if updated_at:
+                    # Format as short date
+                    try:
+                        dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                        updated_at = dt.strftime("%Y-%m-%d")
+                    except (ValueError, AttributeError):
+                        pass
+
+                if show_actions or action_status:
+                    action_text = _format_action_status(env.get("latest_ci_status"))
+                    table.add_row(env_id, description, version, stars, updated_at, action_text)
+                else:
+                    table.add_row(env_id, description, version, stars, updated_at)
 
             console.print(table)
 
@@ -260,7 +639,77 @@ def list_cmd(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command("status", rich_help_panel="Explore")
+def status_cmd(
+    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
+    output: str = typer.Option("table", "--output", help="Output format: table or json"),
+) -> None:
+    """Show action status for an environment.
+
+    \b
+    Examples:
+        prime env status owner/my-env
+        prime env status owner/my-env --output json
+    """
+    validate_output_format(output, console)
+
+    # Parse env_id
+    owner_name, env_name = _parse_environment_slug(env_id)
+
+    try:
+        client = APIClient(require_auth=False)
+
+        result = client.get(
+            f"/environmentshub/{owner_name}/{env_name}/status",
+        )
+
+        data = result.get("data", result)
+
+        if output == "json":
+            output_data_as_json(data, console)
+        else:
+            # Header
+            env_display_name = data.get("name", env_name)
+            console.print(f"\n[bold cyan]Environment:[/bold cyan] {owner_name}/{env_display_name}")
+            if data.get("description"):
+                console.print(f"[dim]Description:[/dim] {data['description']}")
+            console.print(f"[dim]Visibility:[/dim] {data.get('visibility', 'UNKNOWN')}")
+
+            # Latest Version section
+            console.print("\n[bold]Latest Version:[/bold]")
+            latest_version = data.get("latest_version")
+            if latest_version:
+                content_hash = latest_version.get("content_hash") or ""
+                version_str = latest_version.get("semantic_version") or content_hash[:8]
+                console.print(f"  Version: {version_str}")
+                console.print(f"  Hash: {(latest_version.get('content_hash') or '-')[:12]}")
+                created_at = latest_version.get("created_at")
+                console.print(f"  Created: {format_time_ago(created_at)}")
+            else:
+                console.print("  [dim]No versions found[/dim]")
+
+            # Action status section
+            action_data = data.get("action")
+            if action_data:
+                console.print("\n[bold]Action Status:[/bold]")
+                action_status_value = action_data.get("status")
+                action_text = _format_action_status(action_status_value)
+                console.print("  Status: ", end="")
+                console.print(action_text)
+                if action_data.get("job_id"):
+                    console.print(f"  Job ID: [dim]{action_data.get('job_id')}[/dim]")
+
+            console.print()
+
+    except APIError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command(rich_help_panel="Manage")
 def push(
     path: str = typer.Option(".", "--path", "-p", help="Path to environment directory"),
     name: Optional[str] = typer.Option(
@@ -553,6 +1002,9 @@ def push(
 
             unique_wheel_name = wheel_path.name
 
+            # Extract Requires-Dist from wheel METADATA (includes URL dependencies)
+            requires_dist = extract_requires_dist_from_wheel(wheel_path)
+
             wheel_data = {
                 "content_hash": content_hash,
                 "filename": unique_wheel_name,
@@ -566,6 +1018,7 @@ def push(
                     "dependencies": project_metadata.get("dependencies", []),
                     "python_requires": project_metadata.get("requires-python", ">=3.8"),
                     "original_filename": wheel_path.name,
+                    "requires_dist": requires_dist,  # Include full dependency specs from wheel
                 },
             }
 
@@ -884,7 +1337,7 @@ def push(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def init(
     name: str = typer.Argument(..., help="Name of the new environment"),
     path: str = typer.Option(
@@ -919,7 +1372,7 @@ def init(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def pull(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name or owner/name@version)"),
     target: Optional[str] = typer.Option(None, "--target", "-t", help="Target directory"),
@@ -1126,6 +1579,43 @@ def normalize_package_name(name: str) -> str:
     return name.replace("-", "_").lower()
 
 
+def extract_requires_dist_from_wheel(wheel_path: Path) -> List[str]:
+    """Extract Requires-Dist entries from a wheel's METADATA file.
+
+    A wheel is a zip file containing a .dist-info directory with a METADATA file.
+    This function extracts all Requires-Dist entries which include dependencies.
+
+    Args:
+        wheel_path: Path to the wheel file
+
+    Returns:
+        List of Requires-Dist entries (e.g., ["requests>=2.0", "tau2@ git+https://..."])
+    """
+    requires_dist = []
+    try:
+        with zipfile.ZipFile(wheel_path, "r") as whl:
+            # Find the METADATA file in the .dist-info directory
+            metadata_files = [
+                name for name in whl.namelist() if name.endswith(".dist-info/METADATA")
+            ]
+            if not metadata_files:
+                return requires_dist
+
+            metadata_content = whl.read(metadata_files[0]).decode("utf-8")
+
+            # Parse the METADATA file (RFC 822 format)
+            parser = EmailParser()
+            metadata = parser.parsestr(metadata_content)
+
+            # Get all Requires-Dist entries
+            requires_dist = metadata.get_all("Requires-Dist") or []
+
+    except (zipfile.BadZipFile, KeyError, UnicodeDecodeError) as e:
+        console.print(f"[yellow]Warning: Could not extract metadata from wheel: {e}[/yellow]")
+
+    return requires_dist
+
+
 def bump_version(version: str) -> str:
     """Bump patch version (e.g., 1.2.3 -> 1.2.4)."""
     parts = version.split(".")
@@ -1209,18 +1699,22 @@ def update_pyproject_version(pyproject_path: Path, new_version: str) -> None:
         f.write(updated_content)
 
 
-def get_install_command(tool: str, wheel_url: str, no_upgrade: bool = False) -> List[str]:
+def get_install_command(
+    tool: str, wheel_url: str, package_name: str, no_upgrade: bool = False
+) -> List[str]:
     """Generate install command for the specified tool.
 
     Args:
         tool: Package manager to use ('uv' or 'pip')
         wheel_url: URL to the wheel file
-        no_upgrade: If True, don't include --upgrade flag (preserves locked dependencies)
+        package_name: Package name for targeted upgrade with -P flag (uv only)
+        no_upgrade: If True, don't include upgrade flags (preserves locked dependencies)
     """
     if tool == "uv":
         cmd = ["uv", "pip", "install"]
         if not no_upgrade:
-            cmd.append("--upgrade")
+            # Use -P to only upgrade this package, not its dependencies
+            cmd.extend(["-P", package_name])
         cmd.append(wheel_url)
         return cmd
     elif tool == "pip":
@@ -1233,7 +1727,7 @@ def get_install_command(tool: str, wheel_url: str, no_upgrade: bool = False) -> 
         raise ValueError(f"Unsupported package manager: {tool}. Use 'uv' or 'pip'.")
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Explore")
 def info(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     version: str = typer.Option("latest", "--version", "-v", help="Version to show"),
@@ -1411,7 +1905,6 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
         universal_newlines=True,
     )
 
-    # Stream output line by line
     while True:
         output = process.stdout.readline() if process.stdout else ""
         if output == "" and process.poll() is not None:
@@ -1426,7 +1919,7 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
     console.print(f"\n[green]✓ Successfully installed {env_id}@{version}[/green]")
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def install(
     env_ids: List[str] = typer.Argument(
         ..., help="Environment ID(s) to install (owner/name or local name)"
@@ -1448,16 +1941,16 @@ def install(
         help="Don't upgrade existing packages. Useful with locked dependencies (uv.lock).",
     ),
 ) -> None:
-    """Install a verifiers environment
+    """Install a verifiers environment.
 
+    \b
     Examples:
-        prime env install gsm8k                  # local editable install from ./environments
-        prime env install gsm8k -p /path/to/envs # local install from custom path
-        prime env install owner/environment      # install from Prime Hub
-        prime env install owner/environment@0.2.3
+        prime env install gsm8k                    # local install from ./environments
+        prime env install gsm8k -p /path/to/envs   # local install from custom path
+        prime env install owner/environment        # install from Prime Hub
+        prime env install owner/environment@0.2.3  # specific version
         prime env install owner/environment --with pip
-        prime env install owner/environment --no-upgrade
-        prime env install owner/environment1 owner/environment2 owner/environment3
+        prime env install env1 env2 env3           # install multiple
     """
     try:
         client = APIClient(require_auth=False)
@@ -1506,6 +1999,17 @@ def install(
                 else:
                     failed_envs.append((local_name, f"Local path not found: {env_path}"))
                     console.print(f"[red]✗ Local environment not found: {env_path}[/red]")
+                    if "-" in local_name:
+                        alt_path = Path(path) / local_name
+                        if alt_path.exists():
+                            console.print(
+                                f"[yellow]  Hint: Found '{alt_path}' but expected "
+                                f"'{env_path}'[/yellow]"
+                            )
+                            console.print(
+                                "[yellow]  Python packages use underscores, not dashes. "
+                                f"Rename folder to '{env_folder}'[/yellow]"
+                            )
                 continue
 
             # Validate environment ID format (owner/name)
@@ -1529,19 +2033,35 @@ def install(
             # Get both simple index URL and wheel URL
             simple_index_url = details.get("simple_index_url")
             wheel_url = process_wheel_url(details.get("wheel_url"))
+            url_dependencies = details.get("url_dependencies", [])
 
-            # Check if this is a private environment
+            # Check if this is a private environment - pull, build, and install from cache
             if not simple_index_url and not wheel_url and details.get("visibility") == "PRIVATE":
-                skipped_envs.append((f"{env_id}@{target_version}", "Private"))
-                console.print(
-                    f"[yellow]⚠ Skipping {env_id}@{target_version}: Private environment[/yellow]"
-                )
-                console.print(
-                    "[dim]  Direct installation not available for private environments.[/dim]\n"
-                    "[dim]  Please use one of these alternatives:[/dim]\n"
-                    "   1. Use 'prime env pull' to download and install locally\n"
-                    "   2. Make the environment public to enable direct installation"
-                )
+                console.print("[dim]Private environment detected, pulling and building...[/dim]")
+                try:
+                    # Pull, build, and get actual version (resolves "latest" from pyproject.toml)
+                    wheel_path, resolved_version = _pull_and_build_private_env(
+                        client, owner, name, target_version, details
+                    )
+                    normalized_name = normalize_package_name(name)
+                    if with_tool == "uv":
+                        cmd_parts = ["uv", "pip", "install"]
+                        if not no_upgrade:
+                            # Use -P to only upgrade this package, not its dependencies
+                            cmd_parts.extend(["-P", normalized_name])
+                        cmd_parts.append(str(wheel_path))
+                    else:
+                        cmd_parts = ["pip", "install", str(wheel_path)]
+                        if not no_upgrade:
+                            cmd_parts.append("--upgrade")
+                    installable_envs.append((cmd_parts, env_id, resolved_version, name))
+                    console.print(f"[green]✓ Built {env_id}@{resolved_version}[/green]")
+                except Exception as e:
+                    failed_envs.append((f"{env_id}@{target_version}", f"Failed to build: {e}"))
+                    console.print(
+                        f"[red]✗ Failed to build private environment {env_id}@{target_version}: "
+                        f"{e}[/red]"
+                    )
                 continue
             elif not simple_index_url and not wheel_url:
                 skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
@@ -1558,7 +2078,13 @@ def install(
             console.print(f"[green]✓ Found {env_id}@{target_version}[/green]")
 
             cmd_parts = _build_install_command(
-                name, target_version, simple_index_url, wheel_url, with_tool, no_upgrade
+                name,
+                target_version,
+                simple_index_url,
+                wheel_url,
+                with_tool,
+                no_upgrade,
+                url_dependencies,
             )
             if not cmd_parts:
                 skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
@@ -1674,7 +2200,7 @@ def execute_uninstall_command(cmd: List[str], env_name: str, tool: str) -> None:
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def uninstall(
     env_name: str = typer.Argument(..., help="Environment name to uninstall"),
     with_tool: str = typer.Option(
@@ -1683,8 +2209,9 @@ def uninstall(
         help="Package manager to use (uv or pip)",
     ),
 ) -> None:
-    """Uninstall a verifiers environment
+    """Uninstall a verifiers environment.
 
+    \b
     Examples:
         prime env uninstall environment
         prime env uninstall environment --with pip
@@ -1735,7 +2262,7 @@ def uninstall(
 
 
 version_app = typer.Typer(help="Manage environment versions", no_args_is_help=True)
-app.add_typer(version_app, name="version")
+app.add_typer(version_app, name="version", rich_help_panel="Manage")
 
 
 @version_app.command("list", no_args_is_help=True)
@@ -1793,8 +2320,7 @@ def list_versions(
                 # Format date nicely if it's a full timestamp
                 try:
                     if "T" in created_date:
-                        dt = datetime.fromisoformat(created_date.replace("Z", "+00:00"))
-                        created_date = dt.strftime("%Y-%m-%d %H:%M")
+                        created_date = iso_timestamp(created_date)
                 except Exception:
                     pass
 
@@ -1891,7 +2417,7 @@ def delete_version(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def delete(
     env_id: str = typer.Argument(..., help="Environment ID to delete"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
@@ -1930,6 +2456,236 @@ def delete(
         raise typer.Exit(1)
 
 
+def _safe_tar_extract(tar: tarfile.TarFile, dest_path: Path) -> None:
+    """Safely extract tar archive, preventing path traversal and symlink attacks.
+
+    Args:
+        tar: Open tarfile object
+        dest_path: Destination directory for extraction
+
+    Raises:
+        ValueError: If archive contains unsafe paths, symlinks, or hardlinks
+    """
+    dest_path = dest_path.resolve()
+
+    for member in tar.getmembers():
+        member_path = Path(member.name)
+
+        # Block symlinks - they can be used to write outside destination
+        # (e.g., symlink "evil" -> "/tmp", then file "evil/malicious.txt")
+        if member.issym():
+            raise ValueError(f"Refusing to extract symlink: {member.name}")
+
+        # Block hardlinks - they can also be used for attacks
+        if member.islnk():
+            raise ValueError(f"Refusing to extract hardlink: {member.name}")
+
+        # Block absolute paths
+        if member_path.is_absolute():
+            raise ValueError(f"Refusing to extract absolute path: {member.name}")
+
+        # Block path traversal
+        if ".." in member_path.parts:
+            raise ValueError(f"Refusing to extract path with '..': {member.name}")
+
+        # Verify resolved path is within destination
+        target_path = (dest_path / member_path).resolve()
+        if not target_path.is_relative_to(dest_path):
+            raise ValueError(f"Path escapes destination directory: {member.name}")
+
+    # All members validated, safe to extract
+    tar.extractall(dest_path)
+
+
+def _get_env_cache_dir() -> Path:
+    """Get the cache directory for private environment wheels."""
+    cache_dir = Path.home() / ".prime" / "wheel_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _validate_path_component(component: str, component_name: str) -> None:
+    """Validate a path component doesn't contain traversal sequences.
+
+    Args:
+        component: The path component to validate (owner, name, or version)
+        component_name: Name of the component for error messages
+
+    Raises:
+        ValueError: If component contains unsafe characters
+    """
+    if not component:
+        raise ValueError(f"{component_name} cannot be empty")
+
+    # Block path traversal sequences
+    if ".." in component:
+        raise ValueError(f"{component_name} cannot contain '..'")
+
+    # Block path separators
+    if "/" in component or "\\" in component:
+        raise ValueError(f"{component_name} cannot contain path separators")
+
+    # Block null bytes
+    if "\x00" in component:
+        raise ValueError(f"{component_name} cannot contain null bytes")
+
+
+def _get_version_from_pyproject(env_path: Path) -> Optional[str]:
+    """Extract version from pyproject.toml in the environment directory."""
+    pyproject_path = env_path / "pyproject.toml"
+    if not pyproject_path.exists():
+        return None
+    try:
+        pyproject_data = toml.load(pyproject_path)
+        return pyproject_data.get("project", {}).get("version")
+    except Exception:
+        return None
+
+
+def _pull_and_build_private_env(
+    client: APIClient,
+    owner: str,
+    name: str,
+    version: str,
+    details: Dict[str, Any],
+) -> Tuple[Path, str]:
+    """Pull a private environment, build it, and return the wheel path and resolved version.
+
+    Args:
+        client: API client with authentication
+        owner: Environment owner
+        name: Environment name
+        version: Environment version (may be "latest")
+        details: Environment details from API
+
+    Returns:
+        Tuple of (wheel_path, resolved_version)
+
+    Raises:
+        Exception: If download, extraction, or build fails
+    """
+    # Validate path components to prevent directory traversal
+    _validate_path_component(owner, "owner")
+    _validate_path_component(name, "name")
+    _validate_path_component(version, "version")
+
+    download_url = details.get("package_url")
+    if not download_url:
+        raise ValueError("No downloadable package found for private environment")
+
+    cache_dir = _get_env_cache_dir()
+
+    # If version is not "latest", check cache directly
+    if version != "latest":
+        env_cache_path = cache_dir / owner / name / version
+        if not env_cache_path.resolve().is_relative_to(cache_dir.resolve()):
+            raise ValueError("Cache path escapes cache directory")
+        wheel_cache_path = env_cache_path / "dist"
+        if wheel_cache_path.exists():
+            existing_wheels = list(wheel_cache_path.glob("*.whl"))
+            if existing_wheels:
+                console.print(f"[dim]Using cached wheel at {existing_wheels[0]}[/dim]")
+                return existing_wheels[0], version
+
+    # Download to temp directory first to determine actual version
+    temp_extract_dir = None
+    temp_file_path = None
+    try:
+        temp_extract_dir = tempfile.mkdtemp(prefix="prime_env_")
+        temp_extract_path = Path(temp_extract_dir)
+
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+            temp_file_path = tmp.name
+            headers = {}
+            if client.api_key:
+                headers["Authorization"] = f"Bearer {client.api_key}"
+
+            with httpx.stream("GET", download_url, headers=headers, timeout=60.0) as resp:
+                resp.raise_for_status()
+                with open(tmp.name, "wb") as f:
+                    for chunk in resp.iter_bytes(chunk_size=8192):
+                        f.write(chunk)
+
+            # Extract to temp path (with path traversal protection)
+            with tarfile.open(tmp.name, "r:gz") as tar:
+                _safe_tar_extract(tar, temp_extract_path)
+
+        # Get actual version from pyproject.toml
+        actual_version = _get_version_from_pyproject(temp_extract_path) or version
+        _validate_path_component(actual_version, "version")
+
+        # Now we know the real version - check if it's already cached
+        env_cache_path = cache_dir / owner / name / actual_version
+        if not env_cache_path.resolve().is_relative_to(cache_dir.resolve()):
+            raise ValueError("Cache path escapes cache directory")
+        wheel_cache_path = env_cache_path / "dist"
+
+        if wheel_cache_path.exists():
+            existing_wheels = list(wheel_cache_path.glob("*.whl"))
+            if existing_wheels:
+                console.print(f"[dim]Using cached wheel at {existing_wheels[0]}[/dim]")
+                return existing_wheels[0], actual_version
+
+        # Move extracted content to final cache location
+        env_cache_path.mkdir(parents=True, exist_ok=True)
+        for item in temp_extract_path.iterdir():
+            shutil.move(str(item), str(env_cache_path / item.name))
+
+    finally:
+        if temp_file_path and Path(temp_file_path).exists():
+            Path(temp_file_path).unlink()
+        if temp_extract_dir and Path(temp_extract_dir).exists():
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+
+    # Build the wheel
+    console.print("[dim]Building wheel...[/dim]")
+    try:
+        if shutil.which("uv"):
+            subprocess.run(
+                ["uv", "build", "--wheel", "--out-dir", "dist"],
+                cwd=env_cache_path,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        else:
+            subprocess.run(
+                [sys.executable, "-m", "build", "--wheel", str(env_cache_path)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to build wheel: {e.stderr}") from e
+
+    # Find the built wheel
+    wheels = list(wheel_cache_path.glob("*.whl"))
+    if not wheels:
+        raise RuntimeError("No wheel file found after build")
+
+    wheel_path = wheels[0]
+
+    # Create metadata file for tracking
+    try:
+        prime_dir = env_cache_path / ".prime"
+        prime_dir.mkdir(exist_ok=True)
+        metadata_path = prime_dir / ".env-metadata.json"
+        env_metadata = {
+            "environment_id": details.get("id"),
+            "owner": owner,
+            "name": name,
+            "version": actual_version,
+            "cached_at": datetime.now().isoformat(),
+            "wheel_path": str(wheel_path),
+        }
+        with open(metadata_path, "w") as f:
+            json.dump(env_metadata, f, indent=2)
+    except Exception:
+        pass  # Non-critical if metadata save fails
+
+    return wheel_path, actual_version
+
+
 def _is_environment_installed(env_name: str, required_version: Optional[str] = None) -> bool:
     """Check if an environment package is installed."""
     try:
@@ -1962,6 +2718,7 @@ def _build_install_command(
     wheel_url: Optional[str],
     tool: str = "uv",
     no_upgrade: bool = False,
+    url_dependencies: Optional[List[str]] = None,
 ) -> Optional[List[str]]:
     """Build install command for an environment. Returns None if no install method available.
 
@@ -1971,7 +2728,8 @@ def _build_install_command(
         simple_index_url: Simple index URL for the package
         wheel_url: Direct wheel URL
         tool: Package manager to use ('uv' or 'pip')
-        no_upgrade: If True, don't include --upgrade flag (preserves locked dependencies)
+        no_upgrade: If True, don't include upgrade flags (preserves locked dependencies)
+        url_dependencies: List of URL dependencies to install as direct requirements
     """
     normalized_name = normalize_package_name(name)
 
@@ -1979,11 +2737,15 @@ def _build_install_command(
         if tool == "uv":
             cmd = ["uv", "pip", "install"]
             if not no_upgrade:
-                cmd.append("--upgrade")
+                # Use -P to only upgrade this package, not its dependencies
+                cmd.extend(["-P", normalized_name])
             if version and version != "latest":
                 cmd.append(f"{normalized_name}=={version}")
             else:
                 cmd.append(normalized_name)
+            # Add URL dependencies as direct requirements (uv requires this)
+            if url_dependencies:
+                cmd.extend(url_dependencies)
             cmd.extend(["--extra-index-url", simple_index_url])
             return cmd
         else:  # pip
@@ -1994,11 +2756,18 @@ def _build_install_command(
                 cmd.append(f"{normalized_name}=={version}")
             else:
                 cmd.append(normalized_name)
+            # Add URL dependencies for consistency
+            if url_dependencies:
+                cmd.extend(url_dependencies)
             cmd.extend(["--extra-index-url", simple_index_url])
             return cmd
     elif wheel_url:
         try:
-            return get_install_command(tool, wheel_url, no_upgrade)
+            cmd = get_install_command(tool, wheel_url, normalized_name, no_upgrade)
+            # Add URL dependencies for wheel-only installs too
+            if url_dependencies:
+                cmd.extend(url_dependencies)
+            return cmd
         except ValueError:
             return None
 
@@ -2024,6 +2793,7 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
 
     simple_index_url = details.get("simple_index_url")
     wheel_url = process_wheel_url(details.get("wheel_url"))
+    url_dependencies = details.get("url_dependencies", [])
 
     if not simple_index_url and not wheel_url:
         if details.get("visibility") == "PRIVATE":
@@ -2035,7 +2805,9 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
             console.print(f"[red]No installation method available for {env_slug}[/red]")
         return False
 
-    cmd_parts = _build_install_command(name, version, simple_index_url, wheel_url, tool)
+    cmd_parts = _build_install_command(
+        name, version, simple_index_url, wheel_url, tool, url_dependencies=url_dependencies
+    )
     if not cmd_parts:
         console.print(f"[red]Failed to build install command for {env_slug}[/red]")
         return False
@@ -2292,6 +3064,7 @@ def run_eval(
     no_args_is_help=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     deprecated=True,
+    rich_help_panel="Deprecated",
 )
 def eval_env(
     ctx: typer.Context,

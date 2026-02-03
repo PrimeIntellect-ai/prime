@@ -34,9 +34,9 @@ class Sandbox(BaseModel):
     name: str
     docker_image: str = Field(..., alias="dockerImage")
     start_command: Optional[str] = Field(None, alias="startCommand")
-    cpu_cores: int = Field(..., alias="cpuCores")
-    memory_gb: int = Field(..., alias="memoryGB")
-    disk_size_gb: int = Field(..., alias="diskSizeGB")
+    cpu_cores: float = Field(..., alias="cpuCores")
+    memory_gb: float = Field(..., alias="memoryGB")
+    disk_size_gb: float = Field(..., alias="diskSizeGB")
     disk_mount_path: str = Field(..., alias="diskMountPath")
     gpu_count: int = Field(..., alias="gpuCount")
     network_access: bool = Field(True, alias="networkAccess")
@@ -79,9 +79,9 @@ class CreateSandboxRequest(BaseModel):
     name: str
     docker_image: str
     start_command: Optional[str] = "tail -f /dev/null"
-    cpu_cores: int = 1
-    memory_gb: int = 2
-    disk_size_gb: int = 5
+    cpu_cores: float = 1.0
+    memory_gb: float = 2.0
+    disk_size_gb: float = 5.0
     gpu_count: int = 0
     network_access: bool = True
     timeout_minutes: int = 60
@@ -99,9 +99,9 @@ class UpdateSandboxRequest(BaseModel):
     name: Optional[str] = None
     docker_image: Optional[str] = None
     start_command: Optional[str] = None
-    cpu_cores: Optional[int] = None
-    memory_gb: Optional[int] = None
-    disk_size_gb: Optional[int] = None
+    cpu_cores: Optional[float] = None
+    memory_gb: Optional[float] = None
+    disk_size_gb: Optional[float] = None
     gpu_count: Optional[int] = None
     timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
@@ -180,6 +180,7 @@ class ExposePortRequest(BaseModel):
 
     port: int
     name: Optional[str] = None
+    protocol: str = "HTTP"  # HTTP or TCP
 
 
 class ExposedPort(BaseModel):
@@ -192,6 +193,8 @@ class ExposedPort(BaseModel):
     url: str
     tls_socket: str
     protocol: Optional[str] = None
+    external_port: Optional[int] = None  # For TCP exposures
+    external_endpoint: Optional[str] = None  # For TCP: host:port endpoint
     created_at: Optional[str] = None
 
 
@@ -199,6 +202,23 @@ class ListExposedPortsResponse(BaseModel):
     """Response for listing exposed ports"""
 
     exposures: List[ExposedPort]
+
+
+class SSHSession(BaseModel):
+    """SSH session details"""
+
+    session_id: str
+    exposure_id: str
+    sandbox_id: str
+    host: str
+    port: int
+    external_endpoint: str
+    expires_at: datetime
+    ttl_seconds: int
+    gateway_url: str
+    user_ns: str
+    job_id: str
+    token: str
 
 
 class BackgroundJob(BaseModel):

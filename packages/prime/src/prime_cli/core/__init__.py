@@ -7,6 +7,7 @@ from .client import (
     AsyncAPIClient,
     PaymentRequiredError,
     UnauthorizedError,
+    ValidationError,
 )
 from .config import Config
 
@@ -18,4 +19,5 @@ __all__ = [
     "Config",
     "PaymentRequiredError",
     "UnauthorizedError",
+    "ValidationError",
 ]

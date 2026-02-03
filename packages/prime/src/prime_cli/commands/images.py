@@ -38,6 +38,7 @@ def push_image(
     """
     Build and push a Docker image to Prime Intellect registry.
 
+    \b
     Examples:
         prime images push myapp:v1.0.0
         prime images push myapp:latest --dockerfile custom.Dockerfile
@@ -196,6 +197,7 @@ def list_images(
     By default, shows images in the current context (personal or team).
     Use --all to show all accessible images including team images.
 
+    \b
     Examples:
         prime images list
         prime images list --all
@@ -311,6 +313,7 @@ def delete_image(
     For team images, you can use the team-prefixed format directly.
     Only the image creator or team admins can delete team images.
 
+    \b
     Examples:
         prime images delete myapp:v1.0.0
         prime images delete myapp:latest --yes

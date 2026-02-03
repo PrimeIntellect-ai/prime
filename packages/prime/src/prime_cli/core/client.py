@@ -38,6 +38,23 @@ class APITimeoutError(APIError):
     pass
 
 
+class ValidationError(APIError):
+    """Raised when API returns 422 validation error"""
+
+    def __init__(self, errors: list[dict]):
+        self.errors = errors
+        super().__init__(self._format_message())
+
+    def _format_message(self) -> str:
+        lines = ["Validation failed:"]
+        for err in self.errors:
+            loc = err.get("loc", [])
+            path = ".".join(str(x) for x in loc if x != "body")
+            msg = err.get("msg", "unknown error")
+            lines.append(f"  - {path}: {msg}")
+        return "\n".join(lines)
+
+
 class APIClient:
     def __init__(
         self,
@@ -115,6 +132,13 @@ class APIClient:
                     "Payment required. Please check your billing status at "
                     "https://app.primeintellect.ai/dashboard/billing"
                 ) from e
+            if e.response.status_code == 422:
+                try:
+                    error_response = e.response.json()
+                    if "detail" in error_response and isinstance(error_response["detail"], list):
+                        raise ValidationError(error_response["detail"]) from e
+                except (ValueError, KeyError):
+                    pass
 
             # For other HTTP errors, try to extract the error message from the response
             try:
@@ -236,6 +260,13 @@ class AsyncAPIClient:
                     "Payment required. Please check your billing status at "
                     "https://app.primeintellect.ai/dashboard/billing"
                 ) from e
+            if e.response.status_code == 422:
+                try:
+                    error_response = e.response.json()
+                    if "detail" in error_response and isinstance(error_response["detail"], list):
+                        raise ValidationError(error_response["detail"]) from e
+                except (ValueError, KeyError):
+                    pass
 
             # For other HTTP errors, try to extract the error message from the response
             try:

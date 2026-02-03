@@ -16,11 +16,11 @@ from .config import Config
 # Retry configuration for transient connection errors
 # These errors occur when the server closes idle connections in the pool
 # or when we fail to establish/maintain a connection
-# Note: ReadTimeout is NOT included because the request may have been processed
 RETRYABLE_EXCEPTIONS = (
     httpx.RemoteProtocolError,  # Server disconnected unexpectedly
     httpx.ConnectError,  # Connection refused/failed
     httpx.PoolTimeout,  # No connection available in pool
+    httpx.ReadError,  # Connection broken while reading response (e.g., TCP reset)
 )
 
 

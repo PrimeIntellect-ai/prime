@@ -33,7 +33,7 @@ from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
-from ..utils.prompt import prompt_for_value, select_item_interactive
+from ..utils.prompt import any_provided, prompt_for_value, select_item_interactive
 from ..utils.time_utils import format_time_ago, iso_timestamp
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
@@ -3409,7 +3409,7 @@ def env_secret_update(
 
             secret_id = selected.get("id")
 
-        if not any([name, value, description]):
+        if not any_provided(name, value, description):
             console.print("\n[bold]What would you like to update?[/bold]")
             new_value = prompt_for_value("New value", required=False, hide_input=True)
             if new_value:
@@ -3420,9 +3420,9 @@ def env_secret_update(
                 raise typer.Exit()
 
         payload: Dict[str, Any] = {}
-        if name:
+        if name is not None:
             payload["name"] = name
-        if value:
+        if value is not None:
             payload["value"] = value
         if description is not None:
             payload["description"] = description
@@ -3806,7 +3806,7 @@ def var_update(
     """Update an environment variable."""
     validate_output_format(output, console)
 
-    if not any([name, value, description]):
+    if not any_provided(name, value, description):
         console.print(
             "[red]Error: At least one of --name, --value, or --description is required[/red]"
         )
@@ -3819,9 +3819,9 @@ def var_update(
         env_id = _get_environment_id(client, owner, env_name)
 
         payload: Dict[str, Any] = {}
-        if name:
+        if name is not None:
             payload["name"] = name
-        if value:
+        if value is not None:
             payload["value"] = value
         if description is not None:
             payload["description"] = description

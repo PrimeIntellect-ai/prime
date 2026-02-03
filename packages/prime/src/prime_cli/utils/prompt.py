@@ -13,6 +13,10 @@ def confirm_or_skip(message: str, yes_flag: bool, default: bool = False) -> bool
     return bool(typer.confirm(message, default=default))
 
 
+def any_provided(*values: Any) -> bool:
+    return any(v is not None for v in values)
+
+
 def _default_display_fn(item: Dict[str, Any]) -> str:
     """Default display function for interactive selection."""
     name = item.get("name", "")

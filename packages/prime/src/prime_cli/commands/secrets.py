@@ -8,7 +8,7 @@ from prime_cli.core import Config
 
 from ..client import APIClient, APIError
 from ..utils import output_data_as_json, validate_output_format
-from ..utils.prompt import prompt_for_value, select_item_interactive
+from ..utils.prompt import any_provided, prompt_for_value, select_item_interactive
 from ..utils.time_utils import format_time_ago
 
 app = typer.Typer(help="Manage global secrets", no_args_is_help=True)
@@ -207,7 +207,7 @@ def secret_update(
 
             secret_id = selected.get("id")
 
-        if not any([name, value, description]):
+        if not any_provided(name, value, description):
             console.print("\n[bold]What would you like to update?[/bold]")
             new_value = prompt_for_value("New value", required=False, hide_input=True)
             if new_value:
@@ -218,9 +218,9 @@ def secret_update(
                 raise typer.Exit()
 
         payload: Dict[str, Any] = {}
-        if name:
+        if name is not None:
             payload["name"] = name
-        if value:
+        if value is not None:
             payload["value"] = value
         if description is not None:
             payload["description"] = description

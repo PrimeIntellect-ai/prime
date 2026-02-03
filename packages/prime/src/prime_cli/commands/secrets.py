@@ -113,13 +113,13 @@ def secret_create(
         if not name:
             name = prompt_for_value("Secret name")
             if not name:
-                console.print("[dim]Cancelled.[/dim]")
+                console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
         if not value:
             value = prompt_for_value("Secret value", hide_input=True)
             if not value:
-                console.print("[dim]Cancelled.[/dim]")
+                console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
         client = APIClient()
@@ -200,9 +200,9 @@ def secret_update(
                 console.print(f"[yellow]No {scope} secrets to update.[/yellow]")
                 raise typer.Exit()
 
-            selected = select_item_interactive(secrets, "update")
+            selected = select_item_interactive(secrets, "update", item_type="secret")
             if not selected:
-                console.print("[dim]Cancelled.[/dim]")
+                console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
             secret_id = selected.get("id")
@@ -214,7 +214,7 @@ def secret_update(
                 value = new_value
 
             if not value:
-                console.print("[dim]No changes made.[/dim]")
+                console.print("\n[dim]No changes made.[/dim]")
                 raise typer.Exit()
 
         payload: Dict[str, Any] = {}
@@ -270,20 +270,22 @@ def secret_delete(
                 console.print(f"[yellow]No {scope} secrets to delete.[/yellow]")
                 raise typer.Exit()
 
-            selected = select_item_interactive(secrets, "delete")
+            selected = select_item_interactive(secrets, "delete", item_type="secret")
             if not selected:
-                console.print("[dim]Cancelled.[/dim]")
+                console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
             secret_id = selected.get("id")
             secret_name = selected.get("name")
         else:
-            secret_name = secret_id
+            response = client.get(f"/secrets/{secret_id}")
+            secret_data = response.get("data", {})
+            secret_name = secret_data.get("name", secret_id)
 
         if not yes:
             confirm = typer.confirm(f"Delete secret '{secret_name}'?")
             if not confirm:
-                console.print("[dim]Cancelled.[/dim]")
+                console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
         client.delete(f"/secrets/{secret_id}")

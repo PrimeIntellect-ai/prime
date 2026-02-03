@@ -13,9 +13,17 @@ def confirm_or_skip(message: str, yes_flag: bool, default: bool = False) -> bool
     return bool(typer.confirm(message, default=default))
 
 
+def _default_display_fn(item: Dict[str, Any]) -> str:
+    """Default display function for interactive selection."""
+    name = item.get("name", "")
+    desc = item.get("description") or ""
+    return f"{name} - {desc}" if desc else name
+
+
 def select_item_interactive(
     items: List[Dict[str, Any]],
     action: str = "select",
+    item_type: str = "item",
     display_fn: Optional[Callable[[Dict[str, Any]], str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Display items and let user select one interactively.
@@ -23,6 +31,7 @@ def select_item_interactive(
     Args:
         items: List of items to select from
         action: Action verb for the prompt (e.g., "delete", "update")
+        item_type: Type of item being selected (e.g., "secret", "variable")
         display_fn: Function to format each item for display.
                    Defaults to showing 'name' and 'description' fields.
 
@@ -32,16 +41,11 @@ def select_item_interactive(
     if not items:
         return None
 
-    if display_fn is None:
+    formatter = display_fn or _default_display_fn
 
-        def display_fn(item: Dict[str, Any]) -> str:
-            name = item.get("name", "")
-            desc = item.get("description") or ""
-            return f"{name} - {desc}" if desc else name
-
-    console.print(f"\n[bold]Select an item to {action}:[/bold]\n")
+    console.print(f"\n[bold]Select a {item_type} to {action}:[/bold]\n")
     for i, item in enumerate(items, 1):
-        console.print(f"  {i}. {display_fn(item)}")
+        console.print(f"  {i}. {formatter(item)}")
     console.print()
 
     while True:

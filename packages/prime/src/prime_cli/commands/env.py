@@ -3223,7 +3223,7 @@ def _fetch_env_secrets(client: APIClient, env_id: str) -> List[Dict[str, Any]]:
 
 
 @secrets_app.command("list")
-def secret_list(
+def env_secret_list(
     environment: str = typer.Argument(
         ...,
         help="Environment slug (e.g., 'owner/environment-name')",
@@ -3278,7 +3278,7 @@ def secret_list(
 
 
 @secrets_app.command("create")
-def secret_create(
+def env_secret_create(
     environment: str = typer.Argument(
         ...,
         help="Environment slug (e.g., 'owner/environment-name')",
@@ -3316,13 +3316,13 @@ def secret_create(
         if not name:
             name = prompt_for_value("Secret name")
             if not name:
-                console.print("[dim]Cancelled.[/dim]")
+                console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
         if not value:
             value = prompt_for_value("Secret value", hide_input=True)
             if not value:
-                console.print("[dim]Cancelled.[/dim]")
+                console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
         client = APIClient()
@@ -3343,6 +3343,7 @@ def secret_create(
         console.print(f"[green]✓ Created secret '{stored_name}' for {owner}/{env_name}[/green]")
         if stored_name != name:
             console.print(f"[dim]Note: Name was normalized from '{name}'[/dim]")
+        console.print(f"[dim]ID: {secret.get('id')}[/dim]")
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
@@ -3353,7 +3354,7 @@ def secret_create(
 
 
 @secrets_app.command("update")
-def secret_update(
+def env_secret_update(
     environment: str = typer.Argument(
         ...,
         help="Environment slug (e.g., 'owner/environment-name')",
@@ -3401,9 +3402,9 @@ def secret_update(
                 console.print(f"[yellow]No secrets to update for {owner}/{env_name}.[/yellow]")
                 raise typer.Exit()
 
-            selected = select_item_interactive(secrets, "update")
+            selected = select_item_interactive(secrets, "update", item_type="secret")
             if not selected:
-                console.print("[dim]Cancelled.[/dim]")
+                console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
             secret_id = selected.get("id")
@@ -3415,7 +3416,7 @@ def secret_update(
                 value = new_value
 
             if not value:
-                console.print("[dim]No changes made.[/dim]")
+                console.print("\n[dim]No changes made.[/dim]")
                 raise typer.Exit()
 
         payload: Dict[str, Any] = {}
@@ -3446,7 +3447,7 @@ def secret_update(
 
 
 @secrets_app.command("delete")
-def secret_delete(
+def env_secret_delete(
     environment: str = typer.Argument(
         ...,
         help="Environment slug (e.g., 'owner/environment-name')",
@@ -3475,20 +3476,22 @@ def secret_delete(
                 console.print(f"[yellow]No secrets to delete for {owner}/{env_name}.[/yellow]")
                 raise typer.Exit()
 
-            selected = select_item_interactive(secrets, "delete")
+            selected = select_item_interactive(secrets, "delete", item_type="secret")
             if not selected:
-                console.print("[dim]Cancelled.[/dim]")
+                console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
             secret_id = selected.get("id")
             secret_name = selected.get("name")
         else:
-            secret_name = secret_id
+            secrets = _fetch_env_secrets(client, env_id)
+            secret_data = next((s for s in secrets if s.get("id") == secret_id), None)
+            secret_name = secret_data.get("name") if secret_data else secret_id
 
         if not yes:
             confirm = typer.confirm(f"Delete secret '{secret_name}' from {owner}/{env_name}?")
             if not confirm:
-                console.print("[dim]Cancelled.[/dim]")
+                console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
         client.delete(f"/environmentshub/{env_id}/secrets/{secret_id}")
@@ -3503,7 +3506,7 @@ def secret_delete(
 
 
 @secrets_app.command("link")
-def secret_link(
+def env_secret_link(
     environment: str = typer.Argument(
         ...,
         help="Environment slug (e.g., 'owner/environment-name')",
@@ -3558,7 +3561,7 @@ def secret_link(
 
 
 @secrets_app.command("unlink")
-def secret_unlink(
+def env_secret_unlink(
     environment: str = typer.Argument(
         ...,
         help="Environment slug (e.g., 'owner/environment-name')",
@@ -3595,7 +3598,7 @@ def secret_unlink(
 
 
 @secrets_app.command("settings")
-def secret_settings(
+def env_secret_settings(
     environment: str = typer.Argument(
         ...,
         help="Environment slug (e.g., 'owner/environment-name')",

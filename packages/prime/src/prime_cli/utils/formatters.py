@@ -1,6 +1,12 @@
-"""Value formatting utilities."""
-
+import re
 from typing import Any, Dict, List, Optional, Union
+
+ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    return ANSI_ESCAPE.sub("", text)
 
 
 def obfuscate_env_vars(env_vars: Dict[str, Any]) -> Dict[str, str]:

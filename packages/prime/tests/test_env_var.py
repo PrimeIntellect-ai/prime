@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional
 
 import pytest
 from prime_cli.main import app
+from prime_cli.utils import strip_ansi
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -335,13 +336,15 @@ class TestEnvVarHelp:
         result = runner.invoke(app, ["env", "var", "list", "--help"])
 
         assert result.exit_code == 0
-        assert "--output" in result.output
+        output = strip_ansi(result.output)
+        assert "--output" in output
 
     def test_env_var_create_help(self) -> None:
         """Test that env var create help works."""
         result = runner.invoke(app, ["env", "var", "create", "--help"])
 
         assert result.exit_code == 0
-        assert "--name" in result.output
-        assert "--value" in result.output
-        assert "--description" in result.output
+        output = strip_ansi(result.output)
+        assert "--name" in output
+        assert "--value" in output
+        assert "--description" in output

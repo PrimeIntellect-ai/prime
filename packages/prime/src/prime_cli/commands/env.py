@@ -33,6 +33,7 @@ from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
+from ..utils.formatters import strip_ansi as _strip_ansi
 from ..utils.prompt import any_provided, prompt_for_value, select_item_interactive
 from ..utils.time_utils import format_time_ago, iso_timestamp
 
@@ -56,14 +57,6 @@ app.add_typer(secrets_app, name="secrets", rich_help_panel="Manage")
 # Variable subcommand app
 var_app = typer.Typer(help="Manage environment variables", no_args_is_help=True)
 app.add_typer(var_app, name="var", rich_help_panel="Manage")
-
-# Log cleaning pattern
-ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-
-
-def _strip_ansi(text: str) -> str:
-    """Remove ANSI escape codes from text."""
-    return ANSI_ESCAPE.sub("", text)
 
 
 def _parse_environment_slug(environment: str) -> Tuple[str, str]:

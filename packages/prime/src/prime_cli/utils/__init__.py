@@ -9,6 +9,7 @@ from .formatters import (
     format_resources,
     obfuscate_env_vars,
     obfuscate_secrets,
+    strip_ansi,
 )
 from .prompt import any_provided, confirm_or_skip, prompt_for_value, select_item_interactive
 from .time_utils import human_age, iso_timestamp, sort_by_created
@@ -26,6 +27,7 @@ __all__ = [
     "format_ip_display",
     "format_price",
     "format_resources",
+    "strip_ansi",
     "any_provided",
     "confirm_or_skip",
     "prompt_for_value",

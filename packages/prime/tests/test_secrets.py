@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional
 
 import pytest
 from prime_cli.main import app
+from prime_cli.utils import strip_ansi
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -12,6 +13,7 @@ runner = CliRunner()
 def mock_secrets_api(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mock the API client for secrets endpoints."""
     monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    monkeypatch.setattr("prime_cli.core.Config.team_id", None)
 
     sample_secrets = [
         {
@@ -120,6 +122,7 @@ class TestSecretsList:
     def test_list_empty_secrets(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test listing when no secrets exist."""
         monkeypatch.setenv("PRIME_API_KEY", "test-key")
+        monkeypatch.setattr("prime_cli.core.Config.team_id", None)
 
         def mock_get(
             self: Any, endpoint: str, params: Optional[Dict[str, Any]] = None
@@ -327,14 +330,16 @@ class TestSecretsHelp:
         result = runner.invoke(app, ["secrets", "list", "--help"])
 
         assert result.exit_code == 0
-        assert "--output" in result.output
+        output = strip_ansi(result.output)
+        assert "--output" in output
 
     def test_secrets_create_help(self) -> None:
         """Test that secrets create help works."""
         result = runner.invoke(app, ["secrets", "create", "--help"])
 
         assert result.exit_code == 0
-        assert "--name" in result.output
-        assert "--value" in result.output
-        assert "--description" in result.output
-        assert "--file" in result.output
+        output = strip_ansi(result.output)
+        assert "--name" in output
+        assert "--value" in output
+        assert "--description" in output
+        assert "--file" in output

@@ -3717,7 +3717,7 @@ def var_list(
         table.add_column("Created", style="dim")
 
         for var in variables:
-            var_id = var.get("id", "")[:8]
+            var_id = var.get("id", "")
             name = var.get("name", "")
             value = var.get("value", "")
             if len(value) > 30:

@@ -3598,18 +3598,23 @@ def env_secret_unlink(
     """Unlink a global secret from an environment."""
     owner, env_name = _resolve_environment(environment)
 
-    if not yes:
-        confirm = typer.confirm(f"Unlink global secret {global_secret_id} from {owner}/{env_name}?")
-        if not confirm:
-            console.print("[dim]Cancelled.[/dim]")
-            raise typer.Exit()
-
     try:
+        if not yes:
+            confirm = typer.confirm(
+                f"Unlink global secret {global_secret_id} from {owner}/{env_name}?"
+            )
+            if not confirm:
+                console.print("\n[dim]Cancelled.[/dim]")
+                raise typer.Exit()
+
         client = APIClient()
         env_id = _get_environment_id(client, owner, env_name)
         client.delete(f"/environmentshub/{env_id}/secrets/link/{global_secret_id}")
         console.print(f"[green]✓ Unlinked global secret from {owner}/{env_name}[/green]")
 
+    except KeyboardInterrupt:
+        console.print("\n[dim]Cancelled.[/dim]")
+        raise typer.Exit()
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
@@ -3885,18 +3890,21 @@ def var_delete(
     """Delete an environment variable."""
     owner, env_name = _resolve_environment(environment)
 
-    if not yes:
-        confirm = typer.confirm(f"Delete variable {var_id} from {owner}/{env_name}?")
-        if not confirm:
-            console.print("\n[dim]Cancelled.[/dim]")
-            raise typer.Exit()
-
     try:
+        if not yes:
+            confirm = typer.confirm(f"Delete variable {var_id} from {owner}/{env_name}?")
+            if not confirm:
+                console.print("\n[dim]Cancelled.[/dim]")
+                raise typer.Exit()
+
         client = APIClient()
         env_id = _get_environment_id(client, owner, env_name)
         client.delete(f"/environmentshub/{env_id}/variables/{var_id}")
         console.print("[green]✓ Variable deleted[/green]")
 
+    except KeyboardInterrupt:
+        console.print("\n[dim]Cancelled.[/dim]")
+        raise typer.Exit()
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

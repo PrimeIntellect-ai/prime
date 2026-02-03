@@ -52,6 +52,14 @@ def push_image(
             image_name = image_reference
             image_tag = "latest"
 
+        # Validate image name doesn't contain slashes
+        if "/" in image_name:
+            console.print(
+                "[red]Error: Image name cannot contain '/'. "
+                "Use simple names like 'myapp:v1.0.0'.[/red]"
+            )
+            raise typer.Exit(1)
+
         console.print(
             f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
         )

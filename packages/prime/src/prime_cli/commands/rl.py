@@ -1,5 +1,3 @@
-"""RL (Reinforcement Learning) training commands."""
-
 import re
 import time
 from pathlib import Path
@@ -443,7 +441,8 @@ def create_run(
 
     # Validate WANDB_API_KEY is present when W&B monitoring is configured
     wandb_configured = cfg.wandb.entity or cfg.wandb.project
-    if wandb_configured and (not secrets or "WANDB_API_KEY" not in secrets):
+    has_wandb_key = secrets and "WANDB_API_KEY" in secrets
+    if wandb_configured and not has_wandb_key:
         console.print("[red]Configuration Error:[/red]")
         console.print("  WANDB_API_KEY is required when W&B monitoring is configured.\n")
         console.print("Provide it via:")

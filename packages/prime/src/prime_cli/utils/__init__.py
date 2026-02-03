@@ -10,7 +10,7 @@ from .formatters import (
     obfuscate_env_vars,
     obfuscate_secrets,
 )
-from .prompt import confirm_or_skip
+from .prompt import confirm_or_skip, prompt_for_value, select_item_interactive
 from .time_utils import human_age, iso_timestamp, sort_by_created
 
 __all__ = [
@@ -27,6 +27,8 @@ __all__ = [
     "format_price",
     "format_resources",
     "confirm_or_skip",
+    "prompt_for_value",
+    "select_item_interactive",
     "load_toml",
     "BaseConfig",
 ]

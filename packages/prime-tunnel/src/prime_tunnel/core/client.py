@@ -91,10 +91,11 @@ class TunnelClient:
         method: str,
         url: str,
         json: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
         """Make async HTTP request with retry on transient connection errors."""
         client = await self._get_client()
-        return await client.request(method, url, json=json)
+        return await client.request(method, url, json=json, params=params)
 
     async def _handle_response(self, response: httpx.Response, operation: str) -> Dict[str, Any]:
         """Handle response and raise appropriate errors."""
@@ -120,6 +121,7 @@ class TunnelClient:
         self,
         local_port: int,
         name: Optional[str] = None,
+        team_id: Optional[str] = None,
     ) -> TunnelInfo:
         """
         Register a new tunnel with the backend.
@@ -127,6 +129,7 @@ class TunnelClient:
         Args:
             local_port: Local port the tunnel will forward to
             name: Optional friendly name for the tunnel
+            team_id: Optional team ID for team tunnels (uses config team_id if not specified)
 
         Returns:
             TunnelInfo with connection details
@@ -141,6 +144,11 @@ class TunnelClient:
         payload: Dict[str, Any] = {"local_port": local_port}
         if name:
             payload["name"] = name
+
+        # Auto-populate team_id from config if not specified
+        effective_team_id = team_id if team_id is not None else self.config.team_id
+        if effective_team_id:
+            payload["team_id"] = effective_team_id
 
         try:
             response = await self._request_with_retry("POST", url, json=payload)
@@ -217,9 +225,12 @@ class TunnelClient:
         await self._handle_response(response, "delete tunnel")
         return True
 
-    async def list_tunnels(self) -> list[TunnelInfo]:
+    async def list_tunnels(self, team_id: Optional[str] = None) -> list[TunnelInfo]:
         """
-        List all tunnels for the current user.
+        List all tunnels for the current user or team.
+
+        Args:
+            team_id: Optional team ID to filter by (uses config team_id if not specified)
 
         Returns:
             List of TunnelInfo objects
@@ -228,8 +239,14 @@ class TunnelClient:
 
         url = f"{self.base_url}/api/v1/tunnel"
 
+        # Auto-populate team_id from config if not specified
+        params: Dict[str, Any] = {}
+        effective_team_id = team_id if team_id is not None else self.config.team_id
+        if effective_team_id:
+            params["team_id"] = effective_team_id
+
         try:
-            response = await self._request_with_retry("GET", url)
+            response = await self._request_with_retry("GET", url, params=params if params else None)
         except httpx.TimeoutException as e:
             raise TunnelTimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:

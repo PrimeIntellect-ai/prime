@@ -22,6 +22,7 @@ class Tunnel:
         local_port: int,
         local_addr: str = "127.0.0.1",
         name: Optional[str] = None,
+        team_id: Optional[str] = None,
         connection_timeout: float = 30.0,
         log_level: str = "info",
     ):
@@ -32,12 +33,14 @@ class Tunnel:
             local_port: Local port to tunnel
             local_addr: Local address to tunnel (default: 127.0.0.1)
             name: Optional friendly name for the tunnel
+            team_id: Optional team ID for team tunnels (uses config team_id if not specified)
             connection_timeout: Timeout for establishing connection (seconds)
             log_level: frpc log level (trace, debug, info, warn, error)
         """
         self.local_port = local_port
         self.local_addr = local_addr
         self.name = name
+        self.team_id = team_id
         self.connection_timeout = connection_timeout
         self.log_level = log_level
 
@@ -93,6 +96,7 @@ class Tunnel:
             self._tunnel_info = await self._client.create_tunnel(
                 local_port=self.local_port,
                 name=self.name,
+                team_id=self.team_id,
             )
         except BaseException as e:
             await self._cleanup()

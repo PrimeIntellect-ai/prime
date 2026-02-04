@@ -849,6 +849,42 @@ def delete_run(
         raise typer.Exit(1)
 
 
+@app.command("restart", rich_help_panel="Commands")
+def restart_run(
+    run_id: str = typer.Argument(..., help="Run ID to restart"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+) -> None:
+    """Restart a running run from its latest checkpoint.
+
+    Only RUNNING runs can be restarted (checkpoints still on PVC).
+    For STOPPED/FAILED/COMPLETED runs, checkpoints have been cleaned up.
+
+    Example:
+
+        prime rl restart <run_id>
+    """
+    try:
+        if not force:
+            confirm = typer.confirm(
+                f"Are you sure you want to restart run {run_id} from its latest checkpoint?"
+            )
+            if not confirm:
+                console.print("Cancelled.")
+                raise typer.Exit(0)
+
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+
+        run = rl_client.restart_run(run_id)
+
+        console.print(f"[green]✓ Run {run_id} restarting from checkpoint[/green]")
+        console.print(f"Status: {run.status}")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
 @app.command("logs", rich_help_panel="Monitoring")
 def get_logs(
     run_id: str = typer.Argument(..., help="Run ID to get logs for"),

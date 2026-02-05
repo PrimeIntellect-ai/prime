@@ -206,6 +206,20 @@ class RLClient:
                 raise APIError(f"Failed to delete RL run: {e.response.text}")
             raise APIError(f"Failed to delete RL run: {str(e)}")
 
+    def restart_run(self, run_id: str) -> RLRun:
+        """Restart a running RL training run from its latest checkpoint.
+
+        Only RUNNING runs can be restarted (checkpoints still on PVC).
+        For STOPPED/FAILED/COMPLETED runs, checkpoints have been cleaned up.
+        """
+        try:
+            response = self.client.request("PUT", f"/rft/runs/{run_id}/restart")
+            return RLRun.model_validate(response.get("run"))
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to restart RL run: {e.response.text}")
+            raise APIError(f"Failed to restart RL run: {str(e)}")
+
     def get_run(self, run_id: str) -> RLRun:
         """Get details of a specific RL run."""
         try:

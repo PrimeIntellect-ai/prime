@@ -143,11 +143,11 @@ class EnvConfig(BaseModel):
     @model_validator(mode="after")
     def parse_version_from_id(self) -> "EnvConfig":
         """Extract version from id if specified as 'owner/name@version'."""
-        if "@" in self.id and self.version is None:
-            # Parse inline version syntax: "owner/name@0.2.3" -> id="owner/name", version="0.2.3"
+        if "@" in self.id:
             id_part, version_part = self.id.rsplit("@", 1)
             self.id = id_part
-            self.version = version_part
+            if self.version is None:
+                self.version = version_part
         return self
 
     def to_api_dict(self) -> Dict[str, Any]:
@@ -174,11 +174,11 @@ class EvalEnvConfig(BaseModel):
     @model_validator(mode="after")
     def parse_version_from_id(self) -> "EvalEnvConfig":
         """Extract version from id if specified as 'owner/name@version'."""
-        if "@" in self.id and self.version is None:
-            # Parse inline version syntax: "owner/name@0.2.3" -> id="owner/name", version="0.2.3"
+        if "@" in self.id:
             id_part, version_part = self.id.rsplit("@", 1)
             self.id = id_part
-            self.version = version_part
+            if self.version is None:
+                self.version = version_part
         return self
 
     def to_api_dict(self) -> Dict[str, Any]:

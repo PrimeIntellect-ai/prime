@@ -35,7 +35,7 @@ from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
 from ..utils.hosted_eval import print_hosted_result, run_hosted_evaluation
-from ..utils.schemas import HostedEvalConfig
+from ..utils.schemas import EvalStatus, HostedEvalConfig
 from ..utils.time_utils import format_time_ago, iso_timestamp
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
@@ -311,7 +311,7 @@ def actions_retry(
             console.print("[green]Successfully triggered retry[/green]")
             console.print(f"[dim]Job ID: {data.get('job_id')}[/dim]")
             console.print(f"[dim]Version: {data.get('version_id')}[/dim]")
-            job_id = data.get('job_id')
+            job_id = data.get("job_id")
             console.print(
                 f"\n[dim]Use 'prime env action logs {environment} {job_id}' to view logs[/dim]"
             )
@@ -479,9 +479,7 @@ def list_cmd(
     search: Optional[str] = typer.Option(
         None, "--search", "-s", help="Search by name or description"
     ),
-    tag: Optional[List[str]] = typer.Option(
-        None, "--tag", "-t", help="Filter by tag (repeatable)"
-    ),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", "-t", help="Filter by tag (repeatable)"),
     action_status: Optional[str] = typer.Option(
         None, "--action-status", help="Filter by action status (SUCCESS/FAILED/RUNNING/PENDING)"
     ),
@@ -3038,10 +3036,6 @@ def run_eval(
 
     if is_slug:
         console.print(f"[dim]Using upstream environment {upstream_owner}/{upstream_name}[/dim]\n")
-
-        requested_version = "latest"
-        if "@" in environment:
-            _, requested_version = environment.rsplit("@", 1)
 
         if not _is_environment_installed(env_name_for_vf_eval, requested_version):
             console.print(f"[cyan]Installing {environment}...[/cyan]")

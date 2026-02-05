@@ -15,9 +15,12 @@ from typer.core import TyperGroup
 
 from ..client import APIClient
 from ..core import APIError, AsyncAPIClient
+from ..core.config import Config
 from ..utils import output_data_as_json
+from ..utils.eval_push import load_results_jsonl
 from ..utils.hosted_eval import (
     clean_logs,
+    extend_hosted_evaluation_timeout,
     get_evaluation_logs,
     get_new_log_lines,
     stop_hosted_evaluation,
@@ -356,7 +359,7 @@ def _push_single_eval(
     eval_id: Optional[str],
 ) -> str:
     path = _validate_eval_path(config_path)
-    eval_data = _load_eval_directory(path)
+    eval_data = _load_verifiers_format(path)
     console.print(f"[blue]✓ Loaded eval data:[/blue] {path}")
 
     detected_env = eval_data.get("env_id") or eval_data.get("env")
@@ -439,9 +442,12 @@ def _push_single_eval(
     console.print()
 
     viewer_url = finalize_response.get("viewer_url")
-    if viewer_url:
-        console.print(f"[green]View results at:[/green] {viewer_url}")
-        console.print()
+    if not viewer_url:
+        # Fallback: construct URL from frontend_url and eval_id
+        config = Config()
+        viewer_url = f"{config.frontend_url}/dashboard/rft/evals/{eval_id}"
+    console.print(f"[green]View results at:[/green] {viewer_url}")
+    console.print()
 
     console.print("[dim]CLI commands:[/dim]")
     console.print(f"  prime eval get {eval_id}")
@@ -628,12 +634,132 @@ def logs_cmd(
     _display_logs(eval_id, tail, follow)
 
 
+@app.command("pull", no_args_is_help=True)
+def pull_cmd(
+    eval_id: str = typer.Argument(..., help="Evaluation id to pull"),
+    output_dir: Optional[str] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output directory (defaults to outputs/evals/<env>--<model>/<eval_id>)",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite existing files",
+    ),
+) -> None:
+    """Pull evaluation results in verifiers format.
+
+    Downloads evaluation metadata and results from the platform
+    and saves them in the verifiers format (metadata.json + results.jsonl).
+
+    \b
+    Examples:
+        prime eval pull abc123                           # Pull to default location
+        prime eval pull abc123 -o ./my-results           # Pull to custom directory
+        prime eval pull abc123 -f                        # Overwrite existing files
+    """
+    try:
+        api_client = APIClient()
+
+        console.print(f"[blue]Fetching evaluation {eval_id}...[/blue]")
+
+        # Fetch the export data
+        try:
+            export_data = api_client.get(f"/evaluations/{eval_id}/export")
+        except APIError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(1)
+
+        metadata = export_data.get("metadata", {})
+        results = export_data.get("results", [])
+
+        # Determine output directory
+        if output_dir:
+            out_path = Path(output_dir)
+        else:
+            env_id = metadata.get("env_id", "unknown")
+            model = metadata.get("model", "unknown")
+            # Sanitize for path
+            env_safe = re.sub(r"[^\w\-]", "_", str(env_id))
+            model_safe = re.sub(r"[^\w\-]", "_", str(model))
+            out_path = Path(f"outputs/evals/{env_safe}--{model_safe}/{eval_id}")
+
+        # Check if directory exists and has files
+        if out_path.exists() and not force:
+            if (out_path / "metadata.json").exists() or (out_path / "results.jsonl").exists():
+                console.print(
+                    f"[yellow]Warning:[/yellow] Output directory already exists: {out_path}"
+                )
+                console.print("[yellow]Use --force to overwrite existing files[/yellow]")
+                raise typer.Exit(1)
+
+        # Create directory
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        # Write metadata.json
+        metadata_path = out_path / "metadata.json"
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2, default=str)
+        console.print(f"[green]✓[/green] Wrote {metadata_path}")
+
+        # Write results.jsonl
+        results_path = out_path / "results.jsonl"
+        with open(results_path, "w") as f:
+            for result in results:
+                f.write(json.dumps(result, default=str) + "\n")
+        console.print(f"[green]✓[/green] Wrote {results_path} ({len(results)} samples)")
+
+        console.print()
+        console.print(f"[green]✓ Successfully pulled evaluation to:[/green] {out_path}")
+        console.print()
+        console.print("[dim]View results:[/dim]")
+        console.print(f"  prime eval tui --outputs-dir {out_path.parent.parent}")
+        console.print(f"  prime eval push {out_path}")
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
 @app.command("stop", no_args_is_help=True)
 def stop_cmd(
     eval_id: str = typer.Argument(..., help="Evaluation id to stop"),
 ) -> None:
     """Stop a running hosted evaluation."""
     stop_hosted_evaluation(eval_id)
+
+
+@app.command("extend-timeout", no_args_is_help=True)
+def extend_timeout_cmd(
+    eval_id: str = typer.Argument(..., help="Evaluation id to extend timeout for"),
+    minutes: int = typer.Option(
+        60,
+        "--minutes",
+        "-m",
+        help="Additional minutes to add to the timeout (10-720)",
+    ),
+) -> None:
+    """Extend the timeout of a running hosted evaluation.
+
+    Use this command when an evaluation needs more time to complete.
+    Only RUNNING or PENDING evaluations can have their timeout extended.
+    Maximum total timeout is 24 hours (1440 minutes).
+
+    \b
+    Examples:
+        prime eval extend-timeout abc123              # Add 60 minutes (default)
+        prime eval extend-timeout abc123 -m 120      # Add 120 minutes
+    """
+    if minutes < 10 or minutes > 720:
+        console.print("[red]Error:[/red] Additional minutes must be between 10 and 720")
+        raise typer.Exit(1)
+
+    extend_hosted_evaluation_timeout(eval_id, minutes)
 
 
 @app.command(

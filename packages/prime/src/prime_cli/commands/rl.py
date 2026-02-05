@@ -146,7 +146,7 @@ class EnvConfig(BaseModel):
         if "@" in self.id:
             id_part, version_part = self.id.rsplit("@", 1)
             self.id = id_part
-            if self.version is None:
+            if self.version is None and version_part:
                 self.version = version_part
         return self
 
@@ -177,7 +177,7 @@ class EvalEnvConfig(BaseModel):
         if "@" in self.id:
             id_part, version_part = self.id.rsplit("@", 1)
             self.id = id_part
-            if self.version is None:
+            if self.version is None and version_part:
                 self.version = version_part
         return self
 

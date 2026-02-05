@@ -872,7 +872,9 @@ def push(
             client = APIClient()
 
             console.print("Resolving environment...")
-            resolve_data = {"name": env_name, "visibility": visibility}
+            resolve_data = {"name": env_name}
+            if visibility:
+                resolve_data["visibility"] = visibility
             if owner:
                 # Push to a specific owner (user or team) - for collaborators with write access
                 resolve_data["owner_slug"] = owner

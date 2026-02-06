@@ -8,7 +8,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from prime_cli.core import APIError, AsyncAPIClient
-from prime_cli.core.config import Config
+from prime_cli.utils.display import get_eval_viewer_url
 from prime_cli.utils.schemas import (
     EvalStatus,
     HostedEvalConfig,
@@ -305,11 +305,7 @@ def print_hosted_result(result: HostedEvalResult) -> None:
 
     console.print()
 
-    viewer_url = result.viewer_url
-    if not viewer_url:
-        # Fallback: construct URL from frontend_url and eval_id
-        config = Config()
-        viewer_url = f"{config.frontend_url}/dashboard/rft/evals/{result.evaluation_id}"
+    viewer_url = get_eval_viewer_url(result.evaluation_id, result.viewer_url)
     console.print(f"[bold green]View results:[/bold green] {viewer_url}")
 
     if result.error_message:
@@ -330,39 +326,14 @@ def stop_hosted_evaluation(eval_id: str) -> None:
             async with AsyncAPIClient() as client:
                 return await client.post(f"/hosted-evaluations/{eval_id}/cancel")
 
-        result = asyncio.run(do_stop())
-        status = result.get("status", "CANCELLED")
-        message = result.get("message", "Evaluation cancelled successfully")
-        console.print(f"[green]✓ {message}[/green]")
-        console.print(f"[dim]Status: {status}[/dim]")
-        console.print()
-        console.print(
-            "[dim]The sandbox has been terminated. "
-            "Any partial results may still be available.[/dim]"
-        )
+        asyncio.run(do_stop())
+        console.print(f"[green]✓ Evaluation {eval_id} cancelled.[/green]")
         console.print(f"[dim]View results: prime eval get {eval_id}[/dim]")
     except APIError as e:
-        console.print(f"[red]Error stopping evaluation:[/red] {e}")
+        # APIError format is "HTTP {code}: {detail}" — extract the detail message
+        detail = re.sub(r"^HTTP \d+:\s*", "", str(e))
+        console.print(f"[yellow]{detail}[/yellow]")
         raise SystemExit(1)
-
-
-def extend_hosted_evaluation_timeout(eval_id: str, additional_minutes: int) -> None:
-    """Extend the timeout of a running hosted evaluation."""
-    try:
-
-        async def do_extend():
-            async with AsyncAPIClient() as client:
-                return await client.patch(
-                    f"/hosted-evaluations/{eval_id}/timeout",
-                    json={"additional_minutes": additional_minutes},
-                )
-
-        result = asyncio.run(do_extend())
-        new_timeout = result.get("new_timeout_minutes", "unknown")
-        console.print(
-            f"[green]✓ Extended timeout for evaluation {eval_id}[/green]\n"
-            f"[dim]New total timeout: {new_timeout} minutes[/dim]"
-        )
-    except APIError as e:
-        console.print(f"[red]Error extending timeout:[/red] {e}")
+    except Exception as e:
+        console.print(f"[red]Failed to stop evaluation: {e}[/red]")
         raise SystemExit(1)

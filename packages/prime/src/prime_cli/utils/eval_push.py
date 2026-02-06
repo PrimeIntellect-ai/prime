@@ -7,7 +7,7 @@ from prime_evals import EvalsAPIError, EvalsClient
 from rich.console import Console
 
 from prime_cli.core import APIClient
-from prime_cli.core.config import Config
+from prime_cli.utils.display import get_eval_viewer_url
 
 from .env_metadata import find_environment_metadata
 
@@ -215,10 +215,6 @@ def push_eval_results_to_hub(
 
     console.print("[green]✓ Successfully uploaded evaluation results[/green]")
 
-    viewer_url = finalize_response.get("viewer_url")
-    if not viewer_url:
-        # Fallback: construct URL from frontend_url and eval_id
-        config = Config()
-        viewer_url = f"{config.frontend_url}/dashboard/rft/evals/{eval_id}"
+    viewer_url = get_eval_viewer_url(eval_id, finalize_response.get("viewer_url"))
     console.print("\n[green]View results at:[/green]")
     console.print(f"  [link={viewer_url}]{viewer_url}[/link]")

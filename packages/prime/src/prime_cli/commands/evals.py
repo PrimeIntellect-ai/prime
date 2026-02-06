@@ -15,16 +15,17 @@ from typer.core import TyperGroup
 
 from ..client import APIClient
 from ..core import APIError, AsyncAPIClient
-from ..core.config import Config
 from ..utils import output_data_as_json
+from ..utils.display import get_eval_viewer_url
 from ..utils.eval_push import load_results_jsonl
 from ..utils.hosted_eval import (
     clean_logs,
-    extend_hosted_evaluation_timeout,
+    get_evaluation,
     get_evaluation_logs,
     get_new_log_lines,
     stop_hosted_evaluation,
 )
+from ..utils.schemas import EvalStatus
 from .env import run_eval
 
 console = Console()
@@ -126,8 +127,8 @@ def list_evals(
             console.print("[yellow]No evaluations found.[/yellow]")
             return
 
-        table = Table(title="Evaluations")
-        table.add_column("Id", style="cyan")
+        table = Table(title="Evaluations", show_lines=False)
+        table.add_column("Id", style="cyan", no_wrap=True)
         table.add_column("Environment", style="blue")
         table.add_column("Model", style="magenta")
         table.add_column("Status", style="yellow")
@@ -211,6 +212,34 @@ def _fetch_logs(eval_id: str) -> str:
     return asyncio.run(_fetch())
 
 
+def _fetch_eval_status(eval_id: str) -> dict:
+    async def _fetch():
+        async with AsyncAPIClient() as client:
+            return await get_evaluation(client, eval_id)
+
+    return asyncio.run(_fetch())
+
+
+def _print_eval_status(eval_data: dict) -> None:
+    status_str = eval_data.get("status", "UNKNOWN")
+    try:
+        status = EvalStatus(status_str)
+        color = status.color
+    except ValueError:
+        color = "white"
+
+    eval_id = eval_data.get("evaluation_id", eval_data.get("id", ""))
+    console.print(f"[{color}]Status: {status_str}[/{color}]")
+
+    error_message = eval_data.get("error_message")
+    if error_message:
+        console.print(f"[red]Error: {error_message}[/red]")
+
+    if eval_id:
+        viewer_url = get_eval_viewer_url(eval_id, eval_data.get("viewer_url"))
+        console.print(f"[dim]View: {viewer_url}[/dim]")
+
+
 def _display_logs(eval_id: str, tail: int, follow: bool) -> None:
     try:
         if follow:
@@ -219,20 +248,50 @@ def _display_logs(eval_id: str, tail: int, follow: bool) -> None:
             )
             last_logs = ""
             consecutive_errors = 0
+            no_logs_polls = 0
 
             while True:
                 try:
+                    eval_data = _fetch_eval_status(eval_id)
+                    status_str = eval_data.get("status", "UNKNOWN")
+                    try:
+                        status = EvalStatus(status_str)
+                    except ValueError:
+                        status = None
+
+                    if status and status in EvalStatus.terminal_statuses():
+                        console.print()
+                        _print_eval_status(eval_data)
+                        if status != EvalStatus.COMPLETED:
+                            raise typer.Exit(1)
+                        return
+
                     raw_logs = _fetch_logs(eval_id)
                     logs = clean_logs(raw_logs) if raw_logs else ""
                     consecutive_errors = 0
 
-                    if logs != last_logs:
+                    if logs and logs != last_logs:
                         for line in get_new_log_lines(last_logs, logs):
                             console.print(line)
                         last_logs = logs
+                        no_logs_polls = 0
+                    elif not logs:
+                        no_logs_polls += 1
+
+                    if no_logs_polls > 0 and no_logs_polls % 6 == 0:
+                        console.print(
+                            f"[dim]Evaluation status: {status_str} (waiting for logs...)[/dim]"
+                        )
+
                 except APIError as e:
                     consecutive_errors += 1
-                    if "429" in str(e):
+                    err_str = str(e)
+                    if "404" in err_str:
+                        console.print(
+                            f"\n[red]Evaluation {eval_id} not found or has been cancelled.[/red]"
+                        )
+                        raise typer.Exit(1)
+                    if "429" in err_str:
                         if consecutive_errors >= 3:
                             console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
                             time.sleep(30)
@@ -243,6 +302,7 @@ def _display_logs(eval_id: str, tail: int, follow: bool) -> None:
 
                 time.sleep(5)
         else:
+            eval_data = _fetch_eval_status(eval_id)
             raw_logs = _fetch_logs(eval_id)
             logs = clean_logs(raw_logs) if raw_logs else ""
 
@@ -253,11 +313,16 @@ def _display_logs(eval_id: str, tail: int, follow: bool) -> None:
                 for line in lines:
                     console.print(line)
             else:
-                console.print("[yellow]No logs available yet.[/yellow]")
+                console.print("[yellow]No logs available.[/yellow]")
+
+            console.print()
+            _print_eval_status(eval_data)
 
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped watching logs. Evaluation continues running.[/dim]")
         console.print(f"[dim]To stop the evaluation: prime eval stop {eval_id}[/dim]")
+    except typer.Exit:
+        raise
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
@@ -441,11 +506,7 @@ def _push_single_eval(
     console.print(f"[blue]Evaluation id:[/blue] {eval_id}")
     console.print()
 
-    viewer_url = finalize_response.get("viewer_url")
-    if not viewer_url:
-        # Fallback: construct URL from frontend_url and eval_id
-        config = Config()
-        viewer_url = f"{config.frontend_url}/dashboard/rft/evals/{eval_id}"
+    viewer_url = get_eval_viewer_url(eval_id, finalize_response.get("viewer_url"))
     console.print(f"[green]View results at:[/green] {viewer_url}")
     console.print()
 
@@ -732,34 +793,6 @@ def stop_cmd(
 ) -> None:
     """Stop a running hosted evaluation."""
     stop_hosted_evaluation(eval_id)
-
-
-@app.command("extend-timeout", no_args_is_help=True)
-def extend_timeout_cmd(
-    eval_id: str = typer.Argument(..., help="Evaluation id to extend timeout for"),
-    minutes: int = typer.Option(
-        60,
-        "--minutes",
-        "-m",
-        help="Additional minutes to add to the timeout (10-720)",
-    ),
-) -> None:
-    """Extend the timeout of a running hosted evaluation.
-
-    Use this command when an evaluation needs more time to complete.
-    Only RUNNING or PENDING evaluations can have their timeout extended.
-    Maximum total timeout is 24 hours (1440 minutes).
-
-    \b
-    Examples:
-        prime eval extend-timeout abc123              # Add 60 minutes (default)
-        prime eval extend-timeout abc123 -m 120      # Add 120 minutes
-    """
-    if minutes < 10 or minutes > 720:
-        console.print("[red]Error:[/red] Additional minutes must be between 10 and 720")
-        raise typer.Exit(1)
-
-    extend_hosted_evaluation_timeout(eval_id, minutes)
 
 
 @app.command(

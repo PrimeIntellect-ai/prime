@@ -2891,20 +2891,21 @@ def run_eval(
                 env_path=Path(env_path) if env_path else None,
             )
 
-            console.print(
-                "[red]Error: Hosted evaluations require environment slug (owner/name).[/red]"
-            )
-
             if metadata and metadata.get("owner") and metadata.get("name"):
-                suggested_slug = f"{metadata['owner']}/{metadata['name']}"
-                console.print("[yellow]Tip:[/yellow] Found local environment metadata.")
-                console.print(f"[dim]Try:[/dim] prime eval {suggested_slug} --hosted")
+                upstream_owner = metadata["owner"]
+                upstream_name = metadata["name"]
+                is_slug = True
+                console.print(
+                    f"[dim]Resolved upstream environment: {upstream_owner}/{upstream_name}[/dim]"
+                )
             else:
+                console.print(
+                    "[red]Error: Hosted evaluations require environment slug (owner/name).[/red]"
+                )
                 console.print(
                     f"[dim]Example: prime eval primeintellect/{environment} --hosted[/dim]"
                 )
-
-            raise typer.Exit(1)
+                raise typer.Exit(1)
 
         client = APIClient(require_auth=False)
         try:
@@ -3023,10 +3024,11 @@ def run_eval(
                 if result.status != EvalStatus.COMPLETED:
                     raise typer.Exit(1)
             else:
+                eval_id = result.evaluation_id
                 console.print("[green]✓ Hosted evaluation started[/green]")
-                console.print(f"\n[cyan]Evaluation ID:[/cyan] {result.evaluation_id}")
-                console.print("\n[dim]View logs with:[/dim]")
-                console.print(f"  prime eval logs {result.evaluation_id} -f")
+                console.print(f"\n[cyan]Evaluation ID:[/cyan] {eval_id}")
+                console.print(f"\n[dim]View logs with:[/dim]   prime eval logs {eval_id} -f")
+                console.print(f"[dim]Stop eval with:[/dim]     prime eval stop {eval_id}")
 
         except APIError as e:
             console.print(f"[red]Hosted evaluation failed: {e}[/red]")

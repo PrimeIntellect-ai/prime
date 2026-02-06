@@ -308,7 +308,7 @@ def actions_retry(
             console.print("[green]Successfully triggered retry[/green]")
             console.print(f"[dim]Job ID: {data.get('job_id')}[/dim]")
             console.print(f"[dim]Version: {data.get('version_id')}[/dim]")
-            job_id = data.get('job_id')
+            job_id = data.get("job_id")
             console.print(
                 f"\n[dim]Use 'prime env action logs {environment} {job_id}' to view logs[/dim]"
             )
@@ -476,9 +476,7 @@ def list_cmd(
     search: Optional[str] = typer.Option(
         None, "--search", "-s", help="Search by name or description"
     ),
-    tag: Optional[List[str]] = typer.Option(
-        None, "--tag", "-t", help="Filter by tag (repeatable)"
-    ),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", "-t", help="Filter by tag (repeatable)"),
     action_status: Optional[str] = typer.Option(
         None, "--action-status", help="Filter by action status (SUCCESS/FAILED/RUNNING/PENDING)"
     ),
@@ -727,8 +725,8 @@ def push(
         "-t",
         help="Team slug for team ownership (uses config team_id if not provided)",
     ),
-    visibility: str = typer.Option(
-        "PUBLIC", "--visibility", "-v", help="Environment visibility (PUBLIC/PRIVATE)"
+    visibility: Optional[str] = typer.Option(
+        None, "--visibility", "-v", help="Environment visibility (PUBLIC/PRIVATE)"
     ),
     auto_bump: bool = typer.Option(
         False, "--auto-bump", help="Automatically bump patch version before push"
@@ -874,7 +872,9 @@ def push(
             client = APIClient()
 
             console.print("Resolving environment...")
-            resolve_data = {"name": env_name, "visibility": visibility}
+            resolve_data = {"name": env_name}
+            if visibility:
+                resolve_data["visibility"] = visibility
             if owner:
                 # Push to a specific owner (user or team) - for collaborators with write access
                 resolve_data["owner_slug"] = owner

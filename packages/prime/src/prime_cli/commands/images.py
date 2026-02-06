@@ -3,6 +3,7 @@
 import json
 import tarfile
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import httpx
 import typer
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from ..utils import validate_output_format
@@ -158,6 +160,7 @@ def push_image(
             console.print()
             console.print("[bold]Check build status:[/bold]")
             console.print("  prime images list")
+            console.print(f"  prime images logs {build_id} --follow")
             console.print()
             console.print(
                 "[dim]The build typically takes a few minutes depending on image complexity.[/dim]"
@@ -212,6 +215,7 @@ def list_images(
         table = Table(title="Your Docker Images")
         table.add_column("Image Reference", style="cyan")
         table.add_column("Status", justify="center")
+        table.add_column("Failure Reason", style="yellow")
         table.add_column("Size", justify="right")
         table.add_column("Created", style="dim")
 
@@ -252,7 +256,14 @@ def list_images(
                 or f"{img.get('imageName', 'unknown')}:{img.get('imageTag', 'latest')}"
             )
 
-            table.add_row(image_ref, status_display, size_mb, date_str)
+            # Failure reason (if available)
+            failure_reason = ""
+            if status in {"FAILED", "CANCELLED"}:
+                failure_reason = img.get("errorMessage") or ""
+                if len(failure_reason) > 100:
+                    failure_reason = f"{failure_reason[:97]}..."
+
+            table.add_row(image_ref, status_display, failure_reason, size_mb, date_str)
 
         console.print()
         console.print(table)
@@ -260,6 +271,90 @@ def list_images(
         console.print(f"[dim]Total: {len(images)} image(s)[/dim]")
         console.print()
 
+    except UnauthorizedError:
+        console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("logs")
+def build_logs(
+    build_id: str = typer.Argument(..., help="Build ID to get logs for"),
+    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+) -> None:
+    """Get logs for an image build."""
+    try:
+        client = APIClient()
+
+        if follow:
+            console.print(f"[dim]Watching logs for build {build_id}... (Ctrl+C to stop)[/dim]\n")
+            last_logs = ""
+            consecutive_errors = 0
+
+            while True:
+                try:
+                    data = client.request(
+                        "GET",
+                        f"/images/build/{build_id}/logs",
+                        params={"tail_lines": tail},
+                    )
+                    logs = data.get("logs", "")
+                    status = data.get("status", "UNKNOWN")
+                    consecutive_errors = 0
+
+                    if logs != last_logs:
+                        old_lines = last_logs.splitlines() if last_logs else []
+                        new_lines = logs.splitlines()
+
+                        if not last_logs:
+                            for line in new_lines:
+                                console.print(escape(line))
+                        else:
+                            overlap = 0
+                            max_overlap = min(len(old_lines), len(new_lines))
+                            for i in range(1, max_overlap + 1):
+                                if old_lines[-i:] == new_lines[:i]:
+                                    overlap = i
+                            for line in new_lines[overlap:]:
+                                console.print(escape(line))
+
+                        last_logs = logs
+
+                    if status in {"COMPLETED", "FAILED", "CANCELLED"}:
+                        console.print(f"\n[bold]Build finished with status: {status}[/bold]")
+                        return
+
+                except APIError as e:
+                    consecutive_errors += 1
+                    if "429" in str(e):
+                        if consecutive_errors >= 3:
+                            console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
+                            time.sleep(30)
+                        else:
+                            time.sleep(10)
+                        continue
+                    raise
+
+                time.sleep(5)
+
+        else:
+            data = client.request(
+                "GET",
+                f"/images/build/{build_id}/logs",
+                params={"tail_lines": tail},
+            )
+            logs = data.get("logs", "")
+
+            if logs:
+                console.print(escape(logs))
+            else:
+                console.print("[yellow]No logs available yet.[/yellow]")
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped watching logs.[/dim]")
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
         raise typer.Exit(1)

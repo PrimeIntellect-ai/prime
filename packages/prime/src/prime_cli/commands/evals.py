@@ -221,7 +221,7 @@ def _fetch_eval_status(eval_id: str) -> dict:
 
 
 def _print_eval_status(eval_data: dict) -> None:
-    status_str = eval_data.get("status", "UNKNOWN")
+    status_str = eval_data.get("status")
     try:
         status = EvalStatus(status_str)
         color = status.color
@@ -253,7 +253,7 @@ def _display_logs(eval_id: str, tail: int, follow: bool) -> None:
             while True:
                 try:
                     eval_data = _fetch_eval_status(eval_id)
-                    status_str = eval_data.get("status", "UNKNOWN")
+                    status_str = eval_data.get("status")
                     try:
                         status = EvalStatus(status_str)
                     except ValueError:
@@ -727,7 +727,17 @@ def pull_cmd(
 
         console.print(f"[blue]Fetching evaluation {eval_id}...[/blue]")
 
-        # Fetch the export data
+        try:
+            eval_data = _fetch_eval_status(eval_id)
+            status = eval_data.get("status")
+            if status != "COMPLETED":
+                console.print(f"[red]Cannot pull evaluation with status {status}.[/red]")
+                console.print("[dim]Only completed evaluations can be pulled.[/dim]")
+                raise typer.Exit(1)
+        except APIError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(1)
+
         try:
             export_data = api_client.get(f"/evaluations/{eval_id}/export")
         except APIError as e:
@@ -775,10 +785,6 @@ def pull_cmd(
 
         console.print()
         console.print(f"[green]✓ Successfully pulled evaluation to:[/green] {out_path}")
-        console.print()
-        console.print("[dim]View results:[/dim]")
-        console.print(f"  prime eval tui --outputs-dir {out_path.parent.parent}")
-        console.print(f"  prime eval push {out_path}")
 
     except typer.Exit:
         raise

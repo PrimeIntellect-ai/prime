@@ -184,7 +184,7 @@ async def follow_hosted_evaluation(
 
                 try:
                     eval_data = await get_evaluation(client, evaluation_id)
-                    status_str = eval_data.get("status", "UNKNOWN")
+                    status_str = str(eval_data.get("status", ""))
                     status = parse_eval_status(status_str)
                     consecutive_errors = 0
 

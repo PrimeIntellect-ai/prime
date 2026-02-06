@@ -120,6 +120,7 @@ class TunnelClient:
         self,
         local_port: int,
         name: Optional[str] = None,
+        team_id: Optional[str] = None,
     ) -> TunnelInfo:
         """
         Register a new tunnel with the backend.
@@ -127,6 +128,7 @@ class TunnelClient:
         Args:
             local_port: Local port the tunnel will forward to
             name: Optional friendly name for the tunnel
+            team_id: Optional team ID for team tunnels
 
         Returns:
             TunnelInfo with connection details
@@ -137,10 +139,15 @@ class TunnelClient:
         """
         self._check_auth_required()
 
+        if team_id is None:
+            team_id = self.config.team_id
+
         url = f"{self.base_url}/api/v1/tunnel"
         payload: Dict[str, Any] = {"local_port": local_port}
         if name:
             payload["name"] = name
+        if team_id:
+            payload["teamId"] = team_id
 
         try:
             response = await self._request_with_retry("POST", url, json=payload)
@@ -217,16 +224,24 @@ class TunnelClient:
         await self._handle_response(response, "delete tunnel")
         return True
 
-    async def list_tunnels(self) -> list[TunnelInfo]:
+    async def list_tunnels(self, team_id: Optional[str] = None) -> list[TunnelInfo]:
         """
         List all tunnels for the current user.
+
+        Args:
+            team_id: Optional team ID to include team tunnels
 
         Returns:
             List of TunnelInfo objects
         """
         self._check_auth_required()
 
+        if team_id is None:
+            team_id = self.config.team_id
+
         url = f"{self.base_url}/api/v1/tunnel"
+        if team_id:
+            url = f"{url}?teamId={team_id}"
 
         try:
             response = await self._request_with_retry("GET", url)

@@ -1,5 +1,3 @@
-"""RL (Reinforcement Learning) training commands."""
-
 import re
 import time
 from pathlib import Path
@@ -20,19 +18,13 @@ from ..client import APIClient, APIError, ValidationError
 from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.env_vars import EnvParseError, collect_env_vars
+from ..utils.formatters import strip_ansi
 
 console = Console()
 
-# ANSI escape code pattern
-ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 # Progress bar pattern (tqdm-style progress bars)
 PROGRESS_BAR = re.compile(r".*\|[█▏▎▍▌▋▊▉ ]{10,}\|.*")
-
-
-def strip_ansi(text: str) -> str:
-    """Remove ANSI escape codes from text."""
-    return ANSI_ESCAPE.sub("", text)
 
 
 def filter_progress_bars(text: str) -> str:
@@ -443,7 +435,8 @@ def create_run(
 
     # Validate WANDB_API_KEY is present when W&B monitoring is configured
     wandb_configured = cfg.wandb.entity or cfg.wandb.project
-    if wandb_configured and (not secrets or "WANDB_API_KEY" not in secrets):
+    has_wandb_key = secrets and "WANDB_API_KEY" in secrets
+    if wandb_configured and not has_wandb_key:
         console.print("[red]Configuration Error:[/red]")
         console.print("  WANDB_API_KEY is required when W&B monitoring is configured.\n")
         console.print("Provide it via:")

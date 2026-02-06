@@ -22,9 +22,9 @@ class Tunnel:
         local_port: int,
         local_addr: str = "127.0.0.1",
         name: Optional[str] = None,
-        team_id: Optional[str] = None,
         connection_timeout: float = 30.0,
         log_level: str = "info",
+        team_id: Optional[str] = None,
     ):
         """
         Initialize a tunnel.

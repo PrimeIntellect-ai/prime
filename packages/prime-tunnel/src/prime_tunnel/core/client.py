@@ -91,10 +91,11 @@ class TunnelClient:
         method: str,
         url: str,
         json: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, str]] = None,
     ) -> httpx.Response:
         """Make async HTTP request with retry on transient connection errors."""
         client = await self._get_client()
-        return await client.request(method, url, json=json)
+        return await client.request(method, url, json=json, params=params)
 
     async def _handle_response(self, response: httpx.Response, operation: str) -> Dict[str, Any]:
         """Handle response and raise appropriate errors."""
@@ -240,11 +241,10 @@ class TunnelClient:
             team_id = self.config.team_id
 
         url = f"{self.base_url}/api/v1/tunnel"
-        if team_id:
-            url = f"{url}?teamId={team_id}"
+        params = {"teamId": team_id} if team_id else None
 
         try:
-            response = await self._request_with_retry("GET", url)
+            response = await self._request_with_retry("GET", url, params=params)
         except httpx.TimeoutException as e:
             raise TunnelTimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:

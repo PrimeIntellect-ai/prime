@@ -15,9 +15,7 @@ from rich.table import Table
 
 from ..utils import validate_output_format
 
-app = typer.Typer(
-    help="Manage Docker images in Prime Intellect registry [closed beta]", no_args_is_help=True
-)
+app = typer.Typer(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = Console()
 
 config = Config()
@@ -54,9 +52,19 @@ def push_image(
             image_name = image_reference
             image_tag = "latest"
 
+        # Validate image name doesn't contain slashes
+        if "/" in image_name:
+            console.print(
+                "[red]Error: Image name cannot contain '/'. "
+                "Use simple names like 'myapp:v1.0.0'.[/red]"
+            )
+            raise typer.Exit(1)
+
         console.print(
             f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
         )
+        if config.team_id:
+            console.print(f"[dim]Team: {config.team_id}[/dim]")
         console.print()
 
         # Initialize API client
@@ -84,15 +92,19 @@ def push_image(
             # Initialize build
             console.print("[cyan]Initiating build...[/cyan]")
             try:
+                build_payload = {
+                    "image_name": image_name,
+                    "image_tag": image_tag,
+                    "dockerfile_path": dockerfile,
+                    "platform": platform,
+                }
+                if config.team_id:
+                    build_payload["team_id"] = config.team_id
+
                 build_response = client.request(
                     "POST",
                     "/images/build",
-                    json={
-                        "image_name": image_name,
-                        "image_tag": image_tag,
-                        "dockerfile_path": dockerfile,
-                        "platform": platform,
-                    },
+                    json=build_payload,
                 )
             except UnauthorizedError:
                 console.print(
@@ -183,20 +195,32 @@ def push_image(
 @app.command("list")
 def list_images(
     output: str = typer.Option("table", "--output", "-o", help="Output format (table or json)"),
+    all_images: bool = typer.Option(
+        False, "--all", "-a", help="Show all accessible images (personal + team)"
+    ),
 ):
     """
     List all images you've pushed to Prime Intellect registry.
 
+    By default, shows images in the current context (personal or team).
+    Use --all to show all accessible images including team images.
+
     \b
     Examples:
         prime images list
+        prime images list --all
         prime images list --output json
     """
     validate_output_format(output, console)
     try:
         client = APIClient()
 
-        response = client.request("GET", "/images")
+        # Build query params
+        params = {}
+        if config.team_id and not all_images:
+            params["teamId"] = config.team_id
+
+        response = client.request("GET", "/images", params=params if params else None)
         images = response.get("data", [])
 
         if not images:
@@ -209,8 +233,15 @@ def list_images(
             return
 
         # Table output
-        table = Table(title="Your Docker Images")
+        title = "Your Docker Images"
+        if config.team_id and not all_images:
+            title = f"Team Docker Images (team: {config.team_id})"
+        elif all_images:
+            title = "All Accessible Docker Images"
+
+        table = Table(title=title)
         table.add_column("Image Reference", style="cyan")
+        table.add_column("Owner", justify="center")
         table.add_column("Status", justify="center")
         table.add_column("Size", justify="right")
         table.add_column("Created", style="dim")
@@ -231,6 +262,13 @@ def list_images(
             else:
                 status_display = f"[dim]{status}[/dim]"
 
+            # Owner type
+            owner_type = img.get("ownerType", "personal")
+            if owner_type == "team":
+                owner_display = "[blue]Team[/blue]"
+            else:
+                owner_display = "[dim]Personal[/dim]"
+
             # Size
             size_mb = ""
             if img.get("sizeBytes"):
@@ -246,13 +284,14 @@ def list_images(
             except Exception:
                 date_str = img.get("pushedAt") or img.get("createdAt", "")
 
-            # Image reference
+            # Image reference - prefer displayRef for user-friendly format
             image_ref = (
-                img.get("fullImagePath")
+                img.get("displayRef")
+                or img.get("fullImagePath")
                 or f"{img.get('imageName', 'unknown')}:{img.get('imageTag', 'latest')}"
             )
 
-            table.add_row(image_ref, status_display, size_mb, date_str)
+            table.add_row(image_ref, owner_display, status_display, size_mb, date_str)
 
         console.print()
         console.print(table)
@@ -271,23 +310,52 @@ def list_images(
 @app.command("delete")
 def delete_image(
     image_reference: str = typer.Argument(
-        ..., help="Image reference to delete (e.g., 'myapp:v1.0.0')"
+        ...,
+        help="Image reference to delete (e.g., 'myapp:v1.0.0' or 'team-{teamId}/myapp:v1.0.0')",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ):
     """
     Delete an image from your registry.
 
-    Note: This removes the database record but does not delete the actual
-    image from Google Artifact Registry.
+    For team images, you can use the team-prefixed format directly.
+    Only the image creator or team admins can delete team images.
 
     \b
     Examples:
         prime images delete myapp:v1.0.0
         prime images delete myapp:latest --yes
+        prime images delete team-abc123/myapp:v1.0.0
     """
+    # Store original input for error messages
+    original_reference = image_reference
+
     try:
-        # Parse image reference
+        # Check for team-prefixed format: team-{teamId}/imagename:tag
+        team_id = config.team_id
+        if "/" in image_reference:
+            namespace, rest = image_reference.split("/", 1)
+            if namespace.startswith("team-"):
+                # Extract team ID from the reference
+                extracted_team_id = namespace[5:]  # Remove "team-" prefix
+                if not extracted_team_id:
+                    console.print(
+                        "[red]Error: Invalid team image reference. "
+                        "Expected format: team-{teamId}/imagename:tag[/red]"
+                    )
+                    raise typer.Exit(1)
+                team_id = extracted_team_id
+                image_reference = rest
+            else:
+                # Unrecognized namespace (not team-prefixed)
+                console.print(
+                    f"[red]Error: Unrecognized image namespace '{namespace}'. "
+                    "Use 'imagename:tag' for personal images or "
+                    "'team-{{teamId}}/imagename:tag' for team images.[/red]"
+                )
+                raise typer.Exit(1)
+
+        # Validate image reference has a tag (after team-prefix parsing)
         if ":" not in image_reference:
             console.print(
                 "[red]Error: Image reference must include a tag (e.g., myapp:latest)[/red]"
@@ -296,23 +364,32 @@ def delete_image(
 
         image_name, image_tag = image_reference.rsplit(":", 1)
 
+        context = f" (team: {team_id})" if team_id else ""
         if not yes:
-            confirm = typer.confirm(f"Are you sure you want to delete {image_name}:{image_tag}?")
+            msg = f"Are you sure you want to delete {image_name}:{image_tag}{context}?"
+            confirm = typer.confirm(msg)
             if not confirm:
                 console.print("[yellow]Cancelled[/yellow]")
                 raise typer.Exit(0)
 
         client = APIClient()
 
-        client.request("DELETE", f"/images/{image_name}/{image_tag}")
-        console.print(f"[green]✓[/green] Deleted {image_name}:{image_tag}")
+        params = {"teamId": team_id} if team_id else None
+
+        client.request("DELETE", f"/images/{image_name}/{image_tag}", params=params)
+        console.print(f"[green]✓[/green] Deleted {image_name}:{image_tag}{context}")
 
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
         raise typer.Exit(1)
     except APIError as e:
         if "404" in str(e):
-            console.print(f"[red]Error: Image {image_reference} not found[/red]")
+            console.print(f"[red]Error: Image {original_reference} not found[/red]")
+        elif "403" in str(e):
+            console.print(
+                "[red]Error: You don't have permission to delete this image. "
+                "Only the image creator or team admins can delete team images.[/red]"
+            )
         else:
             console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)

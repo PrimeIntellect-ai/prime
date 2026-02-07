@@ -259,7 +259,7 @@ log.level = "{self.log_level}"
 
 # HTTP proxy configuration
 [[proxies]]
-name = "http"
+name = "{self._tunnel_info.tunnel_id}"
 type = "http"
 localIP = "{self.local_addr}"
 localPort = {self.local_port}

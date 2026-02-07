@@ -169,6 +169,7 @@ class Tunnel:
                     self._process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     self._process.kill()
+                    self._process.wait(timeout=2)
             except Exception:
                 pass
             finally:

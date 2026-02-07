@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import httpx
+
 from prime_tunnel.binary import get_frpc_path
 from prime_tunnel.core.client import TunnelClient
 from prime_tunnel.exceptions import TunnelConnectionError, TunnelError, TunnelTimeoutError
@@ -153,6 +155,46 @@ class Tunnel:
             return
 
         await self._cleanup()
+        self._started = False
+
+    def sync_stop(self) -> None:
+        """Stop the tunnel synchronously. Safe for signal handlers and atexit."""
+        if not self._started:
+            return
+
+        if self._process is not None:
+            try:
+                self._process.terminate()
+                try:
+                    self._process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self._process.kill()
+            except Exception:
+                pass
+            finally:
+                self._process = None
+
+        if self._tunnel_info is not None:
+            try:
+                httpx.delete(
+                    f"{self._client.base_url}/api/v1/tunnel/{self._tunnel_info.tunnel_id}",
+                    headers=self._client._headers,
+                    timeout=5.0,
+                )
+            except Exception:
+                pass
+            finally:
+                self._tunnel_info = None
+
+        if self._config_file is not None:
+            try:
+                if self._config_file.exists():
+                    self._config_file.unlink()
+            except Exception:
+                pass
+            finally:
+                self._config_file = None
+
         self._started = False
 
     async def _cleanup(self) -> None:

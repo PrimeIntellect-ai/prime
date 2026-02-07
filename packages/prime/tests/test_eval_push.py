@@ -3,7 +3,7 @@ import json
 import pytest
 from prime_cli.commands.evals import (
     _has_eval_files,
-    _load_eval_directory,
+    _load_verifiers_format,
     _validate_eval_path,
 )
 
@@ -121,7 +121,7 @@ class TestValidateEvalPath:
 
 
 class TestLoadEvalDirectory:
-    """Tests for _load_eval_directory function"""
+    """Tests for _load_verifiers_format function"""
 
     def test_loads_valid_eval_data(self, tmp_path):
         """Loads and parses valid eval directory"""
@@ -140,7 +140,7 @@ class TestLoadEvalDirectory:
         ]
         (tmp_path / "results.jsonl").write_text("\n".join(json.dumps(r) for r in results))
 
-        data = _load_eval_directory(tmp_path)
+        data = _load_verifiers_format(tmp_path)
 
         assert data["eval_name"] == "gsm8k-gpt-4"
         assert data["model_name"] == "gpt-4"
@@ -157,7 +157,7 @@ class TestLoadEvalDirectory:
         (tmp_path / "metadata.json").write_text(json.dumps(metadata))
         (tmp_path / "results.jsonl").write_text("")
 
-        data = _load_eval_directory(tmp_path)
+        data = _load_verifiers_format(tmp_path)
 
         assert data["eval_name"] == "math-problems-claude-3"
         assert data["env"] == "math-problems"
@@ -169,7 +169,7 @@ class TestLoadEvalDirectory:
         (tmp_path / "results.jsonl").write_text("")
 
         with pytest.raises(ValueError) as exc_info:
-            _load_eval_directory(tmp_path)
+            _load_verifiers_format(tmp_path)
 
         assert "env_id" in str(exc_info.value)
 
@@ -180,7 +180,7 @@ class TestLoadEvalDirectory:
         (tmp_path / "results.jsonl").write_text("")
 
         with pytest.raises(ValueError) as exc_info:
-            _load_eval_directory(tmp_path)
+            _load_verifiers_format(tmp_path)
 
         assert "model" in str(exc_info.value)
 
@@ -192,7 +192,7 @@ class TestLoadEvalDirectory:
         results_content = '{"id": 0, "reward": 1.0}\ninvalid json line\n{"id": 1, "reward": 0.5}'
         (tmp_path / "results.jsonl").write_text(results_content)
 
-        data = _load_eval_directory(tmp_path)
+        data = _load_verifiers_format(tmp_path)
 
         # Should only have 2 valid results, skipping the invalid line
         assert len(data["results"]) == 2
@@ -213,7 +213,7 @@ class TestLoadEvalDirectory:
         )
         (tmp_path / "results.jsonl").write_text(results_content)
 
-        data = _load_eval_directory(tmp_path)
+        data = _load_verifiers_format(tmp_path)
 
         # Should only have 2 valid dict results
         assert len(data["results"]) == 2
@@ -234,7 +234,7 @@ class TestLoadEvalDirectory:
         results = [{"id": 42, "reward": 1.0}]
         (tmp_path / "results.jsonl").write_text(json.dumps(results[0]))
 
-        data = _load_eval_directory(tmp_path)
+        data = _load_verifiers_format(tmp_path)
 
         assert data["results"][0]["example_id"] == 42
         assert data["results"][0]["id"] == 42  # Original field preserved
@@ -252,7 +252,7 @@ class TestLoadEvalDirectory:
         (tmp_path / "metadata.json").write_text(json.dumps(metadata))
         (tmp_path / "results.jsonl").write_text("")
 
-        data = _load_eval_directory(tmp_path)
+        data = _load_verifiers_format(tmp_path)
 
         assert data["metrics"] == {
             "reward": 0.75,
@@ -268,7 +268,7 @@ class TestLoadEvalDirectory:
         (tmp_path / "results.jsonl").write_text("")
 
         with pytest.raises(json.JSONDecodeError):
-            _load_eval_directory(tmp_path)
+            _load_verifiers_format(tmp_path)
 
 
 if __name__ == "__main__":

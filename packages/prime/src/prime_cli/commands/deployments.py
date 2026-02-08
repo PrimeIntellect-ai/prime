@@ -14,7 +14,7 @@ from ..utils import output_data_as_json, validate_output_format
 console = Console()
 
 app = typer.Typer(
-    help="Manage adapter deployments.",
+    help="Manage adapter deployments (experimental).",
     no_args_is_help=True,
 )
 

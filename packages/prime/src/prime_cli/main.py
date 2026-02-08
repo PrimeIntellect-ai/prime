@@ -7,6 +7,7 @@ from rich.console import Console
 from . import __version__
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
+from .commands.deployments import app as deployments_app
 from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
@@ -14,6 +15,7 @@ from .commands.images import app as images_app
 from .commands.inference import app as inference_app
 from .commands.lab import app as lab_app
 from .commands.login import app as login_app
+from .commands.models import app as models_app
 from .commands.pods import app as pods_app
 from .commands.registry import app as registry_app
 from .commands.rl import app as rl_app
@@ -39,8 +41,10 @@ app.add_typer(teams_app, name="teams", rich_help_panel="Account")
 app.add_typer(upgrade_app, name="upgrade", rich_help_panel="Account")
 
 # Lab commands
+app.add_typer(deployments_app, name="deployments", rich_help_panel="Lab")
 app.add_typer(env_app, name="env", rich_help_panel="Lab")
 app.add_typer(evals_app, name="eval", rich_help_panel="Lab")
+app.add_typer(models_app, name="models", rich_help_panel="Lab")
 app.add_typer(rl_app, name="rl", rich_help_panel="Lab")
 app.add_typer(lab_app, name="lab", rich_help_panel="Lab")
 

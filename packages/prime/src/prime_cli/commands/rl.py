@@ -11,6 +11,7 @@ import typer
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic import ValidationError as PydanticValidationError
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.table import Table
 from typer.core import TyperGroup
 
@@ -82,7 +83,7 @@ def format_json_log_line(line: str) -> str | None:
             time_part = timestamp[:8]
 
         level = str(entry.get("level", "INFO")).upper()
-        message = entry.get("message", "")
+        message = rich_escape(str(entry.get("message", "")))
 
         # Get style for level
         style = LEVEL_STYLES.get(level, "")
@@ -96,36 +97,13 @@ def format_json_log_line(line: str) -> str | None:
         return None
 
 
-def filter_progress_bars(text: str) -> str:
-    """Filter out progress bar updates, keeping only 100% completion lines.
-
-    Progress bars from tqdm often appear as multiple updates on the same line
-    (due to carriage return handling). This extracts just the final 100% part.
-    """
-    lines = text.splitlines()
-    filtered = []
-    for line in lines:
-        if PROGRESS_BAR.search(line) or re.search(r"\d+%\|", line):
-            if "100%" in line:
-                match = re.search(r"([^|]*100%\|[█▏▎▍▌▋▊▉ ]+\|[^\n]*?)(?=\d+%\||$)", line)
-                if match:
-                    filtered.append(match.group(1).strip())
-                else:
-                    filtered.append(line)
-            continue
-        if line.strip():
-            filtered.append(line)
-    return "\n".join(filtered)
-
-
-def clean_logs(text: str) -> tuple[list[str], bool]:
+def clean_logs(text: str) -> list[str]:
     """Clean and format logs, detecting JSON format automatically.
 
-    Returns (formatted_lines, is_json_format).
+    Returns list of formatted lines.
     """
     lines = text.splitlines()
     formatted_lines = []
-    json_line_count = 0
 
     for line in lines:
         if not line.strip():
@@ -135,11 +113,9 @@ def clean_logs(text: str) -> tuple[list[str], bool]:
         formatted = format_json_log_line(line)
         if formatted == _SKIP_LINE:
             # Valid JSON but should be skipped (e.g., progress logs)
-            json_line_count += 1
             continue
         elif formatted is not None:
             formatted_lines.append(formatted)
-            json_line_count += 1
         else:
             # Fall back to legacy handling
             cleaned = strip_ansi(line)
@@ -150,10 +126,7 @@ def clean_logs(text: str) -> tuple[list[str], bool]:
             if cleaned.strip():
                 formatted_lines.append(cleaned)
 
-    # Consider it JSON format if majority of lines are JSON
-    is_json = json_line_count > len(formatted_lines) // 2
-
-    return formatted_lines, is_json
+    return formatted_lines
 
 
 def generate_rl_config_template(environment: str | None = None) -> str:
@@ -1028,13 +1001,25 @@ def get_logs(
                     consecutive_errors = 0
 
                     if raw:
-                        # Raw mode: just print new content
-                        if raw_logs != "\n".join(last_lines):
-                            console.print(raw_logs)
-                            last_lines = raw_logs.splitlines()
+                        # Raw mode with overlap detection
+                        current_lines = raw_logs.splitlines()
+                        if current_lines != last_lines:
+                            if not last_lines:
+                                for line in current_lines:
+                                    console.print(line)
+                            else:
+                                # Find new lines by comparing with previous
+                                overlap = 0
+                                max_overlap = min(len(last_lines), len(current_lines))
+                                for i in range(1, max_overlap + 1):
+                                    if last_lines[-i:] == current_lines[:i]:
+                                        overlap = i
+                                for line in current_lines[overlap:]:
+                                    console.print(line)
+                            last_lines = current_lines
                     else:
                         # Formatted mode
-                        formatted_lines, _ = clean_logs(raw_logs)
+                        formatted_lines = clean_logs(raw_logs)
 
                         if formatted_lines != last_lines:
                             if not last_lines:
@@ -1065,15 +1050,18 @@ def get_logs(
                 time.sleep(5)
         else:
             raw_logs = rl_client.get_logs(run_id, tail_lines=tail)
-            if raw_logs:
-                if raw:
+            if raw:
+                if raw_logs:
                     console.print(raw_logs)
                 else:
-                    formatted_lines, _ = clean_logs(raw_logs)
+                    console.print("[yellow]No logs available yet.[/yellow]")
+            else:
+                formatted_lines = clean_logs(raw_logs)
+                if formatted_lines:
                     for line in formatted_lines:
                         console.print(line)
-            else:
-                console.print("[yellow]No logs available yet.[/yellow]")
+                else:
+                    console.print("[yellow]No logs available yet.[/yellow]")
 
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped watching logs.[/dim]")

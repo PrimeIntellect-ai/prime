@@ -89,9 +89,9 @@ def format_json_log_line(line: str) -> str | None:
         style = LEVEL_STYLES.get(level, "")
 
         if style:
-            return f"[dim]{time_part}[/dim] [{style}][{level}][/{style}] {message}"
+            return f"[dim]{time_part}[/dim] [{style}]\\[{level}][/{style}] {message}"
         else:
-            return f"[dim]{time_part}[/dim] [{level}] {message}"
+            return f"[dim]{time_part}[/dim] \\[{level}] {message}"
 
     except (json.JSONDecodeError, TypeError, KeyError):
         return None

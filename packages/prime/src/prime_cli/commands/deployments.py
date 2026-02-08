@@ -24,9 +24,7 @@ def list_deployments(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
     output: str = typer.Option("table", "-o", "--output", help="Output format: table or json"),
 ) -> None:
-    """List deployed models.
-
-    Shows only models that are currently deployed for inference.
+    """List adapters and their deployment status.
 
     Example:
 
@@ -119,22 +117,22 @@ def create_deployment(
         model = deployments_client.get_adapter(model_id)
 
         if model.status != "READY":
-            console.print(f"[red]Error:[/red] Model is not ready for deployment.")
+            console.print("[red]Error:[/red] Model is not ready for deployment.")
             console.print(f"Current status: [yellow]{model.status}[/yellow]")
             console.print("[dim]Only models with READY status can be deployed.[/dim]")
             raise typer.Exit(1)
 
         if model.deployment_status == "DEPLOYED":
-            console.print(f"[yellow]Model is already deployed.[/yellow]")
+            console.print("[yellow]Model is already deployed.[/yellow]")
             raise typer.Exit(0)
 
         if model.deployment_status in ("DEPLOYING", "UNLOADING"):
-            console.print(f"[yellow]Model deployment is in progress.[/yellow]")
+            console.print("[yellow]Model deployment is in progress.[/yellow]")
             console.print(f"Current status: {model.deployment_status}")
             raise typer.Exit(1)
 
         # Show model details and confirm
-        console.print(f"[bold]Deploying model:[/bold]")
+        console.print("[bold]Deploying model:[/bold]")
         console.print(f"  ID: {model.id}")
         if model.display_name:
             console.print(f"  Name: {model.display_name}")
@@ -150,7 +148,7 @@ def create_deployment(
         # Deploy the model
         updated_model = deployments_client.deploy_adapter(model_id)
 
-        console.print(f"[green]Deployment initiated successfully![/green]")
+        console.print("[green]Deployment initiated successfully![/green]")
         console.print(f"Status: [yellow]{updated_model.deployment_status}[/yellow]")
         console.print("\n[dim]The model is being deployed. This may take a few minutes.[/dim]")
         console.print("[dim]Use 'prime deployments list' to check deployment status.[/dim]")
@@ -202,21 +200,21 @@ def delete_deployment(
         model = deployments_client.get_adapter(model_id)
 
         if model.deployment_status == "NOT_DEPLOYED":
-            console.print(f"[yellow]Model is not deployed.[/yellow]")
+            console.print("[yellow]Model is not deployed.[/yellow]")
             raise typer.Exit(0)
 
         if model.deployment_status in ("DEPLOYING", "UNLOADING"):
-            console.print(f"[yellow]Model deployment is in progress.[/yellow]")
+            console.print("[yellow]Model deployment is in progress.[/yellow]")
             console.print(f"Current status: {model.deployment_status}")
             raise typer.Exit(1)
 
         if model.deployment_status not in ("DEPLOYED", "DEPLOY_FAILED", "UNLOAD_FAILED"):
-            console.print(f"[red]Error:[/red] Cannot unload model in current state.")
+            console.print("[red]Error:[/red] Cannot unload model in current state.")
             console.print(f"Current status: {model.deployment_status}")
             raise typer.Exit(1)
 
         # Show model details and confirm
-        console.print(f"[bold]Unloading model:[/bold]")
+        console.print("[bold]Unloading model:[/bold]")
         console.print(f"  ID: {model.id}")
         if model.display_name:
             console.print(f"  Name: {model.display_name}")
@@ -232,7 +230,7 @@ def delete_deployment(
         # Unload the model
         updated_model = deployments_client.unload_adapter(model_id)
 
-        console.print(f"[green]Unload initiated successfully![/green]")
+        console.print("[green]Unload initiated successfully![/green]")
         console.print(f"Status: [yellow]{updated_model.deployment_status}[/yellow]")
         console.print("\n[dim]The model is being unloaded.[/dim]")
         console.print("[dim]Use 'prime deployments list' to check status.[/dim]")

@@ -1,5 +1,6 @@
 """RL (Reinforcement Learning) training commands."""
 
+import json
 import re
 import time
 from pathlib import Path
@@ -29,10 +30,63 @@ ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 # Progress bar pattern (tqdm-style progress bars)
 PROGRESS_BAR = re.compile(r".*\|[█▏▎▍▌▋▊▉ ]{10,}\|.*")
 
+# Log level colors for rich console
+LEVEL_STYLES = {
+    "DEBUG": "dim",
+    "INFO": "blue",
+    "WARNING": "yellow",
+    "WARN": "yellow",
+    "ERROR": "red",
+    "CRITICAL": "red bold",
+    "SUCCESS": "green",
+}
+
 
 def strip_ansi(text: str) -> str:
     """Remove ANSI escape codes from text."""
     return ANSI_ESCAPE.sub("", text)
+
+
+def format_json_log_line(line: str) -> str | None:
+    """Parse a JSON log line and format it for CLI display.
+
+    Returns formatted string or None if not a valid JSON log.
+    """
+    trimmed = line.strip()
+    if not trimmed.startswith("{") or not trimmed.endswith("}"):
+        return None
+
+    try:
+        entry = json.loads(trimmed)
+        if not isinstance(entry, dict):
+            return None
+        if "timestamp" not in entry or "level" not in entry:
+            return None
+
+        # Skip progress logs in CLI - they're too spammy
+        if entry.get("type") == "progress":
+            return None
+
+        # Format timestamp (extract time portion)
+        timestamp = entry.get("timestamp", "")
+        if "T" in timestamp:
+            time_part = timestamp.split("T")[1][:8]  # HH:MM:SS
+        else:
+            time_part = timestamp[:8]
+
+        level = str(entry.get("level", "INFO")).upper()
+        message = entry.get("message", "")
+
+        # Get style for level
+        style = LEVEL_STYLES.get(level, "")
+
+        if style:
+            return f"[dim]{time_part}[/dim] [{style}][{level}][/{style}] {message}"
+        else:
+            return f"[dim]{time_part}[/dim] [{level}] {message}"
+
+    except (json.JSONDecodeError, TypeError, KeyError):
+        return None
 
 
 def filter_progress_bars(text: str) -> str:
@@ -57,9 +111,38 @@ def filter_progress_bars(text: str) -> str:
     return "\n".join(filtered)
 
 
-def clean_logs(text: str) -> str:
-    """Clean logs by stripping ANSI codes and filtering progress bars."""
-    return filter_progress_bars(strip_ansi(text))
+def clean_logs(text: str) -> tuple[list[str], bool]:
+    """Clean and format logs, detecting JSON format automatically.
+
+    Returns (formatted_lines, is_json_format).
+    """
+    lines = text.splitlines()
+    formatted_lines = []
+    json_line_count = 0
+
+    for line in lines:
+        if not line.strip():
+            continue
+
+        # Try to parse as JSON log
+        formatted = format_json_log_line(line)
+        if formatted is not None:
+            formatted_lines.append(formatted)
+            json_line_count += 1
+        else:
+            # Fall back to legacy handling
+            cleaned = strip_ansi(line)
+            # Skip tqdm-style progress bars
+            if PROGRESS_BAR.search(cleaned) or re.search(r"\d+%\|", cleaned):
+                if "100%" not in cleaned:
+                    continue
+            if cleaned.strip():
+                formatted_lines.append(cleaned)
+
+    # Consider it JSON format if majority of lines are JSON
+    is_json = json_line_count > len(formatted_lines) // 2
+
+    return formatted_lines, is_json
 
 
 def generate_rl_config_template(environment: str | None = None) -> str:
@@ -916,6 +999,7 @@ def get_logs(
     run_id: str = typer.Argument(..., help="Run ID to get logs for"),
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+    raw: bool = typer.Option(False, "--raw", "-r", help="Show raw logs without formatting"),
 ) -> None:
     """Get logs for a run."""
     try:
@@ -924,31 +1008,38 @@ def get_logs(
 
         if follow:
             console.print(f"[dim]Watching logs for run {run_id}... (Ctrl+C to stop)[/dim]\n")
-            last_logs = ""
+            last_lines: list[str] = []
             consecutive_errors = 0
 
             while True:
                 try:
-                    logs = clean_logs(rl_client.get_logs(run_id, tail_lines=tail))
+                    raw_logs = rl_client.get_logs(run_id, tail_lines=tail)
                     consecutive_errors = 0
 
-                    if logs != last_logs:
-                        old_lines = last_logs.splitlines() if last_logs else []
-                        new_lines = logs.splitlines()
+                    if raw:
+                        # Raw mode: just print new content
+                        if raw_logs != "\n".join(last_lines):
+                            console.print(raw_logs)
+                            last_lines = raw_logs.splitlines()
+                    else:
+                        # Formatted mode
+                        formatted_lines, _ = clean_logs(raw_logs)
 
-                        if not last_logs:
-                            for line in new_lines:
-                                console.print(line)
-                        else:
-                            overlap = 0
-                            max_overlap = min(len(old_lines), len(new_lines))
-                            for i in range(1, max_overlap + 1):
-                                if old_lines[-i:] == new_lines[:i]:
-                                    overlap = i
-                            for line in new_lines[overlap:]:
-                                console.print(line)
+                        if formatted_lines != last_lines:
+                            if not last_lines:
+                                for line in formatted_lines:
+                                    console.print(line)
+                            else:
+                                # Find new lines by comparing with previous
+                                overlap = 0
+                                max_overlap = min(len(last_lines), len(formatted_lines))
+                                for i in range(1, max_overlap + 1):
+                                    if last_lines[-i:] == formatted_lines[:i]:
+                                        overlap = i
+                                for line in formatted_lines[overlap:]:
+                                    console.print(line)
 
-                        last_logs = logs
+                            last_lines = formatted_lines
                 except APIError as e:
                     consecutive_errors += 1
                     if "429" in str(e):
@@ -962,9 +1053,14 @@ def get_logs(
 
                 time.sleep(5)
         else:
-            logs = clean_logs(rl_client.get_logs(run_id, tail_lines=tail))
-            if logs:
-                console.print(logs)
+            raw_logs = rl_client.get_logs(run_id, tail_lines=tail)
+            if raw_logs:
+                if raw:
+                    console.print(raw_logs)
+                else:
+                    formatted_lines, _ = clean_logs(raw_logs)
+                    for line in formatted_lines:
+                        console.print(line)
             else:
                 console.print("[yellow]No logs available yet.[/yellow]")
 

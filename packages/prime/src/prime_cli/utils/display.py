@@ -74,3 +74,19 @@ DISK_STATUS_COLORS = {
     "ERROR": "red",
     "TERMINATED": "white",
 }
+
+ADAPTER_STATUS_COLORS = {
+    "PENDING": "yellow",
+    "UPLOADING": "yellow",
+    "READY": "green",
+    "FAILED": "red",
+}
+
+DEPLOYMENT_STATUS_COLORS = {
+    "NOT_DEPLOYED": "white",
+    "DEPLOYING": "yellow",
+    "DEPLOYED": "green",
+    "UNLOADING": "yellow",
+    "DEPLOY_FAILED": "red",
+    "UNLOAD_FAILED": "red",
+}

@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 import toml
 import typer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic import ValidationError as PydanticValidationError
 from rich.console import Console
 from rich.table import Table
@@ -138,6 +138,17 @@ class EnvConfig(BaseModel):
     id: str
     name: str | None = None
     args: Dict[str, Any] = Field(default_factory=dict)
+    version: str | None = None
+
+    @model_validator(mode="after")
+    def parse_version_from_id(self) -> "EnvConfig":
+        """Extract version from id if specified as 'owner/name@version'."""
+        if "@" in self.id:
+            id_part, version_part = self.id.rsplit("@", 1)
+            self.id = id_part
+            if self.version is None and version_part:
+                self.version = version_part
+        return self
 
     def to_api_dict(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {"id": self.id}
@@ -145,6 +156,8 @@ class EnvConfig(BaseModel):
             result["name"] = self.name
         if self.args:
             result["args"] = self.args
+        if self.version is not None:
+            result["version"] = self.version
         return result
 
 
@@ -156,6 +169,17 @@ class EvalEnvConfig(BaseModel):
     args: Dict[str, Any] = Field(default_factory=dict)
     num_examples: int | None = None
     rollouts_per_example: int | None = None
+    version: str | None = None
+
+    @model_validator(mode="after")
+    def parse_version_from_id(self) -> "EvalEnvConfig":
+        """Extract version from id if specified as 'owner/name@version'."""
+        if "@" in self.id:
+            id_part, version_part = self.id.rsplit("@", 1)
+            self.id = id_part
+            if self.version is None and version_part:
+                self.version = version_part
+        return self
 
     def to_api_dict(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {"id": self.id}
@@ -167,6 +191,8 @@ class EvalEnvConfig(BaseModel):
             result["num_examples"] = self.num_examples
         if self.rollouts_per_example is not None:
             result["rollouts_per_example"] = self.rollouts_per_example
+        if self.version is not None:
+            result["version"] = self.version
         return result
 
 

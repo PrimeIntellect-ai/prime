@@ -56,7 +56,7 @@ def list_deployments(
 
         if not models:
             console.print("[yellow]No models found.[/yellow]")
-            console.print("[dim]List all models with: prime models list[/dim]")
+            console.print("[dim]Train a model first, then deploy it here.[/dim]")
             return
 
         table = Table(title="Adapter Deployments")
@@ -154,6 +154,19 @@ def create_deployment(
         console.print(f"Status: [yellow]{updated_model.deployment_status}[/yellow]")
         console.print("\n[dim]The model is being deployed. This may take a few minutes.[/dim]")
         console.print("[dim]Use 'prime deployments list' to check deployment status.[/dim]")
+
+        console.print("\n[bold]Once deployed, you can run inference with:[/bold]")
+        console.print(
+            f"""
+[dim]curl -X POST https://api.pinference.ai/api/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $PRIME_API_KEY" \\
+  -d '{{
+    "model": "{model.base_model}:{model.id}",
+    "messages": [{{"role": "user", "content": "Hello"}}],
+    "max_tokens": 100
+  }}'[/dim]"""
+        )
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

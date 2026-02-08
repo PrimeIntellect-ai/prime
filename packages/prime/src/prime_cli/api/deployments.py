@@ -21,7 +21,7 @@ class Adapter(BaseModel):
     deployment_status: str = Field(
         default="NOT_DEPLOYED",
         alias="deploymentStatus",
-        description="Deployment status: NOT_DEPLOYED, DEPLOYING, DEPLOYED, UNLOADING, DEPLOY_FAILED, UNLOAD_FAILED",
+        description="NOT_DEPLOYED, DEPLOYING, DEPLOYED, UNLOADING, DEPLOY_FAILED, UNLOAD_FAILED",
     )
     deployed_at: Optional[datetime] = Field(None, alias="deployedAt")
     deployment_error: Optional[str] = Field(None, alias="deploymentError")

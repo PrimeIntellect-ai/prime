@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 from dataclasses import dataclass
@@ -69,11 +70,19 @@ def load_verifiers_prime_plugin(console: Console | None = None) -> PrimeVerifier
     """Load plugin exported by verifiers with fallback behavior."""
     sink = console or Console(stderr=True)
     try:
-        from verifiers.cli.plugins.prime import get_plugin  # type: ignore
+        module = importlib.import_module("verifiers.cli.plugins.prime")
     except Exception as exc:
         sink.print(
             "[yellow]Warning:[/yellow] Could not import verifiers prime plugin "
             f"({exc}). Falling back to built-in command mapping."
+        )
+        return PrimeVerifiersPlugin()
+
+    get_plugin = getattr(module, "get_plugin", None)
+    if not callable(get_plugin):
+        sink.print(
+            "[yellow]Warning:[/yellow] verifiers prime plugin module does not expose "
+            "a callable get_plugin(). Falling back to built-in command mapping."
         )
         return PrimeVerifiersPlugin()
 

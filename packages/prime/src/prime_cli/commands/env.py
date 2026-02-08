@@ -34,6 +34,8 @@ from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
 from ..utils.time_utils import format_time_ago, iso_timestamp
+from ..verifiers_bridge import is_help_request, print_env_build_help, print_env_init_help
+from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
 console = Console()
@@ -55,6 +57,11 @@ ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 def _strip_ansi(text: str) -> str:
     """Remove ANSI escape codes from text."""
     return ANSI_ESCAPE.sub("", text)
+
+
+def _uv_pip_command(subcommand: str, *args: str) -> List[str]:
+    """Run uv pip against the workspace interpreter."""
+    return ["uv", "pip", subcommand, "--python", resolve_workspace_python(), *args]
 
 
 def _parse_environment_slug(environment: str) -> Tuple[str, str]:
@@ -1337,39 +1344,66 @@ def push(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True, rich_help_panel="Manage")
+@app.command(
+    no_args_is_help=True,
+    rich_help_panel="Manage",
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+        "help_option_names": [],
+    },
+)
 def init(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Name of the new environment"),
-    path: str = typer.Option(
-        "./environments", "--path", "-p", help="Path to environments directory"
-    ),
-    rewrite_readme: bool = typer.Option(
-        False, "--rewrite-readme", help="Overwrite README.md with template if it already exists"
-    ),
 ) -> None:
-    """Initialize a new verifiers environment from template"""
-    try:
-        # this import is slow, so we do it inside the command
-        from verifiers.scripts.init import init_environment
+    """Initialize a new environment."""
+    passthrough_args = list(ctx.args)
+    if is_help_request(name, passthrough_args):
+        print_env_init_help()
+        raise typer.Exit(0)
 
-        created_path = init_environment(name, path, rewrite_readme)
+    if name.startswith("-"):
+        console.print("[red]Error:[/red] Environment name must be the first argument.")
+        console.print("[dim]Example: prime env init my-env --path ./environments[/dim]")
+        raise typer.Exit(2)
 
-        console.print(f"[green]✓ Created environment template in {created_path}/[/green]")
-        console.print("\nNext steps:")
-        console.print(f"  cd {created_path}")
-        filename = f"{name}.py".replace("-", "_")
-        console.print(f"  # Edit the {filename} file to implement your environment")
-        console.print("  prime env push")
+    plugin = load_verifiers_prime_plugin(console=console)
+    command = plugin.build_module_command(plugin.init_module, [name, *passthrough_args])
+    result = subprocess.run(command)
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
 
-    except FileNotFoundError as e:
-        console.print(f"[red]File not found: {e}[/red]")
-        raise typer.Exit(1)
-    except PermissionError as e:
-        console.print(f"[red]Permission error: {e}[/red]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
+
+@app.command(
+    no_args_is_help=True,
+    rich_help_panel="Manage",
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+        "help_option_names": [],
+    },
+)
+def build(
+    ctx: typer.Context,
+    env_id: str = typer.Argument(..., help="Environment ID (hyphenated, e.g. openenv-echo)"),
+) -> None:
+    """Build an OpenEnv-backed environment image."""
+    passthrough_args = list(ctx.args)
+    if is_help_request(env_id, passthrough_args):
+        print_env_build_help()
+        raise typer.Exit(0)
+
+    if env_id.startswith("-"):
+        console.print("[red]Error:[/red] Environment ID must be the first argument.")
+        console.print("[dim]Example: prime env build openenv-echo --path ./environments[/dim]")
+        raise typer.Exit(2)
+
+    plugin = load_verifiers_prime_plugin(console=console)
+    command = plugin.build_module_command(plugin.build_module, [env_id, *passthrough_args])
+    result = subprocess.run(command)
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
 
 
 @app.command(no_args_is_help=True, rich_help_panel="Manage")
@@ -1711,7 +1745,7 @@ def get_install_command(
         no_upgrade: If True, don't include upgrade flags (preserves locked dependencies)
     """
     if tool == "uv":
-        cmd = ["uv", "pip", "install"]
+        cmd = _uv_pip_command("install")
         if not no_upgrade:
             # Use -P to only upgrade this package, not its dependencies
             cmd.extend(["-P", package_name])
@@ -1894,7 +1928,11 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
         Exception: If installation fails (caller should catch)
     """
     console.print(f"\n[cyan]Installing {env_id}@{version} with {tool}...[/cyan]")
-    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
+
+    display_command = " ".join(cmd)
+    if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2].startswith("verifiers.cli.commands."):
+        display_command = f"prime env install {env_id}"
+    console.print(f"[dim]Command: {display_command}[/dim]")
 
     process = subprocess.Popen(
         cmd,
@@ -1954,6 +1992,7 @@ def install(
     """
     try:
         client = APIClient(require_auth=False)
+        plugin = load_verifiers_prime_plugin(console=console)
 
         # Validate package manager
         if with_tool not in ["uv", "pip"]:
@@ -1991,7 +2030,10 @@ def install(
                 env_path = Path(path) / env_folder
                 if env_path.exists():
                     if with_tool == "uv":
-                        cmd_parts = ["uv", "pip", "install", "-e", str(env_path)]
+                        cmd_parts = plugin.build_module_command(
+                            plugin.install_module,
+                            [local_name, "--path", path],
+                        )
                     else:
                         cmd_parts = ["pip", "install", "-e", str(env_path)]
                     installable_envs.append((cmd_parts, local_name, "local", local_name))
@@ -2045,7 +2087,7 @@ def install(
                     )
                     normalized_name = normalize_package_name(name)
                     if with_tool == "uv":
-                        cmd_parts = ["uv", "pip", "install"]
+                        cmd_parts = _uv_pip_command("install")
                         if not no_upgrade:
                             # Use -P to only upgrade this package, not its dependencies
                             cmd_parts.extend(["-P", normalized_name])
@@ -2141,6 +2183,8 @@ def install(
             for env_id, reason in install_failed_envs:
                 console.print(f"[red]✗ {env_id} - {reason}")
 
+    except typer.Exit:
+        raise
     except APIError as e:
         console.print(f"[red]API Error: {e}[/red]")
         raise typer.Exit(1)
@@ -2691,7 +2735,7 @@ def _is_environment_installed(env_name: str, required_version: Optional[str] = N
     try:
         pkg_name = normalize_package_name(env_name)
         result = subprocess.run(
-            ["uv", "pip", "show", pkg_name],
+            _uv_pip_command("show", pkg_name),
             capture_output=True,
             text=True,
         )
@@ -2735,7 +2779,7 @@ def _build_install_command(
 
     if simple_index_url:
         if tool == "uv":
-            cmd = ["uv", "pip", "install"]
+            cmd = _uv_pip_command("install")
             if not no_upgrade:
                 # Use -P to only upgrade this package, not its dependencies
                 cmd.extend(["-P", normalized_name])
@@ -2777,7 +2821,7 @@ def _build_install_command(
 def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
     """Install a single environment from the hub. Returns True on success."""
     try:
-        env_id, version = validate_env_id(env_slug)
+        env_id, target_version = validate_env_id(env_slug)
     except ValueError as e:
         console.print(f"[red]Invalid environment format: {e}[/red]")
         return False
@@ -2786,7 +2830,7 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
 
     try:
         client = APIClient(require_auth=False)
-        details = fetch_environment_details(client, owner, name, version)
+        details = fetch_environment_details(client, owner, name, target_version)
     except APIError as e:
         console.print(f"[red]Failed to find environment {env_slug}: {e}[/red]")
         return False
@@ -2795,25 +2839,40 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
     wheel_url = process_wheel_url(details.get("wheel_url"))
     url_dependencies = details.get("url_dependencies", [])
 
-    if not simple_index_url and not wheel_url:
-        if details.get("visibility") == "PRIVATE":
-            console.print(
-                f"[red]Cannot install private environment {env_slug}.[/red]\n"
-                "[yellow]Use 'prime env pull' to download and install locally.[/yellow]"
+    # Mirror the same private-environment behavior as `prime env install`.
+    if not simple_index_url and not wheel_url and details.get("visibility") == "PRIVATE":
+        try:
+            wheel_path, resolved_version = _pull_and_build_private_env(
+                client,
+                owner,
+                name,
+                target_version,
+                details,
             )
-        else:
-            console.print(f"[red]No installation method available for {env_slug}[/red]")
+            normalized_name = normalize_package_name(name)
+            if tool == "uv":
+                cmd_parts = _uv_pip_command("install", "-P", normalized_name, str(wheel_path))
+            else:
+                cmd_parts = ["pip", "install", "--upgrade", str(wheel_path)]
+            execute_install_command(cmd_parts, env_id, resolved_version, tool)
+            return True
+        except Exception as e:
+            console.print(f"[red]Failed to install private environment {env_slug}: {e}[/red]")
+            return False
+
+    if not simple_index_url and not wheel_url:
+        console.print(f"[red]No installation method available for {env_slug}[/red]")
         return False
 
     cmd_parts = _build_install_command(
-        name, version, simple_index_url, wheel_url, tool, url_dependencies=url_dependencies
+        name, target_version, simple_index_url, wheel_url, tool, url_dependencies=url_dependencies
     )
     if not cmd_parts:
         console.print(f"[red]Failed to build install command for {env_slug}[/red]")
         return False
 
     try:
-        execute_install_command(cmd_parts, env_id, version, tool)
+        execute_install_command(cmd_parts, env_id, target_version, tool)
         return True
     except Exception as e:
         console.print(f"[red]Installation failed: {e}[/red]")
@@ -2850,7 +2909,7 @@ def run_eval(
     headers: Optional[List[str]] = None,
 ) -> None:
     """
-    Run verifiers' vf-eval with Prime Inference
+    Run an evaluation command with Prime Inference.
     """
     is_slug = (
         "/" in environment and not environment.startswith("./") and not environment.startswith("/")
@@ -2858,7 +2917,7 @@ def run_eval(
 
     upstream_owner = None
     upstream_name = None
-    env_name_for_vf_eval = environment
+    env_name_for_eval = environment
 
     if is_slug:
         env_slug = environment
@@ -2869,7 +2928,7 @@ def run_eval(
         parts = env_slug.split("/")
         if len(parts) == 2 and parts[0] and parts[1]:
             upstream_owner, upstream_name = parts
-            env_name_for_vf_eval = upstream_name
+            env_name_for_eval = upstream_name
             console.print(
                 f"[dim]Using upstream environment {upstream_owner}/{upstream_name}[/dim]\n"
             )
@@ -2934,7 +2993,8 @@ def run_eval(
             )
             raise typer.Exit(1)
 
-    cmd = ["uv", "run", "vf-eval", env_name_for_vf_eval]
+    plugin = load_verifiers_prime_plugin(console=console)
+    cmd = plugin.build_module_command(plugin.eval_module, [env_name_for_eval])
 
     # Add chosen inference url
     cmd += ["-b", inference_url]
@@ -2952,7 +3012,7 @@ def run_eval(
         env["PRIME_API_KEY"] = api_key
         cmd += ["-k", "PRIME_API_KEY"]
 
-    # Forward vf-eval options if provided here
+    # Forward evaluation options if provided here.
     if env_args:
         cmd += ["-a", env_args]
     if extra_env_kwargs:
@@ -3000,14 +3060,14 @@ def run_eval(
     # Generate job_id for end-to-end tracing of eval runs
     eval_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     job_uuid = str(uuid.uuid4())[:8]
-    sanitized_env = env_name_for_vf_eval.replace("-", "_").replace("/", "_")
+    sanitized_env = env_name_for_eval.replace("-", "_").replace("/", "_")
     sanitized_model = model.replace("/", "_").replace("-", "_")
     job_id = f"{sanitized_env}_{sanitized_model}_{eval_timestamp}_{job_uuid}"
 
-    # Pass tracking header to vf-eval
+    # Pass tracking header to the evaluation process.
     cmd += ["--header", f"X-PI-Job-Id: {job_id}"]
 
-    # If a team is configured, pass it to vf-eval via header
+    # If a team is configured, pass it via header.
     if config.team_id:
         cmd += ["--header", f"X-Prime-Team-ID: {config.team_id}"]
 
@@ -3021,7 +3081,7 @@ def run_eval(
     except KeyboardInterrupt:
         raise typer.Exit(130)
     except FileNotFoundError:
-        console.print("[red]Failed to start vf-eval process.[/red]")
+        console.print("[red]Failed to start evaluation process.[/red]")
         raise typer.Exit(1)
 
     # Automatically push to hub after successful eval (unless --skip-upload is used)
@@ -3030,7 +3090,7 @@ def run_eval(
             try:
                 if is_slug and upstream_owner and upstream_name:
                     push_eval_results_to_hub(
-                        env_name=env_name_for_vf_eval,
+                        env_name=env_name_for_eval,
                         model=model,
                         job_id=job_id,
                         env_path=Path(env_path) if env_path else None,
@@ -3039,7 +3099,7 @@ def run_eval(
                 else:
                     check_path = Path(env_path) if env_path else Path.cwd()
                     push_eval_results_to_hub(
-                        env_name=env_name_for_vf_eval,
+                        env_name=env_name_for_eval,
                         model=model,
                         job_id=job_id,
                         env_path=check_path,

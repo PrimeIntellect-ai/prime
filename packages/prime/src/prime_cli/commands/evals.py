@@ -2,7 +2,7 @@ import json
 import re
 from functools import wraps
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 import typer
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
@@ -14,7 +14,12 @@ from typer.core import TyperGroup
 from ..client import APIClient
 from ..utils import output_data_as_json
 from ..utils.eval_push import load_results_jsonl
-from .env import run_eval
+from ..verifiers_bridge import (
+    is_help_request,
+    print_eval_run_help,
+    run_eval_passthrough,
+    run_eval_tui,
+)
 
 console = Console()
 
@@ -385,13 +390,8 @@ def tui_cmd(
         None, "--outputs-dir", "-o", help="Path to outputs directory"
     ),
 ) -> None:
-    """Launch TUI for viewing eval results (passthrough to vf-tui)."""
-    from verifiers.scripts.tui import VerifiersTUI
-
-    env_path = env_dir or "./environments"
-    outputs_path = outputs_dir or "./outputs"
-    tui_app = VerifiersTUI(env_dir_path=env_path, outputs_dir_path=outputs_path)
-    tui_app.run()
+    """Launch TUI for viewing eval results."""
+    run_eval_tui(env_dir=env_dir, outputs_dir=outputs_dir)
 
 
 @subcommands_app.command("push")
@@ -548,90 +548,17 @@ app.add_typer(subcommands_app, name="")
     "run",
     help="Run an evaluation with API models (default provider = Prime Inference)",
     no_args_is_help=True,
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+        "help_option_names": [],
+    },
 )
 def run_eval_cmd(
+    ctx: typer.Context,
     environment: str = typer.Argument(
         ...,
-        help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/wordle')",
-    ),
-    model: str = typer.Option(
-        "openai/gpt-4.1-mini",
-        "--model",
-        "-m",
-        help=(
-            "Model to use (e.g. 'openai/gpt-4.1-mini', 'prime-intellect/intellect-3', "
-            "see 'prime inference models' for available models)"
-        ),
-    ),
-    num_examples: Optional[int] = typer.Option(
-        None, "--num-examples", "-n", help="Number of examples"
-    ),
-    rollouts_per_example: Optional[int] = typer.Option(
-        None, "--rollouts-per-example", "-r", help="Rollouts per example"
-    ),
-    max_concurrent: Optional[int] = typer.Option(
-        32, "--max-concurrent", "-c", help="Max concurrent requests"
-    ),
-    max_concurrent_generation: Optional[int] = typer.Option(
-        None, "--max-concurrent-generation", help="Max concurrent generation requests"
-    ),
-    max_concurrent_scoring: Optional[int] = typer.Option(
-        None, "--max-concurrent-scoring", help="Max concurrent scoring requests"
-    ),
-    max_tokens: Optional[int] = typer.Option(
-        None, "--max-tokens", "-t", help="Max tokens to generate (unset → model default)"
-    ),
-    temperature: Optional[float] = typer.Option(None, "--temperature", "-T", help="Temperature"),
-    sampling_args: Optional[str] = typer.Option(
-        None,
-        "--sampling-args",
-        "-S",
-        help='Sampling args as JSON, e.g. \'{"enable_thinking": false, "max_tokens": 256}\'',
-    ),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
-    no_interleave_scoring: bool = typer.Option(
-        False, "--no-interleave-scoring", "-N", help="Disable interleaving of scoring"
-    ),
-    state_columns: Optional[str] = typer.Option(
-        None,
-        "--state-columns",
-        "-C",
-        help="Comma-separated list of state columns to save (e.g., 'turn,timing')",
-    ),
-    save_results: bool = typer.Option(False, "--save-results", "-s", help="Save results to disk"),
-    save_every: int = typer.Option(-1, "--save-every", "-f", help="Save dataset every n rollouts"),
-    independent_scoring: bool = typer.Option(
-        False,
-        "--independent-scoring",
-        "-R",
-        help="Score each rollout individually instead of scoring by group",
-    ),
-    save_to_hf_hub: bool = typer.Option(False, "--save-to-hf-hub", "-H", help="Save to HF Hub"),
-    hf_hub_dataset_name: Optional[str] = typer.Option(
-        None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
-    ),
-    env_args: Optional[str] = typer.Option(
-        None, "--env-args", "-a", help='Environment args as JSON, e.g. \'{"key":"value"}\''
-    ),
-    extra_env_kwargs: Optional[str] = typer.Option(
-        None,
-        "--extra-env-kwargs",
-        "-x",
-        help='Extra environment kwargs as JSON, e.g. \'{"key":"value"}\'',
-    ),
-    env_dir_path: Optional[str] = typer.Option(
-        None, "--env-dir-path", "-p", help="Path to environments directory"
-    ),
-    api_key_var: Optional[str] = typer.Option(
-        None, "--api-key-var", "-k", help="Override api key variable instead of using PRIME_API_KEY"
-    ),
-    api_base_url: Optional[str] = typer.Option(
-        None,
-        "--api-base-url",
-        "-b",
-        help=(
-            "Override API base URL variable instead of using Prime Inference, should end in '/v1'"
-        ),
+        help="Environment name/slug or TOML config path",
     ),
     skip_upload: bool = typer.Option(
         False,
@@ -646,52 +573,21 @@ def run_eval_cmd(
             "(used to locate .prime/.env-metadata.json for upstream resolution)"
         ),
     ),
-    endpoints_path: Optional[str] = typer.Option(
-        None,
-        "--endpoints-path",
-        "-e",
-        help="Path to endpoints.py file with custom endpoint configurations",
-    ),
-    header: Optional[List[str]] = typer.Option(
-        None,
-        "--header",
-        help="Extra HTTP header for inference API ('Name: Value'). Repeatable.",
-    ),
 ) -> None:
-    """
-    Run verifiers' vf-eval with Prime Inference.
+    """Run an evaluation with local-first environment resolution."""
+    passthrough_args = list(ctx.args)
+    if is_help_request(environment, passthrough_args):
+        print_eval_run_help()
+        raise typer.Exit(0)
 
-    \b
-    Examples:
-        prime eval run primeintellect/wordle -m openai/gpt-4.1-mini -n 5
-        prime eval run wordle -m openai/gpt-4.1-mini -n 2 -r 3 -t 1024 -T 0.7
-    """
-    run_eval(
+    if environment.startswith("-"):
+        console.print("[red]Error:[/red] Environment/config must be the first argument.")
+        console.print("[dim]Example: prime eval run gsm8k -n 10[/dim]")
+        raise typer.Exit(2)
+
+    run_eval_passthrough(
         environment=environment,
-        model=model,
-        num_examples=num_examples,
-        rollouts_per_example=rollouts_per_example,
-        max_concurrent=max_concurrent,
-        max_concurrent_generation=max_concurrent_generation,
-        max_concurrent_scoring=max_concurrent_scoring,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        sampling_args=sampling_args,
-        verbose=verbose,
-        no_interleave_scoring=no_interleave_scoring,
-        state_columns=state_columns,
-        save_results=save_results,
-        save_every=save_every,
-        independent_scoring=independent_scoring,
-        save_to_hf_hub=save_to_hf_hub,
-        hf_hub_dataset_name=hf_hub_dataset_name,
-        env_args=env_args,
-        extra_env_kwargs=extra_env_kwargs,
-        env_dir_path=env_dir_path,
-        api_key_var=api_key_var,
-        api_base_url=api_base_url,
+        passthrough_args=passthrough_args,
         skip_upload=skip_upload,
         env_path=env_path,
-        endpoints_path=endpoints_path,
-        headers=header,
     )

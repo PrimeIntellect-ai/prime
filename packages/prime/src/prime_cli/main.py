@@ -15,7 +15,6 @@ from .commands.images import app as images_app
 from .commands.inference import app as inference_app
 from .commands.lab import app as lab_app
 from .commands.login import app as login_app
-from .commands.models import app as models_app
 from .commands.pods import app as pods_app
 from .commands.registry import app as registry_app
 from .commands.rl import app as rl_app
@@ -38,7 +37,6 @@ app = typer.Typer(
 app.add_typer(deployments_app, name="deployments", rich_help_panel="Lab")
 app.add_typer(env_app, name="env", rich_help_panel="Lab")
 app.add_typer(evals_app, name="eval", rich_help_panel="Lab")
-app.add_typer(models_app, name="models", rich_help_panel="Lab")
 app.add_typer(rl_app, name="rl", rich_help_panel="Lab")
 app.add_typer(lab_app, name="lab", rich_help_panel="Lab")
 

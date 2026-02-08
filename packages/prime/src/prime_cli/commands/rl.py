@@ -47,10 +47,17 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE.sub("", text)
 
 
+# Sentinel to indicate "this is JSON but should be skipped"
+_SKIP_LINE = "__SKIP__"
+
+
 def format_json_log_line(line: str) -> str | None:
     """Parse a JSON log line and format it for CLI display.
 
-    Returns formatted string or None if not a valid JSON log.
+    Returns:
+        - Formatted string for displayable JSON logs
+        - _SKIP_LINE sentinel for JSON logs that should be filtered (e.g., progress)
+        - None if not a valid JSON log (falls back to legacy handling)
     """
     trimmed = line.strip()
     if not trimmed.startswith("{") or not trimmed.endswith("}"):
@@ -65,7 +72,7 @@ def format_json_log_line(line: str) -> str | None:
 
         # Skip progress logs in CLI - they're too spammy
         if entry.get("type") == "progress":
-            return None
+            return _SKIP_LINE
 
         # Format timestamp (extract time portion)
         timestamp = entry.get("timestamp", "")
@@ -126,7 +133,11 @@ def clean_logs(text: str) -> tuple[list[str], bool]:
 
         # Try to parse as JSON log
         formatted = format_json_log_line(line)
-        if formatted is not None:
+        if formatted == _SKIP_LINE:
+            # Valid JSON but should be skipped (e.g., progress logs)
+            json_line_count += 1
+            continue
+        elif formatted is not None:
             formatted_lines.append(formatted)
             json_line_count += 1
         else:

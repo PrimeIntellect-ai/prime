@@ -175,7 +175,6 @@ def create_deployment(
 def delete_deployment(
     ctx: typer.Context,
     model_id: Optional[str] = typer.Argument(None, help="Model ID to unload"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Unload a model from inference.
 
@@ -185,8 +184,6 @@ def delete_deployment(
     Example:
 
         prime deployments delete <model_id>
-
-        prime deployments delete <model_id> --yes
     """
     if model_id is None:
         console.print(ctx.get_help())
@@ -212,20 +209,6 @@ def delete_deployment(
             console.print("[red]Error:[/red] Cannot unload model in current state.")
             console.print(f"Current status: {model.deployment_status}")
             raise typer.Exit(1)
-
-        # Show model details and confirm
-        console.print("[bold]Unloading model:[/bold]")
-        console.print(f"  ID: {model.id}")
-        if model.display_name:
-            console.print(f"  Name: {model.display_name}")
-        console.print(f"  Base Model: {model.base_model}")
-        console.print()
-
-        if not yes:
-            confirm = typer.confirm("Are you sure you want to unload this model?")
-            if not confirm:
-                console.print("Cancelled.")
-                raise typer.Exit(0)
 
         # Unload the model
         updated_model = deployments_client.unload_adapter(model_id)

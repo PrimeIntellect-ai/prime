@@ -1,5 +1,7 @@
+import asyncio
 import json
 import re
+import time
 from functools import wraps
 from pathlib import Path
 from typing import Optional
@@ -12,8 +14,18 @@ from rich.table import Table
 from typer.core import TyperGroup
 
 from ..client import APIClient
+from ..core import APIError, AsyncAPIClient
 from ..utils import output_data_as_json
+from ..utils.display import get_eval_viewer_url
 from ..utils.eval_push import load_results_jsonl
+from ..utils.hosted_eval import (
+    clean_logs,
+    get_evaluation,
+    get_evaluation_logs,
+    get_new_log_lines,
+    stop_hosted_evaluation,
+)
+from ..utils.schemas import EvalStatus
 from ..verifiers_bridge import (
     print_eval_run_help,
     run_eval_passthrough,
@@ -194,6 +206,136 @@ def get_samples(
     client = EvalsClient(api_client)
     data = client.get_samples(eval_id, page=page, limit=limit)
     format_output(data, output)
+
+
+def _fetch_logs(eval_id: str) -> str:
+    async def _fetch():
+        async with AsyncAPIClient() as client:
+            return await get_evaluation_logs(client, eval_id)
+
+    return asyncio.run(_fetch())
+
+
+def _fetch_eval_status(eval_id: str) -> dict:
+    async def _fetch():
+        async with AsyncAPIClient() as client:
+            return await get_evaluation(client, eval_id)
+
+    return asyncio.run(_fetch())
+
+
+def _print_eval_status(eval_data: dict) -> None:
+    status_str = eval_data.get("status")
+    try:
+        status = EvalStatus(status_str)
+        color = status.color
+    except ValueError:
+        color = "white"
+
+    eval_id = eval_data.get("evaluation_id", eval_data.get("id", ""))
+    console.print(f"[{color}]Status: {status_str}[/{color}]")
+
+    error_message = eval_data.get("error_message")
+    if error_message:
+        console.print(f"[red]Error: {error_message}[/red]")
+
+    if eval_id:
+        viewer_url = get_eval_viewer_url(eval_id, eval_data.get("viewer_url"))
+        console.print(f"[dim]View: {viewer_url}[/dim]")
+
+
+def _display_logs(eval_id: str, tail: int, follow: bool) -> None:
+    try:
+        if follow:
+            console.print(
+                f"[dim]Watching logs for evaluation {eval_id}... (Ctrl+C to stop)[/dim]\n"
+            )
+            last_logs = ""
+            consecutive_errors = 0
+            no_logs_polls = 0
+
+            while True:
+                try:
+                    eval_data = _fetch_eval_status(eval_id)
+                    status_str = eval_data.get("status")
+                    try:
+                        status = EvalStatus(status_str)
+                    except ValueError:
+                        status = None
+
+                    if status:
+                        color = status.color
+                        total_samples = eval_data.get("total_samples", 0)
+                        console.print(
+                            f"[{color}]Status: {status_str}[/{color}] | Samples: {total_samples}"
+                        )
+
+                    raw_logs = _fetch_logs(eval_id)
+                    logs = clean_logs(raw_logs) if raw_logs else ""
+
+                    if logs and logs != last_logs:
+                        no_logs_polls = 0
+                        new_lines = get_new_log_lines(last_logs, logs)
+                        if new_lines:
+                            if len(new_lines) > tail:
+                                new_lines = new_lines[-tail:]
+                            for line in new_lines:
+                                console.print(line)
+                        last_logs = logs
+                    elif not logs:
+                        no_logs_polls += 1
+                        if no_logs_polls <= 3:
+                            console.print(
+                                "[dim]Waiting for logs (container may still be starting)...[/dim]"
+                            )
+
+                    consecutive_errors = 0
+
+                    if status and status in EvalStatus.terminal_statuses():
+                        console.print()
+                        console.print("[bold]Evaluation completed[/bold]")
+                        _print_eval_status(eval_data)
+                        if status != EvalStatus.COMPLETED:
+                            raise typer.Exit(1)
+                        return
+
+                except APIError as e:
+                    consecutive_errors += 1
+                    if "429" in str(e):
+                        if consecutive_errors >= 3:
+                            console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
+                            time.sleep(30)
+                        else:
+                            time.sleep(10)
+                        continue
+                    raise
+
+                time.sleep(5)
+        else:
+            eval_data = _fetch_eval_status(eval_id)
+            raw_logs = _fetch_logs(eval_id)
+            logs = clean_logs(raw_logs) if raw_logs else ""
+
+            if logs:
+                lines = logs.splitlines()
+                if len(lines) > tail:
+                    lines = lines[-tail:]
+                for line in lines:
+                    console.print(line)
+            else:
+                console.print("[yellow]No logs available.[/yellow]")
+
+            console.print()
+            _print_eval_status(eval_data)
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped watching logs. Evaluation continues running.[/dim]")
+        console.print(f"[dim]To stop the evaluation: prime eval stop {eval_id}[/dim]")
+    except typer.Exit:
+        raise
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
 
 def _load_eval_directory(directory: Path) -> dict:
@@ -543,6 +685,110 @@ app = typer.Typer(
 app.add_typer(subcommands_app, name="")
 
 
+@app.command("logs", no_args_is_help=True)
+def logs_cmd(
+    eval_id: str = typer.Argument(..., help="Evaluation id to get logs for"),
+    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+) -> None:
+    """Get logs for a hosted evaluation."""
+    _display_logs(eval_id, tail, follow)
+
+
+@app.command("pull", no_args_is_help=True)
+def pull_cmd(
+    eval_id: str = typer.Argument(..., help="Evaluation id to pull"),
+    output_dir: Optional[str] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output directory (defaults to outputs/evals/<env>--<model>/<eval_id>)",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite existing files",
+    ),
+) -> None:
+    """Pull evaluation results in verifiers format.
+
+    Downloads evaluation metadata and results from the platform
+    and saves them in the verifiers format (metadata.json + results.jsonl).
+    """
+    try:
+        api_client = APIClient()
+
+        console.print(f"[blue]Fetching evaluation {eval_id}...[/blue]")
+
+        try:
+            eval_data = _fetch_eval_status(eval_id)
+            status = eval_data.get("status")
+            if status != "COMPLETED":
+                console.print(f"[red]Cannot pull evaluation with status {status}.[/red]")
+                console.print("[dim]Only completed evaluations can be pulled.[/dim]")
+                raise typer.Exit(1)
+        except APIError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(1)
+
+        try:
+            export_data = api_client.get(f"/evaluations/{eval_id}/export")
+        except APIError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(1)
+
+        metadata = export_data.get("metadata", {})
+        results = export_data.get("results", [])
+
+        if output_dir:
+            out_path = Path(output_dir)
+        else:
+            env_id = metadata.get("env_id", "unknown")
+            model = metadata.get("model", "unknown")
+            env_safe = re.sub(r"[^\w\-]", "_", str(env_id))
+            model_safe = re.sub(r"[^\w\-]", "_", str(model))
+            out_path = Path(f"outputs/evals/{env_safe}--{model_safe}/{eval_id}")
+
+        if out_path.exists() and not force:
+            if (out_path / "metadata.json").exists() or (out_path / "results.jsonl").exists():
+                console.print(
+                    f"[yellow]Warning:[/yellow] Output directory already exists: {out_path}"
+                )
+                console.print("[yellow]Use --force to overwrite existing files[/yellow]")
+                raise typer.Exit(1)
+
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        metadata_path = out_path / "metadata.json"
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2, default=str)
+        console.print(f"[green]✓[/green] Wrote {metadata_path}")
+
+        results_path = out_path / "results.jsonl"
+        with open(results_path, "w") as f:
+            for result in results:
+                f.write(json.dumps(result, default=str) + "\n")
+        console.print(f"[green]✓[/green] Wrote {results_path} ({len(results)} samples)")
+
+        console.print()
+        console.print(f"[green]✓ Successfully pulled evaluation to:[/green] {out_path}")
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command("stop", no_args_is_help=True)
+def stop_cmd(
+    eval_id: str = typer.Argument(..., help="Evaluation id to stop"),
+) -> None:
+    """Stop a running hosted evaluation."""
+    stop_hosted_evaluation(eval_id)
+
+
 @app.command(
     "run",
     help="Run an evaluation with API models (default provider = Prime Inference)",
@@ -577,7 +823,11 @@ def run_eval_cmd(
         ),
     ),
 ) -> None:
-    """Run an evaluation with local-first environment resolution."""
+    """Run an evaluation with local-first environment resolution.
+
+    Hosted mode is forwarded via backend flags, e.g.
+    `prime eval run primeintellect/gsm8k --hosted --follow`.
+    """
     passthrough_args = list(ctx.args)
     if backend_help:
         print_eval_run_help()

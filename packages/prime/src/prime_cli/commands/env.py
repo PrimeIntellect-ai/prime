@@ -33,7 +33,12 @@ from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
 from ..utils.formatters import strip_ansi as _strip_ansi
-from ..utils.prompt import any_provided, prompt_for_value, select_item_interactive
+from ..utils.prompt import (
+    any_provided,
+    prompt_for_value,
+    select_item_interactive,
+    validate_env_var_name,
+)
 from ..utils.time_utils import format_time_ago, iso_timestamp
 from ..verifiers_bridge import print_env_build_help, print_env_init_help
 from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
@@ -3399,30 +3404,31 @@ def env_secret_create(
                 console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
+        if not validate_env_var_name(name, "secret"):
+            raise typer.Exit(1)
+
         if not value:
             value = prompt_for_value("Secret value", hide_input=True)
             if not value:
                 console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
-        client = APIClient()
-        env_id = _get_environment_id(client, owner, env_name)
+        with console.status("[bold blue]Creating secret...", spinner="dots"):
+            client = APIClient()
+            env_id = _get_environment_id(client, owner, env_name)
 
-        payload: Dict[str, Any] = {"name": name, "value": value}
-        if description:
-            payload["description"] = description
+            payload: Dict[str, Any] = {"name": name, "value": value}
+            if description:
+                payload["description"] = description
 
-        response = client.post(f"/environmentshub/{env_id}/secrets", json=payload)
-        secret = response.get("data", {})
+            response = client.post(f"/environmentshub/{env_id}/secrets", json=payload)
+            secret = response.get("data", {})
 
         if output == "json":
             output_data_as_json(secret, console)
             return
 
-        stored_name = secret.get("name", name)
-        console.print(f"[green]✓ Created secret '{stored_name}' for {owner}/{env_name}[/green]")
-        if stored_name != name:
-            console.print(f"[dim]Note: Name was normalized from '{name}'[/dim]")
+        console.print(f"[green]✓ Created secret '{name}' for {owner}/{env_name}[/green]")
         console.print(f"[dim]ID: {secret.get('id')}[/dim]")
 
     except KeyboardInterrupt:
@@ -3807,14 +3813,14 @@ def var_create(
         None,
         help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
-    name: str = typer.Option(
-        ...,
+    name: Optional[str] = typer.Option(
+        None,
         "--name",
         "-n",
         help="Variable name (must be uppercase with underscores, e.g., MY_VAR)",
     ),
-    value: str = typer.Option(
-        ...,
+    value: Optional[str] = typer.Option(
+        None,
         "--value",
         "-v",
         help="Variable value",
@@ -3837,15 +3843,31 @@ def var_create(
     owner, env_name = _resolve_environment(environment)
 
     try:
-        client = APIClient()
-        env_id = _get_environment_id(client, owner, env_name)
+        if not name:
+            name = prompt_for_value("Variable name")
+            if not name:
+                console.print("\n[dim]Cancelled.[/dim]")
+                raise typer.Exit()
 
-        payload: Dict[str, Any] = {"name": name, "value": value}
-        if description:
-            payload["description"] = description
+        if not validate_env_var_name(name, "variable"):
+            raise typer.Exit(1)
 
-        response = client.post(f"/environmentshub/{env_id}/variables", json=payload)
-        var = response.get("data", {})
+        if not value:
+            value = prompt_for_value("Variable value")
+            if not value:
+                console.print("\n[dim]Cancelled.[/dim]")
+                raise typer.Exit()
+
+        with console.status("[bold blue]Creating variable...", spinner="dots"):
+            client = APIClient()
+            env_id = _get_environment_id(client, owner, env_name)
+
+            payload: Dict[str, Any] = {"name": name, "value": value}
+            if description:
+                payload["description"] = description
+
+            response = client.post(f"/environmentshub/{env_id}/variables", json=payload)
+            var = response.get("data", {})
 
         if output == "json":
             output_data_as_json(var, console)
@@ -3854,6 +3876,9 @@ def var_create(
         console.print(f"[green]✓ Created variable '{name}' for {owner}/{env_name}[/green]")
         console.print(f"[dim]ID: {var.get('id')}[/dim]")
 
+    except KeyboardInterrupt:
+        console.print("\n[dim]Cancelled.[/dim]")
+        raise typer.Exit()
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

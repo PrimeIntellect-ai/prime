@@ -1,9 +1,24 @@
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 import typer
 from rich.console import Console
 
 console = Console()
+
+_ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def validate_env_var_name(name: str, item_type: str = "secret") -> bool:
+    if _ENV_VAR_NAME_PATTERN.match(name):
+        return True
+
+    console.print(f"[red]Invalid {item_type} name: '{name}'[/red]")
+    console.print(
+        f"[dim]{item_type.capitalize()} names must be uppercase letters, digits, "
+        "and underscores, starting with a letter (e.g., MY_SECRET, API_KEY_2).[/dim]"
+    )
+    return False
 
 
 def confirm_or_skip(message: str, yes_flag: bool, default: bool = False) -> bool:

@@ -11,7 +11,13 @@ from .formatters import (
     obfuscate_secrets,
     strip_ansi,
 )
-from .prompt import any_provided, confirm_or_skip, prompt_for_value, select_item_interactive
+from .prompt import (
+    any_provided,
+    confirm_or_skip,
+    prompt_for_value,
+    select_item_interactive,
+    validate_env_var_name,
+)
 from .time_utils import human_age, iso_timestamp, sort_by_created
 
 __all__ = [
@@ -32,6 +38,7 @@ __all__ = [
     "confirm_or_skip",
     "prompt_for_value",
     "select_item_interactive",
+    "validate_env_var_name",
     "load_toml",
     "BaseConfig",
 ]

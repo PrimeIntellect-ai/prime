@@ -8,7 +8,12 @@ from prime_cli.core import Config
 
 from ..client import APIClient, APIError
 from ..utils import output_data_as_json, validate_output_format
-from ..utils.prompt import any_provided, prompt_for_value, select_item_interactive
+from ..utils.prompt import (
+    any_provided,
+    prompt_for_value,
+    select_item_interactive,
+    validate_env_var_name,
+)
 from ..utils.time_utils import format_time_ago
 
 app = typer.Typer(help="Manage global secrets", no_args_is_help=True)
@@ -116,6 +121,9 @@ def secret_create(
                 console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
+        if not validate_env_var_name(name, "secret"):
+            raise typer.Exit(1)
+
         if not value:
             value = prompt_for_value("Secret value", hide_input=True)
             if not value:
@@ -140,11 +148,8 @@ def secret_create(
             output_data_as_json(secret, console)
             return
 
-        stored_name = secret.get("name", name)
         scope = "team" if config.team_id else "personal"
-        console.print(f"[green]✓ Created {scope} secret '{stored_name}'[/green]")
-        if stored_name != name:
-            console.print(f"[dim]Note: Name was normalized from '{name}'[/dim]")
+        console.print(f"[green]✓ Created {scope} secret '{name}'[/green]")
         console.print(f"[dim]ID: {secret.get('id')}[/dim]")
 
     except KeyboardInterrupt:

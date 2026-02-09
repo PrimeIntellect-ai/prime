@@ -199,23 +199,48 @@ class TestEnvVarCreate:
         assert output["name"] == "NEW_VAR"
         assert "id" in output
 
-    def test_create_variable_missing_name(self) -> None:
-        """Test that create fails without name."""
+    def test_create_variable_interactive_cancel_name(self) -> None:
+        """Test that create can be cancelled during name prompt."""
         result = runner.invoke(
             app,
-            ["env", "var", "create", "testuser/test-env", "-v", "value"],
+            ["env", "var", "create", "testuser/test-env"],
+            input="\n",
         )
 
-        assert result.exit_code != 0
+        assert result.exit_code == 0
+        assert "Cancelled" in result.output
 
-    def test_create_variable_missing_value(self) -> None:
-        """Test that create fails without value."""
+    def test_create_variable_interactive_cancel_value(self, mock_env_var_api: None) -> None:
+        """Test that create can be cancelled during value prompt."""
         result = runner.invoke(
             app,
             ["env", "var", "create", "testuser/test-env", "-n", "NEW_VAR"],
+            input="\n",
+        )
+
+        assert result.exit_code == 0
+        assert "Cancelled" in result.output
+
+    def test_create_variable_interactive(self, mock_env_var_api: None) -> None:
+        """Test creating a variable interactively."""
+        result = runner.invoke(
+            app,
+            ["env", "var", "create", "testuser/test-env"],
+            input="NEW_VAR\nmy-value\n",
+        )
+
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        assert "Created variable 'NEW_VAR'" in result.output
+
+    def test_create_variable_invalid_name(self, mock_env_var_api: None) -> None:
+        """Test that create rejects invalid variable names."""
+        result = runner.invoke(
+            app,
+            ["env", "var", "create", "testuser/test-env", "-n", "lowercase", "-v", "value"],
         )
 
         assert result.exit_code != 0
+        assert "Invalid variable name" in result.output
 
 
 class TestEnvVarUpdate:

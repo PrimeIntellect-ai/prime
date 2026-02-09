@@ -215,7 +215,6 @@ def list_images(
         table = Table(title="Your Docker Images")
         table.add_column("Image Reference", style="cyan")
         table.add_column("Status", justify="center")
-        table.add_column("Failure Reason", style="yellow")
         table.add_column("Size", justify="right")
         table.add_column("Created", style="dim")
 
@@ -256,14 +255,7 @@ def list_images(
                 or f"{img.get('imageName', 'unknown')}:{img.get('imageTag', 'latest')}"
             )
 
-            # Failure reason (if available)
-            failure_reason = ""
-            if status in {"FAILED", "CANCELLED"}:
-                failure_reason = img.get("errorMessage") or ""
-                if len(failure_reason) > 100:
-                    failure_reason = f"{failure_reason[:97]}..."
-
-            table.add_row(image_ref, status_display, failure_reason, size_mb, date_str)
+            table.add_row(image_ref, status_display, size_mb, date_str)
 
         console.print()
         console.print(table)

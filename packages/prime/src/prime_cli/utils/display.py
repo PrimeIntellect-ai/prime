@@ -1,11 +1,13 @@
 """Display utilities for table and JSON output."""
 
 import json
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import typer
 from rich.console import Console
 from rich.table import Table
+
+from ..core.config import Config
 
 
 def validate_output_format(output: str, console: Console) -> None:
@@ -74,3 +76,11 @@ DISK_STATUS_COLORS = {
     "ERROR": "red",
     "TERMINATED": "white",
 }
+
+
+def get_eval_viewer_url(eval_id: str, viewer_url: Optional[str] = None) -> str:
+    """Return viewer URL for an evaluation."""
+    if viewer_url:
+        return viewer_url
+    config = Config()
+    return f"{config.frontend_url}/dashboard/evaluations/{eval_id}"

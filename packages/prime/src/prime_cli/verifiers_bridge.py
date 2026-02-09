@@ -500,7 +500,7 @@ def _resolve_environment_reference(env_reference: str, env_dir_path: str) -> Res
             install_mode="remote",
             install_slug=install_slug,
             upstream_slug=upstream_slug,
-            env_display_id=upstream_slug,
+            env_display_id=install_slug,
             platform_slug=upstream_slug,
             platform_url=_environment_url_from_slug(upstream_slug),
         )
@@ -592,7 +592,7 @@ def _resolve_environment_reference(env_reference: str, env_dir_path: str) -> Res
         install_mode="remote",
         install_slug=install_slug,
         upstream_slug=upstream_slug,
-        env_display_id=upstream_slug,
+        env_display_id=install_slug,
         platform_slug=upstream_slug,
         platform_url=_environment_url_from_slug(upstream_slug),
     )
@@ -731,7 +731,7 @@ def _collect_gepa_config_env(config_path: Path, fallback_env_dir: str) -> Option
 
 
 def _add_default_inference_and_key_args(
-    passthrough_args: list[str], config: Config
+    passthrough_args: list[str], config: Config, *, require_base_url: bool = True
 ) -> tuple[list[str], dict[str, str], str, str]:
     args = list(passthrough_args)
     env = os.environ.copy()
@@ -744,11 +744,13 @@ def _add_default_inference_and_key_args(
     elif configured_base:
         base = configured_base
         args.extend(["-b", base])
-    else:
+    elif require_base_url:
         console.print(
             "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
         )
         raise typer.Exit(1)
+    else:
+        base = ""
 
     api_key_var = _parse_value_option(args, "--api-key-var", "-k")
     if api_key_var is None:
@@ -822,6 +824,7 @@ def run_eval_passthrough(
 ) -> None:
     plugin = load_verifiers_prime_plugin(console=console)
     config = Config()
+    hosted_requested = _has_flag(passthrough_args, "--hosted", "")
 
     if not config.api_key:
         console.print(
@@ -830,8 +833,13 @@ def run_eval_passthrough(
         )
         raise typer.Exit(1)
 
-    args, env, model, base_url = _add_default_inference_and_key_args(passthrough_args, config)
-    _validate_model(model, base_url, (config.inference_url or "").strip().rstrip("/"))
+    args, env, model, base_url = _add_default_inference_and_key_args(
+        passthrough_args,
+        config,
+        require_base_url=not hosted_requested,
+    )
+    if not hosted_requested:
+        _validate_model(model, base_url, (config.inference_url or "").strip().rstrip("/"))
 
     env_dir_path = _parse_value_option(args, "--env-dir-path", "-p") or DEFAULT_ENV_DIR_PATH
     run_target = environment
@@ -844,7 +852,10 @@ def run_eval_passthrough(
             _prepare_single_environment(plugin, env_ref, ref_env_dir)
     else:
         resolved_env = _prepare_single_environment(plugin, environment, env_dir_path)
-        run_target = resolved_env.env_name
+        if hosted_requested and resolved_env.install_slug:
+            run_target = resolved_env.install_slug
+        else:
+            run_target = resolved_env.env_name
         upstream_slug = resolved_env.upstream_slug
         env_name_for_upload = resolved_env.env_name
         if resolved_env.env_display_id:
@@ -852,7 +863,7 @@ def run_eval_passthrough(
                 ["--header", f"{INTERNAL_ENV_DISPLAY_HEADER}: {resolved_env.env_display_id}"]
             )
 
-    if not skip_upload and not _has_flag(args, "--save-results", "-s"):
+    if not hosted_requested and not skip_upload and not _has_flag(args, "--save-results", "-s"):
         args.append("-s")
 
     job_target = env_name_for_upload or Path(environment).stem
@@ -865,6 +876,11 @@ def run_eval_passthrough(
     console.print(f"[dim]Eval job_id: {job_id}[/dim]")
     command = plugin.build_module_command(plugin.eval_module, [run_target, *args])
     _run_command(command, env=env)
+
+    if hosted_requested:
+        _print_environment_source_footer(resolved_env)
+        console.print("[dim]Hosted evaluation submitted. Skipping local results upload.[/dim]")
+        return
 
     if skip_upload:
         _print_environment_source_footer(resolved_env)

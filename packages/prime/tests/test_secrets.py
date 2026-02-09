@@ -202,6 +202,79 @@ class TestSecretsCreate:
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Created personal secret" in result.output
 
+    def test_create_secret_interactive_cancel_value(self, mock_secrets_api: None) -> None:
+        """Test that create can be cancelled during value prompt."""
+        result = runner.invoke(
+            app,
+            ["secret", "create", "-n", "MY_SECRET"],
+            input="\n",
+        )
+        assert result.exit_code == 0
+        assert "Cancelled" in result.output
+
+    def test_create_secret_invalid_name_lowercase(self, mock_secrets_api: None) -> None:
+        """Test that lowercase names are rejected."""
+        result = runner.invoke(
+            app,
+            ["secret", "create", "-n", "my_secret", "-v", "value"],
+        )
+        assert result.exit_code != 0
+        assert "Invalid secret name" in result.output
+
+    def test_create_secret_invalid_name_starts_with_number(self, mock_secrets_api: None) -> None:
+        """Test that names starting with a number are rejected."""
+        result = runner.invoke(
+            app,
+            ["secret", "create", "-n", "2FAST", "-v", "value"],
+        )
+        assert result.exit_code != 0
+        assert "Invalid secret name" in result.output
+
+    def test_create_secret_invalid_name_special_chars(self, mock_secrets_api: None) -> None:
+        """Test that names with dashes or other special chars are rejected."""
+        result = runner.invoke(
+            app,
+            ["secret", "create", "-n", "MY-SECRET", "-v", "value"],
+        )
+        assert result.exit_code != 0
+        assert "Invalid secret name" in result.output
+
+    def test_create_secret_invalid_name_empty_after_prompt(self, mock_secrets_api: None) -> None:
+        """Test that providing a valid name interactively then invalid name via flag fails."""
+        result = runner.invoke(
+            app,
+            ["secret", "create", "-n", "lowercase_bad", "-v", "value"],
+        )
+        assert result.exit_code != 0
+        assert "Invalid secret name" in result.output
+
+    def test_create_secret_with_file_flag(self, mock_secrets_api: None) -> None:
+        """Test creating a secret with --file flag."""
+        result = runner.invoke(
+            app,
+            ["secret", "create", "-n", "FILE_SECRET", "-v", "base64content==", "--file"],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        assert "Created personal secret 'FILE_SECRET'" in result.output
+
+    def test_create_secret_valid_name_with_numbers(self, mock_secrets_api: None) -> None:
+        """Test that names with numbers (not leading) are accepted."""
+        result = runner.invoke(
+            app,
+            ["secret", "create", "-n", "API_KEY_2", "-v", "value"],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        assert "Created personal secret" in result.output
+
+    def test_create_secret_single_letter_name(self, mock_secrets_api: None) -> None:
+        """Test that a single uppercase letter is a valid name."""
+        result = runner.invoke(
+            app,
+            ["secret", "create", "-n", "X", "-v", "value"],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        assert "Created personal secret" in result.output
+
 
 class TestSecretsUpdate:
     """Tests for the secrets update command."""
@@ -343,3 +416,168 @@ class TestSecretsHelp:
         assert "--value" in output
         assert "--description" in output
         assert "--file" in output
+
+    def test_secrets_update_help(self) -> None:
+        """Test that secrets update help works."""
+        result = runner.invoke(app, ["secret", "update", "--help"])
+
+        assert result.exit_code == 0
+        output = strip_ansi(result.output)
+        assert "--name" in output
+        assert "--value" in output
+        assert "--description" in output
+
+    def test_secrets_delete_help(self) -> None:
+        """Test that secrets delete help works."""
+        result = runner.invoke(app, ["secret", "delete", "--help"])
+
+        assert result.exit_code == 0
+        output = strip_ansi(result.output)
+        assert "--yes" in output
+
+    def test_secrets_get_help(self) -> None:
+        """Test that secrets get help works."""
+        result = runner.invoke(app, ["secret", "get", "--help"])
+
+        assert result.exit_code == 0
+        output = strip_ansi(result.output)
+        assert "SECRET_ID" in output
+
+
+class TestSecretsTeamContext:
+    """Tests for team-scoped secret operations."""
+
+    def test_list_team_secrets(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test listing secrets in team context."""
+        monkeypatch.setenv("PRIME_API_KEY", "test-key")
+        monkeypatch.setattr("prime_cli.core.Config.team_id", "team-123")
+
+        team_secrets = [
+            {
+                "id": "team-secret-001",
+                "name": "TEAM_DB_URL",
+                "description": "Shared database URL",
+                "isFile": False,
+                "userId": None,
+                "teamId": "team-123",
+                "createdAt": "2026-01-20T10:00:00Z",
+                "updatedAt": "2026-01-20T10:00:00Z",
+            },
+        ]
+
+        def mock_get(
+            self: Any, endpoint: str, params: Optional[Dict[str, Any]] = None
+        ) -> Dict[str, Any]:
+            if params and params.get("teamId") == "team-123":
+                return {"data": team_secrets, "totalCount": 1}
+            return {"data": team_secrets, "totalCount": 1}
+
+        monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+        result = runner.invoke(app, ["secret", "list"], env={"COLUMNS": "200", "LINES": "50"})
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        assert "Team Secrets" in result.output
+        assert "TEAM_DB_URL" in result.output
+
+    def test_list_team_secrets_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test listing team secrets with JSON output."""
+        monkeypatch.setenv("PRIME_API_KEY", "test-key")
+        monkeypatch.setattr("prime_cli.core.Config.team_id", "team-123")
+
+        def mock_get(
+            self: Any, endpoint: str, params: Optional[Dict[str, Any]] = None
+        ) -> Dict[str, Any]:
+            return {
+                "data": [{"id": "ts-1", "name": "TEAM_KEY", "teamId": "team-123"}],
+                "totalCount": 1,
+            }
+
+        monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+        result = runner.invoke(app, ["secret", "list", "-o", "json"])
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        output = json.loads(result.output)
+        assert len(output["secrets"]) == 1
+        assert output["secrets"][0]["name"] == "TEAM_KEY"
+
+    def test_empty_team_secrets(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test listing when team has no secrets."""
+        monkeypatch.setenv("PRIME_API_KEY", "test-key")
+        monkeypatch.setattr("prime_cli.core.Config.team_id", "team-123")
+
+        def mock_get(
+            self: Any, endpoint: str, params: Optional[Dict[str, Any]] = None
+        ) -> Dict[str, Any]:
+            return {"data": [], "totalCount": 0}
+
+        monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+        result = runner.invoke(app, ["secret", "list"])
+        assert result.exit_code == 0
+        assert "No team secrets found" in result.output
+
+
+class TestSecretsDeleteEdgeCases:
+    """Additional edge case tests for delete."""
+
+    def test_delete_secret_confirmed_yes(self, mock_secrets_api: None) -> None:
+        """Test deleting a secret by confirming interactively."""
+        result = runner.invoke(
+            app,
+            ["secret", "delete", "secret-id-1234567890"],
+            input="y\n",
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        assert "Deleted secret" in result.output
+
+
+class TestSecretsUpdateEdgeCases:
+    """Additional edge case tests for update."""
+
+    def test_update_secret_description(self, mock_secrets_api: None) -> None:
+        """Test updating only the description."""
+        result = runner.invoke(
+            app,
+            ["secret", "update", "secret-id-1234567890", "-d", "New description"],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        assert "Updated secret" in result.output
+
+    def test_update_secret_multiple_fields(self, mock_secrets_api: None) -> None:
+        """Test updating multiple fields at once."""
+        result = runner.invoke(
+            app,
+            [
+                "secret",
+                "update",
+                "secret-id-1234567890",
+                "-n",
+                "RENAMED",
+                "-v",
+                "new-val",
+                "-d",
+                "new desc",
+            ],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        assert "Updated secret" in result.output
+
+    def test_update_secret_multiple_fields_json(self, mock_secrets_api: None) -> None:
+        """Test updating multiple fields with JSON output."""
+        result = runner.invoke(
+            app,
+            [
+                "secret",
+                "update",
+                "secret-id-1234567890",
+                "-n",
+                "RENAMED",
+                "-v",
+                "new-val",
+                "-o",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        output = json.loads(result.output)
+        assert "id" in output

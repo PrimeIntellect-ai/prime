@@ -242,6 +242,53 @@ class TestEnvVarCreate:
         assert result.exit_code != 0
         assert "Invalid variable name" in result.output
 
+    def test_create_variable_invalid_name_starts_with_number(self, mock_env_var_api: None) -> None:
+        """Test that names starting with a number are rejected."""
+        result = runner.invoke(
+            app,
+            ["env", "var", "create", "testuser/test-env", "-n", "3RD_VAR", "-v", "value"],
+        )
+        assert result.exit_code != 0
+        assert "Invalid variable name" in result.output
+
+    def test_create_variable_invalid_name_with_dash(self, mock_env_var_api: None) -> None:
+        """Test that names with dashes are rejected."""
+        result = runner.invoke(
+            app,
+            ["env", "var", "create", "testuser/test-env", "-n", "MY-VAR", "-v", "value"],
+        )
+        assert result.exit_code != 0
+        assert "Invalid variable name" in result.output
+
+    def test_create_variable_valid_name_with_numbers(self, mock_env_var_api: None) -> None:
+        """Test that names with numbers (not leading) are accepted."""
+        result = runner.invoke(
+            app,
+            ["env", "var", "create", "testuser/test-env", "-n", "VAR_2", "-v", "value"],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        assert "Created variable" in result.output
+
+    def test_create_variable_invalid_output_format(self, mock_env_var_api: None) -> None:
+        """Test creating with an invalid output format."""
+        result = runner.invoke(
+            app,
+            [
+                "env",
+                "var",
+                "create",
+                "testuser/test-env",
+                "-n",
+                "NEW_VAR",
+                "-v",
+                "val",
+                "-o",
+                "yaml",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "Invalid output format" in result.output
+
 
 class TestEnvVarUpdate:
     """Tests for the env var update command."""
@@ -255,7 +302,6 @@ class TestEnvVarUpdate:
                 "var",
                 "update",
                 "var-id-1234567890",
-                "--env",
                 "testuser/test-env",
                 "-n",
                 "RENAMED_VAR",
@@ -274,7 +320,6 @@ class TestEnvVarUpdate:
                 "var",
                 "update",
                 "var-id-1234567890",
-                "--env",
                 "testuser/test-env",
                 "-v",
                 "new-value",
@@ -288,7 +333,7 @@ class TestEnvVarUpdate:
         """Test that update fails when no changes are provided."""
         result = runner.invoke(
             app,
-            ["env", "var", "update", "var-id-1234567890", "--env", "testuser/test-env"],
+            ["env", "var", "update", "var-id-1234567890", "testuser/test-env"],
         )
 
         assert result.exit_code == 1
@@ -303,7 +348,6 @@ class TestEnvVarUpdate:
                 "var",
                 "update",
                 "var-id-1234567890",
-                "--env",
                 "testuser/test-env",
                 "-n",
                 "NEW_NAME",
@@ -316,6 +360,44 @@ class TestEnvVarUpdate:
         output = json.loads(result.output)
         assert "id" in output
 
+    def test_update_variable_description(self, mock_env_var_api: None) -> None:
+        """Test updating only the description."""
+        result = runner.invoke(
+            app,
+            [
+                "env",
+                "var",
+                "update",
+                "var-id-1234567890",
+                "testuser/test-env",
+                "-d",
+                "New description for the var",
+            ],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        assert "Updated variable" in result.output
+
+    def test_update_variable_multiple_fields(self, mock_env_var_api: None) -> None:
+        """Test updating name, value, and description together."""
+        result = runner.invoke(
+            app,
+            [
+                "env",
+                "var",
+                "update",
+                "var-id-1234567890",
+                "testuser/test-env",
+                "-n",
+                "RENAMED_VAR",
+                "-v",
+                "new-value",
+                "-d",
+                "New description",
+            ],
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        assert "Updated variable" in result.output
+
 
 class TestEnvVarDelete:
     """Tests for the env var delete command."""
@@ -324,7 +406,7 @@ class TestEnvVarDelete:
         """Test deleting a variable with confirmation."""
         result = runner.invoke(
             app,
-            ["env", "var", "delete", "var-id-1234567890", "--env", "testuser/test-env", "-y"],
+            ["env", "var", "delete", "var-id-1234567890", "testuser/test-env", "-y"],
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -334,12 +416,28 @@ class TestEnvVarDelete:
         """Test cancelling variable deletion."""
         result = runner.invoke(
             app,
-            ["env", "var", "delete", "var-id-1234567890", "--env", "testuser/test-env"],
+            ["env", "var", "delete", "var-id-1234567890", "testuser/test-env"],
             input="n\n",
         )
 
         assert result.exit_code == 0
         assert "Cancelled" in result.output
+
+    def test_delete_variable_confirmed_interactively(self, mock_env_var_api: None) -> None:
+        """Test confirming deletion interactively."""
+        result = runner.invoke(
+            app,
+            ["env", "var", "delete", "var-id-1234567890", "testuser/test-env"],
+            input="y\n",
+        )
+        assert result.exit_code == 0, f"Failed: {result.output}"
+        assert "Variable deleted" in result.output
+
+    def test_list_variables_invalid_output_format(self, mock_env_var_api: None) -> None:
+        """Test listing with an invalid output format."""
+        result = runner.invoke(app, ["env", "var", "list", "testuser/test-env", "-o", "xml"])
+        assert result.exit_code != 0
+        assert "Invalid output format" in result.output
 
 
 class TestEnvVarHelp:

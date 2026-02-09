@@ -3599,10 +3599,8 @@ def env_secret_link(
         ...,
         help="Global secret ID to link",
     ),
-    environment: Optional[str] = typer.Option(
+    environment: Optional[str] = typer.Argument(
         None,
-        "--env",
-        "-e",
         help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
     env_var_name: Optional[str] = typer.Option(
@@ -3656,10 +3654,8 @@ def env_secret_unlink(
         ...,
         help="Global secret ID to unlink",
     ),
-    environment: Optional[str] = typer.Option(
+    environment: Optional[str] = typer.Argument(
         None,
-        "--env",
-        "-e",
         help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
     yes: bool = typer.Option(
@@ -3689,62 +3685,6 @@ def env_secret_unlink(
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit()
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
-
-
-@secret_app.command("settings")
-def env_secret_settings(
-    environment: Optional[str] = typer.Argument(
-        None,
-        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
-    ),
-    auto_apply: Optional[bool] = typer.Option(
-        None,
-        "--auto-apply/--no-auto-apply",
-        help="Enable/disable auto-applying global secrets",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
-    """View or update environment secret settings."""
-    validate_output_format(output, console)
-    owner, env_name = _resolve_environment(environment)
-
-    try:
-        client = APIClient()
-        env_id = _get_environment_id(client, owner, env_name)
-
-        if auto_apply is not None:
-            response = client.patch(
-                f"/environmentshub/{env_id}/settings",
-                json={"autoApplyGlobalSecrets": auto_apply},
-            )
-            settings_data = response.get("data", {})
-            if output == "json":
-                output_data_as_json(settings_data, console)
-                return
-            status = "enabled" if auto_apply else "disabled"
-            console.print(
-                f"[green]✓ Auto-apply global secrets {status} for {owner}/{env_name}[/green]"
-            )
-        else:
-            response = client.get(f"/environmentshub/{env_id}/settings")
-            settings_data = response.get("data", {})
-            if output == "json":
-                output_data_as_json(settings_data, console)
-                return
-            auto_apply_status = settings_data.get("autoApplyGlobalSecrets", False)
-            status_text = "[green]enabled[/green]" if auto_apply_status else "[dim]disabled[/dim]"
-            console.print(f"\n[bold]Settings for {owner}/{env_name}[/bold]")
-            console.print(f"  Auto-apply global secrets: {status_text}")
-            console.print()
-
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
@@ -3890,10 +3830,8 @@ def var_update(
         ...,
         help="Variable ID to update",
     ),
-    environment: Optional[str] = typer.Option(
+    environment: Optional[str] = typer.Argument(
         None,
-        "--env",
-        "-e",
         help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
     name: Optional[str] = typer.Option(
@@ -3967,10 +3905,8 @@ def var_delete(
         ...,
         help="Variable ID to delete",
     ),
-    environment: Optional[str] = typer.Option(
+    environment: Optional[str] = typer.Argument(
         None,
-        "--env",
-        "-e",
         help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
     yes: bool = typer.Option(

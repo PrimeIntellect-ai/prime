@@ -71,7 +71,6 @@ def _create_skill_dirs(agents: list[str]) -> None:
     context_settings={
         "allow_extra_args": True,
         "ignore_unknown_options": True,
-        "help_option_names": [],
     }
 )
 def setup(
@@ -89,6 +88,11 @@ def setup(
         "--no-interactive",
         help="Disable interactive agent prompts",
     ),
+    backend_help: bool = typer.Option(
+        False,
+        "--backend-help",
+        help="Show backend vf-setup help (all passthrough flags/options)",
+    ),
     skip_agents_md: bool = typer.Option(
         False,
         "--skip-agents-md",
@@ -101,7 +105,7 @@ def setup(
     ),
 ) -> None:
     """Set up a verifiers training workspace."""
-    if any(arg in ("-h", "--help") for arg in ctx.args):
+    if backend_help:
         print_lab_setup_help()
         raise typer.Exit(0)
 

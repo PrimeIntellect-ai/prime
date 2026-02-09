@@ -34,7 +34,7 @@ from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
 from ..utils.time_utils import format_time_ago, iso_timestamp
-from ..verifiers_bridge import is_help_request, print_env_build_help, print_env_init_help
+from ..verifiers_bridge import print_env_build_help, print_env_init_help
 from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
@@ -1350,16 +1350,20 @@ def push(
     context_settings={
         "allow_extra_args": True,
         "ignore_unknown_options": True,
-        "help_option_names": [],
     },
 )
 def init(
     ctx: typer.Context,
     name: str = typer.Argument(..., help="Name of the new environment"),
+    backend_help: bool = typer.Option(
+        False,
+        "--backend-help",
+        help="Show backend vf-init help (all passthrough flags/options)",
+    ),
 ) -> None:
     """Initialize a new environment."""
     passthrough_args = list(ctx.args)
-    if is_help_request(name, passthrough_args):
+    if backend_help:
         print_env_init_help()
         raise typer.Exit(0)
 
@@ -1381,16 +1385,20 @@ def init(
     context_settings={
         "allow_extra_args": True,
         "ignore_unknown_options": True,
-        "help_option_names": [],
     },
 )
 def build(
     ctx: typer.Context,
     env_id: str = typer.Argument(..., help="Environment ID (hyphenated, e.g. openenv-echo)"),
+    backend_help: bool = typer.Option(
+        False,
+        "--backend-help",
+        help="Show backend vf-build help (all passthrough flags/options)",
+    ),
 ) -> None:
     """Build an OpenEnv-backed environment image."""
     passthrough_args = list(ctx.args)
-    if is_help_request(env_id, passthrough_args):
+    if backend_help:
         print_env_build_help()
         raise typer.Exit(0)
 

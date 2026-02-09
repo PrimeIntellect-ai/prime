@@ -4,7 +4,7 @@ import typer
 from rich.console import Console
 from typer.core import TyperGroup
 
-from ..verifiers_bridge import is_help_request, print_gepa_run_help, run_gepa_passthrough
+from ..verifiers_bridge import print_gepa_run_help, run_gepa_passthrough
 
 console = Console()
 
@@ -44,7 +44,6 @@ app = typer.Typer(
     context_settings={
         "allow_extra_args": True,
         "ignore_unknown_options": True,
-        "help_option_names": [],
     },
 )
 def run_gepa_cmd(
@@ -53,10 +52,15 @@ def run_gepa_cmd(
         ...,
         help="Environment name/slug or TOML config path",
     ),
+    backend_help: bool = typer.Option(
+        False,
+        "--backend-help",
+        help="Show backend vf-gepa help (all passthrough flags/options)",
+    ),
 ) -> None:
     """Run optimization with local-first environment resolution."""
     passthrough_args = list(ctx.args)
-    if is_help_request(environment_or_config, passthrough_args):
+    if backend_help:
         print_gepa_run_help()
         raise typer.Exit(0)
 

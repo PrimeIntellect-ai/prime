@@ -58,10 +58,10 @@ def push_eval_results_to_hub(
     upstream_slug: Optional[str] = None,
 ) -> None:
     """
-    Push evaluation results to Prime Evals Hub after vf-eval completes.
+    Push evaluation results to Prime Evals Hub after `prime eval run` completes.
 
     This function:
-    1. Locates the most recent vf-eval output directory
+    1. Locates the most recent evaluation output directory
     2. Reads and parses metadata.json and results.jsonl
     3. Resolves environment ID (from metadata, upstream_slug, or by name)
     4. Converts results to Prime Evals API format

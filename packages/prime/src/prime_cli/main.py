@@ -10,6 +10,7 @@ from .commands.config import app as config_app
 from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
+from .commands.gepa import app as gepa_app
 from .commands.images import app as images_app
 from .commands.inference import app as inference_app
 from .commands.lab import app as lab_app
@@ -36,6 +37,7 @@ app = typer.Typer(
 # Lab commands
 app.add_typer(env_app, name="env", rich_help_panel="Lab")
 app.add_typer(evals_app, name="eval", rich_help_panel="Lab")
+app.add_typer(gepa_app, name="gepa", rich_help_panel="Lab")
 app.add_typer(rl_app, name="rl", rich_help_panel="Lab")
 app.add_typer(lab_app, name="lab", rich_help_panel="Lab")
 

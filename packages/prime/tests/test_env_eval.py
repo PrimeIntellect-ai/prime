@@ -1,4 +1,4 @@
-"""Tests for prime env eval command with Prime Inference"""
+"""Tests for prime eval run command with Prime Inference"""
 
 import os
 import subprocess
@@ -36,7 +36,7 @@ def install_math_env():
 
 
 def test_env_eval_single_turn_math(install_math_env):
-    """Test running prime env eval with single_turn_math environment
+    """Test running prime eval run with single_turn_math environment
 
     This test runs a minimal evaluation (1 example, 1 rollout) against
     Prime Inference to verify the end-to-end eval pipeline works.
@@ -48,8 +48,8 @@ def test_env_eval_single_turn_math(install_math_env):
                 "uv",
                 "run",
                 "prime",
-                "env",
                 "eval",
+                "run",
                 "single_turn_math",
                 "-m",
                 TEST_MODEL,
@@ -72,15 +72,15 @@ def test_env_eval_single_turn_math(install_math_env):
 
 
 def test_env_eval_invalid_model(install_math_env):
-    """Test that prime env eval fails gracefully with invalid model"""
+    """Test that prime eval run fails gracefully with invalid model"""
     with tempfile.TemporaryDirectory() as tmpdir:
         result = subprocess.run(
             [
                 "uv",
                 "run",
                 "prime",
-                "env",
                 "eval",
+                "run",
                 "single_turn_math",
                 "-m",
                 "nonexistent/fake-model-12345",
@@ -104,15 +104,15 @@ def test_env_eval_invalid_model(install_math_env):
 
 
 def test_env_eval_missing_environment():
-    """Test that prime env eval fails gracefully with missing environment"""
+    """Test that prime eval run fails gracefully with missing environment"""
     with tempfile.TemporaryDirectory() as tmpdir:
         result = subprocess.run(
             [
                 "uv",
                 "run",
                 "prime",
-                "env",
                 "eval",
+                "run",
                 "nonexistent_env_xyz_12345",
                 "-m",
                 TEST_MODEL,

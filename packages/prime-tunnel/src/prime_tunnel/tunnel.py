@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import httpx
+
 from prime_tunnel.binary import get_frpc_path
 from prime_tunnel.core.client import TunnelClient
 from prime_tunnel.exceptions import TunnelConnectionError, TunnelError, TunnelTimeoutError
@@ -24,6 +26,7 @@ class Tunnel:
         name: Optional[str] = None,
         connection_timeout: float = 30.0,
         log_level: str = "info",
+        team_id: Optional[str] = None,
     ):
         """
         Initialize a tunnel.
@@ -32,12 +35,14 @@ class Tunnel:
             local_port: Local port to tunnel
             local_addr: Local address to tunnel (default: 127.0.0.1)
             name: Optional friendly name for the tunnel
+            team_id: Optional team ID for team tunnels
             connection_timeout: Timeout for establishing connection (seconds)
             log_level: frpc log level (trace, debug, info, warn, error)
         """
         self.local_port = local_port
         self.local_addr = local_addr
         self.name = name
+        self.team_id = team_id
         self.connection_timeout = connection_timeout
         self.log_level = log_level
 
@@ -93,6 +98,7 @@ class Tunnel:
             self._tunnel_info = await self._client.create_tunnel(
                 local_port=self.local_port,
                 name=self.name,
+                team_id=self.team_id,
             )
         except BaseException as e:
             await self._cleanup()
@@ -149,6 +155,47 @@ class Tunnel:
             return
 
         await self._cleanup()
+        self._started = False
+
+    def sync_stop(self) -> None:
+        """Stop the tunnel synchronously. Safe for signal handlers and atexit."""
+        if not self._started:
+            return
+
+        if self._process is not None:
+            try:
+                self._process.terminate()
+                try:
+                    self._process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self._process.kill()
+                    self._process.wait(timeout=2)
+            except Exception:
+                pass
+            finally:
+                self._process = None
+
+        if self._tunnel_info is not None:
+            try:
+                httpx.delete(
+                    f"{self._client.base_url}/api/v1/tunnel/{self._tunnel_info.tunnel_id}",
+                    headers=self._client._headers,
+                    timeout=5.0,
+                )
+            except Exception:
+                pass
+            finally:
+                self._tunnel_info = None
+
+        if self._config_file is not None:
+            try:
+                if self._config_file.exists():
+                    self._config_file.unlink()
+            except Exception:
+                pass
+            finally:
+                self._config_file = None
+
         self._started = False
 
     async def _cleanup(self) -> None:
@@ -255,7 +302,7 @@ log.level = "{self.log_level}"
 
 # HTTP proxy configuration
 [[proxies]]
-name = "http"
+name = "{self._tunnel_info.tunnel_id}"
 type = "http"
 localIP = "{self.local_addr}"
 localPort = {self.local_port}

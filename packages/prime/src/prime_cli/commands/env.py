@@ -25,10 +25,9 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from prime_cli.core import Config
-
 from ..api.inference import InferenceAPIError, InferenceClient
 from ..client import APIClient, APIError
+from ..core import Config
 from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import push_eval_results_to_hub
@@ -36,6 +35,8 @@ from ..utils.formatters import format_file_size
 from ..utils.formatters import strip_ansi as _strip_ansi
 from ..utils.prompt import any_provided, prompt_for_value, select_item_interactive
 from ..utils.time_utils import format_time_ago, iso_timestamp
+from ..verifiers_bridge import print_env_build_help, print_env_init_help
+from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
 console = Console()
@@ -57,6 +58,11 @@ app.add_typer(secrets_app, name="secrets", rich_help_panel="Manage")
 # Variable subcommand app
 var_app = typer.Typer(help="Manage environment variables", no_args_is_help=True)
 app.add_typer(var_app, name="var", rich_help_panel="Manage")
+
+
+def _uv_pip_command(subcommand: str, *args: str) -> List[str]:
+    """Run uv pip against the workspace interpreter."""
+    return ["uv", "pip", subcommand, "--python", resolve_workspace_python(), *args]
 
 
 def _parse_environment_slug(environment: str) -> Tuple[str, str]:
@@ -746,8 +752,8 @@ def push(
         "-t",
         help="Team slug for team ownership (uses config team_id if not provided)",
     ),
-    visibility: str = typer.Option(
-        "PUBLIC", "--visibility", "-v", help="Environment visibility (PUBLIC/PRIVATE)"
+    visibility: Optional[str] = typer.Option(
+        None, "--visibility", "-v", help="Environment visibility (PUBLIC/PRIVATE)"
     ),
     auto_bump: bool = typer.Option(
         False, "--auto-bump", help="Automatically bump patch version before push"
@@ -893,7 +899,9 @@ def push(
             client = APIClient()
 
             console.print("Resolving environment...")
-            resolve_data = {"name": env_name, "visibility": visibility}
+            resolve_data = {"name": env_name}
+            if visibility:
+                resolve_data["visibility"] = visibility
             if owner:
                 # Push to a specific owner (user or team) - for collaborators with write access
                 resolve_data["owner_slug"] = owner
@@ -1356,39 +1364,74 @@ def push(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True, rich_help_panel="Manage")
+@app.command(
+    no_args_is_help=True,
+    rich_help_panel="Manage",
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+    },
+)
 def init(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Name of the new environment"),
-    path: str = typer.Option(
-        "./environments", "--path", "-p", help="Path to environments directory"
-    ),
-    rewrite_readme: bool = typer.Option(
-        False, "--rewrite-readme", help="Overwrite README.md with template if it already exists"
+    backend_help: bool = typer.Option(
+        False,
+        "--backend-help",
+        help="Show backend vf-init help (all passthrough flags/options)",
     ),
 ) -> None:
-    """Initialize a new verifiers environment from template"""
-    try:
-        # this import is slow, so we do it inside the command
-        from verifiers.scripts.init import init_environment
+    """Initialize a new environment."""
+    passthrough_args = list(ctx.args)
+    if backend_help:
+        print_env_init_help()
+        raise typer.Exit(0)
 
-        created_path = init_environment(name, path, rewrite_readme)
+    if name.startswith("-"):
+        console.print("[red]Error:[/red] Environment name must be the first argument.")
+        console.print("[dim]Example: prime env init my-env --path ./environments[/dim]")
+        raise typer.Exit(2)
 
-        console.print(f"[green]✓ Created environment template in {created_path}/[/green]")
-        console.print("\nNext steps:")
-        console.print(f"  cd {created_path}")
-        filename = f"{name}.py".replace("-", "_")
-        console.print(f"  # Edit the {filename} file to implement your environment")
-        console.print("  prime env push")
+    plugin = load_verifiers_prime_plugin(console=console)
+    command = plugin.build_module_command(plugin.init_module, [name, *passthrough_args])
+    result = subprocess.run(command)
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
 
-    except FileNotFoundError as e:
-        console.print(f"[red]File not found: {e}[/red]")
-        raise typer.Exit(1)
-    except PermissionError as e:
-        console.print(f"[red]Permission error: {e}[/red]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
+
+@app.command(
+    no_args_is_help=True,
+    rich_help_panel="Manage",
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+    },
+)
+def build(
+    ctx: typer.Context,
+    env_id: str = typer.Argument(..., help="Environment ID (hyphenated, e.g. openenv-echo)"),
+    backend_help: bool = typer.Option(
+        False,
+        "--backend-help",
+        help="Show backend vf-build help (all passthrough flags/options)",
+    ),
+) -> None:
+    """Build an OpenEnv-backed environment image."""
+    passthrough_args = list(ctx.args)
+    if backend_help:
+        print_env_build_help()
+        raise typer.Exit(0)
+
+    if env_id.startswith("-"):
+        console.print("[red]Error:[/red] Environment ID must be the first argument.")
+        console.print("[dim]Example: prime env build openenv-echo --path ./environments[/dim]")
+        raise typer.Exit(2)
+
+    plugin = load_verifiers_prime_plugin(console=console)
+    command = plugin.build_module_command(plugin.build_module, [env_id, *passthrough_args])
+    result = subprocess.run(command)
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
 
 
 @app.command(no_args_is_help=True, rich_help_panel="Manage")
@@ -1730,7 +1773,7 @@ def get_install_command(
         no_upgrade: If True, don't include upgrade flags (preserves locked dependencies)
     """
     if tool == "uv":
-        cmd = ["uv", "pip", "install"]
+        cmd = _uv_pip_command("install")
         if not no_upgrade:
             # Use -P to only upgrade this package, not its dependencies
             cmd.extend(["-P", package_name])
@@ -1913,7 +1956,11 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
         Exception: If installation fails (caller should catch)
     """
     console.print(f"\n[cyan]Installing {env_id}@{version} with {tool}...[/cyan]")
-    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
+
+    display_command = " ".join(cmd)
+    if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2].startswith("verifiers.cli.commands."):
+        display_command = f"prime env install {env_id}"
+    console.print(f"[dim]Command: {display_command}[/dim]")
 
     process = subprocess.Popen(
         cmd,
@@ -1973,6 +2020,7 @@ def install(
     """
     try:
         client = APIClient(require_auth=False)
+        plugin = load_verifiers_prime_plugin(console=console)
 
         # Validate package manager
         if with_tool not in ["uv", "pip"]:
@@ -2010,7 +2058,10 @@ def install(
                 env_path = Path(path) / env_folder
                 if env_path.exists():
                     if with_tool == "uv":
-                        cmd_parts = ["uv", "pip", "install", "-e", str(env_path)]
+                        cmd_parts = plugin.build_module_command(
+                            plugin.install_module,
+                            [local_name, "--path", path],
+                        )
                     else:
                         cmd_parts = ["pip", "install", "-e", str(env_path)]
                     installable_envs.append((cmd_parts, local_name, "local", local_name))
@@ -2064,7 +2115,7 @@ def install(
                     )
                     normalized_name = normalize_package_name(name)
                     if with_tool == "uv":
-                        cmd_parts = ["uv", "pip", "install"]
+                        cmd_parts = _uv_pip_command("install")
                         if not no_upgrade:
                             # Use -P to only upgrade this package, not its dependencies
                             cmd_parts.extend(["-P", normalized_name])
@@ -2160,6 +2211,8 @@ def install(
             for env_id, reason in install_failed_envs:
                 console.print(f"[red]✗ {env_id} - {reason}")
 
+    except typer.Exit:
+        raise
     except APIError as e:
         console.print(f"[red]API Error: {e}[/red]")
         raise typer.Exit(1)
@@ -2710,7 +2763,7 @@ def _is_environment_installed(env_name: str, required_version: Optional[str] = N
     try:
         pkg_name = normalize_package_name(env_name)
         result = subprocess.run(
-            ["uv", "pip", "show", pkg_name],
+            _uv_pip_command("show", pkg_name),
             capture_output=True,
             text=True,
         )
@@ -2754,7 +2807,7 @@ def _build_install_command(
 
     if simple_index_url:
         if tool == "uv":
-            cmd = ["uv", "pip", "install"]
+            cmd = _uv_pip_command("install")
             if not no_upgrade:
                 # Use -P to only upgrade this package, not its dependencies
                 cmd.extend(["-P", normalized_name])
@@ -2796,7 +2849,7 @@ def _build_install_command(
 def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
     """Install a single environment from the hub. Returns True on success."""
     try:
-        env_id, version = validate_env_id(env_slug)
+        env_id, target_version = validate_env_id(env_slug)
     except ValueError as e:
         console.print(f"[red]Invalid environment format: {e}[/red]")
         return False
@@ -2805,7 +2858,7 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
 
     try:
         client = APIClient(require_auth=False)
-        details = fetch_environment_details(client, owner, name, version)
+        details = fetch_environment_details(client, owner, name, target_version)
     except APIError as e:
         console.print(f"[red]Failed to find environment {env_slug}: {e}[/red]")
         return False
@@ -2814,25 +2867,40 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
     wheel_url = process_wheel_url(details.get("wheel_url"))
     url_dependencies = details.get("url_dependencies", [])
 
-    if not simple_index_url and not wheel_url:
-        if details.get("visibility") == "PRIVATE":
-            console.print(
-                f"[red]Cannot install private environment {env_slug}.[/red]\n"
-                "[yellow]Use 'prime env pull' to download and install locally.[/yellow]"
+    # Mirror the same private-environment behavior as `prime env install`.
+    if not simple_index_url and not wheel_url and details.get("visibility") == "PRIVATE":
+        try:
+            wheel_path, resolved_version = _pull_and_build_private_env(
+                client,
+                owner,
+                name,
+                target_version,
+                details,
             )
-        else:
-            console.print(f"[red]No installation method available for {env_slug}[/red]")
+            normalized_name = normalize_package_name(name)
+            if tool == "uv":
+                cmd_parts = _uv_pip_command("install", "-P", normalized_name, str(wheel_path))
+            else:
+                cmd_parts = ["pip", "install", "--upgrade", str(wheel_path)]
+            execute_install_command(cmd_parts, env_id, resolved_version, tool)
+            return True
+        except Exception as e:
+            console.print(f"[red]Failed to install private environment {env_slug}: {e}[/red]")
+            return False
+
+    if not simple_index_url and not wheel_url:
+        console.print(f"[red]No installation method available for {env_slug}[/red]")
         return False
 
     cmd_parts = _build_install_command(
-        name, version, simple_index_url, wheel_url, tool, url_dependencies=url_dependencies
+        name, target_version, simple_index_url, wheel_url, tool, url_dependencies=url_dependencies
     )
     if not cmd_parts:
         console.print(f"[red]Failed to build install command for {env_slug}[/red]")
         return False
 
     try:
-        execute_install_command(cmd_parts, env_id, version, tool)
+        execute_install_command(cmd_parts, env_id, target_version, tool)
         return True
     except Exception as e:
         console.print(f"[red]Installation failed: {e}[/red]")

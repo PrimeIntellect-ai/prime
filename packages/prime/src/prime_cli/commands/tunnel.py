@@ -16,11 +16,14 @@ console = Console()
 def start_tunnel(
     port: int = typer.Option(8765, "--port", "-p", help="Local port to tunnel"),
     name: Optional[str] = typer.Option(None, "--name", "-n", help="Friendly name for the tunnel"),
+    team_id: Optional[str] = typer.Option(
+        None, "--team-id", help="Team ID for team tunnels (uses config team_id if not specified)"
+    ),
 ) -> None:
     """Start a tunnel to expose a local port."""
 
     async def run_tunnel():
-        tunnel = Tunnel(local_port=port, name=name)
+        tunnel = Tunnel(local_port=port, name=name, team_id=team_id)
 
         shutdown_event = asyncio.Event()
 
@@ -60,13 +63,19 @@ def start_tunnel(
 
 
 @app.command("list")
-def list_tunnels() -> None:
+def list_tunnels(
+    team_id: Optional[str] = typer.Option(
+        None,
+        "--team-id",
+        help="Team ID to list team tunnels (uses config team_id if not specified)",
+    ),
+) -> None:
     """List active tunnels."""
 
     async def fetch_tunnels():
         client = TunnelClient()
         try:
-            tunnels = await client.list_tunnels()
+            tunnels = await client.list_tunnels(team_id=team_id)
             return tunnels
         finally:
             await client.close()

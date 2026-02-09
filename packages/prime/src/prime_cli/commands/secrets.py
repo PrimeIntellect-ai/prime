@@ -222,6 +222,9 @@ def secret_update(
                 console.print("\n[dim]No changes made.[/dim]")
                 raise typer.Exit()
 
+        if name is not None and not validate_env_var_name(name, "secret"):
+            raise typer.Exit(1)
+
         payload: Dict[str, Any] = {}
         if name is not None:
             payload["name"] = name

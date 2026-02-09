@@ -482,23 +482,6 @@ class TestEnvSecretLink:
         assert "Linked global secret" in result.output
         assert "testuser/test-env" in result.output
 
-    def test_link_secret_with_custom_name(self, mock_env_secret_api: None) -> None:
-        """Test linking with a custom env var name override."""
-        result = runner.invoke(
-            app,
-            [
-                "env",
-                "secret",
-                "link",
-                "global-secret-id-123",
-                "testuser/test-env",
-                "-n",
-                "CUSTOM_ENV_NAME",
-            ],
-        )
-        assert result.exit_code == 0, f"Failed: {result.output}"
-        assert "Linked global secret" in result.output
-
     def test_link_secret_json_output(self, mock_env_secret_api: None) -> None:
         """Test linking a secret with JSON output."""
         result = runner.invoke(

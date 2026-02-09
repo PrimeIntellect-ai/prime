@@ -3327,8 +3327,7 @@ def env_secret_list(
     try:
         client = APIClient()
         env_id = _get_environment_id(client, owner, env_name)
-        response = client.get(f"/environmentshub/{env_id}/secrets")
-        secrets = response.get("data", [])
+        secrets = _fetch_env_secrets(client, env_id)
 
         if output == "json":
             output_data_as_json({"secrets": secrets}, console)
@@ -3506,6 +3505,9 @@ def env_secret_update(
                 console.print("\n[dim]No changes made.[/dim]")
                 raise typer.Exit()
 
+        if name is not None and not validate_env_var_name(name, "secret"):
+            raise typer.Exit(1)
+
         payload: Dict[str, Any] = {}
         if name is not None:
             payload["name"] = name
@@ -3603,12 +3605,6 @@ def env_secret_link(
         None,
         help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
     ),
-    env_var_name: Optional[str] = typer.Option(
-        None,
-        "--name",
-        "-n",
-        help="Override environment variable name (defaults to global secret name)",
-    ),
     output: str = typer.Option(
         "table",
         "--output",
@@ -3624,13 +3620,9 @@ def env_secret_link(
         client = APIClient()
         env_id = _get_environment_id(client, owner, env_name)
 
-        payload: Dict[str, Any] = {}
-        if env_var_name:
-            payload["envVarName"] = env_var_name
-
         response = client.post(
             f"/environmentshub/{env_id}/secrets/link/{global_secret_id}",
-            json=payload,
+            json={},
         )
         linked = response.get("data", {})
 
@@ -3873,6 +3865,9 @@ def var_update(
     try:
         client = APIClient()
         env_id = _get_environment_id(client, owner, env_name)
+
+        if name is not None and not validate_env_var_name(name, "variable"):
+            raise typer.Exit(1)
 
         payload: Dict[str, Any] = {}
         if name is not None:

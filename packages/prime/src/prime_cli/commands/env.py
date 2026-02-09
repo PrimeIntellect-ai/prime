@@ -2894,7 +2894,7 @@ def run_eval(
     no_interleave_scoring: bool,
     state_columns: Optional[str],
     save_results: bool,
-    save_every: int,
+    save_every: Optional[int],
     independent_scoring: bool,
     save_to_hf_hub: bool,
     hf_hub_dataset_name: Optional[str],
@@ -3044,7 +3044,10 @@ def run_eval(
     if save_results or not skip_upload:
         cmd += ["-s"]
     if save_every is not None:
-        cmd += ["-f", str(save_every)]
+        console.print(
+            "[yellow]Warning:[/yellow] --save-every is currently unsupported by verifiers "
+            "and will be ignored."
+        )
     if independent_scoring:
         cmd += ["-R"]
     if save_to_hf_hub:
@@ -3177,7 +3180,12 @@ def eval_env(
         help="Comma-separated list of state columns to save (e.g., 'turn,timing')",
     ),
     save_results: bool = typer.Option(False, "--save-results", "-s", help="Save results to disk"),
-    save_every: int = typer.Option(-1, "--save-every", "-f", help="Save dataset every n rollouts"),
+    save_every: Optional[int] = typer.Option(
+        None,
+        "--save-every",
+        "-f",
+        help="Deprecated: currently ignored.",
+    ),
     independent_scoring: bool = typer.Option(
         False,
         "--independent-scoring",

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import importlib
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Sequence
 
@@ -20,25 +22,52 @@ def _venv_python(venv_root: Path) -> Path:
     return venv_root / "bin" / "python"
 
 
+@lru_cache(maxsize=32)
+def _python_can_import_module(python_executable: str, module_name: str, cwd: str) -> bool:
+    probe = (
+        "import importlib.util, sys; "
+        "raise SystemExit(0 if importlib.util.find_spec(sys.argv[1]) else 1)"
+    )
+    try:
+        result = subprocess.run(
+            [python_executable, "-c", probe, module_name],
+            cwd=cwd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
 def resolve_workspace_python(cwd: Path | None = None) -> str:
-    """Prefer the workspace interpreter over the prime tool interpreter."""
+    """Prefer workspace Python only when it can run verifiers command modules."""
+    workspace = (cwd or Path.cwd()).resolve()
+    workspace_str = str(workspace)
+    module = "verifiers.cli.commands.eval"
+
+    def _usable(candidate: Path) -> bool:
+        return candidate.exists() and _python_can_import_module(
+            str(candidate), module, workspace_str
+        )
+
     uv_project_env = os.environ.get("UV_PROJECT_ENVIRONMENT")
     if uv_project_env:
         candidate = _venv_python(Path(uv_project_env))
-        if candidate.exists():
+        if _usable(candidate):
             return str(candidate)
 
     virtual_env = os.environ.get("VIRTUAL_ENV")
     if virtual_env:
         candidate = _venv_python(Path(virtual_env))
-        if candidate.exists():
+        if _usable(candidate):
             return str(candidate)
 
-    start = cwd or Path.cwd()
-    for directory in [start, *start.parents]:
+    for directory in [workspace, *workspace.parents]:
         if (directory / "pyproject.toml").is_file():
             candidate = _venv_python(directory / ".venv")
-            if candidate.exists():
+            if _usable(candidate):
                 return str(candidate)
 
     return sys.executable

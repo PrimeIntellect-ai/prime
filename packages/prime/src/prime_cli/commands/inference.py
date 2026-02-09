@@ -11,7 +11,7 @@ from ..utils import output_data_as_json, validate_output_format
 
 app = typer.Typer(
     help="Run and manage Prime Inference\n\n"
-    "Use `prime env eval` for environment evals with Prime Inference.",
+    "Use `prime eval run` for environment evals with Prime Inference.",
     no_args_is_help=True,
 )
 console = Console()

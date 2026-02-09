@@ -9,6 +9,9 @@ dev-dependencies = [
     "pre-commit>=3.5.0"
 ]
 
+[tool.uv.sources]
+verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.1.10.dev4" }
+
 [tool.pytest.ini_options]
 pythonpath = [
     "packages/prime/src",

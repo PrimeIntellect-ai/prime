@@ -101,7 +101,7 @@ class TestSecretsList:
 
     def test_list_secrets_table_output(self, mock_secrets_api: None) -> None:
         """Test listing secrets with table output."""
-        result = runner.invoke(app, ["secrets", "list"], env={"COLUMNS": "200", "LINES": "50"})
+        result = runner.invoke(app, ["secret", "list"], env={"COLUMNS": "200", "LINES": "50"})
 
         assert result.exit_code == 0, f"Failed: {result.output}"
         assert "Personal Secrets" in result.output
@@ -111,7 +111,7 @@ class TestSecretsList:
 
     def test_list_secrets_json_output(self, mock_secrets_api: None) -> None:
         """Test listing secrets with JSON output."""
-        result = runner.invoke(app, ["secrets", "list", "-o", "json"])
+        result = runner.invoke(app, ["secret", "list", "-o", "json"])
 
         assert result.exit_code == 0, f"Failed: {result.output}"
         output = json.loads(result.output)
@@ -131,7 +131,7 @@ class TestSecretsList:
 
         monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-        result = runner.invoke(app, ["secrets", "list"])
+        result = runner.invoke(app, ["secret", "list"])
 
         assert result.exit_code == 0
         assert "No personal secrets found" in result.output
@@ -144,7 +144,7 @@ class TestSecretsCreate:
         """Test creating a secret successfully."""
         result = runner.invoke(
             app,
-            ["secrets", "create", "-n", "NEW_SECRET", "-v", "secret-value"],
+            ["secret", "create", "-n", "NEW_SECRET", "-v", "secret-value"],
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -156,7 +156,7 @@ class TestSecretsCreate:
         result = runner.invoke(
             app,
             [
-                "secrets",
+                "secret",
                 "create",
                 "-n",
                 "NEW_SECRET",
@@ -174,7 +174,7 @@ class TestSecretsCreate:
         """Test creating a secret with JSON output."""
         result = runner.invoke(
             app,
-            ["secrets", "create", "-n", "NEW_SECRET", "-v", "value", "-o", "json"],
+            ["secret", "create", "-n", "NEW_SECRET", "-v", "value", "-o", "json"],
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -186,7 +186,7 @@ class TestSecretsCreate:
         """Test that create can be cancelled during name prompt."""
         result = runner.invoke(
             app,
-            ["secrets", "create"],
+            ["secret", "create"],
             input="\n",
         )
         assert result.exit_code == 0
@@ -196,7 +196,7 @@ class TestSecretsCreate:
         """Test creating a secret interactively."""
         result = runner.invoke(
             app,
-            ["secrets", "create"],
+            ["secret", "create"],
             input="MY_NEW_SECRET\nsecret-value\n",
         )
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -210,7 +210,7 @@ class TestSecretsUpdate:
         """Test updating a secret's name."""
         result = runner.invoke(
             app,
-            ["secrets", "update", "secret-id-1234567890", "-n", "RENAMED_SECRET"],
+            ["secret", "update", "secret-id-1234567890", "-n", "RENAMED_SECRET"],
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -220,7 +220,7 @@ class TestSecretsUpdate:
         """Test updating a secret's value."""
         result = runner.invoke(
             app,
-            ["secrets", "update", "secret-id-1234567890", "-v", "new-value"],
+            ["secret", "update", "secret-id-1234567890", "-v", "new-value"],
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -230,7 +230,7 @@ class TestSecretsUpdate:
         """Test that update prompts when no changes are provided."""
         result = runner.invoke(
             app,
-            ["secrets", "update", "secret-id-1234567890"],
+            ["secret", "update", "secret-id-1234567890"],
             input="\n",
         )
         assert result.exit_code == 0
@@ -240,7 +240,7 @@ class TestSecretsUpdate:
         """Test updating a secret interactively."""
         result = runner.invoke(
             app,
-            ["secrets", "update", "secret-id-1234567890"],
+            ["secret", "update", "secret-id-1234567890"],
             input="new-secret-value\n",
         )
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -250,7 +250,7 @@ class TestSecretsUpdate:
         """Test updating a secret with JSON output."""
         result = runner.invoke(
             app,
-            ["secrets", "update", "secret-id-1234567890", "-n", "NEW_NAME", "-o", "json"],
+            ["secret", "update", "secret-id-1234567890", "-n", "NEW_NAME", "-o", "json"],
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -265,7 +265,7 @@ class TestSecretsDelete:
         """Test deleting a secret with confirmation."""
         result = runner.invoke(
             app,
-            ["secrets", "delete", "secret-id-1234567890", "-y"],
+            ["secret", "delete", "secret-id-1234567890", "-y"],
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -275,7 +275,7 @@ class TestSecretsDelete:
         """Test cancelling secret deletion."""
         result = runner.invoke(
             app,
-            ["secrets", "delete", "secret-id-1234567890"],
+            ["secret", "delete", "secret-id-1234567890"],
             input="n\n",
         )
 
@@ -290,7 +290,7 @@ class TestSecretsGet:
         """Test getting a secret with table output."""
         result = runner.invoke(
             app,
-            ["secrets", "get", "secret-id-1234567890"],
+            ["secret", "get", "secret-id-1234567890"],
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -301,7 +301,7 @@ class TestSecretsGet:
         """Test getting a secret with JSON output."""
         result = runner.invoke(
             app,
-            ["secrets", "get", "secret-id-1234567890", "-o", "json"],
+            ["secret", "get", "secret-id-1234567890", "-o", "json"],
         )
 
         assert result.exit_code == 0, f"Failed: {result.output}"
@@ -315,7 +315,7 @@ class TestSecretsHelp:
 
     def test_secrets_help(self) -> None:
         """Test that secrets help works."""
-        result = runner.invoke(app, ["secrets", "--help"])
+        result = runner.invoke(app, ["secret", "--help"])
 
         assert result.exit_code == 0
         assert "Manage global secrets" in result.output
@@ -327,7 +327,7 @@ class TestSecretsHelp:
 
     def test_secrets_list_help(self) -> None:
         """Test that secrets list help works."""
-        result = runner.invoke(app, ["secrets", "list", "--help"])
+        result = runner.invoke(app, ["secret", "list", "--help"])
 
         assert result.exit_code == 0
         output = strip_ansi(result.output)
@@ -335,7 +335,7 @@ class TestSecretsHelp:
 
     def test_secrets_create_help(self) -> None:
         """Test that secrets create help works."""
-        result = runner.invoke(app, ["secrets", "create", "--help"])
+        result = runner.invoke(app, ["secret", "create", "--help"])
 
         assert result.exit_code == 0
         output = strip_ansi(result.output)

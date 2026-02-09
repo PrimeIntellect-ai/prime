@@ -51,9 +51,9 @@ MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 action_app = typer.Typer(help="Manage environment actions (CI jobs)", no_args_is_help=True)
 app.add_typer(action_app, name="action", rich_help_panel="Manage")
 
-# Secrets subcommand app
-secrets_app = typer.Typer(help="Manage environment secrets", no_args_is_help=True)
-app.add_typer(secrets_app, name="secrets", rich_help_panel="Manage")
+# Secret subcommand app
+secret_app = typer.Typer(help="Manage environment secrets", no_args_is_help=True)
+app.add_typer(secret_app, name="secret", rich_help_panel="Manage")
 
 # Variable subcommand app
 var_app = typer.Typer(help="Manage environment variables", no_args_is_help=True)
@@ -3302,7 +3302,7 @@ def _fetch_env_secrets(client: APIClient, env_id: str) -> List[Dict[str, Any]]:
     return response.get("data", [])
 
 
-@secrets_app.command("list")
+@secret_app.command("list")
 def env_secret_list(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3357,7 +3357,7 @@ def env_secret_list(
         raise typer.Exit(1)
 
 
-@secrets_app.command("create")
+@secret_app.command("create")
 def env_secret_create(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3433,7 +3433,7 @@ def env_secret_create(
         raise typer.Exit(1)
 
 
-@secrets_app.command("update")
+@secret_app.command("update")
 def env_secret_update(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3527,7 +3527,7 @@ def env_secret_update(
         raise typer.Exit(1)
 
 
-@secrets_app.command("delete")
+@secret_app.command("delete")
 def env_secret_delete(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3587,7 +3587,7 @@ def env_secret_delete(
         raise typer.Exit(1)
 
 
-@secrets_app.command("link")
+@secret_app.command("link")
 def env_secret_link(
     global_secret_id: str = typer.Argument(
         ...,
@@ -3644,7 +3644,7 @@ def env_secret_link(
         raise typer.Exit(1)
 
 
-@secrets_app.command("unlink")
+@secret_app.command("unlink")
 def env_secret_unlink(
     global_secret_id: str = typer.Argument(
         ...,
@@ -3688,7 +3688,7 @@ def env_secret_unlink(
         raise typer.Exit(1)
 
 
-@secrets_app.command("settings")
+@secret_app.command("settings")
 def env_secret_settings(
     environment: Optional[str] = typer.Argument(
         None,

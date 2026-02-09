@@ -8,6 +8,7 @@ from typing import Optional
 import typer
 from rich.console import Console
 
+from ..verifiers_bridge import print_lab_setup_help
 from ..verifiers_plugin import load_verifiers_prime_plugin
 
 app = typer.Typer(help="Lab commands for verifiers development", no_args_is_help=True)
@@ -70,6 +71,7 @@ def _create_skill_dirs(agents: list[str]) -> None:
     context_settings={
         "allow_extra_args": True,
         "ignore_unknown_options": True,
+        "help_option_names": [],
     }
 )
 def setup(
@@ -99,6 +101,10 @@ def setup(
     ),
 ) -> None:
     """Set up a verifiers training workspace."""
+    if any(arg in ("-h", "--help") for arg in ctx.args):
+        print_lab_setup_help()
+        raise typer.Exit(0)
+
     selected_agents: list[str] = []
     if agents:
         selected_agents = _parse_agents_csv(agents)

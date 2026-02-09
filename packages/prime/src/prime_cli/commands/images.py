@@ -3,7 +3,6 @@
 import json
 import tarfile
 import tempfile
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -160,7 +159,7 @@ def push_image(
             console.print()
             console.print("[bold]Check build status:[/bold]")
             console.print("  prime images list")
-            console.print(f"  prime images logs {build_id} --follow")
+            console.print(f"  prime images logs {build_id}")
             console.print()
             console.print(
                 "[dim]The build typically takes a few minutes depending on image complexity.[/dim]"
@@ -275,78 +274,23 @@ def list_images(
 def build_logs(
     build_id: str = typer.Argument(..., help="Build ID to get logs for"),
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
-    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
 ) -> None:
     """Get logs for an image build."""
     try:
         client = APIClient()
 
-        if follow:
-            console.print(f"[dim]Watching logs for build {build_id}... (Ctrl+C to stop)[/dim]\n")
-            last_logs = ""
-            consecutive_errors = 0
+        data = client.request(
+            "GET",
+            f"/images/build/{build_id}/logs",
+            params={"tail_lines": tail},
+        )
+        logs = data.get("logs", "")
 
-            while True:
-                try:
-                    data = client.request(
-                        "GET",
-                        f"/images/build/{build_id}/logs",
-                        params={"tail_lines": tail},
-                    )
-                    logs = data.get("logs", "")
-                    status = data.get("status", "UNKNOWN")
-                    consecutive_errors = 0
-
-                    if logs != last_logs:
-                        old_lines = last_logs.splitlines() if last_logs else []
-                        new_lines = logs.splitlines()
-
-                        if not last_logs:
-                            for line in new_lines:
-                                console.print(escape(line))
-                        else:
-                            overlap = 0
-                            max_overlap = min(len(old_lines), len(new_lines))
-                            for i in range(1, max_overlap + 1):
-                                if old_lines[-i:] == new_lines[:i]:
-                                    overlap = i
-                            for line in new_lines[overlap:]:
-                                console.print(escape(line))
-
-                        last_logs = logs
-
-                    if status in {"COMPLETED", "FAILED", "CANCELLED"}:
-                        console.print(f"\n[bold]Build finished with status: {status}[/bold]")
-                        return
-
-                except APIError as e:
-                    consecutive_errors += 1
-                    if "429" in str(e):
-                        if consecutive_errors >= 3:
-                            console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
-                            time.sleep(30)
-                        else:
-                            time.sleep(10)
-                        continue
-                    raise
-
-                time.sleep(5)
-
+        if logs:
+            console.print(escape(logs))
         else:
-            data = client.request(
-                "GET",
-                f"/images/build/{build_id}/logs",
-                params={"tail_lines": tail},
-            )
-            logs = data.get("logs", "")
+            console.print("[yellow]No logs available yet.[/yellow]")
 
-            if logs:
-                console.print(escape(logs))
-            else:
-                console.print("[yellow]No logs available yet.[/yellow]")
-
-    except KeyboardInterrupt:
-        console.print("\n[dim]Stopped watching logs.[/dim]")
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
         raise typer.Exit(1)

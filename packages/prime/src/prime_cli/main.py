@@ -40,11 +40,11 @@ app.add_typer(teams_app, name="teams", rich_help_panel="Account")
 app.add_typer(upgrade_app, name="upgrade", rich_help_panel="Account")
 
 # Lab commands
-app.add_typer(deployments_app, name="deployments", rich_help_panel="Lab")
+app.add_typer(lab_app, name="lab", rich_help_panel="Lab")
 app.add_typer(env_app, name="env", rich_help_panel="Lab")
 app.add_typer(evals_app, name="eval", rich_help_panel="Lab")
 app.add_typer(rl_app, name="rl", rich_help_panel="Lab")
-app.add_typer(lab_app, name="lab", rich_help_panel="Lab")
+app.add_typer(deployments_app, name="deployments", rich_help_panel="Lab")
 
 # Compute commands
 app.add_typer(availability_app, name="availability", rich_help_panel="Compute")

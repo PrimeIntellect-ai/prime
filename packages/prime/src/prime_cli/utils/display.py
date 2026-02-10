@@ -74,3 +74,12 @@ DISK_STATUS_COLORS = {
     "ERROR": "red",
     "TERMINATED": "white",
 }
+
+DEPLOYMENT_STATUS_COLORS = {
+    "NOT_DEPLOYED": "white",
+    "DEPLOYING": "yellow",
+    "DEPLOYED": "green",
+    "UNLOADING": "yellow",
+    "DEPLOY_FAILED": "red",
+    "UNLOAD_FAILED": "red",
+}

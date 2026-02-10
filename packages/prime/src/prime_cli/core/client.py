@@ -115,7 +115,7 @@ class APIClient:
             response = self.client.request(method, url, params=params, json=json, timeout=timeout)
             response.raise_for_status()
 
-            if response.status_code == 204 or not response.content:
+            if response.status_code == 204 and not response.content:
                 return {}
 
             result = response.json()
@@ -246,7 +246,7 @@ class AsyncAPIClient:
 
             response.raise_for_status()
 
-            if response.status_code == 204 or not response.content:
+            if response.status_code == 204 and not response.content:
                 return {}
 
             result = response.json()

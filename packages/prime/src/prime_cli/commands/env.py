@@ -36,7 +36,7 @@ from ..utils.formatters import strip_ansi as _strip_ansi
 from ..utils.prompt import (
     any_provided,
     prompt_for_value,
-    select_item_interactive,
+    require_selection,
     validate_env_var_name,
 )
 from ..utils.time_utils import format_time_ago, iso_timestamp
@@ -3484,15 +3484,9 @@ def env_secret_update(
 
         if not secret_id:
             secrets = _fetch_env_secrets(client, env_id)
-            if not secrets:
-                console.print(f"[yellow]No secrets to update for {owner}/{env_name}.[/yellow]")
-                raise typer.Exit()
-
-            selected = select_item_interactive(secrets, "update", item_type="secret")
-            if not selected:
-                console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
-
+            selected = require_selection(
+                secrets, "update", f"No secrets to update for {owner}/{env_name}."
+            )
             secret_id = selected.get("id")
 
         if not any_provided(name, value, description):
@@ -3562,15 +3556,9 @@ def env_secret_delete(
 
         if not secret_id:
             secrets = _fetch_env_secrets(client, env_id)
-            if not secrets:
-                console.print(f"[yellow]No secrets to delete for {owner}/{env_name}.[/yellow]")
-                raise typer.Exit()
-
-            selected = select_item_interactive(secrets, "delete", item_type="secret")
-            if not selected:
-                console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
-
+            selected = require_selection(
+                secrets, "delete", f"No secrets to delete for {owner}/{env_name}."
+            )
             secret_id = selected.get("id")
             secret_name = selected.get("name")
         else:

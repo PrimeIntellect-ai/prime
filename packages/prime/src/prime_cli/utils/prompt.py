@@ -39,6 +39,25 @@ def _default_display_fn(item: Dict[str, Any]) -> str:
     return f"{name} - {desc}" if desc else name
 
 
+def require_selection(
+    items: List[Dict[str, Any]],
+    action: str,
+    empty_message: str,
+    item_type: str = "item",
+    display_fn: Optional[Callable[[Dict[str, Any]], str]] = None,
+) -> Dict[str, Any]:
+    if not items:
+        console.print(f"[yellow]{empty_message}[/yellow]")
+        raise typer.Exit()
+
+    selected = select_item_interactive(items, action, item_type=item_type, display_fn=display_fn)
+    if not selected:
+        console.print("\n[dim]Cancelled.[/dim]")
+        raise typer.Exit()
+
+    return selected
+
+
 def select_item_interactive(
     items: List[Dict[str, Any]],
     action: str = "select",

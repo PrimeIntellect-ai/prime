@@ -15,6 +15,7 @@ from .prompt import (
     any_provided,
     confirm_or_skip,
     prompt_for_value,
+    require_selection,
     select_item_interactive,
     validate_env_var_name,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "confirm_or_skip",
     "prompt_for_value",
     "select_item_interactive",
+    "require_selection",
     "validate_env_var_name",
     "load_toml",
     "BaseConfig",

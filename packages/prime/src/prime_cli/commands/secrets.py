@@ -11,7 +11,7 @@ from ..utils import output_data_as_json, validate_output_format
 from ..utils.prompt import (
     any_provided,
     prompt_for_value,
-    select_item_interactive,
+    require_selection,
     validate_env_var_name,
 )
 from ..utils.time_utils import format_time_ago
@@ -200,16 +200,8 @@ def secret_update(
 
         if not secret_id:
             secrets = _fetch_secrets(client, config)
-            if not secrets:
-                scope = "team" if config.team_id else "personal"
-                console.print(f"[yellow]No {scope} secrets to update.[/yellow]")
-                raise typer.Exit()
-
-            selected = select_item_interactive(secrets, "update", item_type="secret")
-            if not selected:
-                console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
-
+            scope = "team" if config.team_id else "personal"
+            selected = require_selection(secrets, "update", f"No {scope} secrets to update.")
             secret_id = selected.get("id")
 
         if not any_provided(name, value, description):
@@ -273,16 +265,8 @@ def secret_delete(
 
         if not secret_id:
             secrets = _fetch_secrets(client, config)
-            if not secrets:
-                scope = "team" if config.team_id else "personal"
-                console.print(f"[yellow]No {scope} secrets to delete.[/yellow]")
-                raise typer.Exit()
-
-            selected = select_item_interactive(secrets, "delete", item_type="secret")
-            if not selected:
-                console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
-
+            scope = "team" if config.team_id else "personal"
+            selected = require_selection(secrets, "delete", f"No {scope} secrets to delete.")
             secret_id = selected.get("id")
             secret_name = selected.get("name")
         else:

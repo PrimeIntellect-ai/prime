@@ -10,7 +10,7 @@ dev-dependencies = [
 ]
 
 [tool.uv.sources]
-verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.1.10.dev4" }
+verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.1.10.dev5" }
 
 [tool.pytest.ini_options]
 pythonpath = [

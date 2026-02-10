@@ -159,23 +159,6 @@ def print_env_build_help() -> None:
     _write_help(help_text)
 
 
-def print_lab_setup_help() -> None:
-    try:
-        help_text = _load_help_text(
-            load_verifiers_prime_plugin(console=console).setup_module,
-            "prime lab setup",
-        )
-    except Exception as exc:
-        console.print(f"[red]Failed to load help for prime lab setup:[/red] {exc}")
-        raise typer.Exit(1) from exc
-    _write_help(help_text)
-    _write_help(
-        "\nPrime-only options:\n"
-        "  --agents TEXT       Comma-separated coding agents to scaffold.\n"
-        "  --no-interactive    Disable interactive coding-agent prompts.\n"
-    )
-
-
 def run_eval_tui(env_dir: Optional[str], outputs_dir: Optional[str]) -> None:
     plugin = load_verifiers_prime_plugin(console=console)
     env = os.environ.copy()

@@ -317,9 +317,10 @@ class EvalsClient:
         self,
         env_name: Optional[str] = None,
         suite_id: Optional[str] = None,
-        team_id: Optional[str] = None,
         skip: int = 0,
         limit: int = 50,
+        *,
+        team_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """List evaluations with optional filters"""
         params: Dict[str, Any] = {"skip": skip, "limit": limit}
@@ -662,9 +663,10 @@ class AsyncEvalsClient:
         self,
         env_name: Optional[str] = None,
         suite_id: Optional[str] = None,
-        team_id: Optional[str] = None,
         skip: int = 0,
         limit: int = 50,
+        *,
+        team_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """List evaluations with optional filters"""
         params: Dict[str, Any] = {"skip": skip, "limit": limit}

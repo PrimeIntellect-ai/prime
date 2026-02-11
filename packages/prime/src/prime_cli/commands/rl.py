@@ -190,6 +190,10 @@ id = "{env_value}"
 # env_ratios = [0.5, 0.5]
 # skip_verification = false
 # seed = 42
+
+# Optional: advanced run configuration (admin only)
+# [run_config]
+# custom_key = "custom_value"
 '''
 
 
@@ -368,6 +372,7 @@ class RLConfig(BaseModel):
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
+    run_config: Dict[str, Any] = Field(default_factory=dict)  # advanced config (admin only)
 
 
 def _format_validation_errors(errors: list[dict]) -> list[str]:
@@ -681,6 +686,7 @@ def create_run(
             lora_alpha=cfg.lora_alpha,
             oversampling_factor=cfg.oversampling_factor,
             max_async_level=cfg.max_async_level,
+            run_config=cfg.run_config if cfg.run_config else None,
         )
 
         if output == "json":

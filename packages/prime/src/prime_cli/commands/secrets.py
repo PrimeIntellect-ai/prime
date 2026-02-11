@@ -7,7 +7,7 @@ from rich.table import Table
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
-from ..utils import output_data_as_json, validate_output_format
+from ..utils import optional_team_params, output_data_as_json, validate_output_format
 from ..utils.prompt import (
     any_provided,
     prompt_for_value,
@@ -22,10 +22,7 @@ console = Console()
 
 def _fetch_secrets(client: APIClient, config: Config) -> List[Dict[str, Any]]:
     """Fetch secrets for the current user/team context."""
-    params: Dict[str, Any] = {}
-    if config.team_id:
-        params["teamId"] = config.team_id
-    response = client.get("/secrets/", params=params if params else None)
+    response = client.get("/secrets/", params=optional_team_params(config))
     return response.get("data", [])
 
 
@@ -228,6 +225,7 @@ def secret_update(
         response = client.patch(
             f"/secrets/{secret_id}",
             json=payload,
+            params=optional_team_params(config),
         )
         secret = response.get("data", {})
 
@@ -270,7 +268,7 @@ def secret_delete(
             secret_id = selected.get("id")
             secret_name = selected.get("name")
         else:
-            response = client.get(f"/secrets/{secret_id}")
+            response = client.get(f"/secrets/{secret_id}", params=optional_team_params(config))
             secret_data = response.get("data", {})
             secret_name = secret_data.get("name", secret_id)
 
@@ -280,7 +278,7 @@ def secret_delete(
                 console.print("\n[dim]Cancelled.[/dim]")
                 raise typer.Exit()
 
-        client.delete(f"/secrets/{secret_id}")
+        client.delete(f"/secrets/{secret_id}", params=optional_team_params(config))
         console.print(f"[green]✓ Deleted secret '{secret_name}'[/green]")
 
     except KeyboardInterrupt:
@@ -309,8 +307,9 @@ def secret_get(
 
     try:
         client = APIClient()
+        config = Config()
 
-        response = client.get(f"/secrets/{secret_id}")
+        response = client.get(f"/secrets/{secret_id}", params=optional_team_params(config))
         secret = response.get("data", {})
 
         if output == "json":

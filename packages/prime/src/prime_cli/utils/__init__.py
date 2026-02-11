@@ -11,6 +11,7 @@ from .formatters import (
     obfuscate_secrets,
     strip_ansi,
 )
+from .params import optional_team_params
 from .prompt import (
     any_provided,
     confirm_or_skip,
@@ -43,4 +44,5 @@ __all__ = [
     "validate_env_var_name",
     "load_toml",
     "BaseConfig",
+    "optional_team_params",
 ]

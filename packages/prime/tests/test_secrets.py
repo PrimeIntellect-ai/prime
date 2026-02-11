@@ -70,7 +70,10 @@ def mock_secrets_api(monkeypatch: pytest.MonkeyPatch) -> None:
         return {"data": {}}
 
     def mock_patch(
-        self: Any, endpoint: str, json: Optional[Dict[str, Any]] = None
+        self: Any,
+        endpoint: str,
+        json: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if endpoint.startswith("/secrets/"):
             return {
@@ -87,7 +90,11 @@ def mock_secrets_api(monkeypatch: pytest.MonkeyPatch) -> None:
             }
         return {"data": {}}
 
-    def mock_delete(self: Any, endpoint: str) -> None:
+    def mock_delete(
+        self: Any,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> None:
         pass
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)

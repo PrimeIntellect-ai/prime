@@ -317,6 +317,7 @@ class EvalsClient:
         self,
         env_name: Optional[str] = None,
         suite_id: Optional[str] = None,
+        team_id: Optional[str] = None,
         skip: int = 0,
         limit: int = 50,
     ) -> Dict[str, Any]:
@@ -326,6 +327,8 @@ class EvalsClient:
             params["environment_name"] = env_name
         if suite_id:
             params["suite_id"] = suite_id
+        if team_id:
+            params["team_id"] = team_id
 
         response = self.client.request("GET", "/evaluations/", params=params)
         return response
@@ -659,6 +662,7 @@ class AsyncEvalsClient:
         self,
         env_name: Optional[str] = None,
         suite_id: Optional[str] = None,
+        team_id: Optional[str] = None,
         skip: int = 0,
         limit: int = 50,
     ) -> Dict[str, Any]:
@@ -668,6 +672,8 @@ class AsyncEvalsClient:
             params["environment_name"] = env_name
         if suite_id:
             params["suite_id"] = suite_id
+        if team_id:
+            params["team_id"] = team_id
 
         response = await self.client.request("GET", "/evaluations/", params=params)
         return response

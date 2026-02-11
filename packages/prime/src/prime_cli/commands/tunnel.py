@@ -240,7 +240,7 @@ def stop_tunnel(
         console.print(f"[red]Error:[/red] {e}", style="bold")
         raise typer.Exit(1)
 
-    if len(parsed_ids) == 1 and succeeded:
+    if len(parsed_ids) == 1 and succeeded and not all:
         console.print(f"[green]Tunnel deleted:[/green] {parsed_ids[0]}")
         return
 

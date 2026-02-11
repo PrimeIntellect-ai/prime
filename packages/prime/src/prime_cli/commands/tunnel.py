@@ -5,6 +5,7 @@ from typing import List, Optional
 import typer
 from prime_tunnel import Tunnel
 from prime_tunnel.core.client import TunnelClient
+from prime_tunnel.core.config import Config
 from rich.console import Console
 from rich.table import Table
 
@@ -148,8 +149,17 @@ def stop_tunnel(
         help="Team ID to include team tunnels for --all (uses config team_id if not specified)",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    only_mine: bool = typer.Option(
+        True,
+        "--only-mine/--all-users",
+        help="Restrict '--all' deletes to only your tunnels (default: only yours)",
+        show_default=True,
+    ),
 ) -> None:
-    """Stop and delete one or more tunnels."""
+    """Stop and delete one or more tunnels.
+
+    --only-mine controls whether '--all' will restrict to your tunnels or delete for all users.
+    """
 
     if all and tunnel_ids:
         console.print("[red]Error:[/red] Cannot specify tunnel IDs with --all")
@@ -166,18 +176,35 @@ def stop_tunnel(
             client = TunnelClient()
             try:
                 tunnels = await client.list_tunnels(team_id=team_id)
+                if only_mine:
+                    config = Config()
+                    current_user_id = config.user_id
+                    if not current_user_id:
+                        console.print(
+                            "[red]Error:[/red] Cannot filter by user - no user_id configured. "
+                            "Use --all-users to delete all tunnels, or configure your user_id."
+                        )
+                        raise typer.Exit(1)
+                    tunnels = [t for t in tunnels if t.user_id == current_user_id]
                 return [t.tunnel_id for t in tunnels]
             finally:
                 await client.close()
 
         try:
             parsed_ids = asyncio.run(fetch_tunnels())
+        except typer.Exit:
+            raise
         except Exception as e:
             console.print(f"[red]Error:[/red] {e}", style="bold")
             raise typer.Exit(1)
 
         if not parsed_ids:
             console.print("[yellow]No active tunnels to stop[/yellow]")
+            if only_mine:
+                console.print(
+                    "\n[dim]Note: --all only deletes your own tunnels by default. "
+                    "Use --all-users to delete tunnels from all team members.[/dim]"
+                )
             return
     else:
         raw_ids: List[str] = []

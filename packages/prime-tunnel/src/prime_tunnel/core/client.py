@@ -278,6 +278,7 @@ class TunnelClient:
                     server_host="",
                     server_port=7000,
                     expires_at=t["expires_at"],
+                    user_id=t.get("user_id"),
                 )
             )
         return tunnels

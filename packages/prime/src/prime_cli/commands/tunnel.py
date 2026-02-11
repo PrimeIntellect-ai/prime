@@ -1,12 +1,14 @@
 import asyncio
 import signal
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from prime_tunnel import Tunnel
 from prime_tunnel.core.client import TunnelClient
 from rich.console import Console
 from rich.table import Table
+
+from prime_cli.utils.prompt import confirm_or_skip
 
 app = typer.Typer(help="Manage tunnels for exposing local services", no_args_is_help=True)
 console = Console()
@@ -136,25 +138,137 @@ def tunnel_status(
 
 @app.command("stop")
 def stop_tunnel(
-    tunnel_id: str = typer.Argument(..., help="Tunnel ID to stop"),
+    tunnel_ids: Optional[List[str]] = typer.Argument(
+        None, help="Tunnel ID(s) to stop (space or comma-separated)"
+    ),
+    all: bool = typer.Option(False, "--all", help="Stop all tunnels"),
+    team_id: Optional[str] = typer.Option(
+        None,
+        "--team-id",
+        help="Team ID to include team tunnels for --all (uses config team_id if not specified)",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Stop and delete a tunnel."""
+    """Stop and delete one or more tunnels."""
 
-    async def delete_tunnel():
-        client = TunnelClient()
+    if all and tunnel_ids:
+        console.print("[red]Error:[/red] Cannot specify tunnel IDs with --all")
+        raise typer.Exit(1)
+
+    if not all and not tunnel_ids:
+        console.print("[red]Error:[/red] Must specify at least one tunnel ID or --all")
+        raise typer.Exit(1)
+
+    parsed_ids: List[str] = []
+    if all:
+
+        async def fetch_tunnels() -> List[str]:
+            client = TunnelClient()
+            try:
+                tunnels = await client.list_tunnels(team_id=team_id)
+                return [t.tunnel_id for t in tunnels]
+            finally:
+                await client.close()
+
         try:
-            return await client.delete_tunnel(tunnel_id)
+            parsed_ids = asyncio.run(fetch_tunnels())
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}", style="bold")
+            raise typer.Exit(1)
+
+        if not parsed_ids:
+            console.print("[yellow]No active tunnels to stop[/yellow]")
+            return
+    else:
+        raw_ids: List[str] = []
+        for id_string in tunnel_ids or []:
+            if "," in id_string:
+                raw_ids.extend([id_.strip() for id_ in id_string.split(",") if id_.strip()])
+            else:
+                raw_ids.append(id_string.strip())
+
+        seen = set()
+        for tunnel_id in raw_ids:
+            if tunnel_id and tunnel_id not in seen:
+                parsed_ids.append(tunnel_id)
+                seen.add(tunnel_id)
+
+        if not parsed_ids:
+            console.print("[red]Error:[/red] No valid tunnel IDs provided")
+            raise typer.Exit(1)
+
+    if all:
+        confirmation_msg = (
+            f"Are you sure you want to stop ALL {len(parsed_ids)} tunnel(s)? "
+            "This action cannot be undone."
+        )
+        cancel_msg = "Stop all cancelled"
+    elif len(parsed_ids) == 1:
+        confirmation_msg = f"Are you sure you want to stop tunnel {parsed_ids[0]}?"
+        cancel_msg = "Stop cancelled"
+    else:
+        confirmation_msg = f"Are you sure you want to stop {len(parsed_ids)} tunnel(s)?"
+        cancel_msg = "Bulk stop cancelled"
+
+    if not confirm_or_skip(confirmation_msg, yes):
+        console.print(cancel_msg)
+        return
+
+    async def delete_tunnels() -> tuple[List[str], List[dict], List[dict]]:
+        client = TunnelClient()
+        succeeded: List[str] = []
+        not_found: List[dict] = []
+        failed: List[dict] = []
+        try:
+            for tunnel_id in parsed_ids:
+                try:
+                    success = await client.delete_tunnel(tunnel_id)
+                    if success:
+                        succeeded.append(tunnel_id)
+                    else:
+                        not_found.append({"tunnel_id": tunnel_id, "error": "not found"})
+                except Exception as e:
+                    failed.append({"tunnel_id": tunnel_id, "error": str(e)})
         finally:
             await client.close()
+        return succeeded, not_found, failed
 
     try:
-        success = asyncio.run(delete_tunnel())
+        with console.status("[bold blue]Stopping tunnel(s)...", spinner="dots"):
+            succeeded, not_found, failed = asyncio.run(delete_tunnels())
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}", style="bold")
         raise typer.Exit(1)
 
-    if success:
-        console.print(f"[green]Tunnel deleted:[/green] {tunnel_id}")
-    else:
-        console.print(f"[red]Tunnel not found:[/red] {tunnel_id}")
+    if len(parsed_ids) == 1 and succeeded:
+        console.print(f"[green]Tunnel deleted:[/green] {parsed_ids[0]}")
+        return
+
+    total_failed = len(not_found) + len(failed)
+    total_processed = len(succeeded) + total_failed
+    console.print(f"\n[green]Processed {total_processed} tunnel(s)[/green]")
+
+    if succeeded:
+        console.print(
+            f"\n[bold green]Successfully deleted {len(succeeded)} tunnel(s):[/bold green]"
+        )
+        for tunnel_id in succeeded:
+            console.print(f"  ✓ {tunnel_id}")
+
+    if not_found:
+        console.print(f"\n[bold yellow]Not found ({len(not_found)}):[/bold yellow]")
+        for failure in not_found:
+            console.print(f"  - {failure['tunnel_id']}")
+
+    if failed:
+        console.print(f"\n[bold red]Failed to delete {len(failed)} tunnel(s):[/bold red]")
+        for failure in failed:
+            console.print(f"  ✗ {failure['tunnel_id']}: {failure['error']}")
+
+    if total_failed > 0:
         raise typer.Exit(1)
+
+    if all:
+        console.print("[green]All tunnels deleted successfully[/green]")
+    else:
+        console.print("[green]All specified tunnels deleted successfully[/green]")

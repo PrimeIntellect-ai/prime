@@ -708,9 +708,31 @@ def status_cmd(
         raise typer.Exit(1)
 
 
+def _resolve_push_environment_path(path: Optional[str], env_id: Optional[str]) -> Path:
+    """Resolve the local environment directory for `prime env push`."""
+    if env_id:
+        env_folder = env_id.split("/")[-1].replace("-", "_")
+        parent = Path(path) if path else Path("./environments")
+        return (parent / env_folder).resolve()
+
+    return Path(path or ".").resolve()
+
+
 @app.command(rich_help_panel="Manage")
 def push(
-    path: str = typer.Option(".", "--path", "-p", help="Path to environment directory"),
+    env_id: Optional[str] = typer.Argument(
+        None,
+        help="Optional environment ID used as the local folder name (hyphens map to underscores)",
+    ),
+    path: Optional[str] = typer.Option(
+        None,
+        "--path",
+        "-p",
+        help=(
+            "Path to environment directory. Defaults to '.' without env_id, "
+            "or './environments' as the parent directory with env_id."
+        ),
+    ),
     name: Optional[str] = typer.Option(
         None, "--name", "-n", help="Override environment name (defaults to pyproject.toml name)"
     ),
@@ -742,7 +764,7 @@ def push(
     """Push environment to registry"""
 
     try:
-        env_path = Path(path).resolve()
+        env_path = _resolve_push_environment_path(path, env_id)
 
         # Display upstream environment info if metadata exists
         display_upstream_environment_info(env_path)

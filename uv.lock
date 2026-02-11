@@ -1746,7 +1746,7 @@ requires-dist = [
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.0a6" },
     { name = "typer", specifier = ">=0.9.0" },
     { name = "types-toml", marker = "extra == 'dev'", specifier = ">=0.10.0" },
-    { name = "verifiers", git = "https://github.com/PrimeIntellect-ai/verifiers.git?tag=v0.1.10.dev5" },
+    { name = "verifiers", git = "https://github.com/PrimeIntellect-ai/verifiers.git?tag=v0.1.10" },
 ]
 provides-extras = ["dev"]
 
@@ -2893,8 +2893,8 @@ wheels = [
 
 [[package]]
 name = "verifiers"
-version = "0.1.10.dev5"
-source = { git = "https://github.com/PrimeIntellect-ai/verifiers.git?tag=v0.1.10.dev5#0df300be0321ae9efc04c323159fb69d687d3c5e" }
+version = "0.1.10"
+source = { git = "https://github.com/PrimeIntellect-ai/verifiers.git?tag=v0.1.10#ccef04486cda1759981dfc41b81b3939e5b69a9f" }
 dependencies = [
     { name = "datasets" },
     { name = "gepa" },

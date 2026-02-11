@@ -225,6 +225,22 @@ class TunnelClient:
         await self._handle_response(response, "delete tunnel")
         return True
 
+    async def bulk_delete_tunnels(self, tunnel_ids: list[str]) -> dict:
+        """Bulk delete multiple tunnels."""
+        self._check_auth_required()
+
+        url = f"{self.base_url}/api/v1/tunnel"
+        payload = {"tunnel_ids": tunnel_ids}
+
+        try:
+            response = await self._request_with_retry("DELETE", url, json=payload)
+        except httpx.TimeoutException as e:
+            raise TunnelTimeoutError(f"Request timed out: {e}") from e
+        except httpx.RequestError as e:
+            raise TunnelError(f"Failed to connect to API: {e}") from e
+
+        return await self._handle_response(response, "bulk delete tunnels")
+
     async def list_tunnels(self, team_id: Optional[str] = None) -> list[TunnelInfo]:
         """
         List all tunnels for the current user.

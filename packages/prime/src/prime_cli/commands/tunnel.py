@@ -220,15 +220,18 @@ def stop_tunnel(
         not_found: List[dict] = []
         failed: List[dict] = []
         try:
-            for tunnel_id in parsed_ids:
-                try:
-                    success = await client.delete_tunnel(tunnel_id)
-                    if success:
-                        succeeded.append(tunnel_id)
-                    else:
-                        not_found.append({"tunnel_id": tunnel_id, "error": "not found"})
-                except Exception as e:
-                    failed.append({"tunnel_id": tunnel_id, "error": str(e)})
+            result = await client.bulk_delete_tunnels(parsed_ids)
+            succeeded = result.get("succeeded", [])
+            for failure in result.get("failed", []):
+                tid = failure.get("tunnel_id", "")
+                error = failure.get("error", "Unknown error")
+                if "not found" in error.lower():
+                    not_found.append({"tunnel_id": tid, "error": error})
+                else:
+                    failed.append({"tunnel_id": tid, "error": error})
+        except Exception as e:
+            for tid in parsed_ids:
+                failed.append({"tunnel_id": tid, "error": str(e)})
         finally:
             await client.close()
         return succeeded, not_found, failed

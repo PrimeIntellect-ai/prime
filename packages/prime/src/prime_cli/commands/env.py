@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -7,6 +8,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import uuid
 import zipfile
 from datetime import datetime
 
@@ -23,10 +25,20 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from ..api.inference import InferenceAPIError, InferenceClient
 from ..client import APIClient, APIError
+from ..core import Config
 from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
+from ..utils.eval_push import push_eval_results_to_hub
 from ..utils.formatters import format_file_size
+from ..utils.formatters import strip_ansi as _strip_ansi
+from ..utils.prompt import (
+    any_provided,
+    prompt_for_value,
+    require_selection,
+    validate_env_var_name,
+)
 from ..utils.time_utils import format_time_ago, iso_timestamp
 from ..verifiers_bridge import print_env_build_help, print_env_init_help
 from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
@@ -44,13 +56,13 @@ MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 action_app = typer.Typer(help="Manage environment actions (CI jobs)", no_args_is_help=True)
 app.add_typer(action_app, name="action", rich_help_panel="Manage")
 
-# Log cleaning pattern
-ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+# Secret subcommand app
+secret_app = typer.Typer(help="Manage environment secrets", no_args_is_help=True)
+app.add_typer(secret_app, name="secret", rich_help_panel="Manage")
 
-
-def _strip_ansi(text: str) -> str:
-    """Remove ANSI escape codes from text."""
-    return ANSI_ESCAPE.sub("", text)
+# Variable subcommand app
+var_app = typer.Typer(help="Manage environment variables", no_args_is_help=True)
+app.add_typer(var_app, name="var", rich_help_panel="Manage")
 
 
 def _uv_pip_command(subcommand: str, *args: str) -> List[str]:
@@ -82,6 +94,25 @@ def _parse_environment_slug(environment: str) -> Tuple[str, str]:
         raise typer.Exit(1)
 
     return parts[0], parts[1]
+
+
+def _resolve_environment(environment: Optional[str]) -> Tuple[str, str]:
+    """Resolve environment slug from argument or auto-detect from current directory."""
+    if environment:
+        return _parse_environment_slug(environment)
+
+    metadata = find_environment_metadata()
+    if metadata:
+        owner = metadata.get("owner")
+        name = metadata.get("name")
+        if owner and name:
+            console.print(f"[dim]Using environment: {owner}/{name}[/dim]")
+            return owner, name
+
+    console.print(
+        "[red]Error: No environment specified and none detected in current directory[/red]"
+    )
+    raise typer.Exit(1)
 
 
 @action_app.command("list")
@@ -2901,3 +2932,1013 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
     except Exception as e:
         console.print(f"[red]Installation failed: {e}[/red]")
         return False
+
+
+def run_eval(
+    environment: str,
+    model: str,
+    num_examples: Optional[int],
+    rollouts_per_example: Optional[int],
+    max_concurrent: Optional[int],
+    max_concurrent_generation: Optional[int],
+    max_concurrent_scoring: Optional[int],
+    max_tokens: Optional[int],
+    temperature: Optional[float],
+    sampling_args: Optional[str],
+    verbose: bool,
+    no_interleave_scoring: bool,
+    state_columns: Optional[str],
+    save_results: bool,
+    save_every: int,
+    independent_scoring: bool,
+    save_to_hf_hub: bool,
+    hf_hub_dataset_name: Optional[str],
+    env_args: Optional[str],
+    extra_env_kwargs: Optional[str],
+    env_dir_path: Optional[str],
+    api_key_var: Optional[str],
+    api_base_url: Optional[str],
+    skip_upload: bool,
+    env_path: Optional[str],
+    endpoints_path: Optional[str] = None,
+    headers: Optional[List[str]] = None,
+) -> None:
+    """
+    Run verifiers' vf-eval with Prime Inference
+    """
+    is_slug = (
+        "/" in environment and not environment.startswith("./") and not environment.startswith("/")
+    )
+
+    upstream_owner = None
+    upstream_name = None
+    env_name_for_vf_eval = environment
+
+    if is_slug:
+        env_slug = environment
+        requested_version = "latest"
+        if "@" in environment:
+            env_slug, requested_version = environment.rsplit("@", 1)
+
+        parts = env_slug.split("/")
+        if len(parts) == 2 and parts[0] and parts[1]:
+            upstream_owner, upstream_name = parts
+            env_name_for_vf_eval = upstream_name
+            console.print(
+                f"[dim]Using upstream environment {upstream_owner}/{upstream_name}[/dim]\n"
+            )
+
+            if not _is_environment_installed(upstream_name, requested_version):
+                console.print(f"[cyan]Installing {environment}...[/cyan]")
+                if not _install_single_environment(environment):
+                    raise typer.Exit(1)
+                console.print()
+
+            is_resolved = True
+        else:
+            console.print(f"[red]Invalid environment slug format: {environment}[/red]")
+            raise typer.Exit(1)
+    else:
+        check_path = Path(env_path) if env_path else Path.cwd()
+        is_resolved = display_upstream_environment_info(
+            env_path=check_path, environment_name=environment
+        )
+        if not is_resolved and not skip_upload:
+            console.print(
+                "[yellow]Evaluation results will not be uploaded or viewable on the platform "
+                "without a specified upstream environment. Use `prime env push` "
+                "to set an upstream.[/yellow]"
+            )
+
+    config = Config()
+
+    api_key = config.api_key
+    inference_base_url = (config.inference_url or "").strip()
+
+    if not api_key:
+        console.print(
+            "[red]No API key configured.[/red] "
+            "Run [bold]prime login[/bold] or [bold]prime config set-api-key[/bold]."
+        )
+        raise typer.Exit(1)
+
+    # Choose base from --api-base-url (if given) or config
+    if api_base_url:
+        chosen_base = api_base_url.rstrip("/")
+    else:
+        if not inference_base_url:
+            console.print(
+                "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
+            )
+            raise typer.Exit(1)
+        chosen_base = inference_base_url.rstrip("/")
+
+    inference_url = chosen_base
+
+    # Fast fail if the model doesn't exist (only for Prime Inference, not custom URLs)
+    # Check if using Prime Inference URL (either from config or explicitly provided)
+    if chosen_base == inference_base_url:
+        client = InferenceClient()
+        try:
+            client.retrieve_model(model)
+        except InferenceAPIError as e:
+            console.print(
+                f"[red]Invalid model:[/red] {e} \n\n"
+                f"[b]Use 'prime inference models' to see available models.[/b]"
+            )
+            raise typer.Exit(1)
+
+    cmd = ["uv", "run", "vf-eval", env_name_for_vf_eval]
+
+    # Add chosen inference url
+    cmd += ["-b", inference_url]
+
+    # Always pass the selected model (required option)
+    cmd += ["-m", model]
+
+    # Environment modification may be necessary for passing in API key
+    env = os.environ.copy()
+
+    # API key var: respect --api-key-var if provided to this command, else inject PRIME_API_KEY
+    if api_key_var:
+        cmd += ["-k", api_key_var]
+    else:
+        env["PRIME_API_KEY"] = api_key
+        cmd += ["-k", "PRIME_API_KEY"]
+
+    # Forward vf-eval options if provided here
+    if env_args:
+        cmd += ["-a", env_args]
+    if extra_env_kwargs:
+        cmd += ["-x", extra_env_kwargs]
+    if env_dir_path:
+        cmd += ["-p", env_dir_path]
+    if num_examples is not None:
+        cmd += ["-n", str(num_examples)]
+    if rollouts_per_example is not None:
+        cmd += ["-r", str(rollouts_per_example)]
+    if max_concurrent is not None:
+        cmd += ["-c", str(max_concurrent)]
+    if max_concurrent_generation is not None:
+        cmd += ["--max-concurrent-generation", str(max_concurrent_generation)]
+    if max_concurrent_scoring is not None:
+        cmd += ["--max-concurrent-scoring", str(max_concurrent_scoring)]
+    if max_tokens is not None:
+        cmd += ["-t", str(max_tokens)]
+    if temperature is not None:
+        cmd += ["-T", str(temperature)]
+    if sampling_args:
+        cmd += ["-S", sampling_args]
+    if verbose:
+        cmd += ["-v"]
+    if no_interleave_scoring:
+        cmd += ["-N"]
+    if state_columns:
+        cmd += ["-C", state_columns]
+    if save_results or not skip_upload:
+        cmd += ["-s"]
+    if save_every is not None:
+        cmd += ["-f", str(save_every)]
+    if independent_scoring:
+        cmd += ["-R"]
+    if save_to_hf_hub:
+        cmd += ["-H"]
+    if hf_hub_dataset_name:
+        cmd += ["-D", hf_hub_dataset_name]
+    if endpoints_path:
+        cmd += ["-e", endpoints_path]
+    if headers:
+        for header in headers:
+            cmd += ["--header", header]
+
+    # Generate job_id for end-to-end tracing of eval runs
+    eval_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    job_uuid = str(uuid.uuid4())[:8]
+    sanitized_env = env_name_for_vf_eval.replace("-", "_").replace("/", "_")
+    sanitized_model = model.replace("/", "_").replace("-", "_")
+    job_id = f"{sanitized_env}_{sanitized_model}_{eval_timestamp}_{job_uuid}"
+
+    # Pass tracking header to vf-eval
+    cmd += ["--header", f"X-PI-Job-Id: {job_id}"]
+
+    # If a team is configured, pass it to vf-eval via header
+    if config.team_id:
+        cmd += ["--header", f"X-Prime-Team-ID: {config.team_id}"]
+
+    console.print(f"[dim]Eval job_id: {job_id}[/dim]")
+
+    # Execute; stream output directly
+    try:
+        result = subprocess.run(cmd, env=env)
+        if result.returncode != 0:
+            raise typer.Exit(result.returncode)
+    except KeyboardInterrupt:
+        raise typer.Exit(130)
+    except FileNotFoundError:
+        console.print("[red]Failed to start vf-eval process.[/red]")
+        raise typer.Exit(1)
+
+    # Automatically push to hub after successful eval (unless --skip-upload is used)
+    if not skip_upload:
+        if is_resolved:
+            try:
+                if is_slug and upstream_owner and upstream_name:
+                    push_eval_results_to_hub(
+                        env_name=env_name_for_vf_eval,
+                        model=model,
+                        job_id=job_id,
+                        env_path=Path(env_path) if env_path else None,
+                        upstream_slug=f"{upstream_owner}/{upstream_name}",
+                    )
+                else:
+                    check_path = Path(env_path) if env_path else Path.cwd()
+                    push_eval_results_to_hub(
+                        env_name=env_name_for_vf_eval,
+                        model=model,
+                        job_id=job_id,
+                        env_path=check_path,
+                    )
+            except Exception as e:
+                console.print(f"[red]Failed to push results to hub:[/red] {e}")
+                console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
+                raise typer.Exit(1)
+        else:
+            console.print(
+                "[dim]No upstream environment found. Skipped uploading evaluation "
+                "results to platform.\nUse `prime env push` to set an "
+                "upstream, or use `--env-path` to specify the correct path to the "
+                "environment if it's not the current directory.[/dim]"
+            )
+    else:
+        console.print("[dim]Skipped uploading evaluation results[/dim]")
+
+
+@app.command(
+    "eval",
+    no_args_is_help=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    deprecated=True,
+    rich_help_panel="Deprecated",
+)
+def eval_env(
+    ctx: typer.Context,
+    environment: str = typer.Argument(
+        ...,
+        help="Environment name (e.g. 'wordle') or slug (e.g. 'primeintellect/wordle')",
+    ),
+    model: str = typer.Option(
+        "openai/gpt-4.1-mini",
+        "--model",
+        "-m",
+        help=(
+            "Model to use (e.g. 'openai/gpt-4.1-mini', 'prime-intellect/intellect-3', "
+            "see 'prime inference models' for available models)"
+        ),
+    ),
+    num_examples: Optional[int] = typer.Option(
+        None, "--num-examples", "-n", help="Number of examples"
+    ),
+    rollouts_per_example: Optional[int] = typer.Option(
+        None, "--rollouts-per-example", "-r", help="Rollouts per example"
+    ),
+    max_concurrent: Optional[int] = typer.Option(
+        32, "--max-concurrent", "-c", help="Max concurrent requests"
+    ),
+    max_concurrent_generation: Optional[int] = typer.Option(
+        None, "--max-concurrent-generation", help="Max concurrent generation requests"
+    ),
+    max_concurrent_scoring: Optional[int] = typer.Option(
+        None, "--max-concurrent-scoring", help="Max concurrent scoring requests"
+    ),
+    max_tokens: Optional[int] = typer.Option(
+        None, "--max-tokens", "-t", help="Max tokens to generate (unset → model default)"
+    ),
+    temperature: Optional[float] = typer.Option(None, "--temperature", "-T", help="Temperature"),
+    sampling_args: Optional[str] = typer.Option(
+        None,
+        "--sampling-args",
+        "-S",
+        help='Sampling args as JSON, e.g. \'{"enable_thinking": false, "max_tokens": 256}\'',
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    no_interleave_scoring: bool = typer.Option(
+        False, "--no-interleave-scoring", "-N", help="Disable interleaving of scoring"
+    ),
+    state_columns: Optional[str] = typer.Option(
+        None,
+        "--state-columns",
+        "-C",
+        help="Comma-separated list of state columns to save (e.g., 'turn,timing')",
+    ),
+    save_results: bool = typer.Option(False, "--save-results", "-s", help="Save results to disk"),
+    save_every: int = typer.Option(-1, "--save-every", "-f", help="Save dataset every n rollouts"),
+    independent_scoring: bool = typer.Option(
+        False,
+        "--independent-scoring",
+        "-R",
+        help="Score each rollout individually instead of scoring by group",
+    ),
+    save_to_hf_hub: bool = typer.Option(False, "--save-to-hf-hub", "-H", help="Save to HF Hub"),
+    hf_hub_dataset_name: Optional[str] = typer.Option(
+        None, "--hf-hub-dataset-name", "-D", help="HF Hub dataset name"
+    ),
+    env_args: Optional[str] = typer.Option(
+        None, "--env-args", "-a", help='Environment args as JSON, e.g. \'{"key":"value"}\''
+    ),
+    extra_env_kwargs: Optional[str] = typer.Option(
+        None,
+        "--extra-env-kwargs",
+        "-x",
+        help='Extra environment kwargs as JSON, e.g. \'{"key":"value"}\'',
+    ),
+    env_dir_path: Optional[str] = typer.Option(
+        None, "--env-dir-path", "-p", help="Path to environments directory"
+    ),
+    api_key_var: Optional[str] = typer.Option(
+        None, "--api-key-var", "-k", help="Override api key variable instead of using PRIME_API_KEY"
+    ),
+    api_base_url: Optional[str] = typer.Option(
+        None,
+        "--api-base-url",
+        "-b",
+        help=(
+            "Override api base url variable instead of using prime inference url, "
+            "should end in '/v1'"
+        ),
+    ),
+    skip_upload: bool = typer.Option(
+        False,
+        "--skip-upload",
+        help="Skip uploading results to Prime Evals Hub (results are uploaded by default)",
+    ),
+    env_path: Optional[str] = typer.Option(
+        None,
+        "--env-path",
+        help=(
+            "Path to the environment directory "
+            "(used to locate .prime/.env-metadata.json for upstream resolution)"
+        ),
+    ),
+) -> None:
+    """Use 'prime eval' instead."""
+
+    run_eval(
+        environment=environment,
+        model=model,
+        num_examples=num_examples,
+        rollouts_per_example=rollouts_per_example,
+        max_concurrent=max_concurrent,
+        max_concurrent_generation=max_concurrent_generation,
+        max_concurrent_scoring=max_concurrent_scoring,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        sampling_args=sampling_args,
+        verbose=verbose,
+        no_interleave_scoring=no_interleave_scoring,
+        state_columns=state_columns,
+        save_results=save_results,
+        save_every=save_every,
+        independent_scoring=independent_scoring,
+        save_to_hf_hub=save_to_hf_hub,
+        hf_hub_dataset_name=hf_hub_dataset_name,
+        env_args=env_args,
+        extra_env_kwargs=extra_env_kwargs,
+        env_dir_path=env_dir_path,
+        api_key_var=api_key_var,
+        api_base_url=api_base_url,
+        skip_upload=skip_upload,
+        env_path=env_path,
+        endpoints_path=None,
+        headers=None,
+    )
+
+
+def _get_environment_id(client: APIClient, owner: str, env_name: str) -> str:
+    """Resolve environment slug to environment ID using the detail endpoint."""
+    response = client.get(f"/environmentshub/{owner}/{env_name}/@latest")
+    data = response.get("data", {})
+    env_id = data.get("id")
+    if not env_id:
+        raise APIError(f"Environment {owner}/{env_name} not found")
+    return env_id
+
+
+def _fetch_env_secrets(client: APIClient, env_id: str) -> List[Dict[str, Any]]:
+    """Fetch secrets for an environment."""
+    response = client.get(f"/environmentshub/{env_id}/secrets")
+    return response.get("data", [])
+
+
+@secret_app.command("list")
+def env_secret_list(
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """List all secrets for an environment."""
+    validate_output_format(output, console)
+    owner, env_name = _resolve_environment(environment)
+
+    try:
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+        secrets = _fetch_env_secrets(client, env_id)
+
+        if output == "json":
+            output_data_as_json({"secrets": secrets}, console)
+            return
+
+        if not secrets:
+            console.print("[yellow]No secrets found for this environment.[/yellow]")
+            return
+
+        table = Table(title=f"Secrets for {owner}/{env_name}")
+        table.add_column("ID", style="dim", no_wrap=True)
+        table.add_column("Name", style="cyan")
+        table.add_column("Source", style="blue")
+        table.add_column("Description", style="dim")
+        table.add_column("Created", style="dim")
+
+        for secret in secrets:
+            secret_id = secret.get("id", "")
+            name = secret.get("name", "")
+            source = secret.get("source", "")
+            description = secret.get("description") or ""
+            created = secret.get("createdAt", "")
+            if created:
+                created = format_time_ago(created)
+            table.add_row(secret_id, name, source, description, created)
+
+        console.print(table)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@secret_app.command("create")
+def env_secret_create(
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
+    ),
+    name: Optional[str] = typer.Option(
+        None,
+        "--name",
+        "-n",
+        help="Secret name (must be uppercase with underscores, e.g., MY_SECRET)",
+    ),
+    value: Optional[str] = typer.Option(
+        None,
+        "--value",
+        "-v",
+        help="Secret value",
+    ),
+    description: Optional[str] = typer.Option(
+        None,
+        "--description",
+        "-d",
+        help="Secret description",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """Create an environment-specific secret."""
+    validate_output_format(output, console)
+    owner, env_name = _resolve_environment(environment)
+
+    try:
+        if not name:
+            name = prompt_for_value("Secret name")
+            if not name:
+                console.print("\n[dim]Cancelled.[/dim]")
+                raise typer.Exit()
+
+        if not validate_env_var_name(name, "secret"):
+            raise typer.Exit(1)
+
+        if not value:
+            value = prompt_for_value("Secret value", hide_input=True)
+            if not value:
+                console.print("\n[dim]Cancelled.[/dim]")
+                raise typer.Exit()
+
+        with console.status("[bold blue]Creating secret...", spinner="dots"):
+            client = APIClient()
+            env_id = _get_environment_id(client, owner, env_name)
+
+            payload: Dict[str, Any] = {"name": name, "value": value}
+            if description:
+                payload["description"] = description
+
+            response = client.post(f"/environmentshub/{env_id}/secrets", json=payload)
+            secret = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(secret, console)
+            return
+
+        console.print(f"[green]✓ Created secret '{name}' for {owner}/{env_name}[/green]")
+        console.print(f"[dim]ID: {secret.get('id')}[/dim]")
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Cancelled.[/dim]")
+        raise typer.Exit()
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@secret_app.command("update")
+def env_secret_update(
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
+    ),
+    secret_id: Optional[str] = typer.Option(
+        None,
+        "--id",
+        help="Secret ID to update (interactive selection if not provided)",
+    ),
+    name: Optional[str] = typer.Option(
+        None,
+        "--name",
+        "-n",
+        help="New secret name",
+    ),
+    value: Optional[str] = typer.Option(
+        None,
+        "--value",
+        "-v",
+        help="New secret value",
+    ),
+    description: Optional[str] = typer.Option(
+        None,
+        "--description",
+        "-d",
+        help="New secret description",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """Update an environment-specific secret."""
+    validate_output_format(output, console)
+    owner, env_name = _resolve_environment(environment)
+
+    try:
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+
+        if not secret_id:
+            secrets = _fetch_env_secrets(client, env_id)
+            selected = require_selection(
+                secrets, "update", f"No secrets to update for {owner}/{env_name}."
+            )
+            secret_id = selected.get("id")
+
+        if not any_provided(name, value, description):
+            console.print("\n[bold]What would you like to update?[/bold]")
+            new_value = prompt_for_value("New value", required=False, hide_input=True)
+            if new_value:
+                value = new_value
+
+            if not value:
+                console.print("\n[dim]No changes made.[/dim]")
+                raise typer.Exit()
+
+        if name is not None and not validate_env_var_name(name, "secret"):
+            raise typer.Exit(1)
+
+        payload: Dict[str, Any] = {}
+        if name is not None:
+            payload["name"] = name
+        if value is not None:
+            payload["value"] = value
+        if description is not None:
+            payload["description"] = description
+
+        response = client.patch(f"/environmentshub/{env_id}/secrets/{secret_id}", json=payload)
+        secret = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(secret, console)
+            return
+
+        console.print(
+            f"[green]✓ Updated secret '{secret.get('name')}' for {owner}/{env_name}[/green]"
+        )
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Cancelled.[/dim]")
+        raise typer.Exit()
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@secret_app.command("delete")
+def env_secret_delete(
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
+    ),
+    secret_id: Optional[str] = typer.Option(
+        None,
+        "--id",
+        help="Secret ID to delete (interactive selection if not provided)",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation prompt",
+    ),
+) -> None:
+    """Delete an environment-specific secret."""
+    owner, env_name = _resolve_environment(environment)
+
+    try:
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+
+        if not secret_id:
+            secrets = _fetch_env_secrets(client, env_id)
+            selected = require_selection(
+                secrets, "delete", f"No secrets to delete for {owner}/{env_name}."
+            )
+            secret_id = selected.get("id")
+            secret_name = selected.get("name")
+        else:
+            secrets = _fetch_env_secrets(client, env_id)
+            secret_data = next((s for s in secrets if s.get("id") == secret_id), None)
+            secret_name = secret_data.get("name") if secret_data else secret_id
+
+        if not yes:
+            confirm = typer.confirm(f"Delete secret '{secret_name}' from {owner}/{env_name}?")
+            if not confirm:
+                console.print("\n[dim]Cancelled.[/dim]")
+                raise typer.Exit()
+
+        client.delete(f"/environmentshub/{env_id}/secrets/{secret_id}")
+        console.print(f"[green]✓ Deleted secret '{secret_name}' from {owner}/{env_name}[/green]")
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Cancelled.[/dim]")
+        raise typer.Exit()
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@secret_app.command("link")
+def env_secret_link(
+    global_secret_id: str = typer.Argument(
+        ...,
+        help="Global secret ID to link",
+    ),
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """Link a global secret to an environment."""
+    validate_output_format(output, console)
+    owner, env_name = _resolve_environment(environment)
+
+    try:
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+
+        response = client.post(
+            f"/environmentshub/{env_id}/secrets/link/{global_secret_id}",
+            json={},
+        )
+        linked = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(linked, console)
+            return
+
+        secret_name = linked.get("secretName", global_secret_id)
+        console.print(
+            f"[green]✓ Linked global secret '{secret_name}' to {owner}/{env_name}[/green]"
+        )
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@secret_app.command("unlink")
+def env_secret_unlink(
+    global_secret_id: str = typer.Argument(
+        ...,
+        help="Global secret ID to unlink",
+    ),
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation prompt",
+    ),
+) -> None:
+    """Unlink a global secret from an environment."""
+    owner, env_name = _resolve_environment(environment)
+
+    try:
+        if not yes:
+            confirm = typer.confirm(
+                f"Unlink global secret {global_secret_id} from {owner}/{env_name}?"
+            )
+            if not confirm:
+                console.print("\n[dim]Cancelled.[/dim]")
+                raise typer.Exit()
+
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+        client.delete(f"/environmentshub/{env_id}/secrets/link/{global_secret_id}")
+        console.print(f"[green]✓ Unlinked global secret from {owner}/{env_name}[/green]")
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Cancelled.[/dim]")
+        raise typer.Exit()
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@var_app.command("list")
+def var_list(
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """List all variables for an environment."""
+    validate_output_format(output, console)
+    owner, env_name = _resolve_environment(environment)
+
+    try:
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+        response = client.get(f"/environmentshub/{env_id}/variables")
+        variables = response.get("data", [])
+
+        if output == "json":
+            output_data_as_json({"variables": variables}, console)
+            return
+
+        if not variables:
+            console.print("[yellow]No variables found for this environment.[/yellow]")
+            return
+
+        table = Table(title=f"Variables for {owner}/{env_name}")
+        table.add_column("ID", style="dim", no_wrap=True)
+        table.add_column("Name", style="cyan")
+        table.add_column("Value", style="green")
+        table.add_column("Description", style="dim")
+        table.add_column("Created", style="dim")
+
+        for var in variables:
+            var_id = var.get("id", "")
+            name = var.get("name", "")
+            value = var.get("value", "")
+            if len(value) > 30:
+                value = value[:27] + "..."
+            description = var.get("description") or ""
+            created = var.get("createdAt", "")
+            if created:
+                created = format_time_ago(created)
+            table.add_row(var_id, name, value, description, created)
+
+        console.print(table)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@var_app.command("create")
+def var_create(
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
+    ),
+    name: Optional[str] = typer.Option(
+        None,
+        "--name",
+        "-n",
+        help="Variable name (must be uppercase with underscores, e.g., MY_VAR)",
+    ),
+    value: Optional[str] = typer.Option(
+        None,
+        "--value",
+        "-v",
+        help="Variable value",
+    ),
+    description: Optional[str] = typer.Option(
+        None,
+        "--description",
+        "-d",
+        help="Variable description",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """Create an environment variable."""
+    validate_output_format(output, console)
+    owner, env_name = _resolve_environment(environment)
+
+    try:
+        if not name:
+            name = prompt_for_value("Variable name")
+            if not name:
+                console.print("\n[dim]Cancelled.[/dim]")
+                raise typer.Exit()
+
+        if not validate_env_var_name(name, "variable"):
+            raise typer.Exit(1)
+
+        if not value:
+            value = prompt_for_value("Variable value")
+            if not value:
+                console.print("\n[dim]Cancelled.[/dim]")
+                raise typer.Exit()
+
+        with console.status("[bold blue]Creating variable...", spinner="dots"):
+            client = APIClient()
+            env_id = _get_environment_id(client, owner, env_name)
+
+            payload: Dict[str, Any] = {"name": name, "value": value}
+            if description:
+                payload["description"] = description
+
+            response = client.post(f"/environmentshub/{env_id}/variables", json=payload)
+            var = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(var, console)
+            return
+
+        console.print(f"[green]✓ Created variable '{name}' for {owner}/{env_name}[/green]")
+        console.print(f"[dim]ID: {var.get('id')}[/dim]")
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Cancelled.[/dim]")
+        raise typer.Exit()
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@var_app.command("update")
+def var_update(
+    var_id: str = typer.Argument(
+        ...,
+        help="Variable ID to update",
+    ),
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
+    ),
+    name: Optional[str] = typer.Option(
+        None,
+        "--name",
+        "-n",
+        help="New variable name",
+    ),
+    value: Optional[str] = typer.Option(
+        None,
+        "--value",
+        "-v",
+        help="New variable value",
+    ),
+    description: Optional[str] = typer.Option(
+        None,
+        "--description",
+        "-d",
+        help="New variable description",
+    ),
+    output: str = typer.Option(
+        "table",
+        "--output",
+        "-o",
+        help="Output format: table or json",
+    ),
+) -> None:
+    """Update an environment variable."""
+    validate_output_format(output, console)
+
+    if not any_provided(name, value, description):
+        console.print(
+            "[red]Error: At least one of --name, --value, or --description is required[/red]"
+        )
+        raise typer.Exit(1)
+
+    owner, env_name = _resolve_environment(environment)
+
+    try:
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+
+        if name is not None and not validate_env_var_name(name, "variable"):
+            raise typer.Exit(1)
+
+        payload: Dict[str, Any] = {}
+        if name is not None:
+            payload["name"] = name
+        if value is not None:
+            payload["value"] = value
+        if description is not None:
+            payload["description"] = description
+
+        response = client.patch(
+            f"/environmentshub/{env_id}/variables/{var_id}",
+            json=payload,
+        )
+        var = response.get("data", {})
+
+        if output == "json":
+            output_data_as_json(var, console)
+            return
+
+        console.print(f"[green]✓ Updated variable '{var.get('name')}'[/green]")
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@var_app.command("delete")
+def var_delete(
+    var_id: str = typer.Argument(
+        ...,
+        help="Variable ID to delete",
+    ),
+    environment: Optional[str] = typer.Argument(
+        None,
+        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation prompt",
+    ),
+) -> None:
+    """Delete an environment variable."""
+    owner, env_name = _resolve_environment(environment)
+
+    try:
+        if not yes:
+            confirm = typer.confirm(f"Delete variable {var_id} from {owner}/{env_name}?")
+            if not confirm:
+                console.print("\n[dim]Cancelled.[/dim]")
+                raise typer.Exit()
+
+        client = APIClient()
+        env_id = _get_environment_id(client, owner, env_name)
+        client.delete(f"/environmentshub/{env_id}/variables/{var_id}")
+        console.print("[green]✓ Variable deleted[/green]")
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Cancelled.[/dim]")
+        raise typer.Exit()
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)

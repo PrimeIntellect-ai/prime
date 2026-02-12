@@ -5,7 +5,6 @@ from typing import List, Optional
 import typer
 from prime_tunnel import Tunnel
 from prime_tunnel.core.client import TunnelClient
-from prime_tunnel.core.config import Config
 from rich.console import Console
 from rich.table import Table
 
@@ -177,8 +176,7 @@ def stop_tunnel(
             try:
                 tunnels = await client.list_tunnels(team_id=team_id)
                 if only_mine:
-                    config = Config()
-                    current_user_id = config.user_id
+                    current_user_id = client.config.user_id
                     if not current_user_id:
                         console.print(
                             "[red]Error:[/red] Cannot filter by user - no user_id configured. "

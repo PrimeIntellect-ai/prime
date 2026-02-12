@@ -12,6 +12,7 @@ from rich.table import Table
 from typer.core import TyperGroup
 
 from ..client import APIClient
+from ..core import Config
 from ..utils import output_data_as_json
 from ..utils.eval_push import load_results_jsonl
 from ..verifiers_bridge import (
@@ -101,10 +102,12 @@ def list_evals(
 
     try:
         api_client = APIClient()
+        config = Config()
         client = EvalsClient(api_client)
 
         data = client.list_evaluations(
             env_name=env,
+            team_id=config.team_id,
             skip=skip,
             limit=limit,
         )

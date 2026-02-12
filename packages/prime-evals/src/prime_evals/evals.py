@@ -319,6 +319,8 @@ class EvalsClient:
         suite_id: Optional[str] = None,
         skip: int = 0,
         limit: int = 50,
+        *,
+        team_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """List evaluations with optional filters"""
         params: Dict[str, Any] = {"skip": skip, "limit": limit}
@@ -326,6 +328,8 @@ class EvalsClient:
             params["environment_name"] = env_name
         if suite_id:
             params["suite_id"] = suite_id
+        if team_id:
+            params["team_id"] = team_id
 
         response = self.client.request("GET", "/evaluations/", params=params)
         return response
@@ -661,6 +665,8 @@ class AsyncEvalsClient:
         suite_id: Optional[str] = None,
         skip: int = 0,
         limit: int = 50,
+        *,
+        team_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """List evaluations with optional filters"""
         params: Dict[str, Any] = {"skip": skip, "limit": limit}
@@ -668,6 +674,8 @@ class AsyncEvalsClient:
             params["environment_name"] = env_name
         if suite_id:
             params["suite_id"] = suite_id
+        if team_id:
+            params["team_id"] = team_id
 
         response = await self.client.request("GET", "/evaluations/", params=params)
         return response

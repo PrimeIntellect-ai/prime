@@ -123,7 +123,9 @@ def decrypt_challenge_response(
 
 
 @app.callback(invoke_without_command=True)
-def login() -> None:
+def login(
+    headless: bool = typer.Option(False, "--headless", help="Don't attempt to open browser"),
+) -> None:
     """Login to Prime Intellect"""
     config = Config()
     settings = config.view()
@@ -170,10 +172,11 @@ def login() -> None:
         )
 
         # Try to open the browser automatically
-        try:
-            webbrowser.open(challenge_url, new=2)
-        except Exception:
-            pass
+        if not headless:
+            try:
+                webbrowser.open(challenge_url, new=2)
+            except Exception:
+                pass
 
         console.print(
             f"[bold yellow]2.[/bold yellow] Your code should be pre-filled. Code:\n\n"

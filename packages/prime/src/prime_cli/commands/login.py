@@ -170,19 +170,18 @@ def login(
             f"[bold yellow]1.[/bold yellow] Open the following link in your browser:\n"
             f"[link={challenge_url}]{challenge_url}[/link]"
         )
-
-        # Try to open the browser automatically
-        if not headless:
-            try:
-                webbrowser.open(challenge_url, new=2)
-            except Exception:
-                pass
-
         console.print(
             f"[bold yellow]2.[/bold yellow] Your code should be pre-filled. Code:\n\n"
             f"[bold green]{challenge_code}[/bold green]\n"
         )
         console.print("[dim]Waiting for authentication...[/dim]")
+
+        # Try to open the browser automatically (after all prints to avoid errors polluting output)
+        if not headless:
+            try:
+                webbrowser.open(challenge_url, new=2)
+            except Exception:
+                pass
 
         challenge_auth_header = f"Bearer {challenge_response['status_auth_token']}"
         while True:

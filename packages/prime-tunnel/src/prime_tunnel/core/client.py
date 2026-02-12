@@ -196,6 +196,7 @@ class TunnelClient:
             server_host="",
             server_port=7000,
             expires_at=data["expires_at"],
+            user_id=data.get("user_id"),
         )
 
     async def delete_tunnel(self, tunnel_id: str) -> bool:

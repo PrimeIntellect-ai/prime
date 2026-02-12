@@ -15,6 +15,7 @@ class TunnelInfo(BaseModel):
     server_host: str = Field(..., description="frps server hostname")
     server_port: int = Field(7000, description="frps server port")
     expires_at: datetime = Field(..., description="Token expiration time")
+    # Optional because create_tunnel response doesn't include user_id
     user_id: Optional[str] = Field(None, description="Owner user ID")
 
     class Config:

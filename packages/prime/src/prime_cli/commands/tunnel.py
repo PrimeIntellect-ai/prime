@@ -255,8 +255,9 @@ def stop_tunnel(
                 else:
                     failed.append({"tunnel_id": tid, "error": error})
         except Exception as e:
-            for tid in parsed_ids:
-                failed.append({"tunnel_id": tid, "error": str(e)})
+            succeeded = []
+            not_found = []
+            failed = [{"tunnel_id": tid, "error": str(e)} for tid in parsed_ids]
         finally:
             await client.close()
         return succeeded, not_found, failed

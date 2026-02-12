@@ -1155,6 +1155,12 @@ def ssh_connect(
     ssh_args: Optional[List[str]] = typer.Argument(
         None, help="Additional SSH arguments (e.g., -- -v for verbose)"
     ),
+    shell: Optional[str] = typer.Option(
+        None,
+        "--shell",
+        "-s",
+        help="Shell to use (e.g., bash, zsh, sh). Auto-detected if not specified.",
+    ),
 ) -> None:
     """Connect to a sandbox via SSH.
 
@@ -1163,6 +1169,7 @@ def ssh_connect(
     \b
     Examples:
         prime sandbox ssh sb_abc123
+        prime sandbox ssh sb_abc123 --shell bash
         prime sandbox ssh sb_abc123 -- -L 3000:localhost:3000
     """
     session_id: Optional[str] = None
@@ -1266,6 +1273,10 @@ def ssh_connect(
         # Add identity file if specified
         if key_path:
             ssh_cmd.extend(["-i", key_path])
+
+        # Add shell if specified
+        if shell:
+            ssh_cmd.append(shell)
 
         # Add any additional SSH arguments
         if ssh_args:

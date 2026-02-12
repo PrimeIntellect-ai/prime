@@ -148,8 +148,17 @@ def stop_tunnel(
         help="Team ID to include team tunnels for --all (uses config team_id if not specified)",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    only_mine: bool = typer.Option(
+        True,
+        "--only-mine/--all-users",
+        help="Restrict '--all' deletes to only your tunnels (default: only yours)",
+        show_default=True,
+    ),
 ) -> None:
-    """Stop and delete one or more tunnels."""
+    """Stop and delete one or more tunnels.
+
+    --only-mine controls whether '--all' will restrict to your tunnels or delete for all users.
+    """
 
     if all and tunnel_ids:
         console.print("[red]Error:[/red] Cannot specify tunnel IDs with --all")
@@ -166,18 +175,34 @@ def stop_tunnel(
             client = TunnelClient()
             try:
                 tunnels = await client.list_tunnels(team_id=team_id)
+                if only_mine:
+                    current_user_id = client.config.user_id
+                    if not current_user_id:
+                        console.print(
+                            "[red]Error:[/red] Cannot filter by user - no user_id configured. "
+                            "Use --all-users to delete all tunnels, or configure your user_id."
+                        )
+                        raise typer.Exit(1)
+                    tunnels = [t for t in tunnels if t.user_id == current_user_id]
                 return [t.tunnel_id for t in tunnels]
             finally:
                 await client.close()
 
         try:
             parsed_ids = asyncio.run(fetch_tunnels())
+        except typer.Exit:
+            raise
         except Exception as e:
             console.print(f"[red]Error:[/red] {e}", style="bold")
             raise typer.Exit(1)
 
         if not parsed_ids:
             console.print("[yellow]No active tunnels to stop[/yellow]")
+            if only_mine:
+                console.print(
+                    "\n[dim]Note: --all only deletes your own tunnels by default. "
+                    "Use --all-users to delete tunnels from all team members.[/dim]"
+                )
             return
     else:
         raw_ids: List[str] = []
@@ -220,15 +245,19 @@ def stop_tunnel(
         not_found: List[dict] = []
         failed: List[dict] = []
         try:
-            for tunnel_id in parsed_ids:
-                try:
-                    success = await client.delete_tunnel(tunnel_id)
-                    if success:
-                        succeeded.append(tunnel_id)
-                    else:
-                        not_found.append({"tunnel_id": tunnel_id, "error": "not found"})
-                except Exception as e:
-                    failed.append({"tunnel_id": tunnel_id, "error": str(e)})
+            result = await client.bulk_delete_tunnels(parsed_ids)
+            succeeded = result.get("succeeded", [])
+            for failure in result.get("failed", []):
+                tid = failure.get("tunnel_id", "")
+                error = failure.get("error", "Unknown error")
+                if "not found" in error.lower():
+                    not_found.append({"tunnel_id": tid, "error": error})
+                else:
+                    failed.append({"tunnel_id": tid, "error": error})
+        except Exception as e:
+            succeeded = []
+            not_found = []
+            failed = [{"tunnel_id": tid, "error": str(e)} for tid in parsed_ids]
         finally:
             await client.close()
         return succeeded, not_found, failed

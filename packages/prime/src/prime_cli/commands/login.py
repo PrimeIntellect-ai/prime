@@ -123,7 +123,9 @@ def decrypt_challenge_response(
 
 
 @app.callback(invoke_without_command=True)
-def login() -> None:
+def login(
+    headless: bool = typer.Option(False, "--headless", help="Don't attempt to open browser"),
+) -> None:
     """Login to Prime Intellect"""
     config = Config()
     settings = config.view()
@@ -164,25 +166,22 @@ def login() -> None:
         console.print("\n[bold blue]🔐 Login Required[/bold blue]")
         console.print("\n[bold]Follow these steps to authenticate:[/bold]\n")
 
-        # Try to open the browser automatically
-        try:
-            webbrowser.open(challenge_url, new=2)
-            console.print(
-                "[bold yellow]1.[/bold yellow] We've opened the login page in your browser."
-            )
-        except Exception:
-            pass
-
         console.print(
             f"[bold yellow]1.[/bold yellow] Open the following link in your browser:\n"
             f"[link={challenge_url}]{challenge_url}[/link]"
         )
-
         console.print(
             f"[bold yellow]2.[/bold yellow] Your code should be pre-filled. Code:\n\n"
             f"[bold green]{challenge_code}[/bold green]\n"
         )
         console.print("[dim]Waiting for authentication...[/dim]")
+
+        # Try to open the browser automatically (after all prints to avoid errors polluting output)
+        if not headless:
+            try:
+                webbrowser.open(challenge_url, new=2)
+            except Exception:
+                pass
 
         challenge_auth_header = f"Bearer {challenge_response['status_auth_token']}"
         while True:

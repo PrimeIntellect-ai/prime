@@ -164,19 +164,16 @@ def login() -> None:
         console.print("\n[bold blue]🔐 Login Required[/bold blue]")
         console.print("\n[bold]Follow these steps to authenticate:[/bold]\n")
 
-        # Try to open the browser automatically
-        try:
-            webbrowser.open(challenge_url, new=2)
-            console.print(
-                "[bold yellow]1.[/bold yellow] We've opened the login page in your browser."
-            )
-        except Exception:
-            pass
-
         console.print(
             f"[bold yellow]1.[/bold yellow] Open the following link in your browser:\n"
             f"[link={challenge_url}]{challenge_url}[/link]"
         )
+
+        # Try to open the browser automatically
+        try:
+            webbrowser.open(challenge_url, new=2)
+        except Exception:
+            pass
 
         console.print(
             f"[bold yellow]2.[/bold yellow] Your code should be pre-filled. Code:\n\n"

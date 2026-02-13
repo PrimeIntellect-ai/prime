@@ -115,6 +115,7 @@ class RLClient:
         oversampling_factor: Optional[float] = None,
         max_async_level: Optional[int] = None,
         checkpoints_config: Optional[Dict[str, Any]] = None,
+        adapters_config: Optional[Dict[str, Any]] = None,
     ) -> RLRun:
         """Create a new RL training run."""
         try:
@@ -181,6 +182,9 @@ class RLClient:
 
             if checkpoints_config:
                 payload["checkpoints"] = checkpoints_config
+
+            if adapters_config:
+                payload["adapters"] = adapters_config
 
             response = self.client.post("/rft/runs", json=payload)
             return RLRun.model_validate(response.get("run"))

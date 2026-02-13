@@ -131,6 +131,7 @@ class RLClient:
         oversampling_factor: Optional[float] = None,
         max_async_level: Optional[int] = None,
         checkpoints_config: Optional[Dict[str, Any]] = None,
+        adapters_config: Optional[Dict[str, Any]] = None,
         checkpoint_id: Optional[str] = None,
         cluster_name: Optional[str] = None,
     ) -> RLRun:
@@ -196,6 +197,9 @@ class RLClient:
 
             if checkpoints_config:
                 payload["checkpoints"] = checkpoints_config
+
+            if adapters_config:
+                payload["adapters"] = adapters_config
 
             if checkpoint_id:
                 payload["checkpoint_id"] = checkpoint_id

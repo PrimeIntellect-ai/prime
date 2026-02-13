@@ -197,6 +197,11 @@ id = "{env_value}"
 # [checkpoints]
 # interval = 100              # Save checkpoint every N steps
 # keep_cloud = 5              # Keep N checkpoints in cloud (-1 = keep all)
+
+# Optional: adapter upload configuration
+# [adapters]
+# interval = 0                # Upload adapter every N steps (0 = only at run end)
+# keep_last = 3               # Keep N adapters in cloud (-1 = keep all)
 '''
 
 
@@ -369,6 +374,21 @@ class CheckpointsConfig(BaseModel):
         return result if result else None
 
 
+class AdaptersConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    interval: int | None = None  # Upload adapter every N steps (0 = only at run end)
+    keep_last: int | None = None  # Keep N adapters in cloud (-1 = keep all)
+
+    def to_api_dict(self) -> Dict[str, Any] | None:
+        result: Dict[str, Any] = {}
+        if self.interval is not None:
+            result["interval"] = self.interval
+        if self.keep_last is not None:
+            result["keep_last"] = self.keep_last
+        return result if result else None
+
+
 class RLConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -390,6 +410,7 @@ class RLConfig(BaseModel):
     buffer: BufferConfig = Field(default_factory=BufferConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
+    adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
 
@@ -724,6 +745,7 @@ def create_run(
             oversampling_factor=cfg.oversampling_factor,
             max_async_level=cfg.max_async_level,
             checkpoints_config=cfg.checkpoints.to_api_dict(),
+            adapters_config=cfg.adapters.to_api_dict(),
             checkpoint_id=cfg.checkpoint_id,
             cluster_name=cfg.cluster_name,
         )

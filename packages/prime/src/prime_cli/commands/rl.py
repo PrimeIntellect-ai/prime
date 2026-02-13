@@ -190,6 +190,11 @@ id = "{env_value}"
 # env_ratios = [0.5, 0.5]
 # skip_verification = false
 # seed = 42
+
+# Optional: checkpoint configuration
+# [checkpoints]
+# interval = 100              # Save checkpoint every N steps
+# keep_cloud = 5              # Keep N checkpoints in cloud (-1 = keep all)
 '''
 
 
@@ -347,6 +352,21 @@ class WandbConfig(BaseModel):
     name: str | None = None
 
 
+class CheckpointsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    interval: int | None = None  # Save checkpoint every N steps
+    keep_cloud: int | None = None  # Keep N checkpoints in cloud (-1 = keep all)
+
+    def to_api_dict(self) -> Dict[str, Any] | None:
+        result: Dict[str, Any] = {}
+        if self.interval is not None:
+            result["interval"] = self.interval
+        if self.keep_cloud is not None:
+            result["keep_cloud"] = self.keep_cloud
+        return result if result else None
+
+
 class RLConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -366,6 +386,7 @@ class RLConfig(BaseModel):
     val: ValConfig = Field(default_factory=ValConfig)
     buffer: BufferConfig = Field(default_factory=BufferConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
+    checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
 
@@ -681,6 +702,7 @@ def create_run(
             lora_alpha=cfg.lora_alpha,
             oversampling_factor=cfg.oversampling_factor,
             max_async_level=cfg.max_async_level,
+            checkpoints_config=cfg.checkpoints.to_api_dict(),
         )
 
         if output == "json":

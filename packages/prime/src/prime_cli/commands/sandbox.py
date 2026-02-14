@@ -1274,13 +1274,16 @@ def ssh_connect(
         if key_path:
             ssh_cmd.extend(["-i", key_path])
 
+        # Force PTY allocation when a remote command is specified
+        if shell:
+            ssh_cmd.append("-t")
+
         # Add any additional SSH arguments
         if ssh_args:
             ssh_cmd.extend(ssh_args)
 
         # Add shell if specified
         if shell:
-            ssh_cmd.append("-t")
             ssh_cmd.append(shell)
 
         # Connect via SSH (this will be interactive)

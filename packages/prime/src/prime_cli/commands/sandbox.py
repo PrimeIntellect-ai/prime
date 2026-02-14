@@ -1280,6 +1280,7 @@ def ssh_connect(
 
         # Add shell if specified
         if shell:
+            ssh_cmd.append("-t")
             ssh_cmd.append(shell)
 
         # Connect via SSH (this will be interactive)

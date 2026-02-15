@@ -33,7 +33,6 @@ class RLRun(BaseModel):
     max_steps: int = Field(..., alias="maxSteps")
     max_tokens: Optional[int] = Field(None, alias="maxTokens")
     batch_size: int = Field(..., alias="batchSize")
-    trajectory_strategy: Optional[str] = Field(None, alias="trajectoryStrategy")
     base_model: str = Field(..., alias="baseModel")
     environments: List[Dict[str, Any]] = Field(default_factory=list)
     run_config: Optional[Dict[str, Any]] = Field(None, alias="runConfig")
@@ -100,7 +99,6 @@ class RLClient:
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         batch_size: int = 128,
-        trajectory_strategy: Optional[str] = None,
         name: Optional[str] = None,
         wandb_entity: Optional[str] = None,
         wandb_project: Optional[str] = None,
@@ -131,9 +129,6 @@ class RLClient:
                 "batch_size": batch_size,
                 "secrets": secrets_list,
             }
-
-            if trajectory_strategy:
-                payload["trajectory_strategy"] = trajectory_strategy
 
             if name:
                 payload["name"] = name

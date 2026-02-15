@@ -136,7 +136,6 @@ max_steps = 100
 # Training
 batch_size = 128
 rollouts_per_example = 8
-# trajectory_strategy = "interleaved"  # or "branching"
 # learning_rate = 1e-6
 # lora_alpha = 16
 # oversampling_factor = 1.0
@@ -375,7 +374,6 @@ class RLConfig(BaseModel):
     max_steps: int = 100
     batch_size: int = 128
     rollouts_per_example: int = 8
-    trajectory_strategy: str | None = None
     learning_rate: float | None = None
     lora_alpha: int | None = None
     oversampling_factor: float | None = None
@@ -688,7 +686,6 @@ def create_run(
             max_tokens=cfg.sampling.max_tokens,
             temperature=cfg.sampling.temperature,
             batch_size=cfg.batch_size,
-            trajectory_strategy=cfg.trajectory_strategy,
             name=cfg.name,
             wandb_entity=cfg.wandb.entity,
             wandb_project=cfg.wandb.project,

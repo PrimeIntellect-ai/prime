@@ -402,6 +402,20 @@ def _format_validation_errors(errors: list[dict]) -> list[str]:
     return messages
 
 
+def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
+    """Remove deprecated config keys while warning users."""
+    removed = False
+    for key in ("trajectory_strategy", "trajectoryStrategy"):
+        if key in data:
+            data.pop(key, None)
+            removed = True
+
+    if removed:
+        console.print(
+            "[yellow]Warning:[/yellow] `trajectory_strategy` is deprecated and ignored."
+        )
+
+
 def load_config(path: str) -> RLConfig:
     """Load config from TOML file."""
     p = Path(path)
@@ -413,6 +427,9 @@ def load_config(path: str) -> RLConfig:
     except toml.TomlDecodeError as e:
         console.print(f"[red]Error:[/red] Invalid TOML in {path}: {e}")
         raise typer.Exit(1)
+
+    if isinstance(data, dict):
+        _remove_deprecated_config_keys(data)
 
     try:
         return RLConfig.model_validate(data)

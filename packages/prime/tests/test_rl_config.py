@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 import typer
-
 from prime_cli.commands.rl import load_config
 
 

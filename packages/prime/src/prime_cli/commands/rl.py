@@ -136,7 +136,6 @@ max_steps = 100
 # Training
 batch_size = 128
 rollouts_per_example = 8
-# trajectory_strategy = "interleaved"  # or "branching"
 # learning_rate = 1e-6
 # lora_alpha = 16
 # oversampling_factor = 1.0
@@ -375,7 +374,6 @@ class RLConfig(BaseModel):
     max_steps: int = 100
     batch_size: int = 128
     rollouts_per_example: int = 8
-    trajectory_strategy: str | None = None
     learning_rate: float | None = None
     lora_alpha: int | None = None
     oversampling_factor: float | None = None
@@ -404,6 +402,20 @@ def _format_validation_errors(errors: list[dict]) -> list[str]:
     return messages
 
 
+def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
+    """Remove deprecated config keys while warning users."""
+    removed = False
+    for key in ("trajectory_strategy", "trajectoryStrategy"):
+        if key in data:
+            data.pop(key, None)
+            removed = True
+
+    if removed:
+        console.print(
+            "[yellow]Warning:[/yellow] `trajectory_strategy` is deprecated and ignored."
+        )
+
+
 def load_config(path: str) -> RLConfig:
     """Load config from TOML file."""
     p = Path(path)
@@ -415,6 +427,9 @@ def load_config(path: str) -> RLConfig:
     except toml.TomlDecodeError as e:
         console.print(f"[red]Error:[/red] Invalid TOML in {path}: {e}")
         raise typer.Exit(1)
+
+    if isinstance(data, dict):
+        _remove_deprecated_config_keys(data)
 
     try:
         return RLConfig.model_validate(data)
@@ -688,7 +703,6 @@ def create_run(
             max_tokens=cfg.sampling.max_tokens,
             temperature=cfg.sampling.temperature,
             batch_size=cfg.batch_size,
-            trajectory_strategy=cfg.trajectory_strategy,
             name=cfg.name,
             wandb_entity=cfg.wandb.entity,
             wandb_project=cfg.wandb.project,

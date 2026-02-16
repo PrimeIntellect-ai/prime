@@ -21,6 +21,7 @@ dependencies = [
     "verifiers>=0.1.10",
     "build>=1.0.0",
     "toml>=0.10.0",
+    "pathspec>=1.0.3",
 ]
 keywords = ["cli", "gpu", "cloud", "compute"]
 classifiers = [

@@ -14,6 +14,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "aiofiles>=23.0.0",
     "tenacity>=8.0.0",
+    "pathspec>=1.0.3",
 ]
 keywords = ["sandboxes", "remote-execution", "containers", "cloud", "sdk"]
 classifiers = [

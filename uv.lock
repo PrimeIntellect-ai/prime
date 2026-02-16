@@ -1663,6 +1663,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pathspec"
+version = "1.0.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4c/b2/bb8e495d5262bfec41ab5cb18f522f1012933347fb5d9e62452d446baca2/pathspec-1.0.3.tar.gz", hash = "sha256:bac5cf97ae2c2876e2d25ebb15078eb04d76e4b98921ee31c6f85ade8b59444d", size = 130841, upload-time = "2026-01-09T15:46:46.009Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/2b/121e912bd60eebd623f873fd090de0e84f322972ab25a7f9044c056804ed/pathspec-1.0.3-py3-none-any.whl", hash = "sha256:e80767021c1cc524aa3fb14bedda9c34406591343cc42797b386ce7b9354fb6c", size = 55021, upload-time = "2026-01-09T15:46:44.652Z" },
+]
+
+[[package]]
 name = "pathvalidate"
 version = "3.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1712,6 +1721,7 @@ dependencies = [
     { name = "build" },
     { name = "cryptography" },
     { name = "httpx" },
+    { name = "pathspec" },
     { name = "prime-evals" },
     { name = "prime-sandboxes" },
     { name = "prime-tunnel" },
@@ -1735,6 +1745,7 @@ requires-dist = [
     { name = "build", specifier = ">=1.0.0" },
     { name = "cryptography", specifier = ">=41.0.0" },
     { name = "httpx", specifier = ">=0.25.0" },
+    { name = "pathspec", specifier = ">=1.0.3" },
     { name = "prime-evals", editable = "packages/prime-evals" },
     { name = "prime-sandboxes", editable = "packages/prime-sandboxes" },
     { name = "prime-tunnel", editable = "packages/prime-tunnel" },
@@ -1808,6 +1819,7 @@ source = { editable = "packages/prime-sandboxes" }
 dependencies = [
     { name = "aiofiles" },
     { name = "httpx" },
+    { name = "pathspec" },
     { name = "pydantic" },
     { name = "tenacity" },
 ]
@@ -1824,6 +1836,7 @@ dev = [
 requires-dist = [
     { name = "aiofiles", specifier = ">=23.0.0" },
     { name = "httpx", specifier = ">=0.25.0" },
+    { name = "pathspec", specifier = ">=1.0.3" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },

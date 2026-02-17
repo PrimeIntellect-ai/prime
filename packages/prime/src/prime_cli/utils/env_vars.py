@@ -6,6 +6,36 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 
+class EnvParseError(Exception):
+    """Error raised when parsing environment variables fails."""
+
+    pass
+
+
+ENV_VAR_REFERENCE_PATTERN = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+
+def _expand_env_var_references(
+    value: str,
+    *,
+    file_path: Path,
+    line_num: int,
+) -> str:
+    """Expand ${VAR} references in value using current process environment."""
+
+    def replace(match: re.Match[str]) -> str:
+        var_name = match.group(1)
+        resolved = os.environ.get(var_name)
+        if resolved is None:
+            raise EnvParseError(
+                f"Environment variable '{var_name}' is not set "
+                f"(referenced in {file_path}:{line_num})."
+            )
+        return resolved
+
+    return ENV_VAR_REFERENCE_PATTERN.sub(replace, value)
+
+
 def parse_env_file(
     file_path: Path,
     on_warning: Optional[Callable[[str], None]] = None,
@@ -16,6 +46,7 @@ def parse_env_file(
     - KEY=VALUE
     - KEY="VALUE" (quoted values)
     - KEY='VALUE' (single-quoted values)
+    - ${VAR} expansion from process environment
     - # comments
     - Empty lines (ignored)
 
@@ -41,9 +72,10 @@ def parse_env_file(
             key, _, value = line.partition("=")
             key = key.strip()
             value = value.strip()
-            if (value.startswith('"') and value.endswith('"')) or (
+            was_single_quoted = (
                 value.startswith("'") and value.endswith("'")
-            ):
+            )
+            if (value.startswith('"') and value.endswith('"')) or was_single_quoted:
                 value = value[1:-1]
             if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", key):
                 if on_warning:
@@ -52,14 +84,10 @@ def parse_env_file(
                         f"must start with letter/underscore, contain only alphanumeric/underscore"
                     )
                 continue
+            if not was_single_quoted:
+                value = _expand_env_var_references(value, file_path=file_path, line_num=line_num)
             env_vars[key] = value
     return env_vars
-
-
-class EnvParseError(Exception):
-    """Error raised when parsing environment variables fails."""
-
-    pass
 
 
 def parse_env_arg(

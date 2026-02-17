@@ -411,9 +411,7 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
             removed = True
 
     if removed:
-        console.print(
-            "[yellow]Warning:[/yellow] `trajectory_strategy` is deprecated and ignored."
-        )
+        console.print("[yellow]Warning:[/yellow] `trajectory_strategy` is deprecated and ignored.")
 
 
 def load_config(path: str) -> RLConfig:
@@ -522,7 +520,7 @@ def create_run(
     env_file: Optional[List[str]] = typer.Option(
         None,
         "--env-file",
-        help="Path to .env file containing secrets.",
+        help="Path to .env file containing secrets. Supports ${VAR} expansion from local env.",
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
     skip_action_check: bool = typer.Option(

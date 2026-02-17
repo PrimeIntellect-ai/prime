@@ -41,6 +41,18 @@ def test_parse_env_file_raises_for_missing_braced_variable(
         parse_env_file(env_file)
 
 
+def test_parse_env_file_keeps_single_quoted_values_literal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WANDB_API_KEY", "secret-123")
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text("WANDB_API_KEY='${WANDB_API_KEY}'\n")
+
+    parsed = parse_env_file(env_file)
+
+    assert parsed["WANDB_API_KEY"] == "${WANDB_API_KEY}"
+
+
 def test_parse_env_file_keeps_unbraced_dollar_reference_literal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

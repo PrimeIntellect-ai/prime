@@ -1517,7 +1517,7 @@ def pull(
 
         base_dir = _resolve_pull_environment_path(target, name)
         target_dir = base_dir
-        if target is None and target_dir.exists():
+        if not target and target_dir.exists():
             # Find the next available directory with index suffix
             index = 1
             while target_dir.exists():

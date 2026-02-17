@@ -76,7 +76,6 @@ def parse_env_file(
                 value.startswith("'") and value.endswith("'")
             ):
                 value = value[1:-1]
-            value = _expand_env_var_references(value, file_path=file_path, line_num=line_num)
             if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", key):
                 if on_warning:
                     on_warning(
@@ -84,6 +83,7 @@ def parse_env_file(
                         f"must start with letter/underscore, contain only alphanumeric/underscore"
                     )
                 continue
+            value = _expand_env_var_references(value, file_path=file_path, line_num=line_num)
             env_vars[key] = value
     return env_vars
 

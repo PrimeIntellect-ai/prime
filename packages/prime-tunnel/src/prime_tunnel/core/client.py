@@ -193,6 +193,7 @@ class TunnelClient:
             hostname=data["hostname"],
             url=data["url"],
             frp_token="",  # Token not returned on status check
+            proxy_name=data["proxy_name"],
             server_host="",
             server_port=7000,
             expires_at=data["expires_at"],
@@ -276,6 +277,7 @@ class TunnelClient:
                     hostname=t["hostname"],
                     url=t["url"],
                     frp_token="",
+                    proxy_name=t["proxy_name"],
                     server_host="",
                     server_port=7000,
                     expires_at=t["expires_at"],

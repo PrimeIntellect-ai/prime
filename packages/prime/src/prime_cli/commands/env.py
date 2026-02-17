@@ -749,6 +749,17 @@ def _resolve_push_environment_path(path: Optional[str], env_id: Optional[str]) -
     return Path(path or ".").resolve()
 
 
+def _resolve_pull_environment_path(target: Optional[str], env_name: str) -> Path:
+    """Resolve the local target directory for `prime env pull`."""
+    if target:
+        return Path(target)
+
+    env_folder = env_name.replace("-", "_")
+    cwd = Path.cwd()
+    parent = cwd / "environments" if (cwd / "environments").is_dir() else cwd
+    return parent / env_folder
+
+
 @app.command(rich_help_panel="Manage")
 def push(
     env_id: Optional[str] = typer.Argument(
@@ -1504,22 +1515,18 @@ def pull(
             console.print("[red]Error: No downloadable package found[/red]")
             raise typer.Exit(1)
 
-        if target:
-            target_dir = Path(target)
-        else:
-            # Check if the base directory exists and add index suffix if needed
-            base_dir = Path.cwd() / name
-            target_dir = base_dir
-            if target_dir.exists():
-                # Find the next available directory with index suffix
-                index = 1
-                while target_dir.exists():
-                    target_dir = Path.cwd() / f"{name}-{index}"
-                    index += 1
-                console.print(
-                    f"[yellow]Directory {base_dir} already exists. "
-                    f"Using {target_dir} instead.[/yellow]"
-                )
+        base_dir = _resolve_pull_environment_path(target, name)
+        target_dir = base_dir
+        if target is None and target_dir.exists():
+            # Find the next available directory with index suffix
+            index = 1
+            while target_dir.exists():
+                target_dir = base_dir.parent / f"{base_dir.name}-{index}"
+                index += 1
+            console.print(
+                f"[yellow]Directory {base_dir} already exists. "
+                f"Using {target_dir} instead.[/yellow]"
+            )
 
         try:
             target_dir.mkdir(parents=True, exist_ok=True)

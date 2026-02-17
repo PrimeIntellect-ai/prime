@@ -72,6 +72,7 @@ def _make_started_tunnel() -> Tunnel:
         hostname="t-test123.tunnel.example.com",
         url="https://t-test123.tunnel.example.com",
         frp_token="tok",
+        proxy_name="test-user",
         server_host="frp.example.com",
         server_port=7000,
         expires_at=datetime.now(timezone.utc),

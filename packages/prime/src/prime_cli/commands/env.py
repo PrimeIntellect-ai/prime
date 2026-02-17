@@ -1,6 +1,5 @@
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -25,7 +24,6 @@ from rich.table import Table
 from rich.text import Text
 
 from ..client import APIClient, APIError
-from ..core import Config
 from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.formatters import format_file_size

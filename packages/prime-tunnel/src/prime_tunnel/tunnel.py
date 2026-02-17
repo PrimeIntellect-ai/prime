@@ -275,6 +275,7 @@ class Tunnel:
 
         server_host = self._tunnel_info.server_host
         server_port = self._tunnel_info.server_port
+        proxy_name = self._tunnel_info.proxy_name or self._tunnel_info.tunnel_id
 
         # Generate config content
         config = f"""# Prime Tunnel frpc configuration
@@ -302,7 +303,7 @@ log.level = "{self.log_level}"
 
 # HTTP proxy configuration
 [[proxies]]
-name = "{self._tunnel_info.tunnel_id}"
+name = "{proxy_name}"
 type = "http"
 localIP = "{self.local_addr}"
 localPort = {self.local_port}

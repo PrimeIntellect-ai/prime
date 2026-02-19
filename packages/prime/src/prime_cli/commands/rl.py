@@ -141,6 +141,9 @@ rollouts_per_example = 8
 # oversampling_factor = 1.0
 # max_async_level = 4
 
+# Optional: warm-start from an existing checkpoint
+# checkpoint_id = "..."
+
 [sampling]
 max_tokens = 2048
 # temperature = 0.7

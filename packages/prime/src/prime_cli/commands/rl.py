@@ -356,6 +356,7 @@ class CheckpointsConfig(BaseModel):
 
     interval: int | None = None  # Save checkpoint every N steps
     keep_cloud: int | None = None  # Keep N checkpoints in cloud (-1 = keep all)
+    checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
 
     def to_api_dict(self) -> Dict[str, Any] | None:
         result: Dict[str, Any] = {}
@@ -635,6 +636,12 @@ def create_run(
             if cfg.val.interval:
                 console.print(f"  Interval:     {cfg.val.interval}")
 
+        # Checkpoint warm-start
+        if cfg.checkpoints.checkpoint_id:
+            console.print(
+                f"\n[cyan]Warm-start from checkpoint:[/cyan] {cfg.checkpoints.checkpoint_id}"
+            )
+
         # Secrets
         if secrets:
             console.print("\n[cyan]Secrets[/cyan]")
@@ -715,6 +722,7 @@ def create_run(
             oversampling_factor=cfg.oversampling_factor,
             max_async_level=cfg.max_async_level,
             checkpoints_config=cfg.checkpoints.to_api_dict(),
+            checkpoint_id=cfg.checkpoints.checkpoint_id,
         )
 
         if output == "json":

@@ -1272,3 +1272,77 @@ def get_distributions(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+def _format_size(size_bytes: int | None) -> str:
+    """Format bytes into human-readable size."""
+    if size_bytes is None:
+        return "-"
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(size_bytes) < 1024:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024  # type: ignore[assignment]
+    return f"{size_bytes:.1f} TB"
+
+
+@app.command("checkpoints", rich_help_panel="Monitoring")
+def list_checkpoints(
+    run_id: str = typer.Argument(..., help="Run ID to list checkpoints for"),
+    status_filter: Optional[str] = typer.Option(
+        None, "--status", "-s", help="Filter by status (READY, PENDING, UPLOADING, FAILED)"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List checkpoints for a run.
+
+    Example:
+
+        prime rl checkpoints <run_id>
+
+        prime rl checkpoints <run_id> --status READY
+    """
+    validate_output_format(output, console)
+
+    try:
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+
+        checkpoints = rl_client.list_checkpoints(run_id, status_filter=status_filter)
+
+        if output == "json":
+            output_data_as_json({"checkpoints": [cp.model_dump() for cp in checkpoints]}, console)
+            return
+
+        if not checkpoints:
+            console.print("[yellow]No checkpoints found for this run.[/yellow]")
+            return
+
+        table = Table(title=f"Checkpoints for {run_id}")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Step", justify="right", style="bold")
+        table.add_column("Status", style="bold")
+        table.add_column("Size", justify="right")
+        table.add_column("Created", style="dim")
+
+        status_colors = {
+            "READY": "green",
+            "PENDING": "yellow",
+            "UPLOADING": "blue",
+            "FAILED": "red",
+        }
+
+        for cp in checkpoints:
+            color = status_colors.get(cp.status, "white")
+            table.add_row(
+                cp.id,
+                str(cp.step),
+                f"[{color}]{cp.status}[/{color}]",
+                _format_size(cp.size_bytes),
+                cp.created_at.strftime("%Y-%m-%d %H:%M"),
+            )
+
+        console.print(table)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)

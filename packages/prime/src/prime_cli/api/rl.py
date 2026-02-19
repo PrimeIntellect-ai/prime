@@ -80,10 +80,13 @@ class RLClient:
     def __init__(self, client: APIClient) -> None:
         self.client = client
 
-    def list_models(self) -> List[RLModel]:
+    def list_models(self, team_id: Optional[str] = None) -> List[RLModel]:
         """List available models for RL training."""
         try:
-            response = self.client.get("/rft/models")
+            params = {}
+            if team_id:
+                params["team_id"] = team_id
+            response = self.client.get("/rft/models", params=params if params else None)
             models_data = response.get("models", [])
             return [RLModel.model_validate(model) for model in models_data]
         except Exception as e:

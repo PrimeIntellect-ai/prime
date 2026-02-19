@@ -22,7 +22,7 @@ from ..client import APIClient, APIError, ValidationError
 from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.env_vars import EnvParseError, collect_env_vars
-from ..utils.formatters import strip_ansi
+from ..utils.formatters import format_file_size, strip_ansi
 
 console = Console()
 
@@ -1274,17 +1274,6 @@ def get_distributions(
         raise typer.Exit(1)
 
 
-def _format_size(size_bytes: int | None) -> str:
-    """Format bytes into human-readable size."""
-    if size_bytes is None:
-        return "-"
-    for unit in ("B", "KB", "MB", "GB"):
-        if abs(size_bytes) < 1024:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024  # type: ignore[assignment]
-    return f"{size_bytes:.1f} TB"
-
-
 @app.command("checkpoints", rich_help_panel="Monitoring")
 def list_checkpoints(
     run_id: str = typer.Argument(..., help="Run ID to list checkpoints for"),
@@ -1337,7 +1326,7 @@ def list_checkpoints(
                 cp.id,
                 str(cp.step),
                 f"[{color}]{cp.status}[/{color}]",
-                _format_size(cp.size_bytes),
+                format_file_size(cp.size_bytes) if cp.size_bytes is not None else "-",
                 cp.created_at.strftime("%Y-%m-%d %H:%M"),
             )
 

@@ -767,8 +767,9 @@ def list_models(
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
+        config = Config()
 
-        models = rl_client.list_models()
+        models = rl_client.list_models(team_id=config.team_id)
 
         if output == "json":
             output_data_as_json({"models": [m.model_dump() for m in models]}, console)

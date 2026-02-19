@@ -70,6 +70,6 @@ interval = 2              # Save checkpoint every N steps
 keep_cloud = -1              # Keep N checkpoints in cloud (-1 = keep all)
 
 # Optional: adapter upload configuration
-[adapters]
-interval = 1                # Upload adapter every N steps (0 = only at run end)
-keep_last = 2               # Keep N adapters in cloud (-1 = keep all)
+# [adapters]
+# interval = 1              # Upload adapter every N steps (0 = only at run end)
+# keep_last = 2             # Keep N adapters in cloud (-1 = keep all)

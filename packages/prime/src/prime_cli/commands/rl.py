@@ -356,7 +356,6 @@ class CheckpointsConfig(BaseModel):
 
     interval: int | None = None  # Save checkpoint every N steps
     keep_cloud: int | None = None  # Keep N checkpoints in cloud (-1 = keep all)
-    checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
 
     def to_api_dict(self) -> Dict[str, Any] | None:
         result: Dict[str, Any] = {}
@@ -379,6 +378,7 @@ class RLConfig(BaseModel):
     lora_alpha: int | None = None
     oversampling_factor: float | None = None
     max_async_level: int | None = None
+    checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
     env: List[EnvConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
@@ -637,10 +637,8 @@ def create_run(
                 console.print(f"  Interval:     {cfg.val.interval}")
 
         # Checkpoint warm-start
-        if cfg.checkpoints.checkpoint_id:
-            console.print(
-                f"\n[cyan]Warm-start from checkpoint:[/cyan] {cfg.checkpoints.checkpoint_id}"
-            )
+        if cfg.checkpoint_id:
+            console.print(f"\n[cyan]Warm-start from checkpoint:[/cyan] {cfg.checkpoint_id}")
 
         # Secrets
         if secrets:
@@ -722,7 +720,7 @@ def create_run(
             oversampling_factor=cfg.oversampling_factor,
             max_async_level=cfg.max_async_level,
             checkpoints_config=cfg.checkpoints.to_api_dict(),
-            checkpoint_id=cfg.checkpoints.checkpoint_id,
+            checkpoint_id=cfg.checkpoint_id,
         )
 
         if output == "json":

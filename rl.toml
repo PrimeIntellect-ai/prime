@@ -12,6 +12,9 @@ rollouts_per_example = 8
 # oversampling_factor = 1.0
 # max_async_level = 4
 
+# Optional: warm-start from an existing checkpoint
+# checkpoint_id = "..."
+
 [sampling]
 max_tokens = 250
 # temperature = 0.7
@@ -65,7 +68,6 @@ id = "primeintellect/reverse-text"
 [checkpoints]
 interval = 2              # Save checkpoint every N steps
 keep_cloud = -1              # Keep N checkpoints in cloud (-1 = keep all)
-# checkpoint_id = "..."   # Warm-start from an existing checkpoint ID
 
 # Optional: adapter upload configuration
 [adapters]

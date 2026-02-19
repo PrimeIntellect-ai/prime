@@ -22,7 +22,7 @@ from ..client import APIClient, APIError, ValidationError
 from ..utils import output_data_as_json, validate_output_format
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.env_vars import EnvParseError, collect_env_vars
-from ..utils.formatters import strip_ansi
+from ..utils.formatters import format_file_size, strip_ansi
 
 console = Console()
 
@@ -140,6 +140,9 @@ rollouts_per_example = 8
 # lora_alpha = 16
 # oversampling_factor = 1.0
 # max_async_level = 4
+
+# Optional: warm-start from an existing checkpoint
+# checkpoint_id = "..."
 
 [sampling]
 max_tokens = 2048
@@ -378,6 +381,7 @@ class RLConfig(BaseModel):
     lora_alpha: int | None = None
     oversampling_factor: float | None = None
     max_async_level: int | None = None
+    checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
     env: List[EnvConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
@@ -635,6 +639,10 @@ def create_run(
             if cfg.val.interval:
                 console.print(f"  Interval:     {cfg.val.interval}")
 
+        # Checkpoint warm-start
+        if cfg.checkpoint_id:
+            console.print(f"\n[cyan]Warm-start from checkpoint:[/cyan] {cfg.checkpoint_id}")
+
         # Secrets
         if secrets:
             console.print("\n[cyan]Secrets[/cyan]")
@@ -715,6 +723,7 @@ def create_run(
             oversampling_factor=cfg.oversampling_factor,
             max_async_level=cfg.max_async_level,
             checkpoints_config=cfg.checkpoints.to_api_dict(),
+            checkpoint_id=cfg.checkpoint_id,
         )
 
         if output == "json":
@@ -1262,6 +1271,69 @@ def get_distributions(
         )
 
         output_data_as_json(result, console)
+
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command("checkpoints", rich_help_panel="Monitoring")
+def list_checkpoints(
+    run_id: str = typer.Argument(..., help="Run ID to list checkpoints for"),
+    status_filter: Optional[str] = typer.Option(
+        None, "--status", "-s", help="Filter by status (READY, PENDING, UPLOADING, FAILED)"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List checkpoints for a run.
+
+    Example:
+
+        prime rl checkpoints <run_id>
+
+        prime rl checkpoints <run_id> --status READY
+    """
+    validate_output_format(output, console)
+
+    try:
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+
+        checkpoints = rl_client.list_checkpoints(run_id, status_filter=status_filter)
+
+        if output == "json":
+            output_data_as_json({"checkpoints": [cp.model_dump() for cp in checkpoints]}, console)
+            return
+
+        if not checkpoints:
+            console.print("[yellow]No checkpoints found for this run.[/yellow]")
+            return
+
+        table = Table(title=f"Checkpoints for {run_id}")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Step", justify="right", style="bold")
+        table.add_column("Status", style="bold")
+        table.add_column("Size", justify="right")
+        table.add_column("Created", style="dim")
+
+        status_colors = {
+            "READY": "green",
+            "PENDING": "yellow",
+            "UPLOADING": "blue",
+            "FAILED": "red",
+        }
+
+        for cp in checkpoints:
+            color = status_colors.get(cp.status, "white")
+            table.add_row(
+                cp.id,
+                str(cp.step),
+                f"[{color}]{cp.status}[/{color}]",
+                format_file_size(cp.size_bytes) if cp.size_bytes is not None else "-",
+                cp.created_at.strftime("%Y-%m-%d %H:%M"),
+            )
+
+        console.print(table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

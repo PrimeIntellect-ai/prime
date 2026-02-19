@@ -59,6 +59,21 @@ class RLRun(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class RLCheckpoint(BaseModel):
+    """Checkpoint from an RL training run."""
+
+    id: str = Field(..., description="Checkpoint ID")
+    rft_run_id: str = Field(..., alias="rftRunId")
+    step: int = Field(..., description="Training step number")
+    storage_url: str = Field(..., alias="storageUrl")
+    status: str = Field(..., description="Checkpoint status")
+    size_bytes: Optional[int] = Field(None, alias="sizeBytes")
+    created_at: datetime = Field(..., alias="createdAt")
+    uploaded_at: Optional[datetime] = Field(None, alias="uploadedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class RLClient:
     """Client for hosted RL API."""
 
@@ -113,6 +128,7 @@ class RLClient:
         oversampling_factor: Optional[float] = None,
         max_async_level: Optional[int] = None,
         checkpoints_config: Optional[Dict[str, Any]] = None,
+        checkpoint_id: Optional[str] = None,
     ) -> RLRun:
         """Create a new RL training run."""
         try:
@@ -177,6 +193,9 @@ class RLClient:
             if checkpoints_config:
                 payload["checkpoints"] = checkpoints_config
 
+            if checkpoint_id:
+                payload["checkpoint_id"] = checkpoint_id
+
             response = self.client.post("/rft/runs", json=payload)
             return RLRun.model_validate(response.get("run"))
         except ValidationError:
@@ -218,6 +237,25 @@ class RLClient:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to restart RL run: {e.response.text}")
             raise APIError(f"Failed to restart RL run: {str(e)}")
+
+    def list_checkpoints(
+        self, run_id: str, status_filter: Optional[str] = None
+    ) -> List[RLCheckpoint]:
+        """List checkpoints for an RL run."""
+        try:
+            params: Dict[str, str] = {}
+            if status_filter:
+                params["status_filter"] = status_filter
+            response = self.client.get(
+                f"/rft/runs/{run_id}/checkpoints",
+                params=params if params else None,
+            )
+            checkpoints_data = response.get("checkpoints", [])
+            return [RLCheckpoint.model_validate(cp) for cp in checkpoints_data]
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to list checkpoints: {e.response.text}")
+            raise APIError(f"Failed to list checkpoints: {str(e)}")
 
     def get_run(self, run_id: str) -> RLRun:
         """Get details of a specific RL run."""

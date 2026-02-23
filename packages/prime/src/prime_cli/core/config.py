@@ -192,7 +192,10 @@ class Config:
     @property
     def share_resources_with_team(self) -> bool:
         """Get share_resources_with_team setting from config file."""
-        return bool(self.config.get("share_resources_with_team", False))
+        val = self.config.get("share_resources_with_team", False)
+        if isinstance(val, str):
+            return val.lower() == "true"
+        return bool(val)
 
     def set_share_resources_with_team(self, value: bool) -> None:
         """Set share_resources_with_team in config file"""

@@ -113,6 +113,27 @@ def _build_terminated_message(command: str, ctx: dict) -> str:
     return " ".join(parts)
 
 
+def _is_gateway_sandbox_not_found(response: Optional[httpx.Response]) -> bool:
+    """Return True when gateway indicates target sandbox no longer exists."""
+    if response is None or response.status_code != 502:
+        return False
+
+    text = response.text or ""
+    if "The sandbox was not found" in text:
+        return True
+
+    try:
+        body = response.json()
+    except Exception:
+        return False
+
+    if not isinstance(body, dict):
+        return False
+
+    message = body.get("message")
+    return isinstance(message, str) and message.strip() == "The sandbox was not found"
+
+
 def _raise_not_running_error(
     sandbox_id: str,
     ctx: dict,
@@ -483,6 +504,18 @@ class SandboxClient:
             except httpx.HTTPStatusError as e:
                 resp = getattr(e, "response", None)
                 status = getattr(resp, "status_code", "?")
+
+                if status == 502 and _is_gateway_sandbox_not_found(resp):
+                    ctx = self._get_sandbox_error_context(sandbox_id)
+                    ctx["status"] = "TERMINATED"
+                    if not ctx.get("error_type"):
+                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
+                    if not ctx.get("error_message"):
+                        ctx["error_message"] = (
+                            "Sandbox is no longer present on the runtime node. "
+                            "Please create a new sandbox."
+                        )
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
 
                 if status == 409:
                     if self._should_retry_409(sandbox_id, e, attempt, command=command):
@@ -1124,6 +1157,18 @@ class AsyncSandboxClient:
             except httpx.HTTPStatusError as e:
                 resp = getattr(e, "response", None)
                 status = getattr(resp, "status_code", "?")
+
+                if status == 502 and _is_gateway_sandbox_not_found(resp):
+                    ctx = await self._get_sandbox_error_context(sandbox_id)
+                    ctx["status"] = "TERMINATED"
+                    if not ctx.get("error_type"):
+                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
+                    if not ctx.get("error_message"):
+                        ctx["error_message"] = (
+                            "Sandbox is no longer present on the runtime node. "
+                            "Please create a new sandbox."
+                        )
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
 
                 if status == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt, command=command):

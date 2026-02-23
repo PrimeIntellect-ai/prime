@@ -728,10 +728,10 @@ def create(
             else:
                 console.print("\n[bold]Team Members:[/bold]")
                 for idx, m in enumerate(selectable_members, 1):
-                    name = m.get("userName") or "N/A"
+                    member_name = m.get("userName") or "N/A"
                     email = m.get("userEmail") or "N/A"
                     role = m.get("role", "")
-                    console.print(f"  {idx}. {name} ({email}) - {role}")
+                    console.print(f"  {idx}. {member_name} ({email}) - {role}")
 
                 selection = typer.prompt(
                     "\nSelect members (comma-separated numbers, or 'all' for everyone)",

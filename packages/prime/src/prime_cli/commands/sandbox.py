@@ -536,7 +536,7 @@ def delete(
     only_mine: bool = typer.Option(
         True,
         "--only-mine/--all-users",
-        help="Restrict '--all' deletes to only your sandboxes (default: only yours)",
+        help="Restrict '--all' deletes to only your sandboxes",
         show_default=True,
     ),
 ) -> None:

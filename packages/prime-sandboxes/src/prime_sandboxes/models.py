@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SandboxStatus(str, Enum):
@@ -39,6 +39,7 @@ class Sandbox(BaseModel):
     disk_size_gb: float = Field(..., alias="diskSizeGB")
     disk_mount_path: str = Field(..., alias="diskMountPath")
     gpu_count: int = Field(..., alias="gpuCount")
+    gpu_type: Optional[str] = Field(None, alias="gpuType")
     network_access: bool = Field(True, alias="networkAccess")
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
@@ -83,6 +84,7 @@ class CreateSandboxRequest(BaseModel):
     memory_gb: float = 2.0
     disk_size_gb: float = 5.0
     gpu_count: int = 0
+    gpu_type: Optional[str] = None
     network_access: bool = True
     timeout_minutes: int = 60
     environment_vars: Optional[Dict[str, str]] = None
@@ -91,6 +93,12 @@ class CreateSandboxRequest(BaseModel):
     team_id: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
     registry_credentials_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_gpu_fields(self) -> "CreateSandboxRequest":
+        if self.gpu_count > 0 and not self.gpu_type:
+            raise ValueError("gpu_type is required when gpu_count is greater than 0")
+        return self
 
 
 class UpdateSandboxRequest(BaseModel):
@@ -103,6 +111,7 @@ class UpdateSandboxRequest(BaseModel):
     memory_gb: Optional[float] = None
     disk_size_gb: Optional[float] = None
     gpu_count: Optional[int] = None
+    gpu_type: Optional[str] = None
     timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
     registry_credentials_id: Optional[str] = None

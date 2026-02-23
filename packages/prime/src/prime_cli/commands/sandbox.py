@@ -49,14 +49,16 @@ console = Console()
 
 
 config = Config()
+GPU_SANDBOX_INTERNAL_DOCKER_IMAGE = "gpu-managed-runtime"
 
 
 def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
     """Format sandbox data for list display (both table and JSON)"""
+    image_display = "Platform GPU runtime" if sandbox.gpu_count > 0 else sandbox.docker_image
     return {
         "id": sandbox.id,
         "name": sandbox.name,
-        "image": sandbox.docker_image,
+        "image": image_display,
         "status": sandbox.status,
         "resources": format_resources(sandbox.cpu_cores, sandbox.memory_gb, sandbox.gpu_count),
         "labels": ", ".join(sandbox.labels) if sandbox.labels else "-",  # For table output
@@ -68,10 +70,13 @@ def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
 
 def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
     """Format sandbox data for details display (both table and JSON)"""
+    docker_image_display = (
+        "N/A (platform GPU runtime)" if sandbox.gpu_count > 0 else sandbox.docker_image
+    )
     data: Dict[str, Any] = {
         "id": sandbox.id,
         "name": sandbox.name,
-        "docker_image": sandbox.docker_image,
+        "docker_image": docker_image_display,
         "start_command": sandbox.start_command,
         "status": sandbox.status,
         "cpu_cores": sandbox.cpu_cores,
@@ -79,6 +84,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "disk_size_gb": sandbox.disk_size_gb,
         "disk_mount_path": sandbox.disk_mount_path,
         "gpu_count": sandbox.gpu_count,
+        "gpu_type": getattr(sandbox, "gpu_type", None),
         "network_access": sandbox.network_access,
         "timeout_minutes": sandbox.timeout_minutes,
         "labels": sandbox.labels,
@@ -263,6 +269,7 @@ def get(
             table.add_row("Disk Size (GB)", str(sandbox_data["disk_size_gb"]))
             table.add_row("Disk Mount Path", sandbox_data["disk_mount_path"])
             table.add_row("GPU Count", str(sandbox_data["gpu_count"]))
+            table.add_row("GPU Type", sandbox_data.get("gpu_type") or "N/A")
             network_display = Text(
                 "Enabled" if sandbox_data["network_access"] else "Disabled",
                 style="green" if sandbox_data["network_access"] else "yellow",
@@ -323,7 +330,10 @@ def get(
 
 @app.command(no_args_is_help=True)
 def create(
-    docker_image: str = typer.Argument(..., help="Docker image to run"),
+    docker_image: Optional[str] = typer.Argument(
+        None,
+        help="Docker image to run for CPU sandboxes (not supported for GPU sandboxes)",
+    ),
     name: Optional[str] = typer.Option(
         None, help="Name for the sandbox (auto-generated if not provided)"
     ),
@@ -334,6 +344,11 @@ def create(
     memory_gb: float = typer.Option(2.0, help="Memory in GB"),
     disk_size_gb: float = typer.Option(10.0, help="Disk size in GB"),
     gpu_count: int = typer.Option(0, help="Number of GPUs"),
+    gpu_type: Optional[str] = typer.Option(
+        None,
+        "--gpu-type",
+        help="GPU type/model (e.g. H100_80GB, A100_80GB). Required when --gpu-count > 0",
+    ),
     network_access: bool = typer.Option(
         True,
         "--network-access/--no-network-access",
@@ -368,6 +383,7 @@ def create(
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
+        docker_image_was_provided = docker_image is not None
 
         # Parse environment variables
         env_vars = {}
@@ -388,19 +404,49 @@ def create(
                 key, value = secret_var.split("=", 1)
                 secrets_vars[key] = value
 
+        if gpu_count > 0 and not gpu_type:
+            console.print(
+                "[red]GPU type is required when requesting GPUs.[/red] "
+                "Provide --gpu-type with --gpu-count > 0."
+            )
+            raise typer.Exit(1)
+
+        if gpu_count == 0 and gpu_type:
+            console.print(
+                "[red]GPU type provided without GPUs.[/red] "
+                "Set --gpu-count > 0 when using --gpu-type."
+            )
+            raise typer.Exit(1)
+
+        if gpu_count > 0:
+            if docker_image_was_provided:
+                console.print(
+                    "[red]Docker image is not supported for GPU sandboxes.[/red] "
+                    "Do not provide a DOCKER_IMAGE positional argument."
+                )
+                raise typer.Exit(1)
+            docker_image = GPU_SANDBOX_INTERNAL_DOCKER_IMAGE
+        elif not docker_image:
+            console.print(
+                "[red]Docker image is required for CPU sandboxes.[/red] "
+                "Provide a DOCKER_IMAGE positional argument."
+            )
+            raise typer.Exit(1)
+
         # Auto-generate name if not provided
         if not name:
-            # Extract image name without tag/registry
-            image_parts = docker_image.split("/")[-1].split(":")[0]
-            # Replace underscores and dots with dashes, keep only alphanumeric and dashes
-            clean_image = "".join(
-                c if c.isalnum() or c == "-" else "-" for c in image_parts.lower()
-            )
-            # Remove multiple consecutive dashes and trim
-            clean_image = "-".join(filter(None, clean_image.split("-")))
+            if gpu_count > 0 and gpu_type:
+                gpu_slug = "".join(c if c.isalnum() or c == "-" else "-" for c in gpu_type.lower())
+                base_name = f"gpu-{'-'.join(filter(None, gpu_slug.split('-')))}"
+            else:
+                image_parts = docker_image.split("/")[-1].split(":")[0]
+                base_name = "".join(
+                    c if c.isalnum() or c == "-" else "-" for c in image_parts.lower()
+                )
+                base_name = "-".join(filter(None, base_name.split("-")))
 
             suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
-            name = f"{clean_image}-{suffix}"
+            name = f"{base_name}-{suffix}"
 
         request = CreateSandboxRequest(
             name=name,
@@ -410,6 +456,7 @@ def create(
             memory_gb=memory_gb,
             disk_size_gb=disk_size_gb,
             gpu_count=gpu_count,
+            gpu_type=gpu_type,
             network_access=network_access,
             timeout_minutes=timeout_minutes,
             environment_vars=env_vars if env_vars else None,
@@ -422,11 +469,16 @@ def create(
         # Show configuration summary
         console.print("\n[bold]Sandbox Configuration:[/bold]")
         console.print(f"Name: {name}")
-        console.print(f"Docker Image: {docker_image}")
+        if gpu_count > 0:
+            console.print("Docker Image: Not supported (platform GPU runtime)")
+        elif docker_image_was_provided:
+            console.print(f"Docker Image: {docker_image}")
+        else:
+            console.print("Docker Image: N/A")
         console.print(f"Start Command: {start_command or 'N/A'}")
         console.print(f"Resources: {cpu_cores} CPU, {memory_gb}GB RAM, {disk_size_gb}GB disk")
         if gpu_count > 0:
-            console.print(f"GPUs: {gpu_count}")
+            console.print(f"GPUs: {gpu_type} x{gpu_count}")
         network_status = "[green]Enabled[/green]" if network_access else "[yellow]Disabled[/yellow]"
         console.print(f"Network Access: {network_status}")
         console.print(f"Timeout: {timeout_minutes} minutes")

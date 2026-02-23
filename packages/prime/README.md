@@ -145,13 +145,18 @@ Isolated environments for running code remotely:
 
 ```bash
 # Create a sandbox
-prime sandbox create  python:3.11
+prime sandbox create python:3.11
+
+# Create a GPU sandbox
+prime sandbox create --gpu-count 1 --gpu-type H100_80GB
+
+# Note: DOCKER_IMAGE is not supported for GPU sandboxes
 
 # List sandboxes
 prime sandbox list
 
 # Execute commands
-prime sandbox exec <sandbox-id> "python script.py"
+prime sandbox run <sandbox-id> -- python script.py
 
 # Upload/download files
 prime sandbox upload <sandbox-id> local_file.py /remote/path/

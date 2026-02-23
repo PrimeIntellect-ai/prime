@@ -101,6 +101,10 @@ def view() -> None:
         ssh_label += " (from env var)"
     table.add_row("SSH Key Path", ssh_label)
 
+    # Show share resources with team
+    share_label = str(settings.get("share_resources_with_team", False))
+    table.add_row("Share Resources With Team", share_label)
+
     console.print(table)
 
 
@@ -153,16 +157,90 @@ def set_api_key(
 def set_team_id(
     team_id: Optional[str] = typer.Argument(
         None,
-        help="Your Prime Intellect team ID. Leave empty for personal account.",
+        help="Your Prime Intellect team ID. Leave empty for interactive selection.",
     ),
 ) -> None:
-    """Set your team ID. Empty team ID means personal account."""
+    """Set your team ID. Shows interactive team selection if no ID is provided."""
+    config = Config()
+
     if team_id is None:
-        # Interactive mode with prompt
-        team_id = typer.prompt(
-            "Enter your Prime Intellect team ID (leave empty for personal account)",
-            default="",
-        )
+        # Interactive mode: fetch teams and let user pick
+        try:
+            client = APIClient()
+            all_teams: list[dict] = []
+            offset = 0
+            limit = 100
+            while True:
+                response = client.get("/user/teams", params={"offset": offset, "limit": limit})
+                batch = response.get("data", []) if isinstance(response, dict) else []
+                all_teams.extend(batch)
+                total = (
+                    response.get("total_count", len(all_teams))
+                    if isinstance(response, dict)
+                    else len(all_teams)
+                )
+                if len(all_teams) >= total or not batch:
+                    break
+                offset += limit
+
+            if not all_teams:
+                console.print(
+                    "[yellow]You are not a member of any team. Using personal account.[/yellow]"
+                )
+                config.set_team(None)
+                return
+
+            console.print("\n[bold]Select a team:[/bold]\n")
+            console.print("  [cyan]0[/cyan] - Personal Account (no team)")
+            for idx, t in enumerate(all_teams, start=1):
+                name = t.get("name", "Unknown")
+                slug = t.get("slug", "")
+                role = t.get("role", "")
+                slug_part = f" ({slug})" if slug else ""
+                console.print(f"  [cyan]{idx}[/cyan] - {name}{slug_part} [dim]{role}[/dim]")
+
+            console.print()
+            choice = typer.prompt(
+                "Enter number",
+                type=int,
+                default=0,
+            )
+
+            if choice == 0:
+                config.set_team(None)
+                console.print("[green]Team ID cleared. Using personal account.[/green]")
+                return
+
+            if choice < 0 or choice > len(all_teams):
+                console.print("[red]Error: Invalid selection.[/red]")
+                raise typer.Exit(1)
+
+            selected = all_teams[choice - 1]
+            team_id = selected.get("teamId", "")
+            team_name = selected.get("name")
+            team_role = selected.get("role")
+            config.set_team(team_id, team_name=team_name, team_role=team_role)
+            console.print(f"[green]Team '{team_name}' ({team_id}) configured successfully![/green]")
+            return
+
+        except APIError as e:
+            console.print(f"[red]Error fetching teams:[/red] {str(e)}")
+            console.print(
+                "[yellow]Falling back to manual input. You can enter a team ID directly.[/yellow]\n"
+            )
+            team_id = typer.prompt(
+                "Enter your Prime Intellect team ID (leave empty for personal account)",
+                default="",
+            )
+        except Exception as e:
+            console.print(f"[red]Unexpected error:[/red] {str(e)}")
+            console.print(
+                "[yellow]Falling back to manual input. You can enter a team ID directly.[/yellow]\n"
+            )
+            team_id = typer.prompt(
+                "Enter your Prime Intellect team ID (leave empty for personal account)",
+                default="",
+            )
 
     # Validate team ID format
     if not validate_team_id(team_id):
@@ -173,7 +251,6 @@ def set_team_id(
         )
         raise typer.Exit(code=1)
 
-    config = Config()
     team_name = None
     if team_id:
         try:
@@ -326,6 +403,24 @@ def _list_environments() -> None:
         table.add_row(env, env_type)
 
     console.print(table)
+
+
+@app.command(no_args_is_help=True)
+def set_share_resources_with_team(
+    enabled: str = typer.Argument(
+        ...,
+        help="Enable or disable auto-sharing with team: true or false",
+    ),
+) -> None:
+    """Set whether to automatically share new resources with all team members"""
+    value = enabled.lower()
+    if value not in ("true", "false"):
+        console.print("[red]Error: Value must be 'true' or 'false'[/red]")
+        raise typer.Exit(1)
+
+    config = Config()
+    config.set_share_resources_with_team(value == "true")
+    console.print(f"[green]Share resources with team set to: {value}[/green]")
 
 
 @app.command(no_args_is_help=True)

@@ -17,6 +17,9 @@ class _DummyAuthCache:
             "token": "tok",
         }
 
+    def is_gpu(self, _sandbox_id: str) -> bool:
+        return False
+
 
 class _AsyncDummyAuthCache:
     async def get_or_refresh_async(self, _sandbox_id: str):
@@ -26,6 +29,9 @@ class _AsyncDummyAuthCache:
             "job_id": "job",
             "token": "tok",
         }
+
+    async def is_gpu_async(self, _sandbox_id: str) -> bool:
+        return False
 
 
 def _sandbox_not_found_error() -> httpx.HTTPStatusError:

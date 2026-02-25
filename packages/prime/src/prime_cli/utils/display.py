@@ -47,7 +47,7 @@ SANDBOX_STATUS_COLORS = {
     "PENDING": "yellow",
     "PROVISIONING": "yellow",
     "RUNNING": "green",
-    "STOPPED": "blue",
+    "PAUSED": "blue",
     "ERROR": "red",
     "TERMINATED": "white",
     "TIMEOUT": "white",

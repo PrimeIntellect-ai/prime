@@ -57,7 +57,7 @@ def test_sync_execute_command_uses_connect_for_gpu():
     def _rest(*_args, **_kwargs):
         raise AssertionError("REST path should not be used for GPU sandboxes")
 
-    client._execute_command_connect = _connect
+    client._execute_command_connect_rpc = _connect
     client._execute_command_rest = _rest
 
     result = client.execute_command("sbx-gpu", "echo hi")
@@ -79,7 +79,7 @@ def test_sync_execute_command_uses_rest_for_cpu():
         called["rest"] = True
         return CommandResponse(stdout="ok", stderr="", exit_code=0)
 
-    client._execute_command_connect = _connect
+    client._execute_command_connect_rpc = _connect
     client._execute_command_rest = _rest
 
     result = client.execute_command("sbx-cpu", "echo hi")
@@ -102,7 +102,7 @@ async def test_async_execute_command_uses_connect_for_gpu():
     async def _rest(*_args, **_kwargs):
         raise AssertionError("REST path should not be used for GPU sandboxes")
 
-    client._execute_command_connect = _connect
+    client._execute_command_connect_rpc = _connect
     client._execute_command_rest = _rest
 
     try:
@@ -128,7 +128,7 @@ async def test_async_execute_command_uses_rest_for_cpu():
         called["rest"] = True
         return CommandResponse(stdout="ok", stderr="", exit_code=0)
 
-    client._execute_command_connect = _connect
+    client._execute_command_connect_rpc = _connect
     client._execute_command_rest = _rest
 
     try:
@@ -216,7 +216,7 @@ def test_sync_connect_execution_collects_stdout_stderr(monkeypatch):
     monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClientSync", _FakeConnectClient)
 
     client = SandboxClient(APIClient(api_key="test-key"))
-    result = client._execute_command_connect(
+    result = client._execute_command_connect_rpc(
         sandbox_id="sbx-gpu",
         command="echo hi",
         auth=_auth_payload(),
@@ -248,7 +248,7 @@ def test_sync_connect_execution_maps_deadline_to_timeout(monkeypatch):
     }
 
     with pytest.raises(Exception) as exc_info:
-        client._execute_command_connect(
+        client._execute_command_connect_rpc(
             sandbox_id="sbx-gpu",
             command="sleep 100",
             auth=_auth_payload(),

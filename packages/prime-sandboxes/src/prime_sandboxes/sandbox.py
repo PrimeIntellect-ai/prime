@@ -128,22 +128,10 @@ def _build_terminated_message(command: str, ctx: dict) -> str:
     return " ".join(parts)
 
 
-def _is_sandbox_not_found_message(message: Optional[str]) -> bool:
-    if not message:
-        return False
-
-    normalized = message.lower()
-    return "sandbox was not found" in normalized or "sandbox not found" in normalized
-
-
 def _is_gateway_sandbox_not_found(response: Optional[httpx.Response]) -> bool:
     """Return True when gateway indicates target sandbox no longer exists."""
     if response is None or response.status_code != 502:
         return False
-
-    text = response.text or ""
-    if _is_sandbox_not_found_message(text):
-        return True
 
     try:
         body = response.json()
@@ -153,8 +141,7 @@ def _is_gateway_sandbox_not_found(response: Optional[httpx.Response]) -> bool:
     if not isinstance(body, dict):
         return False
 
-    message = body.get("message")
-    return isinstance(message, str) and _is_sandbox_not_found_message(message)
+    return body.get("error") == "sandbox_not_found"
 
 
 def _build_process_start_request(
@@ -196,16 +183,6 @@ def _collect_process_start_event(
         return int(event.end.exit_code)
 
     return None
-
-
-def _is_connect_sandbox_not_found(error: ConnectError) -> bool:
-    if error.code == Code.NOT_FOUND:
-        return True
-
-    if error.code == Code.UNAVAILABLE and _is_sandbox_not_found_message(error.message):
-        return True
-
-    return _is_sandbox_not_found_message(str(error))
 
 
 def _raise_not_running_error(
@@ -581,7 +558,7 @@ class SandboxClient:
         auth = self._auth_cache.get_or_refresh(sandbox_id)
 
         if self._auth_cache.is_gpu(sandbox_id):
-            return self._execute_command_connect(
+            return self._execute_command_connect_rpc(
                 sandbox_id=sandbox_id,
                 command=command,
                 auth=auth,
@@ -599,7 +576,7 @@ class SandboxClient:
             timeout=timeout,
         )
 
-    def _execute_command_connect(
+    def _execute_command_connect_rpc(
         self,
         sandbox_id: str,
         command: str,
@@ -645,7 +622,7 @@ class SandboxClient:
                     _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
                 raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
 
-            if _is_connect_sandbox_not_found(e):
+            if e.code == Code.NOT_FOUND:
                 ctx = self._get_sandbox_error_context(sandbox_id)
                 ctx["status"] = "TERMINATED"
                 if not ctx.get("error_type"):
@@ -1332,7 +1309,7 @@ class AsyncSandboxClient:
         auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
 
         if await self._auth_cache.is_gpu_async(sandbox_id):
-            return await self._execute_command_connect(
+            return await self._execute_command_connect_rpc(
                 sandbox_id=sandbox_id,
                 command=command,
                 auth=auth,
@@ -1350,7 +1327,7 @@ class AsyncSandboxClient:
             timeout=timeout,
         )
 
-    async def _execute_command_connect(
+    async def _execute_command_connect_rpc(
         self,
         sandbox_id: str,
         command: str,
@@ -1396,7 +1373,7 @@ class AsyncSandboxClient:
                     _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
                 raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
 
-            if _is_connect_sandbox_not_found(e):
+            if e.code == Code.NOT_FOUND:
                 ctx = await self._get_sandbox_error_context(sandbox_id)
                 ctx["status"] = "TERMINATED"
                 if not ctx.get("error_type"):

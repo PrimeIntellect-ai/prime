@@ -3,6 +3,7 @@
 import httpx
 import pytest
 
+from prime_sandboxes.core import APIError
 from prime_sandboxes.core.client import APIClient
 from prime_sandboxes.exceptions import SandboxNotRunningError
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
@@ -39,7 +40,26 @@ def _sandbox_not_found_error() -> httpx.HTTPStatusError:
     response = httpx.Response(
         502,
         request=request,
-        json={"message": "The sandbox was not found", "code": 502},
+        json={
+            "error": "sandbox_not_found",
+            "sandboxId": "sbx-123",
+            "message": "The sandbox was not found",
+            "code": 502,
+        },
+    )
+    return httpx.HTTPStatusError("bad gateway", request=request, response=response)
+
+
+def _gateway_error() -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://gateway.example.com/ns/job/exec")
+    response = httpx.Response(
+        502,
+        request=request,
+        json={
+            "error": "gateway_error",
+            "message": "Failed to route request to sandbox",
+            "code": 502,
+        },
     )
     return httpx.HTTPStatusError("bad gateway", request=request, response=response)
 
@@ -86,3 +106,18 @@ async def test_async_execute_command_maps_gateway_502_to_not_running():
         await client.execute_command("sbx-123", "ls /")
 
     assert "sandbox is no longer running" in str(exc_info.value).lower()
+
+
+def test_sync_execute_command_does_not_map_generic_gateway_502_to_not_running():
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client._auth_cache = _DummyAuthCache()
+
+    def _raise_gateway_error(*args, **kwargs):
+        raise _gateway_error()
+
+    client._gateway_post = _raise_gateway_error
+
+    with pytest.raises(APIError) as exc_info:
+        client.execute_command("sbx-123", "ls /")
+
+    assert "sandbox is no longer running" not in str(exc_info.value).lower()

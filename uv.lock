@@ -1853,7 +1853,7 @@ requires-dist = [
     { name = "aiofiles", specifier = ">=23.0.0" },
     { name = "connect-python", specifier = ">=0.8.0" },
     { name = "httpx", specifier = ">=0.25.0" },
-    { name = "protobuf", specifier = ">=6.0.0" },
+    { name = "protobuf", specifier = ">=6.31.1" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },

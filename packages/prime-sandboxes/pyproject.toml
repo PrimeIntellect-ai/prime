@@ -15,7 +15,7 @@ dependencies = [
     "aiofiles>=23.0.0",
     "tenacity>=8.0.0",
     "connect-python>=0.8.0",
-    "protobuf>=6.0.0",
+    "protobuf>=6.31.1",
 ]
 keywords = ["sandboxes", "remote-execution", "containers", "cloud", "sdk"]
 classifiers = [

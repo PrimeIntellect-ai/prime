@@ -382,6 +382,7 @@ class RLConfig(BaseModel):
     oversampling_factor: float | None = None
     max_async_level: int | None = None
     checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
+    cluster_name: str | None = None  # Admin-only: target a specific cluster by name
     env: List[EnvConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
@@ -724,6 +725,7 @@ def create_run(
             max_async_level=cfg.max_async_level,
             checkpoints_config=cfg.checkpoints.to_api_dict(),
             checkpoint_id=cfg.checkpoint_id,
+            cluster_name=cfg.cluster_name,
         )
 
         if output == "json":

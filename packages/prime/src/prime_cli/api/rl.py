@@ -132,6 +132,7 @@ class RLClient:
         max_async_level: Optional[int] = None,
         checkpoints_config: Optional[Dict[str, Any]] = None,
         checkpoint_id: Optional[str] = None,
+        cluster_name: Optional[str] = None,
     ) -> RLRun:
         """Create a new RL training run."""
         try:
@@ -198,6 +199,9 @@ class RLClient:
 
             if checkpoint_id:
                 payload["checkpoint_id"] = checkpoint_id
+
+            if cluster_name:
+                payload["cluster_name"] = cluster_name
 
             response = self.client.post("/rft/runs", json=payload)
             return RLRun.model_validate(response.get("run"))

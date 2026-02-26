@@ -2,7 +2,6 @@ import asyncio
 import fcntl
 import os
 import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -309,9 +308,10 @@ localPort = {self.local_port}
 subdomain = "{self._tunnel_info.tunnel_id}"
 """
 
-        # Write to temp file
-        config_dir = Path(tempfile.gettempdir()) / "prime-tunnel"
+        # Write to config directory
+        config_dir = Path.home() / ".prime" / "tunnels"
         config_dir.mkdir(parents=True, exist_ok=True)
+        config_dir.chmod(0o700)
         config_file = config_dir / f"{self._tunnel_info.tunnel_id}.toml"
 
         # Create file with 0600 permissions

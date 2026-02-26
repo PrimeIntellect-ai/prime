@@ -591,6 +591,8 @@ class SandboxClient:
                 _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
 
             raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
+        except APIError:
+            raise
         except Exception as e:
             raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
         finally:
@@ -1346,6 +1348,8 @@ class AsyncSandboxClient:
                 _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
 
             raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
+        except APIError:
+            raise
         except Exception as e:
             raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
         finally:

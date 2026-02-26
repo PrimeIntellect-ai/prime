@@ -110,6 +110,12 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
     return data
 
 
+def _guard_gpu_unsupported(sandbox: Sandbox, feature_name: str) -> None:
+    if sandbox.gpu_count > 0:
+        console.print(f"[red]Error:[/red] {feature_name} is not yet supported for GPU sandboxes.")
+        raise typer.Exit(1)
+
+
 @app.command("list")
 @app.command("ls", hidden=True)
 def list_sandboxes_cmd(
@@ -332,7 +338,7 @@ def get(
 def create(
     docker_image: Optional[str] = typer.Argument(
         None,
-        help="Docker image to run for CPU sandboxes (not supported for GPU sandboxes)",
+        help="Docker image to run for CPU sandboxes (not yet supported for GPU sandboxes)",
     ),
     name: Optional[str] = typer.Option(
         None, help="Name for the sandbox (auto-generated if not provided)"
@@ -1036,6 +1042,10 @@ def expose_port(
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
+        with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
+            sandbox = sandbox_client.get(sandbox_id)
+        _guard_gpu_unsupported(sandbox, "Port exposure")
+
         with console.status("[bold blue]Exposing port...", spinner="dots"):
             exposed = sandbox_client.expose(sandbox_id, port, name, protocol)
 
@@ -1061,6 +1071,8 @@ def expose_port(
             else:
                 console.print(f"[bold green]TLS Socket:[/bold green] {exposed.tls_socket}")
 
+    except typer.Exit:
+        raise
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -1087,11 +1099,17 @@ def unexpose_port(
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
+        with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
+            sandbox = sandbox_client.get(sandbox_id)
+        _guard_gpu_unsupported(sandbox, "Port unexpose")
+
         with console.status("[bold blue]Unexposing port...", spinner="dots"):
             sandbox_client.unexpose(sandbox_id, exposure_id)
 
         console.print(f"[green]✓ Successfully unexposed {exposure_id}[/green]")
 
+    except typer.Exit:
+        raise
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -1117,6 +1135,10 @@ def list_ports(
 
         if sandbox_id:
             # List ports for a specific sandbox
+            with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
+                sandbox = sandbox_client.get(sandbox_id)
+            _guard_gpu_unsupported(sandbox, "Port listing")
+
             with console.status("[bold blue]Fetching exposed ports...", spinner="dots"):
                 response = sandbox_client.list_exposed_ports(sandbox_id)
 
@@ -1192,6 +1214,8 @@ def list_ports(
 
                     console.print(table)
 
+    except typer.Exit:
+        raise
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
@@ -1256,6 +1280,8 @@ def ssh_connect(
         # Check if sandbox is running
         with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
             sandbox = sandbox_client.get(sandbox_id)
+
+        _guard_gpu_unsupported(sandbox, "SSH")
 
         if sandbox.status != "RUNNING":
             console.print(f"[red]Error:[/red] Sandbox is not running (status: {sandbox.status})")

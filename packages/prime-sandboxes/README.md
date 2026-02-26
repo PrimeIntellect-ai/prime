@@ -53,19 +53,6 @@ print(result.stdout)
 sandbox_client.delete(sandbox.id)
 ```
 
-### GPU Sandbox Example
-
-```python
-gpu_request = CreateSandboxRequest(
-    name="gpu-sandbox",
-    docker_image="nvidia/cuda:12.4.1-base-ubuntu22.04",
-    gpu_count=1,
-    gpu_type="H100_80GB",  # Required when gpu_count > 0
-)
-
-gpu_sandbox = sandbox_client.create(gpu_request)
-```
-
 ## Async Usage
 
 ```python

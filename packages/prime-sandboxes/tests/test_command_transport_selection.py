@@ -1,12 +1,13 @@
 """Tests for CPU/GPU command transport selection."""
 
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 
 import pytest
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 
-from prime_sandboxes._proto.process import process_pb2
+from prime_sandboxes._proto.command_session import command_session_pb2
 from prime_sandboxes.core.client import APIClient
 from prime_sandboxes.models import CommandResponse
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxAuthCache, SandboxClient
@@ -46,7 +47,7 @@ class _AsyncFakeCache:
 
 def test_sync_execute_command_uses_connect_for_gpu():
     client = SandboxClient(APIClient(api_key="test-key"))
-    client._auth_cache = _FakeCache(is_gpu=True)
+    cast(Any, client)._auth_cache = _FakeCache(is_gpu=True)
 
     called = {"connect": False}
 
@@ -57,8 +58,9 @@ def test_sync_execute_command_uses_connect_for_gpu():
     def _rest(*_args, **_kwargs):
         raise AssertionError("REST path should not be used for GPU sandboxes")
 
-    client._execute_command_connect_rpc = _connect
-    client._execute_command_rest = _rest
+    client_any = cast(Any, client)
+    client_any._execute_command_connect_rpc = _connect
+    client_any._execute_command_rest = _rest
 
     result = client.execute_command("sbx-gpu", "echo hi")
 
@@ -68,7 +70,7 @@ def test_sync_execute_command_uses_connect_for_gpu():
 
 def test_sync_execute_command_uses_rest_for_cpu():
     client = SandboxClient(APIClient(api_key="test-key"))
-    client._auth_cache = _FakeCache(is_gpu=False)
+    cast(Any, client)._auth_cache = _FakeCache(is_gpu=False)
 
     called = {"rest": False}
 
@@ -79,8 +81,9 @@ def test_sync_execute_command_uses_rest_for_cpu():
         called["rest"] = True
         return CommandResponse(stdout="ok", stderr="", exit_code=0)
 
-    client._execute_command_connect_rpc = _connect
-    client._execute_command_rest = _rest
+    client_any = cast(Any, client)
+    client_any._execute_command_connect_rpc = _connect
+    client_any._execute_command_rest = _rest
 
     result = client.execute_command("sbx-cpu", "echo hi")
 
@@ -91,7 +94,7 @@ def test_sync_execute_command_uses_rest_for_cpu():
 @pytest.mark.asyncio
 async def test_async_execute_command_uses_connect_for_gpu():
     client = AsyncSandboxClient(api_key="test-key")
-    client._auth_cache = _AsyncFakeCache(is_gpu=True)
+    cast(Any, client)._auth_cache = _AsyncFakeCache(is_gpu=True)
 
     called = {"connect": False}
 
@@ -102,8 +105,9 @@ async def test_async_execute_command_uses_connect_for_gpu():
     async def _rest(*_args, **_kwargs):
         raise AssertionError("REST path should not be used for GPU sandboxes")
 
-    client._execute_command_connect_rpc = _connect
-    client._execute_command_rest = _rest
+    client_any = cast(Any, client)
+    client_any._execute_command_connect_rpc = _connect
+    client_any._execute_command_rest = _rest
 
     try:
         result = await client.execute_command("sbx-gpu", "echo hi")
@@ -117,7 +121,7 @@ async def test_async_execute_command_uses_connect_for_gpu():
 @pytest.mark.asyncio
 async def test_async_execute_command_uses_rest_for_cpu():
     client = AsyncSandboxClient(api_key="test-key")
-    client._auth_cache = _AsyncFakeCache(is_gpu=False)
+    cast(Any, client)._auth_cache = _AsyncFakeCache(is_gpu=False)
 
     called = {"rest": False}
 
@@ -128,8 +132,9 @@ async def test_async_execute_command_uses_rest_for_cpu():
         called["rest"] = True
         return CommandResponse(stdout="ok", stderr="", exit_code=0)
 
-    client._execute_command_connect_rpc = _connect
-    client._execute_command_rest = _rest
+    client_any = cast(Any, client)
+    client_any._execute_command_connect_rpc = _connect
+    client_any._execute_command_rest = _rest
 
     try:
         result = await client.execute_command("sbx-cpu", "echo hi")
@@ -194,19 +199,22 @@ def test_sync_connect_execution_collects_stdout_stderr(monkeypatch):
             self.address = address
 
         def execute_server_stream(self, **_kwargs):
-            yield process_pb2.StartResponse(
-                event=process_pb2.ProcessEvent(
-                    data=process_pb2.ProcessEvent.DataEvent(stdout=b"hello\n")
-                )
+            start_response = getattr(command_session_pb2, "StartResponse")
+            command_session_event = getattr(command_session_pb2, "CommandSessionEvent")
+
+            yield start_response(
+                event=command_session_event(data=command_session_event.DataEvent(stdout=b"hello\n"))
             )
-            yield process_pb2.StartResponse(
-                event=process_pb2.ProcessEvent(
-                    data=process_pb2.ProcessEvent.DataEvent(stderr=b"warn\n")
-                )
+            yield start_response(
+                event=command_session_event(data=command_session_event.DataEvent(stderr=b"warn\n"))
             )
-            yield process_pb2.StartResponse(
-                event=process_pb2.ProcessEvent(
-                    end=process_pb2.ProcessEvent.EndEvent(exit_code=7, exited=True, status="exit")
+            yield start_response(
+                event=command_session_event(
+                    end=command_session_event.EndEvent(
+                        exit_code=7,
+                        exited=True,
+                        status="exit",
+                    )
                 )
             )
 
@@ -241,7 +249,7 @@ def test_sync_connect_execution_maps_deadline_to_timeout(monkeypatch):
     monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClientSync", _FakeConnectClient)
 
     client = SandboxClient(APIClient(api_key="test-key"))
-    client._get_sandbox_error_context = lambda sandbox_id: {
+    cast(Any, client)._get_sandbox_error_context = lambda sandbox_id: {
         "status": "RUNNING",
         "error_type": None,
         "error_message": None,

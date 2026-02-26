@@ -9,7 +9,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, NoReturn, Optional
+from typing import Any, Dict, List, NoReturn, Optional, Protocol, cast
 
 import aiofiles
 import httpx
@@ -17,6 +17,7 @@ from connectrpc.client import ConnectClient, ConnectClientSync
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 from connectrpc.method import IdempotencyLevel, MethodInfo
+from google.protobuf.message import Message
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -24,7 +25,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from ._proto.process import process_pb2
+from ._proto.command_session import command_session_pb2
 from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
     CommandTimeoutError,
@@ -54,8 +55,6 @@ from .models import (
     SSHSession,
 )
 
-_PROCESS_PROTO: Any = process_pb2
-
 # Retry configuration for transient connection errors on gateway requests
 # Note: ReadTimeout is NOT included because the request may have been processed
 GATEWAY_RETRYABLE_EXCEPTIONS = (
@@ -79,11 +78,61 @@ _gateway_retry = retry(
 
 _ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-_PROCESS_START_RPC_METHOD = MethodInfo(
+
+class _CommandSpecLike(Protocol):
+    cwd: str
+
+
+class _CommandSpecFactory(Protocol):
+    def __call__(self, *, cmd: str, args: List[str], envs: Dict[str, str]) -> _CommandSpecLike: ...
+
+
+class _CommandSessionStartRequestFactory(Protocol):
+    def __call__(self, *, command: _CommandSpecLike, stdin: bool) -> Message: ...
+
+
+class _CommandSessionDataEventLike(Protocol):
+    stdout: bytes
+    stderr: bytes
+    pty: bytes
+
+    def WhichOneof(self, field_name: str) -> str | None: ...
+
+
+class _CommandSessionEndEventLike(Protocol):
+    exit_code: int
+
+
+class _CommandSessionEventLike(Protocol):
+    data: _CommandSessionDataEventLike
+    end: _CommandSessionEndEventLike
+
+    def WhichOneof(self, field_name: str) -> str | None: ...
+
+
+class _CommandSessionStartResponseLike(Protocol):
+    event: _CommandSessionEventLike
+
+    def HasField(self, field_name: str) -> bool: ...
+
+
+_COMMAND_SESSION_START_REQUEST_TYPE = cast(
+    type[Message], getattr(command_session_pb2, "StartRequest")
+)
+_COMMAND_SESSION_START_RESPONSE_TYPE = cast(
+    type[Message], getattr(command_session_pb2, "StartResponse")
+)
+_COMMAND_SESSION_START_REQUEST_FACTORY = cast(
+    _CommandSessionStartRequestFactory, _COMMAND_SESSION_START_REQUEST_TYPE
+)
+_COMMAND_SPEC_FACTORY = cast(_CommandSpecFactory, getattr(command_session_pb2, "CommandSpec"))
+
+
+_COMMAND_SESSION_START_RPC_METHOD = MethodInfo(
     name="Start",
-    service_name="process.Process",
-    input=_PROCESS_PROTO.StartRequest,
-    output=_PROCESS_PROTO.StartResponse,
+    service_name="command_session.CommandSession",
+    input=_COMMAND_SESSION_START_REQUEST_TYPE,
+    output=_COMMAND_SESSION_START_RESPONSE_TYPE,
     idempotency_level=IdempotencyLevel.UNKNOWN,
 )
 
@@ -144,24 +193,24 @@ def _is_gateway_sandbox_not_found(response: Optional[httpx.Response]) -> bool:
     return body.get("error") == "sandbox_not_found"
 
 
-def _build_process_start_request(
+def _build_command_session_start_request(
     command: str,
     working_dir: Optional[str],
     env: Optional[Dict[str, str]],
-) -> Any:
-    process_cfg = _PROCESS_PROTO.ProcessConfig(
+) -> Message:
+    command_spec = _COMMAND_SPEC_FACTORY(
         cmd="/bin/bash",
         args=["-l", "-c", command],
         envs=env or {},
     )
     if working_dir is not None:
-        process_cfg.cwd = working_dir
+        command_spec.cwd = working_dir
 
-    return _PROCESS_PROTO.StartRequest(process=process_cfg, stdin=False)
+    return _COMMAND_SESSION_START_REQUEST_FACTORY(command=command_spec, stdin=False)
 
 
-def _collect_process_start_event(
-    response: Any,
+def _collect_command_session_start_event(
+    response: _CommandSessionStartResponseLike,
     stdout_parts: List[str],
     stderr_parts: List[str],
 ) -> Optional[int]:
@@ -589,7 +638,7 @@ class SandboxClient:
         base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
         headers = {"Authorization": f"Bearer {auth['token']}"}
         effective_timeout = timeout if timeout is not None else 300
-        request = _build_process_start_request(command, working_dir, env)
+        request = _build_command_session_start_request(command, working_dir, env)
         stdout_parts: List[str] = []
         stderr_parts: List[str] = []
         exit_code: Optional[int] = None
@@ -598,12 +647,16 @@ class SandboxClient:
         try:
             stream = rpc_client.execute_server_stream(
                 request=request,
-                method=_PROCESS_START_RPC_METHOD,
+                method=_COMMAND_SESSION_START_RPC_METHOD,
                 headers=headers,
                 timeout_ms=effective_timeout * 1000,
             )
             for event in stream:
-                event_exit_code = _collect_process_start_event(event, stdout_parts, stderr_parts)
+                event_exit_code = _collect_command_session_start_event(
+                    cast(_CommandSessionStartResponseLike, event),
+                    stdout_parts,
+                    stderr_parts,
+                )
                 if event_exit_code is not None:
                     exit_code = event_exit_code
 
@@ -1340,7 +1393,7 @@ class AsyncSandboxClient:
         base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
         headers = {"Authorization": f"Bearer {auth['token']}"}
         effective_timeout = timeout if timeout is not None else 300
-        request = _build_process_start_request(command, working_dir, env)
+        request = _build_command_session_start_request(command, working_dir, env)
         stdout_parts: List[str] = []
         stderr_parts: List[str] = []
         exit_code: Optional[int] = None
@@ -1349,12 +1402,16 @@ class AsyncSandboxClient:
         try:
             stream = rpc_client.execute_server_stream(
                 request=request,
-                method=_PROCESS_START_RPC_METHOD,
+                method=_COMMAND_SESSION_START_RPC_METHOD,
                 headers=headers,
                 timeout_ms=effective_timeout * 1000,
             )
             async for event in stream:
-                event_exit_code = _collect_process_start_event(event, stdout_parts, stderr_parts)
+                event_exit_code = _collect_command_session_start_event(
+                    cast(_CommandSessionStartResponseLike, event),
+                    stdout_parts,
+                    stderr_parts,
+                )
                 if event_exit_code is not None:
                     exit_code = event_exit_code
 

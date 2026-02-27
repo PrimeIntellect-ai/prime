@@ -14,6 +14,8 @@ dependencies = [
     "pydantic>=2.0.0",
     "aiofiles>=23.0.0",
     "tenacity>=8.0.0",
+    "connect-python>=0.8.0",
+    "protobuf>=6.31.1",
 ]
 keywords = ["sandboxes", "remote-execution", "containers", "cloud", "sdk"]
 classifiers = [
@@ -60,6 +62,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+extend-exclude = ["src/prime_sandboxes/_proto/**/*.py"]
 
 [tool.ruff.lint]
 extend-select = ["E", "F", "I"]

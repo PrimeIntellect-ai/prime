@@ -9,10 +9,13 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NoReturn, Optional
 
 import aiofiles
 import httpx
+from connectrpc.client import ConnectClient, ConnectClientSync
+from connectrpc.code import Code
+from connectrpc.errors import ConnectError
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -47,6 +50,11 @@ from .models import (
     SandboxListResponse,
     SandboxLogsResponse,
     SSHSession,
+)
+from .rpc_command_session import (
+    COMMAND_SESSION_START_RPC_METHOD,
+    build_command_session_start_request,
+    collect_command_session_start_event,
 )
 
 # Retry configuration for transient connection errors on gateway requests
@@ -113,12 +121,28 @@ def _build_terminated_message(command: str, ctx: dict) -> str:
     return " ".join(parts)
 
 
+def _is_gateway_sandbox_not_found(response: Optional[httpx.Response]) -> bool:
+    """Return True when gateway indicates target sandbox no longer exists."""
+    if response is None or response.status_code != 502:
+        return False
+
+    try:
+        body = response.json()
+    except Exception:
+        return False
+
+    if not isinstance(body, dict):
+        return False
+
+    return body.get("error") == "sandbox_not_found"
+
+
 def _raise_not_running_error(
     sandbox_id: str,
     ctx: dict,
     command: str | None = None,
     cause: BaseException | None = None,
-) -> None:
+) -> NoReturn:
     """Raise appropriate SandboxNotRunningError subclass based on error_type."""
     error_type = ctx.get("error_type")
     status = ctx.get("status")
@@ -249,6 +273,38 @@ class SandboxAuthCache:
         self._auth_cache[sandbox_id] = response
         await self._save_cache_async()
         return dict(response)
+
+    def is_gpu(self, sandbox_id: str) -> bool:
+        """Return True if sandbox is GPU-backed, cached alongside auth token data."""
+        cached_auth = self._check_cached_auth(sandbox_id)
+        if cached_auth and isinstance(cached_auth.get("is_gpu"), bool):
+            return bool(cached_auth["is_gpu"])
+
+        sandbox_data = self.client.request("GET", f"/sandbox/{sandbox_id}")
+        sandbox = Sandbox.model_validate(sandbox_data)
+        is_gpu = sandbox.gpu_count > 0
+
+        if sandbox_id in self._auth_cache:
+            self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
+            self._save_cache()
+
+        return is_gpu
+
+    async def is_gpu_async(self, sandbox_id: str) -> bool:
+        """Return True if sandbox is GPU-backed, cached alongside auth token data."""
+        cached_auth = await self._check_cached_auth_async(sandbox_id)
+        if cached_auth and isinstance(cached_auth.get("is_gpu"), bool):
+            return bool(cached_auth["is_gpu"])
+
+        sandbox_data = await self.client.request("GET", f"/sandbox/{sandbox_id}")
+        sandbox = Sandbox.model_validate(sandbox_data)
+        is_gpu = sandbox.gpu_count > 0
+
+        if sandbox_id in self._auth_cache:
+            self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
+            await self._save_cache_async()
+
+        return is_gpu
 
     def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
         """Cache auth info"""
@@ -450,8 +506,107 @@ class SandboxClient:
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
     ) -> CommandResponse:
-        """Execute command directly via gateway"""
+        """Execute command directly via gateway."""
         auth = self._auth_cache.get_or_refresh(sandbox_id)
+
+        if self._auth_cache.is_gpu(sandbox_id):
+            return self._execute_command_connect_rpc(
+                sandbox_id=sandbox_id,
+                command=command,
+                auth=auth,
+                working_dir=working_dir,
+                env=env,
+                timeout=timeout,
+            )
+
+        return self._execute_command_rest(
+            sandbox_id=sandbox_id,
+            command=command,
+            auth=auth,
+            working_dir=working_dir,
+            env=env,
+            timeout=timeout,
+        )
+
+    def _execute_command_connect_rpc(
+        self,
+        sandbox_id: str,
+        command: str,
+        auth: Dict[str, Any],
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        timeout: Optional[int] = None,
+    ) -> CommandResponse:
+        gateway_url = auth["gateway_url"].rstrip("/")
+        base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        effective_timeout = timeout if timeout is not None else 300
+        request = build_command_session_start_request(command, working_dir, env)
+        stdout_parts: List[str] = []
+        stderr_parts: List[str] = []
+        exit_code: Optional[int] = None
+
+        rpc_client = ConnectClientSync(base_url)
+        try:
+            stream = rpc_client.execute_server_stream(
+                request=request,
+                method=COMMAND_SESSION_START_RPC_METHOD,
+                headers=headers,
+                timeout_ms=effective_timeout * 1000,
+            )
+            for event in stream:
+                event_exit_code = collect_command_session_start_event(
+                    event,
+                    stdout_parts,
+                    stderr_parts,
+                )
+                if event_exit_code is not None:
+                    exit_code = event_exit_code
+
+            if exit_code is None:
+                raise APIError("Command stream ended without exit code")
+
+            return CommandResponse(
+                stdout="".join(stdout_parts),
+                stderr="".join(stderr_parts),
+                exit_code=exit_code,
+            )
+        except ConnectError as e:
+            if e.code == Code.DEADLINE_EXCEEDED:
+                ctx = self._get_sandbox_error_context(sandbox_id)
+                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+
+            if e.code == Code.NOT_FOUND:
+                ctx = self._get_sandbox_error_context(sandbox_id)
+                ctx["status"] = "TERMINATED"
+                if not ctx.get("error_type"):
+                    ctx["error_type"] = "SANDBOX_NOT_FOUND"
+                if not ctx.get("error_message"):
+                    ctx["error_message"] = (
+                        "Sandbox is no longer present on the runtime node. "
+                        "Please create a new sandbox."
+                    )
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+
+            raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
+        except APIError:
+            raise
+        except Exception as e:
+            raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
+        finally:
+            rpc_client.close()
+
+    def _execute_command_rest(
+        self,
+        sandbox_id: str,
+        command: str,
+        auth: Dict[str, Any],
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        timeout: Optional[int] = None,
+    ) -> CommandResponse:
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
         headers = {"Authorization": f"Bearer {auth['token']}"}
@@ -484,6 +639,18 @@ class SandboxClient:
                 resp = getattr(e, "response", None)
                 status = getattr(resp, "status_code", "?")
 
+                if status == 502 and _is_gateway_sandbox_not_found(resp):
+                    ctx = self._get_sandbox_error_context(sandbox_id)
+                    ctx["status"] = "TERMINATED"
+                    if not ctx.get("error_type"):
+                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
+                    if not ctx.get("error_message"):
+                        ctx["error_message"] = (
+                            "Sandbox is no longer present on the runtime node. "
+                            "Please create a new sandbox."
+                        )
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+
                 if status == 409:
                     if self._should_retry_409(sandbox_id, e, attempt, command=command):
                         continue
@@ -508,6 +675,8 @@ class SandboxClient:
                 ) from e
             except Exception as e:
                 raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
+
+        raise APIError("Command execution failed after retries")
 
     def start_background_job(
         self,
@@ -749,6 +918,8 @@ class SandboxClient:
             except Exception as e:
                 raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
 
+        raise APIError("Upload failed after retries")
+
     def upload_bytes(
         self,
         sandbox_id: str,
@@ -792,6 +963,8 @@ class SandboxClient:
                 raise APIError(f"Upload failed: {error_details}")
             except Exception as e:
                 raise APIError(f"Upload failed: {str(e)}")
+
+        raise APIError("Upload failed after retries")
 
     def download_file(
         self,
@@ -1090,9 +1263,107 @@ class AsyncSandboxClient:
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
     ) -> CommandResponse:
-        """Execute command directly via gateway (async)"""
+        """Execute command directly via gateway (async)."""
         auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
 
+        if await self._auth_cache.is_gpu_async(sandbox_id):
+            return await self._execute_command_connect_rpc(
+                sandbox_id=sandbox_id,
+                command=command,
+                auth=auth,
+                working_dir=working_dir,
+                env=env,
+                timeout=timeout,
+            )
+
+        return await self._execute_command_rest(
+            sandbox_id=sandbox_id,
+            command=command,
+            auth=auth,
+            working_dir=working_dir,
+            env=env,
+            timeout=timeout,
+        )
+
+    async def _execute_command_connect_rpc(
+        self,
+        sandbox_id: str,
+        command: str,
+        auth: Dict[str, Any],
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        timeout: Optional[int] = None,
+    ) -> CommandResponse:
+        gateway_url = auth["gateway_url"].rstrip("/")
+        base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        effective_timeout = timeout if timeout is not None else 300
+        request = build_command_session_start_request(command, working_dir, env)
+        stdout_parts: List[str] = []
+        stderr_parts: List[str] = []
+        exit_code: Optional[int] = None
+
+        rpc_client = ConnectClient(base_url)
+        try:
+            stream = rpc_client.execute_server_stream(
+                request=request,
+                method=COMMAND_SESSION_START_RPC_METHOD,
+                headers=headers,
+                timeout_ms=effective_timeout * 1000,
+            )
+            async for event in stream:
+                event_exit_code = collect_command_session_start_event(
+                    event,
+                    stdout_parts,
+                    stderr_parts,
+                )
+                if event_exit_code is not None:
+                    exit_code = event_exit_code
+
+            if exit_code is None:
+                raise APIError("Command stream ended without exit code")
+
+            return CommandResponse(
+                stdout="".join(stdout_parts),
+                stderr="".join(stderr_parts),
+                exit_code=exit_code,
+            )
+        except ConnectError as e:
+            if e.code == Code.DEADLINE_EXCEEDED:
+                ctx = await self._get_sandbox_error_context(sandbox_id)
+                if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+
+            if e.code == Code.NOT_FOUND:
+                ctx = await self._get_sandbox_error_context(sandbox_id)
+                ctx["status"] = "TERMINATED"
+                if not ctx.get("error_type"):
+                    ctx["error_type"] = "SANDBOX_NOT_FOUND"
+                if not ctx.get("error_message"):
+                    ctx["error_message"] = (
+                        "Sandbox is no longer present on the runtime node. "
+                        "Please create a new sandbox."
+                    )
+                _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+
+            raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
+        except APIError:
+            raise
+        except Exception as e:
+            raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
+        finally:
+            await rpc_client.close()
+
+    async def _execute_command_rest(
+        self,
+        sandbox_id: str,
+        command: str,
+        auth: Dict[str, Any],
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        timeout: Optional[int] = None,
+    ) -> CommandResponse:
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
         headers = {"Authorization": f"Bearer {auth['token']}"}
@@ -1125,6 +1396,18 @@ class AsyncSandboxClient:
                 resp = getattr(e, "response", None)
                 status = getattr(resp, "status_code", "?")
 
+                if status == 502 and _is_gateway_sandbox_not_found(resp):
+                    ctx = await self._get_sandbox_error_context(sandbox_id)
+                    ctx["status"] = "TERMINATED"
+                    if not ctx.get("error_type"):
+                        ctx["error_type"] = "SANDBOX_NOT_FOUND"
+                    if not ctx.get("error_message"):
+                        ctx["error_message"] = (
+                            "Sandbox is no longer present on the runtime node. "
+                            "Please create a new sandbox."
+                        )
+                    _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
+
                 if status == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt, command=command):
                         continue
@@ -1149,6 +1432,8 @@ class AsyncSandboxClient:
                 ) from e
             except Exception as e:
                 raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
+
+        raise APIError("Command execution failed after retries")
 
     async def start_background_job(
         self,
@@ -1408,6 +1693,8 @@ class AsyncSandboxClient:
             except Exception as e:
                 raise APIError(f"Upload failed: {e.__class__.__name__}: {e}") from e
 
+        raise APIError("Upload failed after retries")
+
     async def upload_bytes(
         self,
         sandbox_id: str,
@@ -1452,6 +1739,8 @@ class AsyncSandboxClient:
                 raise APIError(f"Upload failed: {error_details}")
             except Exception as e:
                 raise APIError(f"Upload failed: {str(e)}")
+
+        raise APIError("Upload failed after retries")
 
     async def download_file(
         self,

@@ -155,6 +155,7 @@ class BulkDeleteSandboxRequest(BaseModel):
 
     sandbox_ids: Optional[List[str]] = None
     labels: Optional[List[str]] = None
+    name: Optional[str] = None
 
 
 class BulkDeleteSandboxResponse(BaseModel):

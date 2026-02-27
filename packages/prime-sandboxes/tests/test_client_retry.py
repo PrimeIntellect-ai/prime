@@ -267,3 +267,96 @@ class TestSyncGatewayRetry:
             not_found()
 
         assert call_count == 1  # no retry
+
+
+class TestSyncGatewayPostRetry:
+    """Tests for _gateway_post_retry — retries connection errors but NOT 5xx."""
+
+    def test_post_retry_on_connect_error(self):
+        """Connection errors are retried (request was never sent)."""
+        from prime_sandboxes.sandbox import _gateway_post_retry
+
+        call_count = 0
+
+        @_gateway_post_retry
+        def connect_error_then_succeed():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise httpx.ConnectError("Connection refused")
+            return "success"
+
+        result = connect_error_then_succeed()
+        assert result == "success"
+        assert call_count == 2
+
+    def test_post_retry_on_remote_protocol_error(self):
+        """RemoteProtocolError is retried."""
+        from prime_sandboxes.sandbox import _gateway_post_retry
+
+        call_count = 0
+
+        @_gateway_post_retry
+        def protocol_error_then_succeed():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise httpx.RemoteProtocolError("Server disconnected")
+            return "success"
+
+        result = protocol_error_then_succeed()
+        assert result == "success"
+        assert call_count == 3
+
+    def test_post_retry_gives_up(self):
+        """Gives up after max attempts on connection errors."""
+        from prime_sandboxes.sandbox import _gateway_post_retry
+
+        call_count = 0
+
+        @_gateway_post_retry
+        def always_fail():
+            nonlocal call_count
+            call_count += 1
+            raise httpx.PoolTimeout("No connections available")
+
+        with pytest.raises(httpx.PoolTimeout):
+            always_fail()
+
+        assert call_count == 4
+
+    def test_post_no_retry_on_5xx(self):
+        """5xx errors are NOT retried for POST (server received the request)."""
+        from prime_sandboxes.sandbox import _gateway_post_retry
+
+        call_count = 0
+
+        @_gateway_post_retry
+        def server_error():
+            nonlocal call_count
+            call_count += 1
+            response = httpx.Response(502, request=httpx.Request("POST", "http://test"))
+            raise httpx.HTTPStatusError("502", request=response.request, response=response)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            server_error()
+
+        assert call_count == 1  # no retry
+
+    def test_post_no_retry_on_524(self):
+        """Cloudflare 524 timeout is NOT retried for POST."""
+        from prime_sandboxes.sandbox import _gateway_post_retry
+
+        call_count = 0
+
+        @_gateway_post_retry
+        def cf_timeout():
+            nonlocal call_count
+            call_count += 1
+            response = httpx.Response(524, request=httpx.Request("POST", "http://test"))
+            raise httpx.HTTPStatusError("524", request=response.request, response=response)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            cf_timeout()
+
+        assert call_count == 1  # no retry

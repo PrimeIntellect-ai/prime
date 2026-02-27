@@ -146,7 +146,7 @@ class TestSyncGatewayRetry:
         with pytest.raises(httpx.RemoteProtocolError):
             always_fail()
 
-        assert call_count == 3
+        assert call_count == 4
 
     def test_gateway_retry_on_pool_timeout(self):
         """Test retry on PoolTimeout."""
@@ -183,3 +183,59 @@ class TestSyncGatewayRetry:
         result = connect_error_then_succeed()
         assert result == "success"
         assert call_count == 2
+
+    def test_gateway_retry_on_5xx(self):
+        """Test retry on 5xx HTTPStatusError (e.g. Cloudflare 524 timeout)."""
+        from prime_sandboxes.sandbox import _gateway_retry
+
+        call_count = 0
+
+        @_gateway_retry
+        def server_error_then_succeed():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                response = httpx.Response(524, request=httpx.Request("POST", "http://test"))
+                raise httpx.HTTPStatusError("524 timeout", request=response.request, response=response)
+            return "success"
+
+        result = server_error_then_succeed()
+        assert result == "success"
+        assert call_count == 3
+
+    def test_gateway_retry_on_502(self):
+        """Test retry on 502 Bad Gateway."""
+        from prime_sandboxes.sandbox import _gateway_retry
+
+        call_count = 0
+
+        @_gateway_retry
+        def bad_gateway_then_succeed():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                response = httpx.Response(502, request=httpx.Request("POST", "http://test"))
+                raise httpx.HTTPStatusError("502", request=response.request, response=response)
+            return "success"
+
+        result = bad_gateway_then_succeed()
+        assert result == "success"
+        assert call_count == 2
+
+    def test_gateway_no_retry_on_404(self):
+        """Test that non-retryable status codes are NOT retried."""
+        from prime_sandboxes.sandbox import _gateway_retry
+
+        call_count = 0
+
+        @_gateway_retry
+        def not_found():
+            nonlocal call_count
+            call_count += 1
+            response = httpx.Response(404, request=httpx.Request("GET", "http://test"))
+            raise httpx.HTTPStatusError("404", request=response.request, response=response)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            not_found()
+
+        assert call_count == 1  # no retry

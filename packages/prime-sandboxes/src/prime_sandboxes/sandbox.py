@@ -18,6 +18,7 @@ from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 from tenacity import (
     retry,
+    retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
@@ -65,15 +66,28 @@ GATEWAY_RETRYABLE_EXCEPTIONS = (
     httpx.PoolTimeout,  # No connection available in pool
 )
 
+# Retryable HTTP 5xx status codes (e.g. Cloudflare 524 timeout, server errors)
+RETRYABLE_5XX_STATUSES = frozenset({500, 502, 503, 504, 524})
+
 # Max retries for transient 409 errors
 MAX_409_RETRIES = 4
 RETRY_409_BASE_DELAY = 0.25  # 250ms, 500ms, 1000ms, 2000ms with exponential backoff
 
-# Retry decorator for gateway requests
+
+def _is_retryable_gateway_error(exc: BaseException) -> bool:
+    """Check if an exception is retryable for gateway requests."""
+    if isinstance(exc, GATEWAY_RETRYABLE_EXCEPTIONS):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in RETRYABLE_5XX_STATUSES:
+        return True
+    return False
+
+
+# Retry decorator for gateway requests (connection errors + 5xx responses)
 _gateway_retry = retry(
-    retry=retry_if_exception_type(GATEWAY_RETRYABLE_EXCEPTIONS),
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
+    retry=retry_if_exception(_is_retryable_gateway_error),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=1, max=30),
     reraise=True,
 )
 
@@ -367,7 +381,10 @@ class SandboxClient:
     ) -> httpx.Response:
         """Make a POST request to the gateway with retry on transient errors."""
         with httpx.Client(timeout=timeout) as client:
-            return client.post(url, json=json, files=files, params=params, headers=headers)
+            response = client.post(url, json=json, files=files, params=params, headers=headers)
+        if response.status_code in RETRYABLE_5XX_STATUSES:
+            response.raise_for_status()  # let _gateway_retry handle it
+        return response
 
     @staticmethod
     @_gateway_retry
@@ -379,7 +396,10 @@ class SandboxClient:
     ) -> httpx.Response:
         """Make a GET request to the gateway with retry on transient errors."""
         with httpx.Client(timeout=timeout) as client:
-            return client.get(url, params=params, headers=headers)
+            response = client.get(url, params=params, headers=headers)
+        if response.status_code in RETRYABLE_5XX_STATUSES:
+            response.raise_for_status()
+        return response
 
     def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
         """Test if a sandbox is reachable by executing a simple echo command"""
@@ -1124,9 +1144,12 @@ class AsyncSandboxClient:
     ) -> httpx.Response:
         """Make a POST request to the gateway with retry on transient errors."""
         gateway_client = self._get_gateway_client()
-        return await gateway_client.post(
+        response = await gateway_client.post(
             url, json=json, files=files, params=params, headers=headers, timeout=timeout
         )
+        if response.status_code in RETRYABLE_5XX_STATUSES:
+            response.raise_for_status()  # let _gateway_retry handle it
+        return response
 
     @_gateway_retry
     async def _gateway_get(
@@ -1138,7 +1161,10 @@ class AsyncSandboxClient:
     ) -> httpx.Response:
         """Make a GET request to the gateway with retry on transient errors."""
         gateway_client = self._get_gateway_client()
-        return await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
+        response = await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
+        if response.status_code in RETRYABLE_5XX_STATUSES:
+            response.raise_for_status()
+        return response
 
     async def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
         """Test if a sandbox is reachable by executing a simple echo command"""

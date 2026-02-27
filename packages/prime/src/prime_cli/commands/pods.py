@@ -16,6 +16,7 @@ from prime_cli.core import Config
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.pods import HistoryObj, Pod, PodsClient, PodStatus
 from ..client import APIClient, APIError
+from ..commands.teams import fetch_team_members
 from ..helper.short_id import generate_short_id
 from ..utils import (
     confirm_or_skip,
@@ -397,6 +398,18 @@ def create(
         help="Environment variables to set in the pod. Can be specified multiple times "
         "using --env KEY=value --env KEY2=value2",
     ),
+    share_with_team: bool = typer.Option(
+        False,
+        "--share-with-team",
+        help="Share the pod with all team members",
+        hidden=not bool(config.team_id),
+    ),
+    add_members: bool = typer.Option(
+        False,
+        "--add-members",
+        help="Interactively select team members to share the pod with",
+        hidden=not bool(config.team_id),
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Create a new pod with an interactive setup process"""
@@ -405,6 +418,17 @@ def create(
         for env_var in env:
             key, value = env_var.split("=")
             env_vars.append({"key": key, "value": value})
+
+    # Resolve team_id
+    resolved_team_id = team_id or config.team_id
+
+    # Error if user explicitly passed sharing flags without a team
+    if (share_with_team or add_members) and not resolved_team_id:
+        console.print(
+            "[red]Error: --share-with-team and --add-members require a team. "
+            "Use --team-id or set a team with 'prime config set-team-id'[/red]"
+        )
+        raise typer.Exit(1)
 
     try:
         # Validate custom template usage
@@ -686,6 +710,70 @@ def create(
 
                 image = available_images[image_idx - 1]
 
+        # Determine sharing settings
+        shared_with_team = share_with_team
+        team_member_ids: List[str] = []
+        sharing_display: Optional[str] = None
+
+        if add_members and resolved_team_id:
+            # Fetch and display team members for interactive selection
+            members = fetch_team_members(base_client, resolved_team_id)
+
+            # Exclude the current user from the selection list
+            current_user_id = config.user_id
+            selectable_members = [m for m in members if m.get("userId") != current_user_id]
+
+            if not selectable_members:
+                console.print("[yellow]No other team members to share with.[/yellow]")
+            else:
+                console.print("\n[bold]Team Members:[/bold]")
+                for idx, m in enumerate(selectable_members, 1):
+                    member_name = m.get("userName") or "N/A"
+                    email = m.get("userEmail") or "N/A"
+                    role = m.get("role", "")
+                    console.print(f"  {idx}. {member_name} ({email}) - {role}")
+
+                selection = typer.prompt(
+                    "\nSelect members (comma-separated numbers, or 'all' for everyone)",
+                    default="all",
+                )
+
+                if selection.strip().lower() == "all":
+                    shared_with_team = True
+                    sharing_display = "All team members"
+                else:
+                    selected_indices = []
+                    for part in selection.split(","):
+                        part = part.strip()
+                        if part.isdigit():
+                            idx = int(part)
+                            if 1 <= idx <= len(selectable_members):
+                                selected_indices.append(idx - 1)
+                            else:
+                                console.print(
+                                    f"[red]Invalid selection: {idx}. "
+                                    f"Must be between 1 and "
+                                    f"{len(selectable_members)}[/red]"
+                                )
+                                raise typer.Exit(1)
+                        else:
+                            console.print(f"[red]Invalid input: {part}[/red]")
+                            raise typer.Exit(1)
+
+                    selected_members = [selectable_members[i] for i in selected_indices]
+                    team_member_ids = [m["userId"] for m in selected_members]
+                    names = [m.get("userName") or m["userId"] for m in selected_members]
+                    sharing_display = ", ".join(names)
+
+        elif not share_with_team and not add_members:
+            # Check config default — only apply when a team is actually set
+            if resolved_team_id and config.share_resources_with_team:
+                shared_with_team = True
+                sharing_display = "All team members (from config default)"
+
+        if shared_with_team and not sharing_display:
+            sharing_display = "All team members"
+
         # Create pod configuration
         pod_config = {
             "pod": {
@@ -710,11 +798,16 @@ def create(
             "provider": {"type": selected_gpu.provider} if selected_gpu.provider else {},
             "disks": disks,
             "team": {
-                "teamId": team_id,
+                "teamId": resolved_team_id,
             }
-            if team_id
+            if resolved_team_id
             else None,
         }
+
+        if shared_with_team:
+            pod_config["sharedWithTeam"] = True
+        if team_member_ids:
+            pod_config["teamMemberIds"] = team_member_ids
 
         # Show configuration summary
         console.print("\n[bold]Pod Configuration Summary:[/bold]")
@@ -729,9 +822,11 @@ def create(
             pod_config["provider"].get("type"), str
         ):
             console.print(f"provider: {pod_config['provider']['type']}")
-        console.print(f"team: {team_id}")
+        console.print(f"team: {resolved_team_id}")
         if disks:
             console.print(f"disks: {', '.join(disks)}")
+        if sharing_display:
+            console.print(f"sharing: {sharing_display}")
 
         if confirm_or_skip("\nDo you want to create this pod?", yes, default=True):
             try:

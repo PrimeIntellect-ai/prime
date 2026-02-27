@@ -18,6 +18,7 @@ class ConfigModel(BaseModel):
     inference_url: str = "https://api.pinference.ai/api/v1"
     ssh_key_path: str = str(Path.home() / ".ssh" / "id_rsa")
     current_environment: str = "production"
+    share_resources_with_team: bool = False
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -189,6 +190,19 @@ class Config:
         self._save_config(self.config)
 
     @property
+    def share_resources_with_team(self) -> bool:
+        """Get share_resources_with_team setting from config file."""
+        val = self.config.get("share_resources_with_team", False)
+        if isinstance(val, str):
+            return val.lower() == "true"
+        return bool(val)
+
+    def set_share_resources_with_team(self, value: bool) -> None:
+        """Set share_resources_with_team in config file"""
+        self.config["share_resources_with_team"] = value
+        self._save_config(self.config)
+
+    @property
     def current_environment(self) -> str:
         """Get current environment name"""
         current_env: str = self.config.get("current_environment", "production")
@@ -223,6 +237,7 @@ class Config:
             "inference_url": self.inference_url,
             "ssh_key_path": self.ssh_key_path,
             "current_environment": self.current_environment,
+            "share_resources_with_team": self.share_resources_with_team,
         }
 
     def save_environment(self, name: str) -> None:

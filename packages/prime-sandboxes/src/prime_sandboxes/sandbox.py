@@ -19,7 +19,6 @@ from connectrpc.errors import ConnectError
 from tenacity import (
     retry,
     retry_if_exception,
-    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
@@ -78,7 +77,10 @@ def _is_retryable_gateway_error(exc: BaseException) -> bool:
     """Check if an exception is retryable for gateway requests."""
     if isinstance(exc, GATEWAY_RETRYABLE_EXCEPTIONS):
         return True
-    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in RETRYABLE_5XX_STATUSES:
+    if (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response.status_code in RETRYABLE_5XX_STATUSES
+    ):
         return True
     return False
 
@@ -381,10 +383,7 @@ class SandboxClient:
     ) -> httpx.Response:
         """Make a POST request to the gateway with retry on transient errors."""
         with httpx.Client(timeout=timeout) as client:
-            response = client.post(url, json=json, files=files, params=params, headers=headers)
-        if response.status_code in RETRYABLE_5XX_STATUSES:
-            response.raise_for_status()  # let _gateway_retry handle it
-        return response
+            return client.post(url, json=json, files=files, params=params, headers=headers)
 
     @staticmethod
     @_gateway_retry
@@ -1144,12 +1143,9 @@ class AsyncSandboxClient:
     ) -> httpx.Response:
         """Make a POST request to the gateway with retry on transient errors."""
         gateway_client = self._get_gateway_client()
-        response = await gateway_client.post(
+        return await gateway_client.post(
             url, json=json, files=files, params=params, headers=headers, timeout=timeout
         )
-        if response.status_code in RETRYABLE_5XX_STATUSES:
-            response.raise_for_status()  # let _gateway_retry handle it
-        return response
 
     @_gateway_retry
     async def _gateway_get(

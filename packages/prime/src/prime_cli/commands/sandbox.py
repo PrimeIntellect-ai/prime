@@ -538,6 +538,9 @@ def delete(
     labels: Optional[List[str]] = typer.Option(
         None, "--label", "-l", help="Delete all sandboxes with ALL these labels"
     ),
+    name: Optional[str] = typer.Option(
+        None, "--name", "-n", help="Delete all sandboxes with this exact name"
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
     only_mine: bool = typer.Option(
         True,
@@ -546,7 +549,7 @@ def delete(
         show_default=True,
     ),
 ) -> None:
-    """Delete one or more sandboxes by ID, by label, or all sandboxes with --all
+    """Delete one or more sandboxes by ID, by label, by name, or all sandboxes with --all
 
     --only-mine controls whether '--all' will restrict to your sandboxes or delete for all users.
     """
@@ -554,15 +557,16 @@ def delete(
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        if sum([bool(all), bool(sandbox_ids), bool(labels)]) > 1:
+        if sum([bool(all), bool(sandbox_ids), bool(labels), bool(name)]) > 1:
             console.print(
-                "[red]Error:[/red] Cannot specify more than one of: sandbox IDs, --all, or --label"
+                "[red]Error:[/red] Cannot specify more than one of: "
+                "sandbox IDs, --all, --label, or --name"
             )
             raise typer.Exit(1)
 
-        if not all and not sandbox_ids and not labels:
+        if not all and not sandbox_ids and not labels and not name:
             console.print(
-                "[red]Error:[/red] Must specify either sandbox IDs, --all flag, or --label"
+                "[red]Error:[/red] Must specify either sandbox IDs, --all, --label, or --name"
             )
             raise typer.Exit(1)
 
@@ -630,6 +634,27 @@ def delete(
 
             with console.status("[bold blue]Deleting sandboxes by labels...", spinner="dots"):
                 result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(labels=labels)
+
+            console.print(f"\n[green]{result.message}[/green]")
+            if result.succeeded:
+                console.print(
+                    f"\n[bold green]Deleted {len(result.succeeded)} sandbox(es):[/bold green]"
+                )
+                for sandbox_id in result.succeeded:
+                    console.print(f"  ✓ {sandbox_id}")
+
+        elif name:
+            confirmation_msg = (
+                f'Are you sure you want to delete ALL sandboxes named "{name}"? '
+                f"This action cannot be undone."
+            )
+
+            if not confirm_or_skip(confirmation_msg, yes):
+                console.print("Delete cancelled")
+                return
+
+            with console.status("[bold blue]Deleting sandboxes by name...", spinner="dots"):
+                result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(name=name)
 
             console.print(f"\n[green]{result.message}[/green]")
             if result.succeeded:

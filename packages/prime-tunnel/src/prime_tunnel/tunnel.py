@@ -238,34 +238,45 @@ class Tunnel:
         except Exception:
             pass
 
+    @property
+    def recent_output(self) -> list[str]:
+        """Last N lines of frpc output (thread-safe). Falls back to startup output."""
+        if hasattr(self, "_output_lock"):
+            with self._output_lock:
+                return list(self._recent_output)
+        return list(self._output_lines)
+
     def _start_pipe_drain(self) -> None:
         """Start background threads to drain subprocess pipes.
 
-        This prevents the pipe buffer from filling up and blocking frpc
-        when it produces output (logs, reconnection attempts, etc.).
+        Keeps the last 50 lines in a ring buffer for diagnostics (e.g. crash
+        output). This prevents the pipe buffer from filling up and blocking
+        frpc when it produces output (logs, reconnection attempts, etc.).
         """
         if self._process is None:
             return
 
+        self._recent_output: list[str] = []
+        self._output_lock = threading.Lock()
+        max_lines = 50
+
         def drain_pipe(pipe):
-            """Read and discard output from a pipe until EOF."""
+            """Read output from a pipe, retaining recent lines."""
             if pipe is None:
                 return
             try:
-                for _ in pipe:
-                    pass  # Discard all output
+                for line in pipe:
+                    line = line.rstrip("\n")
+                    if line:
+                        with self._output_lock:
+                            self._recent_output.append(line)
+                            if len(self._recent_output) > max_lines:
+                                self._recent_output.pop(0)
             except (OSError, ValueError):
                 pass  # Pipe closed
 
-        # Use separate threads for stdout/stderr to avoid blocking on one
-        stdout_thread = threading.Thread(
-            target=drain_pipe, args=(self._process.stdout,), daemon=True
-        )
-        stderr_thread = threading.Thread(
-            target=drain_pipe, args=(self._process.stderr,), daemon=True
-        )
-        stdout_thread.start()
-        stderr_thread.start()
+        for pipe in (self._process.stdout, self._process.stderr):
+            threading.Thread(target=drain_pipe, args=(pipe,), daemon=True).start()
 
     def _write_frpc_config(self) -> Path:
         """Generate and write frpc configuration file."""

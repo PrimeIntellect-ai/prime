@@ -19,6 +19,7 @@ from connectrpc.errors import ConnectError
 from tenacity import (
     retry,
     retry_if_exception,
+    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
@@ -87,9 +88,18 @@ def _is_retryable_gateway_error(exc: BaseException) -> bool:
     return False
 
 
-# Retry decorator for gateway requests (connection errors + 5xx responses)
+# Retry decorator for idempotent gateway requests (connection errors + 5xx responses)
 _gateway_retry = retry(
     retry=retry_if_exception(_is_retryable_gateway_error),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=1, max=30),
+    reraise=True,
+)
+
+# Retry decorator for non-idempotent gateway requests (connection errors only —
+# 5xx means the server received the request, so retrying risks duplicate side effects)
+_gateway_post_retry = retry(
+    retry=retry_if_exception_type(GATEWAY_RETRYABLE_EXCEPTIONS),
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=1, min=1, max=30),
     reraise=True,
@@ -374,7 +384,7 @@ class SandboxClient:
         )
 
     @staticmethod
-    @_gateway_retry
+    @_gateway_post_retry
     def _gateway_post(
         url: str,
         headers: Dict[str, str],
@@ -383,7 +393,7 @@ class SandboxClient:
         files: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
-        """Make a POST request to the gateway with retry on transient errors."""
+        """Make a POST request to the gateway with retry on connection errors only."""
         with httpx.Client(timeout=timeout) as client:
             return client.post(url, json=json, files=files, params=params, headers=headers)
 
@@ -1133,7 +1143,7 @@ class AsyncSandboxClient:
             )
         return self._gateway_client
 
-    @_gateway_retry
+    @_gateway_post_retry
     async def _gateway_post(
         self,
         url: str,
@@ -1143,7 +1153,7 @@ class AsyncSandboxClient:
         files: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
-        """Make a POST request to the gateway with retry on transient errors."""
+        """Make a POST request to the gateway with retry on connection errors only."""
         gateway_client = self._get_gateway_client()
         return await gateway_client.post(
             url, json=json, files=files, params=params, headers=headers, timeout=timeout

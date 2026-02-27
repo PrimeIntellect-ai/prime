@@ -196,7 +196,9 @@ class TestSyncGatewayRetry:
             call_count += 1
             if call_count < 3:
                 response = httpx.Response(524, request=httpx.Request("POST", "http://test"))
-                raise httpx.HTTPStatusError("524 timeout", request=response.request, response=response)
+                raise httpx.HTTPStatusError(
+                    "524 timeout", request=response.request, response=response
+                )
             return "success"
 
         result = server_error_then_succeed()
@@ -221,6 +223,32 @@ class TestSyncGatewayRetry:
         result = bad_gateway_then_succeed()
         assert result == "success"
         assert call_count == 2
+
+    def test_gateway_no_retry_on_502_sandbox_not_found(self):
+        """Test that 502 with sandbox_not_found body is NOT retried (permanent error)."""
+        import json
+
+        from prime_sandboxes.sandbox import _gateway_retry
+
+        call_count = 0
+
+        @_gateway_retry
+        def sandbox_gone():
+            nonlocal call_count
+            call_count += 1
+            body = json.dumps({"error": "sandbox_not_found"}).encode()
+            response = httpx.Response(
+                502,
+                request=httpx.Request("GET", "http://test"),
+                content=body,
+                headers={"content-type": "application/json"},
+            )
+            raise httpx.HTTPStatusError("502", request=response.request, response=response)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            sandbox_gone()
+
+        assert call_count == 1  # no retry — permanent error
 
     def test_gateway_no_retry_on_404(self):
         """Test that non-retryable status codes are NOT retried."""

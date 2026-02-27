@@ -81,6 +81,8 @@ def _is_retryable_gateway_error(exc: BaseException) -> bool:
         isinstance(exc, httpx.HTTPStatusError)
         and exc.response.status_code in RETRYABLE_5XX_STATUSES
     ):
+        if _is_gateway_sandbox_not_found(exc.response):
+            return False
         return True
     return False
 

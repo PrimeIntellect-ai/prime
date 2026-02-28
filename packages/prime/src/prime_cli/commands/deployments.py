@@ -47,13 +47,12 @@ def list_deployments(
         deployable_models = deployments_client.get_deployable_models()
 
         if output == "json":
-            output_data_as_json(
-                {
-                    "models": [m.model_dump() for m in models],
-                    "deployable_models": deployable_models,
-                },
-                console,
-            )
+            models_data = []
+            for m in models:
+                data = m.model_dump()
+                data["deployable"] = m.base_model in deployable_models
+                models_data.append(data)
+            output_data_as_json({"models": models_data}, console)
             return
 
         if not models:

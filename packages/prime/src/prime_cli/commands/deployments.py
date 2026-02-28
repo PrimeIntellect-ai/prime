@@ -142,9 +142,15 @@ def create_deployment(
         # Check if base model supports LoRA deployment
         deployable_models = deployments_client.get_deployable_models()
         if deployable_models is None:
-            console.print("[dim]Warning: Could not verify base model deployability. Proceeding anyway.[/dim]")
+            console.print(
+                "[dim]Warning: Could not verify base model"
+                " deployability. Proceeding anyway.[/dim]"
+            )
         elif model.base_model not in deployable_models:
-            console.print("[red]Error:[/red] Base model is not currently available for LoRA deployment.")
+            console.print(
+                "[red]Error:[/red] Base model is not currently"
+                " available for LoRA deployment."
+            )
             console.print(f"  Base model: [yellow]{model.base_model}[/yellow]")
             raise typer.Exit(1)
 

@@ -80,3 +80,14 @@ class DeploymentsClient:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to unload adapter: {e.response.text}")
             raise APIError(f"Failed to unload adapter: {str(e)}")
+
+    def get_deployable_models(self) -> Optional[List[str]]:
+        """Get list of base models that support LoRA deployment.
+
+        Returns None on error (fail-open).
+        """
+        try:
+            response = self.client.get("/rft/deployable-models")
+            return response.get("models")
+        except Exception:
+            return None

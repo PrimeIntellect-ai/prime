@@ -1,6 +1,6 @@
 """Deployments command for managing model deployments for inference."""
 
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from rich.console import Console
@@ -45,11 +45,25 @@ def list_deployments(
 
         models = deployments_client.list_adapters(team_id=team_id)
 
-        if output == "json":
-            output_data_as_json(
-                {"models": [m.model_dump() for m in models]},
-                console,
+        deployable_models: Optional[List[str]] = None
+        try:
+            deployable_models = deployments_client.get_deployable_models()
+        except APIError:
+            console.print(
+                "[dim]Warning: Could not fetch deployable"
+                " models list.[/dim]"
             )
+
+        if output == "json":
+            models_data = []
+            for m in models:
+                data = m.model_dump()
+                if deployable_models is not None:
+                    data["deployable"] = (
+                        m.base_model in deployable_models
+                    )
+                models_data.append(data)
+            output_data_as_json({"models": models_data}, console)
             return
 
         if not models:
@@ -62,6 +76,7 @@ def list_deployments(
         table.add_column("Name", style="white")
         table.add_column("Base Model", style="magenta")
         table.add_column("Status", style="white")
+        table.add_column("Deployable", style="white")
         table.add_column("Deployed At", style="dim")
 
         from ..utils.display import DEPLOYMENT_STATUS_COLORS
@@ -72,11 +87,22 @@ def list_deployments(
             status_color = DEPLOYMENT_STATUS_COLORS.get(model.deployment_status, "white")
             status = f"[{status_color}]{model.deployment_status}[/{status_color}]"
 
+            if deployable_models is not None:
+                is_deployable = model.base_model in deployable_models
+                deployable = (
+                    "[green]Yes[/green]"
+                    if is_deployable
+                    else "[red]No[/red]"
+                )
+            else:
+                deployable = "[dim]-[/dim]"
+
             table.add_row(
                 model.id,
                 model.display_name or "-",
                 base_model,
                 status,
+                deployable,
                 deployed_at,
             )
 
@@ -130,6 +156,25 @@ def create_deployment(
             console.print("[yellow]Model deployment is in progress.[/yellow]")
             console.print(f"Current status: {model.deployment_status}")
             raise typer.Exit(1)
+
+        # Check if base model supports LoRA deployment
+        try:
+            deployable_models = deployments_client.get_deployable_models()
+            if model.base_model not in deployable_models:
+                console.print(
+                    "[red]Error:[/red] Base model is not currently"
+                    " available for LoRA deployment."
+                )
+                console.print(
+                    f"  Base model:"
+                    f" [yellow]{model.base_model}[/yellow]"
+                )
+                raise typer.Exit(1)
+        except APIError:
+            console.print(
+                "[dim]Warning: Could not verify base model"
+                " deployability. Proceeding anyway.[/dim]"
+            )
 
         # Show model details and confirm
         console.print("[bold]Deploying model:[/bold]")

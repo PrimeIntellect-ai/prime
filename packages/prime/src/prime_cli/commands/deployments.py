@@ -22,6 +22,8 @@ app = typer.Typer(
 @app.command(name="list")
 def list_deployments(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
+    num: int = typer.Option(20, "--num", "-n", help="Items per page"),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
     output: str = typer.Option("table", "-o", "--output", help="Output format: table or json"),
 ) -> None:
     """List adapters and their deployment status.
@@ -30,11 +32,19 @@ def list_deployments(
 
         prime deployments list
 
+        prime deployments list -n 50
+
+        prime deployments list --page 2
+
         prime deployments list -o json
 
         prime deployments list --team <team_id>
     """
     validate_output_format(output, console)
+
+    if num < 1 or page < 1:
+        console.print("[red]Error:[/red] --num and --page must be at least 1")
+        raise typer.Exit(1)
 
     try:
         api_client = APIClient()
@@ -42,33 +52,35 @@ def list_deployments(
         config = Config()
 
         team_id = team or config.team_id
+        offset = (page - 1) * num
 
-        models = deployments_client.list_adapters(team_id=team_id)
+        models, total = deployments_client.list_adapters(team_id=team_id, limit=num, offset=offset)
 
         deployable_models: Optional[List[str]] = None
         try:
             deployable_models = deployments_client.get_deployable_models()
         except APIError:
-            console.print(
-                "[dim]Warning: Could not fetch deployable"
-                " models list.[/dim]"
-            )
+            console.print("[dim]Warning: Could not fetch deployable models list.[/dim]")
 
         if output == "json":
             models_data = []
             for m in models:
                 data = m.model_dump()
                 if deployable_models is not None:
-                    data["deployable"] = (
-                        m.base_model in deployable_models
-                    )
+                    data["deployable"] = m.base_model in deployable_models
                 models_data.append(data)
-            output_data_as_json({"models": models_data}, console)
+            output_data_as_json(
+                {"models": models_data, "total": total, "page": page, "per_page": num},
+                console,
+            )
             return
 
         if not models:
-            console.print("[yellow]No models found.[/yellow]")
-            console.print("[dim]Train a model first, then deploy it here.[/dim]")
+            if page > 1:
+                console.print("[yellow]No more results.[/yellow]")
+            else:
+                console.print("[yellow]No models found.[/yellow]")
+                console.print("[dim]Train a model first, then deploy it here.[/dim]")
             return
 
         table = Table(title="Adapter Deployments")
@@ -89,11 +101,7 @@ def list_deployments(
 
             if deployable_models is not None:
                 is_deployable = model.base_model in deployable_models
-                deployable = (
-                    "[green]Yes[/green]"
-                    if is_deployable
-                    else "[red]No[/red]"
-                )
+                deployable = "[green]Yes[/green]" if is_deployable else "[red]No[/red]"
             else:
                 deployable = "[dim]-[/dim]"
 
@@ -107,7 +115,14 @@ def list_deployments(
             )
 
         console.print(table)
-        console.print(f"\n[dim]Total: {len(models)} model(s)[/dim]")
+
+        if total > page * num:
+            console.print(
+                f"\n[yellow]Showing page {page} of results. "
+                f"Use --page {page + 1} to see more.[/yellow]"
+            )
+        else:
+            console.print(f"\n[dim]Total: {total} adapter(s)[/dim]")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -162,18 +177,13 @@ def create_deployment(
             deployable_models = deployments_client.get_deployable_models()
             if model.base_model not in deployable_models:
                 console.print(
-                    "[red]Error:[/red] Base model is not currently"
-                    " available for LoRA deployment."
+                    "[red]Error:[/red] Base model is not currently available for LoRA deployment."
                 )
-                console.print(
-                    f"  Base model:"
-                    f" [yellow]{model.base_model}[/yellow]"
-                )
+                console.print(f"  Base model: [yellow]{model.base_model}[/yellow]")
                 raise typer.Exit(1)
         except APIError:
             console.print(
-                "[dim]Warning: Could not verify base model"
-                " deployability. Proceeding anyway.[/dim]"
+                "[dim]Warning: Could not verify base model deployability. Proceeding anyway.[/dim]"
             )
 
         # Show model details and confirm

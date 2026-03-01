@@ -129,13 +129,17 @@ def list_sandboxes_cmd(
         "-l",
         help="Filter by labels (can specify multiple, sandboxes must have ALL)",
     ),
-    page: int = typer.Option(1, help="Page number"),
-    per_page: int = typer.Option(50, help="Items per page"),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
+    num: int = typer.Option(50, "--num", "-n", help="Items per page"),
     all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List your sandboxes (shortcut: ls)"""
     validate_output_format(output, console)
+
+    if num < 1 or page < 1:
+        console.print("[red]Error:[/red] --num and --page must be at least 1")
+        raise typer.Exit(1)
 
     try:
         base_client = APIClient()
@@ -149,7 +153,7 @@ def list_sandboxes_cmd(
             status=status,
             labels=labels,
             page=page,
-            per_page=per_page,
+            per_page=num,
             exclude_terminated=exclude_terminated,
         )
 
@@ -190,7 +194,7 @@ def list_sandboxes_cmd(
                 "sandboxes": sandboxes_data,
                 "total": sandbox_list.total,
                 "page": sandbox_list.page,
-                "per_page": sandbox_list.per_page,
+                "per_page": num,
                 "has_next": sandbox_list.has_next,
             }
             output_data_as_json(output_data, console)

@@ -87,8 +87,8 @@ def format_output(data: dict, output: str) -> None:
 @handle_errors
 def list_evals(
     output: str = typer.Option("table", "--output", "-o", help="table|json"),
-    skip: int = typer.Option(0, "--skip", help="Number of records to skip"),
-    limit: int = typer.Option(50, "--limit", help="Maximum number of records to return"),
+    num: int = typer.Option(20, "--num", "-n", help="Items per page"),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
     env: Optional[str] = typer.Option(
         None,
         "--env",
@@ -100,16 +100,21 @@ def list_evals(
     """List evaluations."""
     _validate_output_format(output, ["table", "json"])
 
+    if num < 1 or page < 1:
+        console.print("[red]Error:[/red] --num and --page must be at least 1")
+        raise typer.Exit(1)
+
     try:
         api_client = APIClient()
         config = Config()
         client = EvalsClient(api_client)
 
+        skip = (page - 1) * num
         data = client.list_evaluations(
             env_name=env,
             team_id=config.team_id,
             skip=skip,
-            limit=limit,
+            limit=num,
         )
 
         if output == "json":
@@ -119,7 +124,10 @@ def list_evals(
         evals = data.get("evaluations", [])
 
         if not evals:
-            console.print("[yellow]No evaluations found.[/yellow]")
+            if page > 1:
+                console.print("[yellow]No more results.[/yellow]")
+            else:
+                console.print("[yellow]No evaluations found.[/yellow]")
             return
 
         table = Table(title="Evaluations")
@@ -152,10 +160,13 @@ def list_evals(
 
         console.print(table)
         total = data.get("total", 0)
-        if evals:
-            console.print(f"[dim]Total: {total} | Showing {skip + 1}-{skip + len(evals)}[/dim]")
+        if total > page * num:
+            console.print(
+                f"\n[yellow]Showing page {page} of results. "
+                f"Use --page {page + 1} to see more.[/yellow]"
+            )
         else:
-            console.print(f"[dim]Total: {total}[/dim]")
+            console.print(f"\n[dim]Total: {total} evaluation(s)[/dim]")
 
     except EvalsAPIError as e:
         console.print(f"[red]API Error:[/red] {e}")
@@ -188,14 +199,14 @@ def get_eval(
 def get_samples(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    limit: int = typer.Option(100, "--num", "-n", help="Samples per page"),
+    num: int = typer.Option(100, "--num", "-n", help="Items per page"),
     output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
 ) -> None:
     _validate_output_format(output, ["json", "pretty"])
 
     api_client = APIClient()
     client = EvalsClient(api_client)
-    data = client.get_samples(eval_id, page=page, limit=limit)
+    data = client.get_samples(eval_id, page=page, limit=num)
     format_output(data, output)
 
 

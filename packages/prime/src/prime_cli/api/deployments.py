@@ -1,7 +1,7 @@
 """Adapter deployments API client."""
 
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,15 +37,25 @@ class DeploymentsClient:
     def __init__(self, client: APIClient) -> None:
         self.client = client
 
-    def list_adapters(self, team_id: Optional[str] = None) -> List[Adapter]:
-        """List adapters and their deployment status."""
+    def list_adapters(
+        self,
+        team_id: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> Tuple[List[Adapter], int]:
+        """List adapters and their deployment status. Returns (adapters, total_count)."""
         try:
-            params = {}
+            params: dict = {}
             if team_id:
                 params["team_id"] = team_id
+            if limit is not None:
+                params["limit"] = limit
+            if offset:
+                params["offset"] = offset
             response = self.client.get("/rft/adapters", params=params if params else None)
             adapters_data = response.get("adapters", [])
-            return [Adapter.model_validate(adapter) for adapter in adapters_data]
+            total = response.get("total", len(adapters_data))
+            return [Adapter.model_validate(adapter) for adapter in adapters_data], total
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to list adapters: {e.response.text}")
@@ -88,10 +98,5 @@ class DeploymentsClient:
             return response.get("models") or []
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(
-                    f"Failed to get deployable models:"
-                    f" {e.response.text}"
-                )
-            raise APIError(
-                f"Failed to get deployable models: {str(e)}"
-            )
+                raise APIError(f"Failed to get deployable models: {e.response.text}")
+            raise APIError(f"Failed to get deployable models: {str(e)}")

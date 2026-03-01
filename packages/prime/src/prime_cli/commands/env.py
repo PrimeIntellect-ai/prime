@@ -122,16 +122,17 @@ def actions_list(
         "-v",
         help="Filter by version ID",
     ),
-    limit: int = typer.Option(
+    num: int = typer.Option(
         20,
-        "--limit",
-        "-l",
-        help="Maximum number of actions to show",
+        "--num",
+        "-n",
+        help="Items per page",
     ),
-    offset: int = typer.Option(
-        0,
-        "--offset",
-        help="Offset for pagination",
+    page: int = typer.Option(
+        1,
+        "--page",
+        "-p",
+        help="Page number",
     ),
     output: str = typer.Option(
         "table",
@@ -143,12 +144,17 @@ def actions_list(
     """List actions (CI jobs) for an environment."""
     validate_output_format(output, console)
 
+    if num < 1 or page < 1:
+        console.print("[red]Error:[/red] --num and --page must be at least 1")
+        raise typer.Exit(1)
+
     owner, env_name = _parse_environment_slug(environment)
 
     try:
         client = APIClient()
+        offset = (page - 1) * num
         params = {
-            "limit": limit,
+            "limit": num,
             "offset": offset,
         }
         if version_id:
@@ -165,7 +171,10 @@ def actions_list(
         total = data.get("total", 0)
 
         if not actions:
-            console.print("[yellow]No actions found for this environment.[/yellow]")
+            if page > 1:
+                console.print("[yellow]No more results.[/yellow]")
+            else:
+                console.print("[yellow]No actions found for this environment.[/yellow]")
             return
 
         table = Table(title=f"Actions for {owner}/{env_name}")
@@ -200,7 +209,13 @@ def actions_list(
             table.add_row(action_id, name, status_color, version_str, trigger, created)
 
         console.print(table)
-        console.print(f"[dim]Showing {len(actions)} of {total} actions[/dim]")
+        if total > page * num:
+            console.print(
+                f"\n[yellow]Showing page {page} of results. "
+                f"Use --page {page + 1} to see more.[/yellow]"
+            )
+        else:
+            console.print(f"\n[dim]Total: {total} action(s)[/dim]")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -491,10 +506,8 @@ def _format_action_status(status: Optional[str]) -> Text:
 
 @app.command("list", rich_help_panel="Explore")
 def list_cmd(
-    limit: int = typer.Option(
-        DEFAULT_LIST_LIMIT, "--num", "-n", help="Number of environments to show"
-    ),
-    offset: int = typer.Option(0, "--offset", help="Number of environments to skip"),
+    num: int = typer.Option(DEFAULT_LIST_LIMIT, "--num", "-n", help="Items per page"),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
     owner: Optional[str] = typer.Option(None, "--owner", help="Filter by owner name"),
     visibility: Optional[str] = typer.Option(
         None, "--visibility", help="Filter by visibility (PUBLIC/PRIVATE)"
@@ -534,6 +547,10 @@ def list_cmd(
     """
     validate_output_format(output, console)
 
+    if num < 1 or page < 1:
+        console.print("[red]Error:[/red] --num and --page must be at least 1")
+        raise typer.Exit(1)
+
     # Validate sort and order
     if sort not in ("name", "created_at", "updated_at", "stars"):
         console.print(
@@ -549,9 +566,10 @@ def list_cmd(
         require_auth = starred or mine
         client = APIClient(require_auth=require_auth)
 
+        offset = (page - 1) * num
         params: Dict[str, Any] = {
             "include_teams": True,
-            "limit": limit,
+            "limit": num,
             "offset": offset,
             "sort_by": sort,
             "sort_order": order,
@@ -581,8 +599,10 @@ def list_cmd(
         if not environments:
             if output == "json":
                 output_data_as_json(
-                    {"environments": [], "total": 0, "offset": offset, "limit": limit}, console
+                    {"environments": [], "total": 0, "page": page, "per_page": num}, console
                 )
+            elif page > 1:
+                console.print("[yellow]No more results.[/yellow]")
             else:
                 console.print("No environments found.", style="yellow")
             return
@@ -610,8 +630,8 @@ def list_cmd(
             output_data = {
                 "environments": env_data,
                 "total": total,
-                "offset": offset,
-                "limit": limit,
+                "page": page,
+                "per_page": num,
             }
             output_data_as_json(output_data, console)
         else:
@@ -649,12 +669,13 @@ def list_cmd(
 
             console.print(table)
 
-            remaining = total - (offset + len(environments))
-            if remaining > 0:
-                next_offset = offset + limit
+            if total > page * num:
                 console.print(
-                    f"\n[dim]Use --offset {next_offset} to see the next environments.[/dim]"
+                    f"\n[yellow]Showing page {page} of results. "
+                    f"Use --page {page + 1} to see more.[/yellow]"
                 )
+            else:
+                console.print(f"\n[dim]Total: {total} environment(s)[/dim]")
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -1519,8 +1540,7 @@ def pull(
                 target_dir = base_dir.parent / f"{base_dir.name}-{index}"
                 index += 1
             console.print(
-                f"[yellow]Directory {base_dir} already exists. "
-                f"Using {target_dir} instead.[/yellow]"
+                f"[yellow]Directory {base_dir} already exists. Using {target_dir} instead.[/yellow]"
             )
 
         try:

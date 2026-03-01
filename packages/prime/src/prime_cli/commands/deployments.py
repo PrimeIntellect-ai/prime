@@ -87,6 +87,7 @@ def list_deployments(
         table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("Name", style="white")
         table.add_column("Base Model", style="magenta")
+        table.add_column("Step", style="yellow", justify="right")
         table.add_column("Status", style="white")
         table.add_column("Deployable", style="white")
         table.add_column("Deployed At", style="dim")
@@ -109,6 +110,7 @@ def list_deployments(
                 model.id,
                 model.display_name or "-",
                 base_model,
+                str(model.step) if model.step is not None else "-",
                 status,
                 deployable,
                 deployed_at,

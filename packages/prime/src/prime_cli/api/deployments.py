@@ -17,6 +17,7 @@ class Adapter(BaseModel):
     team_id: Optional[str] = Field(None, alias="teamId")
     rft_run_id: str = Field(..., alias="rftRunId")
     base_model: str = Field(..., alias="baseModel")
+    step: Optional[int] = Field(None, description="Training step number")
     status: str = Field(..., description="Adapter status: PENDING, UPLOADING, READY, FAILED")
     deployment_status: str = Field(
         default="NOT_DEPLOYED",

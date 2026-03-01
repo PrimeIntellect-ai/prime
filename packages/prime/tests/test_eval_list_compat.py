@@ -63,7 +63,7 @@ def test_list_evals_passes_team_id_when_client_supports_it(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(evals_cmd, "APIClient", lambda: object())
-    monkeypatch.setattr(evals_cmd, "Config", lambda: _ConfigNoTeam())
+    monkeypatch.setattr(evals_cmd, "Config", lambda: _ConfigWithTeam())
     monkeypatch.setattr(evals_cmd, "EvalsClient", lambda _api: client)
     monkeypatch.setattr(evals_cmd, "output_data_as_json", lambda data, _console: captured.update(data))
 
@@ -75,5 +75,5 @@ def test_list_evals_passes_team_id_when_client_supports_it(monkeypatch):
         "suite_id": None,
         "skip": 0,
         "limit": 50,
-        "team_id": None,
+        "team_id": "team-123",
     }

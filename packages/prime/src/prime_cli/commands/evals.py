@@ -110,12 +110,21 @@ def list_evals(
         client = EvalsClient(api_client)
 
         skip = (page - 1) * num
-        data = client.list_evaluations(
-            env_name=env,
-            team_id=config.team_id,
-            skip=skip,
-            limit=num,
-        )
+        try:
+            data = client.list_evaluations(
+                env_name=env,
+                team_id=config.team_id,
+                skip=skip,
+                limit=num,
+            )
+        except TypeError as e:
+            if "team_id" not in str(e):
+                raise
+            data = client.list_evaluations(
+                env_name=env,
+                skip=skip,
+                limit=num,
+            )
 
         if output == "json":
             output_data_as_json(data, console)

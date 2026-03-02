@@ -255,7 +255,9 @@ def update_registry_credential(
             new_username = prompt_for_value("New username", required=False)
             if new_username:
                 username = new_username
-            new_password = prompt_for_value("New password", required=False, hide_input=True)
+            new_password = prompt_for_value(
+                "New password (input hidden, Enter to skip)", required=False, hide_input=True
+            )
             if new_password:
                 password = new_password
             new_server = prompt_for_value("New server", required=False)

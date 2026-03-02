@@ -1970,6 +1970,10 @@ class TemplateClient:
             payload["password"] = password
         if server is not None:
             payload["server"] = server
+        if not payload:
+            raise ValueError(
+                "At least one field (name, username, password, server) must be provided to update"
+            )
         params: Dict[str, str] = {}
         if team_id:
             params["teamId"] = team_id
@@ -2074,6 +2078,10 @@ class AsyncTemplateClient:
             payload["password"] = password
         if server is not None:
             payload["server"] = server
+        if not payload:
+            raise ValueError(
+                "At least one field (name, username, password, server) must be provided to update"
+            )
         params: Dict[str, str] = {}
         if team_id:
             params["teamId"] = team_id

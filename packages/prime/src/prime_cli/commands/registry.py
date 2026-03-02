@@ -215,6 +215,7 @@ def create_registry_credential(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
 
@@ -247,12 +248,21 @@ def update_registry_credential(
             credential_id = selected["id"]
 
         if not any_provided(name, username, password, server):
-            console.print("\n[bold]What would you like to update?[/bold]")
+            console.print("\n[bold]Update fields (press Enter to skip):[/bold]")
+            new_name = prompt_for_value("New name", required=False)
+            if new_name:
+                name = new_name
+            new_username = prompt_for_value("New username", required=False)
+            if new_username:
+                username = new_username
             new_password = prompt_for_value("New password", required=False, hide_input=True)
             if new_password:
                 password = new_password
+            new_server = prompt_for_value("New server", required=False)
+            if new_server:
+                server = new_server
 
-            if not password:
+            if not any_provided(name, username, password, server):
                 console.print("\n[dim]No changes made.[/dim]")
                 raise typer.Exit()
 
@@ -283,6 +293,7 @@ def update_registry_credential(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)
 
 
@@ -338,4 +349,5 @@ def delete_registry_credential(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
         raise typer.Exit(1)

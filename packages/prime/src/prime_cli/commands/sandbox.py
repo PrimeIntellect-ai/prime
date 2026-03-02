@@ -642,6 +642,14 @@ def delete(
                 )
                 for sandbox_id in result.succeeded:
                     console.print(f"  ✓ {sandbox_id}")
+            if result.failed:
+                console.print(
+                    f"\n[bold red]Failed to delete {len(result.failed)} sandbox(es):[/bold red]"
+                )
+                for failure in result.failed:
+                    sandbox_id = failure.get("sandbox_id", "unknown")
+                    error = failure.get("error", "unknown error")
+                    console.print(f"  ✗ {sandbox_id}: {error}")
 
         elif name:
             confirmation_msg = (
@@ -663,6 +671,14 @@ def delete(
                 )
                 for sandbox_id in result.succeeded:
                     console.print(f"  ✓ {sandbox_id}")
+            if result.failed:
+                console.print(
+                    f"\n[bold red]Failed to delete {len(result.failed)} sandbox(es):[/bold red]"
+                )
+                for failure in result.failed:
+                    sandbox_id = failure.get("sandbox_id", "unknown")
+                    error = failure.get("error", "unknown error")
+                    console.print(f"  ✗ {sandbox_id}: {error}")
 
         elif len(sandbox_ids) == 1 and not all:
             sandbox_id = sandbox_ids[0]

@@ -1901,8 +1901,17 @@ class TemplateClient:
     def __init__(self, api_client: Optional[APIClient] = None):
         self.client = api_client or APIClient()
 
-    def list_registry_credentials(self) -> List[RegistryCredentialSummary]:
-        response = self.client.request("GET", "/template/registry-credentials")
+    def list_registry_credentials(
+        self, team_id: Optional[str] = None
+    ) -> List[RegistryCredentialSummary]:
+        if team_id is None:
+            team_id = self.client.config.team_id
+        params: Dict[str, str] = {}
+        if team_id:
+            params["teamId"] = team_id
+        response = self.client.request(
+            "GET", "/template/registry-credentials", params=params or None
+        )
         credentials = response.get("credentials", [])
         return [RegistryCredentialSummary.model_validate(item) for item in credentials]
 
@@ -1927,6 +1936,8 @@ class TemplateClient:
         server: str,
         team_id: Optional[str] = None,
     ) -> RegistryCredentialSummary:
+        if team_id is None:
+            team_id = self.client.config.team_id
         payload: Dict[str, Any] = {
             "name": name,
             "username": username,
@@ -1948,6 +1959,8 @@ class TemplateClient:
         server: Optional[str] = None,
         team_id: Optional[str] = None,
     ) -> RegistryCredentialSummary:
+        if team_id is None:
+            team_id = self.client.config.team_id
         payload: Dict[str, Any] = {}
         if name is not None:
             payload["name"] = name
@@ -1974,6 +1987,8 @@ class TemplateClient:
         credential_id: str,
         team_id: Optional[str] = None,
     ) -> None:
+        if team_id is None:
+            team_id = self.client.config.team_id
         params: Dict[str, str] = {}
         if team_id:
             params["teamId"] = team_id
@@ -1990,8 +2005,17 @@ class AsyncTemplateClient:
     def __init__(self, api_client: Optional[AsyncAPIClient] = None):
         self.client = api_client or AsyncAPIClient()
 
-    async def list_registry_credentials(self) -> List[RegistryCredentialSummary]:
-        response = await self.client.request("GET", "/template/registry-credentials")
+    async def list_registry_credentials(
+        self, team_id: Optional[str] = None
+    ) -> List[RegistryCredentialSummary]:
+        if team_id is None:
+            team_id = self.client.config.team_id
+        params: Dict[str, str] = {}
+        if team_id:
+            params["teamId"] = team_id
+        response = await self.client.request(
+            "GET", "/template/registry-credentials", params=params or None
+        )
         credentials = response.get("credentials", [])
         return [RegistryCredentialSummary.model_validate(item) for item in credentials]
 
@@ -2016,6 +2040,8 @@ class AsyncTemplateClient:
         server: str,
         team_id: Optional[str] = None,
     ) -> RegistryCredentialSummary:
+        if team_id is None:
+            team_id = self.client.config.team_id
         payload: Dict[str, Any] = {
             "name": name,
             "username": username,
@@ -2037,6 +2063,8 @@ class AsyncTemplateClient:
         server: Optional[str] = None,
         team_id: Optional[str] = None,
     ) -> RegistryCredentialSummary:
+        if team_id is None:
+            team_id = self.client.config.team_id
         payload: Dict[str, Any] = {}
         if name is not None:
             payload["name"] = name
@@ -2063,6 +2091,8 @@ class AsyncTemplateClient:
         credential_id: str,
         team_id: Optional[str] = None,
     ) -> None:
+        if team_id is None:
+            team_id = self.client.config.team_id
         params: Dict[str, str] = {}
         if team_id:
             params["teamId"] = team_id

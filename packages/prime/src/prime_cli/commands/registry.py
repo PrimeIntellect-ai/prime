@@ -191,7 +191,6 @@ def create_registry_credential(
             username=username,
             password=password,
             server=server,
-            team_id=config.team_id,
         )
 
         if output == "json":
@@ -262,7 +261,6 @@ def update_registry_credential(
             username=username,
             password=password,
             server=server,
-            team_id=config.team_id,
         )
 
         if output == "json":
@@ -323,7 +321,6 @@ def delete_registry_credential(
 
         client.delete_registry_credential(
             credential_id=credential_id,
-            team_id=config.team_id,
         )
         console.print(f"[green]Deleted registry credential '{credential_name}'[/green]")
 

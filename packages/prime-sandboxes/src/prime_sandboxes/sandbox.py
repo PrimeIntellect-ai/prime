@@ -1240,9 +1240,10 @@ class AsyncSandboxClient:
         self,
         sandbox_ids: Optional[List[str]] = None,
         labels: Optional[List[str]] = None,
+        name: Optional[str] = None,
     ) -> BulkDeleteSandboxResponse:
-        """Bulk delete multiple sandboxes by IDs or labels"""
-        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids, labels=labels)
+        """Bulk delete multiple sandboxes by IDs, labels, or name (must specify exactly one)"""
+        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids, labels=labels, name=name)
         response = await self.client.request(
             "DELETE",
             "/sandbox",

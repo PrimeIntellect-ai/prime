@@ -35,6 +35,7 @@ def _format_registry_row(credential: RegistryCredentialSummary) -> dict:
     return {
         "id": credential.id,
         "name": credential.name,
+        "username": credential.username,
         "server": server,
         "scope": scope,
         "team_id": credential.team_id,

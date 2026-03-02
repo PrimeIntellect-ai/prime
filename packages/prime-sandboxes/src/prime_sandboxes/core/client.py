@@ -126,6 +126,9 @@ class APIClient:
             )
             response.raise_for_status()
 
+            if response.status_code == 204 and not response.content:
+                return {}
+
             result = response.json()
             if not isinstance(result, dict):
                 raise APIError("API response was not a dictionary")
@@ -236,6 +239,9 @@ class AsyncAPIClient:
                 method, url, params=params, json=json, timeout=timeout
             )
             response.raise_for_status()
+
+            if response.status_code == 204 and not response.content:
+                return {}
 
             result = response.json()
             if not isinstance(result, dict):

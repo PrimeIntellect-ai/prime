@@ -199,7 +199,7 @@ def create_registry_credential(
             return
 
         scope = "team" if config.team_id else "personal"
-        console.print(f"[green]Created {scope} registry credential '{name}'[/green]")
+        console.print(f"[green]✓ Created {scope} registry credential '{name}'[/green]")
         console.print(f"[dim]ID: {credential.id}[/dim]")
 
     except KeyboardInterrupt:
@@ -215,7 +215,7 @@ def create_registry_credential(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception()
         raise typer.Exit(1)
 
 
@@ -280,7 +280,7 @@ def update_registry_credential(
             output_data_as_json(_format_registry_row(credential), console)
             return
 
-        console.print(f"[green]Updated registry credential '{credential.name}'[/green]")
+        console.print(f"[green]✓ Updated registry credential '{credential.name}'[/green]")
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
@@ -295,7 +295,7 @@ def update_registry_credential(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception()
         raise typer.Exit(1)
 
 
@@ -322,10 +322,7 @@ def delete_registry_credential(
             credential_id = selected["id"]
             credential_name = selected["name"]
         else:
-            # Fetch credential name for confirmation
-            credentials = _fetch_credentials(client)
-            match = next((c for c in credentials if c["id"] == credential_id), None)
-            credential_name = match["name"] if match else credential_id
+            credential_name = credential_id
 
         if not yes:
             confirm = typer.confirm(f"Delete registry credential '{credential_name}'?")
@@ -336,7 +333,7 @@ def delete_registry_credential(
         client.delete_registry_credential(
             credential_id=credential_id,
         )
-        console.print(f"[green]Deleted registry credential '{credential_name}'[/green]")
+        console.print(f"[green]✓ Deleted registry credential '{credential_name}'[/green]")
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")

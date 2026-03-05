@@ -1901,8 +1901,17 @@ class TemplateClient:
     def __init__(self, api_client: Optional[APIClient] = None):
         self.client = api_client or APIClient()
 
-    def list_registry_credentials(self) -> List[RegistryCredentialSummary]:
-        response = self.client.request("GET", "/template/registry-credentials")
+    def list_registry_credentials(
+        self, team_id: Optional[str] = None
+    ) -> List[RegistryCredentialSummary]:
+        if team_id is None:
+            team_id = self.client.config.team_id
+        params: Dict[str, str] = {}
+        if team_id:
+            params["teamId"] = team_id
+        response = self.client.request(
+            "GET", "/template/registry-credentials", params=params or None
+        )
         credentials = response.get("credentials", [])
         return [RegistryCredentialSummary.model_validate(item) for item in credentials]
 
@@ -1919,6 +1928,80 @@ class TemplateClient:
         )
         return DockerImageCheckResponse.model_validate(response)
 
+    def create_registry_credential(
+        self,
+        name: str,
+        username: str,
+        password: str,
+        server: str,
+        team_id: Optional[str] = None,
+    ) -> RegistryCredentialSummary:
+        if team_id is None:
+            team_id = self.client.config.team_id
+        payload: Dict[str, Any] = {
+            "name": name,
+            "username": username,
+            "password": password,
+            "server": server,
+        }
+        if team_id:
+            payload["teamId"] = team_id
+        response = self.client.request("POST", "/template/registry-credentials", json=payload)
+        data = response.get("data", response)
+        return RegistryCredentialSummary.model_validate(data)
+
+    def update_registry_credential(
+        self,
+        credential_id: str,
+        name: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        server: Optional[str] = None,
+        team_id: Optional[str] = None,
+    ) -> RegistryCredentialSummary:
+        if team_id is None:
+            team_id = self.client.config.team_id
+        payload: Dict[str, Any] = {}
+        if name is not None:
+            payload["name"] = name
+        if username is not None:
+            payload["username"] = username
+        if password is not None:
+            payload["password"] = password
+        if server is not None:
+            payload["server"] = server
+        if not payload:
+            raise ValueError(
+                "At least one field (name, username, password, server) must be provided to update"
+            )
+        params: Dict[str, str] = {}
+        if team_id:
+            params["teamId"] = team_id
+        response = self.client.request(
+            "PATCH",
+            f"/template/registry-credentials/{credential_id}",
+            json=payload,
+            params=params or None,
+        )
+        data = response.get("data", response)
+        return RegistryCredentialSummary.model_validate(data)
+
+    def delete_registry_credential(
+        self,
+        credential_id: str,
+        team_id: Optional[str] = None,
+    ) -> None:
+        if team_id is None:
+            team_id = self.client.config.team_id
+        params: Dict[str, str] = {}
+        if team_id:
+            params["teamId"] = team_id
+        self.client.request(
+            "DELETE",
+            f"/template/registry-credentials/{credential_id}",
+            params=params or None,
+        )
+
 
 class AsyncTemplateClient:
     """Async client for template/registry helper APIs."""
@@ -1926,8 +2009,17 @@ class AsyncTemplateClient:
     def __init__(self, api_client: Optional[AsyncAPIClient] = None):
         self.client = api_client or AsyncAPIClient()
 
-    async def list_registry_credentials(self) -> List[RegistryCredentialSummary]:
-        response = await self.client.request("GET", "/template/registry-credentials")
+    async def list_registry_credentials(
+        self, team_id: Optional[str] = None
+    ) -> List[RegistryCredentialSummary]:
+        if team_id is None:
+            team_id = self.client.config.team_id
+        params: Dict[str, str] = {}
+        if team_id:
+            params["teamId"] = team_id
+        response = await self.client.request(
+            "GET", "/template/registry-credentials", params=params or None
+        )
         credentials = response.get("credentials", [])
         return [RegistryCredentialSummary.model_validate(item) for item in credentials]
 
@@ -1943,6 +2035,80 @@ class AsyncTemplateClient:
             json=payload,
         )
         return DockerImageCheckResponse.model_validate(response)
+
+    async def create_registry_credential(
+        self,
+        name: str,
+        username: str,
+        password: str,
+        server: str,
+        team_id: Optional[str] = None,
+    ) -> RegistryCredentialSummary:
+        if team_id is None:
+            team_id = self.client.config.team_id
+        payload: Dict[str, Any] = {
+            "name": name,
+            "username": username,
+            "password": password,
+            "server": server,
+        }
+        if team_id:
+            payload["teamId"] = team_id
+        response = await self.client.request("POST", "/template/registry-credentials", json=payload)
+        data = response.get("data", response)
+        return RegistryCredentialSummary.model_validate(data)
+
+    async def update_registry_credential(
+        self,
+        credential_id: str,
+        name: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        server: Optional[str] = None,
+        team_id: Optional[str] = None,
+    ) -> RegistryCredentialSummary:
+        if team_id is None:
+            team_id = self.client.config.team_id
+        payload: Dict[str, Any] = {}
+        if name is not None:
+            payload["name"] = name
+        if username is not None:
+            payload["username"] = username
+        if password is not None:
+            payload["password"] = password
+        if server is not None:
+            payload["server"] = server
+        if not payload:
+            raise ValueError(
+                "At least one field (name, username, password, server) must be provided to update"
+            )
+        params: Dict[str, str] = {}
+        if team_id:
+            params["teamId"] = team_id
+        response = await self.client.request(
+            "PATCH",
+            f"/template/registry-credentials/{credential_id}",
+            json=payload,
+            params=params or None,
+        )
+        data = response.get("data", response)
+        return RegistryCredentialSummary.model_validate(data)
+
+    async def delete_registry_credential(
+        self,
+        credential_id: str,
+        team_id: Optional[str] = None,
+    ) -> None:
+        if team_id is None:
+            team_id = self.client.config.team_id
+        params: Dict[str, str] = {}
+        if team_id:
+            params["teamId"] = team_id
+        await self.client.request(
+            "DELETE",
+            f"/template/registry-credentials/{credential_id}",
+            params=params or None,
+        )
 
     async def aclose(self) -> None:
         """Close the async client"""

@@ -16,6 +16,7 @@ from ..core import Config
 from ..utils import output_data_as_json
 from ..utils.eval_push import load_results_jsonl
 from ..verifiers_bridge import (
+    is_help_request,
     print_eval_run_help,
     run_eval_passthrough,
     run_eval_tui,
@@ -553,18 +554,14 @@ app.add_typer(subcommands_app, name="")
     context_settings={
         "allow_extra_args": True,
         "ignore_unknown_options": True,
+        "help_option_names": [],
     },
 )
 def run_eval_cmd(
     ctx: typer.Context,
-    environment: str = typer.Argument(
-        ...,
+    environment: Optional[str] = typer.Argument(
+        None,
         help="Environment name/slug or TOML config path",
-    ),
-    backend_help: bool = typer.Option(
-        False,
-        "--backend-help",
-        help="Show backend vf-eval help (all passthrough flags/options)",
     ),
     skip_upload: bool = typer.Option(
         False,
@@ -582,9 +579,15 @@ def run_eval_cmd(
 ) -> None:
     """Run an evaluation with local-first environment resolution."""
     passthrough_args = list(ctx.args)
-    if backend_help:
+
+    if is_help_request(environment or "", passthrough_args):
         print_eval_run_help()
         raise typer.Exit(0)
+
+    if environment is None:
+        console.print("[red]Error:[/red] Missing argument 'ENVIRONMENT'.")
+        console.print("[dim]Example: prime eval run gsm8k -n 10[/dim]")
+        raise typer.Exit(2)
 
     if environment.startswith("-"):
         console.print("[red]Error:[/red] Environment/config must be the first argument.")

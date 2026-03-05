@@ -35,7 +35,7 @@ from ..utils.prompt import (
     validate_env_var_name,
 )
 from ..utils.time_utils import format_time_ago, iso_timestamp
-from ..verifiers_bridge import print_env_build_help, print_env_init_help
+from ..verifiers_bridge import is_help_request, print_env_build_help, print_env_init_help
 from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
 
 app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
@@ -1424,22 +1424,24 @@ def push(
     context_settings={
         "allow_extra_args": True,
         "ignore_unknown_options": True,
+        "help_option_names": [],
     },
 )
 def init(
     ctx: typer.Context,
-    name: str = typer.Argument(..., help="Name of the new environment"),
-    backend_help: bool = typer.Option(
-        False,
-        "--backend-help",
-        help="Show backend vf-init help (all passthrough flags/options)",
-    ),
+    name: Optional[str] = typer.Argument(None, help="Name of the new environment"),
 ) -> None:
     """Initialize a new environment."""
     passthrough_args = list(ctx.args)
-    if backend_help:
+
+    if is_help_request(name or "", passthrough_args):
         print_env_init_help()
         raise typer.Exit(0)
+
+    if name is None:
+        console.print("[red]Error:[/red] Missing argument 'NAME'.")
+        console.print("[dim]Example: prime env init my-env --path ./environments[/dim]")
+        raise typer.Exit(2)
 
     if name.startswith("-"):
         console.print("[red]Error:[/red] Environment name must be the first argument.")
@@ -1459,22 +1461,26 @@ def init(
     context_settings={
         "allow_extra_args": True,
         "ignore_unknown_options": True,
+        "help_option_names": [],
     },
 )
 def build(
     ctx: typer.Context,
-    env_id: str = typer.Argument(..., help="Environment ID (hyphenated, e.g. openenv-echo)"),
-    backend_help: bool = typer.Option(
-        False,
-        "--backend-help",
-        help="Show backend vf-build help (all passthrough flags/options)",
+    env_id: Optional[str] = typer.Argument(
+        None, help="Environment ID (hyphenated, e.g. openenv-echo)"
     ),
 ) -> None:
     """Build an OpenEnv-backed environment image."""
     passthrough_args = list(ctx.args)
-    if backend_help:
+
+    if is_help_request(env_id or "", passthrough_args):
         print_env_build_help()
         raise typer.Exit(0)
+
+    if env_id is None:
+        console.print("[red]Error:[/red] Missing argument 'ENV_ID'.")
+        console.print("[dim]Example: prime env build openenv-echo --path ./environments[/dim]")
+        raise typer.Exit(2)
 
     if env_id.startswith("-"):
         console.print("[red]Error:[/red] Environment ID must be the first argument.")

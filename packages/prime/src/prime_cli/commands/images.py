@@ -11,6 +11,7 @@ import httpx
 import typer
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from ..utils import validate_output_format
@@ -170,6 +171,7 @@ def push_image(
             console.print()
             console.print("[bold]Check build status:[/bold]")
             console.print("  prime images list")
+            console.print(f"  prime images logs {build_id}")
             console.print()
             console.print(
                 "[dim]The build typically takes a few minutes depending on image complexity.[/dim]"
@@ -298,6 +300,35 @@ def list_images(
         console.print()
         console.print(f"[dim]Total: {len(images)} image(s)[/dim]")
         console.print()
+
+    except UnauthorizedError:
+        console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("logs")
+def build_logs(
+    build_id: str = typer.Argument(..., help="Build ID to get logs for"),
+    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
+) -> None:
+    """Get logs for an image build."""
+    try:
+        client = APIClient()
+
+        data = client.request(
+            "GET",
+            f"/images/build/{build_id}/logs",
+            params={"tail_lines": tail},
+        )
+        logs = data.get("logs", "")
+
+        if logs:
+            console.print(escape(logs))
+        else:
+            console.print("[yellow]No logs available yet.[/yellow]")
 
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")

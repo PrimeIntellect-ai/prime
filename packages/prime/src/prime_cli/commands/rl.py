@@ -202,6 +202,10 @@ id = "{env_value}"
 # [adapters]
 # interval = 0                # Upload adapter every N steps (0 = only at run end)
 # keep_last = 3               # Keep N adapters in cloud (-1 = keep all)
+
+# Optional: infrastructure configuration
+# [infrastructure]
+# compute_size = "standard"   # "standard" (default) or "large" for more CPU/memory
 '''
 
 
@@ -389,6 +393,18 @@ class AdaptersConfig(BaseModel):
         return result if result else None
 
 
+class InfrastructureConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    compute_size: str | None = None
+
+    def to_api_dict(self) -> Dict[str, Any] | None:
+        d: Dict[str, Any] = {}
+        if self.compute_size is not None:
+            d["compute_size"] = self.compute_size
+        return d if d else None
+
+
 class RLConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -411,6 +427,7 @@ class RLConfig(BaseModel):
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
+    infrastructure: InfrastructureConfig = Field(default_factory=InfrastructureConfig)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
 
@@ -661,6 +678,11 @@ def create_run(
             if cfg.val.interval:
                 console.print(f"  Interval:     {cfg.val.interval}")
 
+        # Infrastructure
+        if cfg.infrastructure.compute_size:
+            console.print("\n[cyan]Infrastructure[/cyan]")
+            console.print(f"  Compute Size: {cfg.infrastructure.compute_size}")
+
         # Checkpoint warm-start
         if cfg.checkpoint_id:
             console.print(f"\n[cyan]Warm-start from checkpoint:[/cyan] {cfg.checkpoint_id}")
@@ -748,6 +770,7 @@ def create_run(
             adapters_config=cfg.adapters.to_api_dict(),
             checkpoint_id=cfg.checkpoint_id,
             cluster_name=cfg.cluster_name,
+            infrastructure_config=cfg.infrastructure.to_api_dict(),
         )
 
         if output == "json":

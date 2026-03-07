@@ -205,7 +205,7 @@ id = "{env_value}"
 
 # Optional: infrastructure configuration
 # [infrastructure]
-# compute_size = "standard"   # "standard" (default) or "large" for more CPU/memory
+# compute_size = "M"          # S, M (default), or L
 '''
 
 

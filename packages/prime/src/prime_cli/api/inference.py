@@ -23,18 +23,9 @@ def _extract_error_message(response: httpx.Response) -> str:
 
 def _extract_payment_error_message(response: httpx.Response) -> str:
     try:
-        payload = response.json()
-    except ValueError:
+        return response.json()["error"]["message"].strip()
+    except Exception:
         return _extract_error_message(response)
-
-    if isinstance(payload, dict):
-        error = payload.get("error")
-        if isinstance(error, dict):
-            message = error.get("message")
-            if isinstance(message, str) and message.strip():
-                return message.strip()
-
-    return _extract_error_message(response)
 
 
 class InferenceClient:

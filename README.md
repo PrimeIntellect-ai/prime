@@ -189,8 +189,10 @@ prime eval samples <eval-id>
 # List teams
 prime teams list
 
-# Set team context
-prime config set-team-id
+# Switch context
+prime switch
+prime switch personal
+prime switch <team-slug>
 ```
 
 ## Development

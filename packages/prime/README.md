@@ -168,17 +168,20 @@ prime sandbox delete <sandbox-id>
 
 ### Team Management
 
-Manage resources across team contexts:
+Manage resources across personal and team contexts:
 
 ```bash
 # List your teams
 prime teams list
 
-# Set team context
-prime config set-team-id <team-id>
+# Switch context directly
+prime switch
+prime switch personal
+prime switch <team-slug>
+prime switch <team-id>  # fallback for teams without a slug
 
-# All subsequent commands use team context
-prime pods list  # Shows team's pods
+# All subsequent commands use the selected context
+prime pods list
 ```
 
 ## Configuration

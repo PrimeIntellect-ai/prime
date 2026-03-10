@@ -12,6 +12,22 @@ class InferenceAPIError(Exception):
     pass
 
 
+class InferencePaymentRequiredError(InferenceAPIError):
+    pass
+
+
+def _extract_error_message(response: httpx.Response) -> str:
+    text = response.text.strip()
+    return text or response.reason_phrase or "Unknown error"
+
+
+def _extract_payment_error_message(response: httpx.Response) -> str:
+    try:
+        return response.json()["error"]["message"].strip()
+    except Exception:
+        return _extract_error_message(response)
+
+
 class InferenceClient:
     """
     Minimal client for the OpenAI-compatible Prime Inference API:
@@ -57,9 +73,13 @@ class InferenceClient:
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise InferenceAPIError(
-                f"GET {url} failed: {e.response.status_code} {e.response.text}"
-            ) from e
+            status = e.response.status_code
+            message = _extract_error_message(e.response)
+            if status == 402:
+                raise InferencePaymentRequiredError(
+                    f"Payment required. {_extract_payment_error_message(e.response)}"
+                ) from e
+            raise InferenceAPIError(f"GET {url} failed: {status} {message}") from e
         return resp.json()
 
     def retrieve_model(self, model_id: str) -> Dict[str, Any]:
@@ -69,12 +89,17 @@ class InferenceClient:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
+            message = _extract_error_message(e.response)
             # Treat common "unknown model" responses as a dedicated error
             if status in (400, 404, 422):
                 raise InferenceAPIError(
                     f"Model '{model_id}' not found or unavailable (GET {url} → {status})."
                 ) from e
-            raise InferenceAPIError(f"GET {url} failed: {status} {e.response.text}") from e
+            if status == 402:
+                raise InferencePaymentRequiredError(
+                    f"Payment required. {_extract_payment_error_message(e.response)}"
+                ) from e
+            raise InferenceAPIError(f"GET {url} failed: {status} {message}") from e
         return resp.json()
 
     def chat_completion(
@@ -87,15 +112,29 @@ class InferenceClient:
             try:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as e:
-                raise InferenceAPIError(
-                    f"POST {url} failed: {e.response.status_code} {e.response.text}"
-                ) from e
+                status = e.response.status_code
+                message = _extract_error_message(e.response)
+                if status == 402:
+                    raise InferencePaymentRequiredError(
+                        f"Payment required. {_extract_payment_error_message(e.response)}"
+                    ) from e
+                raise InferenceAPIError(f"POST {url} failed: {status} {message}") from e
             return resp.json()
 
         # Streamed (SSE-style: lines prefixed with 'data: ')
         def _stream() -> Iterator[Dict[str, Any]]:
             with self._client.stream("POST", url, json=payload) as r:
-                r.raise_for_status()
+                try:
+                    r.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    e.response.read()
+                    status = e.response.status_code
+                    message = _extract_error_message(e.response)
+                    if status == 402:
+                        raise InferencePaymentRequiredError(
+                            f"Payment required. {_extract_payment_error_message(e.response)}"
+                        ) from e
+                    raise InferenceAPIError(f"POST {url} failed: {status} {message}") from e
                 for line in r.iter_lines():
                     if not line:
                         continue

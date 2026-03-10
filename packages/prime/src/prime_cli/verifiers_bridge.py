@@ -18,7 +18,7 @@ from rich.console import Console
 
 from prime_cli.core import Config
 
-from .api.inference import InferenceAPIError, InferenceClient
+from .api.inference import InferenceAPIError, InferenceClient, InferencePaymentRequiredError
 from .client import APIClient, APIError
 from .utils.env_metadata import find_environment_metadata, get_environment_metadata
 from .utils.eval_push import push_eval_results_to_hub
@@ -784,6 +784,26 @@ def _validate_model(model: str, inference_base_url: str, configured_base_url: st
         raise typer.Exit(1) from exc
 
 
+def _preflight_inference_billing(
+    model: str, inference_base_url: str, configured_base_url: str
+) -> None:
+    if inference_base_url != configured_base_url:
+        return
+
+    client = InferenceClient()
+    try:
+        client.chat_completion(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": "Reply with OK."}],
+                "max_tokens": 1,
+            }
+        )
+    except InferencePaymentRequiredError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
 def _build_job_id(env_name: str, model: str) -> str:
     eval_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     job_uuid = str(uuid.uuid4())[:8]
@@ -843,7 +863,9 @@ def run_eval_passthrough(
         raise typer.Exit(1)
 
     args, env, model, base_url = _add_default_inference_and_key_args(passthrough_args, config)
-    _validate_model(model, base_url, (config.inference_url or "").strip().rstrip("/"))
+    configured_base_url = (config.inference_url or "").strip().rstrip("/")
+    _validate_model(model, base_url, configured_base_url)
+    _preflight_inference_billing(model, base_url, configured_base_url)
 
     env_dir_path = _parse_value_option(args, "--env-dir-path", "-p") or DEFAULT_ENV_DIR_PATH
     run_target = environment

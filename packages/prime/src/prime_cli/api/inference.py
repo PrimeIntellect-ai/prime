@@ -127,6 +127,7 @@ class InferenceClient:
                 try:
                     r.raise_for_status()
                 except httpx.HTTPStatusError as e:
+                    e.response.read()
                     status = e.response.status_code
                     message = _extract_error_message(e.response)
                     if status == 402:

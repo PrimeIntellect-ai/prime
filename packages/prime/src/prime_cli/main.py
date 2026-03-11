@@ -21,6 +21,7 @@ from .commands.registry import app as registry_app
 from .commands.rl import app as rl_app
 from .commands.sandbox import app as sandbox_app
 from .commands.secrets import app as secret_app
+from .commands.switch import app as switch_app
 from .commands.teams import app as teams_app
 from .commands.tunnel import app as tunnel_app
 from .commands.upgrade import app as upgrade_app
@@ -56,6 +57,7 @@ app.add_typer(inference_app, name="inference", rich_help_panel="Compute")
 # Account commands
 app.add_typer(login_app, name="login", rich_help_panel="Account")
 app.add_typer(whoami_app, name="whoami", rich_help_panel="Account")
+app.add_typer(switch_app, name="switch", rich_help_panel="Account")
 app.add_typer(config_app, name="config", rich_help_panel="Account")
 app.add_typer(teams_app, name="teams", rich_help_panel="Account")
 app.add_typer(secret_app, name="secret", rich_help_panel="Account")

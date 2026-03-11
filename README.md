@@ -173,6 +173,9 @@ prime eval push
 # Push specific eval directory (verifiers format)
 prime eval push outputs/evals/gsm8k--gpt-4/abc123
 
+# Push a public evaluation (default is private)
+prime eval push --public
+
 # List all evaluations
 prime eval list
 

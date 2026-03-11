@@ -10,6 +10,7 @@ from prime_tunnel.exceptions import (
     TunnelLimitReachedError,
     TunnelTimeoutError,
 )
+from prime_tunnel.tunnel import _classify_frpc_error
 from rich.console import Console
 from rich.table import Table
 
@@ -54,7 +55,15 @@ def start_tunnel(
             console.print(f"\n[dim]Forwarding to localhost:{port}[/dim]")
             console.print("[dim]Press Ctrl+C to stop the tunnel[/dim]\n")
 
-            await shutdown_event.wait()
+            # Monitor tunnel health while waiting for shutdown signal
+            while not shutdown_event.is_set():
+                console.print("test")
+                if not tunnel.is_running:
+                    raise _classify_frpc_error(tunnel.recent_output, tunnel.tunnel_id)
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pass
 
         except TunnelConnectionError as e:
             header = f"\\[{e.error_type}]" if e.error_type else "\\[tunnel error]"

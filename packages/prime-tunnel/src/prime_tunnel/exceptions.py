@@ -4,7 +4,7 @@ class TunnelError(Exception):
     pass
 
 
-class TunnelNotRunningError(TunnelError):
+class TunnelConnectionError(TunnelError):
     """Structured error for tunnel failures with diagnostic fields."""
 
     def __init__(

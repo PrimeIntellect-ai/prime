@@ -6,8 +6,8 @@ import typer
 from prime_tunnel import Tunnel
 from prime_tunnel.core.client import TunnelClient
 from prime_tunnel.exceptions import (
+    TunnelConnectionError,
     TunnelLimitReachedError,
-    TunnelNotRunningError,
     TunnelTimeoutError,
 )
 from rich.console import Console
@@ -56,7 +56,7 @@ def start_tunnel(
 
             await shutdown_event.wait()
 
-        except TunnelNotRunningError as e:
+        except TunnelConnectionError as e:
             header = f"[{e.error_type}]" if e.error_type else "[tunnel error]"
             console.print(f"\n[red]{header}[/red] {e}", style="bold")
             if e.tunnel_id:

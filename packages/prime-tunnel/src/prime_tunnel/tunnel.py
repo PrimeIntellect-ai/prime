@@ -12,8 +12,8 @@ import httpx
 from prime_tunnel.binary import get_frpc_path
 from prime_tunnel.core.client import TunnelClient
 from prime_tunnel.exceptions import (
+    TunnelConnectionError,
     TunnelError,
-    TunnelNotRunningError,
     TunnelTimeoutError,
 )
 from prime_tunnel.models import TunnelInfo
@@ -26,7 +26,7 @@ def _classify_frpc_error(output_lines: list[str], tunnel_id: str | None = None) 
     # Auth failures
     if "login failed" in combined:
         if "tunnel not registered" in combined:
-            return TunnelNotRunningError(
+            return TunnelConnectionError(
                 tunnel_id=tunnel_id,
                 error_type="auth_failed",
                 message=(
@@ -35,13 +35,13 @@ def _classify_frpc_error(output_lines: list[str], tunnel_id: str | None = None) 
                 ),
             )
         if "invalid authentication token" in combined:
-            return TunnelNotRunningError(
+            return TunnelConnectionError(
                 tunnel_id=tunnel_id,
                 error_type="auth_failed",
                 message="Tunnel token is invalid or expired. Create a new tunnel.",
             )
         if "invalid binding secret" in combined:
-            return TunnelNotRunningError(
+            return TunnelConnectionError(
                 tunnel_id=tunnel_id,
                 error_type="auth_failed",
                 message=(
@@ -50,7 +50,7 @@ def _classify_frpc_error(output_lines: list[str], tunnel_id: str | None = None) 
             )
 
     if "token in login doesn't match" in combined or "authorization failed" in combined:
-        return TunnelNotRunningError(
+        return TunnelConnectionError(
             tunnel_id=tunnel_id,
             error_type="auth_failed",
             message="Server rejected authorization. Tunnel may have expired or been deleted.",
@@ -58,13 +58,13 @@ def _classify_frpc_error(output_lines: list[str], tunnel_id: str | None = None) 
 
     # Connection lost
     if "heartbeat timeout" in combined:
-        return TunnelNotRunningError(
+        return TunnelConnectionError(
             tunnel_id=tunnel_id,
             error_type="connection_lost",
             message="Lost connection to tunnel server (heartbeat timeout). Check your network.",
         )
     if "pong message contains error" in combined:
-        return TunnelNotRunningError(
+        return TunnelConnectionError(
             tunnel_id=tunnel_id,
             error_type="connection_lost",
             message="Tunnel server sent an error during keepalive.",
@@ -72,19 +72,19 @@ def _classify_frpc_error(output_lines: list[str], tunnel_id: str | None = None) 
 
     # Config errors (proxy type, custom domains, subdomain)
     if "unsupported proxy type" in combined:
-        return TunnelNotRunningError(
+        return TunnelConnectionError(
             tunnel_id=tunnel_id,
             error_type="config_error",
             message="Only HTTP tunnels are supported.",
         )
     if "custom_domains not allowed" in combined:
-        return TunnelNotRunningError(
+        return TunnelConnectionError(
             tunnel_id=tunnel_id,
             error_type="config_error",
             message="Custom domains are not permitted.",
         )
     if "subdomain does not match" in combined:
-        return TunnelNotRunningError(
+        return TunnelConnectionError(
             tunnel_id=tunnel_id,
             error_type="config_error",
             message="Subdomain mismatch. Tunnel configuration error.",
@@ -92,7 +92,7 @@ def _classify_frpc_error(output_lines: list[str], tunnel_id: str | None = None) 
 
     # Network errors
     if "connection refused" in combined or "no such host" in combined or "dial tcp" in combined:
-        return TunnelNotRunningError(
+        return TunnelConnectionError(
             tunnel_id=tunnel_id,
             error_type="connection_lost",
             message="Cannot reach tunnel server. Check internet and firewall.",
@@ -100,7 +100,7 @@ def _classify_frpc_error(output_lines: list[str], tunnel_id: str | None = None) 
 
     # Fallback
     output_text = "\n".join(output_lines) if output_lines else "(no output captured)"
-    return TunnelNotRunningError(
+    return TunnelConnectionError(
         tunnel_id=tunnel_id,
         message=f"frpc connection failed\n--- frpc output ---\n{output_text}\n-------------------",
     )
@@ -174,7 +174,7 @@ class Tunnel:
 
         Raises:
             TunnelError: If tunnel registration fails
-            TunnelNotRunningError: If frpc fails to connect
+            TunnelConnectionError: If frpc fails to connect or tunnel is not running
             TunnelTimeoutError: If connection times out
         """
         if self._started:
@@ -217,7 +217,7 @@ class Tunnel:
             await self._cleanup()
             if isinstance(e, asyncio.CancelledError):
                 raise
-            raise TunnelNotRunningError(message=f"Failed to start frpc: {e}") from e
+            raise TunnelConnectionError(message=f"Failed to start frpc: {e}") from e
 
         # 5. Wait for connection
         try:
@@ -233,7 +233,7 @@ class Tunnel:
             await self._cleanup()
             if isinstance(e, asyncio.CancelledError):
                 raise
-            raise TunnelNotRunningError(message=f"Failed to start pipe drain: {e}") from e
+            raise TunnelConnectionError(message=f"Failed to start pipe drain: {e}") from e
 
         self._started = True
 
@@ -438,7 +438,7 @@ subdomain = "{self._tunnel_info.tunnel_id}"
 
         while time.time() - start_time < self.connection_timeout:
             if self._process is None:
-                raise TunnelNotRunningError(message="frpc process not running")
+                raise TunnelConnectionError(message="frpc process not running")
 
             return_code = self._process.poll()
             if return_code is not None:

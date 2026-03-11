@@ -40,6 +40,18 @@ from ..verifiers_bridge import (
 
 console = Console()
 
+HOSTED_LOGS_DEFAULT_TAIL_LINES = 1000
+HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS = 5.0
+HOSTED_RUN_DEFAULT_POLL_INTERVAL_SECONDS = 10.0
+HOSTED_RUN_DEFAULT_NUM_EXAMPLES = 5
+HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE = 3
+HOSTED_LOGS_RATE_LIMIT_THRESHOLD = 3
+HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS = 30
+HOSTED_LOGS_RETRY_WAIT_SECONDS = 10
+HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS = 6
+EVAL_TABLE_MAX_TEXT_WIDTH = 30
+EVAL_RUN_EXAMPLE_COMMAND = "prime eval run gsm8k -n 10"
+
 
 class DefaultGroup(TyperGroup):
     def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
@@ -221,11 +233,13 @@ def _handle_log_poll_error(eval_id: str, exc: APIError, consecutive_errors: int)
     if "429" not in str(exc):
         raise exc
 
-    if consecutive_errors >= 3:
-        console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
-        time.sleep(30)
+    if consecutive_errors >= HOSTED_LOGS_RATE_LIMIT_THRESHOLD:
+        console.print(
+            f"[yellow]Rate limited. Waiting {HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS:.0f}s...[/yellow]"
+        )
+        time.sleep(HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS)
     else:
-        time.sleep(10)
+        time.sleep(HOSTED_LOGS_RETRY_WAIT_SECONDS)
 
 
 def _display_logs_follow(eval_id: str, poll_interval: float) -> None:
@@ -260,7 +274,7 @@ def _display_logs_follow(eval_id: str, poll_interval: float) -> None:
             else:
                 no_logs_polls += 1
 
-            if no_logs_polls > 0 and no_logs_polls % 6 == 0:
+            if no_logs_polls > 0 and no_logs_polls % HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS == 0:
                 console.print(f"[dim]Evaluation status: {status_str} (waiting for logs...)[/dim]")
         except APIError as exc:
             consecutive_errors += 1
@@ -290,7 +304,7 @@ def _display_logs(
     eval_id: str,
     tail: int,
     follow: bool,
-    poll_interval: float = 5.0,
+    poll_interval: float = HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS,
 ) -> None:
     try:
         if follow:
@@ -436,8 +450,8 @@ def list_evals(
 
             table.add_row(
                 eval_id if eval_id else "",
-                str(env_name)[:30],
-                str(e.get("model_name", ""))[:30],
+                str(env_name)[:EVAL_TABLE_MAX_TEXT_WIDTH],
+                str(e.get("model_name", ""))[:EVAL_TABLE_MAX_TEXT_WIDTH],
                 str(e.get("status", "")),
                 str(num_examples),
                 str(rollouts_per_example),
@@ -845,10 +859,15 @@ app.add_typer(subcommands_app, name="")
 @app.command("logs", no_args_is_help=True)
 def logs_cmd(
     eval_id: str = typer.Argument(..., help="Evaluation id to get logs for"),
-    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
+    tail: int = typer.Option(
+        HOSTED_LOGS_DEFAULT_TAIL_LINES,
+        "--tail",
+        "-n",
+        help="Number of lines to show",
+    ),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
     poll_interval: float = typer.Option(
-        5.0,
+        HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS,
         "--poll-interval",
         help="Polling interval in seconds when following logs",
     ),
@@ -908,7 +927,7 @@ def run_eval_cmd(
         help="Run the evaluation on the platform instead of locally",
     ),
     poll_interval: float = typer.Option(
-        10.0,
+        HOSTED_RUN_DEFAULT_POLL_INTERVAL_SECONDS,
         "--poll-interval",
         help="Polling interval in seconds for hosted evaluation status",
     ),
@@ -952,12 +971,12 @@ def run_eval_cmd(
 
     if environment is None:
         console.print("[red]Error:[/red] Missing argument 'ENVIRONMENT'.")
-        console.print("[dim]Example: prime eval run gsm8k -n 10[/dim]")
+        console.print(f"[dim]Example: {EVAL_RUN_EXAMPLE_COMMAND}[/dim]")
         raise typer.Exit(2)
 
     if environment.startswith("-"):
         console.print("[red]Error:[/red] Environment/config must be the first argument.")
-        console.print("[dim]Example: prime eval run gsm8k -n 10[/dim]")
+        console.print(f"[dim]Example: {EVAL_RUN_EXAMPLE_COMMAND}[/dim]")
         raise typer.Exit(2)
 
     env_dir_path = _parse_value_option(passthrough_args, "--env-dir-path", "-p")
@@ -965,7 +984,7 @@ def run_eval_cmd(
     if not hosted:
         hosted_only_args = {
             "--follow": follow,
-            "--poll-interval": poll_interval != 10.0,
+            "--poll-interval": poll_interval != HOSTED_RUN_DEFAULT_POLL_INTERVAL_SECONDS,
             "--timeout-minutes": timeout_minutes is not None,
             "--allow-sandbox-access": allow_sandbox_access,
             "--allow-instances-access": allow_instances_access,
@@ -1003,8 +1022,16 @@ def run_eval_cmd(
         raw_env_args = _parse_value_option(passthrough_args, "--env-args", "")
 
         try:
-            num_examples = int(raw_num_examples) if raw_num_examples is not None else 5
-            rollouts_per_example = int(raw_rollouts) if raw_rollouts is not None else 3
+            num_examples = (
+                int(raw_num_examples)
+                if raw_num_examples is not None
+                else HOSTED_RUN_DEFAULT_NUM_EXAMPLES
+            )
+            rollouts_per_example = (
+                int(raw_rollouts)
+                if raw_rollouts is not None
+                else HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE
+            )
         except ValueError as exc:
             console.print(
                 "[red]Error:[/red] --num-examples and --rollouts-per-example must be integers"
@@ -1044,7 +1071,7 @@ def run_eval_cmd(
             console.print()
             _display_logs(
                 result.evaluation_id,
-                tail=1000,
+                tail=HOSTED_LOGS_DEFAULT_TAIL_LINES,
                 follow=True,
                 poll_interval=poll_interval,
             )

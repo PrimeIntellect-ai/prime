@@ -9,7 +9,8 @@ from .formatters import strip_ansi
 
 console = Console()
 
-PROGRESS_BAR = re.compile(r".*\|[█▏▎▍▌▋▊▉ ]{10,}\|.*")
+PROGRESS_BAR_MIN_WIDTH = 10
+PROGRESS_BAR = re.compile(rf".*\|[█▏▎▍▌▋▊▉ ]{{{PROGRESS_BAR_MIN_WIDTH},}}\|.*")
 
 
 class EvalStatus(str, Enum):

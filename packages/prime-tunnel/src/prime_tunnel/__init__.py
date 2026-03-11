@@ -4,9 +4,11 @@ __version__ = "0.1.4"
 
 from prime_tunnel.core import Config, TunnelClient
 from prime_tunnel.exceptions import (
+    BinaryDownloadError,
     TunnelAuthError,
-    TunnelConnectionError,
     TunnelError,
+    TunnelLimitReachedError,
+    TunnelNotRunningError,
     TunnelTimeoutError,
 )
 from prime_tunnel.models import TunnelInfo
@@ -22,8 +24,10 @@ __all__ = [
     # Models
     "TunnelInfo",
     # Exceptions
-    "TunnelError",
+    "BinaryDownloadError",
     "TunnelAuthError",
-    "TunnelConnectionError",
+    "TunnelError",
+    "TunnelLimitReachedError",
+    "TunnelNotRunningError",
     "TunnelTimeoutError",
 ]

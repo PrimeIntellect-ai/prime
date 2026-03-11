@@ -5,6 +5,11 @@ from typing import List, Optional
 import typer
 from prime_tunnel import Tunnel
 from prime_tunnel.core.client import TunnelClient
+from prime_tunnel.exceptions import (
+    TunnelLimitReachedError,
+    TunnelNotRunningError,
+    TunnelTimeoutError,
+)
 from rich.console import Console
 from rich.table import Table
 
@@ -51,6 +56,19 @@ def start_tunnel(
 
             await shutdown_event.wait()
 
+        except TunnelNotRunningError as e:
+            header = f"[{e.error_type}]" if e.error_type else "[tunnel error]"
+            console.print(f"\n[red]{header}[/red] {e}", style="bold")
+            if e.tunnel_id:
+                console.print(f"[dim]Tunnel ID: {e.tunnel_id}[/dim]")
+            raise typer.Exit(1)
+        except TunnelLimitReachedError as e:
+            console.print(f"\n[red]Tunnel limit reached:[/red] {e}", style="bold")
+            console.print("[dim]Delete an existing tunnel before creating a new one.[/dim]")
+            raise typer.Exit(1)
+        except TunnelTimeoutError as e:
+            console.print(f"\n[red]Connection timed out:[/red] {e}", style="bold")
+            raise typer.Exit(1)
         except Exception as e:
             console.print(f"[red]Error:[/red] {e}", style="bold")
             raise typer.Exit(1)
@@ -95,12 +113,20 @@ def list_tunnels(
     table = Table(title="Active Tunnels")
     table.add_column("Tunnel ID", style="cyan")
     table.add_column("URL", style="green")
+    table.add_column("Status")
     table.add_column("Expires At")
 
     for tunnel in tunnels:
+        status_display = tunnel.status or "unknown"
+        if status_display == "connected":
+            status_display = "[green]connected[/green]"
+        elif status_display == "pending":
+            status_display = "[yellow]pending[/yellow]"
+
         table.add_row(
             tunnel.tunnel_id,
             tunnel.url,
+            status_display,
             str(tunnel.expires_at),
         )
 
@@ -133,6 +159,7 @@ def tunnel_status(
     console.print(f"[bold]Tunnel ID:[/bold] {tunnel.tunnel_id}")
     console.print(f"[bold]URL:[/bold] {tunnel.url}")
     console.print(f"[bold]Hostname:[/bold] {tunnel.hostname}")
+    console.print(f"[bold]Status:[/bold] {tunnel.status or 'unknown'}")
     console.print(f"[bold]Expires At:[/bold] {tunnel.expires_at}")
 
 

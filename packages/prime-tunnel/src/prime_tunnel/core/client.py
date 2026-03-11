@@ -10,7 +10,12 @@ from tenacity import (
 )
 
 from prime_tunnel.core.config import Config
-from prime_tunnel.exceptions import TunnelAuthError, TunnelError, TunnelTimeoutError
+from prime_tunnel.exceptions import (
+    TunnelAuthError,
+    TunnelError,
+    TunnelLimitReachedError,
+    TunnelTimeoutError,
+)
 from prime_tunnel.models import TunnelInfo
 
 # Retry configuration for transient connection errors
@@ -105,6 +110,14 @@ class TunnelClient:
             raise TunnelAuthError("Payment required. Check billing status.")
         elif response.status_code == 404:
             return {}  # Handle 404 specially in callers
+        elif response.status_code == 400:
+            try:
+                error_detail = response.json().get("detail", response.text)
+            except Exception:
+                error_detail = response.text
+            if "maximum number of" in error_detail.lower():
+                raise TunnelLimitReachedError(error_detail)
+            raise TunnelError(f"Failed to {operation}: {error_detail}")
         elif response.status_code >= 400:
             try:
                 error_detail = response.json().get("detail", response.text)
@@ -197,6 +210,7 @@ class TunnelClient:
             server_port=7000,
             expires_at=data["expires_at"],
             user_id=data.get("user_id"),
+            status=data.get("status"),
         )
 
     async def delete_tunnel(self, tunnel_id: str) -> bool:
@@ -280,6 +294,7 @@ class TunnelClient:
                     server_port=7000,
                     expires_at=t["expires_at"],
                     user_id=t.get("user_id"),
+                    status=t.get("status"),
                 )
             )
         return tunnels

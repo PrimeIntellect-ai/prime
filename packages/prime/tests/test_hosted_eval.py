@@ -37,6 +37,53 @@ class TestLogCleaning:
         assert clean_logs("The hosted eval is still initializing") == ""
 
 
+def test_eval_list_shows_hosted_checkbox(monkeypatch):
+    class DummyConfig:
+        team_id = None
+
+    class DummyClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def list_evaluations(self, **_kwargs):
+            return {
+                "evaluations": [
+                    {
+                        "evaluation_id": "hosted-1",
+                        "environment_names": ["aime2024"],
+                        "model_name": "openai/gpt-4.1-mini",
+                        "status": "RUNNING",
+                        "is_hosted": True,
+                        "metadata": {"num_examples": 3, "rollouts_per_example": 2},
+                    },
+                    {
+                        "evaluation_id": "local-1",
+                        "environment_names": ["gsm8k"],
+                        "model_name": "openai/gpt-4.1-mini",
+                        "status": "COMPLETED",
+                        "is_hosted": False,
+                        "metadata": {"num_examples": 5, "rollouts_per_example": 1},
+                    },
+                ],
+                "total": 2,
+            }
+
+    monkeypatch.setattr("prime_cli.commands.evals.Config", lambda: DummyConfig())
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+    monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyClient)
+
+    result = runner.invoke(
+        app,
+        ["eval", "list"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Mode" in result.output
+    assert "HOSTED" in result.output
+    assert "LOCAL" in result.output
+
+
 def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
     captured = {}
 

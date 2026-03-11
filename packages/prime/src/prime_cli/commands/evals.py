@@ -52,6 +52,8 @@ HOSTED_LOGS_RETRY_WAIT_SECONDS = 10
 HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS = 6
 EVAL_TABLE_MAX_TEXT_WIDTH = 30
 EVAL_RUN_EXAMPLE_COMMAND = "prime eval run gsm8k -n 10"
+EVAL_HOSTED_LABEL = "HOSTED"
+EVAL_LOCAL_LABEL = "LOCAL"
 
 
 class DefaultGroup(TyperGroup):
@@ -435,6 +437,7 @@ def list_evals(
         table.add_column("Environment", style="blue")
         table.add_column("Model", style="magenta")
         table.add_column("Status", style="yellow")
+        table.add_column("Type", style="green", justify="center")
         table.add_column("Examples", style="dim", justify="right")
         table.add_column("Rollouts", style="dim", justify="right")
 
@@ -449,11 +452,15 @@ def list_evals(
             if environment_names and len(environment_names) > 0:
                 env_name = environment_names[0]
 
+            is_hosted = bool(e.get("is_hosted"))
+            execution_mode = EVAL_HOSTED_LABEL if is_hosted else EVAL_LOCAL_LABEL
+
             table.add_row(
                 eval_id if eval_id else "",
                 str(env_name)[:EVAL_TABLE_MAX_TEXT_WIDTH],
                 str(e.get("model_name", ""))[:EVAL_TABLE_MAX_TEXT_WIDTH],
                 str(e.get("status", "")),
+                execution_mode,
                 str(num_examples),
                 str(rollouts_per_example),
             )

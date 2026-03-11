@@ -20,7 +20,9 @@ from prime_tunnel.models import TunnelInfo
 
 
 def _classify_frpc_error(
-    output_lines: list[str], tunnel_id: str | None = None
+    output_lines: list[str],
+    tunnel_id: str | None = None,
+    return_code: int | None = None,
 ) -> TunnelConnectionError:
     """Classify frpc output into a specific tunnel exception."""
     combined = "\n".join(output_lines).lower()
@@ -102,9 +104,10 @@ def _classify_frpc_error(
 
     # Fallback
     output_text = "\n".join(output_lines) if output_lines else "(no output captured)"
+    exit_info = f" (exit code {return_code})" if return_code is not None else ""
     return TunnelConnectionError(
         tunnel_id=tunnel_id,
-        message=f"frpc connection failed\n--- frpc output ---\n{output_text}\n-------------------",
+        message=f"frpc connection failed{exit_info}\n--- frpc output ---\n{output_text}",
     )
 
 
@@ -451,7 +454,7 @@ subdomain = "{self._tunnel_info.tunnel_id}"
                     remaining_output.extend(self._process.stderr.readlines())
                 self._output_lines.extend(line.strip() for line in remaining_output if line.strip())
 
-                raise _classify_frpc_error(self._output_lines, self.tunnel_id)
+                raise _classify_frpc_error(self._output_lines, self.tunnel_id, return_code)
 
             if os.name == "posix":
                 # Set both pipes to non-blocking mode to drain them without deadlock

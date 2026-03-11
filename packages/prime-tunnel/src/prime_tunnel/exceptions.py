@@ -9,9 +9,10 @@ class TunnelConnectionError(TunnelError):
 
     def __init__(
         self,
+        message: str | None = None,
+        *,  # keyword-only below for backwards compat
         tunnel_id: str | None = None,
         error_type: str | None = None,
-        message: str | None = None,
     ):
         self.tunnel_id = tunnel_id
         self.error_type = error_type

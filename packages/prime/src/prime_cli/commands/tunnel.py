@@ -10,7 +10,6 @@ from prime_tunnel.exceptions import (
     TunnelLimitReachedError,
     TunnelTimeoutError,
 )
-from prime_tunnel.tunnel import _classify_frpc_error
 from rich.console import Console
 from rich.table import Table
 
@@ -58,7 +57,14 @@ def start_tunnel(
             # Monitor tunnel health while waiting for shutdown signal
             while not shutdown_event.is_set():
                 if not tunnel.is_running:
-                    raise _classify_frpc_error(tunnel.recent_output, tunnel.tunnel_id)
+                    output = "\n".join(tunnel.recent_output) or "(no output captured)"
+                    raise TunnelConnectionError(
+                        message=(
+                            f"Tunnel process exited unexpectedly\n--- frpc output ---\n{output}"
+                        ),
+                        tunnel_id=tunnel.tunnel_id,
+                        error_type="connection_lost",
+                    )
                 try:
                     await asyncio.wait_for(shutdown_event.wait(), timeout=2.0)
                 except asyncio.TimeoutError:

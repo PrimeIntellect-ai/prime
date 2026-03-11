@@ -17,7 +17,7 @@ class TunnelConnectionError(TunnelError):
         self.tunnel_id = tunnel_id
         self.error_type = error_type
 
-        if message:
+        if message is not None:
             msg = message
         elif error_type:
             msg = f"Tunnel {tunnel_id} failed ({error_type})"

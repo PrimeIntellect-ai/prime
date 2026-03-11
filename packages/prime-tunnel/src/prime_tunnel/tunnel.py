@@ -19,7 +19,9 @@ from prime_tunnel.exceptions import (
 from prime_tunnel.models import TunnelInfo
 
 
-def _classify_frpc_error(output_lines: list[str], tunnel_id: str | None = None) -> TunnelError:
+def _classify_frpc_error(
+    output_lines: list[str], tunnel_id: str | None = None
+) -> TunnelConnectionError:
     """Classify frpc output into a specific tunnel exception."""
     combined = "\n".join(output_lines).lower()
 

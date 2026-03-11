@@ -57,7 +57,6 @@ def start_tunnel(
 
             # Monitor tunnel health while waiting for shutdown signal
             while not shutdown_event.is_set():
-                console.print("test")
                 if not tunnel.is_running:
                     raise _classify_frpc_error(tunnel.recent_output, tunnel.tunnel_id)
                 try:

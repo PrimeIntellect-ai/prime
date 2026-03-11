@@ -1,4 +1,3 @@
-import asyncio
 import json
 import re
 import time
@@ -13,7 +12,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from typer.core import TyperGroup
 
-from ..client import APIClient, APIError, AsyncAPIClient
+from ..client import APIClient, APIError
 from ..core import Config
 from ..utils import output_data_as_json
 from ..utils.display import get_eval_viewer_url
@@ -22,12 +21,9 @@ from ..utils.eval_push import load_results_jsonl
 from ..utils.hosted_eval import (
     EvalStatus,
     HostedEvalConfig,
+    HostedEvalResult,
     clean_logs,
-    get_evaluation,
-    get_evaluation_logs,
     get_new_log_lines,
-    run_hosted_evaluation,
-    stop_hosted_evaluation,
 )
 from ..verifiers_bridge import (
     DEFAULT_ENV_DIR_PATH,
@@ -127,20 +123,56 @@ def _parse_json_option(raw: Optional[str], option_name: str) -> Optional[dict[st
     return parsed
 
 
-def _fetch_eval_status(eval_id: str) -> dict[str, Any]:
-    async def _fetch() -> dict[str, Any]:
-        async with AsyncAPIClient() as client:
-            return await get_evaluation(client, eval_id)
-
-    return asyncio.run(_fetch())
+def _fetch_eval_status(client: APIClient, eval_id: str) -> dict[str, Any]:
+    return client.get(f"/evaluations/{eval_id}")
 
 
-def _fetch_logs(eval_id: str) -> str:
-    async def _fetch() -> str:
-        async with AsyncAPIClient() as client:
-            return await get_evaluation_logs(client, eval_id)
+def _fetch_logs(client: APIClient, eval_id: str) -> str:
+    response = client.get(f"/hosted-evaluations/{eval_id}/logs")
+    return response.get("logs") or ""
 
-    return asyncio.run(_fetch())
+
+def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]:
+    eval_config: dict[str, Any] = {
+        "num_examples": config.num_examples,
+        "rollouts_per_example": config.rollouts_per_example,
+        "allow_sandbox_access": config.allow_sandbox_access,
+        "allow_instances_access": config.allow_instances_access,
+    }
+
+    if config.env_args:
+        eval_config["env_args"] = config.env_args
+    if config.timeout_minutes is not None:
+        eval_config["timeout_minutes"] = config.timeout_minutes
+    if config.custom_secrets:
+        eval_config["custom_secrets"] = config.custom_secrets
+
+    payload: dict[str, Any] = {
+        "environment_ids": [config.environment_id],
+        "inference_model": config.inference_model,
+        "eval_config": eval_config,
+    }
+    if config.name:
+        payload["name"] = config.name
+
+    return payload
+
+
+def _create_hosted_evaluation(config: HostedEvalConfig) -> HostedEvalResult:
+    client = APIClient()
+    created = client.post("/hosted-evaluations", json=_build_hosted_evaluation_payload(config))
+    evaluation_id = created.get("evaluation_id")
+    if not evaluation_id:
+        raise APIError(f"Failed to get evaluation ID from response: {created}")
+
+    return HostedEvalResult(
+        evaluation_id=evaluation_id,
+        status=EvalStatus.PENDING,
+        total_samples=0,
+        avg_score=None,
+        min_score=None,
+        max_score=None,
+    )
 
 
 def _print_eval_status(eval_data: dict[str, Any]) -> None:
@@ -196,20 +228,21 @@ def _handle_log_poll_error(eval_id: str, exc: APIError, consecutive_errors: int)
         time.sleep(10)
 
 
-def _display_logs_follow(eval_id: str) -> None:
+def _display_logs_follow(eval_id: str, poll_interval: float) -> None:
     console.print(f"[dim]Watching logs for evaluation {eval_id}... (Ctrl+C to stop)[/dim]\n")
 
+    client = APIClient()
     last_logs = ""
     consecutive_errors = 0
     no_logs_polls = 0
 
     while True:
         try:
-            eval_data = _fetch_eval_status(eval_id)
+            eval_data = _fetch_eval_status(client, eval_id)
             status_str, status = _parse_eval_status(eval_data)
 
             if status and status in EvalStatus.terminal_statuses():
-                final_logs = clean_logs(_fetch_logs(eval_id))
+                final_logs = clean_logs(_fetch_logs(client, eval_id))
                 _print_new_log_lines(last_logs, final_logs)
                 console.print()
                 _print_eval_status(eval_data)
@@ -217,7 +250,7 @@ def _display_logs_follow(eval_id: str) -> None:
                     raise typer.Exit(1)
                 return
 
-            raw_logs = _fetch_logs(eval_id)
+            raw_logs = _fetch_logs(client, eval_id)
             logs = clean_logs(raw_logs) if raw_logs else ""
             consecutive_errors = 0
 
@@ -234,12 +267,13 @@ def _display_logs_follow(eval_id: str) -> None:
             _handle_log_poll_error(eval_id, exc, consecutive_errors)
             continue
 
-        time.sleep(5)
+        time.sleep(poll_interval)
 
 
 def _display_logs_once(eval_id: str, tail: int) -> None:
-    eval_data = _fetch_eval_status(eval_id)
-    raw_logs = _fetch_logs(eval_id)
+    client = APIClient()
+    eval_data = _fetch_eval_status(client, eval_id)
+    raw_logs = _fetch_logs(client, eval_id)
     logs = clean_logs(raw_logs) if raw_logs else ""
 
     if logs:
@@ -252,10 +286,15 @@ def _display_logs_once(eval_id: str, tail: int) -> None:
     _print_eval_status(eval_data)
 
 
-def _display_logs(eval_id: str, tail: int, follow: bool) -> None:
+def _display_logs(
+    eval_id: str,
+    tail: int,
+    follow: bool,
+    poll_interval: float = 5.0,
+) -> None:
     try:
         if follow:
-            _display_logs_follow(eval_id)
+            _display_logs_follow(eval_id, poll_interval)
         else:
             _display_logs_once(eval_id, tail)
     except KeyboardInterrupt:
@@ -808,9 +847,14 @@ def logs_cmd(
     eval_id: str = typer.Argument(..., help="Evaluation id to get logs for"),
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+    poll_interval: float = typer.Option(
+        5.0,
+        "--poll-interval",
+        help="Polling interval in seconds when following logs",
+    ),
 ) -> None:
     """Get logs for a hosted evaluation."""
-    _display_logs(eval_id, tail, follow)
+    _display_logs(eval_id, tail, follow, poll_interval=poll_interval)
 
 
 @app.command("stop", no_args_is_help=True)
@@ -819,7 +863,8 @@ def stop_cmd(
 ) -> None:
     """Stop a running hosted evaluation."""
     try:
-        result = asyncio.run(stop_hosted_evaluation(eval_id))
+        client = APIClient()
+        result = client.post(f"/hosted-evaluations/{eval_id}/cancel")
         message = result.get("message") or f"Evaluation {eval_id} cancelled."
         console.print(f"[green]✓ {message}[/green]")
         console.print(f"[dim]View results:[/dim] {get_eval_viewer_url(eval_id)}")
@@ -987,13 +1032,7 @@ def run_eval_cmd(
         )
 
         try:
-            result = asyncio.run(
-                run_hosted_evaluation(
-                    config=hosted_config,
-                    poll_interval=poll_interval,
-                    follow=False,
-                )
-            )
+            result = _create_hosted_evaluation(hosted_config)
         except APIError as exc:
             console.print(f"[red]Hosted evaluation failed:[/red] {exc}")
             raise typer.Exit(1) from exc
@@ -1003,7 +1042,12 @@ def run_eval_cmd(
             console.print(f"[cyan]Environment:[/cyan] {platform_slug}")
             console.print(f"[cyan]Evaluation ID:[/cyan] {result.evaluation_id}")
             console.print()
-            _display_logs(result.evaluation_id, tail=1000, follow=True)
+            _display_logs(
+                result.evaluation_id,
+                tail=1000,
+                follow=True,
+                poll_interval=poll_interval,
+            )
             return
 
         console.print("[green]✓ Hosted evaluation started[/green]")

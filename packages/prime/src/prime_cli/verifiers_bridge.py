@@ -132,10 +132,9 @@ def _append_eval_options(help_text: str) -> str:
         "  --eval-name TEXT            Custom name for the hosted evaluation.",
     ]
     lines = help_text.rstrip("\n").splitlines()
-    required_flags = ("--skip-upload", "--env-path", "--hosted")
-    if all(any(flag in line for line in lines) for flag in required_flags):
-        return help_text.rstrip() + "\n"
-    lines.extend(extra_lines)
+    for extra_line in extra_lines:
+        if extra_line not in lines:
+            lines.append(extra_line)
     return "\n".join(lines) + "\n"
 
 

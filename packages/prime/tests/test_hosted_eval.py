@@ -47,13 +47,11 @@ def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
         ),
     )
 
-    async def fake_run_hosted_evaluation(config, poll_interval, follow):
+    def fake_run_hosted_evaluation(config):
         captured["environment_id"] = config.environment_id
         captured["inference_model"] = config.inference_model
         captured["num_examples"] = config.num_examples
         captured["rollouts_per_example"] = config.rollouts_per_example
-        captured["poll_interval"] = poll_interval
-        captured["follow"] = follow
 
         from prime_cli.utils.hosted_eval import EvalStatus, HostedEvalResult
 
@@ -69,7 +67,7 @@ def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "prime_cli.commands.evals.run_hosted_evaluation",
+        "prime_cli.commands.evals._create_hosted_evaluation",
         fake_run_hosted_evaluation,
     )
 
@@ -84,7 +82,6 @@ def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
     assert captured["inference_model"] == "openai/gpt-4.1-mini"
     assert captured["num_examples"] == 5
     assert captured["rollouts_per_example"] == 3
-    assert captured["follow"] is False
     assert "Hosted evaluation started" in result.output
     assert "prime eval logs eval-123 -f" in result.output
 
@@ -100,10 +97,9 @@ def test_eval_run_hosted_follow_streams_logs(monkeypatch):
         ),
     )
 
-    async def fake_run_hosted_evaluation(config, poll_interval, follow):
+    def fake_run_hosted_evaluation(config):
         captured["num_examples"] = config.num_examples
         captured["rollouts_per_example"] = config.rollouts_per_example
-        captured["follow"] = follow
 
         from prime_cli.utils.hosted_eval import EvalStatus, HostedEvalResult
 
@@ -117,14 +113,15 @@ def test_eval_run_hosted_follow_streams_logs(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "prime_cli.commands.evals.run_hosted_evaluation",
+        "prime_cli.commands.evals._create_hosted_evaluation",
         fake_run_hosted_evaluation,
     )
 
-    def fake_display_logs(eval_id, tail, follow):
+    def fake_display_logs(eval_id, tail, follow, poll_interval=5.0):
         captured["display_eval_id"] = eval_id
         captured["display_tail"] = tail
         captured["display_follow"] = follow
+        captured["display_poll_interval"] = poll_interval
 
     monkeypatch.setattr("prime_cli.commands.evals._display_logs", fake_display_logs)
 
@@ -147,10 +144,10 @@ def test_eval_run_hosted_follow_streams_logs(monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["num_examples"] == 7
     assert captured["rollouts_per_example"] == 2
-    assert captured["follow"] is False
     assert captured["display_eval_id"] == "eval-123"
     assert captured["display_tail"] == 1000
     assert captured["display_follow"] is True
+    assert captured["display_poll_interval"] == 10.0
 
 
 def test_eval_run_hosted_rejects_config_target():
@@ -182,7 +179,7 @@ def test_eval_run_hosted_passes_env_dir_path_to_resolver(monkeypatch):
         captured["env_path"] = env_path
         return ("primeintellect/gsm8k", "env-123")
 
-    async def fake_run_hosted_evaluation(config, poll_interval, follow):
+    def fake_run_hosted_evaluation(config):
         from prime_cli.utils.hosted_eval import EvalStatus, HostedEvalResult
 
         return HostedEvalResult(
@@ -196,7 +193,7 @@ def test_eval_run_hosted_passes_env_dir_path_to_resolver(monkeypatch):
 
     monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
     monkeypatch.setattr(
-        "prime_cli.commands.evals.run_hosted_evaluation",
+        "prime_cli.commands.evals._create_hosted_evaluation",
         fake_run_hosted_evaluation,
     )
 
@@ -230,7 +227,7 @@ def test_eval_run_hosted_passes_env_path_to_resolver(monkeypatch):
         captured["env_path"] = env_path
         return ("primeintellect/gsm8k", "env-123")
 
-    async def fake_run_hosted_evaluation(config, poll_interval, follow):
+    def fake_run_hosted_evaluation(config):
         from prime_cli.utils.hosted_eval import EvalStatus, HostedEvalResult
 
         return HostedEvalResult(
@@ -244,7 +241,7 @@ def test_eval_run_hosted_passes_env_path_to_resolver(monkeypatch):
 
     monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
     monkeypatch.setattr(
-        "prime_cli.commands.evals.run_hosted_evaluation",
+        "prime_cli.commands.evals._create_hosted_evaluation",
         fake_run_hosted_evaluation,
     )
 
@@ -272,14 +269,11 @@ def test_eval_run_hosted_passes_env_path_to_resolver(monkeypatch):
 def test_eval_stop_command_calls_cancel_endpoint(monkeypatch):
     captured = {}
 
-    async def fake_stop_hosted_evaluation(eval_id):
-        captured["eval_id"] = eval_id
-        return {"message": "Evaluation cancelled", "evaluation_id": eval_id}
+    def fake_post(self, endpoint, json=None):
+        captured["endpoint"] = endpoint
+        return {"message": "Evaluation cancelled", "evaluation_id": "eval-123"}
 
-    monkeypatch.setattr(
-        "prime_cli.commands.evals.stop_hosted_evaluation",
-        fake_stop_hosted_evaluation,
-    )
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient.post", fake_post)
 
     result = runner.invoke(
         app,
@@ -288,7 +282,7 @@ def test_eval_stop_command_calls_cancel_endpoint(monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
-    assert captured == {"eval_id": "eval-123"}
+    assert captured == {"endpoint": "/hosted-evaluations/eval-123/cancel"}
     assert "Evaluation cancelled" in result.output
     assert "dashboard/evaluations/eval-123" in result.output
 
@@ -355,8 +349,11 @@ def test_eval_logs_command_follows_incremental_output(monkeypatch):
     )
 
     monkeypatch.setattr("prime_cli.commands.evals.time.sleep", lambda _: None)
-    monkeypatch.setattr("prime_cli.commands.evals._fetch_eval_status", lambda _: next(statuses))
-    monkeypatch.setattr("prime_cli.commands.evals._fetch_logs", lambda _: next(logs))
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._fetch_eval_status",
+        lambda _client, _: next(statuses),
+    )
+    monkeypatch.setattr("prime_cli.commands.evals._fetch_logs", lambda _client, _: next(logs))
     monkeypatch.setattr(
         "prime_cli.commands.evals.get_eval_viewer_url",
         lambda eval_id: f"https://app.primeintellect.ai/dashboard/evaluations/{eval_id}",

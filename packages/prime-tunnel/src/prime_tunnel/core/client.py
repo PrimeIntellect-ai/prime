@@ -115,6 +115,7 @@ class TunnelClient:
                 error_detail = response.json().get("detail", response.text)
             except Exception:
                 error_detail = response.text
+            error_detail = str(error_detail)
             if "maximum number of" in error_detail.lower():
                 raise TunnelLimitReachedError(error_detail)
             raise TunnelError(f"Failed to {operation}: {error_detail}")

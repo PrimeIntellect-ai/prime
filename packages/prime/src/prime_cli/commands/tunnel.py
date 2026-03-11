@@ -57,7 +57,7 @@ def start_tunnel(
             await shutdown_event.wait()
 
         except TunnelConnectionError as e:
-            header = f"[{e.error_type}]" if e.error_type else "[tunnel error]"
+            header = f"\\[{e.error_type}]" if e.error_type else "\\[tunnel error]"
             console.print(f"\n[red]{header}[/red] {e}", style="bold")
             if e.tunnel_id:
                 console.print(f"[dim]Tunnel ID: {e.tunnel_id}[/dim]")

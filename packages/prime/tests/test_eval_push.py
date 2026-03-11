@@ -4,8 +4,13 @@ import pytest
 from prime_cli.commands.evals import (
     _has_eval_files,
     _load_eval_directory,
+    _push_single_eval,
     _validate_eval_path,
 )
+from prime_cli.main import app
+from typer.testing import CliRunner
+
+runner = CliRunner()
 
 
 class TestHasEvalFiles:
@@ -118,6 +123,79 @@ class TestValidateEvalPath:
             _validate_eval_path("/nonexistent/path/xyz123")
 
         assert "Path not found" in str(exc_info.value)
+
+
+def test_push_eval_rejects_public_with_eval_id(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    (tmp_path / "metadata.json").write_text(json.dumps({"env": "gsm8k", "model": "gpt-4"}))
+    (tmp_path / "results.jsonl").write_text("")
+
+    result = runner.invoke(
+        app,
+        ["eval", "push", ".", "--eval-id", "eval-123", "--public"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "cannot be used with --eval-id" in result.output
+
+
+class TestPushSingleEval:
+    def test_create_evaluation_defaults_to_private(self, tmp_path, monkeypatch):
+        metadata = {"env": "gsm8k", "model": "gpt-4"}
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+        (tmp_path / "results.jsonl").write_text("")
+
+        captured = {}
+
+        class DummyEvalsClient:
+            def __init__(self, _api_client):
+                pass
+
+            def create_evaluation(self, **kwargs):
+                captured.update(kwargs)
+                return {"evaluation_id": "eval-123"}
+
+            def finalize_evaluation(self, evaluation_id, metrics=None):
+                captured["finalized_evaluation_id"] = evaluation_id
+                captured["finalized_metrics"] = metrics
+
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
+
+        eval_id = _push_single_eval(str(tmp_path), None, None, None)
+
+        assert eval_id == "eval-123"
+        assert captured["is_public"] is False
+
+    def test_create_evaluation_passes_public_flag(self, tmp_path, monkeypatch):
+        metadata = {"env": "gsm8k", "model": "gpt-4"}
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+        (tmp_path / "results.jsonl").write_text("")
+
+        captured = {}
+
+        class DummyEvalsClient:
+            def __init__(self, _api_client):
+                pass
+
+            def create_evaluation(self, **kwargs):
+                captured.update(kwargs)
+                return {"evaluation_id": "eval-123"}
+
+            def finalize_evaluation(self, evaluation_id, metrics=None):
+                captured["finalized_evaluation_id"] = evaluation_id
+                captured["finalized_metrics"] = metrics
+
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
+
+        eval_id = _push_single_eval(str(tmp_path), None, None, None, is_public=True)
+
+        assert eval_id == "eval-123"
+        assert captured["is_public"] is True
 
 
 class TestLoadEvalDirectory:

@@ -305,6 +305,7 @@ def _push_single_eval(
     env_slug: Optional[str],
     run_id: Optional[str],
     eval_id: Optional[str],
+    is_public: bool = False,
 ) -> str:
     path = _validate_eval_path(config_path)
     eval_data = _load_eval_directory(path)
@@ -364,6 +365,7 @@ def _push_single_eval(
             metadata=eval_data.get("metadata"),
             metrics=eval_data.get("metrics"),
             tags=eval_data.get("tags", []),
+            is_public=is_public,
         )
 
         eval_id = create_response.get("evaluation_id")
@@ -438,6 +440,11 @@ def push_eval(
         help="Push to existing evaluation id",
     ),
     output: str = typer.Option("pretty", "--output", "-o", help="json|pretty"),
+    is_public: bool = typer.Option(
+        False,
+        "--public",
+        help="Make the pushed evaluation public. Evaluations are private by default.",
+    ),
 ) -> None:
     """Push evaluation data to Prime Evals.
 
@@ -448,9 +455,17 @@ def push_eval(
         prime eval push                                    # Push current dir or auto-discover
         prime eval push outputs/evals/gsm8k--gpt-4/abc123  # Push specific directory
         prime eval push --env gsm8k                        # Push with environment override
+        prime eval push --public                           # Create a public evaluation
         prime eval push --eval xyz789                      # Push to existing evaluation
     """
     try:
+        if eval_id and is_public:
+            console.print(
+                "[red]Error:[/red] The --public flag cannot be used with --eval-id. "
+                "Visibility can only be set when creating a new evaluation."
+            )
+            raise typer.Exit(1)
+
         if config_path is None and eval_id:
             console.print("[red]Error:[/red] Cannot use --eval-id with auto-discovery")
             console.print()
@@ -462,7 +477,7 @@ def push_eval(
         if config_path is None:
             current_dir = Path(".")
             if _has_eval_files(current_dir):
-                result_eval_id = _push_single_eval(".", env_id, run_id, eval_id)
+                result_eval_id = _push_single_eval(".", env_id, run_id, eval_id, is_public)
                 if output == "json":
                     console.print()
                     output_data_as_json({"evaluation_id": result_eval_id}, console)
@@ -485,7 +500,9 @@ def push_eval(
             results = []
             for eval_dir in eval_dirs:
                 try:
-                    result_eval_id = _push_single_eval(str(eval_dir), env_id, run_id, eval_id)
+                    result_eval_id = _push_single_eval(
+                        str(eval_dir), env_id, run_id, eval_id, is_public
+                    )
                     results.append(
                         {"path": str(eval_dir), "eval_id": result_eval_id, "status": "success"}
                     )
@@ -508,7 +525,7 @@ def push_eval(
 
             return
 
-        result_eval_id = _push_single_eval(config_path, env_id, run_id, eval_id)
+        result_eval_id = _push_single_eval(config_path, env_id, run_id, eval_id, is_public)
 
         if output == "json":
             console.print()

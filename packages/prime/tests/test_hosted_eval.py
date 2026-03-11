@@ -79,7 +79,7 @@ def test_eval_list_shows_hosted_checkbox(monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
-    assert "Mode" in result.output
+    assert "Type" in result.output
     assert "HOSTED" in result.output
     assert "LOCAL" in result.output
 

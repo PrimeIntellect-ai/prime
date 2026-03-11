@@ -1,3 +1,4 @@
+from prime_cli.client import APIError
 from prime_cli.main import app
 from prime_cli.utils.hosted_eval import clean_logs, filter_progress_bars, strip_ansi
 from typer.testing import CliRunner
@@ -170,6 +171,16 @@ def test_eval_run_rejects_hosted_only_flags_without_hosted():
     assert "hosted-only options require `--hosted`" in result.output
 
 
+def test_eval_run_rejects_explicit_poll_interval_without_hosted():
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k", "--poll-interval", "10"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+    assert result.exit_code == 1
+    assert "hosted-only options require `--hosted`" in result.output
+
+
 def test_eval_run_hosted_passes_env_dir_path_to_resolver(monkeypatch):
     captured = {}
 
@@ -264,6 +275,24 @@ def test_eval_run_hosted_passes_env_path_to_resolver(monkeypatch):
         "env_dir_path": None,
         "env_path": "/tmp/local-env",
     }
+
+
+def test_eval_run_hosted_reports_resolve_api_errors(monkeypatch):
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_hosted_environment",
+        lambda environment, env_dir_path=None, env_path=None: (_ for _ in ()).throw(
+            APIError("lookup failed")
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k", "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "lookup failed" in result.output
 
 
 def test_eval_stop_command_calls_cancel_endpoint(monkeypatch):

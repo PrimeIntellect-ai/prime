@@ -3,11 +3,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from rich.console import Console
-
 from .formatters import strip_ansi
-
-console = Console()
 
 PROGRESS_BAR_MIN_WIDTH = 10
 PROGRESS_BAR = re.compile(rf".*\|[█▏▎▍▌▋▊▉ ]{{{PROGRESS_BAR_MIN_WIDTH},}}\|.*")
@@ -24,10 +20,6 @@ class EvalStatus(str, Enum):
     @classmethod
     def terminal_statuses(cls) -> set["EvalStatus"]:
         return {cls.COMPLETED, cls.FAILED, cls.TIMEOUT, cls.CANCELLED}
-
-    @classmethod
-    def has_logs_statuses(cls) -> set["EvalStatus"]:
-        return {cls.RUNNING, cls.COMPLETED, cls.FAILED, cls.TIMEOUT, cls.CANCELLED}
 
     @property
     def color(self) -> str:

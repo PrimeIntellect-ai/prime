@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import typer
+from click.core import ParameterSource
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
 from rich.console import Console
 from rich.syntax import Syntax
@@ -980,11 +981,14 @@ def run_eval_cmd(
         raise typer.Exit(2)
 
     env_dir_path = _parse_value_option(passthrough_args, "--env-dir-path", "-p")
+    poll_interval_was_provided = (
+        ctx.get_parameter_source("poll_interval") == ParameterSource.COMMANDLINE
+    )
 
     if not hosted:
         hosted_only_args = {
             "--follow": follow,
-            "--poll-interval": poll_interval != HOSTED_RUN_DEFAULT_POLL_INTERVAL_SECONDS,
+            "--poll-interval": poll_interval_was_provided,
             "--timeout-minutes": timeout_minutes is not None,
             "--allow-sandbox-access": allow_sandbox_access,
             "--allow-instances-access": allow_instances_access,
@@ -1007,11 +1011,15 @@ def run_eval_cmd(
             )
             raise typer.Exit(1)
 
-        platform_slug, environment_id = _resolve_hosted_environment(
-            environment,
-            env_dir_path=env_dir_path,
-            env_path=env_path,
-        )
+        try:
+            platform_slug, environment_id = _resolve_hosted_environment(
+                environment,
+                env_dir_path=env_dir_path,
+                env_path=env_path,
+            )
+        except APIError as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1) from exc
         model = _parse_value_option(passthrough_args, "--model", "-m") or DEFAULT_MODEL
         raw_num_examples = _parse_value_option(passthrough_args, "--num-examples", "-n")
         raw_rollouts = _parse_value_option(

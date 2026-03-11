@@ -192,7 +192,7 @@ class Tunnel:
             )
         except BaseException as e:
             await self._cleanup()
-            if isinstance(e, asyncio.CancelledError):
+            if isinstance(e, (asyncio.CancelledError, TunnelError)):
                 raise
             raise TunnelError(f"Failed to register tunnel: {e}") from e
 

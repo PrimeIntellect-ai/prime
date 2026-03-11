@@ -6,6 +6,13 @@ from typer.testing import CliRunner
 
 runner = CliRunner()
 
+TEST_ENV = {
+    "COLUMNS": "200",
+    "LINES": "50",
+    "PRIME_DISABLE_VERSION_CHECK": "1",
+    "PRIME_TEAM_ID": "",
+}
+
 
 @pytest.fixture
 def temp_home(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -48,11 +55,7 @@ def mock_teams_api(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class TestSwitchCommand:
     def test_switch_to_personal(self, temp_home: None, mock_teams_api: None) -> None:
-        result = runner.invoke(
-            app,
-            ["switch", "personal"],
-            env={"COLUMNS": "200", "LINES": "50", "PRIME_DISABLE_VERSION_CHECK": "1"},
-        )
+        result = runner.invoke(app, ["switch", "personal"], env=TEST_ENV)
 
         assert result.exit_code == 0, result.output
         assert "Switched to personal account." in result.output
@@ -67,31 +70,19 @@ class TestSwitchCommand:
         )
         monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
-        result = runner.invoke(
-            app,
-            ["switch", "personal"],
-            env={"COLUMNS": "200", "LINES": "50", "PRIME_DISABLE_VERSION_CHECK": "1"},
-        )
+        result = runner.invoke(app, ["switch", "personal"], env=TEST_ENV)
 
         assert result.exit_code == 0, result.output
         assert "Switched to personal account." in result.output
 
     def test_switch_to_team_slug(self, temp_home: None, mock_teams_api: None) -> None:
-        result = runner.invoke(
-            app,
-            ["switch", "prime"],
-            env={"COLUMNS": "200", "LINES": "50", "PRIME_DISABLE_VERSION_CHECK": "1"},
-        )
+        result = runner.invoke(app, ["switch", "prime"], env=TEST_ENV)
 
         assert result.exit_code == 0, result.output
         assert "Switched to team 'Prime Team'." in result.output
 
     def test_switch_to_team_id_fallback(self, temp_home: None, mock_teams_api: None) -> None:
-        result = runner.invoke(
-            app,
-            ["switch", "cmf0ohr9s0026ilerf3w68s6n"],
-            env={"COLUMNS": "200", "LINES": "50", "PRIME_DISABLE_VERSION_CHECK": "1"},
-        )
+        result = runner.invoke(app, ["switch", "cmf0ohr9s0026ilerf3w68s6n"], env=TEST_ENV)
 
         assert result.exit_code == 0, result.output
         assert "Switched to team 'Prime Team'." in result.output
@@ -99,11 +90,7 @@ class TestSwitchCommand:
     def test_switch_to_unknown_team_slug_shows_available_teams(
         self, temp_home: None, mock_teams_api: None
     ) -> None:
-        result = runner.invoke(
-            app,
-            ["switch", "unknown"],
-            env={"COLUMNS": "200", "LINES": "50", "PRIME_DISABLE_VERSION_CHECK": "1"},
-        )
+        result = runner.invoke(app, ["switch", "unknown"], env=TEST_ENV)
 
         assert result.exit_code == 1, result.output
         assert "Team 'unknown' not found." in result.output
@@ -136,22 +123,13 @@ class TestSwitchCommand:
         monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
         monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
-        result = runner.invoke(
-            app,
-            ["switch", "none"],
-            env={"COLUMNS": "200", "LINES": "50", "PRIME_DISABLE_VERSION_CHECK": "1"},
-        )
+        result = runner.invoke(app, ["switch", "none"], env=TEST_ENV)
 
         assert result.exit_code == 1, result.output
         assert "Team 'none' not found." in result.output
 
     def test_switch_interactive_selection(self, temp_home: None, mock_teams_api: None) -> None:
-        result = runner.invoke(
-            app,
-            ["switch"],
-            input="2\n",
-            env={"COLUMNS": "200", "LINES": "50", "PRIME_DISABLE_VERSION_CHECK": "1"},
-        )
+        result = runner.invoke(app, ["switch"], input="2\n", env=TEST_ENV)
 
         assert result.exit_code == 0, result.output
         assert "Switch account:" in result.output
@@ -190,12 +168,7 @@ class TestSwitchCommand:
         monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
         monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
-        result = runner.invoke(
-            app,
-            ["switch"],
-            input="1\n",
-            env={"COLUMNS": "200", "LINES": "50", "PRIME_DISABLE_VERSION_CHECK": "1"},
-        )
+        result = runner.invoke(app, ["switch"], input="1\n", env=TEST_ENV)
 
         assert result.exit_code == 0, result.output
         assert "Personal (current)" not in result.output

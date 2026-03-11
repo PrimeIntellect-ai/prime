@@ -57,6 +57,25 @@ class TestSwitchCommand:
         assert result.exit_code == 0, result.output
         assert "Switched to personal account." in result.output
 
+    def test_switch_to_personal_skips_team_fetch(
+        self, temp_home: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("PRIME_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "prime_cli.commands.switch.fetch_teams",
+            lambda _client: pytest.fail("fetch_teams should not be called for personal switch"),
+        )
+        monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+        result = runner.invoke(
+            app,
+            ["switch", "personal"],
+            env={"COLUMNS": "200", "LINES": "50", "PRIME_DISABLE_VERSION_CHECK": "1"},
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Switched to personal account." in result.output
+
     def test_switch_to_team_slug(self, temp_home: None, mock_teams_api: None) -> None:
         result = runner.invoke(
             app,
@@ -89,6 +108,42 @@ class TestSwitchCommand:
         assert result.exit_code == 1, result.output
         assert "Team 'unknown' not found." in result.output
         assert "Available teams: prime, research" in result.output
+
+    def test_switch_does_not_match_none_slug(
+        self, temp_home: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PRIME_API_KEY", "test-key")
+
+        def mock_get(
+            self: Any, endpoint: str, params: Optional[Dict[str, Any]] = None
+        ) -> Dict[str, Any]:
+            if endpoint == "/user/teams":
+                return {
+                    "data": [
+                        {
+                            "teamId": "cmf0ohr9s0026ilerf3w68s6n",
+                            "name": "New team",
+                            "slug": None,
+                            "role": "ADMIN",
+                            "createdAt": "2026-01-15T10:00:00Z",
+                        }
+                    ]
+                }
+            if endpoint == "/user/whoami":
+                return {"data": {"id": "user-123"}}
+            return {"data": []}
+
+        monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+        monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+        result = runner.invoke(
+            app,
+            ["switch", "none"],
+            env={"COLUMNS": "200", "LINES": "50", "PRIME_DISABLE_VERSION_CHECK": "1"},
+        )
+
+        assert result.exit_code == 1, result.output
+        assert "Team 'none' not found." in result.output
 
     def test_switch_interactive_selection(self, temp_home: None, mock_teams_api: None) -> None:
         result = runner.invoke(

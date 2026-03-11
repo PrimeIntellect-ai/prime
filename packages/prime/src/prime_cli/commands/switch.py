@@ -15,17 +15,20 @@ app = typer.Typer(
 )
 console = Console()
 
+PERSONAL_TARGET = "personal"
+
 
 def _select_team_by_target(teams: list[dict], target: str) -> Optional[dict]:
     normalized_target = target.strip().lower()
+
     for team in teams:
-        team_slug = str(team.get("slug", "")).strip().lower()
-        if team_slug and team_slug == normalized_target:
+        slug = team.get("slug")
+        if slug and slug.strip().lower() == normalized_target:
             return team
 
     for team in teams:
-        team_id = str(team.get("teamId", "")).strip().lower()
-        if team_id and team_id == normalized_target:
+        team_id = team.get("teamId")
+        if team_id and team_id.strip().lower() == normalized_target:
             return team
 
     return None
@@ -59,7 +62,9 @@ def _print_available_slugs(teams: list[dict]) -> None:
 
 @app.callback(invoke_without_command=True)
 def switch(
-    target: Optional[str] = typer.Argument(None, help="'personal', a team slug, or a team ID"),
+    target: Optional[str] = typer.Argument(
+        None, help=f"'{PERSONAL_TARGET}', a team slug, or a team ID"
+    ),
 ) -> None:
     """Switch the active account context."""
     config = Config()
@@ -70,6 +75,12 @@ def switch(
             "Clear it before using [bold]prime switch[/bold]."
         )
         raise typer.Exit(1)
+
+    if target is not None:
+        normalized_target = target.strip().lower()
+        if normalized_target == PERSONAL_TARGET:
+            _switch_to_personal(config)
+            return
 
     try:
         client = APIClient()
@@ -82,11 +93,6 @@ def switch(
         raise typer.Exit(1)
 
     if target is not None:
-        normalized_target = target.strip().lower()
-        if normalized_target == "personal":
-            _switch_to_personal(config)
-            return
-
         selected_team = _select_team_by_target(teams, normalized_target)
         if selected_team is None:
             console.print(f"[red]Team '{target}' not found.[/red]")

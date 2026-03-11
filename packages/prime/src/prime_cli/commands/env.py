@@ -469,21 +469,22 @@ def _collect_archive_files(env_path: Path) -> List[Path]:
         for file_path in sorted(env_path.glob(pattern), key=lambda p: p.name):
             maybe_add_file(file_path)
 
-    def is_dir_included(dir_path: Path) -> bool:
-        if not should_include_directory_in_archive(dir_path):
-            return False
+    def is_nested_dir_ignored(dir_path: Path) -> bool:
+        """Check if a nested directory should be pruned from traversal (gitignore only)."""
         if ignore_matcher is not None and ignore_matcher(str(dir_path)):
-            return False
-        return True
+            return True
+        return False
 
     for subdir in sorted(env_path.iterdir(), key=lambda path: path.name):
-        if not is_dir_included(subdir):
+        if not should_include_directory_in_archive(subdir):
+            continue
+        if is_nested_dir_ignored(subdir):
             continue
 
         for root, dirnames, filenames in os.walk(subdir):
             root_path = Path(root)
             dirnames[:] = sorted(
-                dirname for dirname in dirnames if is_dir_included(root_path / dirname)
+                dirname for dirname in dirnames if not is_nested_dir_ignored(root_path / dirname)
             )
             for filename in sorted(filenames):
                 maybe_add_file(root_path / filename)

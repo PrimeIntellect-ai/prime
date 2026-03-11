@@ -259,9 +259,9 @@ class Tunnel:
         if self._process is None:
             return
 
-        self._recent_output: list[str] = list(self._output_lines)
         self._output_lock = threading.Lock()
         max_lines = 50
+        self._recent_output: list[str] = list(self._output_lines[-max_lines:])
 
         def drain_pipe(pipe):
             """Read output from a pipe, retaining recent lines."""

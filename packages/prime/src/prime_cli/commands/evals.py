@@ -1,8 +1,10 @@
+import asyncio
 import json
 import re
+import time
 from functools import wraps
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
@@ -11,11 +13,29 @@ from rich.syntax import Syntax
 from rich.table import Table
 from typer.core import TyperGroup
 
-from ..client import APIClient
+from ..client import APIClient, APIError, AsyncAPIClient
 from ..core import Config
 from ..utils import output_data_as_json
+from ..utils.display import get_eval_viewer_url
+from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import load_results_jsonl
+from ..utils.hosted_eval import (
+    EvalStatus,
+    HostedEvalConfig,
+    clean_logs,
+    get_evaluation,
+    get_evaluation_logs,
+    get_new_log_lines,
+    run_hosted_evaluation,
+    stop_hosted_evaluation,
+)
 from ..verifiers_bridge import (
+    DEFAULT_ENV_DIR_PATH,
+    DEFAULT_MODEL,
+    _is_config_target,
+    _parse_value_option,
+    _resolve_environment_reference,
+    _split_owner_and_name,
     is_help_request,
     print_eval_run_help,
     run_eval_passthrough,
@@ -82,6 +102,231 @@ def format_output(data: dict, output: str) -> None:
     else:
         syntax = Syntax(json.dumps(data, indent=2), "json", theme="monokai")
         console.print(syntax)
+
+
+def _parse_json_option(raw: Optional[str], option_name: str) -> Optional[dict[str, str]]:
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        console.print(f"[red]Error:[/red] invalid {option_name}: {exc}")
+        raise typer.Exit(1) from exc
+
+    if type(parsed) is not dict:
+        console.print(f"[red]Error:[/red] {option_name} must be a JSON object")
+        raise typer.Exit(1)
+
+    for key, value in parsed.items():
+        if type(key) is not str or type(value) is not str:
+            console.print(
+                f"[red]Error:[/red] {option_name} must contain only string keys and values"
+            )
+            raise typer.Exit(1)
+
+    return parsed
+
+
+def _fetch_eval_status(eval_id: str) -> dict[str, Any]:
+    async def _fetch() -> dict[str, Any]:
+        async with AsyncAPIClient() as client:
+            return await get_evaluation(client, eval_id)
+
+    return asyncio.run(_fetch())
+
+
+def _fetch_logs(eval_id: str) -> str:
+    async def _fetch() -> str:
+        async with AsyncAPIClient() as client:
+            return await get_evaluation_logs(client, eval_id)
+
+    return asyncio.run(_fetch())
+
+
+def _print_eval_status(eval_data: dict[str, Any]) -> None:
+    status_str, status = _parse_eval_status(eval_data)
+    color = status.color if status else "white"
+
+    console.print(f"[{color}]Status: {status_str}[/{color}]")
+
+    error_message = eval_data.get("error_message")
+    if error_message:
+        console.print(f"[red]Error:[/red] {error_message}")
+
+    viewer_url = eval_data.get("viewer_url")
+    if viewer_url:
+        console.print(f"[dim]View: {viewer_url}[/dim]")
+        return
+
+    eval_id = eval_data.get("evaluation_id")
+    if eval_id:
+        console.print(f"[dim]View: {get_eval_viewer_url(eval_id)}[/dim]")
+
+
+def _parse_eval_status(eval_data: dict[str, Any]) -> tuple[str, EvalStatus | None]:
+    raw_status = eval_data.get("status")
+    status_str = raw_status if type(raw_status) is str else "UNKNOWN"
+
+    try:
+        return status_str, EvalStatus(status_str)
+    except ValueError:
+        return status_str, None
+
+
+def _print_new_log_lines(previous_logs: str, current_logs: str) -> str:
+    if current_logs and current_logs != previous_logs:
+        for line in get_new_log_lines(previous_logs, current_logs):
+            console.print(line)
+        return current_logs
+    return previous_logs
+
+
+def _handle_log_poll_error(eval_id: str, exc: APIError, consecutive_errors: int) -> None:
+    if "404" in str(exc):
+        console.print(f"\n[red]Evaluation {eval_id} not found.[/red]")
+        raise typer.Exit(1) from exc
+
+    if "429" not in str(exc):
+        raise exc
+
+    if consecutive_errors >= 3:
+        console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
+        time.sleep(30)
+    else:
+        time.sleep(10)
+
+
+def _display_logs_follow(eval_id: str) -> None:
+    console.print(f"[dim]Watching logs for evaluation {eval_id}... (Ctrl+C to stop)[/dim]\n")
+
+    last_logs = ""
+    consecutive_errors = 0
+    no_logs_polls = 0
+
+    while True:
+        try:
+            eval_data = _fetch_eval_status(eval_id)
+            status_str, status = _parse_eval_status(eval_data)
+
+            if status and status in EvalStatus.terminal_statuses():
+                final_logs = clean_logs(_fetch_logs(eval_id))
+                _print_new_log_lines(last_logs, final_logs)
+                console.print()
+                _print_eval_status(eval_data)
+                if status != EvalStatus.COMPLETED:
+                    raise typer.Exit(1)
+                return
+
+            raw_logs = _fetch_logs(eval_id)
+            logs = clean_logs(raw_logs) if raw_logs else ""
+            consecutive_errors = 0
+
+            if logs:
+                last_logs = _print_new_log_lines(last_logs, logs)
+                no_logs_polls = 0
+            else:
+                no_logs_polls += 1
+
+            if no_logs_polls > 0 and no_logs_polls % 6 == 0:
+                console.print(f"[dim]Evaluation status: {status_str} (waiting for logs...)[/dim]")
+        except APIError as exc:
+            consecutive_errors += 1
+            _handle_log_poll_error(eval_id, exc, consecutive_errors)
+            continue
+
+        time.sleep(5)
+
+
+def _display_logs_once(eval_id: str, tail: int) -> None:
+    eval_data = _fetch_eval_status(eval_id)
+    raw_logs = _fetch_logs(eval_id)
+    logs = clean_logs(raw_logs) if raw_logs else ""
+
+    if logs:
+        for line in logs.splitlines()[-tail:]:
+            console.print(line)
+    else:
+        console.print("[yellow]No logs available.[/yellow]")
+
+    console.print()
+    _print_eval_status(eval_data)
+
+
+def _display_logs(eval_id: str, tail: int, follow: bool) -> None:
+    try:
+        if follow:
+            _display_logs_follow(eval_id)
+        else:
+            _display_logs_once(eval_id, tail)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped watching logs. Evaluation continues running.[/dim]")
+    except typer.Exit:
+        raise
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+
+def _resolve_hosted_environment(
+    environment: str,
+    *,
+    env_dir_path: Optional[str],
+    env_path: Optional[str],
+) -> tuple[str, str]:
+    resolved = _resolve_environment_reference(environment, env_dir_path or DEFAULT_ENV_DIR_PATH)
+
+    if resolved.recommend_push:
+        console.print(
+            "[red]Error:[/red] hosted evaluations require an environment "
+            "that is published to the platform"
+        )
+        if resolved.platform_slug:
+            console.print(
+                "[yellow]Publish the latest local changes for "
+                f"{resolved.platform_slug} first.[/yellow]"
+            )
+        else:
+            console.print("[yellow]Publish the environment with `prime env push` first.[/yellow]")
+        raise typer.Exit(1)
+
+    platform_slug = resolved.platform_slug or resolved.upstream_slug
+    if platform_slug is None and env_path:
+        metadata = find_environment_metadata(
+            env_name=resolved.env_name,
+            env_path=Path(env_path),
+            module_name=resolved.env_name.replace("-", "_"),
+        )
+        owner = metadata.get("owner") if metadata else None
+        name = metadata.get("name") if metadata else None
+        if owner and name:
+            platform_slug = f"{owner}/{name}"
+
+    if platform_slug is None:
+        console.print(
+            "[red]Error:[/red] hosted evaluations require an upstream environment on the platform"
+        )
+        console.print(
+            "[yellow]Use an environment slug or publish the local environment "
+            "with `prime env push`.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    parts = _split_owner_and_name(platform_slug)
+    if parts is None:
+        console.print(f"[red]Error:[/red] invalid environment slug: {platform_slug}")
+        raise typer.Exit(1)
+
+    owner, env_name = parts
+    api_client = APIClient()
+    response = api_client.get(f"/environmentshub/{owner}/{env_name}/@latest")
+    details = response.get("data", response)
+    environment_id = details.get("id")
+    if not environment_id:
+        console.print(f"[red]Error:[/red] could not resolve environment id for {platform_slug}")
+        raise typer.Exit(1)
+
+    console.print(f"[dim]Using hosted environment {platform_slug}[/dim]")
+    return platform_slug, str(environment_id)
 
 
 @subcommands_app.command("list")
@@ -558,6 +803,31 @@ app = typer.Typer(
 app.add_typer(subcommands_app, name="")
 
 
+@app.command("logs", no_args_is_help=True)
+def logs_cmd(
+    eval_id: str = typer.Argument(..., help="Evaluation id to get logs for"),
+    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+) -> None:
+    """Get logs for a hosted evaluation."""
+    _display_logs(eval_id, tail, follow)
+
+
+@app.command("stop", no_args_is_help=True)
+def stop_cmd(
+    eval_id: str = typer.Argument(..., help="Evaluation id to stop"),
+) -> None:
+    """Stop a running hosted evaluation."""
+    try:
+        result = asyncio.run(stop_hosted_evaluation(eval_id))
+        message = result.get("message") or f"Evaluation {eval_id} cancelled."
+        console.print(f"[green]✓ {message}[/green]")
+        console.print(f"[dim]View results:[/dim] {get_eval_viewer_url(eval_id)}")
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+
 @app.command(
     "run",
     help="Run an evaluation with API models (default provider = Prime Inference)",
@@ -587,6 +857,46 @@ def run_eval_cmd(
             "(used to locate .prime/.env-metadata.json for upstream resolution)"
         ),
     ),
+    hosted: bool = typer.Option(
+        False,
+        "--hosted",
+        help="Run the evaluation on the platform instead of locally",
+    ),
+    poll_interval: float = typer.Option(
+        10.0,
+        "--poll-interval",
+        help="Polling interval in seconds for hosted evaluation status",
+    ),
+    follow: bool = typer.Option(
+        False,
+        "--follow",
+        help="Follow hosted evaluation status and stream logs until completion",
+    ),
+    timeout_minutes: Optional[int] = typer.Option(
+        None,
+        "--timeout-minutes",
+        help="Timeout in minutes for hosted evaluation",
+    ),
+    allow_sandbox_access: bool = typer.Option(
+        False,
+        "--allow-sandbox-access",
+        help="Allow sandbox read/write access for hosted evaluations",
+    ),
+    allow_instances_access: bool = typer.Option(
+        False,
+        "--allow-instances-access",
+        help="Allow instance creation and management for hosted evaluations",
+    ),
+    custom_secrets: Optional[str] = typer.Option(
+        None,
+        "--custom-secrets",
+        help='Custom secrets for hosted eval as JSON (e.g. \'{"API_KEY":"xxx"}\')',
+    ),
+    eval_name: Optional[str] = typer.Option(
+        None,
+        "--eval-name",
+        help="Custom name for the hosted evaluation",
+    ),
 ) -> None:
     """Run an evaluation with local-first environment resolution."""
     passthrough_args = list(ctx.args)
@@ -604,6 +914,104 @@ def run_eval_cmd(
         console.print("[red]Error:[/red] Environment/config must be the first argument.")
         console.print("[dim]Example: prime eval run gsm8k -n 10[/dim]")
         raise typer.Exit(2)
+
+    env_dir_path = _parse_value_option(passthrough_args, "--env-dir-path", "-p")
+
+    if not hosted:
+        hosted_only_args = {
+            "--follow": follow,
+            "--poll-interval": poll_interval != 10.0,
+            "--timeout-minutes": timeout_minutes is not None,
+            "--allow-sandbox-access": allow_sandbox_access,
+            "--allow-instances-access": allow_instances_access,
+            "--custom-secrets": custom_secrets is not None,
+            "--eval-name": eval_name is not None,
+        }
+        used_hosted_only_args = [flag for flag, used in hosted_only_args.items() if used]
+        if used_hosted_only_args:
+            console.print(
+                "[red]Error:[/red] hosted-only options require `--hosted`: "
+                + ", ".join(used_hosted_only_args)
+            )
+            raise typer.Exit(1)
+
+    if hosted:
+        if _is_config_target(environment):
+            console.print(
+                "[red]Error:[/red] hosted evaluations require a single environment, "
+                "not a TOML config"
+            )
+            raise typer.Exit(1)
+
+        platform_slug, environment_id = _resolve_hosted_environment(
+            environment,
+            env_dir_path=env_dir_path,
+            env_path=env_path,
+        )
+        model = _parse_value_option(passthrough_args, "--model", "-m") or DEFAULT_MODEL
+        raw_num_examples = _parse_value_option(passthrough_args, "--num-examples", "-n")
+        raw_rollouts = _parse_value_option(
+            passthrough_args,
+            "--rollouts-per-example",
+            "-r",
+        )
+        raw_env_args = _parse_value_option(passthrough_args, "--env-args", "")
+
+        try:
+            num_examples = int(raw_num_examples) if raw_num_examples is not None else 5
+            rollouts_per_example = int(raw_rollouts) if raw_rollouts is not None else 3
+        except ValueError as exc:
+            console.print(
+                "[red]Error:[/red] --num-examples and --rollouts-per-example must be integers"
+            )
+            raise typer.Exit(1) from exc
+
+        if num_examples < -1 or rollouts_per_example < 1:
+            console.print(
+                "[red]Error:[/red] --num-examples must be >= -1 and "
+                "--rollouts-per-example must be >= 1"
+            )
+            raise typer.Exit(1)
+
+        hosted_config = HostedEvalConfig(
+            environment_id=environment_id,
+            inference_model=model,
+            num_examples=num_examples,
+            rollouts_per_example=rollouts_per_example,
+            env_args=_parse_json_option(raw_env_args, "--env-args"),
+            name=eval_name,
+            timeout_minutes=timeout_minutes,
+            allow_sandbox_access=allow_sandbox_access,
+            allow_instances_access=allow_instances_access,
+            custom_secrets=_parse_json_option(custom_secrets, "--custom-secrets"),
+        )
+
+        try:
+            result = asyncio.run(
+                run_hosted_evaluation(
+                    config=hosted_config,
+                    poll_interval=poll_interval,
+                    follow=False,
+                )
+            )
+        except APIError as exc:
+            console.print(f"[red]Hosted evaluation failed:[/red] {exc}")
+            raise typer.Exit(1) from exc
+
+        if follow:
+            console.print("[green]✓ Hosted evaluation started[/green]")
+            console.print(f"[cyan]Environment:[/cyan] {platform_slug}")
+            console.print(f"[cyan]Evaluation ID:[/cyan] {result.evaluation_id}")
+            console.print()
+            _display_logs(result.evaluation_id, tail=1000, follow=True)
+            return
+
+        console.print("[green]✓ Hosted evaluation started[/green]")
+        console.print(f"[cyan]Environment:[/cyan] {platform_slug}")
+        console.print(f"[cyan]Evaluation ID:[/cyan] {result.evaluation_id}")
+        console.print(f"[green]View results:[/green] {get_eval_viewer_url(result.evaluation_id)}")
+        console.print("[dim]View logs:[/dim] prime eval logs " + result.evaluation_id + " -f")
+        return
 
     run_eval_passthrough(
         environment=environment,

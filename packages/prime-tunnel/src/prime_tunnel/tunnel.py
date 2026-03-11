@@ -242,6 +242,9 @@ class Tunnel:
     def recent_output(self) -> list[str]:
         """Last N lines of frpc output (thread-safe). Falls back to startup output."""
         if hasattr(self, "_output_lock"):
+            if not self.is_running and hasattr(self, "_drain_threads"):
+                for t in self._drain_threads:
+                    t.join(timeout=2.0)
             with self._output_lock:
                 return list(self._recent_output)
         return list(self._output_lines)
@@ -256,7 +259,7 @@ class Tunnel:
         if self._process is None:
             return
 
-        self._recent_output: list[str] = []
+        self._recent_output: list[str] = list(self._output_lines)
         self._output_lock = threading.Lock()
         max_lines = 50
 
@@ -275,8 +278,11 @@ class Tunnel:
             except (OSError, ValueError):
                 pass  # Pipe closed
 
+        self._drain_threads: list[threading.Thread] = []
         for pipe in (self._process.stdout, self._process.stderr):
-            threading.Thread(target=drain_pipe, args=(pipe,), daemon=True).start()
+            t = threading.Thread(target=drain_pipe, args=(pipe,), daemon=True)
+            t.start()
+            self._drain_threads.append(t)
 
     def _write_frpc_config(self) -> Path:
         """Generate and write frpc configuration file."""

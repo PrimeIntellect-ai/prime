@@ -469,16 +469,21 @@ def _collect_archive_files(env_path: Path) -> List[Path]:
         for file_path in sorted(env_path.glob(pattern), key=lambda p: p.name):
             maybe_add_file(file_path)
 
+    def is_dir_included(dir_path: Path) -> bool:
+        if not should_include_directory_in_archive(dir_path):
+            return False
+        if ignore_matcher is not None and ignore_matcher(str(dir_path)):
+            return False
+        return True
+
     for subdir in sorted(env_path.iterdir(), key=lambda path: path.name):
-        if not should_include_directory_in_archive(subdir):
+        if not is_dir_included(subdir):
             continue
 
         for root, dirnames, filenames in os.walk(subdir):
             root_path = Path(root)
             dirnames[:] = sorted(
-                dirname
-                for dirname in dirnames
-                if should_include_directory_in_archive(root_path / dirname)
+                dirname for dirname in dirnames if is_dir_included(root_path / dirname)
             )
             for filename in sorted(filenames):
                 maybe_add_file(root_path / filename)

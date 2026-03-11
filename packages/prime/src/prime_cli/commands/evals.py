@@ -459,6 +459,13 @@ def push_eval(
         prime eval push --eval xyz789                      # Push to existing evaluation
     """
     try:
+        if eval_id and is_public:
+            console.print(
+                "[red]Error:[/red] The --public flag cannot be used with --eval-id. "
+                "Visibility can only be set when creating a new evaluation."
+            )
+            raise typer.Exit(1)
+
         if config_path is None and eval_id:
             console.print("[red]Error:[/red] Cannot use --eval-id with auto-discovery")
             console.print()

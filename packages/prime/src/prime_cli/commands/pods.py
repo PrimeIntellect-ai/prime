@@ -742,6 +742,7 @@ def create(
                     shared_with_team = True
                     sharing_display = "All team members"
                 else:
+                    shared_with_team = False
                     selected_indices = []
                     for part in selection.split(","):
                         part = part.strip()

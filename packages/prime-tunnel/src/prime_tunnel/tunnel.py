@@ -1,6 +1,7 @@
 import asyncio
 import fcntl
 import os
+import re
 import subprocess
 import threading
 import time
@@ -25,11 +26,11 @@ def _classify_frpc_error(
     return_code: int | None = None,
 ) -> TunnelConnectionError:
     """Classify frpc output into a specific tunnel exception."""
-    combined = "\n".join(output_lines).lower()
+    combined = re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(output_lines)).lower()
 
     # Auth failures
-    if "login failed" in combined:
-        if "tunnel not registered" in combined:
+    if "login" in combined and "failed" in combined:
+        if "not registered" in combined:
             return TunnelConnectionError(
                 tunnel_id=tunnel_id,
                 error_type="auth_failed",
@@ -75,7 +76,7 @@ def _classify_frpc_error(
         )
 
     # Config errors (proxy type, custom domains, subdomain)
-    if "unsupported proxy type" in combined:
+    if "unsupported proxy type" in combined or "proxy type not support" in combined:
         return TunnelConnectionError(
             tunnel_id=tunnel_id,
             error_type="config_error",

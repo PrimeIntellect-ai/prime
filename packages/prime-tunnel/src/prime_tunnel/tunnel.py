@@ -432,9 +432,7 @@ subdomain = "{self._tunnel_info.tunnel_id}"
                                         "login to the server failed" in line.lower()
                                         or "connect to server error" in line.lower()
                                     ):
-                                        raise _parse_frpc_error(
-                                            self._output_lines, self.tunnel_id
-                                        )
+                                        raise _parse_frpc_error(self._output_lines, self.tunnel_id)
                         except (BlockingIOError, IOError):
                             pass  # No more data available on this pipe
                 finally:

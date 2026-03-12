@@ -96,6 +96,48 @@ def test_eval_run_blocks_when_inference_billing_is_missing(monkeypatch, error_me
     assert exc_info.value.exit_code == 1
 
 
+def test_eval_preflight_omits_max_tokens(monkeypatch):
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+    )
+    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.InferenceClient.retrieve_model",
+        lambda self, model: {"id": model},
+    )
+
+    seen_payloads = []
+
+    def fake_chat_completion(self, payload, stream=False):
+        seen_payloads.append(payload)
+        return {"id": "cmpl-123", "choices": []}
+
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.InferenceClient.chat_completion",
+        fake_chat_completion,
+    )
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._prepare_single_environment",
+        lambda *args, **kwargs: (_ for _ in ()).throw(typer.Exit(0)),
+    )
+
+    with pytest.raises(typer.Exit) as exc_info:
+        run_eval_passthrough(
+            environment="single_turn_math",
+            passthrough_args=["-m", "openai/gpt-4.1-mini"],
+            skip_upload=False,
+            env_path=None,
+        )
+
+    assert exc_info.value.exit_code == 0
+    assert seen_payloads == [
+        {
+            "model": "openai/gpt-4.1-mini",
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+        }
+    ]
+
+
 def test_streaming_error_reads_response_before_formatting(monkeypatch):
     client = InferenceClient.__new__(InferenceClient)
     client.inference_url = "https://api.pinference.ai/api/v1"

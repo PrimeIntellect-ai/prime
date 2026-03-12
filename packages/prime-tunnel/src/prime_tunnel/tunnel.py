@@ -53,6 +53,11 @@ def _classify_frpc_error(
                     "Binding secret mismatch. The tunnel may have been recreated. Create a new one."
                 ),
             )
+        return TunnelConnectionError(
+            tunnel_id=tunnel_id,
+            error_type="auth_failed",
+            message="Login failed. Tunnel may have expired or been deleted.",
+        )
 
     if "token in login doesn't match" in combined or "authorization failed" in combined:
         return TunnelConnectionError(

@@ -130,10 +130,14 @@ def list_tunnels(
 
     for tunnel in tunnels:
         status_display = tunnel.status or "unknown"
-        if status_display == "connected":
+        if status_display == "CONNECTED":
             status_display = "[green]connected[/green]"
-        elif status_display == "pending":
+        elif status_display == "PENDING":
             status_display = "[yellow]pending[/yellow]"
+        elif status_display == "DISCONNECTED":
+            status_display = "[red]disconnected[/red]"
+        elif status_display == "EXPIRED":
+            status_display = "[dim]expired[/dim]"
 
         table.add_row(
             tunnel.tunnel_id,

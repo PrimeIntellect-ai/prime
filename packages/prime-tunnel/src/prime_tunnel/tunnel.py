@@ -62,7 +62,8 @@ def _classify_frpc_error(
             return TunnelConnectionError(
                 tunnel_id=tunnel_id,
                 error_type="already_online",
-                message="Another client is already connected with this tunnel. Stop the existing connection first.",
+                message="Another client is already connected with this tunnel."
+                " Stop the existing connection first.",
             )
         if "connection refused" in combined or "no such host" in combined or "dial tcp" in combined:
             return TunnelConnectionError(

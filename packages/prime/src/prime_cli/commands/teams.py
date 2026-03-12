@@ -12,9 +12,23 @@ console = Console()
 
 
 def fetch_teams(client: APIClient) -> list[dict]:
-    """Fetch teams for the current user (returns data list only)."""
-    response = client.get("/user/teams")
-    return response.get("data", []) if isinstance(response, dict) else []
+    """Fetch all teams for the current user across paginated responses."""
+    all_teams: list[dict] = []
+    offset = 0
+    limit = 100
+
+    while True:
+        response = client.get("/user/teams", params={"offset": offset, "limit": limit})
+        batch = response.get("data", []) if isinstance(response, dict) else []
+        all_teams.extend(batch)
+        total = response.get("total_count", len(all_teams)) if isinstance(response, dict) else 0
+
+        if not batch or len(all_teams) >= total:
+            break
+
+        offset += limit
+
+    return all_teams
 
 
 def fetch_team_members(client: APIClient, team_id: str) -> list[dict]:

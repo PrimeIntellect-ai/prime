@@ -31,7 +31,6 @@ from ..utils.display import POD_STATUS_COLORS
 
 app = typer.Typer(help="Manage compute pods", no_args_is_help=True)
 console = Console()
-config = Config()
 
 
 def _format_pod_for_status(status: PodStatus, pod_details: Pod) -> Dict[str, Any]:
@@ -402,17 +401,16 @@ def create(
         False,
         "--share-with-team",
         help="Share the pod with all team members",
-        hidden=not bool(config.team_id),
     ),
     add_members: bool = typer.Option(
         False,
         "--add-members",
         help="Interactively select team members to share the pod with",
-        hidden=not bool(config.team_id),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Create a new pod with an interactive setup process"""
+    config = Config()
     env_vars = []
     if env:
         for env_var in env:
@@ -421,6 +419,13 @@ def create(
 
     # Resolve team_id
     resolved_team_id = team_id or config.team_id
+
+    if share_with_team and add_members:
+        console.print(
+            "[red]Error: --share-with-team and --add-members are mutually exclusive. "
+            "Use only one of them.[/red]"
+        )
+        raise typer.Exit(1)
 
     # Error if user explicitly passed sharing flags without a team
     if (share_with_team or add_members) and not resolved_team_id:
@@ -1038,7 +1043,7 @@ def connect(pod_id: str) -> None:
                 time.sleep(5)  # Wait 5 seconds before retrying
 
         # Get SSH key path from config
-        ssh_key_path = config.ssh_key_path
+        ssh_key_path = Config().ssh_key_path
         if not os.path.exists(ssh_key_path):
             console.print(f"[red]SSH key not found at {ssh_key_path}[/red]")
             raise typer.Exit(1)

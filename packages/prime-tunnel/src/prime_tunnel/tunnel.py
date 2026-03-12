@@ -64,6 +64,12 @@ def _classify_frpc_error(
                 error_type="already_online",
                 message="Another client is already connected with this tunnel. Stop the existing connection first.",
             )
+        if "connection refused" in combined or "no such host" in combined or "dial tcp" in combined:
+            return TunnelConnectionError(
+                tunnel_id=tunnel_id,
+                error_type="connection_lost",
+                message="Cannot reach tunnel server. Check internet and firewall.",
+            )
         return TunnelConnectionError(
             tunnel_id=tunnel_id,
             error_type="auth_failed",
@@ -109,14 +115,6 @@ def _classify_frpc_error(
             tunnel_id=tunnel_id,
             error_type="config_error",
             message="Subdomain mismatch. Tunnel configuration error.",
-        )
-
-    # Network errors
-    if "connection refused" in combined or "no such host" in combined or "dial tcp" in combined:
-        return TunnelConnectionError(
-            tunnel_id=tunnel_id,
-            error_type="connection_lost",
-            message="Cannot reach tunnel server. Check internet and firewall.",
         )
 
     # Fallback

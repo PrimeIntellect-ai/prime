@@ -500,8 +500,8 @@ subdomain = "{self._tunnel_info.tunnel_id}"
                                     if "start proxy success" in line.lower():
                                         return
                                     if (
-                                        "login failed" in line.lower()
-                                        or "authorization failed" in line.lower()
+                                        "login to the server failed" in line.lower()
+                                        or "connect to server error" in line.lower()
                                     ):
                                         raise _classify_frpc_error(
                                             self._output_lines, self.tunnel_id

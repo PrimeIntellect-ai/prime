@@ -19,6 +19,15 @@ from prime_tunnel.exceptions import (
 )
 from prime_tunnel.models import TunnelInfo
 
+# timestamp + level + caller prefix + message
+_LOG_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\.\d{3}\s"
+    r"\[([EWIDT])\]\s"
+    r"\[.*?\]\s"
+    r"(?:\[.*?\]\s)*"
+    r"(.+)"
+)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 def _parse_frpc_error(
     output_lines: list[str],
@@ -26,16 +35,6 @@ def _parse_frpc_error(
     return_code: int | None = None,
 ) -> TunnelConnectionError:
     """Parse frpc log output into a structured tunnel exception."""
-    # timestamp + level + caller prefix + message
-    _LOG_RE = re.compile(
-        r"\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\.\d{3}\s"
-        r"\[([EWIDT])\]\s"
-        r"\[.*?\]\s"
-        r"(?:\[.*?\]\s)*"
-        r"(.+)"
-    )
-    _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
     error_messages: list[str] = []
     for raw_line in output_lines:
         line = _ANSI_RE.sub("", raw_line)

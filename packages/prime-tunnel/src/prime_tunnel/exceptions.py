@@ -5,22 +5,18 @@ class TunnelError(Exception):
 
 
 class TunnelConnectionError(TunnelError):
-    """Structured error for tunnel failures with diagnostic fields."""
+    """Tunnel connection failure with optional tunnel ID for diagnostics."""
 
     def __init__(
         self,
         message: str | None = None,
         *,  # keyword-only below for backwards compat
         tunnel_id: str | None = None,
-        error_type: str | None = None,
     ):
         self.tunnel_id = tunnel_id
-        self.error_type = error_type
 
         if message is not None:
             msg = message
-        elif error_type:
-            msg = f"Tunnel {tunnel_id} failed ({error_type})"
         elif tunnel_id:
             msg = f"Tunnel {tunnel_id} is not running"
         else:

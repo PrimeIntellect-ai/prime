@@ -20,111 +20,40 @@ from prime_tunnel.exceptions import (
 from prime_tunnel.models import TunnelInfo
 
 
-def _classify_frpc_error(
+def _parse_frpc_error(
     output_lines: list[str],
     tunnel_id: str | None = None,
     return_code: int | None = None,
 ) -> TunnelConnectionError:
-    """Classify frpc output into a specific tunnel exception."""
-    combined = re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(output_lines)).lower()
-
-    if "login to the server failed" in combined or "connect to server error" in combined:
-        if "not registered" in combined:
-            return TunnelConnectionError(
-                tunnel_id=tunnel_id,
-                error_type="auth_failed",
-                message=(
-                    "Tunnel no longer registered. It may have expired or been "
-                    "deleted. Create a new one."
-                ),
-            )
-        if "invalid authentication token" in combined:
-            return TunnelConnectionError(
-                tunnel_id=tunnel_id,
-                error_type="auth_failed",
-                message="Tunnel token is invalid or expired. Create a new tunnel.",
-            )
-        if "invalid binding secret" in combined:
-            return TunnelConnectionError(
-                tunnel_id=tunnel_id,
-                error_type="auth_failed",
-                message=(
-                    "Binding secret mismatch. The tunnel may have been recreated. Create a new one."
-                ),
-            )
-        if "send login request to plugin error" in combined:
-            return TunnelConnectionError(
-                tunnel_id=tunnel_id,
-                error_type="auth_failed",
-                message="Tunnel server plugin unreachable. Try again later.",
-            )
-        if "already online" in combined:
-            return TunnelConnectionError(
-                tunnel_id=tunnel_id,
-                error_type="already_online",
-                message="Another client is already connected with this tunnel."
-                " Stop the existing connection first.",
-            )
-        if "connection refused" in combined or "no such host" in combined or "dial tcp" in combined:
-            return TunnelConnectionError(
-                tunnel_id=tunnel_id,
-                error_type="connection_lost",
-                message="Cannot reach tunnel server. Check internet and firewall.",
-            )
-        return TunnelConnectionError(
-            tunnel_id=tunnel_id,
-            error_type="auth_failed",
-            message="Login failed. Tunnel may have expired or been deleted.",
-        )
-
-    if "token in login doesn't match" in combined:
-        return TunnelConnectionError(
-            tunnel_id=tunnel_id,
-            error_type="auth_failed",
-            message="Server rejected authorization. Tunnel may have expired or been deleted.",
-        )
-
-    # Connection lost
-    if "heartbeat timeout" in combined:
-        return TunnelConnectionError(
-            tunnel_id=tunnel_id,
-            error_type="connection_lost",
-            message="Lost connection to tunnel server (heartbeat timeout). Check your network.",
-        )
-    if "pong message contains error" in combined:
-        return TunnelConnectionError(
-            tunnel_id=tunnel_id,
-            error_type="connection_lost",
-            message="Tunnel server sent an error during keepalive.",
-        )
-
-    # Config errors (proxy type, custom domains, subdomain)
-    if "unsupported proxy type" in combined or "proxy type not support" in combined:
-        return TunnelConnectionError(
-            tunnel_id=tunnel_id,
-            error_type="config_error",
-            message="Only HTTP tunnels are supported.",
-        )
-    if "custom_domains not allowed" in combined:
-        return TunnelConnectionError(
-            tunnel_id=tunnel_id,
-            error_type="config_error",
-            message="Custom domains are not permitted.",
-        )
-    if "subdomain does not match" in combined:
-        return TunnelConnectionError(
-            tunnel_id=tunnel_id,
-            error_type="config_error",
-            message="Subdomain mismatch. Tunnel configuration error.",
-        )
-
-    # Fallback
-    output_text = "\n".join(output_lines) if output_lines else "(no output captured)"
-    exit_info = f" (exit code {return_code})" if return_code is not None else ""
-    return TunnelConnectionError(
-        tunnel_id=tunnel_id,
-        message=f"frpc connection failed{exit_info}\n--- frpc output ---\n{output_text}",
+    """Parse frpc log output into a structured tunnel exception."""
+    # timestamp + level + caller prefix + message
+    _LOG_RE = re.compile(
+        r"\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\.\d{3}\s"
+        r"\[([EWIDT])\]\s"
+        r"\[.*?\]\s"
+        r"(?:\[.*?\]\s)*"
+        r"(.+)"
     )
+    _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+    error_messages: list[str] = []
+    for raw_line in output_lines:
+        line = _ANSI_RE.sub("", raw_line)
+        m = _LOG_RE.match(line)
+        if not m:
+            continue
+        level, msg = m.group(1), m.group(2)
+        if level in ("E", "W"):
+            error_messages.append(msg)
+
+    if error_messages:
+        message = error_messages[-1]
+    else:
+        output_text = "\n".join(output_lines) if output_lines else "(no output captured)"
+        exit_info = f" (exit code {return_code})" if return_code is not None else ""
+        message = f"frpc process failed{exit_info}: {output_text}"
+
+    return TunnelConnectionError(tunnel_id=tunnel_id, message=message)
 
 
 class Tunnel:
@@ -470,7 +399,7 @@ subdomain = "{self._tunnel_info.tunnel_id}"
                     remaining_output.extend(self._process.stderr.readlines())
                 self._output_lines.extend(line.strip() for line in remaining_output if line.strip())
 
-                raise _classify_frpc_error(self._output_lines, self.tunnel_id, return_code)
+                raise _parse_frpc_error(self._output_lines, self.tunnel_id, return_code)
 
             if os.name == "posix":
                 # Set both pipes to non-blocking mode to drain them without deadlock
@@ -503,7 +432,7 @@ subdomain = "{self._tunnel_info.tunnel_id}"
                                         "login to the server failed" in line.lower()
                                         or "connect to server error" in line.lower()
                                     ):
-                                        raise _classify_frpc_error(
+                                        raise _parse_frpc_error(
                                             self._output_lines, self.tunnel_id
                                         )
                         except (BlockingIOError, IOError):

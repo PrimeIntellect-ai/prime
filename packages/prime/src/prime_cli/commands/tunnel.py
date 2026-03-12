@@ -63,7 +63,6 @@ def start_tunnel(
                             f"Tunnel process exited unexpectedly\n--- frpc output ---\n{output}"
                         ),
                         tunnel_id=tunnel.tunnel_id,
-                        error_type="connection_lost",
                     )
                 try:
                     await asyncio.wait_for(shutdown_event.wait(), timeout=2.0)
@@ -71,8 +70,7 @@ def start_tunnel(
                     pass
 
         except TunnelConnectionError as e:
-            header = f"\\[{e.error_type}]" if e.error_type else "\\[tunnel error]"
-            console.print(f"\n[red]{header}[/red] {e}", style="bold")
+            console.print(f"\n[red]Tunnel error:[/red] {e}", style="bold")
             if e.tunnel_id:
                 console.print(f"[dim]Tunnel ID: {e.tunnel_id}[/dim]")
             raise typer.Exit(1)

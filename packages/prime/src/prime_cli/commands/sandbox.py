@@ -538,7 +538,7 @@ def delete(
     sandbox_ids: Optional[List[str]] = typer.Argument(
         None, help="Sandbox ID(s) to delete (space or comma-separated)"
     ),
-    all: bool = typer.Option(False, "--all", help="Delete all sandboxes"),
+    all: bool = typer.Option(False, "--all", "-a", help="Delete all sandboxes"),
     labels: Optional[List[str]] = typer.Option(
         None, "--label", "-l", help="Delete all sandboxes with ALL these labels"
     ),
@@ -546,6 +546,7 @@ def delete(
     only_mine: bool = typer.Option(
         True,
         "--only-mine/--all-users",
+        "-m/-A",
         help="Restrict '--all' deletes to only your sandboxes",
         show_default=True,
     ),

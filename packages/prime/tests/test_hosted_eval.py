@@ -345,11 +345,11 @@ def test_eval_run_hosted_reports_resolve_api_errors(monkeypatch):
 def test_eval_stop_command_calls_cancel_endpoint(monkeypatch):
     captured = {}
 
-    def fake_post(self, endpoint, json=None):
+    def fake_patch(self, endpoint, json=None, params=None):
         captured["endpoint"] = endpoint
         return {"message": "Evaluation cancelled", "evaluation_id": "eval-123"}
 
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient.post", fake_post)
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient.patch", fake_patch)
 
     result = runner.invoke(
         app,

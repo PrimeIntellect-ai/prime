@@ -891,7 +891,7 @@ def stop_cmd(
     """Stop a running hosted evaluation."""
     try:
         client = APIClient()
-        result = client.post(f"/hosted-evaluations/{eval_id}/cancel")
+        result = client.patch(f"/hosted-evaluations/{eval_id}/cancel")
         message = result.get("message") or f"Evaluation {eval_id} cancelled."
         console.print(f"[green]✓ {message}[/green]")
         console.print(f"[dim]View results:[/dim] {get_eval_viewer_url(eval_id)}")

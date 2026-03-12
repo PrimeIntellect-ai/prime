@@ -197,6 +197,15 @@ id = "{env_value}"
 # [checkpoints]
 # interval = 100              # Save checkpoint every N steps
 # keep_cloud = 5              # Keep N checkpoints in cloud (-1 = keep all)
+
+# Optional: adapter upload configuration
+# [adapters]
+# interval = 0                # Upload adapter every N steps (0 = only at run end)
+# keep_last = 3               # Keep N adapters in cloud (-1 = keep all)
+
+# Optional: infrastructure configuration
+# [infrastructure]
+# compute_size = "M"          # S, M (default), or L
 '''
 
 
@@ -369,6 +378,33 @@ class CheckpointsConfig(BaseModel):
         return result if result else None
 
 
+class AdaptersConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    interval: int | None = None  # Upload adapter every N steps (0 = only at run end)
+    keep_last: int | None = None  # Keep N adapters in cloud (-1 = keep all)
+
+    def to_api_dict(self) -> Dict[str, Any] | None:
+        result: Dict[str, Any] = {}
+        if self.interval is not None:
+            result["interval"] = self.interval
+        if self.keep_last is not None:
+            result["keep_last"] = self.keep_last
+        return result if result else None
+
+
+class InfrastructureConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    compute_size: str | None = None
+
+    def to_api_dict(self) -> Dict[str, Any] | None:
+        d: Dict[str, Any] = {}
+        if self.compute_size is not None:
+            d["compute_size"] = self.compute_size
+        return d if d else None
+
+
 class RLConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -382,6 +418,7 @@ class RLConfig(BaseModel):
     oversampling_factor: float | None = None
     max_async_level: int | None = None
     checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
+    cluster_name: str | None = None  # Admin-only: target a specific cluster by name
     env: List[EnvConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
@@ -389,6 +426,8 @@ class RLConfig(BaseModel):
     buffer: BufferConfig = Field(default_factory=BufferConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
+    adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
+    infrastructure: InfrastructureConfig = Field(default_factory=InfrastructureConfig)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
 
@@ -639,6 +678,11 @@ def create_run(
             if cfg.val.interval:
                 console.print(f"  Interval:     {cfg.val.interval}")
 
+        # Infrastructure
+        if cfg.infrastructure.compute_size:
+            console.print("\n[cyan]Infrastructure[/cyan]")
+            console.print(f"  Compute Size: {cfg.infrastructure.compute_size}")
+
         # Checkpoint warm-start
         if cfg.checkpoint_id:
             console.print(f"\n[cyan]Warm-start from checkpoint:[/cyan] {cfg.checkpoint_id}")
@@ -723,7 +767,10 @@ def create_run(
             oversampling_factor=cfg.oversampling_factor,
             max_async_level=cfg.max_async_level,
             checkpoints_config=cfg.checkpoints.to_api_dict(),
+            adapters_config=cfg.adapters.to_api_dict(),
             checkpoint_id=cfg.checkpoint_id,
+            cluster_name=cfg.cluster_name,
+            infrastructure_config=cfg.infrastructure.to_api_dict(),
         )
 
         if output == "json":
@@ -798,12 +845,12 @@ def list_models(
         raise typer.Exit(1)
 
 
-def _list_runs_impl(team: Optional[str], num: int, output: str) -> None:
+def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> None:
     """Implementation for listing RL training runs."""
     validate_output_format(output, console)
 
-    if num < 1:
-        console.print("[red]Error:[/red] --num must be at least 1")
+    if num < 1 or page < 1:
+        console.print("[red]Error:[/red] --num and --page must be at least 1")
         raise typer.Exit(1)
 
     try:
@@ -816,18 +863,28 @@ def _list_runs_impl(team: Optional[str], num: int, output: str) -> None:
         all_runs = rl_client.list_runs(team_id=team_id)
         total_count = len(all_runs)
 
-        # Sort by created_at descending and limit
+        # Sort by created_at descending and paginate
         all_runs.sort(key=lambda r: r.created_at, reverse=True)
-        runs = all_runs[:num]
+        start = (page - 1) * num
+        runs = all_runs[start : start + num]
 
         if output == "json":
             output_data_as_json(
-                {"runs": [r.model_dump() for r in runs], "total": total_count}, console
+                {
+                    "runs": [r.model_dump() for r in runs],
+                    "total": total_count,
+                    "page": page,
+                    "per_page": num,
+                },
+                console,
             )
             return
 
         if not runs:
-            console.print("[yellow]No RL training runs found.[/yellow]")
+            if page > 1:
+                console.print("[yellow]No more results.[/yellow]")
+            else:
+                console.print("[yellow]No RL training runs found.[/yellow]")
             return
 
         table = Table(title="RL Training Runs")
@@ -852,10 +909,10 @@ def _list_runs_impl(team: Optional[str], num: int, output: str) -> None:
 
         console.print(table)
 
-        if total_count > num:
+        if total_count > page * num:
             console.print(
-                f"\n[dim]Showing {len(runs)} of {total_count} runs. "
-                "Use --num (-n) to see more.[/dim]"
+                f"\n[yellow]Showing page {page} of results. "
+                f"Use --page {page + 1} to see more.[/yellow]"
             )
         else:
             console.print(f"\n[dim]Total: {total_count} run(s)[/dim]")
@@ -869,11 +926,12 @@ def _list_runs_impl(team: Optional[str], num: int, output: str) -> None:
 @app.command("ls", rich_help_panel="Commands", hidden=True)
 def list_runs(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
-    num: int = typer.Option(20, "--num", "-n", help="Number of most recent runs to show"),
+    num: int = typer.Option(20, "--num", "-n", help="Items per page"),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List your runs (alias: ls)."""
-    _list_runs_impl(team, num, output)
+    _list_runs_impl(team, num, page, output)
 
 
 @app.command("get", rich_help_panel="Commands")
@@ -1190,7 +1248,7 @@ def get_rollouts(
     run_id: str = typer.Argument(..., help="Run ID to get rollouts for"),
     step: int = typer.Option(..., "--step", "-s", help="Step number to get rollouts for"),
     page: int = typer.Option(1, "--page", "-p", help="Page number (1-indexed)"),
-    limit: int = typer.Option(100, "--limit", "-n", help="Number of samples per page"),
+    num: int = typer.Option(100, "--num", "-n", help="Items per page"),
 ) -> None:
     """Get rollout samples for a run.
 
@@ -1198,7 +1256,7 @@ def get_rollouts(
 
         prime rl rollouts <run_id> --step 10
 
-        prime rl rollouts <run_id> -s 50 --limit 100 | jq '.samples[0]'
+        prime rl rollouts <run_id> -s 50 --num 100 | jq '.samples[0]'
     """
     try:
         api_client = APIClient()
@@ -1208,7 +1266,7 @@ def get_rollouts(
             run_id,
             step=step,
             page=page,
-            limit=limit,
+            limit=num,
         )
 
         output_data_as_json(result, console)

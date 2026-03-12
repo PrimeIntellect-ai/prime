@@ -252,6 +252,7 @@ def set_team_id(
         raise typer.Exit(code=1)
 
     team_name = None
+    team_role = None
     if team_id:
         try:
             client = APIClient()
@@ -259,11 +260,12 @@ def set_team_id(
             for team in teams:
                 if team.get("teamId") == team_id:
                     team_name = team.get("name")
+                    team_role = team.get("role")
                     break
         except (APIError, Exception):
             pass
 
-    config.set_team(team_id, team_name=team_name)
+    config.set_team(team_id, team_name=team_name, team_role=team_role)
     if team_id:
         if team_name:
             console.print(f"[green]Team '{team_name}' ({team_id}) configured successfully![/green]")

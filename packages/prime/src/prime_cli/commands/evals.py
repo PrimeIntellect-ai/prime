@@ -16,6 +16,7 @@ from ..core import Config
 from ..utils import output_data_as_json
 from ..utils.eval_push import load_results_jsonl
 from ..verifiers_bridge import (
+    is_help_request,
     print_eval_run_help,
     run_eval_passthrough,
     run_eval_tui,
@@ -87,8 +88,8 @@ def format_output(data: dict, output: str) -> None:
 @handle_errors
 def list_evals(
     output: str = typer.Option("table", "--output", "-o", help="table|json"),
-    skip: int = typer.Option(0, "--skip", help="Number of records to skip"),
-    limit: int = typer.Option(50, "--limit", help="Maximum number of records to return"),
+    num: int = typer.Option(20, "--num", "-n", help="Items per page"),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
     env: Optional[str] = typer.Option(
         None,
         "--env",
@@ -100,16 +101,21 @@ def list_evals(
     """List evaluations."""
     _validate_output_format(output, ["table", "json"])
 
+    if num < 1 or page < 1:
+        console.print("[red]Error:[/red] --num and --page must be at least 1")
+        raise typer.Exit(1)
+
     try:
         api_client = APIClient()
         config = Config()
         client = EvalsClient(api_client)
 
+        skip = (page - 1) * num
         data = client.list_evaluations(
             env_name=env,
             team_id=config.team_id,
             skip=skip,
-            limit=limit,
+            limit=num,
         )
 
         if output == "json":
@@ -119,7 +125,10 @@ def list_evals(
         evals = data.get("evaluations", [])
 
         if not evals:
-            console.print("[yellow]No evaluations found.[/yellow]")
+            if page > 1:
+                console.print("[yellow]No more results.[/yellow]")
+            else:
+                console.print("[yellow]No evaluations found.[/yellow]")
             return
 
         table = Table(title="Evaluations")
@@ -152,10 +161,13 @@ def list_evals(
 
         console.print(table)
         total = data.get("total", 0)
-        if evals:
-            console.print(f"[dim]Total: {total} | Showing {skip + 1}-{skip + len(evals)}[/dim]")
+        if total > page * num:
+            console.print(
+                f"\n[yellow]Showing page {page} of results. "
+                f"Use --page {page + 1} to see more.[/yellow]"
+            )
         else:
-            console.print(f"[dim]Total: {total}[/dim]")
+            console.print(f"\n[dim]Total: {total} evaluation(s)[/dim]")
 
     except EvalsAPIError as e:
         console.print(f"[red]API Error:[/red] {e}")
@@ -188,14 +200,14 @@ def get_eval(
 def get_samples(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    limit: int = typer.Option(100, "--num", "-n", help="Samples per page"),
+    num: int = typer.Option(100, "--num", "-n", help="Items per page"),
     output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
 ) -> None:
     _validate_output_format(output, ["json", "pretty"])
 
     api_client = APIClient()
     client = EvalsClient(api_client)
-    data = client.get_samples(eval_id, page=page, limit=limit)
+    data = client.get_samples(eval_id, page=page, limit=num)
     format_output(data, output)
 
 
@@ -293,6 +305,7 @@ def _push_single_eval(
     env_slug: Optional[str],
     run_id: Optional[str],
     eval_id: Optional[str],
+    is_public: bool = False,
 ) -> str:
     path = _validate_eval_path(config_path)
     eval_data = _load_eval_directory(path)
@@ -352,6 +365,7 @@ def _push_single_eval(
             metadata=eval_data.get("metadata"),
             metrics=eval_data.get("metrics"),
             tags=eval_data.get("tags", []),
+            is_public=is_public,
         )
 
         eval_id = create_response.get("evaluation_id")
@@ -426,6 +440,11 @@ def push_eval(
         help="Push to existing evaluation id",
     ),
     output: str = typer.Option("pretty", "--output", "-o", help="json|pretty"),
+    is_public: bool = typer.Option(
+        False,
+        "--public",
+        help="Make the pushed evaluation public. Evaluations are private by default.",
+    ),
 ) -> None:
     """Push evaluation data to Prime Evals.
 
@@ -436,9 +455,17 @@ def push_eval(
         prime eval push                                    # Push current dir or auto-discover
         prime eval push outputs/evals/gsm8k--gpt-4/abc123  # Push specific directory
         prime eval push --env gsm8k                        # Push with environment override
+        prime eval push --public                           # Create a public evaluation
         prime eval push --eval xyz789                      # Push to existing evaluation
     """
     try:
+        if eval_id and is_public:
+            console.print(
+                "[red]Error:[/red] The --public flag cannot be used with --eval-id. "
+                "Visibility can only be set when creating a new evaluation."
+            )
+            raise typer.Exit(1)
+
         if config_path is None and eval_id:
             console.print("[red]Error:[/red] Cannot use --eval-id with auto-discovery")
             console.print()
@@ -450,7 +477,7 @@ def push_eval(
         if config_path is None:
             current_dir = Path(".")
             if _has_eval_files(current_dir):
-                result_eval_id = _push_single_eval(".", env_id, run_id, eval_id)
+                result_eval_id = _push_single_eval(".", env_id, run_id, eval_id, is_public)
                 if output == "json":
                     console.print()
                     output_data_as_json({"evaluation_id": result_eval_id}, console)
@@ -473,7 +500,9 @@ def push_eval(
             results = []
             for eval_dir in eval_dirs:
                 try:
-                    result_eval_id = _push_single_eval(str(eval_dir), env_id, run_id, eval_id)
+                    result_eval_id = _push_single_eval(
+                        str(eval_dir), env_id, run_id, eval_id, is_public
+                    )
                     results.append(
                         {"path": str(eval_dir), "eval_id": result_eval_id, "status": "success"}
                     )
@@ -496,7 +525,7 @@ def push_eval(
 
             return
 
-        result_eval_id = _push_single_eval(config_path, env_id, run_id, eval_id)
+        result_eval_id = _push_single_eval(config_path, env_id, run_id, eval_id, is_public)
 
         if output == "json":
             console.print()
@@ -553,18 +582,14 @@ app.add_typer(subcommands_app, name="")
     context_settings={
         "allow_extra_args": True,
         "ignore_unknown_options": True,
+        "help_option_names": [],
     },
 )
 def run_eval_cmd(
     ctx: typer.Context,
-    environment: str = typer.Argument(
-        ...,
+    environment: Optional[str] = typer.Argument(
+        None,
         help="Environment name/slug or TOML config path",
-    ),
-    backend_help: bool = typer.Option(
-        False,
-        "--backend-help",
-        help="Show backend vf-eval help (all passthrough flags/options)",
     ),
     skip_upload: bool = typer.Option(
         False,
@@ -582,9 +607,15 @@ def run_eval_cmd(
 ) -> None:
     """Run an evaluation with local-first environment resolution."""
     passthrough_args = list(ctx.args)
-    if backend_help:
+
+    if is_help_request(environment or "", passthrough_args):
         print_eval_run_help()
         raise typer.Exit(0)
+
+    if environment is None:
+        console.print("[red]Error:[/red] Missing argument 'ENVIRONMENT'.")
+        console.print("[dim]Example: prime eval run gsm8k -n 10[/dim]")
+        raise typer.Exit(2)
 
     if environment.startswith("-"):
         console.print("[red]Error:[/red] Environment/config must be the first argument.")

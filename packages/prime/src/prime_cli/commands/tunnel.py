@@ -141,7 +141,7 @@ def stop_tunnel(
     tunnel_ids: Optional[List[str]] = typer.Argument(
         None, help="Tunnel ID(s) to stop (space or comma-separated)"
     ),
-    all: bool = typer.Option(False, "--all", help="Stop all tunnels"),
+    all: bool = typer.Option(False, "--all", "-a", help="Stop all tunnels"),
     team_id: Optional[str] = typer.Option(
         None,
         "--team-id",
@@ -151,7 +151,8 @@ def stop_tunnel(
     only_mine: bool = typer.Option(
         True,
         "--only-mine/--all-users",
-        help="Restrict '--all' deletes to only your tunnels (default: only yours)",
+        "-m/-A",
+        help="Restrict '--all' deletes to only your tunnels",
         show_default=True,
     ),
 ) -> None:

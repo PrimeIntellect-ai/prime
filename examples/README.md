@@ -148,6 +148,7 @@ request = CreateSandboxRequest(
     memory_gb=4,
     disk_size_gb=20,
     gpu_count=0,
+    gpu_type=None,
     timeout_minutes=60,
     environment_vars={"ENV": "production"},
     secrets={"API_KEY": "your-secret-key"},
@@ -165,10 +166,18 @@ print(f"Created sandbox: {sandbox.id}")
 prime sandbox list [--team_id TEAM] [--status STATUS] [--page N] [--per_page N]
 
 # Create sandbox
-prime sandbox create NAME --docker_image IMAGE [OPTIONS]
+prime sandbox create IMAGE [OPTIONS]
+
+# Create GPU sandbox
+prime sandbox create --gpu-count 1 --gpu-type H100_80GB
+
+# Note: DOCKER_IMAGE is not supported for GPU sandboxes
 
 # With environment variables and secrets:
 prime sandbox create python:3.11-slim --env KEY=VALUE --secret API_KEY=secret123
+
+# Run command in sandbox
+prime sandbox run SANDBOX_ID -- python script.py
 
 # Get sandbox details
 prime sandbox get SANDBOX_ID

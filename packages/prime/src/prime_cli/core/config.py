@@ -91,14 +91,15 @@ class Config:
     def team_id(self) -> Optional[str]:
         """Get team ID with precedence: env > file > None."""
         env_val = os.getenv("PRIME_TEAM_ID")
-        if env_val is not None:
-            return env_val or None
+        if env_val is not None and env_val.strip():
+            return env_val
         return self.config.get("team_id") or None
 
     @property
     def team_id_from_env(self) -> bool:
         """Check if team ID is set via environment variable."""
-        return os.getenv("PRIME_TEAM_ID") is not None
+        env_val = os.getenv("PRIME_TEAM_ID")
+        return bool(env_val and env_val.strip())
 
     @property
     def team_name(self) -> Optional[str]:

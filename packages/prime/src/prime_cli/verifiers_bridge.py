@@ -18,7 +18,7 @@ from rich.console import Console
 
 from prime_cli.core import Config
 
-from .api.inference import InferenceAPIError, InferenceClient
+from .api.inference import InferenceAPIError, InferenceClient, InferencePaymentRequiredError
 from .client import APIClient, APIError
 from .utils.env_metadata import find_environment_metadata, get_environment_metadata
 from .utils.eval_push import push_eval_results_to_hub
@@ -67,8 +67,16 @@ def _sanitize_help_text(help_text: str, module_name: str, prime_command: str) ->
     for idx, line in enumerate(lines):
         if line.lower().startswith("usage:"):
             suffix = line.split(":", 1)[1].strip()
-            parts = suffix.split(maxsplit=1)
-            suffix = parts[1] if len(parts) > 1 else ""
+            python_module_prefix = re.compile(
+                rf"^python(?:\d+(?:\.\d+)?)?\s+-m\s+{re.escape(module_name)}(?:\s+|$)"
+            )
+            module_prefix = re.compile(rf"^{re.escape(module_name)}(?:\s+|$)")
+            match = python_module_prefix.match(suffix) or module_prefix.match(suffix)
+            if match is not None:
+                suffix = suffix[match.end() :].lstrip()
+            else:
+                parts = suffix.split(maxsplit=1)
+                suffix = parts[1] if len(parts) > 1 else ""
             lines[idx] = f"Usage: {prime_command}{(' ' + suffix) if suffix else ''}"
             break
 
@@ -82,6 +90,8 @@ def _sanitize_help_text(help_text: str, module_name: str, prime_command: str) ->
         sanitized = sanitized.replace(module_alias, command_alias)
 
     sanitized = re.sub(r"\bvf-[a-z0-9-]+\b", prime_command, sanitized)
+    if prime_command in {"prime eval run", "prime gepa run"}:
+        sanitized = re.sub(r"\benv_id_or_config\b", "environment", sanitized)
     return sanitized.rstrip() + "\n"
 
 
@@ -106,6 +116,18 @@ def _write_help(text: str) -> None:
     sys.stdout.flush()
 
 
+def _append_eval_options(help_text: str) -> str:
+    extra_lines = [
+        "  --skip-upload        Skip uploading evaluation results to the platform.",
+        "  --env-path PATH      Explicit path for upstream environment metadata.",
+    ]
+    lines = help_text.rstrip("\n").splitlines()
+    if any("--skip-upload" in line or "--env-path" in line for line in lines):
+        return help_text.rstrip() + "\n"
+    lines.extend(extra_lines)
+    return "\n".join(lines) + "\n"
+
+
 def print_eval_run_help() -> None:
     try:
         help_text = _load_help_text(
@@ -115,12 +137,7 @@ def print_eval_run_help() -> None:
     except Exception as exc:
         console.print(f"[red]Failed to load help for prime eval run:[/red] {exc}")
         raise typer.Exit(1) from exc
-    _write_help(help_text)
-    _write_help(
-        "\nPrime-only options:\n"
-        "  --skip-upload        Skip uploading evaluation results to the platform.\n"
-        "  --env-path PATH      Explicit path for upstream environment metadata.\n"
-    )
+    _write_help(_append_eval_options(help_text))
 
 
 def print_gepa_run_help() -> None:
@@ -155,6 +172,18 @@ def print_env_build_help() -> None:
         )
     except Exception as exc:
         console.print(f"[red]Failed to load help for prime env build:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    _write_help(help_text)
+
+
+def print_lab_setup_help() -> None:
+    try:
+        help_text = _load_help_text(
+            load_verifiers_prime_plugin(console=console).setup_module,
+            "prime lab setup",
+        )
+    except Exception as exc:
+        console.print(f"[red]Failed to load help for prime lab setup:[/red] {exc}")
         raise typer.Exit(1) from exc
     _write_help(help_text)
 
@@ -755,6 +784,25 @@ def _validate_model(model: str, inference_base_url: str, configured_base_url: st
         raise typer.Exit(1) from exc
 
 
+def _preflight_inference_billing(
+    model: str, inference_base_url: str, configured_base_url: str
+) -> None:
+    if inference_base_url != configured_base_url:
+        return
+
+    client = InferenceClient()
+    try:
+        client.chat_completion(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": "Reply with OK."}],
+            }
+        )
+    except InferencePaymentRequiredError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
 def _build_job_id(env_name: str, model: str) -> str:
     eval_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     job_uuid = str(uuid.uuid4())[:8]
@@ -814,7 +862,9 @@ def run_eval_passthrough(
         raise typer.Exit(1)
 
     args, env, model, base_url = _add_default_inference_and_key_args(passthrough_args, config)
-    _validate_model(model, base_url, (config.inference_url or "").strip().rstrip("/"))
+    configured_base_url = (config.inference_url or "").strip().rstrip("/")
+    _validate_model(model, base_url, configured_base_url)
+    _preflight_inference_billing(model, base_url, configured_base_url)
 
     env_dir_path = _parse_value_option(args, "--env-dir-path", "-p") or DEFAULT_ENV_DIR_PATH
     run_target = environment

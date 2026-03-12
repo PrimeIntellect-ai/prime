@@ -29,6 +29,7 @@ _LOG_RE = re.compile(
 )
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
+
 def _parse_frpc_error(
     output_lines: list[str],
     tunnel_id: str | None = None,

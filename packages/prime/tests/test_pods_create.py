@@ -12,6 +12,7 @@ TEST_ENV = {
     "COLUMNS": "200",
     "LINES": "50",
     "PRIME_DISABLE_VERSION_CHECK": "1",
+    "PRIME_TEAM_ID": "",
 }
 
 

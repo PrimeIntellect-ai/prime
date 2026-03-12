@@ -796,7 +796,6 @@ def _preflight_inference_billing(
             {
                 "model": model,
                 "messages": [{"role": "user", "content": "Reply with OK."}],
-                "max_tokens": 1,
             }
         )
     except InferencePaymentRequiredError as exc:

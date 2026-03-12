@@ -28,8 +28,7 @@ def _classify_frpc_error(
     """Classify frpc output into a specific tunnel exception."""
     combined = re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(output_lines)).lower()
 
-    # Auth failures
-    if "login" in combined and "failed" in combined:
+    if "login to the server failed" in combined or "connect to server error" in combined:
         if "not registered" in combined:
             return TunnelConnectionError(
                 tunnel_id=tunnel_id,
@@ -52,6 +51,12 @@ def _classify_frpc_error(
                 message=(
                     "Binding secret mismatch. The tunnel may have been recreated. Create a new one."
                 ),
+            )
+        if "send login request to plugin error" in combined:
+            return TunnelConnectionError(
+                tunnel_id=tunnel_id,
+                error_type="auth_failed",
+                message="Tunnel server plugin unreachable. Try again later.",
             )
         return TunnelConnectionError(
             tunnel_id=tunnel_id,

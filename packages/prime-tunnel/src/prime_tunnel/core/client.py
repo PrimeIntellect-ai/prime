@@ -168,6 +168,8 @@ class TunnelClient:
             response = await self._request_with_retry("POST", url, json=payload)
         except httpx.TimeoutException as e:
             raise TunnelTimeoutError(f"Request timed out: {e}") from e
+        except TimeoutError as e:
+            raise TunnelTimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
             raise TunnelError(f"Failed to connect to API: {e}") from e
 
@@ -194,6 +196,8 @@ class TunnelClient:
         try:
             response = await self._request_with_retry("GET", url)
         except httpx.TimeoutException as e:
+            raise TunnelTimeoutError(f"Request timed out: {e}") from e
+        except TimeoutError as e:
             raise TunnelTimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
             raise TunnelError(f"Failed to connect to API: {e}") from e
@@ -232,6 +236,8 @@ class TunnelClient:
             response = await self._request_with_retry("DELETE", url)
         except httpx.TimeoutException as e:
             raise TunnelTimeoutError(f"Request timed out: {e}") from e
+        except TimeoutError as e:
+            raise TunnelTimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
             raise TunnelError(f"Failed to connect to API: {e}") from e
 
@@ -251,6 +257,8 @@ class TunnelClient:
         try:
             response = await self._request_with_retry("DELETE", url, json=payload)
         except httpx.TimeoutException as e:
+            raise TunnelTimeoutError(f"Request timed out: {e}") from e
+        except TimeoutError as e:
             raise TunnelTimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
             raise TunnelError(f"Failed to connect to API: {e}") from e
@@ -278,6 +286,8 @@ class TunnelClient:
         try:
             response = await self._request_with_retry("GET", url, params=params)
         except httpx.TimeoutException as e:
+            raise TunnelTimeoutError(f"Request timed out: {e}") from e
+        except TimeoutError as e:
             raise TunnelTimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
             raise TunnelError(f"Failed to connect to API: {e}") from e

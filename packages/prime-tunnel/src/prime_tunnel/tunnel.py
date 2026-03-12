@@ -58,13 +58,19 @@ def _classify_frpc_error(
                 error_type="auth_failed",
                 message="Tunnel server plugin unreachable. Try again later.",
             )
+        if "already online" in combined:
+            return TunnelConnectionError(
+                tunnel_id=tunnel_id,
+                error_type="already_online",
+                message="Another client is already connected with this tunnel. Stop the existing connection first.",
+            )
         return TunnelConnectionError(
             tunnel_id=tunnel_id,
             error_type="auth_failed",
             message="Login failed. Tunnel may have expired or been deleted.",
         )
 
-    if "token in login doesn't match" in combined or "authorization failed" in combined:
+    if "token in login doesn't match" in combined:
         return TunnelConnectionError(
             tunnel_id=tunnel_id,
             error_type="auth_failed",

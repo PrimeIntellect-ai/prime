@@ -118,13 +118,23 @@ def _write_help(text: str) -> None:
 
 def _append_eval_options(help_text: str) -> str:
     extra_lines = [
-        "  --skip-upload        Skip uploading evaluation results to the platform.",
-        "  --env-path PATH      Explicit path for upstream environment metadata.",
+        "  --skip-upload               Skip uploading evaluation results to the platform.",
+        "  --env-path PATH             Explicit path for upstream environment metadata.",
+        "  --hosted                    Run the evaluation on the platform instead of locally.",
+        "  stop EVAL_ID                Cancel a running hosted evaluation.",
+        "  --poll-interval FLOAT       Polling interval in seconds for hosted evaluations.",
+        "  --follow                    Follow hosted evaluation logs until completion.",
+        "  --timeout-minutes INTEGER   Timeout in minutes for hosted evaluations.",
+        "  --allow-sandbox-access      Allow sandbox read/write access for hosted evaluations.",
+        "  --allow-instances-access    "
+        "Allow instance creation and management for hosted evaluations.",
+        "  --custom-secrets JSON       Custom sandbox secrets for hosted evaluations.",
+        "  --eval-name TEXT            Custom name for the hosted evaluation.",
     ]
     lines = help_text.rstrip("\n").splitlines()
-    if any("--skip-upload" in line or "--env-path" in line for line in lines):
-        return help_text.rstrip() + "\n"
-    lines.extend(extra_lines)
+    for extra_line in extra_lines:
+        if extra_line not in lines:
+            lines.append(extra_line)
     return "\n".join(lines) + "\n"
 
 

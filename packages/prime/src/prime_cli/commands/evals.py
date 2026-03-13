@@ -1,21 +1,38 @@
 import json
 import re
+import time
 from functools import wraps
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
+from click.core import ParameterSource
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
 from typer.core import TyperGroup
 
-from ..client import APIClient
+from ..client import APIClient, APIError
 from ..core import Config
 from ..utils import output_data_as_json
+from ..utils.display import get_eval_viewer_url
+from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import load_results_jsonl
+from ..utils.hosted_eval import (
+    EvalStatus,
+    HostedEvalConfig,
+    HostedEvalResult,
+    clean_logs,
+    get_new_log_lines,
+)
 from ..verifiers_bridge import (
+    DEFAULT_ENV_DIR_PATH,
+    DEFAULT_MODEL,
+    _is_config_target,
+    _parse_value_option,
+    _resolve_environment_reference,
+    _split_owner_and_name,
     is_help_request,
     print_eval_run_help,
     run_eval_passthrough,
@@ -23,6 +40,20 @@ from ..verifiers_bridge import (
 )
 
 console = Console()
+
+HOSTED_LOGS_DEFAULT_TAIL_LINES = 1000
+HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS = 5.0
+HOSTED_RUN_DEFAULT_POLL_INTERVAL_SECONDS = 10.0
+HOSTED_RUN_DEFAULT_NUM_EXAMPLES = 5
+HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE = 3
+HOSTED_LOGS_RATE_LIMIT_THRESHOLD = 3
+HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS = 30
+HOSTED_LOGS_RETRY_WAIT_SECONDS = 10
+HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS = 6
+EVAL_TABLE_MAX_TEXT_WIDTH = 30
+EVAL_RUN_EXAMPLE_COMMAND = "prime eval run gsm8k -n 10"
+EVAL_HOSTED_LABEL = "HOSTED"
+EVAL_LOCAL_LABEL = "LOCAL"
 
 
 class DefaultGroup(TyperGroup):
@@ -84,6 +115,279 @@ def format_output(data: dict, output: str) -> None:
         console.print(syntax)
 
 
+def _parse_json_option(raw: Optional[str], option_name: str) -> Optional[dict[str, str]]:
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        console.print(f"[red]Error:[/red] invalid {option_name}: {exc}")
+        raise typer.Exit(1) from exc
+
+    if type(parsed) is not dict:
+        console.print(f"[red]Error:[/red] {option_name} must be a JSON object")
+        raise typer.Exit(1)
+
+    for key, value in parsed.items():
+        if type(key) is not str or type(value) is not str:
+            console.print(
+                f"[red]Error:[/red] {option_name} must contain only string keys and values"
+            )
+            raise typer.Exit(1)
+
+    return parsed
+
+
+def _fetch_eval_status(client: APIClient, eval_id: str) -> dict[str, Any]:
+    return client.get(f"/evaluations/{eval_id}")
+
+
+def _fetch_logs(client: APIClient, eval_id: str) -> str:
+    response = client.get(f"/hosted-evaluations/{eval_id}/logs")
+    return response.get("logs") or ""
+
+
+def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]:
+    eval_config: dict[str, Any] = {
+        "num_examples": config.num_examples,
+        "rollouts_per_example": config.rollouts_per_example,
+        "allow_sandbox_access": config.allow_sandbox_access,
+        "allow_instances_access": config.allow_instances_access,
+    }
+
+    if config.env_args:
+        eval_config["env_args"] = config.env_args
+    if config.timeout_minutes is not None:
+        eval_config["timeout_minutes"] = config.timeout_minutes
+    if config.custom_secrets:
+        eval_config["custom_secrets"] = config.custom_secrets
+
+    payload: dict[str, Any] = {
+        "environment_ids": [config.environment_id],
+        "inference_model": config.inference_model,
+        "eval_config": eval_config,
+    }
+    if config.name:
+        payload["name"] = config.name
+
+    return payload
+
+
+def _create_hosted_evaluation(config: HostedEvalConfig) -> HostedEvalResult:
+    client = APIClient()
+    payload = _build_hosted_evaluation_payload(config)
+
+    if client.config.team_id:
+        payload["team_id"] = client.config.team_id
+
+    created = client.post("/hosted-evaluations", json=payload)
+    evaluation_id = created.get("evaluation_id")
+
+    if not evaluation_id:
+        raise APIError(f"Failed to get evaluation ID from response: {created}")
+
+    return HostedEvalResult(
+        evaluation_id=evaluation_id,
+        status=EvalStatus.PENDING,
+        total_samples=0,
+        avg_score=None,
+        min_score=None,
+        max_score=None,
+    )
+
+
+def _print_eval_status(eval_data: dict[str, Any]) -> None:
+    status_str, status = _parse_eval_status(eval_data)
+    color = status.color if status else "white"
+
+    console.print(f"[{color}]Status: {status_str}[/{color}]")
+
+    error_message = eval_data.get("error_message")
+    if error_message:
+        console.print(f"[red]Error:[/red] {error_message}")
+
+    viewer_url = eval_data.get("viewer_url")
+    if viewer_url:
+        console.print(f"[dim]View: {viewer_url}[/dim]")
+        return
+
+    eval_id = eval_data.get("evaluation_id")
+    if eval_id:
+        console.print(f"[dim]View: {get_eval_viewer_url(eval_id)}[/dim]")
+
+
+def _parse_eval_status(eval_data: dict[str, Any]) -> tuple[str, EvalStatus | None]:
+    raw_status = eval_data.get("status")
+    status_str = raw_status if type(raw_status) is str else "UNKNOWN"
+
+    try:
+        return status_str, EvalStatus(status_str)
+    except ValueError:
+        return status_str, None
+
+
+def _handle_log_poll_error(eval_id: str, exc: APIError, consecutive_errors: int) -> None:
+    if "404" in str(exc):
+        console.print(f"\n[red]Evaluation {eval_id} not found.[/red]")
+        raise typer.Exit(1) from exc
+
+    if "429" not in str(exc):
+        raise exc
+
+    if consecutive_errors >= HOSTED_LOGS_RATE_LIMIT_THRESHOLD:
+        console.print(
+            f"[yellow]Rate limited. Waiting {HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS:.0f}s...[/yellow]"
+        )
+        time.sleep(HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS)
+    else:
+        time.sleep(HOSTED_LOGS_RETRY_WAIT_SECONDS)
+
+
+def _display_logs_follow(eval_id: str, poll_interval: float) -> None:
+    console.print(f"[dim]Watching logs for evaluation {eval_id}... (Ctrl+C to stop)[/dim]\n")
+
+    client = APIClient()
+    last_logs = ""
+    consecutive_errors = 0
+    no_logs_polls = 0
+
+    while True:
+        try:
+            eval_data = _fetch_eval_status(client, eval_id)
+            status_str, status = _parse_eval_status(eval_data)
+
+            if status and status in EvalStatus.terminal_statuses():
+                final_logs = clean_logs(_fetch_logs(client, eval_id))
+                if final_logs and final_logs != last_logs:
+                    for line in get_new_log_lines(last_logs, final_logs):
+                        console.print(line)
+                    last_logs = final_logs
+                console.print()
+                _print_eval_status(eval_data)
+                if status != EvalStatus.COMPLETED:
+                    raise typer.Exit(1)
+                return
+
+            raw_logs = _fetch_logs(client, eval_id)
+            logs = clean_logs(raw_logs) if raw_logs else ""
+            consecutive_errors = 0
+
+            if logs and logs != last_logs:
+                for line in get_new_log_lines(last_logs, logs):
+                    console.print(line)
+                last_logs = logs
+                no_logs_polls = 0
+            else:
+                no_logs_polls += 1
+
+            if no_logs_polls > 0 and no_logs_polls % HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS == 0:
+                console.print(f"[dim]Evaluation status: {status_str} (waiting for logs...)[/dim]")
+        except APIError as exc:
+            consecutive_errors += 1
+            _handle_log_poll_error(eval_id, exc, consecutive_errors)
+            continue
+
+        time.sleep(poll_interval)
+
+
+def _display_logs_once(eval_id: str, tail: int) -> None:
+    client = APIClient()
+    eval_data = _fetch_eval_status(client, eval_id)
+    raw_logs = _fetch_logs(client, eval_id)
+    logs = clean_logs(raw_logs) if raw_logs else ""
+
+    if logs:
+        for line in logs.splitlines()[-tail:]:
+            console.print(line)
+    else:
+        console.print("[yellow]No logs available.[/yellow]")
+
+    console.print()
+    _print_eval_status(eval_data)
+
+
+def _display_logs(
+    eval_id: str,
+    tail: int,
+    follow: bool,
+    poll_interval: float = HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS,
+) -> None:
+    try:
+        if follow:
+            _display_logs_follow(eval_id, poll_interval)
+        else:
+            _display_logs_once(eval_id, tail)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped watching logs. Evaluation continues running.[/dim]")
+    except typer.Exit:
+        raise
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+
+def _resolve_hosted_environment(
+    environment: str,
+    *,
+    env_dir_path: Optional[str],
+    env_path: Optional[str],
+) -> tuple[str, str]:
+    resolved = _resolve_environment_reference(environment, env_dir_path or DEFAULT_ENV_DIR_PATH)
+
+    if resolved.recommend_push:
+        console.print(
+            "[red]Error:[/red] hosted evaluations require an environment "
+            "that is published to the platform"
+        )
+        if resolved.platform_slug:
+            console.print(
+                "[yellow]Publish the latest local changes for "
+                f"{resolved.platform_slug} first.[/yellow]"
+            )
+        else:
+            console.print("[yellow]Publish the environment with `prime env push` first.[/yellow]")
+        raise typer.Exit(1)
+
+    platform_slug = resolved.platform_slug or resolved.upstream_slug
+    if platform_slug is None and env_path:
+        metadata = find_environment_metadata(
+            env_name=resolved.env_name,
+            env_path=Path(env_path),
+            module_name=resolved.env_name.replace("-", "_"),
+        )
+        owner = metadata.get("owner") if metadata else None
+        name = metadata.get("name") if metadata else None
+        if owner and name:
+            platform_slug = f"{owner}/{name}"
+
+    if platform_slug is None:
+        console.print(
+            "[red]Error:[/red] hosted evaluations require an upstream environment on the platform"
+        )
+        console.print(
+            "[yellow]Use an environment slug or publish the local environment "
+            "with `prime env push`.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    parts = _split_owner_and_name(platform_slug)
+    if parts is None:
+        console.print(f"[red]Error:[/red] invalid environment slug: {platform_slug}")
+        raise typer.Exit(1)
+
+    owner, env_name = parts
+    api_client = APIClient()
+    response = api_client.get(f"/environmentshub/{owner}/{env_name}/@latest")
+    details = response.get("data", response)
+    environment_id = details.get("id")
+    if not environment_id:
+        console.print(f"[red]Error:[/red] could not resolve environment id for {platform_slug}")
+        raise typer.Exit(1)
+
+    console.print(f"[dim]Using hosted environment {platform_slug}[/dim]")
+    return platform_slug, str(environment_id)
+
+
 @subcommands_app.command("list")
 @handle_errors
 def list_evals(
@@ -136,6 +440,7 @@ def list_evals(
         table.add_column("Environment", style="blue")
         table.add_column("Model", style="magenta")
         table.add_column("Status", style="yellow")
+        table.add_column("Type", style="green", justify="center")
         table.add_column("Examples", style="dim", justify="right")
         table.add_column("Rollouts", style="dim", justify="right")
 
@@ -150,11 +455,15 @@ def list_evals(
             if environment_names and len(environment_names) > 0:
                 env_name = environment_names[0]
 
+            is_hosted = bool(e.get("is_hosted"))
+            execution_mode = EVAL_HOSTED_LABEL if is_hosted else EVAL_LOCAL_LABEL
+
             table.add_row(
                 eval_id if eval_id else "",
-                str(env_name)[:30],
-                str(e.get("model_name", ""))[:30],
+                str(env_name)[:EVAL_TABLE_MAX_TEXT_WIDTH],
+                str(e.get("model_name", ""))[:EVAL_TABLE_MAX_TEXT_WIDTH],
                 str(e.get("status", "")),
+                execution_mode,
                 str(num_examples),
                 str(rollouts_per_example),
             )
@@ -575,6 +884,42 @@ app = typer.Typer(
 app.add_typer(subcommands_app, name="")
 
 
+@app.command("logs", no_args_is_help=True)
+def logs_cmd(
+    eval_id: str = typer.Argument(..., help="Evaluation id to get logs for"),
+    tail: int = typer.Option(
+        HOSTED_LOGS_DEFAULT_TAIL_LINES,
+        "--tail",
+        "-n",
+        help="Number of lines to show",
+    ),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+    poll_interval: float = typer.Option(
+        HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS,
+        "--poll-interval",
+        help="Polling interval in seconds when following logs",
+    ),
+) -> None:
+    """Get logs for a hosted evaluation."""
+    _display_logs(eval_id, tail, follow, poll_interval=poll_interval)
+
+
+@app.command("stop", no_args_is_help=True)
+def stop_cmd(
+    eval_id: str = typer.Argument(..., help="Evaluation id to stop"),
+) -> None:
+    """Stop a running hosted evaluation."""
+    try:
+        client = APIClient()
+        result = client.patch(f"/hosted-evaluations/{eval_id}/cancel")
+        message = result.get("message") or f"Evaluation {eval_id} cancelled."
+        console.print(f"[green]✓ {message}[/green]")
+        console.print(f"[dim]View results:[/dim] {get_eval_viewer_url(eval_id)}")
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+
 @app.command(
     "run",
     help="Run an evaluation with API models (default provider = Prime Inference)",
@@ -604,6 +949,46 @@ def run_eval_cmd(
             "(used to locate .prime/.env-metadata.json for upstream resolution)"
         ),
     ),
+    hosted: bool = typer.Option(
+        False,
+        "--hosted",
+        help="Run the evaluation on the platform instead of locally",
+    ),
+    poll_interval: float = typer.Option(
+        HOSTED_RUN_DEFAULT_POLL_INTERVAL_SECONDS,
+        "--poll-interval",
+        help="Polling interval in seconds for hosted evaluation status",
+    ),
+    follow: bool = typer.Option(
+        False,
+        "--follow",
+        help="Follow hosted evaluation status and stream logs until completion",
+    ),
+    timeout_minutes: Optional[int] = typer.Option(
+        None,
+        "--timeout-minutes",
+        help="Timeout in minutes for hosted evaluation",
+    ),
+    allow_sandbox_access: bool = typer.Option(
+        False,
+        "--allow-sandbox-access",
+        help="Allow sandbox read/write access for hosted evaluations",
+    ),
+    allow_instances_access: bool = typer.Option(
+        False,
+        "--allow-instances-access",
+        help="Allow instance creation and management for hosted evaluations",
+    ),
+    custom_secrets: Optional[str] = typer.Option(
+        None,
+        "--custom-secrets",
+        help='Custom secrets for hosted eval as JSON (e.g. \'{"API_KEY":"xxx"}\')',
+    ),
+    eval_name: Optional[str] = typer.Option(
+        None,
+        "--eval-name",
+        help="Custom name for the hosted evaluation",
+    ),
 ) -> None:
     """Run an evaluation with local-first environment resolution."""
     passthrough_args = list(ctx.args)
@@ -614,13 +999,125 @@ def run_eval_cmd(
 
     if environment is None:
         console.print("[red]Error:[/red] Missing argument 'ENVIRONMENT'.")
-        console.print("[dim]Example: prime eval run gsm8k -n 10[/dim]")
+        console.print(f"[dim]Example: {EVAL_RUN_EXAMPLE_COMMAND}[/dim]")
         raise typer.Exit(2)
 
     if environment.startswith("-"):
         console.print("[red]Error:[/red] Environment/config must be the first argument.")
-        console.print("[dim]Example: prime eval run gsm8k -n 10[/dim]")
+        console.print(f"[dim]Example: {EVAL_RUN_EXAMPLE_COMMAND}[/dim]")
         raise typer.Exit(2)
+
+    env_dir_path = _parse_value_option(passthrough_args, "--env-dir-path", "-p")
+    poll_interval_was_provided = (
+        ctx.get_parameter_source("poll_interval") == ParameterSource.COMMANDLINE
+    )
+
+    if not hosted:
+        hosted_only_args = {
+            "--follow": follow,
+            "--poll-interval": poll_interval_was_provided,
+            "--timeout-minutes": timeout_minutes is not None,
+            "--allow-sandbox-access": allow_sandbox_access,
+            "--allow-instances-access": allow_instances_access,
+            "--custom-secrets": custom_secrets is not None,
+            "--eval-name": eval_name is not None,
+        }
+        used_hosted_only_args = [flag for flag, used in hosted_only_args.items() if used]
+        if used_hosted_only_args:
+            console.print(
+                "[red]Error:[/red] hosted-only options require `--hosted`: "
+                + ", ".join(used_hosted_only_args)
+            )
+            raise typer.Exit(1)
+
+    if hosted:
+        if _is_config_target(environment):
+            console.print(
+                "[red]Error:[/red] hosted evaluations require a single environment, "
+                "not a TOML config"
+            )
+            raise typer.Exit(1)
+
+        try:
+            platform_slug, environment_id = _resolve_hosted_environment(
+                environment,
+                env_dir_path=env_dir_path,
+                env_path=env_path,
+            )
+        except APIError as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1) from exc
+        model = _parse_value_option(passthrough_args, "--model", "-m") or DEFAULT_MODEL
+        raw_num_examples = _parse_value_option(passthrough_args, "--num-examples", "-n")
+        raw_rollouts = _parse_value_option(
+            passthrough_args,
+            "--rollouts-per-example",
+            "-r",
+        )
+        raw_env_args = _parse_value_option(passthrough_args, "--env-args", "")
+
+        try:
+            num_examples = (
+                int(raw_num_examples)
+                if raw_num_examples is not None
+                else HOSTED_RUN_DEFAULT_NUM_EXAMPLES
+            )
+            rollouts_per_example = (
+                int(raw_rollouts)
+                if raw_rollouts is not None
+                else HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE
+            )
+        except ValueError as exc:
+            console.print(
+                "[red]Error:[/red] --num-examples and --rollouts-per-example must be integers"
+            )
+            raise typer.Exit(1) from exc
+
+        if num_examples < -1 or rollouts_per_example < 1:
+            console.print(
+                "[red]Error:[/red] --num-examples must be >= -1 and "
+                "--rollouts-per-example must be >= 1"
+            )
+            raise typer.Exit(1)
+
+        hosted_config = HostedEvalConfig(
+            environment_id=environment_id,
+            inference_model=model,
+            num_examples=num_examples,
+            rollouts_per_example=rollouts_per_example,
+            env_args=_parse_json_option(raw_env_args, "--env-args"),
+            name=eval_name,
+            timeout_minutes=timeout_minutes,
+            allow_sandbox_access=allow_sandbox_access,
+            allow_instances_access=allow_instances_access,
+            custom_secrets=_parse_json_option(custom_secrets, "--custom-secrets"),
+        )
+
+        try:
+            result = _create_hosted_evaluation(hosted_config)
+        except APIError as exc:
+            console.print(f"[red]Hosted evaluation failed:[/red] {exc}")
+            raise typer.Exit(1) from exc
+
+        if follow:
+            console.print("[green]✓ Hosted evaluation started[/green]")
+            console.print(f"[cyan]Environment:[/cyan] {platform_slug}")
+            console.print(f"[cyan]Evaluation ID:[/cyan] {result.evaluation_id}")
+            console.print()
+            _display_logs(
+                result.evaluation_id,
+                tail=HOSTED_LOGS_DEFAULT_TAIL_LINES,
+                follow=True,
+                poll_interval=poll_interval,
+            )
+            return
+
+        console.print("[green]✓ Hosted evaluation started[/green]")
+        console.print(f"[cyan]Environment:[/cyan] {platform_slug}")
+        console.print(f"[cyan]Evaluation ID:[/cyan] {result.evaluation_id}")
+        console.print(f"[green]View results:[/green] {get_eval_viewer_url(result.evaluation_id)}")
+        console.print("[dim]View logs:[/dim] prime eval logs " + result.evaluation_id + " -f")
+        return
 
     run_eval_passthrough(
         environment=environment,

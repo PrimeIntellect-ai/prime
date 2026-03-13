@@ -7,6 +7,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from prime_cli.core import Config
+
 
 def validate_output_format(output: str, console: Console) -> None:
     """Validate that output format is supported."""
@@ -40,6 +42,12 @@ def build_table(title: str, columns: List[Tuple[str, str]], show_lines: bool = T
 def status_color(status: str, mapping: Dict[str, str], default: str = "white") -> str:
     """Get color for status based on mapping with fallback to default."""
     return mapping.get(status, default)
+
+
+def get_eval_viewer_url(evaluation_id: str) -> str:
+    """Build the dashboard URL for an evaluation."""
+    frontend_url = Config().frontend_url.rstrip("/")
+    return f"{frontend_url}/dashboard/evaluations/{evaluation_id}"
 
 
 # Common status color mappings

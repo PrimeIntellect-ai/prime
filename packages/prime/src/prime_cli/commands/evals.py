@@ -226,14 +226,6 @@ def _parse_eval_status(eval_data: dict[str, Any]) -> tuple[str, EvalStatus | Non
         return status_str, None
 
 
-def _print_new_log_lines(previous_logs: str, current_logs: str) -> str:
-    if current_logs and current_logs != previous_logs:
-        for line in get_new_log_lines(previous_logs, current_logs):
-            console.print(line)
-        return current_logs
-    return previous_logs
-
-
 def _handle_log_poll_error(eval_id: str, exc: APIError, consecutive_errors: int) -> None:
     if "404" in str(exc):
         console.print(f"\n[red]Evaluation {eval_id} not found.[/red]")
@@ -266,7 +258,10 @@ def _display_logs_follow(eval_id: str, poll_interval: float) -> None:
 
             if status and status in EvalStatus.terminal_statuses():
                 final_logs = clean_logs(_fetch_logs(client, eval_id))
-                _print_new_log_lines(last_logs, final_logs)
+                if final_logs and final_logs != last_logs:
+                    for line in get_new_log_lines(last_logs, final_logs):
+                        console.print(line)
+                    last_logs = final_logs
                 console.print()
                 _print_eval_status(eval_data)
                 if status != EvalStatus.COMPLETED:
@@ -277,8 +272,10 @@ def _display_logs_follow(eval_id: str, poll_interval: float) -> None:
             logs = clean_logs(raw_logs) if raw_logs else ""
             consecutive_errors = 0
 
-            if logs:
-                last_logs = _print_new_log_lines(last_logs, logs)
+            if logs and logs != last_logs:
+                for line in get_new_log_lines(last_logs, logs):
+                    console.print(line)
+                last_logs = logs
                 no_logs_polls = 0
             else:
                 no_logs_polls += 1

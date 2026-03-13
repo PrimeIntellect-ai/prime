@@ -481,3 +481,46 @@ def test_eval_logs_command_follows_incremental_output(monkeypatch):
     assert "Line 3" in result.output
     assert result.output.count("Line 1") == 1
     assert "Status: COMPLETED" in result.output
+
+
+def test_eval_logs_command_emits_waiting_status_when_logs_are_unchanged(monkeypatch):
+    statuses = iter(
+        [
+            {"status": "RUNNING", "evaluation_id": "eval-123"},
+            {"status": "RUNNING", "evaluation_id": "eval-123"},
+            {"status": "COMPLETED", "evaluation_id": "eval-123", "total_samples": 1},
+        ]
+    )
+    logs = iter(
+        [
+            "Line 1",
+            "Line 1",
+            "Line 1",
+        ]
+    )
+
+    monkeypatch.setattr("prime_cli.commands.evals.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "prime_cli.commands.evals.HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS",
+        1,
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._fetch_eval_status",
+        lambda _client, _: next(statuses),
+    )
+    monkeypatch.setattr("prime_cli.commands.evals._fetch_logs", lambda _client, _: next(logs))
+    monkeypatch.setattr(
+        "prime_cli.commands.evals.get_eval_viewer_url",
+        lambda eval_id: f"https://app.primeintellect.ai/dashboard/evaluations/{eval_id}",
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "logs", "eval-123", "--follow"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Line 1") == 1
+    assert "Evaluation status: RUNNING (waiting for logs...)" in result.output
+    assert "Status: COMPLETED" in result.output

@@ -26,8 +26,13 @@ def push_image(
     image_reference: str = typer.Argument(
         ..., help="Image reference (e.g., 'myapp:v1.0.0' or 'myapp:latest')"
     ),
-    dockerfile: str = typer.Option("Dockerfile", "--dockerfile", "-f", help="Path to Dockerfile"),
     context: str = typer.Option(".", "--context", "-c", help="Build context directory"),
+    dockerfile: str = typer.Option(
+        "Dockerfile",
+        "--dockerfile",
+        "-f",
+        help="Path to Dockerfile, relative to --context",
+    ),
     platform: str = typer.Option(
         "linux/amd64",
         "--platform",
@@ -41,7 +46,7 @@ def push_image(
     \b
     Examples:
         prime images push myapp:v1.0.0
-        prime images push myapp:latest --dockerfile custom.Dockerfile
+        prime images push myapp:latest --context ./app --dockerfile Dockerfile.prod
         prime images push myapp:v1 --platform linux/arm64
     """
     try:

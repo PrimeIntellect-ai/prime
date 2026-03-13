@@ -94,12 +94,14 @@ def list_tunnels(
 
     table = Table(title="Active Tunnels")
     table.add_column("Tunnel ID", style="cyan")
+    table.add_column("User ID", style="magenta")
     table.add_column("URL", style="green")
     table.add_column("Expires At")
 
     for tunnel in tunnels:
         table.add_row(
             tunnel.tunnel_id,
+            tunnel.user_id or "",
             tunnel.url,
             str(tunnel.expires_at),
         )

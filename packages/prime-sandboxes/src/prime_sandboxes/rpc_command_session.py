@@ -73,7 +73,7 @@ def build_command_session_start_request(
 ) -> Message:
     command_spec = _COMMAND_SPEC_FACTORY(
         cmd="/bin/bash",
-        args=["-l", "-c", command],
+        args=["-c", command],
         envs=env or {},
     )
     if working_dir is not None:

@@ -232,14 +232,111 @@ def test_eval_run_hosted_follow_streams_logs(monkeypatch):
     assert captured["display_poll_interval"] == 10.0
 
 
-def test_eval_run_hosted_rejects_config_target():
+def test_eval_run_hosted_supports_single_eval_toml(monkeypatch, tmp_path):
+    captured = {}
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "openai/gpt-4.1-mini"
+num_examples = 7
+rollouts_per_example = 2
+
+[[eval]]
+env_id = "gsm8k"
+env_args = { split = "test" }
+""".strip()
+    )
+
+    def fake_resolve(environment, env_dir_path=None, env_path=None):
+        captured["environment"] = environment
+        captured["env_dir_path"] = env_dir_path
+        captured["env_path"] = env_path
+        return ("primeintellect/gsm8k", "env-123")
+
+    def fake_run_hosted_evaluation(config):
+        captured["environment_id"] = config.environment_id
+        captured["inference_model"] = config.inference_model
+        captured["num_examples"] = config.num_examples
+        captured["rollouts_per_example"] = config.rollouts_per_example
+        captured["env_args"] = config.env_args
+
+        from prime_cli.utils.hosted_eval import EvalStatus, HostedEvalResult
+
+        return HostedEvalResult(
+            evaluation_id="eval-123",
+            status=EvalStatus.PENDING,
+            total_samples=0,
+            avg_score=None,
+            min_score=None,
+            max_score=None,
+        )
+
+    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluation",
+        fake_run_hosted_evaluation,
+    )
+
     result = runner.invoke(
         app,
-        ["eval", "run", "config.toml", "--hosted"],
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "environment": "gsm8k",
+        "env_dir_path": None,
+        "env_path": None,
+        "environment_id": "env-123",
+        "inference_model": "openai/gpt-4.1-mini",
+        "num_examples": 7,
+        "rollouts_per_example": 2,
+        "env_args": {"split": "test"},
+    }
+
+
+def test_eval_run_hosted_rejects_multi_eval_toml(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+[[eval]]
+env_id = "gsm8k"
+
+[[eval]]
+env_id = "math500"
+""".strip()
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
     assert result.exit_code == 1
-    assert "single environment" in result.output
+    assert "exactly one" in result.output
+    assert "eval" in result.output
+
+
+def test_eval_run_hosted_rejects_unsupported_toml_fields(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+resume = true
+
+[[eval]]
+env_id = "gsm8k"
+""".strip()
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+    assert result.exit_code == 1
+    assert "does not support" in result.output
+    assert "`resume`" in result.output
 
 
 def test_eval_run_rejects_hosted_only_flags_without_hosted():

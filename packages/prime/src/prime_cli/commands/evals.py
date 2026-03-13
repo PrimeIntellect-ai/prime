@@ -15,7 +15,7 @@ from typer.core import TyperGroup
 
 from ..client import APIClient, APIError
 from ..core import Config
-from ..utils import output_data_as_json
+from ..utils import load_toml, output_data_as_json
 from ..utils.display import get_eval_viewer_url
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import load_results_jsonl
@@ -54,6 +54,16 @@ EVAL_TABLE_MAX_TEXT_WIDTH = 30
 EVAL_RUN_EXAMPLE_COMMAND = "prime eval run gsm8k -n 10"
 EVAL_HOSTED_LABEL = "HOSTED"
 EVAL_LOCAL_LABEL = "LOCAL"
+HOSTED_EVAL_CONFIG_ALLOWED_FIELDS = {
+    "env_id",
+    "env_args",
+    "env_dir_path",
+    "endpoints_path",
+    "endpoint_id",
+    "model",
+    "num_examples",
+    "rollouts_per_example",
+}
 
 
 class DefaultGroup(TyperGroup):
@@ -136,6 +146,135 @@ def _parse_json_option(raw: Optional[str], option_name: str) -> Optional[dict[st
             raise typer.Exit(1)
 
     return parsed
+
+
+def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) -> str:
+    raw_endpoint_id = raw_config.get("endpoint_id")
+    raw_model = raw_config.get("model")
+
+    if raw_endpoint_id is not None and raw_model is not None:
+        console.print(
+            "[red]Error:[/red] hosted eval config cannot set both `endpoint_id` and `model`"
+        )
+        raise typer.Exit(1)
+
+    if raw_endpoint_id is None:
+        if raw_model is None:
+            return DEFAULT_MODEL
+        if type(raw_model) is not str or not raw_model:
+            console.print("[red]Error:[/red] `model` must be a non-empty string")
+            raise typer.Exit(1)
+        return raw_model
+
+    if type(raw_endpoint_id) is not str or not raw_endpoint_id:
+        console.print("[red]Error:[/red] `endpoint_id` must be a non-empty string")
+        raise typer.Exit(1)
+
+    endpoints_path = raw_config.get("endpoints_path", "./configs/endpoints.toml")
+    if type(endpoints_path) is not str or not endpoints_path:
+        console.print("[red]Error:[/red] `endpoints_path` must be a non-empty string")
+        raise typer.Exit(1)
+
+    endpoints_path_obj = Path(endpoints_path)
+    if not endpoints_path_obj.is_absolute():
+        endpoints_path = str((config_path.parent / endpoints_path_obj).resolve())
+
+    try:
+        from verifiers.utils.eval_utils import load_endpoints, resolve_endpoints_file
+    except ImportError as exc:
+        console.print("[red]Error:[/red] verifiers is required to resolve `endpoint_id`")
+        raise typer.Exit(1) from exc
+
+    resolved_endpoints_file = resolve_endpoints_file(endpoints_path)
+    if resolved_endpoints_file is None or resolved_endpoints_file.suffix != ".toml":
+        console.print(
+            "[red]Error:[/red] `endpoint_id` requires an endpoints.toml registry "
+            "via `endpoints_path`"
+        )
+        raise typer.Exit(1)
+
+    endpoints = load_endpoints(endpoints_path)
+    if raw_endpoint_id not in endpoints:
+        console.print(
+            f"[red]Error:[/red] endpoint_id '{raw_endpoint_id}' not found in {endpoints_path}"
+        )
+        raise typer.Exit(1)
+
+    endpoint_group = endpoints[raw_endpoint_id]
+    endpoint_models = {entry["model"] for entry in endpoint_group}
+    if len(endpoint_models) != 1:
+        console.print(
+            f"[red]Error:[/red] endpoint_id '{raw_endpoint_id}' resolves to multiple models: "
+            f"{sorted(endpoint_models)}"
+        )
+        raise typer.Exit(1)
+
+    return endpoint_group[0]["model"]
+
+
+def _load_hosted_eval_config(config_path_str: str) -> dict[str, Any]:
+    config_path = Path(config_path_str)
+    raw = load_toml(str(config_path), console)
+
+    eval_entries = raw.get("eval")
+    if not isinstance(eval_entries, list):
+        console.print(
+            "[red]Error:[/red] hosted eval config must use [[eval]] and contain exactly one entry"
+        )
+        raise typer.Exit(1)
+
+    if len(eval_entries) != 1:
+        console.print(
+            "[red]Error:[/red] hosted eval config currently supports exactly one [[eval]] entry"
+        )
+        raise typer.Exit(1)
+
+    eval_entry = eval_entries[0]
+    if not isinstance(eval_entry, dict):
+        console.print("[red]Error:[/red] [[eval]] must be a TOML table")
+        raise typer.Exit(1)
+
+    merged = {k: v for k, v in raw.items() if k != "eval"}
+    merged.update(eval_entry)
+
+    unsupported_fields = sorted(set(merged) - HOSTED_EVAL_CONFIG_ALLOWED_FIELDS)
+    if unsupported_fields:
+        console.print(
+            "[red]Error:[/red] hosted eval config does not support: "
+            + ", ".join(f"`{field}`" for field in unsupported_fields)
+        )
+        raise typer.Exit(1)
+
+    env_id = merged.get("env_id")
+    if type(env_id) is not str or not env_id:
+        console.print("[red]Error:[/red] hosted eval config requires a non-empty `env_id`")
+        raise typer.Exit(1)
+
+    env_args = merged.get("env_args")
+    if env_args is None:
+        merged["env_args"] = None
+    elif not isinstance(env_args, dict) or any(
+        type(key) is not str or type(value) is not str for key, value in env_args.items()
+    ):
+        console.print(
+            "[red]Error:[/red] hosted eval config `env_args` must contain only "
+            "string keys and values"
+        )
+        raise typer.Exit(1)
+
+    env_dir_path = merged.get("env_dir_path")
+    if env_dir_path is not None and (type(env_dir_path) is not str or not env_dir_path):
+        console.print("[red]Error:[/red] `env_dir_path` must be a non-empty string")
+        raise typer.Exit(1)
+
+    for field_name in ("num_examples", "rollouts_per_example"):
+        field_value = merged.get(field_name)
+        if field_value is not None and type(field_value) is not int:
+            console.print(f"[red]Error:[/red] `{field_name}` must be an integer")
+            raise typer.Exit(1)
+
+    merged["model"] = _resolve_hosted_config_model(merged, config_path)
+    return merged
 
 
 def _fetch_eval_status(client: APIClient, eval_id: str) -> dict[str, Any]:
@@ -1031,23 +1170,38 @@ def run_eval_cmd(
             raise typer.Exit(1)
 
     if hosted:
+        hosted_target = environment
+        hosted_target_env_dir_path = env_dir_path
+        hosted_target_model = DEFAULT_MODEL
+        hosted_target_num_examples = HOSTED_RUN_DEFAULT_NUM_EXAMPLES
+        hosted_target_rollouts = HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE
+        hosted_target_env_args: Optional[dict[str, str]] = None
+
         if _is_config_target(environment):
-            console.print(
-                "[red]Error:[/red] hosted evaluations require a single environment, "
-                "not a TOML config"
+            hosted_target_config = _load_hosted_eval_config(environment)
+            hosted_target = hosted_target_config["env_id"]
+            hosted_target_env_dir_path = hosted_target_config.get("env_dir_path")
+            hosted_target_model = hosted_target_config["model"]
+            hosted_target_num_examples = hosted_target_config.get(
+                "num_examples",
+                HOSTED_RUN_DEFAULT_NUM_EXAMPLES,
             )
-            raise typer.Exit(1)
+            hosted_target_rollouts = hosted_target_config.get(
+                "rollouts_per_example",
+                HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE,
+            )
+            hosted_target_env_args = hosted_target_config.get("env_args")
 
         try:
             platform_slug, environment_id = _resolve_hosted_environment(
-                environment,
-                env_dir_path=env_dir_path,
+                hosted_target,
+                env_dir_path=hosted_target_env_dir_path,
                 env_path=env_path,
             )
         except APIError as exc:
             console.print(f"[red]Error:[/red] {exc}")
             raise typer.Exit(1) from exc
-        model = _parse_value_option(passthrough_args, "--model", "-m") or DEFAULT_MODEL
+        model = _parse_value_option(passthrough_args, "--model", "-m") or hosted_target_model
         raw_num_examples = _parse_value_option(passthrough_args, "--num-examples", "-n")
         raw_rollouts = _parse_value_option(
             passthrough_args,
@@ -1060,12 +1214,10 @@ def run_eval_cmd(
             num_examples = (
                 int(raw_num_examples)
                 if raw_num_examples is not None
-                else HOSTED_RUN_DEFAULT_NUM_EXAMPLES
+                else hosted_target_num_examples
             )
             rollouts_per_example = (
-                int(raw_rollouts)
-                if raw_rollouts is not None
-                else HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE
+                int(raw_rollouts) if raw_rollouts is not None else hosted_target_rollouts
             )
         except ValueError as exc:
             console.print(
@@ -1085,7 +1237,11 @@ def run_eval_cmd(
             inference_model=model,
             num_examples=num_examples,
             rollouts_per_example=rollouts_per_example,
-            env_args=_parse_json_option(raw_env_args, "--env-args"),
+            env_args=(
+                _parse_json_option(raw_env_args, "--env-args")
+                if raw_env_args is not None
+                else hosted_target_env_args
+            ),
             name=eval_name,
             timeout_minutes=timeout_minutes,
             allow_sandbox_access=allow_sandbox_access,

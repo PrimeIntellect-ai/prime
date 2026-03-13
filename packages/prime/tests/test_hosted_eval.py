@@ -134,6 +134,40 @@ def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
     assert "prime eval logs eval-123 -f" in result.output
 
 
+def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
+    captured = {}
+
+    class DummyConfig:
+        team_id = "team-123"
+
+    class DummyAPIClient:
+        def __init__(self):
+            self.config = DummyConfig()
+
+        def post(self, endpoint, json=None):
+            captured["endpoint"] = endpoint
+            captured["json"] = json
+            return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+
+    from prime_cli.commands.evals import _create_hosted_evaluation
+    from prime_cli.utils.hosted_eval import HostedEvalConfig
+
+    result = _create_hosted_evaluation(
+        HostedEvalConfig(
+            environment_id="env-123",
+            inference_model="openai/gpt-4.1-mini",
+            num_examples=5,
+            rollouts_per_example=3,
+        )
+    )
+
+    assert result.evaluation_id == "eval-123"
+    assert captured["endpoint"] == "/hosted-evaluations"
+    assert captured["json"]["team_id"] == "team-123"
+
+
 def test_eval_run_hosted_follow_streams_logs(monkeypatch):
     captured = {}
 

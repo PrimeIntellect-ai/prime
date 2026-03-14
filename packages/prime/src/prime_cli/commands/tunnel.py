@@ -5,6 +5,11 @@ from typing import List, Optional
 import typer
 from prime_tunnel import Tunnel
 from prime_tunnel.core.client import TunnelClient
+from prime_tunnel.exceptions import (
+    TunnelConnectionError,
+    TunnelLimitReachedError,
+    TunnelTimeoutError,
+)
 from rich.console import Console
 from rich.table import Table
 
@@ -49,8 +54,33 @@ def start_tunnel(
             console.print(f"\n[dim]Forwarding to localhost:{port}[/dim]")
             console.print("[dim]Press Ctrl+C to stop the tunnel[/dim]\n")
 
-            await shutdown_event.wait()
+            # Monitor tunnel health while waiting for shutdown signal
+            while not shutdown_event.is_set():
+                if not tunnel.is_running:
+                    output = "\n".join(tunnel.recent_output) or "(no output captured)"
+                    raise TunnelConnectionError(
+                        message=(
+                            f"Tunnel process exited unexpectedly\n--- frpc output ---\n{output}"
+                        ),
+                        tunnel_id=tunnel.tunnel_id,
+                    )
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pass
 
+        except TunnelConnectionError as e:
+            console.print(f"\n[red]Tunnel error:[/red] {e}", style="bold")
+            if e.tunnel_id:
+                console.print(f"[dim]Tunnel ID: {e.tunnel_id}[/dim]")
+            raise typer.Exit(1)
+        except TunnelLimitReachedError as e:
+            console.print(f"\n[red]Tunnel limit reached:[/red] {e}", style="bold")
+            console.print("[dim]Delete an existing tunnel before creating a new one.[/dim]")
+            raise typer.Exit(1)
+        except TunnelTimeoutError as e:
+            console.print(f"\n[red]Connection timed out:[/red] {e}", style="bold")
+            raise typer.Exit(1)
         except Exception as e:
             console.print(f"[red]Error:[/red] {e}", style="bold")
             raise typer.Exit(1)
@@ -96,13 +126,25 @@ def list_tunnels(
     table.add_column("Tunnel ID", style="cyan")
     table.add_column("User ID", style="magenta")
     table.add_column("URL", style="green")
+    table.add_column("Status")
     table.add_column("Expires At")
 
     for tunnel in tunnels:
+        status_display = tunnel.status or "unknown"
+        if status_display == "CONNECTED":
+            status_display = "[green]connected[/green]"
+        elif status_display == "PENDING":
+            status_display = "[yellow]pending[/yellow]"
+        elif status_display == "DISCONNECTED":
+            status_display = "[red]disconnected[/red]"
+        elif status_display == "EXPIRED":
+            status_display = "[dim]expired[/dim]"
+
         table.add_row(
             tunnel.tunnel_id,
             tunnel.user_id or "",
             tunnel.url,
+            status_display,
             str(tunnel.expires_at),
         )
 
@@ -135,6 +177,7 @@ def tunnel_status(
     console.print(f"[bold]Tunnel ID:[/bold] {tunnel.tunnel_id}")
     console.print(f"[bold]URL:[/bold] {tunnel.url}")
     console.print(f"[bold]Hostname:[/bold] {tunnel.hostname}")
+    console.print(f"[bold]Status:[/bold] {tunnel.status or 'unknown'}")
     console.print(f"[bold]Expires At:[/bold] {tunnel.expires_at}")
 
 

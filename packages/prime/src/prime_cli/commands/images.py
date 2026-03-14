@@ -5,6 +5,7 @@ import tarfile
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import click
 import httpx
@@ -17,6 +18,8 @@ from ..utils import validate_output_format
 
 app = typer.Typer(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = Console()
+# Use a synthetic archive path to avoid collisions with Dockerfiles already in the context.
+PACKAGED_DOCKERFILE_PATH = ".__prime_dockerfile__"
 
 config = Config()
 
@@ -26,8 +29,14 @@ def push_image(
     image_reference: str = typer.Argument(
         ..., help="Image reference (e.g., 'myapp:v1.0.0' or 'myapp:latest')"
     ),
-    dockerfile: str = typer.Option("Dockerfile", "--dockerfile", "-f", help="Path to Dockerfile"),
     context: str = typer.Option(".", "--context", "-c", help="Build context directory"),
+    dockerfile: Optional[str] = typer.Option(
+        None,
+        "--dockerfile",
+        "-f",
+        help="Path to Dockerfile",
+        show_default="<context>/Dockerfile",
+    ),
     platform: str = typer.Option(
         "linux/amd64",
         "--platform",
@@ -41,7 +50,7 @@ def push_image(
     \b
     Examples:
         prime images push myapp:v1.0.0
-        prime images push myapp:latest --dockerfile custom.Dockerfile
+        prime images push myapp:latest --context ./app --dockerfile ../docker/Dockerfile.prod
         prime images push myapp:v1 --platform linux/arm64
     """
     try:
@@ -70,10 +79,23 @@ def push_image(
         # Initialize API client
         client = APIClient()
 
-        # Check if Dockerfile exists
-        dockerfile_path = Path(context) / dockerfile
+        context_path = Path(context).resolve()
+        dockerfile_path = Path(dockerfile).resolve() if dockerfile else context_path / "Dockerfile"
+
+        if not context_path.exists():
+            console.print(f"[red]Error: Build context not found at {context_path}[/red]")
+            raise typer.Exit(1)
+
+        if not context_path.is_dir():
+            console.print(f"[red]Error: Build context must be a directory: {context_path}[/red]")
+            raise typer.Exit(1)
+
         if not dockerfile_path.exists():
             console.print(f"[red]Error: Dockerfile not found at {dockerfile_path}[/red]")
+            raise typer.Exit(1)
+
+        if not dockerfile_path.is_file():
+            console.print(f"[red]Error: Dockerfile must be a file: {dockerfile_path}[/red]")
             raise typer.Exit(1)
 
         # Create tar.gz of build context
@@ -83,7 +105,8 @@ def push_image(
 
         try:
             with tarfile.open(tar_path, "w:gz") as tar:
-                tar.add(context, arcname=".")
+                tar.add(context_path, arcname=".")
+                tar.add(dockerfile_path, arcname=PACKAGED_DOCKERFILE_PATH)
 
             tar_size_mb = Path(tar_path).stat().st_size / (1024 * 1024)
             console.print(f"[green]✓[/green] Build context packaged ({tar_size_mb:.2f} MB)")
@@ -95,7 +118,7 @@ def push_image(
                 build_payload = {
                     "image_name": image_name,
                     "image_tag": image_tag,
-                    "dockerfile_path": dockerfile,
+                    "dockerfile_path": PACKAGED_DOCKERFILE_PATH,
                     "platform": platform,
                 }
                 if config.team_id:

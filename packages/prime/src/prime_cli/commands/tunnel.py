@@ -164,13 +164,13 @@ def stop_tunnel(
         True,
         "--only-mine/--all-users",
         "-m/-A",
-        help="Restrict '--all' deletes to only your tunnels",
+        help="Restrict '--all' and '--label' deletes to only your tunnels",
         show_default=True,
     ),
 ) -> None:
     """Stop and delete one or more tunnels.
 
-    --only-mine controls whether '--all' will restrict to your tunnels or delete for all users.
+    --only-mine controls whether '--all' and '--label' will restrict to your tunnels or delete for all users.
     """
     modes = sum([bool(tunnel_ids), all, bool(label)])
     if modes > 1:
@@ -181,59 +181,47 @@ def stop_tunnel(
         console.print("[red]Error:[/red] Must specify tunnel IDs, --all, or --label")
         raise typer.Exit(1)
 
-    # Handle --label: delete by labels directly via API
+    # Handle --label: list matching tunnels, apply only_mine filter, then bulk delete by IDs
     if label:
-        confirmation_msg = (
-            f"Are you sure you want to stop all tunnels with labels {', '.join(label)}? "
-            "This action cannot be undone."
-        )
-        if not confirm_or_skip(confirmation_msg, yes):
-            console.print("Stop cancelled")
-            return
 
-        async def delete_by_labels():
+        async def fetch_labeled_tunnels() -> List[str]:
             client = TunnelClient()
             try:
-                return await client.bulk_delete_tunnels(labels=label, team_id=team_id)
+                tunnels = await client.list_tunnels(team_id=team_id, labels=label)
+                if only_mine:
+                    current_user_id = client.config.user_id
+                    if not current_user_id:
+                        console.print(
+                            "[red]Error:[/red] Cannot filter by user - no user_id configured. "
+                            "Use --all-users to delete all tunnels, or configure your user_id."
+                        )
+                        raise typer.Exit(1)
+                    tunnels = [t for t in tunnels if t.user_id == current_user_id]
+                return [t.tunnel_id for t in tunnels]
             finally:
                 await client.close()
 
         try:
-            with console.status("[bold blue]Stopping tunnel(s)...", spinner="dots"):
-                result = asyncio.run(delete_by_labels())
+            parsed_ids = asyncio.run(fetch_labeled_tunnels())
+        except typer.Exit:
+            raise
         except Exception as e:
             console.print(f"[red]Error:[/red] {e}", style="bold")
             raise typer.Exit(1)
 
-        succeeded = result.get("succeeded", [])
-        failed = result.get("failed", [])
-
-        if not succeeded and not failed:
+        if not parsed_ids:
             console.print(
                 f"[yellow]No tunnels found matching labels {', '.join(label)}[/yellow]"
             )
+            if only_mine:
+                console.print(
+                    "\n[dim]Note: --label only deletes your own tunnels by default. "
+                    "Use --all-users to delete tunnels from all team members.[/dim]"
+                )
             return
 
-        if succeeded:
-            console.print(
-                f"[bold green]Successfully deleted {len(succeeded)} tunnel(s):[/bold green]"
-            )
-            for tid in succeeded:
-                console.print(f"  ✓ {tid}")
-
-        if failed:
-            console.print(
-                f"\n[bold red]Failed to delete {len(failed)} tunnel(s):[/bold red]"
-            )
-            for failure in failed:
-                tid = failure.get("tunnel_id", "unknown")
-                error = failure.get("error", "Unknown error")
-                console.print(f"  ✗ {tid}: {error}")
-            raise typer.Exit(1)
-        return
-
-    parsed_ids: List[str] = []
-    if all:
+    elif all:
+        parsed_ids: List[str] = []
 
         async def fetch_tunnels() -> List[str]:
             client = TunnelClient()
@@ -269,6 +257,7 @@ def stop_tunnel(
                 )
             return
     else:
+        parsed_ids: List[str] = []
         raw_ids: List[str] = []
         for id_string in tunnel_ids or []:
             if "," in id_string:
@@ -286,12 +275,12 @@ def stop_tunnel(
             console.print("[red]Error:[/red] No valid tunnel IDs provided")
             raise typer.Exit(1)
 
-    if all:
+    if all or label:
         confirmation_msg = (
-            f"Are you sure you want to stop ALL {len(parsed_ids)} tunnel(s)? "
+            f"Are you sure you want to stop {len(parsed_ids)} tunnel(s)? "
             "This action cannot be undone."
         )
-        cancel_msg = "Stop all cancelled"
+        cancel_msg = "Stop cancelled"
     elif len(parsed_ids) == 1:
         confirmation_msg = f"Are you sure you want to stop tunnel {parsed_ids[0]}?"
         cancel_msg = "Stop cancelled"

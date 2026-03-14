@@ -96,7 +96,7 @@ class TunnelClient:
         method: str,
         url: str,
         json: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, str]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
         """Make async HTTP request with retry on transient connection errors.
 
@@ -117,7 +117,7 @@ class TunnelClient:
         method: str,
         url: str,
         json: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, str]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
         """Make async HTTP request with retry on transient errors including timeouts.
 
@@ -270,6 +270,8 @@ class TunnelClient:
         """Bulk delete multiple tunnels by IDs or labels."""
         if not tunnel_ids and not labels:
             raise ValueError("Must specify either tunnel_ids or labels")
+        if tunnel_ids and labels:
+            raise ValueError("Cannot specify both tunnel_ids and labels")
 
         self._check_auth_required()
 

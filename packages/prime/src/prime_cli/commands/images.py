@@ -18,6 +18,7 @@ from ..utils import validate_output_format
 
 app = typer.Typer(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = Console()
+# Use a synthetic archive path to avoid collisions with Dockerfiles already in the context.
 PACKAGED_DOCKERFILE_PATH = ".__prime_dockerfile__"
 
 config = Config()

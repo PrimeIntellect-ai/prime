@@ -265,8 +265,12 @@ class TunnelClient:
         self,
         tunnel_ids: Optional[list[str]] = None,
         labels: Optional[list[str]] = None,
+        team_id: Optional[str] = None,
     ) -> dict:
         """Bulk delete multiple tunnels by IDs or labels."""
+        if not tunnel_ids and not labels:
+            raise ValueError("Must specify either tunnel_ids or labels")
+
         self._check_auth_required()
 
         url = f"{self.base_url}/api/v1/tunnel"
@@ -275,6 +279,8 @@ class TunnelClient:
             payload["tunnel_ids"] = tunnel_ids
         if labels:
             payload["labels"] = labels
+        if team_id:
+            payload["teamId"] = team_id
 
         try:
             response = await self._idempotent_request_with_retry("DELETE", url, json=payload)

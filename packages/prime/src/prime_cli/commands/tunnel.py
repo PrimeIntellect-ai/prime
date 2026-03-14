@@ -184,7 +184,7 @@ def stop_tunnel(
     # Handle --label: delete by labels directly via API
     if label:
         confirmation_msg = (
-            f"Are you sure you want to stop all tunnels with labels {label}? "
+            f"Are you sure you want to stop all tunnels with labels {', '.join(label)}? "
             "This action cannot be undone."
         )
         if not confirm_or_skip(confirmation_msg, yes):
@@ -194,7 +194,7 @@ def stop_tunnel(
         async def delete_by_labels():
             client = TunnelClient()
             try:
-                return await client.bulk_delete_tunnels(labels=label)
+                return await client.bulk_delete_tunnels(labels=label, team_id=team_id)
             finally:
                 await client.close()
 
@@ -206,13 +206,30 @@ def stop_tunnel(
             raise typer.Exit(1)
 
         succeeded = result.get("succeeded", [])
-        message = result.get("message", "")
+        failed = result.get("failed", [])
+
+        if not succeeded and not failed:
+            console.print(
+                f"[yellow]No tunnels found matching labels {', '.join(label)}[/yellow]"
+            )
+            return
+
         if succeeded:
-            console.print(f"[green]{message}[/green]")
+            console.print(
+                f"[bold green]Successfully deleted {len(succeeded)} tunnel(s):[/bold green]"
+            )
             for tid in succeeded:
                 console.print(f"  ✓ {tid}")
-        else:
-            console.print(f"[yellow]No tunnels found matching labels {label}[/yellow]")
+
+        if failed:
+            console.print(
+                f"\n[bold red]Failed to delete {len(failed)} tunnel(s):[/bold red]"
+            )
+            for failure in failed:
+                tid = failure.get("tunnel_id", "unknown")
+                error = failure.get("error", "Unknown error")
+                console.print(f"  ✗ {tid}: {error}")
+            raise typer.Exit(1)
         return
 
     parsed_ids: List[str] = []

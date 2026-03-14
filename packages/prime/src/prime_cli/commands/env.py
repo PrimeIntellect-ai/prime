@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -13,12 +14,13 @@ from datetime import datetime
 # Wheel METADATA files use RFC 822 format (PEP 566), same as email headers
 from email.parser import Parser as EmailParser
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
 import toml
 import typer
+from gitignore_parser import parse_gitignore
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -404,12 +406,14 @@ def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
     if not file_path.is_file():
         return False
 
+    rel_path = file_path.relative_to(base_path)
+
     # Skip hidden files
     if file_path.name.startswith("."):
         return False
 
     # Skip files in __pycache__ directories
-    if "__pycache__" in str(file_path.relative_to(base_path)):
+    if "__pycache__" in rel_path.parts:
         return False
 
     return True
@@ -435,6 +439,55 @@ def should_include_directory_in_archive(dir_path: Path) -> bool:
     return True
 
 
+def _build_gitignore_matcher(env_path: Path) -> Optional[Callable[[str], bool]]:
+    """Build a matcher for the root .gitignore file, if present."""
+    gitignore_path = env_path / ".gitignore"
+    if not gitignore_path.exists():
+        return None
+    return parse_gitignore(str(gitignore_path), base_dir=str(env_path))
+
+
+def _collect_archive_files(env_path: Path) -> List[Path]:
+    """Collect archive file paths in deterministic order, honoring .gitignore."""
+    ignore_matcher = _build_gitignore_matcher(env_path)
+    files_by_rel_path: Dict[str, Path] = {}
+
+    def maybe_add_file(file_path: Path) -> None:
+        if not should_include_file_in_archive(file_path, env_path):
+            return
+        if ignore_matcher is not None and ignore_matcher(str(file_path)):
+            return
+
+        rel_path = str(file_path.relative_to(env_path)).replace("\\", "/")
+        files_by_rel_path[rel_path] = file_path
+
+    for pattern in ["README.md", "pyproject.toml", "*.py"]:
+        for file_path in sorted(env_path.glob(pattern), key=lambda p: p.name):
+            maybe_add_file(file_path)
+
+    def is_nested_dir_ignored(dir_path: Path) -> bool:
+        """Check if a nested directory should be pruned from traversal (gitignore only)."""
+        if ignore_matcher is not None and ignore_matcher(str(dir_path)):
+            return True
+        return False
+
+    for subdir in sorted(env_path.iterdir(), key=lambda path: path.name):
+        if not should_include_directory_in_archive(subdir):
+            continue
+        if is_nested_dir_ignored(subdir):
+            continue
+
+        for root, dirnames, filenames in os.walk(subdir):
+            root_path = Path(root)
+            dirnames[:] = sorted(
+                dirname for dirname in dirnames if not is_nested_dir_ignored(root_path / dirname)
+            )
+            for filename in sorted(filenames):
+                maybe_add_file(root_path / filename)
+
+    return [files_by_rel_path[rel_path] for rel_path in sorted(files_by_rel_path)]
+
+
 def compute_content_hash(env_path: Path) -> str:
     """Compute deterministic, cross-platform content hash for environment files.
 
@@ -446,45 +499,15 @@ def compute_content_hash(env_path: Path) -> str:
     """
     content_hasher = hashlib.sha256()
 
-    # Collect all items to hash in a deterministic order
-    items_to_hash = []
-
-    # Add root-level files
-    for pattern in ["pyproject.toml", "*.py", "README.md"]:
-        for file_path in env_path.glob(pattern):
-            if file_path.is_file():
-                items_to_hash.append(("file", file_path))
-
-    # Add subdirectory contents
-    for subdir in sorted(env_path.iterdir(), key=lambda x: x.name):
-        if should_include_directory_in_archive(subdir):
-            # Add directory marker
-            items_to_hash.append(("dir", subdir))
-
-            # Add files in subdirectory
-            for file_path in subdir.rglob("*"):
-                if should_include_file_in_archive(file_path, env_path):
-                    items_to_hash.append(("file", file_path))
-
-    # Sort all items by their relative path for deterministic ordering
-    items_to_hash.sort(key=lambda item: str(item[1].relative_to(env_path)).replace("\\", "/"))
-
-    # Hash items in sorted order
-    for item_type, item_path in items_to_hash:
-        rel_path = item_path.relative_to(env_path)
-        # Use forward slashes for cross-platform consistency
-        normalized_path = str(rel_path).replace("\\", "/")
-
-        if item_type == "dir":
-            content_hasher.update(f"dir:{normalized_path}".encode("utf-8"))
-        elif item_type == "file":
-            content_hasher.update(f"file:{normalized_path}".encode("utf-8"))
-            try:
-                with open(item_path, "rb") as f:
-                    content_hasher.update(f.read())
-            except IOError:
-                # Skip files that can't be read
-                pass
+    for file_path in _collect_archive_files(env_path):
+        normalized_path = str(file_path.relative_to(env_path)).replace("\\", "/")
+        content_hasher.update(f"file:{normalized_path}".encode("utf-8"))
+        try:
+            with open(file_path, "rb") as f:
+                content_hasher.update(f.read())
+        except IOError:
+            # Skip files that can't be read
+            pass
 
     return content_hasher.hexdigest()
 
@@ -1158,21 +1181,9 @@ def push(
                 with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
                     temp_file_path = tmp.name
                     with tarfile.open(tmp.name, "w:gz") as tar:
-                        for pattern in ["README.md", "pyproject.toml", "*.py"]:
-                            for file in env_path.glob(pattern):
-                                if file.is_file():
-                                    tar.add(file, arcname=file.name)
-
-                        # Sort subdirectories for deterministic ordering and apply filtering
-                        for subdir in sorted(env_path.iterdir(), key=lambda x: x.name):
-                            if should_include_directory_in_archive(subdir):
-                                # Add directory with custom filtering instead of entire subdirectory
-                                for file in subdir.rglob("*"):
-                                    if should_include_file_in_archive(file, env_path):
-                                        # Calculate relative path from env_path for consistent
-                                        # archive structure
-                                        arcname = file.relative_to(env_path)
-                                        tar.add(file, arcname=str(arcname))
+                        for file_path in _collect_archive_files(env_path):
+                            arcname = file_path.relative_to(env_path)
+                            tar.add(file_path, arcname=str(arcname))
 
                     # Check tarball size
                     tarball_size = Path(tmp.name).stat().st_size

@@ -273,6 +273,9 @@ class TunnelClient:
 
         self._check_auth_required()
 
+        if team_id is None:
+            team_id = self.config.team_id
+
         url = f"{self.base_url}/api/v1/tunnel"
         payload: Dict[str, Any] = {}
         if tunnel_ids:

@@ -170,7 +170,8 @@ def stop_tunnel(
 ) -> None:
     """Stop and delete one or more tunnels.
 
-    --only-mine controls whether '--all' and '--label' will restrict to your tunnels or delete for all users.
+    --only-mine controls whether '--all' and '--label' will restrict
+    to your tunnels or delete for all users.
     """
     modes = sum([bool(tunnel_ids), all, bool(label)])
     if modes > 1:
@@ -210,9 +211,7 @@ def stop_tunnel(
             raise typer.Exit(1)
 
         if not parsed_ids:
-            console.print(
-                f"[yellow]No tunnels found matching labels {', '.join(label)}[/yellow]"
-            )
+            console.print(f"[yellow]No tunnels found matching labels {', '.join(label)}[/yellow]")
             if only_mine:
                 console.print(
                     "\n[dim]Note: --label only deletes your own tunnels by default. "

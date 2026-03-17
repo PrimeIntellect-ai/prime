@@ -440,6 +440,41 @@ env_id = "gsm8k"
     assert captured["endpoints_path"] == "./configs/endpoints.toml"
 
 
+def test_eval_run_local_toml_passthrough(monkeypatch, tmp_path):
+    captured = {}
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "openai/gpt-4.1-mini"
+
+[[eval]]
+env_id = "gsm8k"
+""".strip()
+    )
+
+    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
+        captured["environment"] = environment
+        captured["passthrough_args"] = passthrough_args
+        captured["skip_upload"] = skip_upload
+        captured["env_path"] = env_path
+
+    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--skip-upload"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "environment": str(config_path),
+        "passthrough_args": [],
+        "skip_upload": True,
+        "env_path": None,
+    }
+
+
 def test_eval_run_rejects_hosted_only_flags_without_hosted():
     result = runner.invoke(
         app,

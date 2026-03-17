@@ -784,11 +784,10 @@ class SandboxClient:
         params = {"path": file_path}
 
         response = self._gateway_get(url, headers=headers, params=params, timeout=timeout)
+        if response.status_code == 404:
+            return None
         response.raise_for_status()
-        data = response.json()
-        if data.get("exists"):
-            return data.get("content")
-        return None
+        return response.json().get("content")
 
     def get_background_job(
         self,
@@ -809,7 +808,7 @@ class SandboxClient:
             if content is None or not content.strip():
                 return BackgroundJobStatus(job_id=job.job_id, completed=False)
             exit_code = int(content.strip())
-        except Exception:
+        except (httpx.HTTPStatusError, httpx.RequestError):
             # Fall back to command execution (old sidecar without /read-file)
             exit_file_quoted = shlex.quote(job.exit_file)
             check = self.execute_command(
@@ -1572,11 +1571,10 @@ class AsyncSandboxClient:
         params = {"path": file_path}
 
         response = await self._gateway_get(url, headers=headers, params=params, timeout=timeout)
+        if response.status_code == 404:
+            return None
         response.raise_for_status()
-        data = response.json()
-        if data.get("exists"):
-            return data.get("content")
-        return None
+        return response.json().get("content")
 
     async def get_background_job(
         self,
@@ -1597,7 +1595,7 @@ class AsyncSandboxClient:
             if content is None or not content.strip():
                 return BackgroundJobStatus(job_id=job.job_id, completed=False)
             exit_code = int(content.strip())
-        except Exception:
+        except (httpx.HTTPStatusError, httpx.RequestError):
             # Fall back to command execution (old sidecar without /read-file)
             exit_file_quoted = shlex.quote(job.exit_file)
             check = await self.execute_command(

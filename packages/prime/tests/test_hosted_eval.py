@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from prime_cli.client import APIError
 from prime_cli.main import app
 from prime_cli.utils.hosted_eval import clean_logs, filter_progress_bars, strip_ansi
@@ -337,6 +339,105 @@ env_id = "gsm8k"
     assert result.exit_code == 1
     assert "does not support" in result.output
     assert "`resume`" in result.output
+
+
+def test_eval_run_hosted_toml_preserves_cli_env_dir_path(monkeypatch, tmp_path):
+    captured = {}
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+[[eval]]
+env_id = "gsm8k"
+""".strip()
+    )
+
+    def fake_resolve(environment, env_dir_path=None, env_path=None):
+        captured["environment"] = environment
+        captured["env_dir_path"] = env_dir_path
+        captured["env_path"] = env_path
+        return ("primeintellect/gsm8k", "env-123")
+
+    def fake_run_hosted_evaluation(config):
+        from prime_cli.utils.hosted_eval import EvalStatus, HostedEvalResult
+
+        return HostedEvalResult(
+            evaluation_id="eval-123",
+            status=EvalStatus.PENDING,
+            total_samples=0,
+            avg_score=None,
+            min_score=None,
+            max_score=None,
+        )
+
+    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluation",
+        fake_run_hosted_evaluation,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run",
+            str(config_path),
+            "--hosted",
+            "--env-dir-path",
+            "/tmp/custom-envs",
+        ],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "environment": "gsm8k",
+        "env_dir_path": "/tmp/custom-envs",
+        "env_path": None,
+    }
+
+
+def test_eval_run_hosted_endpoint_id_uses_default_endpoints_path_from_cwd(monkeypatch, tmp_path):
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    config_path = config_dir / "eval.toml"
+    config_path.write_text(
+        """
+endpoint_id = "test-endpoint"
+
+[[eval]]
+env_id = "gsm8k"
+""".strip()
+    )
+
+    captured = {}
+
+    def fake_resolve_endpoints_file(path):
+        captured["endpoints_path"] = path
+        return Path(path)
+
+    def fake_load_endpoints(path):
+        return {
+            "test-endpoint": [
+                {
+                    "model": "openai/gpt-4.1-mini",
+                    "url": "https://api.example.com/v1",
+                    "key": "PRIME_API_KEY",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        "verifiers.utils.eval_utils.resolve_endpoints_file",
+        fake_resolve_endpoints_file,
+    )
+    monkeypatch.setattr("verifiers.utils.eval_utils.load_endpoints", fake_load_endpoints)
+
+    from prime_cli.commands.evals import _load_hosted_eval_config
+
+    loaded = _load_hosted_eval_config(str(config_path))
+
+    assert loaded["model"] == "openai/gpt-4.1-mini"
+    assert captured["endpoints_path"] == "./configs/endpoints.toml"
 
 
 def test_eval_run_rejects_hosted_only_flags_without_hosted():

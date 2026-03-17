@@ -176,7 +176,7 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
         raise typer.Exit(1)
 
     endpoints_path_obj = Path(endpoints_path)
-    if not endpoints_path_obj.is_absolute():
+    if "endpoints_path" in raw_config and not endpoints_path_obj.is_absolute():
         endpoints_path = str((config_path.parent / endpoints_path_obj).resolve())
 
     try:
@@ -1180,7 +1180,8 @@ def run_eval_cmd(
         if _is_config_target(environment):
             hosted_target_config = _load_hosted_eval_config(environment)
             hosted_target = hosted_target_config["env_id"]
-            hosted_target_env_dir_path = hosted_target_config.get("env_dir_path")
+            if hosted_target_config.get("env_dir_path") is not None:
+                hosted_target_env_dir_path = hosted_target_config["env_dir_path"]
             hosted_target_model = hosted_target_config["model"]
             hosted_target_num_examples = hosted_target_config.get(
                 "num_examples",

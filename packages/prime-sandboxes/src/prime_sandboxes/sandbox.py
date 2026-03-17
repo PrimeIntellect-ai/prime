@@ -653,9 +653,9 @@ class SandboxClient:
 
         for attempt in range(MAX_409_RETRIES):
             try:
-                # The + 2 accounts for connection creation and closing. Prevents any command
+                # The + 5 accounts for connection creation and closing. Prevents any command
                 # running close to its `effective_timeout` from being killed prematurely
-                client_timeout = effective_timeout + 2
+                client_timeout = effective_timeout + 5
                 response = self._gateway_post(
                     url, headers=headers, timeout=client_timeout, json=payload
                 )
@@ -770,6 +770,26 @@ class SandboxClient:
             exit_file=exit_file,
         )
 
+    def _read_sandbox_file(
+        self,
+        sandbox_id: str,
+        file_path: str,
+        timeout: int = 10,
+    ) -> Optional[str]:
+        """Read a file directly from the sandbox filesystem"""
+        auth = self._auth_cache.get_or_refresh(sandbox_id)
+        gateway_url = auth["gateway_url"].rstrip("/")
+        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        params = {"path": file_path}
+
+        response = self._gateway_get(url, headers=headers, params=params, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("exists"):
+            return data.get("content")
+        return None
+
     def get_background_job(
         self,
         sandbox_id: str,
@@ -784,16 +804,24 @@ class SandboxClient:
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
-        exit_file_quoted = shlex.quote(job.exit_file)
+        try:
+            content = self._read_sandbox_file(sandbox_id, job.exit_file)
+            if content is None or not content.strip():
+                return BackgroundJobStatus(job_id=job.job_id, completed=False)
+            exit_code = int(content.strip())
+        except Exception:
+            # Fall back to command execution (old sidecar without /read-file)
+            exit_file_quoted = shlex.quote(job.exit_file)
+            check = self.execute_command(
+                sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30
+            )
+            if not check.stdout.strip():
+                return BackgroundJobStatus(job_id=job.job_id, completed=False)
+            exit_code = int(check.stdout.strip())
+
+        # Job completed — read output logs
         stdout_log_file_quoted = shlex.quote(job.stdout_log_file)
         stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
-
-        check = self.execute_command(sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30)
-
-        if not check.stdout.strip():
-            return BackgroundJobStatus(job_id=job.job_id, completed=False)
-
-        exit_code = int(check.stdout.strip())
         stdout_logs = self.execute_command(sandbox_id, f"cat {stdout_log_file_quoted}", timeout=60)
         stderr_logs = self.execute_command(sandbox_id, f"cat {stderr_log_file_quoted}", timeout=60)
 
@@ -1413,9 +1441,9 @@ class AsyncSandboxClient:
 
         for attempt in range(MAX_409_RETRIES):
             try:
-                # The + 2 accounts for connection creation and closing. Prevents any command
+                # The + 5 accounts for connection creation and closing. Prevents any command
                 # running close to its `effective_timeout` from being killed prematurely
-                client_timeout = effective_timeout + 2
+                client_timeout = effective_timeout + 5
                 response = await self._gateway_post(
                     url, headers=headers, timeout=client_timeout, json=payload
                 )
@@ -1530,6 +1558,26 @@ class AsyncSandboxClient:
             exit_file=exit_file,
         )
 
+    async def _read_sandbox_file(
+        self,
+        sandbox_id: str,
+        file_path: str,
+        timeout: int = 10,
+    ) -> Optional[str]:
+        """Read a file directly from the sandbox filesystem"""
+        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
+        gateway_url = auth["gateway_url"].rstrip("/")
+        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        params = {"path": file_path}
+
+        response = await self._gateway_get(url, headers=headers, params=params, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("exists"):
+            return data.get("content")
+        return None
+
     async def get_background_job(
         self,
         sandbox_id: str,
@@ -1544,18 +1592,24 @@ class AsyncSandboxClient:
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
-        exit_file_quoted = shlex.quote(job.exit_file)
+        try:
+            content = await self._read_sandbox_file(sandbox_id, job.exit_file)
+            if content is None or not content.strip():
+                return BackgroundJobStatus(job_id=job.job_id, completed=False)
+            exit_code = int(content.strip())
+        except Exception:
+            # Fall back to command execution (old sidecar without /read-file)
+            exit_file_quoted = shlex.quote(job.exit_file)
+            check = await self.execute_command(
+                sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30
+            )
+            if not check.stdout.strip():
+                return BackgroundJobStatus(job_id=job.job_id, completed=False)
+            exit_code = int(check.stdout.strip())
+
+        # Job completed — read output logs
         stdout_log_file_quoted = shlex.quote(job.stdout_log_file)
         stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
-
-        check = await self.execute_command(
-            sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30
-        )
-
-        if not check.stdout.strip():
-            return BackgroundJobStatus(job_id=job.job_id, completed=False)
-
-        exit_code = int(check.stdout.strip())
         stdout_logs = await self.execute_command(
             sandbox_id, f"cat {stdout_log_file_quoted}", timeout=60
         )

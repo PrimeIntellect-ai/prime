@@ -809,7 +809,7 @@ class SandboxClient:
                 return BackgroundJobStatus(job_id=job.job_id, completed=False)
             exit_code = int(content.strip())
         except (httpx.HTTPStatusError, httpx.RequestError, json.JSONDecodeError):
-            # Fall back to command execution (old sidecar without /read-file)
+            # Fall back to cat
             exit_file_quoted = shlex.quote(job.exit_file)
             check = self.execute_command(
                 sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30
@@ -1612,7 +1612,7 @@ class AsyncSandboxClient:
                 return BackgroundJobStatus(job_id=job.job_id, completed=False)
             exit_code = int(content.strip())
         except (httpx.HTTPStatusError, httpx.RequestError, json.JSONDecodeError):
-            # Fall back to command execution (old sidecar without /read-file)
+            # Fall back to cat
             exit_file_quoted = shlex.quote(job.exit_file)
             check = await self.execute_command(
                 sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30

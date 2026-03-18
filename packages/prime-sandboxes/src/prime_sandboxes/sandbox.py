@@ -808,7 +808,7 @@ class SandboxClient:
             if content is None or not content.strip():
                 return BackgroundJobStatus(job_id=job.job_id, completed=False)
             exit_code = int(content.strip())
-        except (httpx.HTTPStatusError, httpx.RequestError):
+        except (httpx.HTTPStatusError, httpx.RequestError, json.JSONDecodeError):
             # Fall back to command execution (old sidecar without /read-file)
             exit_file_quoted = shlex.quote(job.exit_file)
             check = self.execute_command(
@@ -816,7 +816,12 @@ class SandboxClient:
             )
             if not check.stdout.strip():
                 return BackgroundJobStatus(job_id=job.job_id, completed=False)
-            exit_code = int(check.stdout.strip())
+            try:
+                exit_code = int(check.stdout.strip())
+            except ValueError:
+                return BackgroundJobStatus(job_id=job.job_id, completed=False)
+        except ValueError:
+            return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
         # Job completed — read output logs
         stdout_log_file_quoted = shlex.quote(job.stdout_log_file)
@@ -1595,7 +1600,7 @@ class AsyncSandboxClient:
             if content is None or not content.strip():
                 return BackgroundJobStatus(job_id=job.job_id, completed=False)
             exit_code = int(content.strip())
-        except (httpx.HTTPStatusError, httpx.RequestError):
+        except (httpx.HTTPStatusError, httpx.RequestError, json.JSONDecodeError):
             # Fall back to command execution (old sidecar without /read-file)
             exit_file_quoted = shlex.quote(job.exit_file)
             check = await self.execute_command(
@@ -1603,7 +1608,12 @@ class AsyncSandboxClient:
             )
             if not check.stdout.strip():
                 return BackgroundJobStatus(job_id=job.job_id, completed=False)
-            exit_code = int(check.stdout.strip())
+            try:
+                exit_code = int(check.stdout.strip())
+            except ValueError:
+                return BackgroundJobStatus(job_id=job.job_id, completed=False)
+        except ValueError:
+            return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
         # Job completed — read output logs
         stdout_log_file_quoted = shlex.quote(job.stdout_log_file)

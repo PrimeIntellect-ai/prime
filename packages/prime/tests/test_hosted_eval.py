@@ -167,6 +167,55 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
     assert captured["json"]["team_id"] == "team-123"
 
 
+def test_create_hosted_evaluation_includes_sampling_args_in_payload(monkeypatch):
+    captured = {}
+
+    class DummyConfig:
+        team_id = None
+
+    class DummyAPIClient:
+        def __init__(self):
+            self.config = DummyConfig()
+
+        def post(self, endpoint, json=None):
+            captured["endpoint"] = endpoint
+            captured["json"] = json
+            return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+
+    _create_hosted_evaluations(
+        HostedEvalConfig(
+            environment_id="env-123",
+            inference_model="openai/gpt-4.1-mini",
+            num_examples=5,
+            rollouts_per_example=3,
+            sampling_args={
+                "temperature": 0.2,
+                "extra_body": {
+                    "provider": {
+                        "order": ["azure"],
+                        "allow_fallbacks": False,
+                        "require_parameters": True,
+                    }
+                },
+            },
+        )
+    )
+
+    assert captured["endpoint"] == "/hosted-evaluations"
+    assert captured["json"]["eval_config"]["sampling_args"] == {
+        "temperature": 0.2,
+        "extra_body": {
+            "provider": {
+                "order": ["azure"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            }
+        },
+    }
+
+
 def test_create_hosted_evaluation_accepts_plural_ids_response(monkeypatch):
     class DummyConfig:
         team_id = None
@@ -253,7 +302,8 @@ def test_eval_run_hosted_supports_single_eval_toml(monkeypatch, tmp_path):
     captured = {}
     config_path = tmp_path / "eval.toml"
     config_path.write_text(
-        """
+        (
+            """
 model = "openai/gpt-4.1-mini"
 num_examples = 7
 rollouts_per_example = 2
@@ -261,11 +311,14 @@ timeout_minutes = 180
 allow_sandbox_access = true
 allow_instances_access = true
 eval_name = "math500 smoke test"
-
-[[eval]]
-env_id = "gsm8k"
-env_args = { split = "test" }
-""".strip()
+"""
+            + "sampling_args = { "
+            + 'extra_body = { provider = { order = ["azure"], '
+            + "allow_fallbacks = false, require_parameters = true } } }\n\n"
+            + "[[eval]]\n"
+            + 'env_id = "gsm8k"\n'
+            + 'env_args = { split = "test" }'
+        )
     )
 
     def fake_resolve(environment, env_dir_path=None, env_path=None):
@@ -284,6 +337,7 @@ env_args = { split = "test" }
         captured["timeout_minutes"] = config.timeout_minutes
         captured["allow_sandbox_access"] = config.allow_sandbox_access
         captured["allow_instances_access"] = config.allow_instances_access
+        captured["sampling_args"] = config.sampling_args
         captured["name"] = config.name
         return {"evaluation_id": "eval-123"}
 
@@ -313,6 +367,15 @@ env_args = { split = "test" }
         "timeout_minutes": 180,
         "allow_sandbox_access": True,
         "allow_instances_access": True,
+        "sampling_args": {
+            "extra_body": {
+                "provider": {
+                    "order": ["azure"],
+                    "allow_fallbacks": False,
+                    "require_parameters": True,
+                }
+            }
+        },
         "name": "math500 smoke test",
     }
 
@@ -348,6 +411,7 @@ env_args = { split = "test" }
         captured["timeout_minutes"] = config.timeout_minutes
         captured["allow_sandbox_access"] = config.allow_sandbox_access
         captured["allow_instances_access"] = config.allow_instances_access
+        captured["sampling_args"] = config.sampling_args
         captured["name"] = config.name
         return {"evaluation_id": "eval-123"}
 
@@ -374,6 +438,8 @@ env_args = { split = "test" }
             '{"split":"validation"}',
             "--timeout-minutes",
             "240",
+            "--sampling-args",
+            '{"temperature":0.2,"extra_body":{"provider":{"order":["azure"],"allow_fallbacks":false,"require_parameters":true}}}',
             "--eval-name",
             "from cli",
         ],
@@ -390,6 +456,16 @@ env_args = { split = "test" }
         "timeout_minutes": 240,
         "allow_sandbox_access": True,
         "allow_instances_access": True,
+        "sampling_args": {
+            "temperature": 0.2,
+            "extra_body": {
+                "provider": {
+                    "order": ["azure"],
+                    "allow_fallbacks": False,
+                    "require_parameters": True,
+                }
+            },
+        },
         "name": "from cli",
     }
 

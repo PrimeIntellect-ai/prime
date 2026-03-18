@@ -1076,11 +1076,7 @@ class SandboxClient:
                     url, headers=headers, params=params, timeout=effective_timeout
                 )
                 response.raise_for_status()
-                data = response.json()
-                return ReadFileResponse(
-                    content=data.get("content", ""),
-                    size=data.get("size", 0),
-                )
+                return ReadFileResponse.model_validate(response.json())
             except httpx.TimeoutException as e:
                 raise APIError(
                     f"Read file timed out after {effective_timeout}s: {file_path}"
@@ -1911,11 +1907,7 @@ class AsyncSandboxClient:
                     url, headers=headers, params=params, timeout=effective_timeout
                 )
                 response.raise_for_status()
-                data = response.json()
-                return ReadFileResponse(
-                    content=data.get("content", ""),
-                    size=data.get("size", 0),
-                )
+                return ReadFileResponse.model_validate(response.json())
             except httpx.TimeoutException as e:
                 raise APIError(
                     f"Read file timed out after {effective_timeout}s: {file_path}"

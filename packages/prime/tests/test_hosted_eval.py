@@ -645,6 +645,70 @@ env_id = "gsm8k"
     assert captured["endpoints_path"] == "./configs/endpoints.toml"
 
 
+def test_hosted_eval_config_allows_eval_endpoint_id_to_override_top_level_model(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "openai/gpt-4.1-mini"
+
+[[eval]]
+env_id = "gsm8k"
+endpoint_id = "test-endpoint"
+""".strip()
+    )
+
+    monkeypatch.setattr(
+        "verifiers.utils.eval_utils.resolve_endpoints_file",
+        lambda path: Path(path),
+    )
+    monkeypatch.setattr(
+        "verifiers.utils.eval_utils.load_endpoints",
+        lambda path: {
+            "test-endpoint": [
+                {
+                    "model": "anthropic/claude-sonnet-4",
+                    "url": "https://api.example.com/v1",
+                    "key": "PRIME_API_KEY",
+                }
+            ]
+        },
+    )
+
+    loaded = _load_hosted_eval_configs(str(config_path))[0]
+
+    assert loaded["model"] == "anthropic/claude-sonnet-4"
+
+
+def test_hosted_eval_config_allows_eval_model_to_override_top_level_endpoint_id(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+endpoint_id = "test-endpoint"
+
+[[eval]]
+env_id = "gsm8k"
+model = "anthropic/claude-sonnet-4"
+""".strip()
+    )
+
+    monkeypatch.setattr(
+        "verifiers.utils.eval_utils.resolve_endpoints_file",
+        lambda path: (_ for _ in ()).throw(AssertionError("should not resolve endpoint_id")),
+    )
+    monkeypatch.setattr(
+        "verifiers.utils.eval_utils.load_endpoints",
+        lambda path: (_ for _ in ()).throw(AssertionError("should not load endpoints")),
+    )
+
+    loaded = _load_hosted_eval_configs(str(config_path))[0]
+
+    assert loaded["model"] == "anthropic/claude-sonnet-4"
+
+
 def test_eval_run_local_toml_passthrough(monkeypatch, tmp_path):
     captured = {}
     config_path = tmp_path / "eval.toml"

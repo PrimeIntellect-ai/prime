@@ -295,6 +295,12 @@ def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
 
         merged = {k: v for k, v in raw.items() if k != "eval"}
         merged.update(eval_entry)
+
+        if "endpoint_id" in eval_entry and "model" not in eval_entry:
+            merged.pop("model", None)
+        if "model" in eval_entry and "endpoint_id" not in eval_entry:
+            merged.pop("endpoint_id", None)
+
         merged = _validate_single_hosted_eval_config(merged, config_path)
         merged_configs.append(merged)
 

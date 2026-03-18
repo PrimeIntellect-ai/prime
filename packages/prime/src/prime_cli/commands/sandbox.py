@@ -49,16 +49,14 @@ console = Console()
 
 
 config = Config()
-GPU_SANDBOX_INTERNAL_DOCKER_IMAGE = "gpu-managed-runtime"
 
 
 def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
     """Format sandbox data for list display (both table and JSON)"""
-    image_display = "Platform GPU runtime" if sandbox.gpu_count > 0 else sandbox.docker_image
     return {
         "id": sandbox.id,
         "name": sandbox.name,
-        "image": image_display,
+        "image": sandbox.docker_image,
         "status": sandbox.status,
         "resources": format_resources(sandbox.cpu_cores, sandbox.memory_gb, sandbox.gpu_count),
         "labels": ", ".join(sandbox.labels) if sandbox.labels else "-",  # For table output
@@ -70,13 +68,10 @@ def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
 
 def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
     """Format sandbox data for details display (both table and JSON)"""
-    docker_image_display = (
-        "N/A (platform GPU runtime)" if sandbox.gpu_count > 0 else sandbox.docker_image
-    )
     data: Dict[str, Any] = {
         "id": sandbox.id,
         "name": sandbox.name,
-        "docker_image": docker_image_display,
+        "docker_image": sandbox.docker_image,
         "start_command": sandbox.start_command,
         "status": sandbox.status,
         "cpu_cores": sandbox.cpu_cores,
@@ -342,7 +337,7 @@ def get(
 def create(
     docker_image: Optional[str] = typer.Argument(
         None,
-        help="Docker image to run for CPU sandboxes (not yet supported for GPU sandboxes)",
+        help="Image to run. For GPU sandboxes, provide the VM image reference.",
     ),
     name: Optional[str] = typer.Option(
         None, help="Name for the sandbox (auto-generated if not provided)"
@@ -393,8 +388,6 @@ def create(
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
-        docker_image_was_provided = docker_image is not None
-
         # Parse environment variables
         env_vars = {}
         if env:
@@ -428,18 +421,9 @@ def create(
             )
             raise typer.Exit(1)
 
-        if gpu_count > 0:
-            if docker_image_was_provided:
-                console.print(
-                    "[red]Docker image is not supported for GPU sandboxes.[/red] "
-                    "Do not provide a DOCKER_IMAGE positional argument."
-                )
-                raise typer.Exit(1)
-            docker_image = GPU_SANDBOX_INTERNAL_DOCKER_IMAGE
-        elif not docker_image:
+        if not docker_image:
             console.print(
-                "[red]Docker image is required for CPU sandboxes.[/red] "
-                "Provide a DOCKER_IMAGE positional argument."
+                "[red]Docker image is required.[/red] Provide a DOCKER_IMAGE positional argument."
             )
             raise typer.Exit(1)
 
@@ -479,12 +463,7 @@ def create(
         # Show configuration summary
         console.print("\n[bold]Sandbox Configuration:[/bold]")
         console.print(f"Name: {name}")
-        if gpu_count > 0:
-            console.print("Docker Image: Not supported (platform GPU runtime)")
-        elif docker_image_was_provided:
-            console.print(f"Docker Image: {docker_image}")
-        else:
-            console.print("Docker Image: N/A")
+        console.print(f"Docker Image: {docker_image}")
         console.print(f"Start Command: {start_command or 'N/A'}")
         console.print(f"Resources: {cpu_cores} CPU, {memory_gb}GB RAM, {disk_size_gb}GB disk")
         if gpu_count > 0:

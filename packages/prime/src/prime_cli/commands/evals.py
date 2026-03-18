@@ -67,6 +67,15 @@ HOSTED_EVAL_CONFIG_ALLOWED_FIELDS = {
     "allow_instances_access",
     "eval_name",
 }
+HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
+    "env_dir_path": (str, "a non-empty string"),
+    "num_examples": (int, "an integer"),
+    "rollouts_per_example": (int, "an integer"),
+    "timeout_minutes": (int, "an integer"),
+    "allow_sandbox_access": (bool, "a boolean"),
+    "allow_instances_access": (bool, "a boolean"),
+    "eval_name": (str, "a non-empty string"),
+}
 
 
 class DefaultGroup(TyperGroup):
@@ -151,6 +160,20 @@ def _parse_json_option(raw: Optional[str], option_name: str) -> Optional[dict[st
     return parsed
 
 
+def _validate_hosted_config_field(
+    merged: dict[str, Any], field_name: str, expected_type: type[Any], description: str
+) -> None:
+    field_value = merged.get(field_name)
+    if field_value is None:
+        return
+    if type(field_value) is not expected_type:
+        console.print(f"[red]Error:[/red] `{field_name}` must be {description}")
+        raise typer.Exit(1)
+    if expected_type is str and not field_value:
+        console.print(f"[red]Error:[/red] `{field_name}` must be {description}")
+        raise typer.Exit(1)
+
+
 def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) -> str:
     raw_endpoint_id = raw_config.get("endpoint_id")
     raw_model = raw_config.get("model")
@@ -185,7 +208,10 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
     try:
         from verifiers.utils.eval_utils import load_endpoints, resolve_endpoints_file
     except ImportError as exc:
-        console.print("[red]Error:[/red] verifiers is required to resolve `endpoint_id`")
+        console.print(
+            "[red]Error:[/red] verifiers is required to resolve `endpoint_id`. "
+            "Install the `verifiers` package or use `model` instead."
+        )
         raise typer.Exit(1) from exc
 
     resolved_endpoints_file = resolve_endpoints_file(endpoints_path)
@@ -243,27 +269,8 @@ def _validate_single_hosted_eval_config(
         )
         raise typer.Exit(1)
 
-    env_dir_path = merged.get("env_dir_path")
-    if env_dir_path is not None and (type(env_dir_path) is not str or not env_dir_path):
-        console.print("[red]Error:[/red] `env_dir_path` must be a non-empty string")
-        raise typer.Exit(1)
-
-    for field_name in ("num_examples", "rollouts_per_example", "timeout_minutes"):
-        field_value = merged.get(field_name)
-        if field_value is not None and type(field_value) is not int:
-            console.print(f"[red]Error:[/red] `{field_name}` must be an integer")
-            raise typer.Exit(1)
-
-    for field_name in ("allow_sandbox_access", "allow_instances_access"):
-        field_value = merged.get(field_name)
-        if field_value is not None and type(field_value) is not bool:
-            console.print(f"[red]Error:[/red] `{field_name}` must be a boolean")
-            raise typer.Exit(1)
-
-    eval_name = merged.get("eval_name")
-    if eval_name is not None and (type(eval_name) is not str or not eval_name):
-        console.print("[red]Error:[/red] `eval_name` must be a non-empty string")
-        raise typer.Exit(1)
+    for field_name, (expected_type, description) in HOSTED_EVAL_CONFIG_FIELD_TYPES.items():
+        _validate_hosted_config_field(merged, field_name, expected_type, description)
 
     merged["model"] = _resolve_hosted_config_model(merged, config_path)
     return merged

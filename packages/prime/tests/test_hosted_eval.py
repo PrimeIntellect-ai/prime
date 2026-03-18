@@ -709,6 +709,38 @@ model = "anthropic/claude-sonnet-4"
     assert loaded["model"] == "anthropic/claude-sonnet-4"
 
 
+def test_hosted_eval_config_endpoint_id_reports_missing_verifiers(monkeypatch, tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+endpoint_id = "test-endpoint"
+
+[[eval]]
+env_id = "gsm8k"
+""".strip()
+    )
+
+    import builtins
+
+    original_import = builtins.__import__
+
+    def raise_import_error(name, *args, **kwargs):
+        if name == "verifiers.utils.eval_utils":
+            raise ImportError("missing verifiers")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", raise_import_error)
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "verifiers is required to resolve `endpoint_id`" in result.output
+
+
 def test_eval_run_local_toml_passthrough(monkeypatch, tmp_path):
     captured = {}
     config_path = tmp_path / "eval.toml"

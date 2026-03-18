@@ -785,6 +785,7 @@ class SandboxClient:
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
+
         def read_or_cat(path: str, timeout: int = 60) -> str:
             try:
                 return self.read_file(sandbox_id, path).content
@@ -1599,6 +1600,7 @@ class AsyncSandboxClient:
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
+
         async def read_or_cat(path: str, timeout: int = 60) -> str:
             try:
                 return (await self.read_file(sandbox_id, path)).content

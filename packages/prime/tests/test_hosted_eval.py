@@ -97,27 +97,16 @@ def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
         ),
     )
 
-    def fake_run_hosted_evaluation(config):
+    def fake_run_hosted_evaluation(config, environment_ids=None):
         captured["environment_id"] = config.environment_id
+        captured["environment_ids"] = environment_ids
         captured["inference_model"] = config.inference_model
         captured["num_examples"] = config.num_examples
         captured["rollouts_per_example"] = config.rollouts_per_example
-
-        from prime_cli.utils.hosted_eval import EvalStatus, HostedEvalResult
-
-        return HostedEvalResult(
-            evaluation_id="eval-123",
-            status=EvalStatus.PENDING,
-            total_samples=14,
-            avg_score=0.75,
-            min_score=0.5,
-            max_score=1.0,
-            error_message=None,
-            logs="done",
-        )
+        return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluation",
+        "prime_cli.commands.evals._create_hosted_evaluations",
         fake_run_hosted_evaluation,
     )
 
@@ -129,6 +118,7 @@ def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["environment_id"] == "env-123"
+    assert captured["environment_ids"] == ["env-123"]
     assert captured["inference_model"] == "openai/gpt-4.1-mini"
     assert captured["num_examples"] == 5
     assert captured["rollouts_per_example"] == 3
@@ -153,10 +143,10 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
 
     monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
 
-    from prime_cli.commands.evals import _create_hosted_evaluation
+    from prime_cli.commands.evals import _create_hosted_evaluations
     from prime_cli.utils.hosted_eval import HostedEvalConfig
 
-    result = _create_hosted_evaluation(
+    result = _create_hosted_evaluations(
         HostedEvalConfig(
             environment_id="env-123",
             inference_model="openai/gpt-4.1-mini",
@@ -165,7 +155,7 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
         )
     )
 
-    assert result.evaluation_id == "eval-123"
+    assert result["evaluation_id"] == "eval-123"
     assert captured["endpoint"] == "/hosted-evaluations"
     assert captured["json"]["team_id"] == "team-123"
 
@@ -181,23 +171,14 @@ def test_eval_run_hosted_follow_streams_logs(monkeypatch):
         ),
     )
 
-    def fake_run_hosted_evaluation(config):
+    def fake_run_hosted_evaluation(config, environment_ids=None):
         captured["num_examples"] = config.num_examples
         captured["rollouts_per_example"] = config.rollouts_per_example
-
-        from prime_cli.utils.hosted_eval import EvalStatus, HostedEvalResult
-
-        return HostedEvalResult(
-            evaluation_id="eval-123",
-            status=EvalStatus.PENDING,
-            total_samples=0,
-            avg_score=None,
-            min_score=None,
-            max_score=None,
-        )
+        captured["environment_ids"] = environment_ids
+        return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluation",
+        "prime_cli.commands.evals._create_hosted_evaluations",
         fake_run_hosted_evaluation,
     )
 
@@ -228,6 +209,7 @@ def test_eval_run_hosted_follow_streams_logs(monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["num_examples"] == 7
     assert captured["rollouts_per_example"] == 2
+    assert captured["environment_ids"] == ["env-123"]
     assert captured["display_eval_id"] == "eval-123"
     assert captured["display_tail"] == 1000
     assert captured["display_follow"] is True
@@ -242,6 +224,10 @@ def test_eval_run_hosted_supports_single_eval_toml(monkeypatch, tmp_path):
 model = "openai/gpt-4.1-mini"
 num_examples = 7
 rollouts_per_example = 2
+timeout_minutes = 180
+allow_sandbox_access = true
+allow_instances_access = true
+eval_name = "math500 smoke test"
 
 [[eval]]
 env_id = "gsm8k"
@@ -255,27 +241,22 @@ env_args = { split = "test" }
         captured["env_path"] = env_path
         return ("primeintellect/gsm8k", "env-123")
 
-    def fake_run_hosted_evaluation(config):
+    def fake_run_hosted_evaluation(config, environment_ids=None):
         captured["environment_id"] = config.environment_id
+        captured["environment_ids"] = environment_ids
         captured["inference_model"] = config.inference_model
         captured["num_examples"] = config.num_examples
         captured["rollouts_per_example"] = config.rollouts_per_example
         captured["env_args"] = config.env_args
-
-        from prime_cli.utils.hosted_eval import EvalStatus, HostedEvalResult
-
-        return HostedEvalResult(
-            evaluation_id="eval-123",
-            status=EvalStatus.PENDING,
-            total_samples=0,
-            avg_score=None,
-            min_score=None,
-            max_score=None,
-        )
+        captured["timeout_minutes"] = config.timeout_minutes
+        captured["allow_sandbox_access"] = config.allow_sandbox_access
+        captured["allow_instances_access"] = config.allow_instances_access
+        captured["name"] = config.name
+        return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
     monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluation",
+        "prime_cli.commands.evals._create_hosted_evaluations",
         fake_run_hosted_evaluation,
     )
 
@@ -291,22 +272,165 @@ env_args = { split = "test" }
         "env_dir_path": None,
         "env_path": None,
         "environment_id": "env-123",
+        "environment_ids": ["env-123"],
         "inference_model": "openai/gpt-4.1-mini",
         "num_examples": 7,
         "rollouts_per_example": 2,
         "env_args": {"split": "test"},
+        "timeout_minutes": 180,
+        "allow_sandbox_access": True,
+        "allow_instances_access": True,
+        "name": "math500 smoke test",
     }
 
 
-def test_eval_run_hosted_rejects_multi_eval_toml(tmp_path):
+def test_eval_run_hosted_cli_overrides_supported_toml_fields(monkeypatch, tmp_path):
+    captured = {}
     config_path = tmp_path / "eval.toml"
     config_path.write_text(
         """
+model = "openai/gpt-4.1-mini"
+num_examples = 7
+rollouts_per_example = 2
+timeout_minutes = 180
+allow_sandbox_access = true
+allow_instances_access = true
+eval_name = "from toml"
+
+[[eval]]
+env_id = "gsm8k"
+env_args = { split = "test" }
+""".strip()
+    )
+
+    def fake_resolve(environment, env_dir_path=None, env_path=None):
+        return ("primeintellect/gsm8k", "env-123")
+
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        captured["environment_ids"] = environment_ids
+        captured["inference_model"] = config.inference_model
+        captured["num_examples"] = config.num_examples
+        captured["rollouts_per_example"] = config.rollouts_per_example
+        captured["env_args"] = config.env_args
+        captured["timeout_minutes"] = config.timeout_minutes
+        captured["allow_sandbox_access"] = config.allow_sandbox_access
+        captured["allow_instances_access"] = config.allow_instances_access
+        captured["name"] = config.name
+        return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_run_hosted_evaluation,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run",
+            str(config_path),
+            "--hosted",
+            "-m",
+            "anthropic/claude-sonnet-4",
+            "-n",
+            "3",
+            "-r",
+            "4",
+            "--env-args",
+            '{"split":"validation"}',
+            "--timeout-minutes",
+            "240",
+            "--eval-name",
+            "from cli",
+        ],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "environment_ids": ["env-123"],
+        "inference_model": "anthropic/claude-sonnet-4",
+        "num_examples": 3,
+        "rollouts_per_example": 4,
+        "env_args": {"split": "validation"},
+        "timeout_minutes": 240,
+        "allow_sandbox_access": True,
+        "allow_instances_access": True,
+        "name": "from cli",
+    }
+
+
+def test_eval_run_hosted_supports_multi_eval_toml_with_shared_config(monkeypatch, tmp_path):
+    captured = {}
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "openai/gpt-4.1-mini"
+num_examples = 5
+rollouts_per_example = 3
+
 [[eval]]
 env_id = "gsm8k"
 
 [[eval]]
 env_id = "math500"
+""".strip()
+    )
+
+    resolved_calls = []
+
+    def fake_resolve(environment, env_dir_path=None, env_path=None):
+        resolved_calls.append((environment, env_dir_path, env_path))
+        return (f"primeintellect/{environment}", f"env-{environment}")
+
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        captured["environment_id"] = config.environment_id
+        captured["environment_ids"] = environment_ids
+        captured["inference_model"] = config.inference_model
+        captured["num_examples"] = config.num_examples
+        captured["rollouts_per_example"] = config.rollouts_per_example
+        return {"evaluation_id": "eval-123", "evaluation_ids": ["eval-123", "eval-456"]}
+
+    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_run_hosted_evaluation,
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert resolved_calls == [
+        ("gsm8k", None, None),
+        ("math500", None, None),
+    ]
+    assert captured == {
+        "environment_id": "env-gsm8k",
+        "environment_ids": ["env-gsm8k", "env-math500"],
+        "inference_model": "openai/gpt-4.1-mini",
+        "num_examples": 5,
+        "rollouts_per_example": 3,
+    }
+    assert "Evaluation IDs:" in result.output
+    assert "eval-123, eval-456" in result.output
+
+
+def test_eval_run_hosted_rejects_multi_eval_toml_with_different_shared_settings(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+[[eval]]
+env_id = "gsm8k"
+num_examples = 5
+
+[[eval]]
+env_id = "math500"
+num_examples = 10
 """.strip()
     )
 
@@ -316,8 +440,27 @@ env_id = "math500"
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
     assert result.exit_code == 1
-    assert "exactly one" in result.output
-    assert "eval" in result.output
+    assert "must share the same" in result.output
+
+
+def test_eval_run_hosted_rejects_invalid_supported_toml_field_types(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+timeout_minutes = "180"
+
+[[eval]]
+env_id = "gsm8k"
+""".strip()
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+    assert result.exit_code == 1
+    assert "`timeout_minutes` must be an integer" in result.output
 
 
 def test_eval_run_hosted_rejects_unsupported_toml_fields(tmp_path):
@@ -357,21 +500,12 @@ env_id = "gsm8k"
         captured["env_path"] = env_path
         return ("primeintellect/gsm8k", "env-123")
 
-    def fake_run_hosted_evaluation(config):
-        from prime_cli.utils.hosted_eval import EvalStatus, HostedEvalResult
-
-        return HostedEvalResult(
-            evaluation_id="eval-123",
-            status=EvalStatus.PENDING,
-            total_samples=0,
-            avg_score=None,
-            min_score=None,
-            max_score=None,
-        )
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
     monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluation",
+        "prime_cli.commands.evals._create_hosted_evaluations",
         fake_run_hosted_evaluation,
     )
 
@@ -432,9 +566,9 @@ env_id = "gsm8k"
     )
     monkeypatch.setattr("verifiers.utils.eval_utils.load_endpoints", fake_load_endpoints)
 
-    from prime_cli.commands.evals import _load_hosted_eval_config
+    from prime_cli.commands.evals import _load_hosted_eval_configs
 
-    loaded = _load_hosted_eval_config(str(config_path))
+    loaded = _load_hosted_eval_configs(str(config_path))[0]
 
     assert loaded["model"] == "openai/gpt-4.1-mini"
     assert captured["endpoints_path"] == "./configs/endpoints.toml"
@@ -504,21 +638,12 @@ def test_eval_run_hosted_passes_env_dir_path_to_resolver(monkeypatch):
         captured["env_path"] = env_path
         return ("primeintellect/gsm8k", "env-123")
 
-    def fake_run_hosted_evaluation(config):
-        from prime_cli.utils.hosted_eval import EvalStatus, HostedEvalResult
-
-        return HostedEvalResult(
-            evaluation_id="eval-123",
-            status=EvalStatus.PENDING,
-            total_samples=0,
-            avg_score=None,
-            min_score=None,
-            max_score=None,
-        )
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
     monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluation",
+        "prime_cli.commands.evals._create_hosted_evaluations",
         fake_run_hosted_evaluation,
     )
 
@@ -552,21 +677,12 @@ def test_eval_run_hosted_passes_env_path_to_resolver(monkeypatch):
         captured["env_path"] = env_path
         return ("primeintellect/gsm8k", "env-123")
 
-    def fake_run_hosted_evaluation(config):
-        from prime_cli.utils.hosted_eval import EvalStatus, HostedEvalResult
-
-        return HostedEvalResult(
-            evaluation_id="eval-123",
-            status=EvalStatus.PENDING,
-            total_samples=0,
-            avg_score=None,
-            min_score=None,
-            max_score=None,
-        )
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
     monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluation",
+        "prime_cli.commands.evals._create_hosted_evaluations",
         fake_run_hosted_evaluation,
     )
 

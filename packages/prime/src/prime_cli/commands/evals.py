@@ -22,7 +22,6 @@ from ..utils.eval_push import load_results_jsonl
 from ..utils.hosted_eval import (
     EvalStatus,
     HostedEvalConfig,
-    HostedEvalResult,
     clean_logs,
     get_new_log_lines,
 )
@@ -63,6 +62,10 @@ HOSTED_EVAL_CONFIG_ALLOWED_FIELDS = {
     "model",
     "num_examples",
     "rollouts_per_example",
+    "timeout_minutes",
+    "allow_sandbox_access",
+    "allow_instances_access",
+    "eval_name",
 }
 
 
@@ -212,31 +215,9 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
     return endpoint_group[0]["model"]
 
 
-def _load_hosted_eval_config(config_path_str: str) -> dict[str, Any]:
-    config_path = Path(config_path_str)
-    raw = load_toml(str(config_path), console)
-
-    eval_entries = raw.get("eval")
-    if not isinstance(eval_entries, list):
-        console.print(
-            "[red]Error:[/red] hosted eval config must use [[eval]] and contain exactly one entry"
-        )
-        raise typer.Exit(1)
-
-    if len(eval_entries) != 1:
-        console.print(
-            "[red]Error:[/red] hosted eval config currently supports exactly one [[eval]] entry"
-        )
-        raise typer.Exit(1)
-
-    eval_entry = eval_entries[0]
-    if not isinstance(eval_entry, dict):
-        console.print("[red]Error:[/red] [[eval]] must be a TOML table")
-        raise typer.Exit(1)
-
-    merged = {k: v for k, v in raw.items() if k != "eval"}
-    merged.update(eval_entry)
-
+def _validate_single_hosted_eval_config(
+    merged: dict[str, Any], config_path: Path
+) -> dict[str, Any]:
     unsupported_fields = sorted(set(merged) - HOSTED_EVAL_CONFIG_ALLOWED_FIELDS)
     if unsupported_fields:
         console.print(
@@ -267,14 +248,80 @@ def _load_hosted_eval_config(config_path_str: str) -> dict[str, Any]:
         console.print("[red]Error:[/red] `env_dir_path` must be a non-empty string")
         raise typer.Exit(1)
 
-    for field_name in ("num_examples", "rollouts_per_example"):
+    for field_name in ("num_examples", "rollouts_per_example", "timeout_minutes"):
         field_value = merged.get(field_name)
         if field_value is not None and type(field_value) is not int:
             console.print(f"[red]Error:[/red] `{field_name}` must be an integer")
             raise typer.Exit(1)
 
+    for field_name in ("allow_sandbox_access", "allow_instances_access"):
+        field_value = merged.get(field_name)
+        if field_value is not None and type(field_value) is not bool:
+            console.print(f"[red]Error:[/red] `{field_name}` must be a boolean")
+            raise typer.Exit(1)
+
+    eval_name = merged.get("eval_name")
+    if eval_name is not None and (type(eval_name) is not str or not eval_name):
+        console.print("[red]Error:[/red] `eval_name` must be a non-empty string")
+        raise typer.Exit(1)
+
     merged["model"] = _resolve_hosted_config_model(merged, config_path)
     return merged
+
+
+def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
+    config_path = Path(config_path_str)
+    raw = load_toml(str(config_path), console)
+
+    eval_entries = raw.get("eval")
+    if not isinstance(eval_entries, list):
+        console.print(
+            "[red]Error:[/red] hosted eval config must use [[eval]] and contain at least one entry"
+        )
+        raise typer.Exit(1)
+
+    if not eval_entries:
+        console.print(
+            "[red]Error:[/red] hosted eval config must contain at least one [[eval]] entry"
+        )
+        raise typer.Exit(1)
+
+    merged_configs: list[dict[str, Any]] = []
+    shared_keys = {
+        "model",
+        "num_examples",
+        "rollouts_per_example",
+        "env_args",
+        "timeout_minutes",
+        "allow_sandbox_access",
+        "allow_instances_access",
+        "eval_name",
+    }
+    expected_shared: dict[str, Any] | None = None
+
+    for eval_entry in eval_entries:
+        if not isinstance(eval_entry, dict):
+            console.print("[red]Error:[/red] [[eval]] must be a TOML table")
+            raise typer.Exit(1)
+
+        merged = {k: v for k, v in raw.items() if k != "eval"}
+        merged.update(eval_entry)
+        merged = _validate_single_hosted_eval_config(merged, config_path)
+
+        shared_values = {key: merged.get(key) for key in shared_keys}
+        if expected_shared is None:
+            expected_shared = shared_values
+        elif shared_values != expected_shared:
+            console.print(
+                "[red]Error:[/red] multiple hosted [[eval]] entries must share the same "
+                "model, env_args, num_examples, rollouts_per_example, timeout_minutes, "
+                "allow_sandbox_access, allow_instances_access, and eval_name"
+            )
+            raise typer.Exit(1)
+
+        merged_configs.append(merged)
+
+    return merged_configs
 
 
 def _fetch_eval_status(client: APIClient, eval_id: str) -> dict[str, Any]:
@@ -312,9 +359,14 @@ def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]
     return payload
 
 
-def _create_hosted_evaluation(config: HostedEvalConfig) -> HostedEvalResult:
+def _create_hosted_evaluations(
+    config: HostedEvalConfig, environment_ids: Optional[list[str]] = None
+) -> dict[str, Any]:
     client = APIClient()
     payload = _build_hosted_evaluation_payload(config)
+
+    if environment_ids is not None:
+        payload["environment_ids"] = environment_ids
 
     if client.config.team_id:
         payload["team_id"] = client.config.team_id
@@ -325,14 +377,7 @@ def _create_hosted_evaluation(config: HostedEvalConfig) -> HostedEvalResult:
     if not evaluation_id:
         raise APIError(f"Failed to get evaluation ID from response: {created}")
 
-    return HostedEvalResult(
-        evaluation_id=evaluation_id,
-        status=EvalStatus.PENDING,
-        total_samples=0,
-        avg_score=None,
-        min_score=None,
-        max_score=None,
-    )
+    return created
 
 
 def _print_eval_status(eval_data: dict[str, Any]) -> None:
@@ -1170,35 +1215,65 @@ def run_eval_cmd(
             raise typer.Exit(1)
 
     if hosted:
-        hosted_target = environment
-        hosted_target_env_dir_path = env_dir_path
         hosted_target_model = DEFAULT_MODEL
         hosted_target_num_examples = HOSTED_RUN_DEFAULT_NUM_EXAMPLES
         hosted_target_rollouts = HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE
         hosted_target_env_args: Optional[dict[str, str]] = None
+        hosted_target_timeout_minutes: Optional[int] = None
+        hosted_target_allow_sandbox_access = False
+        hosted_target_allow_instances_access = False
+        hosted_target_eval_name: Optional[str] = None
+        hosted_targets = [environment]
+        hosted_target_env_dir_paths = [env_dir_path]
 
         if _is_config_target(environment):
-            hosted_target_config = _load_hosted_eval_config(environment)
-            hosted_target = hosted_target_config["env_id"]
-            if hosted_target_config.get("env_dir_path") is not None:
-                hosted_target_env_dir_path = hosted_target_config["env_dir_path"]
-            hosted_target_model = hosted_target_config["model"]
-            hosted_target_num_examples = hosted_target_config.get(
+            hosted_target_configs = _load_hosted_eval_configs(environment)
+            hosted_targets = [config["env_id"] for config in hosted_target_configs]
+            hosted_target_env_dir_paths = [
+                config.get("env_dir_path") or env_dir_path for config in hosted_target_configs
+            ]
+            hosted_target_model = hosted_target_configs[0]["model"]
+            hosted_target_num_examples = hosted_target_configs[0].get(
                 "num_examples",
                 HOSTED_RUN_DEFAULT_NUM_EXAMPLES,
             )
-            hosted_target_rollouts = hosted_target_config.get(
+            hosted_target_rollouts = hosted_target_configs[0].get(
                 "rollouts_per_example",
                 HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE,
             )
-            hosted_target_env_args = hosted_target_config.get("env_args")
-
-        try:
-            platform_slug, environment_id = _resolve_hosted_environment(
-                hosted_target,
-                env_dir_path=hosted_target_env_dir_path,
-                env_path=env_path,
+            hosted_target_env_args = hosted_target_configs[0].get("env_args")
+            hosted_target_timeout_minutes = hosted_target_configs[0].get("timeout_minutes")
+            hosted_target_allow_sandbox_access = hosted_target_configs[0].get(
+                "allow_sandbox_access",
+                False,
             )
+            hosted_target_allow_instances_access = hosted_target_configs[0].get(
+                "allow_instances_access",
+                False,
+            )
+            hosted_target_eval_name = hosted_target_configs[0].get("eval_name")
+
+        if follow and len(hosted_targets) > 1:
+            console.print(
+                "[red]Error:[/red] `--follow` is only supported for a single hosted evaluation"
+            )
+            raise typer.Exit(1)
+
+        platform_slugs: list[str] = []
+        environment_ids: list[str] = []
+        try:
+            for hosted_target, hosted_target_env_dir_path in zip(
+                hosted_targets,
+                hosted_target_env_dir_paths,
+                strict=False,
+            ):
+                platform_slug, environment_id = _resolve_hosted_environment(
+                    hosted_target,
+                    env_dir_path=hosted_target_env_dir_path,
+                    env_path=env_path,
+                )
+                platform_slugs.append(platform_slug)
+                environment_ids.append(environment_id)
         except APIError as exc:
             console.print(f"[red]Error:[/red] {exc}")
             raise typer.Exit(1) from exc
@@ -1234,7 +1309,7 @@ def run_eval_cmd(
             raise typer.Exit(1)
 
         hosted_config = HostedEvalConfig(
-            environment_id=environment_id,
+            environment_id=environment_ids[0],
             inference_model=model,
             num_examples=num_examples,
             rollouts_per_example=rollouts_per_example,
@@ -1243,26 +1318,36 @@ def run_eval_cmd(
                 if raw_env_args is not None
                 else hosted_target_env_args
             ),
-            name=eval_name,
-            timeout_minutes=timeout_minutes,
-            allow_sandbox_access=allow_sandbox_access,
-            allow_instances_access=allow_instances_access,
+            name=eval_name or hosted_target_eval_name,
+            timeout_minutes=(
+                timeout_minutes if timeout_minutes is not None else hosted_target_timeout_minutes
+            ),
+            allow_sandbox_access=(
+                allow_sandbox_access if allow_sandbox_access else hosted_target_allow_sandbox_access
+            ),
+            allow_instances_access=(
+                allow_instances_access
+                if allow_instances_access
+                else hosted_target_allow_instances_access
+            ),
             custom_secrets=_parse_json_option(custom_secrets, "--custom-secrets"),
         )
 
         try:
-            result = _create_hosted_evaluation(hosted_config)
+            result = _create_hosted_evaluations(hosted_config, environment_ids=environment_ids)
         except APIError as exc:
             console.print(f"[red]Hosted evaluation failed:[/red] {exc}")
             raise typer.Exit(1) from exc
 
+        evaluation_ids = result.get("evaluation_ids") or [result["evaluation_id"]]
+
         if follow:
             console.print("[green]✓ Hosted evaluation started[/green]")
-            console.print(f"[cyan]Environment:[/cyan] {platform_slug}")
-            console.print(f"[cyan]Evaluation ID:[/cyan] {result.evaluation_id}")
+            console.print(f"[cyan]Environment:[/cyan] {platform_slugs[0]}")
+            console.print(f"[cyan]Evaluation ID:[/cyan] {evaluation_ids[0]}")
             console.print()
             _display_logs(
-                result.evaluation_id,
+                evaluation_ids[0],
                 tail=HOSTED_LOGS_DEFAULT_TAIL_LINES,
                 follow=True,
                 poll_interval=poll_interval,
@@ -1270,10 +1355,16 @@ def run_eval_cmd(
             return
 
         console.print("[green]✓ Hosted evaluation started[/green]")
-        console.print(f"[cyan]Environment:[/cyan] {platform_slug}")
-        console.print(f"[cyan]Evaluation ID:[/cyan] {result.evaluation_id}")
-        console.print(f"[green]View results:[/green] {get_eval_viewer_url(result.evaluation_id)}")
-        console.print("[dim]View logs:[/dim] prime eval logs " + result.evaluation_id + " -f")
+        if len(platform_slugs) == 1:
+            console.print(f"[cyan]Environment:[/cyan] {platform_slugs[0]}")
+            console.print(f"[cyan]Evaluation ID:[/cyan] {evaluation_ids[0]}")
+            console.print(f"[green]View results:[/green] {get_eval_viewer_url(evaluation_ids[0])}")
+            console.print("[dim]View logs:[/dim] prime eval logs " + evaluation_ids[0] + " -f")
+            return
+
+        console.print(f"[cyan]Environments:[/cyan] {', '.join(platform_slugs)}")
+        console.print(f"[cyan]Evaluation IDs:[/cyan] {', '.join(evaluation_ids)}")
+        console.print("[dim]View logs:[/dim] prime eval logs <evaluation-id> -f")
         return
 
     run_eval_passthrough(

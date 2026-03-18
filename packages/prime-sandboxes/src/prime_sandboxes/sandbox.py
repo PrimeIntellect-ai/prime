@@ -774,7 +774,7 @@ class SandboxClient:
         self,
         sandbox_id: str,
         file_path: str,
-        timeout: int = 10,
+        timeout: int = 30,
     ) -> Optional[str]:
         """Read a file directly from the sandbox filesystem"""
         auth = self._auth_cache.get_or_refresh(sandbox_id)
@@ -824,18 +824,29 @@ class SandboxClient:
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
         # Job completed — read output logs
-        stdout_log_file_quoted = shlex.quote(job.stdout_log_file)
-        stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
-        stdout_logs = self.execute_command(sandbox_id, f"cat {stdout_log_file_quoted}", timeout=60)
-        stderr_logs = self.execute_command(sandbox_id, f"cat {stderr_log_file_quoted}", timeout=60)
+        stdout_content = self._read_log_file(sandbox_id, job.stdout_log_file)
+        stderr_content = self._read_log_file(sandbox_id, job.stderr_log_file)
 
         return BackgroundJobStatus(
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
-            stdout=stdout_logs.stdout,
-            stderr=stderr_logs.stdout,
+            stdout=stdout_content,
+            stderr=stderr_content,
         )
+
+    def _read_log_file(self, sandbox_id: str, file_path: str) -> str:
+        """Read a log file, trying /read-file first then falling back to cat."""
+        try:
+            content = self._read_sandbox_file(sandbox_id, file_path)
+            if content is not None:
+                return content
+        except (httpx.HTTPStatusError, httpx.RequestError, json.JSONDecodeError):
+            pass
+        # Fall back to cat
+        quoted = shlex.quote(file_path)
+        result = self.execute_command(sandbox_id, f"cat {quoted}", timeout=60)
+        return result.stdout
 
     def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1
@@ -1566,7 +1577,7 @@ class AsyncSandboxClient:
         self,
         sandbox_id: str,
         file_path: str,
-        timeout: int = 10,
+        timeout: int = 30,
     ) -> Optional[str]:
         """Read a file directly from the sandbox filesystem"""
         auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
@@ -1616,22 +1627,29 @@ class AsyncSandboxClient:
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
         # Job completed — read output logs
-        stdout_log_file_quoted = shlex.quote(job.stdout_log_file)
-        stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
-        stdout_logs = await self.execute_command(
-            sandbox_id, f"cat {stdout_log_file_quoted}", timeout=60
-        )
-        stderr_logs = await self.execute_command(
-            sandbox_id, f"cat {stderr_log_file_quoted}", timeout=60
-        )
+        stdout_content = await self._read_log_file(sandbox_id, job.stdout_log_file)
+        stderr_content = await self._read_log_file(sandbox_id, job.stderr_log_file)
 
         return BackgroundJobStatus(
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
-            stdout=stdout_logs.stdout,
-            stderr=stderr_logs.stdout,
+            stdout=stdout_content,
+            stderr=stderr_content,
         )
+
+    async def _read_log_file(self, sandbox_id: str, file_path: str) -> str:
+        """Read a log file, trying /read-file first then falling back to cat."""
+        try:
+            content = await self._read_sandbox_file(sandbox_id, file_path)
+            if content is not None:
+                return content
+        except (httpx.HTTPStatusError, httpx.RequestError, json.JSONDecodeError):
+            pass
+        # Fall back to cat
+        quoted = shlex.quote(file_path)
+        result = await self.execute_command(sandbox_id, f"cat {quoted}", timeout=60)
+        return result.stdout
 
     async def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1

@@ -167,6 +167,32 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
     assert captured["json"]["team_id"] == "team-123"
 
 
+def test_create_hosted_evaluation_accepts_plural_ids_response(monkeypatch):
+    class DummyConfig:
+        team_id = None
+
+    class DummyAPIClient:
+        def __init__(self):
+            self.config = DummyConfig()
+
+        def post(self, endpoint, json=None):
+            return {"evaluation_ids": ["eval-123", "eval-456"]}
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+
+    result = _create_hosted_evaluations(
+        HostedEvalConfig(
+            environment_id="env-123",
+            inference_model="openai/gpt-4.1-mini",
+            num_examples=5,
+            rollouts_per_example=3,
+        ),
+        environment_ids=["env-123", "env-456"],
+    )
+
+    assert result["evaluation_ids"] == ["eval-123", "eval-456"]
+
+
 def test_eval_run_hosted_follow_streams_logs(monkeypatch):
     captured = {}
 
@@ -427,7 +453,8 @@ env_id = "math500"
     assert "eval-123, eval-456" in result.output
 
 
-def test_eval_run_hosted_rejects_multi_eval_toml_with_different_shared_settings(tmp_path):
+def test_eval_run_hosted_supports_multi_eval_toml_with_different_settings(monkeypatch, tmp_path):
+    captured_calls = []
     config_path = tmp_path / "eval.toml"
     config_path.write_text(
         """
@@ -441,13 +468,52 @@ num_examples = 10
 """.strip()
     )
 
+    def fake_resolve(environment, env_dir_path=None, env_path=None):
+        return (f"primeintellect/{environment}", f"env-{environment}")
+
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        captured_calls.append(
+            {
+                "environment_id": config.environment_id,
+                "environment_ids": environment_ids,
+                "num_examples": config.num_examples,
+                "rollouts_per_example": config.rollouts_per_example,
+            }
+        )
+        return {
+            "evaluation_id": f"eval-{len(captured_calls)}",
+            "evaluation_ids": [f"eval-{len(captured_calls)}"],
+        }
+
+    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_run_hosted_evaluation,
+    )
+
     result = runner.invoke(
         app,
         ["eval", "run", str(config_path), "--hosted"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
-    assert result.exit_code == 1
-    assert "must share the same" in result.output
+
+    assert result.exit_code == 0, result.output
+    assert captured_calls == [
+        {
+            "environment_id": "env-gsm8k",
+            "environment_ids": ["env-gsm8k"],
+            "num_examples": 5,
+            "rollouts_per_example": 3,
+        },
+        {
+            "environment_id": "env-math500",
+            "environment_ids": ["env-math500"],
+            "num_examples": 10,
+            "rollouts_per_example": 3,
+        },
+    ]
+    assert "Evaluation IDs:" in result.output
+    assert "eval-1, eval-2" in result.output
 
 
 def test_eval_run_hosted_rejects_invalid_supported_toml_field_types(tmp_path):

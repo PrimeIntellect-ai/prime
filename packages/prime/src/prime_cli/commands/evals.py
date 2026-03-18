@@ -287,17 +287,6 @@ def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
         raise typer.Exit(1)
 
     merged_configs: list[dict[str, Any]] = []
-    shared_keys = {
-        "model",
-        "num_examples",
-        "rollouts_per_example",
-        "env_args",
-        "timeout_minutes",
-        "allow_sandbox_access",
-        "allow_instances_access",
-        "eval_name",
-    }
-    expected_shared: dict[str, Any] | None = None
 
     for eval_entry in eval_entries:
         if not isinstance(eval_entry, dict):
@@ -307,18 +296,6 @@ def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
         merged = {k: v for k, v in raw.items() if k != "eval"}
         merged.update(eval_entry)
         merged = _validate_single_hosted_eval_config(merged, config_path)
-
-        shared_values = {key: merged.get(key) for key in shared_keys}
-        if expected_shared is None:
-            expected_shared = shared_values
-        elif shared_values != expected_shared:
-            console.print(
-                "[red]Error:[/red] multiple hosted [[eval]] entries must share the same "
-                "model, env_args, num_examples, rollouts_per_example, timeout_minutes, "
-                "allow_sandbox_access, allow_instances_access, and eval_name"
-            )
-            raise typer.Exit(1)
-
         merged_configs.append(merged)
 
     return merged_configs
@@ -373,8 +350,9 @@ def _create_hosted_evaluations(
 
     created = client.post("/hosted-evaluations", json=payload)
     evaluation_id = created.get("evaluation_id")
+    evaluation_ids = created.get("evaluation_ids")
 
-    if not evaluation_id:
+    if not evaluation_id and not evaluation_ids:
         raise APIError(f"Failed to get evaluation ID from response: {created}")
 
     return created
@@ -1215,69 +1193,26 @@ def run_eval_cmd(
             raise typer.Exit(1)
 
     if hosted:
-        hosted_target_model = DEFAULT_MODEL
-        hosted_target_num_examples = HOSTED_RUN_DEFAULT_NUM_EXAMPLES
-        hosted_target_rollouts = HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE
-        hosted_target_env_args: Optional[dict[str, str]] = None
-        hosted_target_timeout_minutes: Optional[int] = None
-        hosted_target_allow_sandbox_access = False
-        hosted_target_allow_instances_access = False
-        hosted_target_eval_name: Optional[str] = None
-        hosted_targets = [environment]
-        hosted_target_env_dir_paths = [env_dir_path]
-
+        hosted_target_configs: list[dict[str, Any]] = []
         if _is_config_target(environment):
             hosted_target_configs = _load_hosted_eval_configs(environment)
-            hosted_targets = [config["env_id"] for config in hosted_target_configs]
-            hosted_target_env_dir_paths = [
-                config.get("env_dir_path") or env_dir_path for config in hosted_target_configs
+        else:
+            hosted_target_configs = [
+                {
+                    "env_id": environment,
+                    "env_dir_path": env_dir_path,
+                    "model": DEFAULT_MODEL,
+                    "num_examples": HOSTED_RUN_DEFAULT_NUM_EXAMPLES,
+                    "rollouts_per_example": HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE,
+                    "env_args": None,
+                    "timeout_minutes": None,
+                    "allow_sandbox_access": False,
+                    "allow_instances_access": False,
+                    "eval_name": None,
+                }
             ]
-            hosted_target_model = hosted_target_configs[0]["model"]
-            hosted_target_num_examples = hosted_target_configs[0].get(
-                "num_examples",
-                HOSTED_RUN_DEFAULT_NUM_EXAMPLES,
-            )
-            hosted_target_rollouts = hosted_target_configs[0].get(
-                "rollouts_per_example",
-                HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE,
-            )
-            hosted_target_env_args = hosted_target_configs[0].get("env_args")
-            hosted_target_timeout_minutes = hosted_target_configs[0].get("timeout_minutes")
-            hosted_target_allow_sandbox_access = hosted_target_configs[0].get(
-                "allow_sandbox_access",
-                False,
-            )
-            hosted_target_allow_instances_access = hosted_target_configs[0].get(
-                "allow_instances_access",
-                False,
-            )
-            hosted_target_eval_name = hosted_target_configs[0].get("eval_name")
 
-        if follow and len(hosted_targets) > 1:
-            console.print(
-                "[red]Error:[/red] `--follow` is only supported for a single hosted evaluation"
-            )
-            raise typer.Exit(1)
-
-        platform_slugs: list[str] = []
-        environment_ids: list[str] = []
-        try:
-            for hosted_target, hosted_target_env_dir_path in zip(
-                hosted_targets,
-                hosted_target_env_dir_paths,
-                strict=False,
-            ):
-                platform_slug, environment_id = _resolve_hosted_environment(
-                    hosted_target,
-                    env_dir_path=hosted_target_env_dir_path,
-                    env_path=env_path,
-                )
-                platform_slugs.append(platform_slug)
-                environment_ids.append(environment_id)
-        except APIError as exc:
-            console.print(f"[red]Error:[/red] {exc}")
-            raise typer.Exit(1) from exc
-        model = _parse_value_option(passthrough_args, "--model", "-m") or hosted_target_model
+        raw_model = _parse_value_option(passthrough_args, "--model", "-m")
         raw_num_examples = _parse_value_option(passthrough_args, "--num-examples", "-n")
         raw_rollouts = _parse_value_option(
             passthrough_args,
@@ -1285,69 +1220,154 @@ def run_eval_cmd(
             "-r",
         )
         raw_env_args = _parse_value_option(passthrough_args, "--env-args", "")
+        parsed_cli_env_args = (
+            _parse_json_option(raw_env_args, "--env-args") if raw_env_args is not None else None
+        )
+        parsed_custom_secrets = _parse_json_option(custom_secrets, "--custom-secrets")
 
-        try:
-            num_examples = (
-                int(raw_num_examples)
-                if raw_num_examples is not None
-                else hosted_target_num_examples
-            )
-            rollouts_per_example = (
-                int(raw_rollouts) if raw_rollouts is not None else hosted_target_rollouts
-            )
-        except ValueError as exc:
-            console.print(
-                "[red]Error:[/red] --num-examples and --rollouts-per-example must be integers"
-            )
-            raise typer.Exit(1) from exc
+        effective_targets: list[dict[str, Any]] = []
+        for target_config in hosted_target_configs:
+            try:
+                default_num_examples = int(
+                    target_config.get("num_examples", HOSTED_RUN_DEFAULT_NUM_EXAMPLES)
+                )
+                default_rollouts_per_example = int(
+                    target_config.get(
+                        "rollouts_per_example",
+                        HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE,
+                    )
+                )
+                num_examples = (
+                    int(raw_num_examples) if raw_num_examples is not None else default_num_examples
+                )
+                rollouts_per_example = (
+                    int(raw_rollouts) if raw_rollouts is not None else default_rollouts_per_example
+                )
+            except ValueError as exc:
+                console.print(
+                    "[red]Error:[/red] --num-examples and --rollouts-per-example must be integers"
+                )
+                raise typer.Exit(1) from exc
 
-        if num_examples < -1 or rollouts_per_example < 1:
+            if num_examples < -1 or rollouts_per_example < 1:
+                console.print(
+                    "[red]Error:[/red] --num-examples must be >= -1 and "
+                    "--rollouts-per-example must be >= 1"
+                )
+                raise typer.Exit(1)
+
+            effective_targets.append(
+                {
+                    "env_id": target_config["env_id"],
+                    "env_dir_path": target_config.get("env_dir_path") or env_dir_path,
+                    "model": raw_model or target_config["model"],
+                    "num_examples": num_examples,
+                    "rollouts_per_example": rollouts_per_example,
+                    "env_args": (
+                        parsed_cli_env_args
+                        if raw_env_args is not None
+                        else target_config.get("env_args")
+                    ),
+                    "timeout_minutes": (
+                        timeout_minutes
+                        if timeout_minutes is not None
+                        else target_config.get("timeout_minutes")
+                    ),
+                    "allow_sandbox_access": (
+                        allow_sandbox_access
+                        if allow_sandbox_access
+                        else target_config.get("allow_sandbox_access", False)
+                    ),
+                    "allow_instances_access": (
+                        allow_instances_access
+                        if allow_instances_access
+                        else target_config.get("allow_instances_access", False)
+                    ),
+                    "eval_name": eval_name or target_config.get("eval_name"),
+                }
+            )
+
+        if follow and len(effective_targets) > 1:
             console.print(
-                "[red]Error:[/red] --num-examples must be >= -1 and "
-                "--rollouts-per-example must be >= 1"
+                "[red]Error:[/red] `--follow` is only supported for a single hosted evaluation"
             )
             raise typer.Exit(1)
 
-        hosted_config = HostedEvalConfig(
-            environment_id=environment_ids[0],
-            inference_model=model,
-            num_examples=num_examples,
-            rollouts_per_example=rollouts_per_example,
-            env_args=(
-                _parse_json_option(raw_env_args, "--env-args")
-                if raw_env_args is not None
-                else hosted_target_env_args
-            ),
-            name=eval_name or hosted_target_eval_name,
-            timeout_minutes=(
-                timeout_minutes if timeout_minutes is not None else hosted_target_timeout_minutes
-            ),
-            allow_sandbox_access=(
-                allow_sandbox_access if allow_sandbox_access else hosted_target_allow_sandbox_access
-            ),
-            allow_instances_access=(
-                allow_instances_access
-                if allow_instances_access
-                else hosted_target_allow_instances_access
-            ),
-            custom_secrets=_parse_json_option(custom_secrets, "--custom-secrets"),
-        )
+        grouped_targets: dict[tuple[Any, ...], dict[str, Any]] = {}
+        target_order: list[tuple[Any, ...]] = []
+        for target in effective_targets:
+            env_args = target.get("env_args")
+            env_args_key = tuple(sorted(env_args.items())) if env_args is not None else None
+            group_key = (
+                target["model"],
+                target["num_examples"],
+                target["rollouts_per_example"],
+                env_args_key,
+                target.get("timeout_minutes"),
+                target.get("allow_sandbox_access", False),
+                target.get("allow_instances_access", False),
+                target.get("eval_name"),
+            )
+            if group_key not in grouped_targets:
+                grouped_targets[group_key] = {
+                    "target": target,
+                    "targets": [],
+                    "platform_slugs": [],
+                    "environment_ids": [],
+                }
+                target_order.append(group_key)
+            grouped_targets[group_key]["targets"].append(target)
 
         try:
-            result = _create_hosted_evaluations(hosted_config, environment_ids=environment_ids)
+            for group_key in target_order:
+                group = grouped_targets[group_key]
+                for grouped_target in group["targets"]:
+                    platform_slug, environment_id = _resolve_hosted_environment(
+                        grouped_target["env_id"],
+                        env_dir_path=grouped_target["env_dir_path"],
+                        env_path=env_path,
+                    )
+                    group["platform_slugs"].append(platform_slug)
+                    group["environment_ids"].append(environment_id)
+        except APIError as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1) from exc
+
+        all_platform_slugs: list[str] = []
+        all_evaluation_ids: list[str] = []
+        try:
+            for group_key in target_order:
+                group = grouped_targets[group_key]
+                target = group["target"]
+                hosted_config = HostedEvalConfig(
+                    environment_id=group["environment_ids"][0],
+                    inference_model=target["model"],
+                    num_examples=target["num_examples"],
+                    rollouts_per_example=target["rollouts_per_example"],
+                    env_args=target.get("env_args"),
+                    name=target.get("eval_name"),
+                    timeout_minutes=target.get("timeout_minutes"),
+                    allow_sandbox_access=target.get("allow_sandbox_access", False),
+                    allow_instances_access=target.get("allow_instances_access", False),
+                    custom_secrets=parsed_custom_secrets,
+                )
+                result = _create_hosted_evaluations(
+                    hosted_config,
+                    environment_ids=group["environment_ids"],
+                )
+                all_platform_slugs.extend(group["platform_slugs"])
+                all_evaluation_ids.extend(result.get("evaluation_ids") or [result["evaluation_id"]])
         except APIError as exc:
             console.print(f"[red]Hosted evaluation failed:[/red] {exc}")
             raise typer.Exit(1) from exc
 
-        evaluation_ids = result.get("evaluation_ids") or [result["evaluation_id"]]
-
         if follow:
             console.print("[green]✓ Hosted evaluation started[/green]")
-            console.print(f"[cyan]Environment:[/cyan] {platform_slugs[0]}")
-            console.print(f"[cyan]Evaluation ID:[/cyan] {evaluation_ids[0]}")
+            console.print(f"[cyan]Environment:[/cyan] {all_platform_slugs[0]}")
+            console.print(f"[cyan]Evaluation ID:[/cyan] {all_evaluation_ids[0]}")
             console.print()
             _display_logs(
-                evaluation_ids[0],
+                all_evaluation_ids[0],
                 tail=HOSTED_LOGS_DEFAULT_TAIL_LINES,
                 follow=True,
                 poll_interval=poll_interval,
@@ -1355,15 +1375,17 @@ def run_eval_cmd(
             return
 
         console.print("[green]✓ Hosted evaluation started[/green]")
-        if len(platform_slugs) == 1:
-            console.print(f"[cyan]Environment:[/cyan] {platform_slugs[0]}")
-            console.print(f"[cyan]Evaluation ID:[/cyan] {evaluation_ids[0]}")
-            console.print(f"[green]View results:[/green] {get_eval_viewer_url(evaluation_ids[0])}")
-            console.print("[dim]View logs:[/dim] prime eval logs " + evaluation_ids[0] + " -f")
+        if len(all_platform_slugs) == 1:
+            console.print(f"[cyan]Environment:[/cyan] {all_platform_slugs[0]}")
+            console.print(f"[cyan]Evaluation ID:[/cyan] {all_evaluation_ids[0]}")
+            console.print(
+                f"[green]View results:[/green] {get_eval_viewer_url(all_evaluation_ids[0])}"
+            )
+            console.print("[dim]View logs:[/dim] prime eval logs " + all_evaluation_ids[0] + " -f")
             return
 
-        console.print(f"[cyan]Environments:[/cyan] {', '.join(platform_slugs)}")
-        console.print(f"[cyan]Evaluation IDs:[/cyan] {', '.join(evaluation_ids)}")
+        console.print(f"[cyan]Environments:[/cyan] {', '.join(all_platform_slugs)}")
+        console.print(f"[cyan]Evaluation IDs:[/cyan] {', '.join(all_evaluation_ids)}")
         console.print("[dim]View logs:[/dim] prime eval logs <evaluation-id> -f")
         return
 

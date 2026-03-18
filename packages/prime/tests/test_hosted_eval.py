@@ -1,8 +1,18 @@
 from pathlib import Path
 
 from prime_cli.client import APIError
+from prime_cli.commands.evals import (
+    _create_hosted_evaluations,
+    _load_hosted_eval_configs,
+    _print_eval_status,
+)
 from prime_cli.main import app
-from prime_cli.utils.hosted_eval import clean_logs, filter_progress_bars, strip_ansi
+from prime_cli.utils.hosted_eval import (
+    HostedEvalConfig,
+    clean_logs,
+    filter_progress_bars,
+    strip_ansi,
+)
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -142,9 +152,6 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
             return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
-
-    from prime_cli.commands.evals import _create_hosted_evaluations
-    from prime_cli.utils.hosted_eval import HostedEvalConfig
 
     result = _create_hosted_evaluations(
         HostedEvalConfig(
@@ -566,8 +573,6 @@ env_id = "gsm8k"
     )
     monkeypatch.setattr("verifiers.utils.eval_utils.load_endpoints", fake_load_endpoints)
 
-    from prime_cli.commands.evals import _load_hosted_eval_configs
-
     loaded = _load_hosted_eval_configs(str(config_path))[0]
 
     assert loaded["model"] == "openai/gpt-4.1-mini"
@@ -747,8 +752,6 @@ def test_eval_stop_command_calls_cancel_endpoint(monkeypatch):
 
 
 def test_print_eval_status_prefers_returned_viewer_url(monkeypatch, capsys):
-    from prime_cli.commands.evals import _print_eval_status
-
     called = {"used": False}
 
     monkeypatch.setattr(
@@ -771,8 +774,6 @@ def test_print_eval_status_prefers_returned_viewer_url(monkeypatch, capsys):
 
 
 def test_print_eval_status_falls_back_to_eval_id_when_viewer_url_missing(monkeypatch, capsys):
-    from prime_cli.commands.evals import _print_eval_status
-
     monkeypatch.setattr(
         "prime_cli.commands.evals.get_eval_viewer_url",
         lambda eval_id: f"fallback/{eval_id}",

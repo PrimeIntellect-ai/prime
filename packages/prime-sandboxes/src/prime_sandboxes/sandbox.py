@@ -1100,6 +1100,8 @@ class SandboxClient:
             except Exception as e:
                 raise APIError(f"Read file failed: {e.__class__.__name__}: {e}") from e
 
+        raise APIError("Read file failed after retries")
+
     def expose(
         self,
         sandbox_id: str,
@@ -1930,6 +1932,8 @@ class AsyncSandboxClient:
                 ) from e
             except Exception as e:
                 raise APIError(f"Read file failed: {e.__class__.__name__}: {e}") from e
+
+        raise APIError("Read file failed after retries")
 
     async def aclose(self) -> None:
         """Close the async client and gateway client"""

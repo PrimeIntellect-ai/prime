@@ -277,10 +277,6 @@ class SandboxAuthCache:
         except Exception:
             pass
 
-    async def _save_cache_async(self) -> None:
-        """Save auth cache to file (async version)"""
-        await self._save_cache_data_async(dict(self._auth_cache))
-
     async def _save_cache_data_async(self, cache_data: Dict[str, Any]) -> None:
         """Persist a cache snapshot only if it still matches the current shared state."""
         await asyncio.to_thread(self._save_cache_data_if_current, cache_data)

@@ -71,6 +71,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
     data: Dict[str, Any] = {
         "id": sandbox.id,
         "name": sandbox.name,
+        "type": "VM" if sandbox.vm else "Container",
         "docker_image": sandbox.docker_image,
         "start_command": sandbox.start_command,
         "status": sandbox.status,
@@ -264,6 +265,7 @@ def get(
 
             table.add_row("ID", sandbox_data["id"])
             table.add_row("Name", sandbox_data["name"])
+            table.add_row("Type", sandbox_data["type"])
             table.add_row("Docker Image", sandbox_data["docker_image"])
             table.add_row("Start Command", sandbox_data["start_command"] or "N/A")
 

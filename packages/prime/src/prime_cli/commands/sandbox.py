@@ -80,6 +80,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "disk_mount_path": sandbox.disk_mount_path,
         "gpu_count": sandbox.gpu_count,
         "gpu_type": getattr(sandbox, "gpu_type", None),
+        "vm": sandbox.vm,
         "network_access": sandbox.network_access,
         "timeout_minutes": sandbox.timeout_minutes,
         "labels": sandbox.labels,
@@ -105,9 +106,9 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
     return data
 
 
-def _guard_gpu_unsupported(sandbox: Sandbox, feature_name: str) -> None:
-    if sandbox.gpu_count > 0:
-        console.print(f"[red]Error:[/red] {feature_name} is not yet supported for GPU sandboxes.")
+def _guard_vm_unsupported(sandbox: Sandbox, feature_name: str) -> None:
+    if sandbox.vm:
+        console.print(f"[red]Error:[/red] {feature_name} is not yet supported for VM sandboxes.")
         raise typer.Exit(1)
 
 
@@ -337,7 +338,7 @@ def get(
 def create(
     docker_image: Optional[str] = typer.Argument(
         None,
-        help="Image to run. For GPU sandboxes, provide the VM image reference.",
+        help="Image to run. When using --vm, provide the VM image reference.",
     ),
     name: Optional[str] = typer.Option(
         None, help="Name for the sandbox (auto-generated if not provided)"
@@ -353,6 +354,11 @@ def create(
         None,
         "--gpu-type",
         help="GPU type/model (e.g. H100_80GB, A100_80GB). Required when --gpu-count > 0",
+    ),
+    vm: bool = typer.Option(
+        False,
+        "--vm",
+        help="Create a VM-backed sandbox on the VM sandbox infra. Required when requesting GPUs.",
     ),
     network_access: bool = typer.Option(
         True,
@@ -414,6 +420,12 @@ def create(
             )
             raise typer.Exit(1)
 
+        if gpu_count > 0 and not vm:
+            console.print(
+                "[red]GPUs require VM sandboxes.[/red] Pass --vm whenever using --gpu-count."
+            )
+            raise typer.Exit(1)
+
         if gpu_count == 0 and gpu_type:
             console.print(
                 "[red]GPU type provided without GPUs.[/red] "
@@ -432,6 +444,12 @@ def create(
             if gpu_count > 0 and gpu_type:
                 gpu_slug = "".join(c if c.isalnum() or c == "-" else "-" for c in gpu_type.lower())
                 base_name = f"gpu-{'-'.join(filter(None, gpu_slug.split('-')))}"
+            elif vm:
+                image_parts = docker_image.split("/")[-1].split(":")[0]
+                image_slug = "".join(
+                    c if c.isalnum() or c == "-" else "-" for c in image_parts.lower()
+                )
+                base_name = f"vm-{'-'.join(filter(None, image_slug.split('-')))}"
             else:
                 image_parts = docker_image.split("/")[-1].split(":")[0]
                 base_name = "".join(
@@ -451,6 +469,7 @@ def create(
             disk_size_gb=disk_size_gb,
             gpu_count=gpu_count,
             gpu_type=gpu_type,
+            vm=vm,
             network_access=network_access,
             timeout_minutes=timeout_minutes,
             environment_vars=env_vars if env_vars else None,
@@ -466,6 +485,7 @@ def create(
         console.print(f"Docker Image: {docker_image}")
         console.print(f"Start Command: {start_command or 'N/A'}")
         console.print(f"Resources: {cpu_cores} CPU, {memory_gb}GB RAM, {disk_size_gb}GB disk")
+        console.print(f"VM: {'Enabled' if vm else 'Disabled'}")
         if gpu_count > 0:
             console.print(f"GPUs: {gpu_type} x{gpu_count}")
         network_status = "[green]Enabled[/green]" if network_access else "[yellow]Disabled[/yellow]"
@@ -1028,7 +1048,7 @@ def expose_port(
 
         with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
             sandbox = sandbox_client.get(sandbox_id)
-        _guard_gpu_unsupported(sandbox, "Port exposure")
+        _guard_vm_unsupported(sandbox, "Port exposure")
 
         with console.status("[bold blue]Exposing port...", spinner="dots"):
             exposed = sandbox_client.expose(sandbox_id, port, name, protocol)
@@ -1085,7 +1105,7 @@ def unexpose_port(
 
         with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
             sandbox = sandbox_client.get(sandbox_id)
-        _guard_gpu_unsupported(sandbox, "Port unexpose")
+        _guard_vm_unsupported(sandbox, "Port unexpose")
 
         with console.status("[bold blue]Unexposing port...", spinner="dots"):
             sandbox_client.unexpose(sandbox_id, exposure_id)
@@ -1121,7 +1141,7 @@ def list_ports(
             # List ports for a specific sandbox
             with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
                 sandbox = sandbox_client.get(sandbox_id)
-            _guard_gpu_unsupported(sandbox, "Port listing")
+            _guard_vm_unsupported(sandbox, "Port listing")
 
             with console.status("[bold blue]Fetching exposed ports...", spinner="dots"):
                 response = sandbox_client.list_exposed_ports(sandbox_id)
@@ -1265,7 +1285,7 @@ def ssh_connect(
         with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
             sandbox = sandbox_client.get(sandbox_id)
 
-        _guard_gpu_unsupported(sandbox, "SSH")
+        _guard_vm_unsupported(sandbox, "SSH")
 
         if sandbox.status != "RUNNING":
             console.print(f"[red]Error:[/red] Sandbox is not running (status: {sandbox.status})")

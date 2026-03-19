@@ -18,7 +18,7 @@ class _DummyAuthCache:
             "token": "tok",
         }
 
-    def is_gpu(self, _sandbox_id: str) -> bool:
+    def is_vm(self, _sandbox_id: str) -> bool:
         return False
 
 
@@ -31,7 +31,7 @@ class _AsyncDummyAuthCache:
             "token": "tok",
         }
 
-    async def is_gpu_async(self, _sandbox_id: str) -> bool:
+    async def is_vm_async(self, _sandbox_id: str) -> bool:
         return False
 
 

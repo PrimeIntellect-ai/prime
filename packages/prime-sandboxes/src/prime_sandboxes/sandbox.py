@@ -266,7 +266,7 @@ class SandboxAuthCache:
             pass
 
     async def _save_cache_async(self) -> None:
-        """Save auth cache to file without blocking the event loop."""
+        """Save auth cache to file (async version)"""
         try:
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
             async with aiofiles.open(self._cache_file, "w") as f:

@@ -1,5 +1,8 @@
 """Tests for CPU/GPU command transport selection."""
 
+import asyncio
+import json
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
@@ -191,6 +194,83 @@ def test_auth_cache_stores_gpu_flag_for_reuse(tmp_path):
     assert cache.is_gpu("sbx-1")
     assert cache.is_gpu("sbx-1")
     assert cache.client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_async_clear_wins_over_inflight_lazy_load(tmp_path, monkeypatch):
+    stale_auth = _auth_payload() | {"token": "stale"}
+    cache_file = tmp_path / "auth_cache.json"
+    cache_file.write_text(json.dumps({"sbx-stale": stale_auth}))
+
+    class _FakeAsyncAPIClient:
+        async def request(self, method: str, path: str):
+            assert method == "POST"
+            assert path == "/sandbox/sbx-new/auth"
+            return _auth_payload() | {"token": "fresh"}
+
+    cache = SandboxAuthCache(tmp_path / "auth_cache.json", _FakeAsyncAPIClient(), lazy=True)
+
+    started = threading.Event()
+    allow_finish = threading.Event()
+
+    def _blocked_read_cache_file() -> tuple[dict[str, Any], bool]:
+        started.set()
+        allow_finish.wait(timeout=5)
+        return {"sbx-stale": stale_auth}, False
+
+    monkeypatch.setattr(cache, "_read_cache_file", _blocked_read_cache_file)
+
+    task = asyncio.create_task(cache.get_or_refresh_async("sbx-new"))
+    await asyncio.to_thread(started.wait, 5)
+
+    cache.clear()
+    allow_finish.set()
+
+    fresh_auth = await task
+
+    assert fresh_auth["token"] == "fresh"
+    assert cache._loaded is True
+    assert cache._auth_cache == {"sbx-new": fresh_auth}
+
+    persisted = json.loads(cache_file.read_text())
+    assert persisted == {"sbx-new": fresh_auth}
+
+
+@pytest.mark.asyncio
+async def test_sync_clear_wins_over_inflight_async_save(tmp_path, monkeypatch):
+    cache_file = tmp_path / "auth_cache.json"
+
+    class _FakeAsyncAPIClient:
+        async def request(self, method: str, path: str):
+            assert method == "POST"
+            assert path == "/sandbox/sbx-new/auth"
+            return _auth_payload() | {"token": "fresh"}
+
+    cache = SandboxAuthCache(cache_file, _FakeAsyncAPIClient(), lazy=True)
+
+    started = threading.Event()
+    allow_finish = threading.Event()
+    original_write = cache._save_cache_data_if_current
+
+    def _blocked_save_cache_data_if_current(cache_data: dict[str, Any]) -> None:
+        started.set()
+        allow_finish.wait(timeout=5)
+        original_write(cache_data)
+
+    monkeypatch.setattr(cache, "_save_cache_data_if_current", _blocked_save_cache_data_if_current)
+
+    task = asyncio.create_task(cache.get_or_refresh_async("sbx-new"))
+    await asyncio.to_thread(started.wait, 5)
+
+    cache.clear()
+    allow_finish.set()
+
+    fresh_auth = await task
+
+    assert fresh_auth["token"] == "fresh"
+    assert cache._loaded is True
+    assert cache._auth_cache == {}
+    assert not cache_file.exists()
 
 
 def test_sync_connect_execution_collects_stdout_stderr(monkeypatch):

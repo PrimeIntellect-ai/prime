@@ -377,6 +377,7 @@ class SandboxAuthCache:
         """Clear all cached auth tokens (async)."""
         async with self._get_async_lock():
             self._auth_cache = {}
+            self._loaded = True
             try:
                 if self._cache_file.exists():
                     self._cache_file.unlink()

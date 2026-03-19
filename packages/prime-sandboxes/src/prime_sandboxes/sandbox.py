@@ -379,8 +379,7 @@ class SandboxAuthCache:
             self._auth_cache = {}
             self._loaded = True
             try:
-                if self._cache_file.exists():
-                    self._cache_file.unlink()
+                await asyncio.to_thread(self._cache_file.unlink, missing_ok=True)
             except Exception:
                 pass
 

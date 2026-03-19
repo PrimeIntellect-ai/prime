@@ -24,7 +24,7 @@ class RLRun(BaseModel):
     name: Optional[str] = Field(None, description="Run name")
     user_id: str = Field(..., alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
-    cluster_id: str = Field(..., alias="rftClusterId")
+    cluster_id: Optional[str] = Field(None, alias="rftClusterId")
     status: str = Field(..., description="Run status")
 
     # Training configuration

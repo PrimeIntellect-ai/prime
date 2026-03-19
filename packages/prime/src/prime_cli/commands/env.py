@@ -470,7 +470,9 @@ def _collect_archive_files(env_path: Path) -> List[Path]:
             maybe_add_file(file_path)
 
     def is_nested_dir_ignored(dir_path: Path) -> bool:
-        """Check if a nested directory should be pruned from traversal (gitignore only)."""
+        """Check if a nested directory should be pruned from traversal."""
+        if not should_include_directory_in_archive(dir_path):
+            return True
         if ignore_matcher is not None and ignore_matcher(str(dir_path)):
             return True
         return False

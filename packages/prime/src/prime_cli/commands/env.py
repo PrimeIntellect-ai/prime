@@ -404,6 +404,10 @@ def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
     if not file_path.is_file():
         return False
 
+    # Skip symlinks - they cause extraction failures in _safe_tar_extract
+    if file_path.is_symlink():
+        return False
+
     # Skip hidden files
     if file_path.name.startswith("."):
         return False

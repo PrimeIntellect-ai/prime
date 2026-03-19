@@ -373,6 +373,16 @@ class SandboxAuthCache:
 
         return is_gpu
 
+    async def clear_async(self) -> None:
+        """Clear all cached auth tokens (async)."""
+        async with self._get_async_lock():
+            self._auth_cache = {}
+            try:
+                if self._cache_file.exists():
+                    self._cache_file.unlink()
+            except Exception:
+                pass
+
 
 def _check_sandbox_statuses(
     sandboxes: List[Sandbox], target_ids: set
@@ -1243,9 +1253,9 @@ class AsyncSandboxClient:
         # Sandbox is not running
         _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
 
-    def clear_auth_cache(self) -> None:
+    async def clear_auth_cache(self) -> None:
         """Clear all cached auth tokens"""
-        self._auth_cache.clear()
+        await self._auth_cache.clear_async()
 
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""

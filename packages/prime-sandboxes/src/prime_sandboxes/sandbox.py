@@ -1254,8 +1254,12 @@ class AsyncSandboxClient:
         # Sandbox is not running
         _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
 
-    async def clear_auth_cache(self) -> None:
-        """Clear all cached auth tokens"""
+    def clear_auth_cache(self) -> None:
+        """Clear cached auth tokens synchronously for backward compatibility."""
+        self._auth_cache.clear()
+
+    async def clear_auth_cache_async(self) -> None:
+        """Clear cached auth tokens without blocking other async cache users."""
         await self._auth_cache.clear_async()
 
     async def create(self, request: CreateSandboxRequest) -> Sandbox:

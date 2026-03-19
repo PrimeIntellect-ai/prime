@@ -324,6 +324,7 @@ class SandboxAuthCache:
     def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
         """Cache auth info."""
         with self._lock:
+            self._ensure_loaded()
             self._auth_cache[sandbox_id] = auth_info
             self._save_cache()
 
@@ -331,6 +332,7 @@ class SandboxAuthCache:
         """Clear all cached auth tokens."""
         with self._lock:
             self._auth_cache = {}
+            self._loaded = True
             try:
                 if self._cache_file.exists():
                     self._cache_file.unlink()

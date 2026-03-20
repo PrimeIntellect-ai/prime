@@ -351,13 +351,13 @@ class AsyncSandboxAuthCache:
         self._auth_cache, needs_save = await asyncio.to_thread(_load_auth_cache, self._cache_file)
         self._loaded = True
         if needs_save:
-            await self._save_cache()
+            await self._save_cache(dict(self._auth_cache))
 
-    async def _save_cache(self) -> None:
+    async def _save_cache(self, data: Dict[str, Any]) -> None:
         try:
             await asyncio.to_thread(self._cache_file.parent.mkdir, parents=True, exist_ok=True)
             async with aiofiles.open(self._cache_file, "w") as f:
-                await f.write(json.dumps(self._auth_cache))
+                await f.write(json.dumps(data))
         except Exception:
             pass
 
@@ -391,10 +391,12 @@ class AsyncSandboxAuthCache:
             response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
             async with self._lock:
                 self._auth_cache[sandbox_id] = response
-            await self._save_cache()
+                snapshot = dict(self._auth_cache)
+            await self._save_cache(snapshot)
             return dict(response)
         finally:
-            ev = self._inflight.pop(sandbox_id, None)
+            async with self._lock:
+                ev = self._inflight.pop(sandbox_id, None)
             if ev is not None:
                 ev.set()
 
@@ -413,14 +415,19 @@ class AsyncSandboxAuthCache:
         async with self._lock:
             if sandbox_id in self._auth_cache:
                 self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
-        await self._save_cache()
+                snapshot = dict(self._auth_cache)
+            else:
+                snapshot = None
+        if snapshot is not None:
+            await self._save_cache(snapshot)
 
         return is_gpu
 
     async def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
         async with self._lock:
             self._auth_cache[sandbox_id] = auth_info
-        await self._save_cache()
+            snapshot = dict(self._auth_cache)
+        await self._save_cache(snapshot)
 
     async def clear(self) -> None:
         async with self._lock:

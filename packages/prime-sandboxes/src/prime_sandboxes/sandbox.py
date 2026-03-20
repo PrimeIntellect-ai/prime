@@ -354,10 +354,13 @@ class AsyncSandboxAuthCache:
             await self._save_cache(dict(self._auth_cache))
 
     async def _save_cache(self, data: Dict[str, Any]) -> None:
+        def _write() -> None:
+            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._cache_file, "w") as f:
+                json.dump(data, f)
+
         try:
-            await asyncio.to_thread(self._cache_file.parent.mkdir, parents=True, exist_ok=True)
-            async with aiofiles.open(self._cache_file, "w") as f:
-                await f.write(json.dumps(data))
+            await asyncio.to_thread(_write)
         except Exception:
             pass
 

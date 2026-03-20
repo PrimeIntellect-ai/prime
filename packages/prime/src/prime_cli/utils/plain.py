@@ -33,13 +33,18 @@ def is_plain_mode(args: list[str] | None = None) -> bool:
 class PrimeConsole(Console):
     def __init__(self, *, stderr: bool = False, **kwargs: Any) -> None:
         super().__init__(stderr=stderr, **kwargs)
+        plain_console_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if key not in {"emoji", "highlight", "markup", "no_color"}
+        }
         self._plain_console = Console(
             stderr=stderr,
             no_color=True,
             markup=False,
             highlight=False,
             emoji=False,
-            **kwargs,
+            **plain_console_kwargs,
         )
 
     def print(self, *objects: Any, sep: str = " ", end: str = "\n", **kwargs: Any) -> None:

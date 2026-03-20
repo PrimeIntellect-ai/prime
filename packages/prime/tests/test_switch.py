@@ -1,7 +1,9 @@
+import io
 from typing import Any, Dict, Optional
 
 import pytest
 from prime_cli.main import app
+from prime_cli.utils.plain import get_console
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -12,6 +14,18 @@ TEST_ENV = {
     "PRIME_DISABLE_VERSION_CHECK": "1",
     "PRIME_TEAM_ID": "",
 }
+
+
+def test_get_console_accepts_explicit_plain_rendering_kwargs() -> None:
+    console = get_console(
+        file=io.StringIO(),
+        markup=False,
+        highlight=False,
+        no_color=True,
+        emoji=False,
+    )
+
+    assert console is not None
 
 
 @pytest.fixture

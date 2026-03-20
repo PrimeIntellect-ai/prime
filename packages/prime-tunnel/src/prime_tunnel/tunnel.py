@@ -1,3 +1,4 @@
+import atexit
 import asyncio
 import fcntl
 import os
@@ -186,6 +187,7 @@ class Tunnel:
             raise TunnelConnectionError(message=f"Failed to start pipe drain: {e}") from e
 
         self._started = True
+        atexit.register(self.sync_stop)
 
         return self.url
 
@@ -194,6 +196,7 @@ class Tunnel:
         if not self._started:
             return
 
+        atexit.unregister(self.sync_stop)
         await self._cleanup()
         self._started = False
 
@@ -201,6 +204,8 @@ class Tunnel:
         """Stop the tunnel synchronously. Safe for signal handlers and atexit."""
         if not self._started:
             return
+
+        atexit.unregister(self.sync_stop)
 
         if self._process is not None:
             try:
@@ -347,6 +352,9 @@ auth.token = "{self._tunnel_info.frp_token}"
 
 # Per-tunnel binding secret
 metadatas.binding_secret = "{self._tunnel_info.binding_secret}"
+
+# Keep retrying if connection to frps is lost instead of exiting
+loginFailExit = false
 
 # Transport settings
 transport.tcpMux = true

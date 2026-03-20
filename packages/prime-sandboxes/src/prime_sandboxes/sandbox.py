@@ -425,6 +425,7 @@ class AsyncSandboxAuthCache:
 
     async def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
         async with self._lock:
+            await self._ensure_loaded()
             self._auth_cache[sandbox_id] = auth_info
             snapshot = dict(self._auth_cache)
         await self._save_cache(snapshot)

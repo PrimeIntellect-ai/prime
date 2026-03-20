@@ -205,6 +205,7 @@ class SandboxAuthCache:
         self._cache_file = cache_file_path
         self.client = client
         self._lock = threading.Lock()
+        self._async_lock_init = threading.Lock()
         self._async_lock: Optional[asyncio.Lock] = None
         if lazy:
             self._auth_cache: Dict[str, Any] = {}
@@ -217,7 +218,9 @@ class SandboxAuthCache:
 
     def _get_async_lock(self) -> asyncio.Lock:
         if self._async_lock is None:
-            self._async_lock = asyncio.Lock()
+            with self._async_lock_init:
+                if self._async_lock is None:
+                    self._async_lock = asyncio.Lock()
         return self._async_lock
 
     def _ensure_loaded(self) -> None:

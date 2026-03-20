@@ -249,11 +249,13 @@ class SandboxAuthCache:
         if needs_save:
             self._save_cache()
 
-    def _save_cache(self) -> None:
+    def _save_cache(self, data: Optional[Dict[str, Any]] = None) -> None:
+        if data is None:
+            data = self._auth_cache
         try:
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self._cache_file, "w") as f:
-                json.dump(self._auth_cache, f)
+                json.dump(data, f)
         except Exception:
             pass
 
@@ -286,7 +288,8 @@ class SandboxAuthCache:
             response = self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
             with self._lock:
                 self._auth_cache[sandbox_id] = response
-            self._save_cache()
+                snapshot = dict(self._auth_cache)
+            self._save_cache(snapshot)
             return dict(response)
         finally:
             with self._lock:
@@ -308,14 +311,19 @@ class SandboxAuthCache:
         with self._lock:
             if sandbox_id in self._auth_cache:
                 self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
-        self._save_cache()
+                snapshot = dict(self._auth_cache)
+            else:
+                snapshot = None
+        if snapshot is not None:
+            self._save_cache(snapshot)
 
         return is_gpu
 
     def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
         with self._lock:
             self._auth_cache[sandbox_id] = auth_info
-        self._save_cache()
+            snapshot = dict(self._auth_cache)
+        self._save_cache(snapshot)
 
     def clear(self) -> None:
         with self._lock:

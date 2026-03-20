@@ -34,7 +34,6 @@ from ..utils.display import POD_STATUS_COLORS
 
 app = PlainTyper(help="Manage compute pods", no_args_is_help=True)
 console = get_console()
-config = Config()
 
 LIST_PODS_JSON_HELP = json_output_help(
     ".pods[] = {id, name, gpu, status, created_at}",

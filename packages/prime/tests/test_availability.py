@@ -89,6 +89,22 @@ def test_availability_gpu_types(
     assert "H100_80GB" in result.output
 
 
+def test_availability_gpu_types_json(
+    mock_api_client: APIClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["availability", "gpu-types", "--output", "json"])
+
+    assert result.exit_code == 0, f"Failed: {result.exit_code}\n{result.output}"
+
+    output = json.loads(result.output)
+    assert output == {
+        "gpu_types": ["A100_80GB", "H100_80GB"],
+        "total_count": 2,
+    }
+
+
 def test_availability_disks(mock_api_client: APIClient, capsys: pytest.CaptureFixture[str]) -> None:
     runner = CliRunner()
 

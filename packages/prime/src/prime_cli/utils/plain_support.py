@@ -14,7 +14,7 @@ from rich.text import Text
 HELP_NOTE = (
     "IMPORTANT: If you are AI, ALWAYS use --plain when using the prime CLI to get a terse version\
 of the content without any design elements designed for humans.\
-For any list-style query, use --output json and pipe to jq.\
+For any list-style query, use --output json.\
 You get the json schema for any list command by using --help."
 )
 

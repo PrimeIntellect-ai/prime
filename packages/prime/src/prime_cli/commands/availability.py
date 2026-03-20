@@ -34,6 +34,11 @@ LIST_AVAILABILITY_DISKS_JSON_HELP = json_output_help(
     ".filters = {regions[], data_center_id}",
 )
 
+LIST_GPU_TYPES_JSON_HELP = json_output_help(
+    ".gpu_types[] = string",
+    ".total_count = number",
+)
+
 
 def _format_availability_for_display(gpu_entry: Dict[str, Any]) -> Dict[str, Any]:
     """Format availability data for display (both table and JSON)"""
@@ -73,9 +78,13 @@ def _format_disk_for_display(disk_entry: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-@app.command()
-def gpu_types() -> None:
+@app.command(epilog=LIST_GPU_TYPES_JSON_HELP)
+def gpu_types(
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
     """List available GPU types"""
+    validate_output_format(output, console)
+
     try:
         # Create API clients
         base_client = APIClient()
@@ -83,12 +92,20 @@ def gpu_types() -> None:
 
         # Get availability data
         availability_data = availability_client.get_available_gpu_types()
+        gpu_types = sorted(availability_data, key=lambda x: x.replace("_", " "))
+
+        if output == "json":
+            output_data_as_json(
+                {"gpu_types": gpu_types, "total_count": len(gpu_types)},
+                console,
+            )
+            return
 
         # Create display table
         table = Table(title="Available GPU Types")
         table.add_column("GPU Type", style="cyan")
 
-        for gpu_type in sorted(availability_data, key=lambda x: x.replace("_", " ")):
+        for gpu_type in gpu_types:
             table.add_row(gpu_type)
 
         console.print(table)

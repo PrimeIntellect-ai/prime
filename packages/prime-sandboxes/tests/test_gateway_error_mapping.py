@@ -23,7 +23,7 @@ class _DummyAuthCache:
 
 
 class _AsyncDummyAuthCache:
-    async def get_or_refresh_async(self, _sandbox_id: str):
+    async def get_or_refresh(self, _sandbox_id: str):
         return {
             "gateway_url": "https://gateway.example.com",
             "user_ns": "ns",
@@ -31,7 +31,7 @@ class _AsyncDummyAuthCache:
             "token": "tok",
         }
 
-    async def is_gpu_async(self, _sandbox_id: str) -> bool:
+    async def is_gpu(self, _sandbox_id: str) -> bool:
         return False
 
 

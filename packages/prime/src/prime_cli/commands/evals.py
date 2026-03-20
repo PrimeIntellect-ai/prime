@@ -170,7 +170,6 @@ def format_output(data: dict, output: str) -> None:
         console.print(syntax)
 
 
-@subcommands_app.command("list", epilog=LIST_EVALS_JSON_HELP)
 def _parse_json_option(raw: Optional[str], option_name: str) -> Optional[dict[str, str]]:
     if raw is None:
         return None

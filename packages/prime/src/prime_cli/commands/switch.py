@@ -2,18 +2,18 @@ from typing import Optional
 
 import typer
 from click.exceptions import Abort
-from rich.console import Console
 
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
+from ..utils import PlainTyper, get_console
 from .teams import fetch_teams
 
-app = typer.Typer(
+app = PlainTyper(
     help="Switch between your personal account and team contexts",
     no_args_is_help=False,
 )
-console = Console()
+console = get_console()
 
 PERSONAL_TARGET = "personal"
 

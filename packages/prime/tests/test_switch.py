@@ -60,6 +60,12 @@ class TestSwitchCommand:
         assert result.exit_code == 0, result.output
         assert "Switched to personal account." in result.output
 
+    def test_switch_accepts_plain_flag(self, temp_home: None, mock_teams_api: None) -> None:
+        result = runner.invoke(app, ["switch", "--plain", "personal"], env=TEST_ENV)
+
+        assert result.exit_code == 0, result.output
+        assert "Switched to personal account." in result.output
+
     def test_switch_to_personal_skips_team_fetch(
         self, temp_home: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:

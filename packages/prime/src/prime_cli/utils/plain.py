@@ -3,6 +3,7 @@ import sys
 import traceback
 from contextlib import nullcontext
 from copy import copy
+from typing import Any
 
 import click
 import typer
@@ -14,7 +15,7 @@ from typer.core import TyperCommand, TyperGroup, _main
 from typer.models import Default, DefaultPlaceholder
 
 
-def is_plain_mode(args=None):
+def is_plain_mode(args: list[str] | None = None) -> bool:
     ctx = click.get_current_context(silent=True)
     while ctx is not None:
         if ctx.meta.get("plain"):
@@ -29,10 +30,10 @@ def is_plain_mode(args=None):
     return False
 
 
-class PrimeConsole:
-    def __init__(self, *, stderr=False, **kwargs):
-        self.rich = Console(stderr=stderr, **kwargs)
-        self.plain = Console(
+class PrimeConsole(Console):
+    def __init__(self, *, stderr: bool = False, **kwargs: Any) -> None:
+        super().__init__(stderr=stderr, **kwargs)
+        self._plain_console = Console(
             stderr=stderr,
             no_color=True,
             markup=False,
@@ -41,12 +42,12 @@ class PrimeConsole:
             **kwargs,
         )
 
-    def print(self, *objects, sep=" ", end="\n", **kwargs):
+    def print(self, *objects: Any, sep: str = " ", end: str = "\n", **kwargs: Any) -> None:
         if not is_plain_mode():
-            self.rich.print(*objects, sep=sep, end=end, **kwargs)
+            super().print(*objects, sep=sep, end=end, **kwargs)
             return
 
-        kwargs.pop("markup", None)
+        markup = kwargs.pop("markup", None)
         kwargs.pop("highlight", None)
         plain_objects = []
         for obj in objects:
@@ -80,26 +81,27 @@ class PrimeConsole:
                 else:
                     text = str(obj)
 
-            try:
-                text = Text.from_markup(text).plain
-            except Exception:
-                pass
+            if markup is not False:
+                try:
+                    text = Text.from_markup(text).plain
+                except Exception:
+                    pass
             plain_objects.append(text)
 
-        self.plain.print(sep.join(plain_objects), end=end, **kwargs)
+        self._plain_console.print(sep.join(plain_objects), end=end, **kwargs)
 
-    def status(self, status, *args, **kwargs):
+    def status(self, status: str, *args: Any, **kwargs: Any):
         if is_plain_mode():
             self.print(status)
-        elif self.rich.file.isatty():
-            return self.rich.status(status, *args, **kwargs)
+        elif getattr(self.file, "isatty", lambda: False)():
+            return super().status(status, *args, **kwargs)
         return nullcontext()
 
-    def print_exception(self, *args, **kwargs):
+    def print_exception(self, *args: Any, **kwargs: Any) -> None:
         if is_plain_mode():
-            self.plain.print(traceback.format_exc().rstrip())
+            self._plain_console.print(traceback.format_exc().rstrip())
             return
-        self.rich.print_exception(*args, **kwargs)
+        super().print_exception(*args, **kwargs)
 
 
 get_console = PrimeConsole

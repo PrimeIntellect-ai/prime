@@ -38,10 +38,10 @@ class _AsyncFakeCache:
     def __init__(self, is_gpu: bool):
         self._is_gpu = is_gpu
 
-    async def get_or_refresh_async(self, _sandbox_id: str):
+    async def get_or_refresh(self, _sandbox_id: str):
         return _auth_payload()
 
-    async def is_gpu_async(self, _sandbox_id: str) -> bool:
+    async def is_gpu(self, _sandbox_id: str) -> bool:
         return self._is_gpu
 
 

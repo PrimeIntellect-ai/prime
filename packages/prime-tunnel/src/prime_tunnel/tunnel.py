@@ -1,5 +1,5 @@
-import atexit
 import asyncio
+import atexit
 import fcntl
 import os
 import re

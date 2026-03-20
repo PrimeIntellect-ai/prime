@@ -31,8 +31,7 @@ def test_load_config_warns_and_ignores_deprecated_trajectory_strategy(
 def test_load_config_still_rejects_other_unknown_keys(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text(
-        'model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\n'
-        "unknown_field = 123\n"
+        'model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\nunknown_field = 123\n'
     )
 
     with pytest.raises(typer.Exit):

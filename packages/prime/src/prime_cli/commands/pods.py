@@ -7,7 +7,6 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import typer
-from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
@@ -18,19 +17,44 @@ from ..api.pods import HistoryObj, Pod, PodsClient, PodStatus
 from ..client import APIClient, APIError
 from ..helper.short_id import generate_short_id
 from ..utils import (
+    PlainTyper,
     confirm_or_skip,
     format_ip_display,
+    get_console,
     human_age,
+    is_plain_mode,
     iso_timestamp,
+    json_output_help,
     output_data_as_json,
     status_color,
     validate_output_format,
 )
 from ..utils.display import POD_STATUS_COLORS
 
-app = typer.Typer(help="Manage compute pods", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="Manage compute pods", no_args_is_help=True)
+console = get_console()
 config = Config()
+
+LIST_PODS_JSON_HELP = json_output_help(
+    ".pods[] = {id, name, gpu, status, created_at}",
+    ".total_count = number",
+    ".offset = number",
+    ".limit = number",
+)
+
+POD_STATUS_JSON_HELP = json_output_help(
+    ". = {id, status, name, team_id, provider, gpu, image, created_at, ip, ssh, ...}",
+    ".port_mappings[]? = {protocol, external, internal, description?, used_by?}",
+    ".attached_resources[]? = {id, type, status, size, mount_path}",
+)
+
+POD_HISTORY_JSON_HELP = json_output_help(
+    ".history[] = {id, name, provider, gpu, created_at, terminated_at?, "
+    "duration?, price_per_hour, total_cost, team_id}",
+    ".total_count = number",
+    ".offset = number",
+    ".limit = number",
+)
 
 
 def _format_pod_for_status(status: PodStatus, pod_details: Pod) -> Dict[str, Any]:
@@ -121,7 +145,7 @@ def _format_pod_for_list(pod: Pod) -> Dict[str, Any]:
     }
 
 
-@app.command()
+@app.command(epilog=LIST_PODS_JSON_HELP)
 def list(
     limit: int = typer.Option(100, help="Maximum number of pods to list"),
     offset: int = typer.Option(0, help="Number of pods to skip"),
@@ -152,8 +176,10 @@ def list(
             # Only update display if data changed or first run
             if current_pods_hash != last_pods_hash:
                 # Clear screen if watching
-                if watch:
+                if watch and not is_plain_mode():
                     os.system("cls" if os.name == "nt" else "clear")
+                elif watch and is_plain_mode() and last_pods_hash is not None:
+                    console.print()
 
                 # Sort pods by created_at (oldest first, like sandbox list)
                 sorted_pods = sorted(
@@ -254,7 +280,7 @@ def list(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, epilog=POD_STATUS_JSON_HELP)
 def status(
     pod_id: str,
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
@@ -835,7 +861,7 @@ def _format_history_for_display(history_item: HistoryObj) -> Dict[str, Any]:
     }
 
 
-@app.command()
+@app.command(epilog=POD_HISTORY_JSON_HELP)
 def history(
     limit: int = typer.Option(100, help="Maximum number of history items to list"),
     offset: int = typer.Option(0, help="Number of history items to skip"),

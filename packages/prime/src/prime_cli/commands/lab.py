@@ -3,12 +3,12 @@
 import subprocess
 
 import typer
-from rich.console import Console
 
+from ..utils import PlainTyper, get_console
 from ..verifiers_plugin import load_verifiers_prime_plugin
 
-app = typer.Typer(help="Lab commands for verifiers development", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="Lab commands for verifiers development", no_args_is_help=True)
+console = get_console()
 
 
 @app.command(

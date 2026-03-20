@@ -2,7 +2,6 @@ import sys
 from typing import Optional
 
 import typer
-from rich.console import Console
 
 from . import __version__
 from .commands.availability import app as availability_app
@@ -26,9 +25,10 @@ from .commands.tunnel import app as tunnel_app
 from .commands.upgrade import app as upgrade_app
 from .commands.whoami import app as whoami_app
 from .core import Config
+from .utils import PlainTyper, get_console
 from .utils.version_check import check_for_update
 
-app = typer.Typer(
+app = PlainTyper(
     name="prime",
     help=f"Prime Intellect CLI (v{__version__})",
     no_args_is_help=True,
@@ -97,7 +97,7 @@ def callback(
     if ctx.invoked_subcommand is not None:
         update_available, latest = check_for_update()
         if update_available and latest:
-            console = Console(stderr=True, force_terminal=sys.stderr.isatty())
+            console = get_console(stderr=True, force_terminal=sys.stderr.isatty())
             console.print(
                 f"[yellow]A new version of prime is available: {latest} "
                 f"(installed: {__version__})[/yellow]"

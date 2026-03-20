@@ -19,12 +19,17 @@ from urllib.parse import urlparse
 import httpx
 import toml
 import typer
-from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 from ..client import APIClient, APIError
-from ..utils import output_data_as_json, validate_output_format
+from ..utils import (
+    PlainTyper,
+    get_console,
+    json_output_help,
+    output_data_as_json,
+    validate_output_format,
+)
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.formatters import format_file_size
 from ..utils.formatters import strip_ansi as _strip_ansi
@@ -38,8 +43,8 @@ from ..utils.time_utils import format_time_ago, iso_timestamp
 from ..verifiers_bridge import print_env_build_help, print_env_init_help
 from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
 
-app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="Manage verifiers environments", no_args_is_help=True)
+console = get_console()
 
 # Constants
 MAX_FILES_TO_SHOW = 10
@@ -48,16 +53,59 @@ DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 
 # Action subcommand app
-action_app = typer.Typer(help="Manage environment actions (CI jobs)", no_args_is_help=True)
+action_app = PlainTyper(help="Manage environment actions (CI jobs)", no_args_is_help=True)
 app.add_typer(action_app, name="action", rich_help_panel="Manage")
 
 # Secret subcommand app
-secret_app = typer.Typer(help="Manage environment secrets", no_args_is_help=True)
+secret_app = PlainTyper(help="Manage environment secrets", no_args_is_help=True)
 app.add_typer(secret_app, name="secret", rich_help_panel="Manage")
 
 # Variable subcommand app
-var_app = typer.Typer(help="Manage environment variables", no_args_is_help=True)
+var_app = PlainTyper(help="Manage environment variables", no_args_is_help=True)
 app.add_typer(var_app, name="var", rich_help_panel="Manage")
+
+ACTION_LIST_JSON_HELP = json_output_help(
+    ".actions[] = {id, name|job_type, status, version, trigger, created_at}",
+    ".total = number",
+)
+
+ACTION_RETRY_JSON_HELP = json_output_help(
+    ". = {success, job_id?, version_id?, message?}",
+)
+
+ENV_LIST_JSON_HELP = json_output_help(
+    ".environments[] = {environment, description, visibility, version, stars, "
+    "updated_at, action_status?, tags[]?}",
+    ".total = number",
+    ".page = number",
+    ".per_page = number",
+)
+
+ENV_STATUS_JSON_HELP = json_output_help(
+    ". = {name, description?, visibility, latest_version?, action?}",
+    ".latest_version? = {semantic_version?, content_hash?, created_at?}",
+    ".action? = {status, job_id?}",
+)
+
+ENV_SECRET_LIST_JSON_HELP = json_output_help(
+    ".secrets[] = {id, name, source, description?, createdAt, updatedAt?}",
+)
+
+ENV_SECRET_DETAIL_JSON_HELP = json_output_help(
+    ". = {id, name, source, description?, value?, createdAt, updatedAt?}",
+)
+
+ENV_SECRET_LINK_JSON_HELP = json_output_help(
+    ". = {id, secretId, secretName, environmentId, createdAt}",
+)
+
+ENV_VAR_LIST_JSON_HELP = json_output_help(
+    ".variables[] = {id, name, value, description?, createdAt, updatedAt?}",
+)
+
+ENV_VAR_DETAIL_JSON_HELP = json_output_help(
+    ". = {id, name, value, description?, createdAt, updatedAt?}",
+)
 
 
 def _uv_pip_command(subcommand: str, *args: str) -> List[str]:
@@ -110,7 +158,7 @@ def _resolve_environment(environment: Optional[str]) -> Tuple[str, str]:
     raise typer.Exit(1)
 
 
-@action_app.command("list")
+@action_app.command("list", epilog=ACTION_LIST_JSON_HELP)
 def actions_list(
     environment: str = typer.Argument(
         ...,
@@ -305,7 +353,7 @@ def actions_logs(
         raise typer.Exit(1)
 
 
-@action_app.command("retry")
+@action_app.command("retry", epilog=ACTION_RETRY_JSON_HELP)
 def actions_retry(
     environment: str = typer.Argument(
         ...,
@@ -504,7 +552,7 @@ def _format_action_status(status: Optional[str]) -> Text:
     return Text(status, style=color)
 
 
-@app.command("list", rich_help_panel="Explore")
+@app.command("list", rich_help_panel="Explore", epilog=ENV_LIST_JSON_HELP)
 def list_cmd(
     num: int = typer.Option(DEFAULT_LIST_LIMIT, "--num", "-n", help="Items per page"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
@@ -685,7 +733,7 @@ def list_cmd(
         raise typer.Exit(1)
 
 
-@app.command("status", rich_help_panel="Explore")
+@app.command("status", rich_help_panel="Explore", epilog=ENV_STATUS_JSON_HELP)
 def status_cmd(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     output: str = typer.Option("table", "--output", help="Output format: table or json"),
@@ -2382,7 +2430,7 @@ def uninstall(
         raise typer.Exit(1)
 
 
-version_app = typer.Typer(help="Manage environment versions", no_args_is_help=True)
+version_app = PlainTyper(help="Manage environment versions", no_args_is_help=True)
 app.add_typer(version_app, name="version", rich_help_panel="Manage")
 
 
@@ -2972,7 +3020,7 @@ def _fetch_env_secrets(client: APIClient, env_id: str) -> List[Dict[str, Any]]:
     return response.get("data", [])
 
 
-@secret_app.command("list")
+@secret_app.command("list", epilog=ENV_SECRET_LIST_JSON_HELP)
 def env_secret_list(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3026,7 +3074,7 @@ def env_secret_list(
         raise typer.Exit(1)
 
 
-@secret_app.command("create")
+@secret_app.command("create", epilog=ENV_SECRET_DETAIL_JSON_HELP)
 def env_secret_create(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3103,7 +3151,7 @@ def env_secret_create(
         raise typer.Exit(1)
 
 
-@secret_app.command("update")
+@secret_app.command("update", epilog=ENV_SECRET_DETAIL_JSON_HELP)
 def env_secret_update(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3248,7 +3296,7 @@ def env_secret_delete(
         raise typer.Exit(1)
 
 
-@secret_app.command("link")
+@secret_app.command("link", epilog=ENV_SECRET_LINK_JSON_HELP)
 def env_secret_link(
     global_secret_id: str = typer.Argument(
         ...,
@@ -3335,7 +3383,7 @@ def env_secret_unlink(
         raise typer.Exit(1)
 
 
-@var_app.command("list")
+@var_app.command("list", epilog=ENV_VAR_LIST_JSON_HELP)
 def var_list(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3392,7 +3440,7 @@ def var_list(
         raise typer.Exit(1)
 
 
-@var_app.command("create")
+@var_app.command("create", epilog=ENV_VAR_DETAIL_JSON_HELP)
 def var_create(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3469,7 +3517,7 @@ def var_create(
         raise typer.Exit(1)
 
 
-@var_app.command("update")
+@var_app.command("update", epilog=ENV_VAR_DETAIL_JSON_HELP)
 def var_update(
     var_id: str = typer.Argument(
         ...,

@@ -6,14 +6,18 @@ from typing import Optional
 
 import typer
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
-from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
-from typer.core import TyperGroup
 
 from ..client import APIClient
 from ..core import Config
-from ..utils import output_data_as_json
+from ..utils import (
+    PlainAwareTyperGroup,
+    PlainTyper,
+    get_console,
+    json_output_help,
+    output_data_as_json,
+)
 from ..utils.eval_push import load_results_jsonl
 from ..verifiers_bridge import (
     print_eval_run_help,
@@ -21,10 +25,34 @@ from ..verifiers_bridge import (
     run_eval_tui,
 )
 
-console = Console()
+console = get_console()
+
+LIST_EVALS_JSON_HELP = json_output_help(
+    ".evaluations[] = {evaluation_id|id, environment_names[], model_name, status, metadata}",
+    ".total = number",
+)
+
+EVAL_DETAIL_JSON_HELP = json_output_help(
+    ". = evaluation object from Prime Evals",
+    "Common keys: .evaluation_id? | .id, .environment_names[]?, .model_name?, "
+    ".status?, .metadata?, .metrics?",
+)
+
+EVAL_SAMPLES_JSON_HELP = json_output_help(
+    ".samples[] = sample object",
+    "Common keys: .samples[].example_id?, .samples[].input?, .samples[].output?, .samples[].score?",
+    ".total? = number",
+    ".page? = number",
+    ".limit? = number",
+)
+
+PUSH_EVAL_JSON_HELP = json_output_help(
+    "Single push: .evaluation_id = string",
+    "Auto-discovery batch push: .results[] = {path, status, eval_id?, error?}",
+)
 
 
-class DefaultGroup(TyperGroup):
+class DefaultGroup(PlainAwareTyperGroup):
     def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
         super().__init__(*args, **kwargs)
         self.default_cmd_name = default_cmd_name
@@ -33,10 +61,14 @@ class DefaultGroup(TyperGroup):
         if not args:
             return super().parse_args(ctx, args)
 
-        if args[0] in ("--help", "-h"):
+        decision_args = [arg for arg in args if arg != "--plain"]
+        if not decision_args:
             return super().parse_args(ctx, args)
 
-        if args[0] in self.commands:
+        if decision_args[0] in ("--help", "-h"):
+            return super().parse_args(ctx, args)
+
+        if decision_args[0] in self.commands:
             return super().parse_args(ctx, args)
 
         args = [self.default_cmd_name] + list(args)
@@ -49,7 +81,7 @@ class DefaultGroup(TyperGroup):
         )
 
 
-subcommands_app = typer.Typer()
+subcommands_app = PlainTyper()
 
 
 def handle_errors(func):
@@ -83,7 +115,7 @@ def format_output(data: dict, output: str) -> None:
         console.print(syntax)
 
 
-@subcommands_app.command("list")
+@subcommands_app.command("list", epilog=LIST_EVALS_JSON_HELP)
 @handle_errors
 def list_evals(
     output: str = typer.Option("table", "--output", "-o", help="table|json"),
@@ -180,7 +212,7 @@ def list_evals(
         raise typer.Exit(1)
 
 
-@subcommands_app.command("get")
+@subcommands_app.command("get", epilog=EVAL_DETAIL_JSON_HELP)
 @handle_errors
 def get_eval(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation to retrieve"),
@@ -194,7 +226,7 @@ def get_eval(
     format_output(data, output)
 
 
-@subcommands_app.command("samples")
+@subcommands_app.command("samples", epilog=EVAL_SAMPLES_JSON_HELP)
 @handle_errors
 def get_samples(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation"),
@@ -407,7 +439,7 @@ def tui_cmd(
     run_eval_tui(env_dir=env_dir, outputs_dir=outputs_dir)
 
 
-@subcommands_app.command("push")
+@subcommands_app.command("push", epilog=PUSH_EVAL_JSON_HELP)
 @handle_errors
 def push_eval(
     config_path: Optional[str] = typer.Argument(
@@ -545,7 +577,7 @@ def push_eval(
         raise typer.Exit(1)
 
 
-app = typer.Typer(
+app = PlainTyper(
     cls=DefaultGroup,
     help=(
         "Run evaluations or manage results (list, get, push, samples).\n\n"

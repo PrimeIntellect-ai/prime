@@ -14,7 +14,6 @@ from typing import Optional
 
 import toml
 import typer
-from rich.console import Console
 
 from prime_cli.core import Config
 
@@ -22,9 +21,10 @@ from .api.inference import InferenceAPIError, InferenceClient
 from .client import APIClient, APIError
 from .utils.env_metadata import find_environment_metadata, get_environment_metadata
 from .utils.eval_push import push_eval_results_to_hub
+from .utils.plain import get_console
 from .verifiers_plugin import PrimeVerifiersPlugin, load_verifiers_prime_plugin
 
-console = Console()
+console = get_console()
 
 DEFAULT_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_ENV_DIR_PATH = "./environments"

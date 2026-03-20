@@ -1,9 +1,10 @@
 from typing import Any, Dict, Iterable, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
-from rich.console import Console
 
-console = Console()
+from ..utils.plain import get_console
+
+console = get_console()
 
 
 class DiskConfig(BaseModel):

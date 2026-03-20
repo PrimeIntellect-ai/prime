@@ -19,7 +19,7 @@ def validate_output_format(output: str, console: Console) -> None:
 
 def output_data_as_json(data: Any, console: Console) -> None:
     """Output data as formatted JSON."""
-    console.print(json.dumps(data, indent=2, default=str))
+    console.print(json.dumps(data, indent=2, default=str), markup=False, highlight=False)
 
 
 def build_table(title: str, columns: List[Tuple[str, str]], show_lines: bool = True) -> Table:

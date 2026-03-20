@@ -10,15 +10,20 @@ import click
 import httpx
 import typer
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
-from rich.console import Console
 from rich.table import Table
 
-from ..utils import validate_output_format
+from ..utils import PlainTyper, get_console, json_output_help, validate_output_format
 
-app = typer.Typer(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
+console = get_console()
 
 config = Config()
+
+LIST_IMAGES_JSON_HELP = json_output_help(
+    "Raw API response is printed unchanged.",
+    ".data[] = {displayRef?, fullImagePath?, imageName, imageTag, status, "
+    "ownerType, sizeBytes?, createdAt, pushedAt?}",
+)
 
 
 @app.command("push")
@@ -192,7 +197,7 @@ def push_image(
         raise typer.Exit(1)
 
 
-@app.command("list")
+@app.command("list", epilog=LIST_IMAGES_JSON_HELP)
 def list_images(
     output: str = typer.Option("table", "--output", "-o", help="Output format (table or json)"),
     all_images: bool = typer.Option(

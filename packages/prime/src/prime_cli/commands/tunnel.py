@@ -5,13 +5,13 @@ from typing import List, Optional
 import typer
 from prime_tunnel import Tunnel
 from prime_tunnel.core.client import TunnelClient
-from rich.console import Console
 from rich.table import Table
 
+from prime_cli.utils import PlainTyper, get_console
 from prime_cli.utils.prompt import confirm_or_skip
 
-app = typer.Typer(help="Manage tunnels for exposing local services", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="Manage tunnels for exposing local services", no_args_is_help=True)
+console = get_console()
 
 
 @app.command("start")

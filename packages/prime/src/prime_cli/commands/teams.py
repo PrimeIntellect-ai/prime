@@ -1,12 +1,22 @@
 import typer
-from rich.console import Console
 from rich.table import Table
 
 from ..client import APIClient, APIError
-from ..utils import output_data_as_json, validate_output_format
+from ..utils import (
+    PlainTyper,
+    get_console,
+    json_output_help,
+    output_data_as_json,
+    validate_output_format,
+)
 
-app = typer.Typer(help="List your teams", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="List your teams", no_args_is_help=True)
+console = get_console()
+
+LIST_TEAMS_JSON_HELP = json_output_help(
+    ".teams[] = {teamId, name, slug, role, createdAt}",
+    ".total_count = number",
+)
 
 
 def fetch_teams(client: APIClient) -> list[dict]:
@@ -15,7 +25,7 @@ def fetch_teams(client: APIClient) -> list[dict]:
     return response.get("data", []) if isinstance(response, dict) else []
 
 
-@app.command(name="list")
+@app.command(name="list", epilog=LIST_TEAMS_JSON_HELP)
 def list_teams(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:

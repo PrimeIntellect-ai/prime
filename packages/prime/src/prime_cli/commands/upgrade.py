@@ -3,13 +3,13 @@ import subprocess
 import sys
 
 import typer
-from rich.console import Console
 
 from prime_cli import __version__
+from prime_cli.utils import PlainTyper, get_console
 from prime_cli.utils.version_check import get_latest_pypi_version
 
-app = typer.Typer(help="Upgrade the Prime CLI to the latest version", no_args_is_help=False)
-console = Console()
+app = PlainTyper(help="Upgrade the Prime CLI to the latest version", no_args_is_help=False)
+console = get_console()
 
 
 def _detect_install_method() -> str:

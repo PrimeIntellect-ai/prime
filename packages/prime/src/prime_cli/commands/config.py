@@ -3,16 +3,16 @@ import re
 from typing import Optional
 
 import typer
-from rich.console import Console
 from rich.table import Table
 
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
+from ..utils import PlainTyper, get_console
 from .teams import fetch_teams
 
-app = typer.Typer(help="Configure the CLI", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="Configure the CLI", no_args_is_help=True)
+console = get_console()
 
 # Team ID validation pattern: CUID (v1)
 TEAM_ID_PATTERN = re.compile(r"^c[a-z0-9]{24}$")

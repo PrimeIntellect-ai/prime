@@ -1,18 +1,38 @@
 from typing import Any, Dict, List, Optional
 
 import typer
-from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..client import APIClient, APIError
 from ..helper.short_id import generate_short_id, generate_short_id_disk
-from ..utils import output_data_as_json, status_color, validate_output_format
+from ..utils import (
+    PlainTyper,
+    get_console,
+    json_output_help,
+    output_data_as_json,
+    status_color,
+    validate_output_format,
+)
 from ..utils.display import STOCK_STATUS_COLORS
 
-app = typer.Typer(help="Check GPU availability and pricing", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="Check GPU availability and pricing", no_args_is_help=True)
+console = get_console()
+
+LIST_GPU_JSON_HELP = json_output_help(
+    ".gpu_resources[] = {id, cloud_id, gpu_type, gpu_count, socket, provider, "
+    "location, stock_status, price_per_hour, price_value, security, vcpus, "
+    "memory_gb, disk_gb, gpu_memory, is_spot}",
+    ".total_count = number",
+    ".filters = {gpu_type, gpu_count, regions[], socket, provider, group_similar}",
+)
+
+LIST_AVAILABILITY_DISKS_JSON_HELP = json_output_help(
+    ".disks[] = {short_id, provider, location, stock_status, price, max_size, is_multinode}",
+    ".total_count = number",
+    ".filters = {regions[], data_center_id}",
+)
 
 
 def _format_availability_for_display(gpu_entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -84,7 +104,7 @@ def gpu_types() -> None:
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(epilog=LIST_GPU_JSON_HELP)
 def list(
     gpu_type: Optional[str] = typer.Option(None, help="GPU type (e.g., H100_80GB)"),
     gpu_count: Optional[int] = typer.Option(None, help="Number of GPUs required"),
@@ -279,7 +299,7 @@ def list(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(epilog=LIST_AVAILABILITY_DISKS_JSON_HELP)
 def disks(
     regions: Optional[List[str]] = typer.Option(
         None, help="Filter by regions (e.g., united_states)"

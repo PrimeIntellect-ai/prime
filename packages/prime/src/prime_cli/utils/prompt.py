@@ -2,9 +2,10 @@ import re
 from typing import Any, Callable, Dict, List, Optional
 
 import typer
-from rich.console import Console
 
-console = Console()
+from .plain import get_console
+
+console = get_console()
 
 _ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 

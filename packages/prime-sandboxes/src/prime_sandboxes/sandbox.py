@@ -6,7 +6,6 @@ import os
 import re
 import shlex
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -254,14 +253,8 @@ class SandboxAuthCache:
         """Write current in-memory cache to disk. Must be called under self._lock."""
         try:
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=self._cache_file.parent, suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w") as f:
-                    json.dump(self._auth_cache, f)
-                os.replace(tmp, self._cache_file)
-            except BaseException:
-                os.unlink(tmp)
-                raise
+            with open(self._cache_file, "w") as f:
+                json.dump(self._auth_cache, f)
         except Exception:
             pass
 
@@ -357,14 +350,8 @@ class AsyncSandboxAuthCache:
 
         def _write() -> None:
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=self._cache_file.parent, suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w") as f:
-                    f.write(data)
-                os.replace(tmp, self._cache_file)
-            except BaseException:
-                os.unlink(tmp)
-                raise
+            with open(self._cache_file, "w") as f:
+                f.write(data)
 
         try:
             await asyncio.to_thread(_write)

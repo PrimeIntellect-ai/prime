@@ -1,4 +1,4 @@
-"""Tests for CPU/GPU command transport selection."""
+"""Tests for container/VM command transport selection."""
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
@@ -24,30 +24,30 @@ def _auth_payload():
 
 
 class _FakeCache:
-    def __init__(self, is_gpu: bool):
-        self._is_gpu = is_gpu
+    def __init__(self, is_vm: bool):
+        self._is_vm = is_vm
 
     def get_or_refresh(self, _sandbox_id: str):
         return _auth_payload()
 
-    def is_gpu(self, _sandbox_id: str) -> bool:
-        return self._is_gpu
+    def is_vm(self, _sandbox_id: str) -> bool:
+        return self._is_vm
 
 
 class _AsyncFakeCache:
-    def __init__(self, is_gpu: bool):
-        self._is_gpu = is_gpu
+    def __init__(self, is_vm: bool):
+        self._is_vm = is_vm
 
     async def get_or_refresh_async(self, _sandbox_id: str):
         return _auth_payload()
 
-    async def is_gpu_async(self, _sandbox_id: str) -> bool:
-        return self._is_gpu
+    async def is_vm_async(self, _sandbox_id: str) -> bool:
+        return self._is_vm
 
 
-def test_sync_execute_command_uses_connect_for_gpu():
+def test_sync_execute_command_uses_connect_for_vm():
     client = SandboxClient(APIClient(api_key="test-key"))
-    cast(Any, client)._auth_cache = _FakeCache(is_gpu=True)
+    cast(Any, client)._auth_cache = _FakeCache(is_vm=True)
 
     called = {"connect": False}
 
@@ -56,7 +56,7 @@ def test_sync_execute_command_uses_connect_for_gpu():
         return CommandResponse(stdout="ok", stderr="", exit_code=0)
 
     def _rest(*_args, **_kwargs):
-        raise AssertionError("REST path should not be used for GPU sandboxes")
+        raise AssertionError("REST path should not be used for VM sandboxes")
 
     client_any = cast(Any, client)
     client_any._execute_command_connect_rpc = _connect
@@ -70,7 +70,7 @@ def test_sync_execute_command_uses_connect_for_gpu():
 
 def test_sync_execute_command_uses_rest_for_cpu():
     client = SandboxClient(APIClient(api_key="test-key"))
-    cast(Any, client)._auth_cache = _FakeCache(is_gpu=False)
+    cast(Any, client)._auth_cache = _FakeCache(is_vm=False)
 
     called = {"rest": False}
 
@@ -92,9 +92,9 @@ def test_sync_execute_command_uses_rest_for_cpu():
 
 
 @pytest.mark.asyncio
-async def test_async_execute_command_uses_connect_for_gpu():
+async def test_async_execute_command_uses_connect_for_vm():
     client = AsyncSandboxClient(api_key="test-key")
-    cast(Any, client)._auth_cache = _AsyncFakeCache(is_gpu=True)
+    cast(Any, client)._auth_cache = _AsyncFakeCache(is_vm=True)
 
     called = {"connect": False}
 
@@ -103,7 +103,7 @@ async def test_async_execute_command_uses_connect_for_gpu():
         return CommandResponse(stdout="ok", stderr="", exit_code=0)
 
     async def _rest(*_args, **_kwargs):
-        raise AssertionError("REST path should not be used for GPU sandboxes")
+        raise AssertionError("REST path should not be used for VM sandboxes")
 
     client_any = cast(Any, client)
     client_any._execute_command_connect_rpc = _connect
@@ -121,7 +121,7 @@ async def test_async_execute_command_uses_connect_for_gpu():
 @pytest.mark.asyncio
 async def test_async_execute_command_uses_rest_for_cpu():
     client = AsyncSandboxClient(api_key="test-key")
-    cast(Any, client)._auth_cache = _AsyncFakeCache(is_gpu=False)
+    cast(Any, client)._auth_cache = _AsyncFakeCache(is_vm=False)
 
     called = {"rest": False}
 
@@ -145,7 +145,7 @@ async def test_async_execute_command_uses_rest_for_cpu():
         await client.aclose()
 
 
-def test_auth_cache_stores_gpu_flag_for_reuse(tmp_path):
+def test_auth_cache_stores_vm_flag_for_reuse(tmp_path):
     class _FakeAPIClient:
         def __init__(self):
             self.calls = 0
@@ -155,15 +155,16 @@ def test_auth_cache_stores_gpu_flag_for_reuse(tmp_path):
                 self.calls += 1
                 return {
                     "id": "sbx-1",
-                    "name": "gpu-box",
+                    "name": "vm-box",
                     "dockerImage": "img",
                     "startCommand": None,
                     "cpuCores": 1.0,
                     "memoryGB": 2.0,
                     "diskSizeGB": 10.0,
                     "diskMountPath": "/sandbox-workspace",
-                    "gpuCount": 1,
-                    "gpuType": "RTX_PRO_6000",
+                    "gpuCount": 0,
+                    "gpuType": None,
+                    "vm": True,
                     "networkAccess": True,
                     "status": "RUNNING",
                     "timeoutMinutes": 60,
@@ -188,8 +189,8 @@ def test_auth_cache_stores_gpu_flag_for_reuse(tmp_path):
     cache = SandboxAuthCache(tmp_path / "auth_cache.json", _FakeAPIClient())
     cache.set("sbx-1", _auth_payload())
 
-    assert cache.is_gpu("sbx-1")
-    assert cache.is_gpu("sbx-1")
+    assert cache.is_vm("sbx-1")
+    assert cache.is_vm("sbx-1")
     assert cache.client.calls == 1
 
 

@@ -303,37 +303,37 @@ class SandboxAuthCache:
         await self._save_cache_async()
         return dict(response)
 
-    def is_gpu(self, sandbox_id: str) -> bool:
-        """Return True if sandbox is GPU-backed, cached alongside auth token data."""
+    def is_vm(self, sandbox_id: str) -> bool:
+        """Return True if sandbox is VM-backed, cached alongside auth token data."""
         cached_auth = self._check_cached_auth(sandbox_id)
-        if cached_auth and isinstance(cached_auth.get("is_gpu"), bool):
-            return bool(cached_auth["is_gpu"])
+        if cached_auth and isinstance(cached_auth.get("is_vm"), bool):
+            return bool(cached_auth["is_vm"])
 
         sandbox_data = self.client.request("GET", f"/sandbox/{sandbox_id}")
         sandbox = Sandbox.model_validate(sandbox_data)
-        is_gpu = sandbox.gpu_count > 0
+        is_vm = sandbox.vm
 
         if sandbox_id in self._auth_cache:
-            self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
+            self._auth_cache[sandbox_id]["is_vm"] = is_vm
             self._save_cache()
 
-        return is_gpu
+        return is_vm
 
-    async def is_gpu_async(self, sandbox_id: str) -> bool:
-        """Return True if sandbox is GPU-backed, cached alongside auth token data."""
+    async def is_vm_async(self, sandbox_id: str) -> bool:
+        """Return True if sandbox is VM-backed, cached alongside auth token data."""
         cached_auth = await self._check_cached_auth_async(sandbox_id)
-        if cached_auth and isinstance(cached_auth.get("is_gpu"), bool):
-            return bool(cached_auth["is_gpu"])
+        if cached_auth and isinstance(cached_auth.get("is_vm"), bool):
+            return bool(cached_auth["is_vm"])
 
         sandbox_data = await self.client.request("GET", f"/sandbox/{sandbox_id}")
         sandbox = Sandbox.model_validate(sandbox_data)
-        is_gpu = sandbox.gpu_count > 0
+        is_vm = sandbox.vm
 
         if sandbox_id in self._auth_cache:
-            self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
+            self._auth_cache[sandbox_id]["is_vm"] = is_vm
             await self._save_cache_async()
 
-        return is_gpu
+        return is_vm
 
     def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
         """Cache auth info"""
@@ -541,7 +541,7 @@ class SandboxClient:
         """Execute command directly via gateway."""
         auth = self._auth_cache.get_or_refresh(sandbox_id)
 
-        if self._auth_cache.is_gpu(sandbox_id):
+        if self._auth_cache.is_vm(sandbox_id):
             return self._execute_command_connect_rpc(
                 sandbox_id=sandbox_id,
                 command=command,
@@ -1354,7 +1354,7 @@ class AsyncSandboxClient:
         """Execute command directly via gateway (async)."""
         auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
 
-        if await self._auth_cache.is_gpu_async(sandbox_id):
+        if await self._auth_cache.is_vm_async(sandbox_id):
             return await self._execute_command_connect_rpc(
                 sandbox_id=sandbox_id,
                 command=command,

@@ -24,6 +24,7 @@ def test_create_sandbox_request_defaults():
     assert request.disk_size_gb == 5
     assert request.gpu_count == 0
     assert request.gpu_type is None
+    assert request.vm is False
     assert request.timeout_minutes == 60
     assert request.labels == []
 
@@ -45,10 +46,34 @@ def test_create_sandbox_request_accepts_gpu_type_for_gpu_count():
         docker_image="python:3.11-slim",
         gpu_count=1,
         gpu_type="H100_80GB",
+        vm=True,
     )
 
     assert request.gpu_count == 1
     assert request.gpu_type == "H100_80GB"
+    assert request.vm is True
+
+
+def test_create_sandbox_request_requires_vm_for_gpu_count():
+    """Test vm is required when gpu_count > 0"""
+    with pytest.raises(ValidationError):
+        CreateSandboxRequest(
+            name="gpu-sandbox",
+            docker_image="python:3.11-slim",
+            gpu_count=1,
+            gpu_type="H100_80GB",
+        )
+
+
+def test_create_sandbox_request_rejects_gpu_type_without_gpu_count():
+    """Test gpu_type is rejected when gpu_count is zero"""
+    with pytest.raises(ValidationError):
+        CreateSandboxRequest(
+            name="cpu-sandbox",
+            docker_image="python:3.11-slim",
+            gpu_type="H100_80GB",
+            vm=True,
+        )
 
 
 def test_create_sandbox_request_gpu_type_none_matches_default():
@@ -86,6 +111,7 @@ def test_sandbox_model_with_alias():
         "diskMountPath": "/workspace",
         "gpuCount": 1,
         "gpuType": "H100_80GB",
+        "vm": True,
         "status": "RUNNING",
         "timeoutMinutes": 120,
         "labels": ["test"],
@@ -101,3 +127,4 @@ def test_sandbox_model_with_alias():
     assert sandbox.memory_gb == 4
     assert sandbox.status == "RUNNING"
     assert sandbox.gpu_type == "H100_80GB"
+    assert sandbox.vm is True

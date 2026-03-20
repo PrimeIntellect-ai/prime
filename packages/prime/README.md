@@ -147,10 +147,11 @@ Isolated environments for running code remotely:
 # Create a sandbox
 prime sandbox create python:3.11
 
-# Create a GPU sandbox
-prime sandbox create --gpu-count 1 --gpu-type H100_80GB
+# Create a VM sandbox with GPUs
+prime sandbox create user-1/vm-image:latest --vm --gpu-count 1 --gpu-type H100_80GB
 
-# Note: DOCKER_IMAGE is not supported for GPU sandboxes
+# Create a CPU-only VM sandbox
+prime sandbox create user-1/vm-image:latest --vm
 
 # List sandboxes
 prime sandbox list

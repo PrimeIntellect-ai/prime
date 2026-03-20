@@ -1,13 +1,13 @@
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from prime_cli.commands.login import fetch_and_select_team
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
-from prime_cli.utils.plain import set_plain_mode
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -151,12 +151,9 @@ def test_plain_login_team_selection_is_unstyled(
     )
     monkeypatch.setattr("prime_cli.commands.login.typer.prompt", lambda *args, **kwargs: 2)
 
-    set_plain_mode(True)
-    try:
-        config = FakeConfig()
-        fetch_and_select_team(SimpleNamespace(), config)
-    finally:
-        set_plain_mode(False)
+    monkeypatch.setattr(sys, "argv", ["prime", "--plain"])
+    config = FakeConfig()
+    fetch_and_select_team(cast(Any, SimpleNamespace()), cast(Any, config))
 
     output = capsys.readouterr().out
     _assert_plain_output(output)

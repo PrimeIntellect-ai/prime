@@ -145,8 +145,8 @@ class Tunnel:
             raise TunnelConnectionError(f"Failed to start pipe drain: {e}") from e
 
         self._started = True
-
-        return self.url
+        assert self._tunnel_info is not None and self._tunnel_info.url is not None
+        return self._tunnel_info.url
 
     async def stop(self) -> None:
         """Stop the tunnel and cleanup resources."""

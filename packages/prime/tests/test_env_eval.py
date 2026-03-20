@@ -3,6 +3,7 @@
 import os
 import subprocess
 import tempfile
+from typing import Any, cast
 
 import pytest
 
@@ -26,7 +27,7 @@ def install_math_env():
         text=True,
     )
     if result.returncode != 0:
-        pytest.skip(f"Failed to install single_turn_math: {result.stderr}")
+        cast(Any, pytest.skip)(f"Failed to install single_turn_math: {result.stderr}")
     yield
     # Cleanup: uninstall after tests
     subprocess.run(

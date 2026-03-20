@@ -151,7 +151,8 @@ while True:
 
         # Verify TCP endpoint is accessible
         print("  Verifying TCP endpoint...")
-        if verify_tcp(tcp_exposure.external_endpoint):
+        endpoint = tcp_exposure.external_endpoint
+        if endpoint and verify_tcp(endpoint):
             print("  TCP verification: SUCCESS (echo server responded correctly)")
         else:
             print("  TCP verification: FAILED")
@@ -171,7 +172,9 @@ while True:
         # Usage instructions
         print("\n--- How to Connect ---")
         print(f"HTTP: curl {http_exposure.url}")
-        print(f"TCP:  Connect to {tcp_exposure.external_endpoint} with a TCP client")
+        print(
+            f"TCP:  Connect to {tcp_exposure.external_endpoint or 'the exposed endpoint'} with a TCP client"
+        )
 
         print("\nDemo completed successfully!")
 

@@ -459,7 +459,7 @@ class RLConfig(BaseModel):
     env_files: List[str] = Field(default_factory=list)
 
 
-def _format_validation_errors(errors: list[dict]) -> list[str]:
+def _format_validation_errors(errors: list[Any]) -> list[str]:
     """Format Pydantic validation errors into user-friendly messages."""
     messages = []
     for error in errors:

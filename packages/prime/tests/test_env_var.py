@@ -20,7 +20,7 @@ def mock_env_var_api(monkeypatch: pytest.MonkeyPatch) -> None:
         "owner": {"name": "testuser", "type": "user"},
     }
 
-    sample_variables = [
+    sample_variables: list[dict[str, Any]] = [
         {
             "id": "var-id-1234567890",
             "name": "DEBUG",

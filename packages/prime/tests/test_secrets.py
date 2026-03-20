@@ -15,7 +15,7 @@ def mock_secrets_api(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "test-key")
     monkeypatch.setattr("prime_cli.core.Config.team_id", None)
 
-    sample_secrets = [
+    sample_secrets: list[dict[str, Any]] = [
         {
             "id": "secret-id-1234567890",
             "name": "MY_SECRET",

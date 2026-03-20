@@ -82,6 +82,7 @@ async def test_create_pod_validation():
         cloud_id="test-cloud-id",
         gpu_type="A100_80GB",
         provider_type="runpod",
+        data_center_id="test-datacenter",
         gpu_count=0,  # Invalid
     )
 
@@ -96,6 +97,7 @@ async def test_create_pod_disk_size_validation():
         cloud_id="test-cloud-id",
         gpu_type="A100_80GB",
         provider_type="runpod",
+        data_center_id="test-datacenter",
         disk_size=0,  # Invalid
     )
 
@@ -110,6 +112,7 @@ async def test_create_pod_vcpus_validation():
         cloud_id="test-cloud-id",
         gpu_type="A100_80GB",
         provider_type="runpod",
+        data_center_id="test-datacenter",
         vcpus=0,  # Invalid
     )
 
@@ -124,6 +127,7 @@ async def test_create_pod_memory_validation():
         cloud_id="test-cloud-id",
         gpu_type="A100_80GB",
         provider_type="runpod",
+        data_center_id="test-datacenter",
         memory=0,  # Invalid
     )
 

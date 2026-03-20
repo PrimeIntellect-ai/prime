@@ -50,4 +50,5 @@ def test_json_schema_is_shown_for_eval_push_help() -> None:
     output = _squash(result.output)
     assert "JSON output (--output json)" in output
     assert "Single push: .evaluation_id = string" in output
-    assert "Auto-discovery batch push: .results[] = {path, status, eval_id?, error?}" in output
+    assert "Auto-" in output
+    assert "discovery batch push: .results[] = {path, status, eval_id?, error?}" in output

@@ -201,7 +201,7 @@ def actions_list(
     try:
         client = APIClient()
         offset = (page - 1) * num
-        params = {
+        params: dict[str, int | str] = {
             "limit": num,
             "offset": offset,
         }

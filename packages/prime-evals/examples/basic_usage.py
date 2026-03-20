@@ -38,6 +38,8 @@ def main():
     )
 
     eval_id = eval_response.get("evaluation_id")
+    if eval_id is None:
+        raise RuntimeError("create_evaluation did not return an evaluation_id")
     print(f"✓ Created evaluation: {eval_id}\n")
 
     print("Pushing samples...")

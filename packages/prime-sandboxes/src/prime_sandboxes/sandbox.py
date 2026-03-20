@@ -247,11 +247,9 @@ class SandboxAuthCache:
         self._inflight: Dict[str, threading.Event] = {}
         self._auth_cache, needs_save = _load_auth_cache(self._cache_file)
         if needs_save:
-            self._save_cache()
+            self._save_cache(dict(self._auth_cache))
 
-    def _save_cache(self, data: Optional[Dict[str, Any]] = None) -> None:
-        if data is None:
-            data = self._auth_cache
+    def _save_cache(self, data: Dict[str, Any]) -> None:
         try:
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self._cache_file, "w") as f:
@@ -352,13 +350,13 @@ class AsyncSandboxAuthCache:
         self._auth_cache, needs_save = await asyncio.to_thread(_load_auth_cache, self._cache_file)
         self._loaded = True
         if needs_save:
-            await self._save_cache(dict(self._auth_cache))
+            await self._save_cache(json.dumps(self._auth_cache))
 
-    async def _save_cache(self, data: Dict[str, Any]) -> None:
+    async def _save_cache(self, data: str) -> None:
         def _write() -> None:
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self._cache_file, "w") as f:
-                json.dump(data, f)
+                f.write(data)
 
         try:
             await asyncio.to_thread(_write)
@@ -396,8 +394,8 @@ class AsyncSandboxAuthCache:
                 response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
                 async with self._lock:
                     self._auth_cache[sandbox_id] = response
-                    snapshot = dict(self._auth_cache)
-                await self._save_cache(snapshot)
+                    serialized = json.dumps(self._auth_cache)
+                await self._save_cache(serialized)
                 return dict(response)
             finally:
                 async with self._lock:
@@ -420,11 +418,11 @@ class AsyncSandboxAuthCache:
         async with self._lock:
             if sandbox_id in self._auth_cache:
                 self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
-                snapshot = dict(self._auth_cache)
+                serialized = json.dumps(self._auth_cache)
             else:
-                snapshot = None
-        if snapshot is not None:
-            await self._save_cache(snapshot)
+                serialized = None
+        if serialized is not None:
+            await self._save_cache(serialized)
 
         return is_gpu
 
@@ -432,8 +430,8 @@ class AsyncSandboxAuthCache:
         async with self._lock:
             await self._ensure_loaded()
             self._auth_cache[sandbox_id] = auth_info
-            snapshot = dict(self._auth_cache)
-        await self._save_cache(snapshot)
+            serialized = json.dumps(self._auth_cache)
+        await self._save_cache(serialized)
 
     async def clear(self) -> None:
         async with self._lock:

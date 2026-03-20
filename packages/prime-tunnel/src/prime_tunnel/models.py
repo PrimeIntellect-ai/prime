@@ -17,6 +17,7 @@ class TunnelInfo(BaseModel):
     expires_at: datetime = Field(..., description="Token expiration time")
     # Optional because create_tunnel response doesn't include user_id
     user_id: Optional[str] = Field(None, description="Owner user ID")
+    status: Optional[str] = Field(None, description="Current tunnel status")
 
     class Config:
         from_attributes = True

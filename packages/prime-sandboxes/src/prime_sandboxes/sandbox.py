@@ -341,7 +341,7 @@ class AsyncSandboxAuthCache:
         self._cache_file = cache_file_path
         self.client = client
         self._lock = asyncio.Lock()
-        self._inflight: Dict[str, asyncio.Future] = {}
+        self._inflight: Dict[str, asyncio.Event] = {}
         self._auth_cache: Dict[str, Any] = {}
         self._loaded = False
 
@@ -374,29 +374,29 @@ class AsyncSandboxAuthCache:
                 return cached
 
             if sandbox_id in self._inflight:
-                future = self._inflight[sandbox_id]
+                event = self._inflight[sandbox_id]
             else:
-                future = None
-                self._inflight[sandbox_id] = asyncio.get_running_loop().create_future()
+                event = None
+                self._inflight[sandbox_id] = asyncio.Event()
 
-        if future is not None:
-            return dict(await future)
+        if event is not None:
+            await event.wait()
+            async with self._lock:
+                cached = _check_cached_auth(self._auth_cache, sandbox_id)
+                if cached:
+                    return cached
+            return await self.get_or_refresh(sandbox_id)
 
         try:
             response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
             async with self._lock:
                 self._auth_cache[sandbox_id] = response
-                fut = self._inflight.pop(sandbox_id, None)
             await self._save_cache()
-            if fut is not None and not fut.done():
-                fut.set_result(response)
             return dict(response)
-        except BaseException as e:
-            async with self._lock:
-                fut = self._inflight.pop(sandbox_id, None)
-            if fut is not None and not fut.done():
-                fut.set_exception(e)
-            raise
+        finally:
+            ev = self._inflight.pop(sandbox_id, None)
+            if ev is not None:
+                ev.set()
 
     async def is_gpu(self, sandbox_id: str) -> bool:
         """Return True if sandbox is GPU-backed, cached alongside auth token data."""

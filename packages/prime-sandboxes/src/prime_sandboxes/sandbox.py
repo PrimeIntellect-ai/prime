@@ -247,13 +247,14 @@ class SandboxAuthCache:
         self._inflight: Dict[str, threading.Event] = {}
         self._auth_cache, needs_save = _load_auth_cache(self._cache_file)
         if needs_save:
-            self._save_cache(dict(self._auth_cache))
+            self._save_cache()
 
-    def _save_cache(self, data: Dict[str, Any]) -> None:
+    def _save_cache(self) -> None:
+        """Write current in-memory cache to disk. Must be called under self._lock."""
         try:
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self._cache_file, "w") as f:
-                json.dump(data, f)
+                json.dump(self._auth_cache, f)
         except Exception:
             pass
 
@@ -287,8 +288,7 @@ class SandboxAuthCache:
                 response = self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
                 with self._lock:
                     self._auth_cache[sandbox_id] = response
-                    snapshot = dict(self._auth_cache)
-                self._save_cache(snapshot)
+                    self._save_cache()
                 return dict(response)
             finally:
                 with self._lock:
@@ -310,27 +310,19 @@ class SandboxAuthCache:
         with self._lock:
             if sandbox_id in self._auth_cache:
                 self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
-                snapshot = dict(self._auth_cache)
-            else:
-                snapshot = None
-        if snapshot is not None:
-            self._save_cache(snapshot)
+                self._save_cache()
 
         return is_gpu
 
     def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
         with self._lock:
             self._auth_cache[sandbox_id] = auth_info
-            snapshot = dict(self._auth_cache)
-        self._save_cache(snapshot)
+            self._save_cache()
 
     def clear(self) -> None:
         with self._lock:
             self._auth_cache = {}
-        try:
-            self._cache_file.unlink(missing_ok=True)
-        except Exception:
-            pass
+            self._save_cache()
 
 
 class AsyncSandboxAuthCache:
@@ -350,9 +342,12 @@ class AsyncSandboxAuthCache:
         self._auth_cache, needs_save = await asyncio.to_thread(_load_auth_cache, self._cache_file)
         self._loaded = True
         if needs_save:
-            await self._save_cache(json.dumps(self._auth_cache))
+            await self._save_cache()
 
-    async def _save_cache(self, data: str) -> None:
+    async def _save_cache(self) -> None:
+        """Write current in-memory cache to disk. Must be called under self._lock."""
+        data = json.dumps(self._auth_cache)
+
         def _write() -> None:
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self._cache_file, "w") as f:
@@ -394,8 +389,7 @@ class AsyncSandboxAuthCache:
                 response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
                 async with self._lock:
                     self._auth_cache[sandbox_id] = response
-                    serialized = json.dumps(self._auth_cache)
-                await self._save_cache(serialized)
+                    await self._save_cache()
                 return dict(response)
             finally:
                 async with self._lock:
@@ -418,11 +412,7 @@ class AsyncSandboxAuthCache:
         async with self._lock:
             if sandbox_id in self._auth_cache:
                 self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
-                serialized = json.dumps(self._auth_cache)
-            else:
-                serialized = None
-        if serialized is not None:
-            await self._save_cache(serialized)
+                await self._save_cache()
 
         return is_gpu
 
@@ -430,17 +420,13 @@ class AsyncSandboxAuthCache:
         async with self._lock:
             await self._ensure_loaded()
             self._auth_cache[sandbox_id] = auth_info
-            serialized = json.dumps(self._auth_cache)
-        await self._save_cache(serialized)
+            await self._save_cache()
 
     async def clear(self) -> None:
         async with self._lock:
             self._auth_cache = {}
             self._loaded = True
-        try:
-            await asyncio.to_thread(self._cache_file.unlink, missing_ok=True)
-        except Exception:
-            pass
+            await self._save_cache()
 
 
 def _check_sandbox_statuses(

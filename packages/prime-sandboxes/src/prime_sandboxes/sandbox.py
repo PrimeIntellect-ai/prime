@@ -277,7 +277,9 @@ class SandboxAuthCache:
     async def _save_cache_async(self) -> None:
         """Save auth cache to file (async version)"""
         try:
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(
+                self._cache_file.parent.mkdir, parents=True, exist_ok=True
+            )
             async with aiofiles.open(self._cache_file, "w") as f:
                 await f.write(json.dumps(self._auth_cache))
         except Exception:
@@ -1784,7 +1786,7 @@ class AsyncSandboxClient:
             local_file_path: Local file path to upload
             timeout: Optional timeout in seconds
         """
-        if not os.path.exists(local_file_path):
+        if not await asyncio.to_thread(os.path.exists, local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
         auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
@@ -1903,7 +1905,7 @@ class AsyncSandboxClient:
 
                 dir_path = os.path.dirname(local_file_path)
                 if dir_path:
-                    os.makedirs(dir_path, exist_ok=True)
+                    await asyncio.to_thread(os.makedirs, dir_path, exist_ok=True)
 
                 # Write file asynchronously (non-blocking I/O)
                 async with aiofiles.open(local_file_path, "wb") as f:

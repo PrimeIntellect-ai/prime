@@ -196,8 +196,8 @@ class Tunnel:
         if not self._started:
             return
 
-        atexit.unregister(self.sync_stop)
         await self._cleanup()
+        atexit.unregister(self.sync_stop)
         self._started = False
 
     def sync_stop(self) -> None:

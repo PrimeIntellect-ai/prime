@@ -329,7 +329,7 @@ class SandboxAuthCache:
             response = self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
             with self._lock:
                 self._auth_cache[sandbox_id] = response
-                self._save_cache()
+            self._save_cache()
             return dict(response)
         finally:
             with self._lock:
@@ -352,7 +352,7 @@ class SandboxAuthCache:
         with self._lock:
             if sandbox_id in self._auth_cache:
                 self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
-                self._save_cache()
+        self._save_cache()
 
         return is_gpu
 
@@ -361,7 +361,7 @@ class SandboxAuthCache:
         with self._lock:
             self._ensure_loaded()
             self._auth_cache[sandbox_id] = auth_info
-            self._save_cache()
+        self._save_cache()
 
     def clear(self) -> None:
         """Clear all cached auth tokens."""

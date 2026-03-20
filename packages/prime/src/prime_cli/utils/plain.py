@@ -1,15 +1,108 @@
-from typing import Any, cast
+import io
+import sys
+import traceback
+from contextlib import nullcontext
+from copy import copy
 
 import click
 import typer
+from rich.console import Console
+from rich.syntax import Syntax
+from rich.table import Table
+from rich.text import Text
 from typer.core import TyperCommand, TyperGroup, _main
 from typer.models import Default, DefaultPlaceholder
 
-from . import plain_support
 
-get_console = plain_support.get_console
-is_plain_mode = plain_support.is_plain_mode
-rich_help = plain_support.rich_help
+def is_plain_mode(args=None):
+    ctx = click.get_current_context(silent=True)
+    while ctx is not None:
+        if ctx.meta.get("plain"):
+            return True
+        ctx = ctx.parent
+
+    for arg in sys.argv[1:] if args is None else args:
+        if arg == "--":
+            return False
+        if arg == "--plain":
+            return True
+    return False
+
+
+class PrimeConsole:
+    def __init__(self, *, stderr=False, **kwargs):
+        self.rich = Console(stderr=stderr, **kwargs)
+        self.plain = Console(
+            stderr=stderr,
+            no_color=True,
+            markup=False,
+            highlight=False,
+            emoji=False,
+            **kwargs,
+        )
+
+    def print(self, *objects, sep=" ", end="\n", **kwargs):
+        if not is_plain_mode():
+            self.rich.print(*objects, sep=sep, end=end, **kwargs)
+            return
+
+        kwargs.pop("markup", None)
+        kwargs.pop("highlight", None)
+        plain_objects = []
+        for obj in objects:
+            if isinstance(obj, Table):
+                table = copy(obj)
+                table.box = None
+                table.show_lines = False
+                table.border_style = ""
+                table.header_style = ""
+                table.row_styles = []
+                table.pad_edge = False
+                table.padding = (0, 1)
+                console = Console(
+                    record=True,
+                    file=io.StringIO(),
+                    no_color=True,
+                    markup=False,
+                    highlight=False,
+                    emoji=False,
+                )
+                console.print(table)
+                plain_objects.append(console.export_text().rstrip())
+                continue
+
+            text = ""
+            if obj is not None:
+                if isinstance(obj, Syntax):
+                    text = obj.code
+                elif isinstance(obj, Text):
+                    text = obj.plain
+                else:
+                    text = str(obj)
+
+            try:
+                text = Text.from_markup(text).plain
+            except Exception:
+                pass
+            plain_objects.append(text)
+
+        self.plain.print(sep.join(plain_objects), end=end, **kwargs)
+
+    def status(self, status, *args, **kwargs):
+        if is_plain_mode():
+            self.print(status)
+        elif self.rich.file.isatty():
+            return self.rich.status(status, *args, **kwargs)
+        return nullcontext()
+
+    def print_exception(self, *args, **kwargs):
+        if is_plain_mode():
+            self.plain.print(traceback.format_exc().rstrip())
+            return
+        self.rich.print_exception(*args, **kwargs)
+
+
+get_console = PrimeConsole
 
 
 def _plain_option(params):
@@ -44,7 +137,7 @@ def _plain_option(params):
 
 class _PlainMixin:
     def __init__(self, *args, params=None, **kwargs):
-        cast(Any, super()).__init__(*args, params=_plain_option(params), **kwargs)
+        super().__init__(*args, params=_plain_option(params), **kwargs)
 
     def main(
         self,
@@ -57,35 +150,41 @@ class _PlainMixin:
     ):
         plain = is_plain_mode(args)
         return _main(
-            cast(click.Command, self),
+            self,
             args=args,
             prog_name=prog_name,
             complete_var=complete_var,
             standalone_mode=standalone_mode,
             windows_expand_args=windows_expand_args,
-            rich_markup_mode=None if plain else cast(Any, self).rich_markup_mode,
+            rich_markup_mode=None if plain else self.rich_markup_mode,
             **extra,
         )
 
 
-class PlainAwareTyperCommand(_PlainMixin, TyperCommand):
+class _PlainTyperCommand(_PlainMixin, TyperCommand):
     def format_help(self, ctx, formatter):
-        note = plain_support.help_note(self, ctx)
-        if is_plain_mode():
-            if note:
-                formatter.write_text(f"Note: {note}\n")
-            return click.core.Command.format_help(self, ctx, formatter)
-        return rich_help(self, ctx, self.rich_markup_mode)
+        if not is_plain_mode():
+            return super().format_help(ctx, formatter)
+
+        rich_markup_mode = self.rich_markup_mode
+        self.rich_markup_mode = None
+        try:
+            return super().format_help(ctx, formatter)
+        finally:
+            self.rich_markup_mode = rich_markup_mode
 
 
 class PlainAwareTyperGroup(_PlainMixin, TyperGroup):
     def format_help(self, ctx, formatter):
-        note = plain_support.help_note(self, ctx)
-        if is_plain_mode():
-            if note:
-                formatter.write_text(f"Note: {note}\n")
-            return click.core.Group.format_help(self, ctx, formatter)
-        return rich_help(self, ctx, self.rich_markup_mode)
+        if not is_plain_mode():
+            return super().format_help(ctx, formatter)
+
+        rich_markup_mode = self.rich_markup_mode
+        self.rich_markup_mode = None
+        try:
+            return super().format_help(ctx, formatter)
+        finally:
+            self.rich_markup_mode = rich_markup_mode
 
 
 class PlainTyper(typer.Typer):
@@ -97,4 +196,4 @@ class PlainTyper(typer.Typer):
         return super().callback(cls=cls, **kwargs)
 
     def command(self, name=None, *, cls=None, **kwargs):
-        return super().command(name=name, cls=cls or PlainAwareTyperCommand, **kwargs)
+        return super().command(name=name, cls=cls or _PlainTyperCommand, **kwargs)

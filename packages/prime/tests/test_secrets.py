@@ -46,7 +46,10 @@ def mock_secrets_api(monkeypatch: pytest.MonkeyPatch) -> None:
         elif endpoint.startswith("/secrets/"):
             secret_id = endpoint.split("/")[-1]
             for s in sample_secrets:
-                if s["id"] == secret_id or s["id"].startswith(secret_id):
+                current_secret_id = s.get("id")
+                if isinstance(current_secret_id, str) and (
+                    current_secret_id == secret_id or current_secret_id.startswith(secret_id)
+                ):
                     return {"data": s}
             return {"data": sample_secrets[0]}
         return {"data": []}

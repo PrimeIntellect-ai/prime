@@ -11,6 +11,7 @@ def main() -> None:
         print("Error: TS_AUTHKEY environment variable is not set")
         print("Please set your Tailscale auth key: export TS_AUTHKEY=your_auth_key")
         sys.exit(1)
+    assert ts_authkey is not None
 
     client = APIClient()  # Automatically loads API key from ~/.prime/config.json
     sandbox_client = SandboxClient(client)

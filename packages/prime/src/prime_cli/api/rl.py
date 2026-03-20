@@ -24,7 +24,7 @@ class RLRun(BaseModel):
     name: Optional[str] = Field(None, description="Run name")
     user_id: str = Field(..., alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
-    cluster_id: str = Field(..., alias="rftClusterId")
+    cluster_id: Optional[str] = Field(None, alias="rftClusterId")
     status: str = Field(..., description="Run status")
 
     # Training configuration
@@ -134,6 +134,7 @@ class RLClient:
         adapters_config: Optional[Dict[str, Any]] = None,
         checkpoint_id: Optional[str] = None,
         cluster_name: Optional[str] = None,
+        infrastructure_config: Optional[Dict[str, Any]] = None,
     ) -> RLRun:
         """Create a new RL training run."""
         try:
@@ -206,6 +207,10 @@ class RLClient:
 
             if cluster_name:
                 payload["cluster_name"] = cluster_name
+
+            if infrastructure_config:
+                if "compute_size" in infrastructure_config:
+                    payload["compute_size"] = infrastructure_config["compute_size"]
 
             response = self.client.post("/rft/runs", json=payload)
             return RLRun.model_validate(response.get("run"))

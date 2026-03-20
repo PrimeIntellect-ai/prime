@@ -7,6 +7,7 @@ from prime_evals import EvalsAPIError, EvalsClient
 
 from prime_cli.core import APIClient
 
+from .display import get_eval_viewer_url
 from .env_metadata import find_environment_metadata
 from .plain import get_console
 
@@ -214,7 +215,6 @@ def push_eval_results_to_hub(
 
     console.print("[green]✓ Successfully uploaded evaluation results[/green]")
 
-    frontend_url = api_client.config.frontend_url
-    eval_url = f"{frontend_url}/dashboard/evaluations/{eval_id}"
+    eval_url = get_eval_viewer_url(eval_id)
     console.print("\n[green]View results at:[/green]")
     console.print(f"  [link={eval_url}]{eval_url}[/link]")

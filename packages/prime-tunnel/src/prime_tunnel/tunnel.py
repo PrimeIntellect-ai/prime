@@ -1,6 +1,7 @@
 import asyncio
 import fcntl
 import os
+import re
 import subprocess
 import threading
 import time
@@ -11,8 +12,48 @@ import httpx
 
 from prime_tunnel.binary import get_frpc_path
 from prime_tunnel.core.client import TunnelClient
-from prime_tunnel.exceptions import TunnelConnectionError, TunnelError, TunnelTimeoutError
+from prime_tunnel.exceptions import (
+    TunnelConnectionError,
+    TunnelError,
+    TunnelTimeoutError,
+)
 from prime_tunnel.models import TunnelInfo
+
+# timestamp + level + caller prefix + message
+_LOG_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\.\d{3}\s"
+    r"\[([EWIDT])\]\s"
+    r"\[.*?\]\s"
+    r"(?:\[.*?\]\s)*"
+    r"(.+)"
+)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _parse_frpc_error(
+    output_lines: list[str],
+    tunnel_id: str | None = None,
+    return_code: int | None = None,
+) -> TunnelConnectionError:
+    """Parse frpc log output into a structured tunnel exception."""
+    error_messages: list[str] = []
+    for raw_line in output_lines:
+        line = _ANSI_RE.sub("", raw_line)
+        m = _LOG_RE.match(line)
+        if not m:
+            continue
+        level, msg = m.group(1), m.group(2)
+        if level in ("E", "W"):
+            error_messages.append(msg)
+
+    if error_messages:
+        message = error_messages[-1]
+    else:
+        output_text = "\n".join(output_lines) if output_lines else "(no output captured)"
+        exit_info = f" (exit code {return_code})" if return_code is not None else ""
+        message = f"frpc process failed{exit_info}: {output_text}"
+
+    return TunnelConnectionError(tunnel_id=tunnel_id, message=message)
 
 
 class Tunnel:
@@ -83,7 +124,7 @@ class Tunnel:
 
         Raises:
             TunnelError: If tunnel registration fails
-            TunnelConnectionError: If frpc fails to connect
+            TunnelConnectionError: If frpc fails to connect or tunnel is not running
             TunnelTimeoutError: If connection times out
         """
         if self._started:
@@ -101,7 +142,7 @@ class Tunnel:
             )
         except BaseException as e:
             await self._cleanup()
-            if isinstance(e, asyncio.CancelledError):
+            if isinstance(e, (asyncio.CancelledError, TunnelError)):
                 raise
             raise TunnelError(f"Failed to register tunnel: {e}") from e
 
@@ -126,7 +167,7 @@ class Tunnel:
             await self._cleanup()
             if isinstance(e, asyncio.CancelledError):
                 raise
-            raise TunnelConnectionError(f"Failed to start frpc: {e}") from e
+            raise TunnelConnectionError(message=f"Failed to start frpc: {e}") from e
 
         # 5. Wait for connection
         try:
@@ -142,7 +183,7 @@ class Tunnel:
             await self._cleanup()
             if isinstance(e, asyncio.CancelledError):
                 raise
-            raise TunnelConnectionError(f"Failed to start pipe drain: {e}") from e
+            raise TunnelConnectionError(message=f"Failed to start pipe drain: {e}") from e
 
         self._started = True
         assert self._tunnel_info is not None and self._tunnel_info.url is not None
@@ -242,6 +283,9 @@ class Tunnel:
     def recent_output(self) -> list[str]:
         """Last N lines of frpc output (thread-safe). Falls back to startup output."""
         if hasattr(self, "_output_lock"):
+            if not self.is_running and hasattr(self, "_drain_threads"):
+                for t in self._drain_threads:
+                    t.join(timeout=2.0)
             with self._output_lock:
                 return list(self._recent_output)
         return list(self._output_lines)
@@ -256,9 +300,9 @@ class Tunnel:
         if self._process is None:
             return
 
-        self._recent_output: list[str] = []
         self._output_lock = threading.Lock()
         max_lines = 50
+        self._recent_output: list[str] = list(self._output_lines[-max_lines:])
 
         def drain_pipe(pipe):
             """Read output from a pipe, retaining recent lines."""
@@ -275,8 +319,11 @@ class Tunnel:
             except (OSError, ValueError):
                 pass  # Pipe closed
 
+        self._drain_threads: list[threading.Thread] = []
         for pipe in (self._process.stdout, self._process.stderr):
-            threading.Thread(target=drain_pipe, args=(pipe,), daemon=True).start()
+            t = threading.Thread(target=drain_pipe, args=(pipe,), daemon=True)
+            t.start()
+            self._drain_threads.append(t)
 
     def _write_frpc_config(self) -> Path:
         """Generate and write frpc configuration file."""
@@ -304,7 +351,8 @@ metadatas.binding_secret = "{self._tunnel_info.binding_secret}"
 # Transport settings
 transport.tcpMux = true
 transport.tcpMuxKeepaliveInterval = 30
-transport.poolCount = 5
+transport.poolCount = 10
+transport.dialServerKeepalive = 60
 
 # Logging - always use console so we can detect connection via stdout
 log.to = "console"
@@ -341,7 +389,7 @@ subdomain = "{self._tunnel_info.tunnel_id}"
 
         while time.time() - start_time < self.connection_timeout:
             if self._process is None:
-                raise TunnelConnectionError("frpc process not running")
+                raise TunnelConnectionError(message="frpc process not running")
 
             return_code = self._process.poll()
             if return_code is not None:
@@ -352,14 +400,7 @@ subdomain = "{self._tunnel_info.tunnel_id}"
                     remaining_output.extend(self._process.stderr.readlines())
                 self._output_lines.extend(line.strip() for line in remaining_output if line.strip())
 
-                # Build detailed error message
-                output_text = (
-                    "\n".join(self._output_lines) if self._output_lines else "(no output captured)"
-                )
-                raise TunnelConnectionError(
-                    f"frpc exited with code {return_code}\n"
-                    f"--- frpc output ---\n{output_text}\n-------------------"
-                )
+                raise _parse_frpc_error(self._output_lines, self.tunnel_id, return_code)
 
             if os.name == "posix":
                 # Set both pipes to non-blocking mode to drain them without deadlock
@@ -388,12 +429,11 @@ subdomain = "{self._tunnel_info.tunnel_id}"
                                     # Check for success/failure indicators
                                     if "start proxy success" in line.lower():
                                         return
-                                    if "login failed" in line.lower():
-                                        raise TunnelConnectionError(f"frpc login failed: {line}")
-                                    if "authorization failed" in line.lower():
-                                        raise TunnelConnectionError(
-                                            f"frpc authorization failed: {line}"
-                                        )
+                                    if (
+                                        "login to the server failed" in line.lower()
+                                        or "connect to server error" in line.lower()
+                                    ):
+                                        raise _parse_frpc_error(self._output_lines, self.tunnel_id)
                         except (BlockingIOError, IOError):
                             pass  # No more data available on this pipe
                 finally:

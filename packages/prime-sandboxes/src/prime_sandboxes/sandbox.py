@@ -46,6 +46,7 @@ from .models import (
     ExposePortRequest,
     FileUploadResponse,
     ListExposedPortsResponse,
+    ReadFileResponse,
     RegistryCredentialSummary,
     Sandbox,
     SandboxListResponse,
@@ -653,9 +654,9 @@ class SandboxClient:
 
         for attempt in range(MAX_409_RETRIES):
             try:
-                # The + 2 accounts for connection creation and closing. Prevents any command
+                # The + 5 accounts for connection creation and closing. Prevents any command
                 # running close to its `effective_timeout` from being killed prematurely
-                client_timeout = effective_timeout + 2
+                client_timeout = effective_timeout + 5
                 response = self._gateway_post(
                     url, headers=headers, timeout=client_timeout, json=payload
                 )
@@ -784,25 +785,30 @@ class SandboxClient:
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
-        exit_file_quoted = shlex.quote(job.exit_file)
-        stdout_log_file_quoted = shlex.quote(job.stdout_log_file)
-        stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
 
-        check = self.execute_command(sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30)
+        def read_or_cat(path: str, timeout: int = 60) -> str:
+            try:
+                return self.read_file(sandbox_id, path).content
+            except APIError:
+                return self.execute_command(
+                    sandbox_id, f"cat {shlex.quote(path)} 2>/dev/null", timeout=timeout
+                ).stdout
 
-        if not check.stdout.strip():
+        exit_content = read_or_cat(job.exit_file, timeout=30)
+        if not exit_content.strip():
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
-        exit_code = int(check.stdout.strip())
-        stdout_logs = self.execute_command(sandbox_id, f"cat {stdout_log_file_quoted}", timeout=60)
-        stderr_logs = self.execute_command(sandbox_id, f"cat {stderr_log_file_quoted}", timeout=60)
+        try:
+            exit_code = int(exit_content.strip())
+        except ValueError:
+            return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
         return BackgroundJobStatus(
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
-            stdout=stdout_logs.stdout,
-            stderr=stderr_logs.stdout,
+            stdout=read_or_cat(job.stdout_log_file),
+            stderr=read_or_cat(job.stderr_log_file),
         )
 
     def wait_for_creation(
@@ -1047,6 +1053,54 @@ class SandboxClient:
                 ) from e
             except Exception as e:
                 raise APIError(f"Download failed: {e.__class__.__name__}: {e}") from e
+
+    def read_file(
+        self,
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int] = None,
+    ) -> ReadFileResponse:
+        """Read a file from a sandbox via gateway."""
+        auth = self._auth_cache.get_or_refresh(sandbox_id)
+
+        gateway_url = auth["gateway_url"].rstrip("/")
+        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        params = {"path": file_path}
+
+        effective_timeout = timeout if timeout is not None else 30
+
+        for attempt in range(MAX_409_RETRIES):
+            try:
+                response = self._gateway_get(
+                    url, headers=headers, params=params, timeout=effective_timeout
+                )
+                response.raise_for_status()
+                return ReadFileResponse.model_validate(response.json())
+            except httpx.TimeoutException as e:
+                raise APIError(
+                    f"Read file timed out after {effective_timeout}s: {file_path}"
+                ) from e
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 409:
+                    if self._should_retry_409(sandbox_id, e, attempt):
+                        continue
+                error_details = (
+                    f"HTTP {e.response.status_code} {e.request.method} "
+                    f"{e.request.url}: {e.response.text}"
+                )
+                raise APIError(f"Read file failed: {error_details}") from e
+            except httpx.RequestError as e:
+                req = getattr(e, "request", None)
+                method = getattr(req, "method", "?")
+                u = getattr(req, "url", "?")
+                raise APIError(
+                    f"Read file failed: {e.__class__.__name__} at {method} {u}: {e}"
+                ) from e
+            except Exception as e:
+                raise APIError(f"Read file failed: {e.__class__.__name__}: {e}") from e
+
+        raise APIError("Read file failed after retries")
 
     def expose(
         self,
@@ -1413,9 +1467,9 @@ class AsyncSandboxClient:
 
         for attempt in range(MAX_409_RETRIES):
             try:
-                # The + 2 accounts for connection creation and closing. Prevents any command
+                # The + 5 accounts for connection creation and closing. Prevents any command
                 # running close to its `effective_timeout` from being killed prematurely
-                client_timeout = effective_timeout + 2
+                client_timeout = effective_timeout + 5
                 response = await self._gateway_post(
                     url, headers=headers, timeout=client_timeout, json=payload
                 )
@@ -1544,31 +1598,34 @@ class AsyncSandboxClient:
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
-        exit_file_quoted = shlex.quote(job.exit_file)
-        stdout_log_file_quoted = shlex.quote(job.stdout_log_file)
-        stderr_log_file_quoted = shlex.quote(job.stderr_log_file)
 
-        check = await self.execute_command(
-            sandbox_id, f"cat {exit_file_quoted} 2>/dev/null", timeout=30
-        )
+        async def read_or_cat(path: str, timeout: int = 60) -> str:
+            try:
+                return (await self.read_file(sandbox_id, path)).content
+            except APIError:
+                return (
+                    await self.execute_command(
+                        sandbox_id,
+                        f"cat {shlex.quote(path)} 2>/dev/null",
+                        timeout=timeout,
+                    )
+                ).stdout
 
-        if not check.stdout.strip():
+        exit_content = await read_or_cat(job.exit_file, timeout=30)
+        if not exit_content.strip():
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
-        exit_code = int(check.stdout.strip())
-        stdout_logs = await self.execute_command(
-            sandbox_id, f"cat {stdout_log_file_quoted}", timeout=60
-        )
-        stderr_logs = await self.execute_command(
-            sandbox_id, f"cat {stderr_log_file_quoted}", timeout=60
-        )
+        try:
+            exit_code = int(exit_content.strip())
+        except ValueError:
+            return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
         return BackgroundJobStatus(
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
-            stdout=stdout_logs.stdout,
-            stderr=stderr_logs.stdout,
+            stdout=await read_or_cat(job.stdout_log_file),
+            stderr=await read_or_cat(job.stderr_log_file),
         )
 
     async def wait_for_creation(
@@ -1829,6 +1886,54 @@ class AsyncSandboxClient:
                 ) from e
             except Exception as e:
                 raise APIError(f"Download failed: {e.__class__.__name__}: {e}") from e
+
+    async def read_file(
+        self,
+        sandbox_id: str,
+        file_path: str,
+        timeout: Optional[int] = None,
+    ) -> ReadFileResponse:
+        """Read a file from a sandbox via gateway (async)"""
+        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
+
+        gateway_url = auth["gateway_url"].rstrip("/")
+        url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        params = {"path": file_path}
+
+        effective_timeout = timeout if timeout is not None else 30
+
+        for attempt in range(MAX_409_RETRIES):
+            try:
+                response = await self._gateway_get(
+                    url, headers=headers, params=params, timeout=effective_timeout
+                )
+                response.raise_for_status()
+                return ReadFileResponse.model_validate(response.json())
+            except httpx.TimeoutException as e:
+                raise APIError(
+                    f"Read file timed out after {effective_timeout}s: {file_path}"
+                ) from e
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 409:
+                    if await self._should_retry_409(sandbox_id, e, attempt):
+                        continue
+                error_details = (
+                    f"HTTP {e.response.status_code} {e.request.method} "
+                    f"{e.request.url}: {e.response.text}"
+                )
+                raise APIError(f"Read file failed: {error_details}") from e
+            except httpx.RequestError as e:
+                req = getattr(e, "request", None)
+                method = getattr(req, "method", "?")
+                u = getattr(req, "url", "?")
+                raise APIError(
+                    f"Read file failed: {e.__class__.__name__} at {method} {u}: {e}"
+                ) from e
+            except Exception as e:
+                raise APIError(f"Read file failed: {e.__class__.__name__}: {e}") from e
+
+        raise APIError("Read file failed after retries")
 
     async def aclose(self) -> None:
         """Close the async client and gateway client"""

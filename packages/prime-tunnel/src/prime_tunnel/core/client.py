@@ -10,15 +10,25 @@ from tenacity import (
 )
 
 from prime_tunnel.core.config import Config
-from prime_tunnel.exceptions import TunnelAuthError, TunnelError, TunnelTimeoutError
+from prime_tunnel.exceptions import (
+    TunnelAuthError,
+    TunnelError,
+    TunnelLimitReachedError,
+    TunnelTimeoutError,
+)
 from prime_tunnel.models import TunnelInfo
 
 # Retry configuration for transient connection errors
+# Note: TimeoutException is NOT included because the request may have been processed
 RETRYABLE_EXCEPTIONS = (
     httpx.RemoteProtocolError,
     httpx.ConnectError,
     httpx.PoolTimeout,
 )
+
+# Idempotent requests (GET, DELETE) can also retry on timeouts since
+# re-issuing the same request has no side effects
+IDEMPOTENT_RETRYABLE_EXCEPTIONS = RETRYABLE_EXCEPTIONS + (httpx.TimeoutException,)
 
 
 def _default_user_agent() -> str:
@@ -93,7 +103,32 @@ class TunnelClient:
         json: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, str]] = None,
     ) -> httpx.Response:
-        """Make async HTTP request with retry on transient connection errors."""
+        """Make async HTTP request with retry on transient connection errors.
+
+        Used for non-idempotent requests (POST) where timeouts are NOT retried
+        because the server may have already processed the request.
+        """
+        client = await self._get_client()
+        return await client.request(method, url, json=json, params=params)
+
+    @retry(
+        retry=retry_if_exception_type(IDEMPOTENT_RETRYABLE_EXCEPTIONS),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
+        reraise=True,
+    )
+    async def _idempotent_request_with_retry(
+        self,
+        method: str,
+        url: str,
+        json: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, str]] = None,
+    ) -> httpx.Response:
+        """Make async HTTP request with retry on transient errors including timeouts.
+
+        Used for idempotent requests (GET, DELETE) where retrying after a timeout
+        is safe because the operation has no additional side effects.
+        """
         client = await self._get_client()
         return await client.request(method, url, json=json, params=params)
 
@@ -105,6 +140,15 @@ class TunnelClient:
             raise TunnelAuthError("Payment required. Check billing status.")
         elif response.status_code == 404:
             return {}  # Handle 404 specially in callers
+        elif response.status_code == 400:
+            try:
+                error_detail = response.json().get("detail", response.text)
+            except Exception:
+                error_detail = response.text
+            error_detail = str(error_detail)
+            if "maximum number of" in error_detail.lower():
+                raise TunnelLimitReachedError(error_detail)
+            raise TunnelError(f"Failed to {operation}: {error_detail}")
         elif response.status_code >= 400:
             try:
                 error_detail = response.json().get("detail", response.text)
@@ -154,6 +198,8 @@ class TunnelClient:
             response = await self._request_with_retry("POST", url, json=payload)
         except httpx.TimeoutException as e:
             raise TunnelTimeoutError(f"Request timed out: {e}") from e
+        except TimeoutError as e:
+            raise TunnelTimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
             raise TunnelError(f"Failed to connect to API: {e}") from e
 
@@ -178,8 +224,10 @@ class TunnelClient:
         url = f"{self.base_url}/api/v1/tunnel/{tunnel_id}"
 
         try:
-            response = await self._request_with_retry("GET", url)
+            response = await self._idempotent_request_with_retry("GET", url)
         except httpx.TimeoutException as e:
+            raise TunnelTimeoutError(f"Request timed out: {e}") from e
+        except TimeoutError as e:
             raise TunnelTimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
             raise TunnelError(f"Failed to connect to API: {e}") from e
@@ -197,6 +245,7 @@ class TunnelClient:
             server_port=7000,
             expires_at=data["expires_at"],
             user_id=data.get("user_id"),
+            status=data.get("status"),
         )
 
     async def delete_tunnel(self, tunnel_id: str) -> bool:
@@ -214,8 +263,10 @@ class TunnelClient:
         url = f"{self.base_url}/api/v1/tunnel/{tunnel_id}"
 
         try:
-            response = await self._request_with_retry("DELETE", url)
+            response = await self._idempotent_request_with_retry("DELETE", url)
         except httpx.TimeoutException as e:
+            raise TunnelTimeoutError(f"Request timed out: {e}") from e
+        except TimeoutError as e:
             raise TunnelTimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
             raise TunnelError(f"Failed to connect to API: {e}") from e
@@ -234,8 +285,10 @@ class TunnelClient:
         payload = {"tunnel_ids": tunnel_ids}
 
         try:
-            response = await self._request_with_retry("DELETE", url, json=payload)
+            response = await self._idempotent_request_with_retry("DELETE", url, json=payload)
         except httpx.TimeoutException as e:
+            raise TunnelTimeoutError(f"Request timed out: {e}") from e
+        except TimeoutError as e:
             raise TunnelTimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
             raise TunnelError(f"Failed to connect to API: {e}") from e
@@ -261,8 +314,10 @@ class TunnelClient:
         params = {"teamId": team_id} if team_id else None
 
         try:
-            response = await self._request_with_retry("GET", url, params=params)
+            response = await self._idempotent_request_with_retry("GET", url, params=params)
         except httpx.TimeoutException as e:
+            raise TunnelTimeoutError(f"Request timed out: {e}") from e
+        except TimeoutError as e:
             raise TunnelTimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
             raise TunnelError(f"Failed to connect to API: {e}") from e
@@ -280,6 +335,7 @@ class TunnelClient:
                     server_port=7000,
                     expires_at=t["expires_at"],
                     user_id=t.get("user_id"),
+                    status=t.get("status"),
                 )
             )
         return tunnels

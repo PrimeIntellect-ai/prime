@@ -101,6 +101,10 @@ def view() -> None:
         ssh_label += " (from env var)"
     table.add_row("SSH Key Path", ssh_label)
 
+    # Show share resources with team
+    share_label = str(settings.get("share_resources_with_team", False))
+    table.add_row("Share Resources With Team", share_label)
+
     console.print(table)
 
 
@@ -151,18 +155,13 @@ def set_api_key(
 
 @app.command()
 def set_team_id(
-    team_id: Optional[str] = typer.Argument(
-        None,
-        help="Your Prime Intellect team ID. Leave empty for personal account.",
+    team_id: str = typer.Argument(
+        ...,
+        help="Your Prime Intellect team ID.",
     ),
 ) -> None:
-    """Set your team ID. Empty team ID means personal account."""
-    if team_id is None:
-        # Interactive mode with prompt
-        team_id = typer.prompt(
-            "Enter your Prime Intellect team ID (leave empty for personal account)",
-            default="",
-        )
+    """Set your team ID."""
+    config = Config()
 
     # Validate team ID format
     if not validate_team_id(team_id):
@@ -173,7 +172,6 @@ def set_team_id(
         )
         raise typer.Exit(code=1)
 
-    config = Config()
     team_name = None
     team_role = None
     if team_id:
@@ -328,6 +326,24 @@ def _list_environments() -> None:
         table.add_row(env, env_type)
 
     console.print(table)
+
+
+@app.command(no_args_is_help=True)
+def set_share_resources_with_team(
+    enabled: str = typer.Argument(
+        ...,
+        help="Enable or disable auto-sharing with team: true or false",
+    ),
+) -> None:
+    """Set whether to automatically share new resources with all team members"""
+    value = enabled.lower()
+    if value not in ("true", "false"):
+        console.print("[red]Error: Value must be 'true' or 'false'[/red]")
+        raise typer.Exit(1)
+
+    config = Config()
+    config.set_share_resources_with_team(value == "true")
+    console.print(f"[green]Share resources with team set to: {value}[/green]")
 
 
 @app.command(no_args_is_help=True)

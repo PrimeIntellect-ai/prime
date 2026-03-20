@@ -173,6 +173,9 @@ prime eval push
 # Push specific eval directory (verifiers format)
 prime eval push outputs/evals/gsm8k--gpt-4/abc123
 
+# Push a public evaluation (default is private)
+prime eval push --public
+
 # List all evaluations
 prime eval list
 
@@ -189,8 +192,10 @@ prime eval samples <eval-id>
 # List teams
 prime teams list
 
-# Set team context
-prime config set-team-id
+# Switch context
+prime switch
+prime switch personal
+prime switch <team-slug>
 ```
 
 ## Development

@@ -265,37 +265,38 @@ class SandboxAuthCache:
         Coalesces concurrent requests for the same sandbox_id so only one
         auth POST is issued while others wait for the result.
         """
-        with self._lock:
-            cached = _check_cached_auth(self._auth_cache, sandbox_id)
-            if cached:
-                return cached
-
-            if sandbox_id in self._inflight:
-                event = self._inflight[sandbox_id]
-            else:
-                event = None
-                self._inflight[sandbox_id] = threading.Event()
-
-        if event is not None:
-            event.wait()
+        while True:
             with self._lock:
                 cached = _check_cached_auth(self._auth_cache, sandbox_id)
                 if cached:
                     return cached
-            return self.get_or_refresh(sandbox_id)
 
-        try:
-            response = self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
-            with self._lock:
-                self._auth_cache[sandbox_id] = response
-                snapshot = dict(self._auth_cache)
-            self._save_cache(snapshot)
-            return dict(response)
-        finally:
-            with self._lock:
-                ev = self._inflight.pop(sandbox_id, None)
-            if ev is not None:
-                ev.set()
+                if sandbox_id in self._inflight:
+                    event = self._inflight[sandbox_id]
+                else:
+                    event = None
+                    self._inflight[sandbox_id] = threading.Event()
+
+            if event is not None:
+                event.wait()
+                with self._lock:
+                    cached = _check_cached_auth(self._auth_cache, sandbox_id)
+                    if cached:
+                        return cached
+                continue
+
+            try:
+                response = self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+                with self._lock:
+                    self._auth_cache[sandbox_id] = response
+                    snapshot = dict(self._auth_cache)
+                self._save_cache(snapshot)
+                return dict(response)
+            finally:
+                with self._lock:
+                    ev = self._inflight.pop(sandbox_id, None)
+                if ev is not None:
+                    ev.set()
 
     def is_gpu(self, sandbox_id: str) -> bool:
         """Return True if sandbox is GPU-backed, cached alongside auth token data."""
@@ -370,38 +371,39 @@ class AsyncSandboxAuthCache:
         Coalesces concurrent requests for the same sandbox_id so only one
         auth POST is issued while others await the result.
         """
-        async with self._lock:
-            await self._ensure_loaded()
-            cached = _check_cached_auth(self._auth_cache, sandbox_id)
-            if cached:
-                return cached
-
-            if sandbox_id in self._inflight:
-                event = self._inflight[sandbox_id]
-            else:
-                event = None
-                self._inflight[sandbox_id] = asyncio.Event()
-
-        if event is not None:
-            await event.wait()
+        while True:
             async with self._lock:
+                await self._ensure_loaded()
                 cached = _check_cached_auth(self._auth_cache, sandbox_id)
                 if cached:
                     return cached
-            return await self.get_or_refresh(sandbox_id)
 
-        try:
-            response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
-            async with self._lock:
-                self._auth_cache[sandbox_id] = response
-                snapshot = dict(self._auth_cache)
-            await self._save_cache(snapshot)
-            return dict(response)
-        finally:
-            async with self._lock:
-                ev = self._inflight.pop(sandbox_id, None)
-            if ev is not None:
-                ev.set()
+                if sandbox_id in self._inflight:
+                    event = self._inflight[sandbox_id]
+                else:
+                    event = None
+                    self._inflight[sandbox_id] = asyncio.Event()
+
+            if event is not None:
+                await event.wait()
+                async with self._lock:
+                    cached = _check_cached_auth(self._auth_cache, sandbox_id)
+                    if cached:
+                        return cached
+                continue
+
+            try:
+                response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+                async with self._lock:
+                    self._auth_cache[sandbox_id] = response
+                    snapshot = dict(self._auth_cache)
+                await self._save_cache(snapshot)
+                return dict(response)
+            finally:
+                async with self._lock:
+                    ev = self._inflight.pop(sandbox_id, None)
+                if ev is not None:
+                    ev.set()
 
     async def is_gpu(self, sandbox_id: str) -> bool:
         """Return True if sandbox is GPU-backed, cached alongside auth token data."""

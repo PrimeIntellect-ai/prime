@@ -96,7 +96,7 @@ class TunnelClient:
         method: str,
         url: str,
         json: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, str]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
         """Make async HTTP request with retry on transient connection errors.
 
@@ -117,7 +117,7 @@ class TunnelClient:
         method: str,
         url: str,
         json: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, str]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
         """Make async HTTP request with retry on transient errors including timeouts.
 
@@ -152,6 +152,7 @@ class TunnelClient:
         local_port: int,
         name: Optional[str] = None,
         team_id: Optional[str] = None,
+        labels: Optional[list[str]] = None,
     ) -> TunnelInfo:
         """
         Register a new tunnel with the backend.
@@ -160,6 +161,7 @@ class TunnelClient:
             local_port: Local port the tunnel will forward to
             name: Optional friendly name for the tunnel
             team_id: Optional team ID for team tunnels
+            labels: Optional labels for the tunnel
 
         Returns:
             TunnelInfo with connection details
@@ -179,6 +181,8 @@ class TunnelClient:
             payload["name"] = name
         if team_id:
             payload["teamId"] = team_id
+        if labels:
+            payload["labels"] = labels
 
         try:
             response = await self._request_with_retry("POST", url, json=payload)
@@ -226,6 +230,7 @@ class TunnelClient:
             server_host="",
             server_port=7000,
             expires_at=data["expires_at"],
+            labels=data.get("labels", []),
             user_id=data.get("user_id"),
         )
 
@@ -256,12 +261,31 @@ class TunnelClient:
         await self._handle_response(response, "delete tunnel")
         return True
 
-    async def bulk_delete_tunnels(self, tunnel_ids: list[str]) -> dict:
-        """Bulk delete multiple tunnels."""
+    async def bulk_delete_tunnels(
+        self,
+        tunnel_ids: Optional[list[str]] = None,
+        labels: Optional[list[str]] = None,
+        team_id: Optional[str] = None,
+    ) -> dict:
+        """Bulk delete multiple tunnels by IDs or labels."""
+        if not tunnel_ids and not labels:
+            raise ValueError("Must specify either tunnel_ids or labels")
+        if tunnel_ids and labels:
+            raise ValueError("Cannot specify both tunnel_ids and labels")
+
         self._check_auth_required()
 
+        if team_id is None:
+            team_id = self.config.team_id
+
         url = f"{self.base_url}/api/v1/tunnel"
-        payload = {"tunnel_ids": tunnel_ids}
+        payload: Dict[str, Any] = {}
+        if tunnel_ids:
+            payload["tunnel_ids"] = tunnel_ids
+        if labels:
+            payload["labels"] = labels
+        if team_id:
+            payload["teamId"] = team_id
 
         try:
             response = await self._idempotent_request_with_retry("DELETE", url, json=payload)
@@ -272,12 +296,17 @@ class TunnelClient:
 
         return await self._handle_response(response, "bulk delete tunnels")
 
-    async def list_tunnels(self, team_id: Optional[str] = None) -> list[TunnelInfo]:
+    async def list_tunnels(
+        self,
+        team_id: Optional[str] = None,
+        labels: Optional[list[str]] = None,
+    ) -> list[TunnelInfo]:
         """
         List all tunnels for the current user.
 
         Args:
             team_id: Optional team ID to include team tunnels
+            labels: Optional labels to filter by (tunnels must have ALL specified labels)
 
         Returns:
             List of TunnelInfo objects
@@ -288,10 +317,14 @@ class TunnelClient:
             team_id = self.config.team_id
 
         url = f"{self.base_url}/api/v1/tunnel"
-        params = {"teamId": team_id} if team_id else None
+        params: Dict[str, Any] = {}
+        if team_id:
+            params["teamId"] = team_id
+        if labels:
+            params["labels"] = labels
 
         try:
-            response = await self._idempotent_request_with_retry("GET", url, params=params)
+            response = await self._idempotent_request_with_retry("GET", url, params=params or None)
         except httpx.TimeoutException as e:
             raise TunnelTimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
@@ -309,6 +342,7 @@ class TunnelClient:
                     server_host="",
                     server_port=7000,
                     expires_at=t["expires_at"],
+                    labels=t.get("labels", []),
                     user_id=t.get("user_id"),
                 )
             )

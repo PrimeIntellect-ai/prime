@@ -26,6 +26,7 @@ class Tunnel:
         connection_timeout: float = 30.0,
         log_level: str = "info",
         team_id: Optional[str] = None,
+        labels: Optional[list[str]] = None,
     ):
         """
         Initialize a tunnel.
@@ -37,11 +38,13 @@ class Tunnel:
             team_id: Optional team ID for team tunnels
             connection_timeout: Timeout for establishing connection (seconds)
             log_level: frpc log level (trace, debug, info, warn, error)
+            labels: Optional labels for the tunnel
         """
         self.local_port = local_port
         self.local_addr = local_addr
         self.name = name
         self.team_id = team_id
+        self.labels = labels
         self.connection_timeout = connection_timeout
         self.log_level = log_level
 
@@ -98,6 +101,7 @@ class Tunnel:
                 local_port=self.local_port,
                 name=self.name,
                 team_id=self.team_id,
+                labels=self.labels,
             )
         except BaseException as e:
             await self._cleanup()

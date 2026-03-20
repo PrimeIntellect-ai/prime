@@ -1,7 +1,5 @@
 """Tests for gateway sandbox-not-found error mapping."""
 
-from typing import Any, cast
-
 import httpx
 import pytest
 
@@ -73,8 +71,8 @@ def test_sync_execute_command_maps_gateway_502_to_not_running():
     def _raise_gateway_error(*args, **kwargs):
         raise _sandbox_not_found_error()
 
-    cast(Any, client)._gateway_post = _raise_gateway_error
-    cast(Any, client)._get_sandbox_error_context = lambda _sandbox_id: {
+    client._gateway_post = _raise_gateway_error
+    client._get_sandbox_error_context = lambda _sandbox_id: {
         "status": "RUNNING",
         "error_type": None,
         "error_message": None,
@@ -101,8 +99,8 @@ async def test_async_execute_command_maps_gateway_502_to_not_running():
             "error_message": None,
         }
 
-    cast(Any, client)._gateway_post = _raise_gateway_error
-    cast(Any, client)._get_sandbox_error_context = _fake_error_context
+    client._gateway_post = _raise_gateway_error
+    client._get_sandbox_error_context = _fake_error_context
 
     with pytest.raises(SandboxNotRunningError) as exc_info:
         await client.execute_command("sbx-123", "ls /")
@@ -117,7 +115,7 @@ def test_sync_execute_command_does_not_map_generic_gateway_502_to_not_running():
     def _raise_gateway_error(*args, **kwargs):
         raise _gateway_error()
 
-    cast(Any, client)._gateway_post = _raise_gateway_error
+    client._gateway_post = _raise_gateway_error
 
     with pytest.raises(APIError) as exc_info:
         client.execute_command("sbx-123", "ls /")

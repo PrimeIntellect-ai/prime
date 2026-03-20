@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from typing import cast
 from unittest.mock import MagicMock, patch
 
 from prime_tunnel import Config, Tunnel, TunnelClient
@@ -89,7 +88,7 @@ def test_sync_stop_noop_when_not_started():
 
 def test_sync_stop_terminates_process_and_deletes_registration():
     tunnel = _make_started_tunnel()
-    process_mock = cast(MagicMock, tunnel._process)
+    process_mock = tunnel._process
 
     with patch("prime_tunnel.tunnel.httpx.delete") as mock_delete:
         tunnel.sync_stop()
@@ -104,7 +103,7 @@ def test_sync_stop_terminates_process_and_deletes_registration():
 
 def test_sync_stop_kills_on_timeout():
     tunnel = _make_started_tunnel()
-    process_mock = cast(MagicMock, tunnel._process)
+    process_mock = tunnel._process
     import subprocess
 
     process_mock.wait.side_effect = subprocess.TimeoutExpired(cmd="frpc", timeout=5)

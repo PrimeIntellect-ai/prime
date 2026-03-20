@@ -99,8 +99,6 @@ def test_sample_model():
     assert sample.format_reward == 1.0
     assert sample.correctness == 1.0
     assert sample.answer == "18"
-    assert sample.prompt is not None
-    assert sample.completion is not None
     assert len(sample.prompt) == 1
     assert len(sample.completion) == 1
 

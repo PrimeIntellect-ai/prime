@@ -3,7 +3,7 @@ import json
 import sys
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
@@ -99,7 +99,7 @@ class EvalsClient:
             ) from e
 
     def _resolve_environments(
-        self, environments: Sequence[Union[str, Mapping[str, Any]]]
+        self, environments: List[Union[str, Dict[str, str]]]
     ) -> List[Dict[str, str]]:
         """
         Resolve a list of environments from various identifier formats to database IDs.
@@ -110,7 +110,7 @@ class EvalsClient:
             if isinstance(env, str):
                 env = {"slug": env} if "/" in env else {"name": env}
 
-            resolved_env = dict(env) if isinstance(env, Mapping) else {}
+            resolved_env = env.copy() if isinstance(env, dict) else {}
 
             # Handle different identifier types explicitly
             # Check for explicit "slug" or "name" keys first
@@ -142,7 +142,7 @@ class EvalsClient:
     def create_evaluation(
         self,
         name: str,
-        environments: Optional[Sequence[Union[str, Mapping[str, Any]]]] = None,
+        environments: Optional[List[Dict[str, str]]] = None,
         suite_id: Optional[str] = None,
         run_id: Optional[str] = None,
         model_name: Optional[str] = None,
@@ -183,7 +183,7 @@ class EvalsClient:
                     "Either provide valid environment identifiers or provide a 'run_id'. "
                 )
 
-        payload: Dict[str, Any] = {
+        payload = {
             "name": name,
             "environments": resolved_environments,
             "suite_id": suite_id,
@@ -443,18 +443,18 @@ class AsyncEvalsClient:
             ) from e
 
     async def _resolve_environments(
-        self, environments: Sequence[Union[str, Mapping[str, Any]]]
+        self, environments: List[Union[str, Dict[str, str]]]
     ) -> List[Dict[str, str]]:
         """
         Resolve a list of environments from various identifier formats to database IDs.
         """
 
-        async def resolve_env(env: Union[str, Mapping[str, Any]]) -> Optional[Dict[str, str]]:
+        async def resolve_env(env: Union[str, Dict[str, str]]) -> Optional[Dict[str, str]]:
             # Handle string inputs (convert to dict format)
             if isinstance(env, str):
                 env = {"slug": env} if "/" in env else {"name": env}
 
-            resolved_env = dict(env) if isinstance(env, Mapping) else {}
+            resolved_env = env.copy() if isinstance(env, dict) else {}
             # Handle different identifier types explicitly
             # Check for explicit "slug" or "name" keys first
             try:
@@ -492,7 +492,7 @@ class AsyncEvalsClient:
     async def create_evaluation(
         self,
         name: str,
-        environments: Optional[Sequence[Union[str, Mapping[str, Any]]]] = None,
+        environments: Optional[List[Dict[str, str]]] = None,
         suite_id: Optional[str] = None,
         run_id: Optional[str] = None,
         model_name: Optional[str] = None,
@@ -533,7 +533,7 @@ class AsyncEvalsClient:
                     "Either provide valid environment identifiers or provide a 'run_id'. "
                 )
 
-        payload: Dict[str, Any] = {
+        payload = {
             "name": name,
             "environments": resolved_environments,
             "suite_id": suite_id,

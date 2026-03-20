@@ -15,7 +15,7 @@ def mock_secrets_api(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "test-key")
     monkeypatch.setattr("prime_cli.core.Config.team_id", None)
 
-    sample_secrets: list[dict[str, Any]] = [
+    sample_secrets = [
         {
             "id": "secret-id-1234567890",
             "name": "MY_SECRET",
@@ -46,10 +46,7 @@ def mock_secrets_api(monkeypatch: pytest.MonkeyPatch) -> None:
         elif endpoint.startswith("/secrets/"):
             secret_id = endpoint.split("/")[-1]
             for s in sample_secrets:
-                current_secret_id = s.get("id")
-                if isinstance(current_secret_id, str) and (
-                    current_secret_id == secret_id or current_secret_id.startswith(secret_id)
-                ):
+                if s["id"] == secret_id or s["id"].startswith(secret_id):
                     return {"data": s}
             return {"data": sample_secrets[0]}
         return {"data": []}

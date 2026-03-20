@@ -71,39 +71,41 @@ async def create_pod(
         return {"error": "memory must be greater than 0 if specified"}
 
     # Build request body according to API specification
-    pod: dict[str, Any] = {
-        "cloudId": cloud_id,
-        "gpuType": gpu_type,
-        "gpuCount": gpu_count,
-        "socket": socket,
-        "image": image,
-        "dataCenterId": data_center_id,
+    request_body = {
+        "pod": {
+            "cloudId": cloud_id,
+            "gpuType": gpu_type,
+            "gpuCount": gpu_count,
+            "socket": socket,
+            "image": image,
+            "dataCenterId": data_center_id,
+        },
+        "provider": {"type": provider_type},
     }
-    request_body: dict[str, Any] = {"pod": pod, "provider": {"type": provider_type}}
 
     # Add optional pod fields
     if name:
-        pod["name"] = name
+        request_body["pod"]["name"] = name
     if disk_size is not None:
-        pod["diskSize"] = disk_size
+        request_body["pod"]["diskSize"] = disk_size
     if vcpus is not None:
-        pod["vcpus"] = vcpus
+        request_body["pod"]["vcpus"] = vcpus
     if memory is not None:
-        pod["memory"] = memory
+        request_body["pod"]["memory"] = memory
     if max_price is not None:
-        pod["maxPrice"] = max_price
+        request_body["pod"]["maxPrice"] = max_price
     if country:
-        pod["country"] = country
+        request_body["pod"]["country"] = country
     if security:
-        pod["security"] = security
+        request_body["pod"]["security"] = security
     if auto_restart is not None:
-        pod["autoRestart"] = auto_restart
+        request_body["pod"]["autoRestart"] = auto_restart
     if jupyter_password:
-        pod["jupyterPassword"] = jupyter_password
+        request_body["pod"]["jupyterPassword"] = jupyter_password
     if custom_template_id:
-        pod["customTemplateId"] = custom_template_id
+        request_body["pod"]["customTemplateId"] = custom_template_id
     if env_vars:
-        pod["envVars"] = [{"key": k, "value": v} for k, v in env_vars.items()]
+        request_body["pod"]["envVars"] = [{"key": k, "value": v} for k, v in env_vars.items()]
 
     # Add team if specified
     if team_id:

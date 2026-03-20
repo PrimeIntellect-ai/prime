@@ -20,7 +20,7 @@ def mock_env_var_api(monkeypatch: pytest.MonkeyPatch) -> None:
         "owner": {"name": "testuser", "type": "user"},
     }
 
-    sample_variables: list[dict[str, Any]] = [
+    sample_variables = [
         {
             "id": "var-id-1234567890",
             "name": "DEBUG",
@@ -49,10 +49,7 @@ def mock_env_var_api(monkeypatch: pytest.MonkeyPatch) -> None:
                 return {"data": sample_variables}
             var_id = endpoint.split("/")[-1]
             for v in sample_variables:
-                variable_id = v.get("id")
-                if isinstance(variable_id, str) and (
-                    variable_id == var_id or variable_id.startswith(var_id)
-                ):
+                if v["id"] == var_id or v["id"].startswith(var_id):
                     return {"data": v}
             return {"data": sample_variables[0]}
         return {"data": {}}

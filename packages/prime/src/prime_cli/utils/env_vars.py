@@ -72,7 +72,9 @@ def parse_env_file(
             key, _, value = line.partition("=")
             key = key.strip()
             value = value.strip()
-            was_single_quoted = value.startswith("'") and value.endswith("'")
+            was_single_quoted = (
+                value.startswith("'") and value.endswith("'")
+            )
             if (value.startswith('"') and value.endswith('"')) or was_single_quoted:
                 value = value[1:-1]
             if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", key):

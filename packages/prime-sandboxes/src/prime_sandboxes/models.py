@@ -177,6 +177,7 @@ class RegistryCredentialSummary(BaseModel):
 
     id: str
     name: str
+    username: Optional[str] = None
     server: str
     created_at: datetime = Field(..., alias="createdAt")
     updated_at: datetime = Field(..., alias="updatedAt")

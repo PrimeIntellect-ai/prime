@@ -341,7 +341,7 @@ def delete_image(
     """
     Delete an image from your registry.
 
-    For team images, you can use the team-prefixed format directly.
+    For team images, you can use the team-prefixed format or slug-based format.
     Only the image creator or team admins can delete team images.
 
     \b
@@ -349,13 +349,15 @@ def delete_image(
         prime images delete myapp:v1.0.0
         prime images delete myapp:latest --yes
         prime images delete team-abc123/myapp:v1.0.0
+        prime images delete myslug/myapp:v1.0.0
     """
     # Store original input for error messages
     original_reference = image_reference
 
     try:
-        # Check for team-prefixed format: team-{teamId}/imagename:tag
+        # Parse namespaced format: {namespace}/imagename:tag
         team_id = config.team_id
+        namespace = None
         if "/" in image_reference:
             namespace, rest = image_reference.split("/", 1)
             if namespace.startswith("team-"):
@@ -368,17 +370,11 @@ def delete_image(
                     )
                     raise typer.Exit(1)
                 team_id = extracted_team_id
-                image_reference = rest
-            else:
-                # Unrecognized namespace (not team-prefixed)
-                console.print(
-                    f"[red]Error: Unrecognized image namespace '{namespace}'. "
-                    "Use 'imagename:tag' for personal images or "
-                    "'team-{{teamId}}/imagename:tag' for team images.[/red]"
-                )
-                raise typer.Exit(1)
+            # For any namespaced format (team-, userId, or slug), pass through
+            # to backend which handles resolution
+            image_reference = rest
 
-        # Validate image reference has a tag (after team-prefix parsing)
+        # Validate image reference has a tag (after namespace parsing)
         if ":" not in image_reference:
             console.print(
                 "[red]Error: Image reference must include a tag (e.g., myapp:latest)[/red]"
@@ -387,9 +383,16 @@ def delete_image(
 
         image_name, image_tag = image_reference.rsplit(":", 1)
 
+        # Build the path for the API call, preserving namespace for slug resolution
+        if namespace and not namespace.startswith("team-"):
+            api_image_path = f"{namespace}/{image_name}"
+        else:
+            api_image_path = image_name
+
         context = f" (team: {team_id})" if team_id else ""
+        display_name = f"{namespace}/{image_name}" if namespace else image_name
         if not yes:
-            msg = f"Are you sure you want to delete {image_name}:{image_tag}{context}?"
+            msg = f"Are you sure you want to delete {display_name}:{image_tag}{context}?"
             confirm = typer.confirm(msg)
             if not confirm:
                 console.print("[yellow]Cancelled[/yellow]")
@@ -399,8 +402,8 @@ def delete_image(
 
         params = {"teamId": team_id} if team_id else None
 
-        client.request("DELETE", f"/images/{image_name}/{image_tag}", params=params)
-        console.print(f"[green]✓[/green] Deleted {image_name}:{image_tag}{context}")
+        client.request("DELETE", f"/images/{api_image_path}/{image_tag}", params=params)
+        console.print(f"[green]✓[/green] Deleted {display_name}:{image_tag}{context}")
 
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")

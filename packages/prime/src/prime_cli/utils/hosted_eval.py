@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from .formatters import strip_ansi
 
@@ -45,6 +45,7 @@ class HostedEvalConfig:
     allow_sandbox_access: bool = False
     allow_instances_access: bool = False
     custom_secrets: Optional[dict[str, str]] = None
+    sampling_args: Optional[dict[str, Any]] = None
 
 
 @dataclass

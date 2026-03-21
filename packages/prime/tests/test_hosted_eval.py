@@ -612,6 +612,28 @@ env_id = "gsm8k"
     assert "`timeout_minutes` must be an integer" in result.output
 
 
+def test_eval_run_hosted_rejects_non_json_serializable_sampling_args_in_toml(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+sampling_args = { until = 1979-05-27T07:32:00Z }
+
+[[eval]]
+env_id = "gsm8k"
+""".strip()
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "`sampling_args`" in result.output
+    assert "JSON-serializable" in result.output
+
+
 def test_eval_run_hosted_rejects_unsupported_toml_fields(tmp_path):
     config_path = tmp_path / "eval.toml"
     config_path.write_text(

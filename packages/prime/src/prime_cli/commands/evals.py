@@ -191,6 +191,15 @@ def _validate_json_object_field(merged: dict[str, Any], field_name: str) -> None
         console.print(f"[red]Error:[/red] hosted eval config `{field_name}` must be a TOML table")
         raise typer.Exit(1)
 
+    try:
+        json.dumps(field_value)
+    except (TypeError, ValueError) as exc:
+        console.print(
+            "[red]Error:[/red] hosted eval config "
+            f"`{field_name}` must contain only JSON-serializable values"
+        )
+        raise typer.Exit(1) from exc
+
 
 def _freeze_json_value(value: Any) -> Any:
     if isinstance(value, dict):
@@ -1197,7 +1206,7 @@ def run_eval_cmd(
         "--sampling-args",
         help=(
             "Sampling args for hosted eval as JSON. "
-            "Example: {'temperature': 0.7, 'extra_body': {'provider': {'order': ['azure']}}}"
+            'Example: {"temperature": 0.7, "extra_body": {"provider": {"order": ["azure"]}}}'
         ),
     ),
     eval_name: Optional[str] = typer.Option(

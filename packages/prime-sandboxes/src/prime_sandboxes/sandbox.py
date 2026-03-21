@@ -229,13 +229,19 @@ class SandboxAuthCache:
 
     async def _ensure_loaded_async(self) -> None:
         if not self._loaded:
-            self._auth_cache, needs_save = await asyncio.to_thread(self._load_cache)
-            self._loaded = True
-            if needs_save:
-                await self._save_cache_async()
+            loaded_cache, dirty = await asyncio.to_thread(self._read_cache_file)
+            cache_to_persist: Optional[Dict[str, Any]] = None
+            with self._lock:
+                if not self._loaded:
+                    self._auth_cache = loaded_cache
+                    self._loaded = True
+                    if dirty:
+                        cache_to_persist = dict(self._auth_cache)
+            if cache_to_persist is not None:
+                await self._save_cache_data_async(cache_to_persist)
 
-    def _load_cache(self) -> tuple[Dict[str, Any], bool]:
-        """Load auth cache from file and clean expired entries"""
+    def _read_cache_file(self) -> tuple[Dict[str, Any], bool]:
+        """Read auth cache from disk and return cleaned contents plus a dirty flag."""
         try:
             if self._cache_file.exists():
                 with open(self._cache_file, "r") as f:
@@ -258,6 +264,10 @@ class SandboxAuthCache:
             pass
         return {}, False
 
+    def _load_cache(self) -> tuple[Dict[str, Any], bool]:
+        """Load auth cache from file and report whether cleaned data should be persisted."""
+        return self._read_cache_file()
+
     def _save_cache(self) -> None:
         """Save auth cache to file"""
         try:
@@ -267,17 +277,24 @@ class SandboxAuthCache:
         except Exception:
             pass
 
-    async def _save_cache_async(self) -> None:
-        """Save auth cache to file (async version)"""
+    async def _save_cache_data_async(self, cache_data: Dict[str, Any]) -> None:
+        """Persist a cache snapshot only if it still matches the current shared state."""
+        await asyncio.to_thread(self._save_cache_data_if_current, cache_data)
+
+    def _save_cache_data_if_current(self, cache_data: Dict[str, Any]) -> None:
+        """Save cache data when no sync operation has changed the cache since snapshot."""
         try:
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            async with aiofiles.open(self._cache_file, "w") as f:
-                await f.write(json.dumps(self._auth_cache))
+            with self._lock:
+                if self._auth_cache != cache_data:
+                    return
+                self._cache_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(self._cache_file, "w") as f:
+                    json.dump(cache_data, f)
         except Exception:
             pass
 
-    def _check_cached_auth(self, sandbox_id: str) -> Optional[Dict[str, Any]]:
-        """Return a copy of cached auth if still valid, else evict and return None."""
+    def _check_cached_auth(self, sandbox_id: str) -> tuple[Optional[Dict[str, Any]], bool]:
+        """Return cached auth plus whether an expired entry was evicted."""
         if sandbox_id in self._auth_cache:
             auth_info = self._auth_cache[sandbox_id]
             expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
@@ -285,15 +302,18 @@ class SandboxAuthCache:
             if expires_at.tzinfo is None:
                 expires_at = expires_at.replace(tzinfo=timezone.utc)
             if datetime.now(timezone.utc) < expires_at:
-                return dict(auth_info)
+                return dict(auth_info), False
             del self._auth_cache[sandbox_id]
-        return None
+            return None, True
+        return None, False
 
     def get_or_refresh(self, sandbox_id: str) -> Dict[str, Any]:
         """Get cached auth info or fetch new token if expired/missing."""
         with self._lock:
             self._ensure_loaded()
-            cached_auth = self._check_cached_auth(sandbox_id)
+            cached_auth, evicted = self._check_cached_auth(sandbox_id)
+            if evicted:
+                self._save_cache()
             if cached_auth:
                 return cached_auth
 
@@ -308,7 +328,9 @@ class SandboxAuthCache:
         """Return True if sandbox is GPU-backed, cached alongside auth token data."""
         with self._lock:
             self._ensure_loaded()
-            cached_auth = self._check_cached_auth(sandbox_id)
+            cached_auth, evicted = self._check_cached_auth(sandbox_id)
+            if evicted:
+                self._save_cache()
             if cached_auth and isinstance(cached_auth.get("is_gpu"), bool):
                 return bool(cached_auth["is_gpu"])
 
@@ -345,22 +367,36 @@ class SandboxAuthCache:
         """Get cached auth info or fetch new token if expired/missing (async)."""
         async with self._get_async_lock():
             await self._ensure_loaded_async()
-            cached_auth = self._check_cached_auth(sandbox_id)
+            cache_to_persist: Optional[Dict[str, Any]] = None
+            with self._lock:
+                cached_auth, evicted = self._check_cached_auth(sandbox_id)
+                if evicted:
+                    cache_to_persist = dict(self._auth_cache)
+            if cache_to_persist is not None:
+                await self._save_cache_data_async(cache_to_persist)
             if cached_auth:
                 return cached_auth
 
         response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
 
         async with self._get_async_lock():
-            self._auth_cache[sandbox_id] = response
-            await self._save_cache_async()
+            with self._lock:
+                self._auth_cache[sandbox_id] = response
+                cache_to_persist = dict(self._auth_cache)
+            await self._save_cache_data_async(cache_to_persist)
         return dict(response)
 
     async def is_gpu_async(self, sandbox_id: str) -> bool:
         """Return True if sandbox is GPU-backed, cached alongside auth token data."""
         async with self._get_async_lock():
             await self._ensure_loaded_async()
-            cached_auth = self._check_cached_auth(sandbox_id)
+            cache_to_persist: Optional[Dict[str, Any]] = None
+            with self._lock:
+                cached_auth, evicted = self._check_cached_auth(sandbox_id)
+                if evicted:
+                    cache_to_persist = dict(self._auth_cache)
+            if cache_to_persist is not None:
+                await self._save_cache_data_async(cache_to_persist)
             if cached_auth and isinstance(cached_auth.get("is_gpu"), bool):
                 return bool(cached_auth["is_gpu"])
 
@@ -369,21 +405,20 @@ class SandboxAuthCache:
         is_gpu = sandbox.gpu_count > 0
 
         async with self._get_async_lock():
-            if sandbox_id in self._auth_cache:
-                self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
-                await self._save_cache_async()
+            cache_to_persist: Optional[Dict[str, Any]] = None
+            with self._lock:
+                if sandbox_id in self._auth_cache:
+                    self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
+                    cache_to_persist = dict(self._auth_cache)
+            if cache_to_persist is not None:
+                await self._save_cache_data_async(cache_to_persist)
 
         return is_gpu
 
     async def clear_async(self) -> None:
         """Clear all cached auth tokens (async)."""
         async with self._get_async_lock():
-            self._auth_cache = {}
-            self._loaded = True
-            try:
-                await asyncio.to_thread(self._cache_file.unlink, missing_ok=True)
-            except Exception:
-                pass
+            await asyncio.to_thread(self.clear)
 
 
 def _check_sandbox_statuses(

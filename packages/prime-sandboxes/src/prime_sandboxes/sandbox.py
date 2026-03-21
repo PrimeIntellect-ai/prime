@@ -210,8 +210,10 @@ class SandboxAuthCache:
             self._auth_cache: Dict[str, Any] = {}
             self._loaded = False
         else:
-            self._auth_cache = self._load_cache()
+            self._auth_cache, needs_save = self._load_cache()
             self._loaded = True
+            if needs_save:
+                self._save_cache()
 
     def _get_async_lock(self) -> asyncio.Lock:
         if self._async_lock is None:
@@ -220,8 +222,10 @@ class SandboxAuthCache:
 
     def _ensure_loaded(self) -> None:
         if not self._loaded:
-            self._auth_cache = self._load_cache()
+            self._auth_cache, needs_save = self._load_cache()
             self._loaded = True
+            if needs_save:
+                self._save_cache()
 
     async def _ensure_loaded_async(self) -> None:
         if not self._loaded:
@@ -260,13 +264,9 @@ class SandboxAuthCache:
             pass
         return {}, False
 
-    def _load_cache(self) -> Dict[str, Any]:
-        """Load auth cache from file and clean expired entries"""
-        cleaned_cache, dirty = self._read_cache_file()
-        if dirty:
-            self._auth_cache = cleaned_cache
-            self._save_cache()
-        return cleaned_cache
+    def _load_cache(self) -> tuple[Dict[str, Any], bool]:
+        """Load auth cache from file and report whether cleaned data should be persisted."""
+        return self._read_cache_file()
 
     def _save_cache(self) -> None:
         """Save auth cache to file"""

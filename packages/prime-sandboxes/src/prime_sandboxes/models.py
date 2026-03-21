@@ -57,6 +57,7 @@ class Sandbox(BaseModel):
     user_id: Optional[str] = Field(None, alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
     kubernetes_job_id: Optional[str] = Field(None, alias="kubernetesJobId")
+    region: Optional[str] = None
     registry_credentials_id: Optional[str] = Field(default=None, alias="registryCredentialsId")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -91,6 +92,7 @@ class CreateSandboxRequest(BaseModel):
     secrets: Optional[Dict[str, str]] = None
     labels: List[str] = Field(default_factory=list)
     team_id: Optional[str] = None
+    region: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
     registry_credentials_id: Optional[str] = None
 

@@ -88,6 +88,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "network_access": sandbox.network_access,
         "timeout_minutes": sandbox.timeout_minutes,
         "labels": sandbox.labels,
+        "region": sandbox.region or "us-central1",
         "created_at": iso_timestamp(sandbox.created_at),
         "user_id": sandbox.user_id,
         "team_id": sandbox.team_id,
@@ -286,6 +287,7 @@ def get(
             )
             table.add_row("Network Access", network_display)
             table.add_row("Timeout (minutes)", str(sandbox_data["timeout_minutes"]))
+            table.add_row("Region", sandbox_data.get("region", "us-central1"))
 
             # Show labels
             labels_display = ", ".join(sandbox_data["labels"]) if sandbox_data["labels"] else "None"
@@ -387,6 +389,11 @@ def create(
         "-l",
         help="Labels/tags for the sandbox. Can be specified multiple times.",
     ),
+    region: Optional[str] = typer.Option(
+        None,
+        "--region",
+        help="Cluster region (e.g. us-central1, asia-south1). Defaults to us-central1.",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Create a new sandbox"""
@@ -473,6 +480,7 @@ def create(
             secrets=secrets_vars if secrets_vars else None,
             labels=labels if labels else [],
             team_id=team_id,
+            region=region,
             registry_credentials_id=registry_credentials_id,
         )
 
@@ -492,6 +500,8 @@ def create(
         network_status = "[green]Enabled[/green]" if network_access else "[yellow]Disabled[/yellow]"
         console.print(f"Network Access: {network_status}")
         console.print(f"Timeout: {timeout_minutes} minutes")
+        if region:
+            console.print(f"Region: {region}")
         console.print(f"Team: {team_id or 'Personal'}")
         if registry_credentials_id:
             console.print(f"Registry Credentials: {registry_credentials_id}")

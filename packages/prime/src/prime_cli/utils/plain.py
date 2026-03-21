@@ -167,8 +167,6 @@ class _PlainMixin:
             **extra,
         )
 
-
-class _PlainTyperCommand(_PlainMixin, TyperCommand):
     def format_help(self, ctx, formatter):
         if not is_plain_mode():
             return super().format_help(ctx, formatter)
@@ -179,19 +177,37 @@ class _PlainTyperCommand(_PlainMixin, TyperCommand):
             return super().format_help(ctx, formatter)
         finally:
             self.rich_markup_mode = rich_markup_mode
+
+
+class _PlainTyperCommand(_PlainMixin, TyperCommand):
+    pass
 
 
 class PlainAwareTyperGroup(_PlainMixin, TyperGroup):
-    def format_help(self, ctx, formatter):
-        if not is_plain_mode():
-            return super().format_help(ctx, formatter)
+    pass
 
-        rich_markup_mode = self.rich_markup_mode
-        self.rich_markup_mode = None
-        try:
-            return super().format_help(ctx, formatter)
-        finally:
-            self.rich_markup_mode = rich_markup_mode
+
+class DefaultCommandGroup(PlainAwareTyperGroup):
+    def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.default_cmd_name = default_cmd_name
+
+    def parse_args(self, ctx, args):
+        if not args:
+            return super().parse_args(ctx, args)
+
+        decision_args = [arg for arg in args if arg != "--plain"]
+        if not decision_args:
+            return super().parse_args(ctx, args)
+
+        if decision_args[0] in ("--help", "-h"):
+            return super().parse_args(ctx, args)
+
+        if decision_args[0] in self.commands:
+            return super().parse_args(ctx, args)
+
+        args = [self.default_cmd_name] + list(args)
+        return super().parse_args(ctx, args)
 
 
 class PlainTyper(typer.Typer):

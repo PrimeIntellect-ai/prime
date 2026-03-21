@@ -19,7 +19,7 @@ from .formatters import (
 )
 from .json_help import json_help, json_output_help
 from .params import optional_team_params
-from .plain import PlainAwareTyperGroup, PlainTyper, get_console, is_plain_mode
+from .plain import DefaultCommandGroup, PlainAwareTyperGroup, PlainTyper, get_console, is_plain_mode
 from .prompt import (
     any_provided,
     confirm_or_skip,
@@ -56,6 +56,7 @@ __all__ = [
     "load_toml",
     "BaseConfig",
     "optional_team_params",
+    "DefaultCommandGroup",
     "PlainAwareTyperGroup",
     "PlainTyper",
     "get_console",

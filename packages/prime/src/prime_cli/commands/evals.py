@@ -14,7 +14,7 @@ from rich.table import Table
 from ..client import APIClient, APIError
 from ..core import Config
 from ..utils import (
-    PlainAwareTyperGroup,
+    DefaultCommandGroup,
     PlainTyper,
     get_console,
     json_output_help,
@@ -107,28 +107,7 @@ HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
 }
 
 
-class DefaultGroup(PlainAwareTyperGroup):
-    def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.default_cmd_name = default_cmd_name
-
-    def parse_args(self, ctx, args):
-        if not args:
-            return super().parse_args(ctx, args)
-
-        decision_args = [arg for arg in args if arg != "--plain"]
-        if not decision_args:
-            return super().parse_args(ctx, args)
-
-        if decision_args[0] in ("--help", "-h"):
-            return super().parse_args(ctx, args)
-
-        if decision_args[0] in self.commands:
-            return super().parse_args(ctx, args)
-
-        args = [self.default_cmd_name] + list(args)
-        return super().parse_args(ctx, args)
-
+class DefaultGroup(DefaultCommandGroup):
     def format_usage(self, ctx, formatter):
         formatter.write_usage(
             ctx.command_path,

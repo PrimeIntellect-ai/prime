@@ -18,7 +18,7 @@ from prime_cli.core import Config
 from ..api.rl import RLClient, RLRun
 from ..client import APIClient, APIError, ValidationError
 from ..utils import (
-    PlainAwareTyperGroup,
+    DefaultCommandGroup,
     PlainTyper,
     get_console,
     json_help,
@@ -561,23 +561,8 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     }
 
 
-class DefaultGroup(PlainAwareTyperGroup):
+class DefaultGroup(DefaultCommandGroup):
     """Makes 'run' the default command when a config file is passed."""
-
-    def parse_args(self, ctx, args):
-        if not args:
-            return super().parse_args(ctx, args)
-
-        decision_args = [arg for arg in args if arg != "--plain"]
-        if not decision_args:
-            return super().parse_args(ctx, args)
-
-        if decision_args[0] in ("--help", "-h"):
-            return super().parse_args(ctx, args)
-        if decision_args[0] in self.commands:
-            return super().parse_args(ctx, args)
-        args = ["run"] + list(args)
-        return super().parse_args(ctx, args)
 
     def format_usage(self, ctx, formatter):
         formatter.write_usage(

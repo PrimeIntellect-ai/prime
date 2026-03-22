@@ -3,23 +3,35 @@
 from typing import List, Optional
 
 import typer
-from rich.console import Console
 from rich.table import Table
 
 from ..api.deployments import DeploymentsClient
 from ..client import APIClient, APIError
 from ..core import Config
-from ..utils import output_data_as_json, validate_output_format
+from ..utils import (
+    PlainTyper,
+    get_console,
+    json_output_help,
+    output_data_as_json,
+    validate_output_format,
+)
 
-console = Console()
+console = get_console()
 
-app = typer.Typer(
+app = PlainTyper(
     help="Manage adapter deployments (experimental).",
     no_args_is_help=True,
 )
 
+LIST_DEPLOYMENTS_JSON_HELP = json_output_help(
+    ".models[] = {id, display_name, base_model, step, status, deployment_status, deployable?, ...}",
+    ".total = number",
+    ".page = number",
+    ".per_page = number",
+)
 
-@app.command(name="list")
+
+@app.command(name="list", epilog=LIST_DEPLOYMENTS_JSON_HELP)
 def list_deployments(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
     num: int = typer.Option(20, "--num", "-n", help="Items per page"),

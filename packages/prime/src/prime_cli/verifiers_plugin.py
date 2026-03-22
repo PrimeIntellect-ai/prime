@@ -13,6 +13,8 @@ from typing import Sequence
 
 from rich.console import Console
 
+from .utils.plain import get_console
+
 EXPECTED_PLUGIN_API_VERSION = 1
 
 
@@ -97,7 +99,7 @@ class PrimeVerifiersPlugin:
 
 def load_verifiers_prime_plugin(console: Console | None = None) -> PrimeVerifiersPlugin:
     """Load plugin exported by verifiers with fallback behavior."""
-    sink = console or Console(stderr=True)
+    sink = console or get_console(stderr=True)
     try:
         module = importlib.import_module("verifiers.cli.plugins.prime")
     except Exception as exc:

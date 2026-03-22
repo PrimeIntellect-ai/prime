@@ -9,6 +9,8 @@ from pydantic import BaseModel
 from rich.console import Console
 from typing_extensions import Self
 
+from .plain import get_console
+
 
 def load_toml(path: str, console: Console | None = None) -> dict[str, Any]:
     """Load and parse a TOML configuration file.
@@ -23,7 +25,7 @@ def load_toml(path: str, console: Console | None = None) -> dict[str, Any]:
     Raises:
         typer.Exit: If the config file doesn't exist or is invalid TOML.
     """
-    console = console or Console()
+    console = console or get_console()
     p = Path(path)
 
     if not p.exists():

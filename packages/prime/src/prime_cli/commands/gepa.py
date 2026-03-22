@@ -1,29 +1,14 @@
 """GEPA commands."""
 
 import typer
-from rich.console import Console
-from typer.core import TyperGroup
 
+from ..utils import DefaultCommandGroup, PlainTyper, get_console
 from ..verifiers_bridge import is_help_request, print_gepa_run_help, run_gepa_passthrough
 
-console = Console()
+console = get_console()
 
 
-class DefaultGroup(TyperGroup):
-    def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.default_cmd_name = default_cmd_name
-
-    def parse_args(self, ctx, args):
-        if not args:
-            return super().parse_args(ctx, args)
-        if args[0] in ("--help", "-h"):
-            return super().parse_args(ctx, args)
-        if args[0] in self.commands:
-            return super().parse_args(ctx, args)
-        args = [self.default_cmd_name] + list(args)
-        return super().parse_args(ctx, args)
-
+class DefaultGroup(DefaultCommandGroup):
     def format_usage(self, ctx, formatter):
         formatter.write_usage(
             ctx.command_path,
@@ -31,7 +16,7 @@ class DefaultGroup(TyperGroup):
         )
 
 
-app = typer.Typer(
+app = PlainTyper(
     cls=DefaultGroup,
     help="Run GEPA prompt optimization.",
     no_args_is_help=True,

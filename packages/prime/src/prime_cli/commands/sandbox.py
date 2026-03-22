@@ -24,17 +24,19 @@ from prime_sandboxes import (
     SandboxNotRunningError,
     UnauthorizedError,
 )
-from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
 from ..utils import (
+    PlainTyper,
     build_table,
     confirm_or_skip,
     format_resources,
+    get_console,
     human_age,
     iso_timestamp,
+    json_output_help,
     obfuscate_env_vars,
     obfuscate_secrets,
     output_data_as_json,
@@ -44,12 +46,40 @@ from ..utils import (
 )
 from ..utils.display import SANDBOX_STATUS_COLORS
 
-app = typer.Typer(help="Manage code sandboxes", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="Manage code sandboxes", no_args_is_help=True)
+console = get_console()
 
 
 config = Config()
 GPU_SANDBOX_INTERNAL_DOCKER_IMAGE = "gpu-managed-runtime"
+
+LIST_SANDBOXES_JSON_HELP = json_output_help(
+    ".sandboxes[] = {id, name, image, status, resources, labels[], created_at}",
+    ".total = number",
+    ".page = number",
+    ".per_page = number",
+    ".has_next = boolean",
+)
+
+SANDBOX_DETAIL_JSON_HELP = json_output_help(
+    ". = {id, name, docker_image, start_command, status, cpu_cores, "
+    "memory_gb, disk_size_gb, disk_mount_path, gpu_count, gpu_type?, "
+    "network_access, timeout_minutes, labels[], created_at, user_id, team_id, "
+    "...}",
+    ".environment_vars? = object",
+    ".secrets? = object",
+    ".advanced_configs? = object",
+)
+
+SANDBOX_EXPOSURE_JSON_HELP = json_output_help(
+    ". = {sandbox_id?, exposure_id, port, protocol, name?, url, "
+    "external_port?, external_endpoint?, tls_socket?}",
+)
+
+LIST_SANDBOX_PORTS_JSON_HELP = json_output_help(
+    ".exposures[] = {sandbox_id?, exposure_id, port, protocol, name?, url, "
+    "external_port?, external_endpoint?, tls_socket?}",
+)
 
 
 def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
@@ -116,7 +146,7 @@ def _guard_gpu_unsupported(sandbox: Sandbox, feature_name: str) -> None:
         raise typer.Exit(1)
 
 
-@app.command("list")
+@app.command("list", epilog=LIST_SANDBOXES_JSON_HELP)
 @app.command("ls", hidden=True)
 def list_sandboxes_cmd(
     team_id: Optional[str] = typer.Option(
@@ -240,7 +270,7 @@ def list_sandboxes_cmd(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, epilog=SANDBOX_DETAIL_JSON_HELP)
 def get(
     sandbox_id: str,
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
@@ -1021,7 +1051,7 @@ def reset_cache(
             raise typer.Exit(1)
 
 
-@app.command("expose", no_args_is_help=True)
+@app.command("expose", no_args_is_help=True, epilog=SANDBOX_EXPOSURE_JSON_HELP)
 def expose_port(
     sandbox_id: str = typer.Argument(..., help="Sandbox ID to expose port from"),
     port: int = typer.Argument(..., help="Port number to expose"),
@@ -1124,7 +1154,7 @@ def unexpose_port(
         raise typer.Exit(1)
 
 
-@app.command("list-ports")
+@app.command("list-ports", epilog=LIST_SANDBOX_PORTS_JSON_HELP)
 def list_ports(
     sandbox_id: Optional[str] = typer.Argument(
         None, help="Sandbox ID (omit to list all exposed ports across all sandboxes)"

@@ -8,14 +8,19 @@ from typing import Any, Optional
 import typer
 from click.core import ParameterSource
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
-from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
-from typer.core import TyperGroup
 
 from ..client import APIClient, APIError
 from ..core import Config
-from ..utils import load_toml, output_data_as_json
+from ..utils import (
+    DefaultCommandGroup,
+    PlainTyper,
+    get_console,
+    json_output_help,
+    load_toml,
+    output_data_as_json,
+)
 from ..utils.display import get_eval_viewer_url
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_push import load_results_jsonl
@@ -38,7 +43,31 @@ from ..verifiers_bridge import (
     run_eval_tui,
 )
 
-console = Console()
+console = get_console()
+
+LIST_EVALS_JSON_HELP = json_output_help(
+    ".evaluations[] = {evaluation_id|id, environment_names[], model_name, status, metadata}",
+    ".total = number",
+)
+
+EVAL_DETAIL_JSON_HELP = json_output_help(
+    ". = evaluation object from Prime Evals",
+    "Common keys: .evaluation_id? | .id, .environment_names[]?, .model_name?, "
+    ".status?, .metadata?, .metrics?",
+)
+
+EVAL_SAMPLES_JSON_HELP = json_output_help(
+    ".samples[] = sample object",
+    "Common keys: .samples[].example_id?, .samples[].input?, .samples[].output?, .samples[].score?",
+    ".total? = number",
+    ".page? = number",
+    ".limit? = number",
+)
+
+PUSH_EVAL_JSON_HELP = json_output_help(
+    "Single push: .evaluation_id = string",
+    "Auto-discovery batch push: .results[] = {path, status, eval_id?, error?}",
+)
 
 HOSTED_LOGS_DEFAULT_TAIL_LINES = 1000
 HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS = 5.0
@@ -78,24 +107,7 @@ HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
 }
 
 
-class DefaultGroup(TyperGroup):
-    def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.default_cmd_name = default_cmd_name
-
-    def parse_args(self, ctx, args):
-        if not args:
-            return super().parse_args(ctx, args)
-
-        if args[0] in ("--help", "-h"):
-            return super().parse_args(ctx, args)
-
-        if args[0] in self.commands:
-            return super().parse_args(ctx, args)
-
-        args = [self.default_cmd_name] + list(args)
-        return super().parse_args(ctx, args)
-
+class DefaultGroup(DefaultCommandGroup):
     def format_usage(self, ctx, formatter):
         formatter.write_usage(
             ctx.command_path,
@@ -103,7 +115,7 @@ class DefaultGroup(TyperGroup):
         )
 
 
-subcommands_app = typer.Typer()
+subcommands_app = PlainTyper()
 
 
 def handle_errors(func):
@@ -563,7 +575,7 @@ def _resolve_hosted_environment(
     return platform_slug, str(environment_id)
 
 
-@subcommands_app.command("list")
+@subcommands_app.command("list", epilog=LIST_EVALS_JSON_HELP)
 @handle_errors
 def list_evals(
     output: str = typer.Option("table", "--output", "-o", help="table|json"),
@@ -665,7 +677,7 @@ def list_evals(
         raise typer.Exit(1)
 
 
-@subcommands_app.command("get")
+@subcommands_app.command("get", epilog=EVAL_DETAIL_JSON_HELP)
 @handle_errors
 def get_eval(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation to retrieve"),
@@ -679,7 +691,7 @@ def get_eval(
     format_output(data, output)
 
 
-@subcommands_app.command("samples")
+@subcommands_app.command("samples", epilog=EVAL_SAMPLES_JSON_HELP)
 @handle_errors
 def get_samples(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation"),
@@ -894,7 +906,7 @@ def tui_cmd(
     run_eval_tui(env_dir=env_dir, outputs_dir=outputs_dir)
 
 
-@subcommands_app.command("push")
+@subcommands_app.command("push", epilog=PUSH_EVAL_JSON_HELP)
 @handle_errors
 def push_eval(
     config_path: Optional[str] = typer.Argument(
@@ -1047,7 +1059,7 @@ def push_eval(
         raise typer.Exit(1)
 
 
-app = typer.Typer(
+app = PlainTyper(
     cls=DefaultGroup,
     help=(
         "Run evaluations or manage results (list, get, push, samples).\n\n"

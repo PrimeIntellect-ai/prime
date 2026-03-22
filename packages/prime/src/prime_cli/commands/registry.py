@@ -10,20 +10,26 @@ from prime_sandboxes import (
     TemplateClient,
     UnauthorizedError,
 )
-from rich.console import Console
 from rich.markup import escape
 
 from ..utils import (
+    PlainTyper,
     build_table,
+    get_console,
     human_age,
     iso_timestamp,
+    json_output_help,
     output_data_as_json,
     validate_output_format,
 )
 
-app = typer.Typer(help="Manage registry credentials and private images", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="Manage registry credentials and private images", no_args_is_help=True)
+console = get_console()
 config = Config()
+
+LIST_REGISTRY_JSON_HELP = json_output_help(
+    ".credentials[] = {id, name, server, scope, team_id, user_id, created_at, updated_at, age}",
+)
 
 
 def _format_registry_row(credential: RegistryCredentialSummary) -> dict:
@@ -44,7 +50,7 @@ def _format_registry_row(credential: RegistryCredentialSummary) -> dict:
     }
 
 
-@app.command("list")
+@app.command("list", epilog=LIST_REGISTRY_JSON_HELP)
 def list_registry_credentials(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:

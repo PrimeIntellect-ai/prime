@@ -1974,7 +1974,7 @@ class AsyncSandboxClient:
         timeout: Optional[int] = None,
     ) -> ReadFileResponse:
         """Read a file from a sandbox via gateway (async)"""
-        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
+        auth = await self._auth_cache.get_or_refresh(sandbox_id)
 
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"

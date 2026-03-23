@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from prime_cli.client import APIError
 from prime_cli.commands.evals import (
     _create_hosted_evaluations,
@@ -191,6 +192,63 @@ def test_create_hosted_evaluation_accepts_plural_ids_response(monkeypatch):
     )
 
     assert result["evaluation_ids"] == ["eval-123", "eval-456"]
+
+
+def test_create_hosted_evaluation_raises_api_error_for_failed_create_response(monkeypatch):
+    class DummyConfig:
+        team_id = None
+
+    class DummyAPIClient:
+        def __init__(self):
+            self.config = DummyConfig()
+
+        def post(self, endpoint, json=None):
+            return {
+                "evaluation_id": "eval-123",
+                "status": "FAILED",
+                "error": "You are not a member of this team",
+            }
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+
+    with pytest.raises(APIError, match="You are not a member of this team"):
+        _create_hosted_evaluations(
+            HostedEvalConfig(
+                environment_id="env-123",
+                inference_model="openai/gpt-4.1-mini",
+                num_examples=5,
+                rollouts_per_example=3,
+            )
+        )
+
+
+def test_eval_run_hosted_reports_failed_create_response(monkeypatch):
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_hosted_environment",
+        lambda environment, env_dir_path=None, env_path=None: (
+            "primeintellect/gsm8k",
+            "env-123",
+        ),
+    )
+
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        raise APIError("You are not a member of this team")
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_run_hosted_evaluation,
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "primeintellect/gsm8k", "--hosted", "-m", "openai/gpt-4.1-mini"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "Hosted evaluation failed:" in result.output
+    assert "You are not a member of this team" in result.output
+    assert "Hosted evaluation started" not in result.output
 
 
 def test_eval_run_hosted_follow_streams_logs(monkeypatch):

@@ -295,6 +295,37 @@ def test_eval_run_hosted_reports_failed_create_response_with_plural_ids(monkeypa
     assert "prime eval logs eval-456 -f" in result.output
 
 
+def test_create_hosted_evaluation_ids_falls_back_to_singular_id_when_plural_is_empty(monkeypatch):
+    class DummyConfig:
+        team_id = None
+
+    class DummyAPIClient:
+        def __init__(self):
+            self.config = DummyConfig()
+
+        def post(self, endpoint, json=None):
+            return {
+                "evaluation_id": "eval-123",
+                "evaluation_ids": [],
+                "status": "FAILED",
+                "error": "Startup failed",
+            }
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+
+    result = _create_hosted_evaluations(
+        HostedEvalConfig(
+            environment_id="env-123",
+            inference_model="openai/gpt-4.1-mini",
+            num_examples=5,
+            rollouts_per_example=3,
+        )
+    )
+
+    assert result["evaluation_id"] == "eval-123"
+    assert result["evaluation_ids"] == []
+
+
 def test_eval_run_hosted_follow_streams_logs(monkeypatch):
     captured = {}
 

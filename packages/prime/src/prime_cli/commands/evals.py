@@ -410,7 +410,11 @@ def _print_eval_status(eval_data: dict[str, Any]) -> None:
 def _result_evaluation_ids(result: dict[str, Any]) -> list[str]:
     evaluation_ids = result.get("evaluation_ids")
     if isinstance(evaluation_ids, list):
-        return [evaluation_id for evaluation_id in evaluation_ids if isinstance(evaluation_id, str)]
+        filtered_ids = [
+            evaluation_id for evaluation_id in evaluation_ids if isinstance(evaluation_id, str)
+        ]
+        if filtered_ids:
+            return filtered_ids
 
     evaluation_id = result.get("evaluation_id")
     if isinstance(evaluation_id, str):

@@ -1217,7 +1217,7 @@ def run_eval_cmd(
         None,
         "--sampling-args",
         help=(
-            "Sampling args for hosted eval as JSON. "
+            "Sampling args as JSON for local or hosted evals. "
             'Example: {"temperature": 0.7, "extra_body": {"provider": {"order": ["azure"]}}}'
         ),
     ),
@@ -1248,6 +1248,9 @@ def run_eval_cmd(
     poll_interval_was_provided = (
         ctx.get_parameter_source("poll_interval") == ParameterSource.COMMANDLINE
     )
+    local_passthrough_args = list(passthrough_args)
+    if sampling_args is not None:
+        local_passthrough_args.extend(["--sampling-args", sampling_args])
 
     if not hosted:
         hosted_only_args = {
@@ -1257,7 +1260,6 @@ def run_eval_cmd(
             "--allow-sandbox-access": allow_sandbox_access,
             "--allow-instances-access": allow_instances_access,
             "--custom-secrets": custom_secrets is not None,
-            "--sampling-args": sampling_args is not None,
             "--eval-name": eval_name is not None,
         }
         used_hosted_only_args = [flag for flag, used in hosted_only_args.items() if used]
@@ -1477,7 +1479,7 @@ def run_eval_cmd(
 
     run_eval_passthrough(
         environment=environment,
-        passthrough_args=passthrough_args,
+        passthrough_args=local_passthrough_args,
         skip_upload=skip_upload,
         env_path=env_path,
     )

@@ -835,7 +835,7 @@ def create_run(
             repetition_penalty=cfg.sampling.repetition_penalty,
             min_tokens=cfg.sampling.min_tokens,
             seed=cfg.sampling.seed,
-            temp_scheduler=cfg.sampling.temp_scheduler.model_dump()
+            temp_scheduler=cfg.sampling.temp_scheduler.model_dump(exclude_none=True)
             if cfg.sampling.temp_scheduler
             else None,
             extra_body=cfg.sampling.extra_body,

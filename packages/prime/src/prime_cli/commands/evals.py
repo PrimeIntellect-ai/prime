@@ -382,7 +382,7 @@ def _create_hosted_evaluations(
         and not evaluation_id
         and not evaluation_ids
     ):
-        error_message = created.get("error") or created.get("error_message")
+        error_message = created.get("error")
         raise APIError(error_message or f"Hosted evaluation creation failed: {created}")
 
     if not evaluation_id and not evaluation_ids:
@@ -397,7 +397,7 @@ def _print_eval_status(eval_data: dict[str, Any]) -> None:
 
     console.print(f"[{color}]Status: {status_str}[/{color}]")
 
-    error_message = eval_data.get("error_message") or eval_data.get("error")
+    error_message = eval_data.get("error_message")
     if error_message:
         console.print(f"[red]Error:[/red] {error_message}")
 
@@ -412,13 +412,13 @@ def _print_eval_status(eval_data: dict[str, Any]) -> None:
 
 
 def _result_evaluation_ids(result: dict[str, Any]) -> list[str]:
-    evaluation_ids = result.get("evaluation_ids")
-    if isinstance(evaluation_ids, list):
-        filtered_ids = [
-            evaluation_id for evaluation_id in evaluation_ids if isinstance(evaluation_id, str)
-        ]
-        if filtered_ids:
-            return filtered_ids
+    evaluation_ids = [
+        evaluation_id
+        for evaluation_id in (result.get("evaluation_ids") or [])
+        if isinstance(evaluation_id, str)
+    ]
+    if evaluation_ids:
+        return evaluation_ids
 
     evaluation_id = result.get("evaluation_id")
     if isinstance(evaluation_id, str):
@@ -443,8 +443,16 @@ def _print_failed_hosted_creation_results(
     console.print("[yellow]Hosted evaluation creation returned failed evaluations.[/yellow]")
     _print_hosted_evaluation_ids(platform_slugs, evaluation_ids)
     for failed_result in failed_results:
-        _print_eval_status(failed_result)
+        status_str, status = _parse_eval_status(failed_result)
+        color = status.color if status else "white"
+        console.print(f"[{color}]Status: {status_str}[/{color}]")
+
+        error_message = failed_result.get("error")
+        if error_message:
+            console.print(f"[red]Error:[/red] {error_message}")
+
         for evaluation_id in _result_evaluation_ids(failed_result):
+            console.print(f"[dim]View: {get_eval_viewer_url(evaluation_id)}[/dim]")
             console.print(f"[dim]View logs:[/dim] prime eval logs {evaluation_id} -f")
 
 

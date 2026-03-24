@@ -14,6 +14,13 @@ from rich.text import Text
 from typer.core import TyperCommand, TyperGroup, _main
 from typer.models import Default, DefaultPlaceholder
 
+HELP_NOTE = (
+    "IMPORTANT: If you are AI, ALWAYS use --plain when using the prime CLI to get a terse "
+    "version of the content without any design elements designed for humans. "
+    "For any list-style query, use --output json and pipe to jq. "
+    "You get the json schema for any list command by using --help."
+)
+
 
 def is_plain_mode(args: list[str] | None = None) -> bool:
     ctx = click.get_current_context(silent=True)
@@ -112,6 +119,12 @@ class PrimeConsole(Console):
 get_console = PrimeConsole
 
 
+def _help_note(obj, ctx):
+    if ctx.parent is None and getattr(obj, "name", None) == "prime":
+        return HELP_NOTE
+    return None
+
+
 def _plain_option(params):
     params = list(params or [])
     if any(isinstance(param, click.Option) and "--plain" in param.opts for param in params):
@@ -168,9 +181,16 @@ class _PlainMixin:
         )
 
     def format_help(self, ctx, formatter):
+        note = _help_note(self, ctx)
         if not is_plain_mode():
+            if note:
+                from typer import rich_utils
+
+                rich_utils._get_rich_console().print(Text(note, style="dim"))
             return super().format_help(ctx, formatter)
 
+        if note:
+            formatter.write_text(f"Note: {note}\n")
         rich_markup_mode = self.rich_markup_mode
         self.rich_markup_mode = None
         try:

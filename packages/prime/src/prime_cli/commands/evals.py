@@ -377,7 +377,11 @@ def _create_hosted_evaluations(
     evaluation_id = created.get("evaluation_id")
     evaluation_ids = created.get("evaluation_ids")
 
-    if created.get("status") == "FAILED" and not evaluation_id and not evaluation_ids:
+    if (
+        created.get("status") == EvalStatus.FAILED.value
+        and not evaluation_id
+        and not evaluation_ids
+    ):
         error_message = created.get("error") or created.get("error_message")
         raise APIError(error_message or f"Hosted evaluation creation failed: {created}")
 

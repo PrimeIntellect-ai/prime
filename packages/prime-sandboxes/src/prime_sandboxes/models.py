@@ -150,6 +150,13 @@ class FileUploadResponse(BaseModel):
     timestamp: datetime
 
 
+class ReadFileResponse(BaseModel):
+    """Read file response model"""
+
+    content: str
+    size: int
+
+
 class SandboxLogsResponse(BaseModel):
     """Sandbox logs response model"""
 

@@ -10,21 +10,65 @@ import toml
 import typer
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic import ValidationError as PydanticValidationError
-from rich.console import Console
 from rich.markup import escape as rich_escape
 from rich.table import Table
-from typer.core import TyperGroup
 
 from prime_cli.core import Config
 
 from ..api.rl import RLClient, RLRun
 from ..client import APIClient, APIError, ValidationError
-from ..utils import output_data_as_json, validate_output_format
+from ..utils import (
+    DefaultCommandGroup,
+    PlainTyper,
+    get_console,
+    json_help,
+    json_output_help,
+    output_data_as_json,
+    validate_output_format,
+)
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.env_vars import EnvParseError, collect_env_vars
 from ..utils.formatters import format_file_size, strip_ansi
 
-console = Console()
+console = get_console()
+
+RL_RUN_JSON_HELP = json_output_help(
+    ".run = {id, name?, status, base_model, environments[], "
+    "rollouts_per_example, max_steps, batch_size, created_at, updated_at, ...}",
+)
+
+RL_MODELS_JSON_HELP = json_output_help(
+    ".models[] = {name, at_capacity}",
+)
+
+RL_LIST_JSON_HELP = json_output_help(
+    ".runs[] = {id, name?, status, base_model, environments[], max_steps, "
+    "batch_size, created_at, updated_at, ...}",
+    ".total = number",
+    ".page = number",
+    ".per_page = number",
+)
+
+RL_METRICS_JSON_HELP = json_help(
+    ".metrics[] = metric record from the RL API",
+)
+
+RL_ROLLOUTS_JSON_HELP = json_help(
+    ". = {run_id, samples[], total, page, limit, total_pages}",
+)
+
+RL_PROGRESS_JSON_HELP = json_help(
+    ". = {latest_step, steps_with_samples[], steps_with_distributions[], last_updated_at}",
+)
+
+RL_DISTRIBUTIONS_JSON_HELP = json_help(
+    ". = {bins[], step}",
+)
+
+RL_CHECKPOINTS_JSON_HELP = json_output_help(
+    ".checkpoints[] = {id, rft_run_id, step, storage_url, status, "
+    "size_bytes?, created_at, uploaded_at?}",
+)
 
 
 # Progress bar pattern (tqdm-style progress bars)
@@ -432,7 +476,7 @@ class RLConfig(BaseModel):
     env_files: List[str] = Field(default_factory=list)
 
 
-def _format_validation_errors(errors: list[dict]) -> list[str]:
+def _format_validation_errors(errors: list[Any]) -> list[str]:
     """Format Pydantic validation errors into user-friendly messages."""
     messages = []
     for error in errors:
@@ -517,18 +561,8 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     }
 
 
-class DefaultGroup(TyperGroup):
+class DefaultGroup(DefaultCommandGroup):
     """Makes 'run' the default command when a config file is passed."""
-
-    def parse_args(self, ctx, args):
-        if not args:
-            return super().parse_args(ctx, args)
-        if args[0] in ("--help", "-h"):
-            return super().parse_args(ctx, args)
-        if args[0] in self.commands:
-            return super().parse_args(ctx, args)
-        args = ["run"] + list(args)
-        return super().parse_args(ctx, args)
 
     def format_usage(self, ctx, formatter):
         formatter.write_usage(
@@ -537,14 +571,14 @@ class DefaultGroup(TyperGroup):
         )
 
 
-app = typer.Typer(
+app = PlainTyper(
     cls=DefaultGroup,
     help="Manage hosted RL training runs.",
     no_args_is_help=True,
 )
 
 
-@app.command("run", rich_help_panel="Commands")
+@app.command("run", rich_help_panel="Commands", epilog=RL_RUN_JSON_HELP)
 def create_run(
     config_path: str = typer.Argument(
         ...,
@@ -804,7 +838,7 @@ def create_run(
         raise typer.Exit(1)
 
 
-@app.command("models", rich_help_panel="Commands")
+@app.command("models", rich_help_panel="Commands", epilog=RL_MODELS_JSON_HELP)
 def list_models(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
@@ -922,7 +956,7 @@ def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> No
         raise typer.Exit(1)
 
 
-@app.command("list", rich_help_panel="Commands")
+@app.command("list", rich_help_panel="Commands", epilog=RL_LIST_JSON_HELP)
 @app.command("ls", rich_help_panel="Commands", hidden=True)
 def list_runs(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
@@ -934,7 +968,7 @@ def list_runs(
     _list_runs_impl(team, num, page, output)
 
 
-@app.command("get", rich_help_panel="Commands")
+@app.command("get", rich_help_panel="Commands", epilog=RL_RUN_JSON_HELP)
 def get_run(
     run_id: str = typer.Argument(..., help="Run ID to get details for"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
@@ -1208,7 +1242,7 @@ def init_config(
     console.print(f"\n[dim]Run with:[/dim] prime rl run {output_path}")
 
 
-@app.command("metrics", rich_help_panel="Monitoring")
+@app.command("metrics", rich_help_panel="Monitoring", epilog=RL_METRICS_JSON_HELP)
 def get_metrics(
     run_id: str = typer.Argument(..., help="Run ID to get metrics for"),
     min_step: Optional[int] = typer.Option(None, "--min-step", help="Minimum step (inclusive)"),
@@ -1243,7 +1277,7 @@ def get_metrics(
         raise typer.Exit(1)
 
 
-@app.command("rollouts", rich_help_panel="Monitoring")
+@app.command("rollouts", rich_help_panel="Monitoring", epilog=RL_ROLLOUTS_JSON_HELP)
 def get_rollouts(
     run_id: str = typer.Argument(..., help="Run ID to get rollouts for"),
     step: int = typer.Option(..., "--step", "-s", help="Step number to get rollouts for"),
@@ -1276,7 +1310,7 @@ def get_rollouts(
         raise typer.Exit(1)
 
 
-@app.command("progress", rich_help_panel="Monitoring")
+@app.command("progress", rich_help_panel="Monitoring", epilog=RL_PROGRESS_JSON_HELP)
 def get_progress(
     run_id: str = typer.Argument(..., help="Run ID to get progress for"),
 ) -> None:
@@ -1301,7 +1335,7 @@ def get_progress(
         raise typer.Exit(1)
 
 
-@app.command("distributions", rich_help_panel="Monitoring")
+@app.command("distributions", rich_help_panel="Monitoring", epilog=RL_DISTRIBUTIONS_JSON_HELP)
 def get_distributions(
     run_id: str = typer.Argument(..., help="Run ID to get distributions for"),
     distribution_type: Optional[str] = typer.Option(
@@ -1336,7 +1370,7 @@ def get_distributions(
         raise typer.Exit(1)
 
 
-@app.command("checkpoints", rich_help_panel="Monitoring")
+@app.command("checkpoints", rich_help_panel="Monitoring", epilog=RL_CHECKPOINTS_JSON_HELP)
 def list_checkpoints(
     run_id: str = typer.Argument(..., help="Run ID to list checkpoints for"),
     status_filter: Optional[str] = typer.Option(

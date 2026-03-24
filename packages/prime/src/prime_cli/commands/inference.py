@@ -3,18 +3,28 @@ from __future__ import annotations
 import datetime as _dt
 
 import typer
-from rich.console import Console
 from rich.table import Table
 
 from ..api.inference import InferenceAPIError, InferenceClient
-from ..utils import output_data_as_json, validate_output_format
+from ..utils import (
+    PlainTyper,
+    get_console,
+    json_output_help,
+    output_data_as_json,
+    validate_output_format,
+)
 
-app = typer.Typer(
+app = PlainTyper(
     help="Run and manage Prime Inference\n\n"
     "Use `prime eval run` for environment evals with Prime Inference.",
     no_args_is_help=True,
 )
-console = Console()
+console = get_console()
+
+MODELS_JSON_HELP = json_output_help(
+    "Typical OpenAI schema: .object?, .data[] = {id, created, pricing?}",
+    "Compatibility fallback: .models[] may be present instead of .data[]",
+)
 
 
 def _fmt_created(val: str) -> str:
@@ -38,7 +48,7 @@ def _fmt_price(x) -> str:
         return str(x)
 
 
-@app.command("models")
+@app.command("models", epilog=MODELS_JSON_HELP)
 def list_models(
     output: str = typer.Option("table", "--output", "-o", help="table|json"),
 ) -> None:

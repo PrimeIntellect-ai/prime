@@ -20,6 +20,7 @@ dependencies = [
     "cryptography>=41.0.0",
     "verifiers>=0.1.10",
     "build>=1.0.0",
+    "gitignore-parser>=0.1.13",
     "toml>=0.10.0",
 ]
 keywords = ["cli", "gpu", "cloud", "compute"]

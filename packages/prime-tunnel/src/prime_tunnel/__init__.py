@@ -1,12 +1,14 @@
 """Prime Tunnel SDK - Expose local services via secure tunnels."""
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 from prime_tunnel.core import Config, TunnelClient
 from prime_tunnel.exceptions import (
+    BinaryDownloadError,
     TunnelAuthError,
     TunnelConnectionError,
     TunnelError,
+    TunnelLimitReachedError,
     TunnelTimeoutError,
 )
 from prime_tunnel.models import TunnelInfo
@@ -22,8 +24,10 @@ __all__ = [
     # Models
     "TunnelInfo",
     # Exceptions
-    "TunnelError",
+    "BinaryDownloadError",
     "TunnelAuthError",
+    "TunnelError",
+    "TunnelLimitReachedError",
     "TunnelConnectionError",
     "TunnelTimeoutError",
 ]

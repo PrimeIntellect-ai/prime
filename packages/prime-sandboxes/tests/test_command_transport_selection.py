@@ -38,10 +38,10 @@ class _AsyncFakeCache:
     def __init__(self, is_vm: bool):
         self._is_vm = is_vm
 
-    async def get_or_refresh_async(self, _sandbox_id: str):
+    async def get_or_refresh(self, _sandbox_id: str):
         return _auth_payload()
 
-    async def is_vm_async(self, _sandbox_id: str) -> bool:
+    async def is_vm(self, _sandbox_id: str) -> bool:
         return self._is_vm
 
 

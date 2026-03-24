@@ -36,6 +36,7 @@ from .models import (
     ExposePortRequest,
     FileUploadResponse,
     ListExposedPortsResponse,
+    ReadFileResponse,
     RegistryCredentialSummary,
     Sandbox,
     SandboxListResponse,
@@ -45,7 +46,7 @@ from .models import (
 )
 from .sandbox import AsyncSandboxClient, AsyncTemplateClient, SandboxClient, TemplateClient
 
-__version__ = "0.2.16"
+__version__ = "0.2.18"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -69,6 +70,7 @@ __all__ = [
     "CommandRequest",
     "CommandResponse",
     "FileUploadResponse",
+    "ReadFileResponse",
     "BulkDeleteSandboxRequest",
     "BulkDeleteSandboxResponse",
     "RegistryCredentialSummary",

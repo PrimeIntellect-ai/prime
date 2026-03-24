@@ -1,5 +1,7 @@
 """Tests for gateway sandbox-not-found error mapping."""
 
+from typing import Any, cast
+
 import httpx
 import pytest
 
@@ -18,7 +20,7 @@ class _DummyAuthCache:
             "token": "tok",
         }
 
-    def is_gpu(self, _sandbox_id: str) -> bool:
+    def is_vm(self, _sandbox_id: str) -> bool:
         return False
 
 
@@ -31,7 +33,7 @@ class _AsyncDummyAuthCache:
             "token": "tok",
         }
 
-    async def is_gpu(self, _sandbox_id: str) -> bool:
+    async def is_vm(self, _sandbox_id: str) -> bool:
         return False
 
 
@@ -66,13 +68,14 @@ def _gateway_error() -> httpx.HTTPStatusError:
 
 def test_sync_execute_command_maps_gateway_502_to_not_running():
     client = SandboxClient(APIClient(api_key="test-key"))
-    client._auth_cache = _DummyAuthCache()
+    client_any = cast(Any, client)
+    client_any._auth_cache = _DummyAuthCache()
 
     def _raise_gateway_error(*args, **kwargs):
         raise _sandbox_not_found_error()
 
-    client._gateway_post = _raise_gateway_error
-    client._get_sandbox_error_context = lambda _sandbox_id: {
+    client_any._gateway_post = _raise_gateway_error
+    client_any._get_sandbox_error_context = lambda sandbox_id: {
         "status": "RUNNING",
         "error_type": None,
         "error_message": None,
@@ -87,20 +90,21 @@ def test_sync_execute_command_maps_gateway_502_to_not_running():
 @pytest.mark.asyncio
 async def test_async_execute_command_maps_gateway_502_to_not_running():
     client = AsyncSandboxClient(api_key="test-key")
-    client._auth_cache = _AsyncDummyAuthCache()
+    client_any = cast(Any, client)
+    client_any._auth_cache = _AsyncDummyAuthCache()
 
     async def _raise_gateway_error(*args, **kwargs):
         raise _sandbox_not_found_error()
 
-    async def _fake_error_context(_sandbox_id: str):
+    async def _fake_error_context(sandbox_id: str):
         return {
             "status": "RUNNING",
             "error_type": None,
             "error_message": None,
         }
 
-    client._gateway_post = _raise_gateway_error
-    client._get_sandbox_error_context = _fake_error_context
+    client_any._gateway_post = _raise_gateway_error
+    client_any._get_sandbox_error_context = _fake_error_context
 
     with pytest.raises(SandboxNotRunningError) as exc_info:
         await client.execute_command("sbx-123", "ls /")
@@ -110,12 +114,13 @@ async def test_async_execute_command_maps_gateway_502_to_not_running():
 
 def test_sync_execute_command_does_not_map_generic_gateway_502_to_not_running():
     client = SandboxClient(APIClient(api_key="test-key"))
-    client._auth_cache = _DummyAuthCache()
+    client_any = cast(Any, client)
+    client_any._auth_cache = _DummyAuthCache()
 
     def _raise_gateway_error(*args, **kwargs):
         raise _gateway_error()
 
-    client._gateway_post = _raise_gateway_error
+    client_any._gateway_post = _raise_gateway_error
 
     with pytest.raises(APIError) as exc_info:
         client.execute_command("sbx-123", "ls /")

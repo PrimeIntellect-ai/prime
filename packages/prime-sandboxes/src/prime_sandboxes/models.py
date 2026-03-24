@@ -40,6 +40,7 @@ class Sandbox(BaseModel):
     disk_mount_path: str = Field(..., alias="diskMountPath")
     gpu_count: int = Field(..., alias="gpuCount")
     gpu_type: Optional[str] = Field(None, alias="gpuType")
+    vm: bool = False
     network_access: bool = Field(True, alias="networkAccess")
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
@@ -85,6 +86,7 @@ class CreateSandboxRequest(BaseModel):
     disk_size_gb: float = 5.0
     gpu_count: int = 0
     gpu_type: Optional[str] = None
+    vm: bool = False
     network_access: bool = True
     timeout_minutes: int = 60
     environment_vars: Optional[Dict[str, str]] = None
@@ -98,6 +100,10 @@ class CreateSandboxRequest(BaseModel):
     def validate_gpu_fields(self) -> "CreateSandboxRequest":
         if self.gpu_count > 0 and not self.gpu_type:
             raise ValueError("gpu_type is required when gpu_count is greater than 0")
+        if self.gpu_count > 0 and not self.vm:
+            raise ValueError("gpu_count is only supported when vm is true")
+        if self.gpu_count == 0 and self.gpu_type is not None:
+            raise ValueError("gpu_type requires gpu_count greater than 0")
         return self
 
 

@@ -95,6 +95,8 @@ HOSTED_EVAL_CONFIG_ALLOWED_FIELDS = {
     "allow_sandbox_access",
     "allow_instances_access",
     "sampling_args",
+    "api_base_url",
+    "api_key_var",
     "eval_name",
 }
 HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
@@ -104,6 +106,8 @@ HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
     "timeout_minutes": (int, "an integer"),
     "allow_sandbox_access": (bool, "a boolean"),
     "allow_instances_access": (bool, "a boolean"),
+    "api_base_url": (str, "a non-empty string"),
+    "api_key_var": (str, "a non-empty string"),
     "eval_name": (str, "a non-empty string"),
 }
 
@@ -391,6 +395,10 @@ def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]
         eval_config["custom_secrets"] = config.custom_secrets
     if config.sampling_args:
         eval_config["sampling_args"] = config.sampling_args
+    if config.api_base_url:
+        eval_config["api_base_url"] = config.api_base_url
+    if config.api_key_var:
+        eval_config["api_key_var"] = config.api_key_var
 
     payload: dict[str, Any] = {
         "environment_ids": [config.environment_id],
@@ -1287,6 +1295,8 @@ def run_eval_cmd(
                     "allow_sandbox_access": False,
                     "allow_instances_access": False,
                     "sampling_args": None,
+                    "api_base_url": None,
+                    "api_key_var": None,
                     "eval_name": None,
                 }
             ]
@@ -1299,6 +1309,8 @@ def run_eval_cmd(
             "-r",
         )
         raw_env_args = _parse_value_option(passthrough_args, "--env-args", "")
+        raw_api_base_url = _parse_value_option(passthrough_args, "--api-base-url", "-b")
+        raw_api_key_var = _parse_value_option(passthrough_args, "--api-key-var", "-k")
         parsed_cli_env_args = (
             _parse_string_map_option(raw_env_args, "--env-args")
             if raw_env_args is not None
@@ -1371,6 +1383,8 @@ def run_eval_cmd(
                         if parsed_sampling_args is not None
                         else target_config.get("sampling_args")
                     ),
+                    "api_base_url": raw_api_base_url or target_config.get("api_base_url"),
+                    "api_key_var": raw_api_key_var or target_config.get("api_key_var"),
                     "eval_name": eval_name or target_config.get("eval_name"),
                 }
             )
@@ -1393,6 +1407,8 @@ def run_eval_cmd(
                 target.get("allow_sandbox_access", False),
                 target.get("allow_instances_access", False),
                 _freeze_json_value(target.get("sampling_args")),
+                target.get("api_base_url"),
+                target.get("api_key_var"),
                 target.get("eval_name"),
             )
             if group_key not in grouped_targets:
@@ -1438,6 +1454,8 @@ def run_eval_cmd(
                     allow_instances_access=target.get("allow_instances_access", False),
                     custom_secrets=target.get("custom_secrets"),
                     sampling_args=target.get("sampling_args"),
+                    api_base_url=target.get("api_base_url"),
+                    api_key_var=target.get("api_key_var"),
                 )
                 result = _create_hosted_evaluations(
                     hosted_config,

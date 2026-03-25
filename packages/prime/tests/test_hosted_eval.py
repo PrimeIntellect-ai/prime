@@ -136,6 +136,49 @@ def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
     assert "prime eval logs eval-123 -f" in result.output
 
 
+def test_eval_run_hosted_passes_api_base_url_and_key_var(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_hosted_environment",
+        lambda environment, env_dir_path=None, env_path=None: (
+            "primeintellect/gsm8k",
+            "env-123",
+        ),
+    )
+
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        captured["api_base_url"] = config.api_base_url
+        captured["api_key_var"] = config.api_key_var
+        return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_run_hosted_evaluation,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run",
+            "primeintellect/gsm8k",
+            "--hosted",
+            "-m",
+            "openai/gpt-4.1-mini",
+            "-b",
+            "https://api.openai.com/v1",
+            "-k",
+            "OPENAI_API_KEY",
+        ],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["api_base_url"] == "https://api.openai.com/v1"
+    assert captured["api_key_var"] == "OPENAI_API_KEY"
+
+
 def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
     captured = {}
 
@@ -214,6 +257,39 @@ def test_create_hosted_evaluation_includes_sampling_args_in_payload(monkeypatch)
             }
         },
     }
+
+
+def test_create_hosted_evaluation_includes_api_base_url_and_key_var_in_payload(monkeypatch):
+    captured = {}
+
+    class DummyConfig:
+        team_id = None
+
+    class DummyAPIClient:
+        def __init__(self):
+            self.config = DummyConfig()
+
+        def post(self, endpoint, json=None):
+            captured["endpoint"] = endpoint
+            captured["json"] = json
+            return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+
+    _create_hosted_evaluations(
+        HostedEvalConfig(
+            environment_id="env-123",
+            inference_model="openai/gpt-4.1-mini",
+            num_examples=5,
+            rollouts_per_example=3,
+            api_base_url="https://api.openai.com/v1",
+            api_key_var="OPENAI_API_KEY",
+        )
+    )
+
+    assert captured["endpoint"] == "/hosted-evaluations"
+    assert captured["json"]["eval_config"]["api_base_url"] == "https://api.openai.com/v1"
+    assert captured["json"]["eval_config"]["api_key_var"] == "OPENAI_API_KEY"
 
 
 def test_create_hosted_evaluation_accepts_plural_ids_response(monkeypatch):

@@ -275,18 +275,7 @@ class Tunnel:
         if not self._started:
             return
 
-        if self._process is not None:
-            try:
-                self._process.terminate()
-                try:
-                    self._process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self._process.kill()
-                    self._process.wait(timeout=2)
-            except Exception:
-                pass
-            finally:
-                self._process = None
+        self._kill_process()
 
         if self._tunnel_info is not None:
             try:
@@ -314,18 +303,7 @@ class Tunnel:
     async def _cleanup(self) -> None:
         """Clean up tunnel resources."""
         # Stop frpc process (this will cause drain threads to exit via EOF)
-        if self._process is not None:
-            try:
-                self._process.terminate()
-                try:
-                    self._process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self._process.kill()
-                    self._process.wait(timeout=2)
-            except Exception:
-                pass
-            finally:
-                self._process = None
+        self._kill_process()
 
         # Delete tunnel registration
         if self._tunnel_info is not None:

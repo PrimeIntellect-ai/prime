@@ -115,6 +115,79 @@ class Tunnel:
             return False
         return self._process.poll() is None
 
+    def _kill_process(self) -> None:
+        """Kill the frpc process without cleaning up registration or config."""
+        if self._process is not None:
+            try:
+                self._process.terminate()
+                try:
+                    self._process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self._process.kill()
+                    self._process.wait(timeout=2)
+            except Exception:
+                pass
+            finally:
+                self._process = None
+
+    async def restart(self) -> str:
+        """Restart the frpc process, keeping the same tunnel registration and URL.
+
+        Use this when the frpc process died but the tunnel registration is still
+        valid (Redis TTL is 7 days). This preserves the same tunnel URL so
+        existing sandbox clients continue to work.
+
+        Returns:
+            The tunnel URL (same as before)
+
+        Raises:
+            TunnelError: If no tunnel registration exists
+            TunnelConnectionError: If frpc fails to reconnect
+            TunnelTimeoutError: If connection times out
+        """
+        if self._tunnel_info is None:
+            raise TunnelError("Cannot restart: no tunnel registration")
+
+        self._kill_process()
+
+        # Re-write config if the file was removed
+        if self._config_file is None or not self._config_file.exists():
+            self._config_file = self._write_frpc_config()
+
+        frpc_path = await asyncio.to_thread(get_frpc_path)
+
+        try:
+            self._process = subprocess.Popen(
+                [str(frpc_path), "-c", str(self._config_file)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except BaseException as e:
+            if isinstance(e, asyncio.CancelledError):
+                raise
+            raise TunnelConnectionError(message=f"Failed to start frpc: {e}") from e
+
+        self._output_lines = []
+
+        try:
+            await self._wait_for_connection()
+        except BaseException:
+            self._kill_process()
+            raise
+
+        try:
+            self._start_pipe_drain()
+        except BaseException as e:
+            self._kill_process()
+            if isinstance(e, asyncio.CancelledError):
+                raise
+            raise TunnelConnectionError(
+                message=f"Failed to start pipe drain: {e}"
+            ) from e
+
+        return self.url
+
     async def start(self) -> str:
         """
         Start the tunnel.
@@ -350,8 +423,8 @@ metadatas.binding_secret = "{self._tunnel_info.binding_secret}"
 
 # Transport settings
 transport.tcpMux = true
-transport.tcpMuxKeepaliveInterval = 30
-transport.poolCount = 10
+transport.tcpMuxKeepaliveInterval = 60
+transport.poolCount = 50
 transport.dialServerKeepalive = 60
 
 # Logging - always use console so we can detect connection via stdout

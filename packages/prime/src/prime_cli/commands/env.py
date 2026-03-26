@@ -1214,6 +1214,7 @@ def push(
                             wheel_upload_url,
                             content=f.read(),
                             headers={"Content-Type": "application/octet-stream"},
+                            timeout=300.0,
                         )
                         upload_response.raise_for_status()
                 except httpx.RequestError as e:

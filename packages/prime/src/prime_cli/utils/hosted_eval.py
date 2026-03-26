@@ -46,6 +46,8 @@ class HostedEvalConfig:
     allow_instances_access: bool = False
     custom_secrets: Optional[dict[str, str]] = None
     sampling_args: Optional[dict[str, Any]] = None
+    api_base_url: Optional[str] = None
+    api_key_var: Optional[str] = None
 
 
 @dataclass

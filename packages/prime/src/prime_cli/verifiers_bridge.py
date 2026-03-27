@@ -289,59 +289,16 @@ def _is_valid_hash(value: object) -> bool:
     )
 
 
-def _should_skip_directory(name: str) -> bool:
-    if name.startswith("."):
-        return True
-    if name in {"dist", "__pycache__", "build", "outputs"}:
-        return True
-    if name.endswith(".egg-info"):
-        return True
-    return False
-
-
 def _compute_local_content_hash(env_path: Path) -> Optional[str]:
-    import hashlib
-
     if not env_path.exists() or not env_path.is_dir():
         return None
 
-    hasher = hashlib.sha256()
-    items_to_hash: list[tuple[str, Path]] = []
+    from .commands.env import compute_content_hash
 
-    for pattern in ("pyproject.toml", "*.py", "README.md"):
-        for file_path in env_path.glob(pattern):
-            if file_path.is_file():
-                items_to_hash.append(("file", file_path))
-
-    for subdir in sorted(env_path.iterdir(), key=lambda p: p.name):
-        if not subdir.is_dir() or _should_skip_directory(subdir.name):
-            continue
-        items_to_hash.append(("dir", subdir))
-        for file_path in sorted(subdir.rglob("*")):
-            if not file_path.is_file():
-                continue
-            rel_parts = file_path.relative_to(env_path).parts
-            if any(_should_skip_directory(part) for part in rel_parts[:-1]):
-                continue
-            if file_path.name.startswith("."):
-                continue
-            items_to_hash.append(("file", file_path))
-
-    items_to_hash.sort(key=lambda item: item[1].relative_to(env_path).as_posix().lower())
-
-    for item_type, path in items_to_hash:
-        rel = path.relative_to(env_path).as_posix()
-        if item_type == "dir":
-            hasher.update(f"dir:{rel}".encode("utf-8"))
-            continue
-        hasher.update(f"file:{rel}".encode("utf-8"))
-        try:
-            with open(path, "rb") as f:
-                hasher.update(f.read())
-        except OSError:
-            return None
-
-    return hasher.hexdigest()
+    try:
+        return compute_content_hash(env_path)
+    except OSError:
+        return None
 
 
 def _fetch_user_slug(client: APIClient) -> Optional[str]:

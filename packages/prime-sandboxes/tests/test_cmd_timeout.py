@@ -1,5 +1,10 @@
+import time
+
+import pytest
+
 from prime_sandboxes import (
     APIClient,
+    APIError,
     CreateSandboxRequest,
     SandboxClient,
 )
@@ -30,9 +35,23 @@ def test_command_timeout():
 
         print("\nExecuting command...")
         command = "sleep 100 && echo 'done'"
-        result = sandbox_client.execute_command(
-            sandbox_id=sandbox.id, command=command, timeout=60 * 2
-        )
+
+        last_error = None
+        for attempt in range(3):
+            try:
+                result = sandbox_client.execute_command(
+                    sandbox_id=sandbox.id, command=command, timeout=60 * 2
+                )
+                break
+            except APIError as exc:
+                last_error = exc
+                if "HTTP 502 POST" not in str(exc) or attempt == 2:
+                    raise
+                print(f"Retrying after transient gateway failure (attempt {attempt + 1}/3)...")
+                time.sleep(2)
+        else:
+            pytest.fail(f"Command execution did not succeed: {last_error}")
+
         print(f"✓ Executed command: {command} with result: {result}")
 
         assert result.exit_code == 0

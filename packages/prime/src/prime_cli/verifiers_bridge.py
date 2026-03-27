@@ -878,13 +878,17 @@ def run_eval_passthrough(
         )
         return
 
-    if resolved_env is not None and resolved_env.recommend_push:
+    if (
+        resolved_env is not None
+        and resolved_env.recommend_push
+        and resolved_env.platform_slug is not None
+    ):
         _print_environment_source_footer(resolved_env)
         console.print(
             "[yellow]Warning:[/yellow] Local environment differs from the current "
             "platform version. Uploading evaluation results to the tracked upstream anyway."
         )
-        if upstream_slug is None and resolved_env.platform_slug is not None:
+        if upstream_slug is None:
             upstream_slug = resolved_env.platform_slug
 
     upload_env_name = env_name_for_upload or environment
@@ -907,7 +911,7 @@ def run_eval_passthrough(
             "correct environment path."
         )
         console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
-        raise typer.Exit(1)
+        return
 
     if resolved_env is not None and resolved_env.platform_url:
         console.print(f"[dim]Environment URL: {resolved_env.platform_url}[/dim]")

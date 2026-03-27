@@ -1,7 +1,5 @@
 import json
 
-import pytest
-import typer
 from prime_cli.commands.env import compute_content_hash
 from prime_cli.verifiers_bridge import (
     ResolvedEnvironment,
@@ -132,7 +130,7 @@ def test_run_eval_uploads_even_when_local_env_is_ahead(monkeypatch, capsys):
     assert "tracked upstream anyway" in output
 
 
-def test_run_eval_errors_when_upload_is_required_but_no_upstream_exists(monkeypatch, capsys):
+def test_run_eval_warns_when_upload_is_required_but_no_upstream_exists(monkeypatch, capsys):
     _setup_eval_passthrough(monkeypatch)
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._prepare_single_environment",
@@ -149,15 +147,15 @@ def test_run_eval_errors_when_upload_is_required_but_no_upstream_exists(monkeypa
         "prime_cli.verifiers_bridge.find_environment_metadata", lambda **kwargs: None
     )
 
-    with pytest.raises(typer.Exit) as exc_info:
-        run_eval_passthrough(
-            environment="simpleqa",
-            passthrough_args=[],
-            skip_upload=False,
-            env_path=None,
-        )
+    run_eval_passthrough(
+        environment="simpleqa",
+        passthrough_args=[],
+        skip_upload=False,
+        env_path=None,
+    )
 
-    assert exc_info.value.exit_code == 1
     output = capsys.readouterr().out
     assert "Failed to push results to hub:" in output
     assert "no upstream environment found" in output
+    assert "Evaluation completed but results were not pushed." in output
+    assert "tracked upstream anyway" not in output

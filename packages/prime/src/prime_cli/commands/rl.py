@@ -1189,7 +1189,7 @@ def get_logs(
                     break
                 time.sleep(2.0)
             if raw:
-                if raw_logs:
+                if raw_logs.strip():
                     console.print(raw_logs)
                 else:
                     console.print("[yellow]No logs available yet.[/yellow]")

@@ -135,8 +135,6 @@ def list_tunnels(
             status_display = "[green]connected[/green]"
         elif status_display == "PENDING":
             status_display = "[yellow]pending[/yellow]"
-        elif status_display == "DISCONNECTED":
-            status_display = "[red]disconnected[/red]"
         elif status_display == "EXPIRED":
             status_display = "[dim]expired[/dim]"
 

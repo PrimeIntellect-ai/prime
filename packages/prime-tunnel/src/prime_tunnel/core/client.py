@@ -207,7 +207,7 @@ class TunnelClient:
         if not data:
             raise TunnelError("Failed to create tunnel: unexpected empty response")
 
-        return TunnelInfo(**data)
+        return TunnelInfo(**data["data"])
 
     async def get_tunnel(self, tunnel_id: str) -> Optional[TunnelInfo]:
         """
@@ -236,16 +236,17 @@ class TunnelClient:
             return None
 
         data = await self._handle_response(response, "get tunnel")
+        tunnel = data["data"]
         return TunnelInfo(
-            tunnel_id=data["tunnel_id"],
-            hostname=data["hostname"],
-            url=data["url"],
+            tunnel_id=tunnel["tunnel_id"],
+            hostname=tunnel["hostname"],
+            url=tunnel["url"],
             frp_token="",  # Token not returned on status check
             server_host="",
             server_port=7000,
-            expires_at=data["expires_at"],
-            user_id=data.get("user_id"),
-            status=data.get("status"),
+            expires_at=tunnel["expires_at"],
+            user_id=tunnel.get("user_id"),
+            status=tunnel.get("status"),
         )
 
     async def delete_tunnel(self, tunnel_id: str) -> bool:
@@ -293,7 +294,8 @@ class TunnelClient:
         except httpx.RequestError as e:
             raise TunnelError(f"Failed to connect to API: {e}") from e
 
-        return await self._handle_response(response, "bulk delete tunnels")
+        data = await self._handle_response(response, "bulk delete tunnels")
+        return data["data"]
 
     async def list_tunnels(self, team_id: Optional[str] = None) -> list[TunnelInfo]:
         """
@@ -324,7 +326,7 @@ class TunnelClient:
 
         data = await self._handle_response(response, "list tunnels")
         tunnels = []
-        for t in data.get("tunnels", []):
+        for t in data["data"]:
             tunnels.append(
                 TunnelInfo(
                     tunnel_id=t["tunnel_id"],

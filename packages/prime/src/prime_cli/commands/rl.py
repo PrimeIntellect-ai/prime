@@ -4,7 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import toml
 import typer
@@ -175,7 +175,7 @@ def generate_rl_config_template(environment: str | None = None) -> str:
 model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
 max_steps = 100
 
-# env_files = ["secrets.env"] # optional file(s) for secrets
+# env_files = ["secrets.env"] # optional local .env file(s) for secrets
 
 # Training
 batch_size = 128
@@ -526,6 +526,55 @@ def load_config(path: str) -> RLConfig:
         raise typer.Exit(1)
 
 
+def _hub_env_slug(env_id: str) -> str | None:
+    """Return owner/name for hub environments, stripping any @version suffix."""
+    env_slug = env_id.split("@", 1)[0]
+    return env_slug if "/" in env_slug else None
+
+
+def _find_hub_envs_with_secret(
+    client: APIClient,
+    envs: List[EnvConfig],
+    secret_name: str,
+    *,
+    on_warning: Optional[Callable[[str], None]] = None,
+) -> tuple[List[str], List[str]]:
+    """Find hub environments that already expose a named secret."""
+    matching_envs: List[str] = []
+    lookup_failures: List[str] = []
+
+    for env_config in envs:
+        env_slug = _hub_env_slug(env_config.id)
+        if not env_slug:
+            continue
+
+        owner, name = env_slug.split("/", 1)
+        try:
+            detail_response = client.get(f"/environmentshub/{owner}/{name}/@latest")
+            env_data = detail_response.get("data") or {}
+            env_uuid = env_data.get("id")
+            if not env_uuid:
+                lookup_failures.append(env_slug)
+                if on_warning:
+                    on_warning(
+                        f"Could not determine environment ID for {env_slug} while checking "
+                        f"for {secret_name}."
+                    )
+                continue
+
+            secrets_response = client.get(f"/environmentshub/{env_uuid}/secrets")
+            env_secrets = secrets_response.get("data") or []
+            secret_names = {str(secret.get("name")) for secret in env_secrets if secret.get("name")}
+            if secret_name in secret_names and env_slug not in matching_envs:
+                matching_envs.append(env_slug)
+        except APIError as e:
+            lookup_failures.append(env_slug)
+            if on_warning:
+                on_warning(f"Could not inspect secrets for {env_slug}: {e}")
+
+    return matching_envs, lookup_failures
+
+
 # Status color mapping
 RUN_STATUS_COLORS = {
     "PENDING": "yellow",
@@ -590,14 +639,17 @@ def create_run(
         "--env-var",
         help=(
             "Environment variable/secret to pass to the training container. "
-            "Accepts: KEY=VALUE (direct value), KEY (reads from $KEY), "
-            "or path/to/file.env (loads env file)."
+            "Accepts: KEY=VALUE (direct value), KEY (reads from local $KEY, not Prime hub "
+            "secrets), or path/to/file.env (loads a local env file)."
         ),
     ),
     env_file: Optional[List[str]] = typer.Option(
         None,
         "--env-file",
-        help="Path to .env file containing secrets. Supports ${VAR} expansion from local env.",
+        help=(
+            "Path to a local .env file containing secrets. Supports ${VAR} expansion from "
+            "the local process environment."
+        ),
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
     skip_action_check: bool = typer.Option(
@@ -639,19 +691,46 @@ def create_run(
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
-    # Validate WANDB_API_KEY is present when W&B monitoring is configured
-    wandb_configured = cfg.wandb.entity or cfg.wandb.project
-    has_wandb_key = secrets and "WANDB_API_KEY" in secrets
+    # Validate WANDB_API_KEY is present when W&B monitoring is configured.
+    # A hub environment secret with the same name also satisfies this requirement.
+    wandb_configured = bool(cfg.wandb.entity or cfg.wandb.project)
+    has_wandb_key = "WANDB_API_KEY" in secrets
+    hub_envs_with_wandb_key: List[str] = []
+
     if wandb_configured and not has_wandb_key:
+        hub_envs_with_wandb_key, _lookup_failures = _find_hub_envs_with_secret(
+            APIClient(),
+            cfg.env,
+            "WANDB_API_KEY",
+            on_warning=warn,
+        )
+
+    if wandb_configured and not has_wandb_key and not hub_envs_with_wandb_key:
         console.print("[red]Configuration Error:[/red]")
         console.print("  WANDB_API_KEY is required when W&B monitoring is configured.\n")
-        console.print("Provide it via:")
+        console.print("Provide it via one of these local inputs:")
         console.print('  - env_files in your config: env_files = ["secrets.env"]')
         console.print("  - CLI flag: --env-file secrets.env")
         console.print("  - CLI flag: -e WANDB_API_KEY=your-key")
         console.print(
-            "  - Environment variable: export WANDB_API_KEY=... && prime rl ... -e WANDB_API_KEY"
+            "  - Local shell variable: export WANDB_API_KEY=... "
+            "&& prime rl run rl.toml -e WANDB_API_KEY"
         )
+
+        hub_env_slugs = [
+            env_slug for env_slug in (_hub_env_slug(e.id) for e in cfg.env) if env_slug
+        ]
+        if hub_env_slugs:
+            console.print("\nOr attach/link the Prime secret to one of the hub environments:")
+            for env_slug in hub_env_slugs:
+                console.print(f"  - Inspect attached secrets: prime env secret list {env_slug}")
+            console.print(
+                "  - Link a team/personal secret: prime env secret link <secret-id> owner/env"
+            )
+            console.print(
+                "  - Note: -e WANDB_API_KEY reads your local shell env, not Prime hub secrets."
+            )
+
         raise typer.Exit(1)
 
     try:
@@ -697,6 +776,13 @@ def create_run(
             console.print(f"  Project: {cfg.wandb.entity or '?'}/{cfg.wandb.project or '?'}")
             if cfg.wandb.name:
                 console.print(f"  Run Name: {cfg.wandb.name}")
+            if has_wandb_key:
+                console.print("  API Key: provided via local run secrets")
+            elif hub_envs_with_wandb_key:
+                console.print(
+                    "  API Key: detected on hub environment secret(s): "
+                    f"{', '.join(hub_envs_with_wandb_key)}"
+                )
 
         # Eval
         if cfg.eval.env:

@@ -881,10 +881,11 @@ def run_eval_passthrough(
     if resolved_env is not None and resolved_env.recommend_push:
         _print_environment_source_footer(resolved_env)
         console.print(
-            "[yellow]Evaluation completed. Automatic upload is skipped until the local "
-            "environment is published.[/yellow]"
+            "[yellow]Warning:[/yellow] Local environment differs from the current "
+            "platform version. Uploading evaluation results to the tracked upstream anyway."
         )
-        return
+        if upstream_slug is None and resolved_env.platform_slug is not None:
+            upstream_slug = resolved_env.platform_slug
 
     upload_env_name = env_name_for_upload or environment
     if upstream_slug is None:
@@ -901,12 +902,12 @@ def run_eval_passthrough(
     if upstream_slug is None:
         _print_environment_source_footer(resolved_env)
         console.print(
-            "[dim]No upstream environment found. "
-            "Skipped uploading evaluation results to platform.\n"
+            "[red]Failed to push results to hub:[/red] no upstream environment found. "
             "Use `prime env push` to set an upstream, or use `--env-path` to specify the "
-            "correct environment path.[/dim]"
+            "correct environment path."
         )
-        return
+        console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
+        raise typer.Exit(1)
 
     if resolved_env is not None and resolved_env.platform_url:
         console.print(f"[dim]Environment URL: {resolved_env.platform_url}[/dim]")

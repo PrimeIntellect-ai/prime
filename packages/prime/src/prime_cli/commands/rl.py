@@ -1180,9 +1180,16 @@ def get_logs(
 
                 time.sleep(5)
         else:
-            raw_logs = rl_client.get_logs(run_id, tail_lines=tail)
+            # Runs can take a short while to expose logs after start; poll before giving up.
+            deadline = time.monotonic() + 30.0
+            raw_logs = ""
+            while time.monotonic() < deadline:
+                raw_logs = rl_client.get_logs(run_id, tail_lines=tail)
+                if (raw and raw_logs.strip()) or (not raw and clean_logs(raw_logs)):
+                    break
+                time.sleep(2.0)
             if raw:
-                if raw_logs:
+                if raw_logs.strip():
                     console.print(raw_logs)
                 else:
                     console.print("[yellow]No logs available yet.[/yellow]")

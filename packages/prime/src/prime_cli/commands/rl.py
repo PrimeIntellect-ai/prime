@@ -167,6 +167,34 @@ def clean_logs(text: str) -> list[str]:
     return formatted_lines
 
 
+RL_LOGS_WAIT_FOR_CONTENT_SECONDS = 30.0
+RL_LOGS_WAIT_POLL_INTERVAL_SECONDS = 2.0
+RL_LOGS_FOLLOW_POLL_INTERVAL_SECONDS = 5.0
+
+
+def _rl_logs_have_displayable_content(raw_logs: str, raw: bool) -> bool:
+    if raw:
+        return bool(raw_logs.strip())
+    return bool(clean_logs(raw_logs))
+
+
+def _fetch_rl_logs_until_content(
+    rl_client: RLClient,
+    run_id: str,
+    tail: int,
+    raw: bool,
+) -> str:
+    """Poll until logs have displayable content or the wait budget is exhausted."""
+    deadline = time.monotonic() + RL_LOGS_WAIT_FOR_CONTENT_SECONDS
+    last = ""
+    while time.monotonic() < deadline:
+        last = rl_client.get_logs(run_id, tail_lines=tail)
+        if _rl_logs_have_displayable_content(last, raw):
+            return last
+        time.sleep(RL_LOGS_WAIT_POLL_INTERVAL_SECONDS)
+    return last
+
+
 def generate_rl_config_template(environment: str | None = None) -> str:
     """Generate a TOML config template for RL training."""
     env_value = environment or "primeintellect/reverse-text"
@@ -1178,9 +1206,12 @@ def get_logs(
                         continue
                     raise
 
-                time.sleep(5)
+                if not last_lines and not _rl_logs_have_displayable_content(raw_logs, raw):
+                    time.sleep(RL_LOGS_WAIT_POLL_INTERVAL_SECONDS)
+                else:
+                    time.sleep(RL_LOGS_FOLLOW_POLL_INTERVAL_SECONDS)
         else:
-            raw_logs = rl_client.get_logs(run_id, tail_lines=tail)
+            raw_logs = _fetch_rl_logs_until_content(rl_client, run_id, tail, raw)
             if raw:
                 if raw_logs:
                     console.print(raw_logs)

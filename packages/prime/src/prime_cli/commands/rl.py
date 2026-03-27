@@ -32,6 +32,9 @@ from ..utils.formatters import format_file_size, strip_ansi
 
 console = get_console()
 
+_RL_LOGS_INITIAL_WAIT_POLL_SECONDS = 5.0
+_RL_LOGS_INITIAL_WAIT_MAX_SECONDS = 30.0
+
 RL_RUN_JSON_HELP = json_output_help(
     ".run = {id, name?, status, base_model, environments[], "
     "rollouts_per_example, max_steps, batch_size, created_at, updated_at, ...}",
@@ -1180,9 +1183,15 @@ def get_logs(
 
                 time.sleep(5)
         else:
-            raw_logs = rl_client.get_logs(run_id, tail_lines=tail)
+            wait_deadline = time.monotonic() + _RL_LOGS_INITIAL_WAIT_MAX_SECONDS
+            raw_logs = ""
+            while time.monotonic() < wait_deadline:
+                raw_logs = rl_client.get_logs(run_id, tail_lines=tail)
+                if raw_logs.strip():
+                    break
+                time.sleep(_RL_LOGS_INITIAL_WAIT_POLL_SECONDS)
             if raw:
-                if raw_logs:
+                if raw_logs.strip():
                     console.print(raw_logs)
                 else:
                     console.print("[yellow]No logs available yet.[/yellow]")

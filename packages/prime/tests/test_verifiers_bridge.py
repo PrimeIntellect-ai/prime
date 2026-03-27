@@ -128,6 +128,7 @@ def test_run_eval_uploads_even_when_local_env_is_ahead(monkeypatch, capsys):
 
     output = capsys.readouterr().out
     assert "tracked upstream anyway" in output
+    assert output.count("Environment URL:") == 1
 
 
 def test_run_eval_warns_when_upload_is_required_but_no_upstream_exists(monkeypatch, capsys):

@@ -1,6 +1,10 @@
 import json
+from typing import Any, cast
 
+import pytest
+import typer
 from prime_cli.commands.env import compute_content_hash
+from prime_cli.core import APIClient
 from prime_cli.verifiers_bridge import (
     ResolvedEnvironment,
     _compute_local_content_hash,
@@ -50,7 +54,7 @@ def test_fetch_remote_env_details_uses_versions_endpoint_for_content_hash():
                 }
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
-    details = _fetch_remote_env_details(DummyClient(), "alice", "simpleqa")
+    details = _fetch_remote_env_details(cast(Any, DummyClient()), "alice", "simpleqa")
 
     assert details is not None
     assert details["sha256"] == "artifact-sha-not-source-hash"
@@ -79,7 +83,7 @@ def test_resolve_local_env_display_recognizes_in_sync_metadata_connected_env(tmp
     )
 
     env_display_id, platform_slug, platform_url, recommend_push, push_reason = (
-        _resolve_local_env_display("simpleqa", env_dir, object())
+        _resolve_local_env_display("simpleqa", env_dir, APIClient(api_key="test-key"))
     )
 
     assert env_display_id == "alice/simpleqa"
@@ -122,7 +126,7 @@ def _setup_eval_passthrough(monkeypatch):
     monkeypatch.setattr("prime_cli.verifiers_bridge._run_command", lambda *args, **kwargs: None)
 
 
-def test_run_eval_uploads_even_when_local_env_is_ahead(monkeypatch, capsys):
+def test_run_eval_requires_publish_before_upload_when_local_env_is_ahead(monkeypatch, capsys):
     _setup_eval_passthrough(monkeypatch)
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._prepare_single_environment",
@@ -135,6 +139,30 @@ def test_run_eval_uploads_even_when_local_env_is_ahead(monkeypatch, capsys):
             platform_url="https://app.primeintellect.ai/dashboard/environments/alice/simpleqa",
             recommend_push=True,
             push_reason="ahead",
+            local_env_path=None,
+        ),
+    )
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *args, **kwargs: True)
+
+    push_calls = []
+
+    def fake_env_push(**kwargs):
+        push_calls.append(kwargs)
+
+    monkeypatch.setattr("prime_cli.commands.env.push", fake_env_push)
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._resolve_environment_reference",
+        lambda env_name, env_dir_path: ResolvedEnvironment(
+            original=env_name,
+            env_name=env_name,
+            install_mode="local",
+            env_display_id="alice/simpleqa",
+            upstream_slug="alice/simpleqa",
+            platform_slug="alice/simpleqa",
+            platform_url="https://app.primeintellect.ai/dashboard/environments/alice/simpleqa",
+            recommend_push=False,
+            local_env_path=None,
         ),
     )
 
@@ -155,18 +183,19 @@ def test_run_eval_uploads_even_when_local_env_is_ahead(monkeypatch, capsys):
         env_path=None,
     )
 
+    assert push_calls == [{"path": None, "owner": "alice", "name": "simpleqa"}]
     assert captured["env_name"] == "simpleqa"
     assert captured["model"] == "openai/gpt-4.1-mini"
     assert captured["job_id"] == "job-123"
     assert captured["upstream_slug"] == "alice/simpleqa"
 
     output = capsys.readouterr().out
-    assert "tracked upstream anyway" not in output
-    assert "Local environment is ahead" not in output
+    assert "Cannot push evaluation results:" in output
+    assert "reproducible" in output
     assert output.count("Environment URL:") == 1
 
 
-def test_run_eval_warns_when_upload_is_required_but_no_upstream_exists(monkeypatch, capsys):
+def test_run_eval_fails_when_local_env_diverges_in_non_interactive_mode(monkeypatch, capsys):
     _setup_eval_passthrough(monkeypatch)
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._prepare_single_environment",
@@ -177,21 +206,21 @@ def test_run_eval_warns_when_upload_is_required_but_no_upstream_exists(monkeypat
             env_display_id="simpleqa (local only)",
             recommend_push=True,
             push_reason="local_only",
+            local_env_path=None,
         ),
     )
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.find_environment_metadata", lambda **kwargs: None
-    )
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
 
-    run_eval_passthrough(
-        environment="simpleqa",
-        passthrough_args=[],
-        skip_upload=False,
-        env_path=None,
-    )
+    with pytest.raises(typer.Exit) as exc_info:
+        run_eval_passthrough(
+            environment="simpleqa",
+            passthrough_args=[],
+            skip_upload=False,
+            env_path=None,
+        )
 
+    assert cast(typer.Exit, exc_info.value).exit_code == 1
     output = capsys.readouterr().out
-    assert "Failed to push results to hub:" in output
-    assert "no upstream environment found" in output
-    assert "Evaluation completed but results were not pushed." in output
-    assert "tracked upstream anyway" not in output
+    assert "Cannot push evaluation results:" in output
+    assert "reproducible" in output
+    assert "Publish the current local version with:" in output

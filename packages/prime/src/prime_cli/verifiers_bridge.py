@@ -856,6 +856,53 @@ def _print_environment_source_footer(resolved: Optional[ResolvedEnvironment]) ->
         )
 
 
+def _ensure_published_environment_for_eval(
+    resolved: ResolvedEnvironment,
+    env_dir_path: str,
+) -> ResolvedEnvironment:
+    console.print(
+        "[red]Cannot push evaluation results:[/red] the local environment differs from the "
+        "published upstream."
+    )
+    console.print(
+        "[yellow]Pushed evaluations must match a published environment version to remain "
+        "reproducible.[/yellow]"
+    )
+    console.print(
+        f"[dim]Publish the current local version with:[/dim] {_format_push_command(resolved)}"
+    )
+
+    if not sys.stdin.isatty():
+        raise typer.Exit(1)
+
+    if not typer.confirm("Publish the current local environment now?", default=True):
+        raise typer.Exit(1)
+
+    from .commands.env import push as env_push
+
+    owner = None
+    name = None
+    if resolved.platform_slug:
+        parts = _split_owner_and_name(resolved.platform_slug)
+        if parts is not None:
+            owner, name = parts
+
+    env_push(
+        path=str(resolved.local_env_path) if resolved.local_env_path is not None else None,
+        owner=owner,
+        name=name,
+    )
+
+    refreshed = _resolve_environment_reference(resolved.env_name, env_dir_path)
+    if refreshed.recommend_push:
+        console.print(
+            "[red]Failed to publish a reproducible environment version for this evaluation.[/red]"
+        )
+        raise typer.Exit(1)
+
+    return refreshed
+
+
 def run_eval_passthrough(
     environment: str,
     passthrough_args: list[str],
@@ -923,13 +970,10 @@ def run_eval_passthrough(
         )
         return
 
-    if (
-        resolved_env is not None
-        and resolved_env.recommend_push
-        and resolved_env.platform_slug is not None
-        and upstream_slug is None
-    ):
-        upstream_slug = resolved_env.platform_slug
+    if resolved_env is not None and resolved_env.recommend_push:
+        resolved_env = _ensure_published_environment_for_eval(resolved_env, env_dir_path)
+        upstream_slug = resolved_env.upstream_slug or resolved_env.platform_slug
+        env_name_for_upload = resolved_env.env_name
 
     upload_env_name = env_name_for_upload or environment
     if upstream_slug is None:

@@ -161,7 +161,8 @@ def test_run_eval_uploads_even_when_local_env_is_ahead(monkeypatch, capsys):
     assert captured["upstream_slug"] == "alice/simpleqa"
 
     output = capsys.readouterr().out
-    assert "tracked upstream anyway" in output
+    assert "tracked upstream anyway" not in output
+    assert "Local environment is ahead" not in output
     assert output.count("Environment URL:") == 1
 
 

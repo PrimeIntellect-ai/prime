@@ -849,17 +849,8 @@ def _print_environment_source_footer(resolved: Optional[ResolvedEnvironment]) ->
         return
     if resolved.platform_url:
         console.print(f"[dim]Environment URL: {resolved.platform_url}[/dim]")
-    if resolved.recommend_push:
-        if resolved.push_reason == "ahead" and resolved.platform_slug:
-            console.print(
-                f"[yellow]Local environment is ahead of {resolved.platform_slug}.[/yellow]"
-            )
-        elif resolved.push_reason == "local_only":
-            console.print("[yellow]Local environment is not linked to an upstream.[/yellow]")
-        else:
-            console.print(
-                "[yellow]Local environment differs from the current platform version.[/yellow]"
-            )
+    if resolved.push_reason == "local_only":
+        console.print("[yellow]Local environment is not linked to an upstream.[/yellow]")
         console.print(
             f"[dim]Publish the current local version with:[/dim] {_format_push_command(resolved)}"
         )
@@ -892,7 +883,6 @@ def run_eval_passthrough(
     upstream_slug: Optional[str] = None
     env_name_for_upload: Optional[str] = None
     resolved_env: Optional[ResolvedEnvironment] = None
-    printed_environment_footer = False
 
     if _is_config_target(environment):
         for env_ref, ref_env_dir in _collect_eval_config_envs(Path(environment), env_dir_path):
@@ -937,15 +927,9 @@ def run_eval_passthrough(
         resolved_env is not None
         and resolved_env.recommend_push
         and resolved_env.platform_slug is not None
+        and upstream_slug is None
     ):
-        _print_environment_source_footer(resolved_env)
-        printed_environment_footer = True
-        console.print(
-            "[yellow]Warning:[/yellow] Local environment differs from the current "
-            "platform version. Uploading evaluation results to the tracked upstream anyway."
-        )
-        if upstream_slug is None:
-            upstream_slug = resolved_env.platform_slug
+        upstream_slug = resolved_env.platform_slug
 
     upload_env_name = env_name_for_upload or environment
     if upstream_slug is None:
@@ -969,7 +953,7 @@ def run_eval_passthrough(
         console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
         return
 
-    if resolved_env is not None and resolved_env.platform_url and not printed_environment_footer:
+    if resolved_env is not None and resolved_env.platform_url:
         console.print(f"[dim]Environment URL: {resolved_env.platform_url}[/dim]")
 
     try:

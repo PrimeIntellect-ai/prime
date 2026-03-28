@@ -920,8 +920,6 @@ class SandboxClient:
         Raises:
             TimeoutError: If command doesn't complete within timeout
         """
-        import time
-
         job = self.start_background_job(
             sandbox_id, command, working_dir=working_dir, env=env
         )
@@ -1781,16 +1779,15 @@ class AsyncSandboxClient:
         Raises:
             TimeoutError: If command doesn't complete within timeout
         """
-        import asyncio as _asyncio
-
         job = await self.start_background_job(
             sandbox_id, command, working_dir=working_dir, env=env
         )
-        for _elapsed in range(0, timeout + poll_interval, poll_interval):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             status = await self.get_background_job(sandbox_id, job)
             if status.completed:
                 return status
-            await _asyncio.sleep(poll_interval)
+            await asyncio.sleep(poll_interval)
         raise TimeoutError(
             f"Background job {job.job_id} timed out after {timeout}s"
         )

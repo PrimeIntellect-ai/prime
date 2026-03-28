@@ -891,6 +891,46 @@ class SandboxClient:
             stderr=read_or_cat(job.stderr_log_file),
         )
 
+    def run_background_job(
+        self,
+        sandbox_id: str,
+        command: str,
+        timeout: int = 900,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        poll_interval: int = 3,
+    ) -> BackgroundJobStatus:
+        """Run a command in the background and wait for completion.
+
+        Combines start_background_job() + polling into a single call.
+        Use this for long-running commands that would exceed HTTP timeouts
+        with execute_command().
+
+        Args:
+            sandbox_id: The sandbox ID
+            command: Command to execute
+            timeout: Maximum seconds to wait for completion
+            working_dir: Working directory for command execution
+            env: Environment variables
+            poll_interval: Seconds between status polls
+
+        Returns:
+            BackgroundJobStatus with exit_code, stdout, stderr
+
+        Raises:
+            CommandTimeoutError: If command doesn't complete within timeout
+        """
+        job = self.start_background_job(
+            sandbox_id, command, working_dir=working_dir, env=env
+        )
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = self.get_background_job(sandbox_id, job)
+            if status.completed:
+                return status
+            time.sleep(poll_interval)
+        raise CommandTimeoutError(sandbox_id, command, timeout)
+
     def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1
     ) -> None:
@@ -1707,6 +1747,46 @@ class AsyncSandboxClient:
             stdout=await read_or_cat(job.stdout_log_file),
             stderr=await read_or_cat(job.stderr_log_file),
         )
+
+    async def run_background_job(
+        self,
+        sandbox_id: str,
+        command: str,
+        timeout: int = 900,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        poll_interval: int = 3,
+    ) -> BackgroundJobStatus:
+        """Run a command in the background and wait for completion (async).
+
+        Combines start_background_job() + polling into a single call.
+        Use this for long-running commands that would exceed HTTP timeouts
+        with execute_command().
+
+        Args:
+            sandbox_id: The sandbox ID
+            command: Command to execute
+            timeout: Maximum seconds to wait for completion
+            working_dir: Working directory for command execution
+            env: Environment variables
+            poll_interval: Seconds between status polls
+
+        Returns:
+            BackgroundJobStatus with exit_code, stdout, stderr
+
+        Raises:
+            CommandTimeoutError: If command doesn't complete within timeout
+        """
+        job = await self.start_background_job(
+            sandbox_id, command, working_dir=working_dir, env=env
+        )
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = await self.get_background_job(sandbox_id, job)
+            if status.completed:
+                return status
+            await asyncio.sleep(poll_interval)
+        raise CommandTimeoutError(sandbox_id, command, timeout)
 
     async def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1

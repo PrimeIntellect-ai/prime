@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Optional
 
 import toml
 import typer
@@ -20,6 +20,10 @@ from prime_cli.core import Config
 from .api.inference import InferenceAPIError, InferenceClient, InferencePaymentRequiredError
 from .client import APIClient, APIError
 from .utils.env_metadata import find_environment_metadata, get_environment_metadata
+from .utils.environment_versions import (
+    extract_env_version_summary,
+    fetch_latest_env_version_summary,
+)
 from .utils.eval_push import push_eval_results_to_hub
 from .utils.plain import get_console
 from .verifiers_plugin import PrimeVerifiersPlugin, load_verifiers_prime_plugin
@@ -343,41 +347,6 @@ def _fetch_active_team_slug(client: APIClient, active_team_id: Optional[str]) ->
     return None
 
 
-def _extract_version_summary(version_data: Mapping[str, object]) -> dict[str, str]:
-    version_label = version_data.get("semantic_version") or version_data.get("version")
-    semantic_version = (
-        version_label.removesuffix(" (latest)") if isinstance(version_label, str) else ""
-    )
-
-    content_hash = version_data.get("content_hash") or version_data.get("sha256")
-
-    summary: dict[str, str] = {}
-    if semantic_version:
-        summary["semantic_version"] = semantic_version
-    if isinstance(content_hash, str) and content_hash:
-        summary["content_hash"] = content_hash
-    return summary
-
-
-def _fetch_latest_version_summary(
-    client: APIClient,
-    owner_slug: str,
-    env_name: str,
-) -> Optional[dict[str, str]]:
-    try:
-        response = client.get(f"/environmentshub/{owner_slug}/{env_name}/versions")
-    except APIError:
-        return None
-
-    versions_data = response.get("data", response)
-    versions = versions_data.get("versions")
-    if not versions:
-        return None
-
-    latest_version = _extract_version_summary(versions[0])
-    return latest_version or None
-
-
 def _fetch_remote_env_details(
     client: APIClient, owner_slug: str, env_name: str, version: str = "latest"
 ) -> Optional[dict]:
@@ -390,17 +359,15 @@ def _fetch_remote_env_details(
     if not isinstance(details, dict) or version != "latest":
         return details if isinstance(details, dict) else {}
 
-    # The @latest endpoint currently returns an artifact sha256, not the source content hash
-    # used by `prime env push`. The /versions endpoint exposes the content hash we need for
-    # local-vs-remote sync detection, so enrich latest_version from there when needed.
+    # Enrich latest_version from /versions when @latest does not include the source content hash.
     latest_version = details.get("latest_version")
     latest_summary = (
-        _extract_version_summary(latest_version) if isinstance(latest_version, Mapping) else {}
+        extract_env_version_summary(latest_version) if isinstance(latest_version, dict) else {}
     )
     if latest_summary.get("content_hash"):
         return details
 
-    fallback_latest_version = _fetch_latest_version_summary(client, owner_slug, env_name)
+    fallback_latest_version = fetch_latest_env_version_summary(client, owner_slug, env_name)
     if not fallback_latest_version:
         return details
 

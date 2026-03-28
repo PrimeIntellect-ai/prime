@@ -126,7 +126,7 @@ def _setup_eval_passthrough(monkeypatch):
     monkeypatch.setattr("prime_cli.verifiers_bridge._run_command", lambda *args, **kwargs: None)
 
 
-def test_run_eval_requires_publish_before_upload_when_local_env_is_ahead(monkeypatch, capsys):
+def test_run_eval_fails_when_local_env_is_ahead(monkeypatch, capsys):
     _setup_eval_passthrough(monkeypatch)
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._prepare_single_environment",
@@ -142,60 +142,20 @@ def test_run_eval_requires_publish_before_upload_when_local_env_is_ahead(monkeyp
             local_env_path=None,
         ),
     )
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("typer.confirm", lambda *args, **kwargs: True)
 
-    push_calls = []
+    with pytest.raises(typer.Exit) as exc_info:
+        run_eval_passthrough(
+            environment="simpleqa",
+            passthrough_args=[],
+            skip_upload=False,
+            env_path=None,
+        )
 
-    def fake_publish_environment_for_eval(resolved):
-        push_calls.append(resolved.platform_slug)
-
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._publish_environment_for_eval",
-        fake_publish_environment_for_eval,
-    )
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._resolve_environment_reference",
-        lambda env_name, env_dir_path: ResolvedEnvironment(
-            original=env_name,
-            env_name=env_name,
-            install_mode="local",
-            env_display_id="alice/simpleqa",
-            upstream_slug="alice/simpleqa",
-            platform_slug="alice/simpleqa",
-            platform_url="https://app.primeintellect.ai/dashboard/environments/alice/simpleqa",
-            recommend_push=False,
-            local_env_path=None,
-        ),
-    )
-
-    captured = {}
-
-    def fake_push_eval_results_to_hub(**kwargs):
-        captured.update(kwargs)
-
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.push_eval_results_to_hub",
-        fake_push_eval_results_to_hub,
-    )
-
-    run_eval_passthrough(
-        environment="simpleqa",
-        passthrough_args=[],
-        skip_upload=False,
-        env_path=None,
-    )
-
-    assert push_calls == ["alice/simpleqa"]
-    assert captured["env_name"] == "simpleqa"
-    assert captured["model"] == "openai/gpt-4.1-mini"
-    assert captured["job_id"] == "job-123"
-    assert captured["upstream_slug"] == "alice/simpleqa"
-
+    assert cast(typer.Exit, exc_info.value).exit_code == 1
     output = capsys.readouterr().out
     assert "Cannot push evaluation results:" in output
     assert "reproducible" in output
-    assert output.count("Environment URL:") == 1
+    assert "Publish the current local version with:" in output
 
 
 def test_run_eval_fails_when_local_env_diverges_in_non_interactive_mode(monkeypatch, capsys):
@@ -212,8 +172,6 @@ def test_run_eval_fails_when_local_env_diverges_in_non_interactive_mode(monkeypa
             local_env_path=None,
         ),
     )
-    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-
     with pytest.raises(typer.Exit) as exc_info:
         run_eval_passthrough(
             environment="simpleqa",

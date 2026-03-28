@@ -4,6 +4,7 @@ from prime_cli.commands.env import compute_content_hash
 from prime_cli.verifiers_bridge import (
     ResolvedEnvironment,
     _compute_local_content_hash,
+    _fetch_remote_env_details,
     _resolve_local_env_display,
     run_eval_passthrough,
 )
@@ -24,6 +25,39 @@ def test_compute_local_content_hash_matches_env_push_hash(tmp_path):
     _create_env(env_dir)
 
     assert _compute_local_content_hash(env_dir) == compute_content_hash(env_dir)
+
+
+def test_fetch_remote_env_details_uses_versions_endpoint_for_content_hash():
+    class DummyClient:
+        def get(self, endpoint):
+            if endpoint == "/environmentshub/alice/simpleqa/@latest":
+                return {
+                    "data": {
+                        "name": "simpleqa",
+                        "sha256": "artifact-sha-not-source-hash",
+                    }
+                }
+            if endpoint == "/environmentshub/alice/simpleqa/versions":
+                return {
+                    "data": {
+                        "versions": [
+                            {
+                                "version": "0.1.4 (latest)",
+                                "sha256": "a" * 64,
+                            }
+                        ]
+                    }
+                }
+            raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    details = _fetch_remote_env_details(DummyClient(), "alice", "simpleqa")
+
+    assert details is not None
+    assert details["sha256"] == "artifact-sha-not-source-hash"
+    assert details["latest_version"] == {
+        "semantic_version": "0.1.4",
+        "content_hash": "a" * 64,
+    }
 
 
 def test_resolve_local_env_display_recognizes_in_sync_metadata_connected_env(tmp_path, monkeypatch):

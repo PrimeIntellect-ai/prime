@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 import toml
 import typer
@@ -343,20 +343,74 @@ def _fetch_active_team_slug(client: APIClient, active_team_id: Optional[str]) ->
     return None
 
 
+def _extract_version_summary(version_data: Mapping[str, object]) -> dict[str, str]:
+    version_label = version_data.get("semantic_version") or version_data.get("version")
+    semantic_version = (
+        version_label.removesuffix(" (latest)") if isinstance(version_label, str) else ""
+    )
+
+    content_hash = version_data.get("content_hash") or version_data.get("sha256")
+
+    summary: dict[str, str] = {}
+    if semantic_version:
+        summary["semantic_version"] = semantic_version
+    if isinstance(content_hash, str) and content_hash:
+        summary["content_hash"] = content_hash
+    return summary
+
+
+def _fetch_latest_version_summary(
+    client: APIClient,
+    owner_slug: str,
+    env_name: str,
+) -> Optional[dict[str, str]]:
+    try:
+        response = client.get(f"/environmentshub/{owner_slug}/{env_name}/versions")
+    except APIError:
+        return None
+
+    versions_data = response.get("data", response)
+    versions = versions_data.get("versions")
+    if not versions:
+        return None
+
+    latest_version = _extract_version_summary(versions[0])
+    return latest_version or None
+
+
 def _fetch_remote_env_details(
     client: APIClient, owner_slug: str, env_name: str, version: str = "latest"
 ) -> Optional[dict]:
     try:
         response = client.get(f"/environmentshub/{owner_slug}/{env_name}/@{version}")
-        details = response.get("data", response) if isinstance(response, dict) else None
-        if isinstance(details, dict):
-            return details
-        return {}
-    except APIError as exc:
-        message = str(exc).lower()
-        if "404" in message or "not found" in message:
-            return None
+    except APIError:
         return None
+
+    details = response.get("data", response)
+    if not isinstance(details, dict) or version != "latest":
+        return details if isinstance(details, dict) else {}
+
+    # The @latest endpoint currently returns an artifact sha256, not the source content hash
+    # used by `prime env push`. The /versions endpoint exposes the content hash we need for
+    # local-vs-remote sync detection, so enrich latest_version from there when needed.
+    latest_version = details.get("latest_version")
+    latest_summary = (
+        _extract_version_summary(latest_version) if isinstance(latest_version, Mapping) else {}
+    )
+    if latest_summary.get("content_hash"):
+        return details
+
+    fallback_latest_version = _fetch_latest_version_summary(client, owner_slug, env_name)
+    if not fallback_latest_version:
+        return details
+
+    return {
+        **details,
+        "latest_version": {
+            **latest_summary,
+            **fallback_latest_version,
+        },
+    }
 
 
 def _extract_remote_version_details(details: Optional[dict]) -> tuple[Optional[str], Optional[str]]:

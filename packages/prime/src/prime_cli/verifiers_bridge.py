@@ -823,6 +823,21 @@ def _print_environment_source_footer(resolved: Optional[ResolvedEnvironment]) ->
         )
 
 
+def _publish_environment_for_eval(resolved: ResolvedEnvironment) -> None:
+    command = [sys.executable, "-m", "prime_cli.main", "env", "push"]
+
+    if resolved.local_env_path is not None:
+        command.extend(["--path", str(resolved.local_env_path)])
+
+    if resolved.platform_slug:
+        parts = _split_owner_and_name(resolved.platform_slug)
+        if parts is not None:
+            owner, name = parts
+            command.extend(["--owner", owner, "--name", name])
+
+    _run_command(command)
+
+
 def _ensure_published_environment_for_eval(
     resolved: ResolvedEnvironment,
     env_dir_path: str,
@@ -842,23 +857,10 @@ def _ensure_published_environment_for_eval(
     if not sys.stdin.isatty():
         raise typer.Exit(1)
 
-    if not typer.confirm("Publish the current local environment now?", default=True):
+    if not typer.confirm("Publish the current local environment now?"):
         raise typer.Exit(1)
 
-    from .commands.env import push as env_push
-
-    owner = None
-    name = None
-    if resolved.platform_slug:
-        parts = _split_owner_and_name(resolved.platform_slug)
-        if parts is not None:
-            owner, name = parts
-
-    env_push(
-        path=str(resolved.local_env_path) if resolved.local_env_path is not None else None,
-        owner=owner,
-        name=name,
-    )
+    _publish_environment_for_eval(resolved)
 
     refreshed = _resolve_environment_reference(resolved.env_name, env_dir_path)
     if refreshed.recommend_push:

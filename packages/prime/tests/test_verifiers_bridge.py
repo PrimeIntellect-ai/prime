@@ -147,10 +147,13 @@ def test_run_eval_requires_publish_before_upload_when_local_env_is_ahead(monkeyp
 
     push_calls = []
 
-    def fake_env_push(**kwargs):
-        push_calls.append(kwargs)
+    def fake_publish_environment_for_eval(resolved):
+        push_calls.append(resolved.platform_slug)
 
-    monkeypatch.setattr("prime_cli.commands.env.push", fake_env_push)
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._publish_environment_for_eval",
+        fake_publish_environment_for_eval,
+    )
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._resolve_environment_reference",
         lambda env_name, env_dir_path: ResolvedEnvironment(
@@ -183,7 +186,7 @@ def test_run_eval_requires_publish_before_upload_when_local_env_is_ahead(monkeyp
         env_path=None,
     )
 
-    assert push_calls == [{"path": None, "owner": "alice", "name": "simpleqa"}]
+    assert push_calls == ["alice/simpleqa"]
     assert captured["env_name"] == "simpleqa"
     assert captured["model"] == "openai/gpt-4.1-mini"
     assert captured["job_id"] == "job-123"

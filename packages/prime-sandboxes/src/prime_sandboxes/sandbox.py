@@ -918,7 +918,7 @@ class SandboxClient:
             BackgroundJobStatus with exit_code, stdout, stderr
 
         Raises:
-            TimeoutError: If command doesn't complete within timeout
+            CommandTimeoutError: If command doesn't complete within timeout
         """
         job = self.start_background_job(
             sandbox_id, command, working_dir=working_dir, env=env
@@ -929,9 +929,7 @@ class SandboxClient:
             if status.completed:
                 return status
             time.sleep(poll_interval)
-        raise TimeoutError(
-            f"Background job {job.job_id} timed out after {timeout}s"
-        )
+        raise CommandTimeoutError(sandbox_id, command, timeout)
 
     def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1
@@ -1777,7 +1775,7 @@ class AsyncSandboxClient:
             BackgroundJobStatus with exit_code, stdout, stderr
 
         Raises:
-            TimeoutError: If command doesn't complete within timeout
+            CommandTimeoutError: If command doesn't complete within timeout
         """
         job = await self.start_background_job(
             sandbox_id, command, working_dir=working_dir, env=env
@@ -1788,9 +1786,7 @@ class AsyncSandboxClient:
             if status.completed:
                 return status
             await asyncio.sleep(poll_interval)
-        raise TimeoutError(
-            f"Background job {job.job_id} timed out after {timeout}s"
-        )
+        raise CommandTimeoutError(sandbox_id, command, timeout)
 
     async def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1

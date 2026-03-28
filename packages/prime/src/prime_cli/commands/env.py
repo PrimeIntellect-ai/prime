@@ -802,13 +802,13 @@ def status_cmd(
             # Latest Version section
             console.print("\n[bold]Latest Version:[/bold]")
             latest_version = data.get("latest_version")
-            if isinstance(latest_version, dict):
-                latest_summary = extract_env_version_summary(latest_version)
+            latest_summary = extract_env_version_summary(latest_version)
+            if latest_summary:
                 content_hash = latest_summary.get("content_hash", "")
                 version_str = latest_summary.get("semantic_version") or content_hash[:8]
                 console.print(f"  Version: {version_str}")
                 console.print(f"  Hash: {content_hash[:12] if content_hash else '-'}")
-                created_at = latest_version.get("created_at")
+                created_at = latest_version.get("created_at") if latest_version else None
                 console.print(f"  Created: {format_time_ago(created_at)}")
             else:
                 console.print("  [dim]No versions found[/dim]")

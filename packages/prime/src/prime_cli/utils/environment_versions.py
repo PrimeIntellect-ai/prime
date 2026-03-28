@@ -5,7 +5,10 @@ from typing import Mapping, Optional
 from ..client import APIClient, APIError
 
 
-def extract_env_version_summary(version_data: Mapping[str, object]) -> dict[str, str]:
+def extract_env_version_summary(version_data: Mapping[str, object] | None) -> dict[str, str]:
+    if version_data is None:
+        return {}
+
     version_label = version_data.get("semantic_version") or version_data.get("version")
     semantic_version = (
         version_label.removesuffix(" (latest)") if isinstance(version_label, str) else ""

@@ -46,8 +46,8 @@ def test_fetch_remote_env_details_uses_versions_endpoint_for_content_hash():
                     "data": {
                         "versions": [
                             {
-                                "version": "0.1.4 (latest)",
-                                "sha256": "a" * 64,
+                                "semantic_version": "0.1.4",
+                                "content_hash": "a" * 64,
                             }
                         ]
                     }

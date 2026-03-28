@@ -318,6 +318,139 @@ def test_create_hosted_evaluation_accepts_plural_ids_response(monkeypatch):
     assert result["evaluation_ids"] == ["eval-123", "eval-456"]
 
 
+def test_create_hosted_evaluation_preserves_failed_response_with_evaluation_id(monkeypatch):
+    class DummyConfig:
+        team_id = None
+
+    class DummyAPIClient:
+        def __init__(self):
+            self.config = DummyConfig()
+
+        def post(self, endpoint, json=None):
+            return {
+                "evaluation_id": "eval-123",
+                "status": "FAILED",
+                "error": "You are not a member of this team",
+            }
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+
+    result = _create_hosted_evaluations(
+        HostedEvalConfig(
+            environment_id="env-123",
+            inference_model="openai/gpt-4.1-mini",
+            num_examples=5,
+            rollouts_per_example=3,
+        )
+    )
+
+    assert result["evaluation_id"] == "eval-123"
+    assert result["status"] == "FAILED"
+    assert result["error"] == "You are not a member of this team"
+
+
+def test_eval_run_hosted_reports_failed_create_response_with_evaluation_id(monkeypatch):
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_hosted_environment",
+        lambda environment, env_dir_path=None, env_path=None: (
+            "primeintellect/gsm8k",
+            "env-123",
+        ),
+    )
+
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        return {
+            "evaluation_id": "eval-123",
+            "status": "FAILED",
+            "error": "You are not a member of this team",
+        }
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_run_hosted_evaluation,
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "primeintellect/gsm8k", "--hosted", "-m", "openai/gpt-4.1-mini"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "Hosted evaluation creation returned failed evaluations." in result.output
+    assert "Evaluation IDs:" in result.output
+    assert "eval-123" in result.output
+    assert "Status: FAILED" in result.output
+    assert "You are not a member of this team" in result.output
+    assert "prime eval logs eval-123 -f" in result.output
+    assert "Hosted evaluation started" not in result.output
+
+
+def test_eval_run_hosted_reports_failed_create_response_with_plural_ids(monkeypatch):
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_hosted_environment",
+        lambda environment, env_dir_path=None, env_path=None: (
+            "primeintellect/gsm8k",
+            "env-123",
+        ),
+    )
+
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        return {
+            "evaluation_ids": ["eval-123", "eval-456"],
+            "status": "FAILED",
+            "error": "Startup failed",
+        }
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_run_hosted_evaluation,
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "primeintellect/gsm8k", "--hosted", "-m", "openai/gpt-4.1-mini"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "Evaluation IDs:" in result.output
+    assert "eval-123, eval-456" in result.output
+    assert "prime eval logs eval-123 -f" in result.output
+    assert "prime eval logs eval-456 -f" in result.output
+
+
+def test_create_hosted_evaluation_ids_falls_back_to_singular_id_when_plural_is_empty(monkeypatch):
+    class DummyConfig:
+        team_id = None
+
+    class DummyAPIClient:
+        def __init__(self):
+            self.config = DummyConfig()
+
+        def post(self, endpoint, json=None):
+            return {
+                "evaluation_id": "eval-123",
+                "evaluation_ids": [],
+                "status": "FAILED",
+                "error": "Startup failed",
+            }
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+
+    result = _create_hosted_evaluations(
+        HostedEvalConfig(
+            environment_id="env-123",
+            inference_model="openai/gpt-4.1-mini",
+            num_examples=5,
+            rollouts_per_example=3,
+        )
+    )
+
+    assert result["evaluation_id"] == "eval-123"
+    assert result["evaluation_ids"] == []
+
+
 def test_eval_run_hosted_follow_streams_logs(monkeypatch):
     captured = {}
 

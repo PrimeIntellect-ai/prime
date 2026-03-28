@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Mapping, Optional
+from typing import Mapping, Optional, cast
 
 from ..client import APIClient, APIError
 
@@ -31,19 +31,9 @@ def fetch_latest_env_version_summary(
 ) -> Optional[dict[str, str]]:
     try:
         response = client.get(f"/environmentshub/{owner_slug}/{env_name}/versions")
-    except APIError:
-        return None
-
-    versions_data = response.get("data", response)
-    if not isinstance(versions_data, dict):
-        return None
-
-    versions = versions_data.get("versions")
-    if not isinstance(versions, list) or not versions:
-        return None
-
-    latest_version = versions[0]
-    if not isinstance(latest_version, Mapping):
+        versions = response["data"]["versions"]
+        latest_version = cast(Mapping[str, object], versions[0])
+    except (APIError, KeyError, IndexError, TypeError):
         return None
 
     summary = extract_env_version_summary(latest_version)

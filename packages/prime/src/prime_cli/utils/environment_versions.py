@@ -9,6 +9,8 @@ def extract_env_version_summary(version_data: Mapping[str, object] | None) -> di
     if version_data is None:
         return {}
 
+    # TODO: remove these fallback aliases once the platform /versions response
+    # exposes semantic_version/content_hash directly alongside version/sha256.
     version_label = version_data.get("semantic_version") or version_data.get("version")
     semantic_version = (
         version_label.removesuffix(" (latest)") if isinstance(version_label, str) else ""

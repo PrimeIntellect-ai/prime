@@ -142,6 +142,14 @@ def test_run_eval_fails_when_local_env_is_ahead(monkeypatch, capsys):
             local_env_path=None,
         ),
     )
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.push_eval_results_to_hub",
+        lambda **kwargs: pytest.fail("eval upload should not run for unpublished environments"),
+    )
+    monkeypatch.setattr(
+        "typer.confirm",
+        lambda *args, **kwargs: pytest.fail("eval upload should not prompt to publish"),
+    )
 
     with pytest.raises(typer.Exit) as exc_info:
         run_eval_passthrough(
@@ -154,6 +162,7 @@ def test_run_eval_fails_when_local_env_is_ahead(monkeypatch, capsys):
     assert cast(typer.Exit, exc_info.value).exit_code == 1
     output = capsys.readouterr().out
     assert "Cannot push evaluation results:" in output
+    assert "differs from the published" in output
     assert "reproducible" in output
     assert "Publish the current local version with:" in output
 
@@ -183,5 +192,6 @@ def test_run_eval_fails_when_local_env_diverges_in_non_interactive_mode(monkeypa
     assert cast(typer.Exit, exc_info.value).exit_code == 1
     output = capsys.readouterr().out
     assert "Cannot push evaluation results:" in output
+    assert "the local environment is not published yet" in output
     assert "reproducible" in output
     assert "Publish the current local version with:" in output

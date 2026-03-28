@@ -824,10 +824,11 @@ def _print_environment_source_footer(resolved: Optional[ResolvedEnvironment]) ->
 
 
 def _fail_unpublished_environment_for_eval(resolved: ResolvedEnvironment) -> None:
-    console.print(
-        "[red]Cannot push evaluation results:[/red] the local environment differs from the "
-        "published upstream."
-    )
+    message = "the local environment differs from the published upstream."
+    if resolved.push_reason == "local_only":
+        message = "the local environment is not published yet."
+
+    console.print(f"[red]Cannot push evaluation results:[/red] {message}")
     console.print(
         "[yellow]Pushed evaluations must match a published environment version to remain "
         "reproducible.[/yellow]"

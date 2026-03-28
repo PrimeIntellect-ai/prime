@@ -20,6 +20,10 @@ from prime_cli.core import Config
 from .api.inference import InferenceAPIError, InferenceClient, InferencePaymentRequiredError
 from .client import APIClient, APIError
 from .utils.env_metadata import find_environment_metadata, get_environment_metadata
+from .utils.environment_versions import (
+    extract_env_version_summary,
+    fetch_latest_env_version_summary,
+)
 from .utils.eval_push import push_eval_results_to_hub
 from .utils.plain import get_console
 from .verifiers_plugin import PrimeVerifiersPlugin, load_verifiers_prime_plugin
@@ -289,59 +293,16 @@ def _is_valid_hash(value: object) -> bool:
     )
 
 
-def _should_skip_directory(name: str) -> bool:
-    if name.startswith("."):
-        return True
-    if name in {"dist", "__pycache__", "build", "outputs"}:
-        return True
-    if name.endswith(".egg-info"):
-        return True
-    return False
-
-
 def _compute_local_content_hash(env_path: Path) -> Optional[str]:
-    import hashlib
-
     if not env_path.exists() or not env_path.is_dir():
         return None
 
-    hasher = hashlib.sha256()
-    items_to_hash: list[tuple[str, Path]] = []
+    from .commands.env import compute_content_hash
 
-    for pattern in ("pyproject.toml", "*.py", "README.md"):
-        for file_path in env_path.glob(pattern):
-            if file_path.is_file():
-                items_to_hash.append(("file", file_path))
-
-    for subdir in sorted(env_path.iterdir(), key=lambda p: p.name):
-        if not subdir.is_dir() or _should_skip_directory(subdir.name):
-            continue
-        items_to_hash.append(("dir", subdir))
-        for file_path in sorted(subdir.rglob("*")):
-            if not file_path.is_file():
-                continue
-            rel_parts = file_path.relative_to(env_path).parts
-            if any(_should_skip_directory(part) for part in rel_parts[:-1]):
-                continue
-            if file_path.name.startswith("."):
-                continue
-            items_to_hash.append(("file", file_path))
-
-    items_to_hash.sort(key=lambda item: item[1].relative_to(env_path).as_posix().lower())
-
-    for item_type, path in items_to_hash:
-        rel = path.relative_to(env_path).as_posix()
-        if item_type == "dir":
-            hasher.update(f"dir:{rel}".encode("utf-8"))
-            continue
-        hasher.update(f"file:{rel}".encode("utf-8"))
-        try:
-            with open(path, "rb") as f:
-                hasher.update(f.read())
-        except OSError:
-            return None
-
-    return hasher.hexdigest()
+    try:
+        return compute_content_hash(env_path)
+    except OSError:
+        return None
 
 
 def _fetch_user_slug(client: APIClient) -> Optional[str]:
@@ -391,15 +352,32 @@ def _fetch_remote_env_details(
 ) -> Optional[dict]:
     try:
         response = client.get(f"/environmentshub/{owner_slug}/{env_name}/@{version}")
-        details = response.get("data", response) if isinstance(response, dict) else None
-        if isinstance(details, dict):
-            return details
-        return {}
-    except APIError as exc:
-        message = str(exc).lower()
-        if "404" in message or "not found" in message:
-            return None
+    except APIError:
         return None
+
+    details = response.get("data", response)
+    if not isinstance(details, dict) or version != "latest":
+        return details if isinstance(details, dict) else {}
+
+    # Enrich latest_version from /versions when @latest does not include the source content hash.
+    latest_version = details.get("latest_version")
+    latest_summary = (
+        extract_env_version_summary(latest_version) if isinstance(latest_version, dict) else {}
+    )
+    if latest_summary.get("content_hash"):
+        return details
+
+    fallback_latest_version = fetch_latest_env_version_summary(client, owner_slug, env_name)
+    if not fallback_latest_version:
+        return details
+
+    return {
+        **details,
+        "latest_version": {
+            **latest_summary,
+            **fallback_latest_version,
+        },
+    }
 
 
 def _extract_remote_version_details(details: Optional[dict]) -> tuple[Optional[str], Optional[str]]:
@@ -838,20 +816,27 @@ def _print_environment_source_footer(resolved: Optional[ResolvedEnvironment]) ->
         return
     if resolved.platform_url:
         console.print(f"[dim]Environment URL: {resolved.platform_url}[/dim]")
-    if resolved.recommend_push:
-        if resolved.push_reason == "ahead" and resolved.platform_slug:
-            console.print(
-                f"[yellow]Local environment is ahead of {resolved.platform_slug}.[/yellow]"
-            )
-        elif resolved.push_reason == "local_only":
-            console.print("[yellow]Local environment is not linked to an upstream.[/yellow]")
-        else:
-            console.print(
-                "[yellow]Local environment differs from the current platform version.[/yellow]"
-            )
+    if resolved.push_reason == "local_only":
+        console.print("[yellow]Local environment is not linked to an upstream.[/yellow]")
         console.print(
             f"[dim]Publish the current local version with:[/dim] {_format_push_command(resolved)}"
         )
+
+
+def _fail_unpublished_environment_for_eval(resolved: ResolvedEnvironment) -> None:
+    message = "the local environment differs from the published upstream."
+    if resolved.push_reason == "local_only":
+        message = "the local environment is not published yet."
+
+    console.print(f"[red]Cannot push evaluation results:[/red] {message}")
+    console.print(
+        "[yellow]Pushed evaluations must match a published environment version to remain "
+        "reproducible.[/yellow]"
+    )
+    console.print(
+        f"[dim]Publish the current local version with:[/dim] {_format_push_command(resolved)}"
+    )
+    raise typer.Exit(1)
 
 
 def run_eval_passthrough(
@@ -922,12 +907,7 @@ def run_eval_passthrough(
         return
 
     if resolved_env is not None and resolved_env.recommend_push:
-        _print_environment_source_footer(resolved_env)
-        console.print(
-            "[yellow]Evaluation completed. Automatic upload is skipped until the local "
-            "environment is published.[/yellow]"
-        )
-        return
+        _fail_unpublished_environment_for_eval(resolved_env)
 
     upload_env_name = env_name_for_upload or environment
     if upstream_slug is None:
@@ -944,11 +924,11 @@ def run_eval_passthrough(
     if upstream_slug is None:
         _print_environment_source_footer(resolved_env)
         console.print(
-            "[dim]No upstream environment found. "
-            "Skipped uploading evaluation results to platform.\n"
+            "[red]Failed to push results to hub:[/red] no upstream environment found. "
             "Use `prime env push` to set an upstream, or use `--env-path` to specify the "
-            "correct environment path.[/dim]"
+            "correct environment path."
         )
+        console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
         return
 
     if resolved_env is not None and resolved_env.platform_url:

@@ -191,6 +191,17 @@ rollouts_per_example = 8
 [sampling]
 max_tokens = 2048
 # temperature = 0.7
+# repetition_penalty = 1.0
+# min_tokens = 0
+# seed = 42
+# extra_body = {{ }}
+
+# Optional: temperature scheduling (use instead of temperature)
+# [sampling.temp_scheduler]
+# type = "linear"               # "linear" or "cosine"
+# start_temperature = 1.5
+# end_temperature = 0.3
+# total_steps = 1000            # defaults to max_steps if not set
 
 [[env]]
 id = "{env_value}"
@@ -317,11 +328,25 @@ class EvalEnvConfig(BaseModel):
         return result
 
 
+class TemperatureSchedulerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: str = "linear"  # "linear" or "cosine"
+    start_temperature: float
+    end_temperature: float
+    total_steps: int | None = None
+
+
 class SamplingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_tokens: int | None = None
     temperature: float | None = None
+    repetition_penalty: float | None = None
+    min_tokens: int | None = None
+    seed: int | None = None
+    temp_scheduler: TemperatureSchedulerConfig | None = None
+    extra_body: Dict[str, Any] | None = None
 
 
 class EvalConfig(BaseModel):
@@ -684,12 +709,33 @@ def create_run(
             console.print(f"  Max Async Level:     {cfg.max_async_level}")
 
         # Sampling
-        if cfg.sampling.max_tokens or cfg.sampling.temperature is not None:
+        has_sampling = (
+            cfg.sampling.max_tokens
+            or cfg.sampling.temperature is not None
+            or cfg.sampling.repetition_penalty is not None
+            or cfg.sampling.min_tokens is not None
+            or cfg.sampling.seed is not None
+            or cfg.sampling.temp_scheduler is not None
+            or cfg.sampling.extra_body is not None
+        )
+        if has_sampling:
             console.print("\n[cyan]Sampling[/cyan]")
             if cfg.sampling.max_tokens:
-                console.print(f"  Max Tokens:  {cfg.sampling.max_tokens}")
+                console.print(f"  Max Tokens:          {cfg.sampling.max_tokens}")
             if cfg.sampling.temperature is not None:
-                console.print(f"  Temperature: {cfg.sampling.temperature}")
+                console.print(f"  Temperature:         {cfg.sampling.temperature}")
+            if cfg.sampling.repetition_penalty is not None:
+                console.print(f"  Repetition Penalty:  {cfg.sampling.repetition_penalty}")
+            if cfg.sampling.min_tokens is not None:
+                console.print(f"  Min Tokens:          {cfg.sampling.min_tokens}")
+            if cfg.sampling.seed is not None:
+                console.print(f"  Seed:                {cfg.sampling.seed}")
+            if cfg.sampling.temp_scheduler is not None:
+                ts = cfg.sampling.temp_scheduler
+                sched = f"{ts.type} ({ts.start_temperature} → {ts.end_temperature})"
+                console.print(f"  Temp Scheduler:      {sched}")
+            if cfg.sampling.extra_body is not None:
+                console.print(f"  Extra Body:          {cfg.sampling.extra_body}")
 
         # W&B
         if cfg.wandb.entity or cfg.wandb.project:
@@ -786,6 +832,13 @@ def create_run(
             max_steps=cfg.max_steps,
             max_tokens=cfg.sampling.max_tokens,
             temperature=cfg.sampling.temperature,
+            repetition_penalty=cfg.sampling.repetition_penalty,
+            min_tokens=cfg.sampling.min_tokens,
+            seed=cfg.sampling.seed,
+            temp_scheduler=cfg.sampling.temp_scheduler.model_dump(exclude_none=True)
+            if cfg.sampling.temp_scheduler
+            else None,
+            extra_body=cfg.sampling.extra_body,
             batch_size=cfg.batch_size,
             name=cfg.name,
             wandb_entity=cfg.wandb.entity,

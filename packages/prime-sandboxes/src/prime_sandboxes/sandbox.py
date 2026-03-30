@@ -29,6 +29,7 @@ from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
+    SandboxFileNotFoundError,
     SandboxImagePullError,
     SandboxNotRunningError,
     SandboxOOMError,
@@ -869,7 +870,7 @@ class SandboxClient:
         def read_or_empty(path: str) -> str:
             try:
                 return self.read_file(sandbox_id, path).content
-            except APIError:
+            except SandboxFileNotFoundError:
                 return ""
 
         exit_content = read_or_empty(job.exit_file)
@@ -1198,6 +1199,8 @@ class SandboxClient:
                     f"Read file timed out after {effective_timeout}s: {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    raise SandboxFileNotFoundError(f"File not found: {file_path}") from e
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
                         continue
@@ -1718,7 +1721,7 @@ class AsyncSandboxClient:
         async def read_or_empty(path: str) -> str:
             try:
                 return (await self.read_file(sandbox_id, path)).content
-            except APIError:
+            except SandboxFileNotFoundError:
                 return ""
 
         exit_content = await read_or_empty(job.exit_file)
@@ -2063,6 +2066,8 @@ class AsyncSandboxClient:
                     f"Read file timed out after {effective_timeout}s: {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    raise SandboxFileNotFoundError(f"File not found: {file_path}") from e
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
                         continue

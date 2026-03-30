@@ -16,6 +16,7 @@ from .core import (
 from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
+    SandboxFileNotFoundError,
     SandboxImagePullError,
     SandboxNotRunningError,
     SandboxOOMError,
@@ -87,6 +88,7 @@ __all__ = [
     "APIError",
     "UnauthorizedError",
     "PaymentRequiredError",
+    "SandboxFileNotFoundError",
     "APITimeoutError",
     "TimeoutError",  # Deprecated alias
     "SandboxOOMError",

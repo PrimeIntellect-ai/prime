@@ -17,21 +17,36 @@ jobs:
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_RELEASE_WEBHOOK_URL }}
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+          RELEASE_NAME: ${{ github.event.release.name }}
         run: |
           if [ -z "$SLACK_WEBHOOK" ]; then
             echo "No Slack webhook configured, skipping"
             exit 0
           fi
-          TAG="${{ github.event.release.tag_name }}"
-          RELEASE_URL="${{ github.event.release.html_url }}"
-          BODY=$(gh release view "$TAG" --json body -q .body)
+
+          # Derive package name from tag prefix
+          HEADER="$RELEASE_TAG released"
+          case "$RELEASE_TAG" in
+            prime-evals-*)   HEADER="Prime Evals $RELEASE_TAG released" ;;
+            prime-mcp-*)     HEADER="Prime MCP Server $RELEASE_TAG released" ;;
+            prime-sandboxes-*) HEADER="Prime Sandboxes $RELEASE_TAG released" ;;
+            prime-tunnel-*)  HEADER="Prime Tunnel $RELEASE_TAG released" ;;
+            v*)              HEADER="Prime CLI $RELEASE_TAG released" ;;
+          esac
+
+          BODY=$(gh release view "$RELEASE_TAG" --json body -q .body)
 
           # Build Slack mrkdwn: convert "* title by @user in url" to "• <url|title>"
           CHANGES=$(echo "$BODY" | grep '^\* ' | head -20 | sed 's/^\* \(.*\) by @.* in \(https:\/\/[^ ]*\)/• <\2|\1>/' | sed 's/^\* /• /' || true)
+          if [ -z "$CHANGES" ]; then
+            CHANGES="No changelog entries."
+          fi
 
           # Build JSON safely with jq
           PAYLOAD=$(jq -n \
-            --arg header "Prime CLI ${TAG} released" \
+            --arg header "$HEADER" \
             --arg changes "$CHANGES" \
             --arg url "$RELEASE_URL" \
             '{

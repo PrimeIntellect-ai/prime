@@ -1,0 +1,44 @@
+name: Release Notification
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Notify Slack
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_RELEASE_WEBHOOK_URL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "No Slack webhook configured, skipping"
+            exit 0
+          fi
+          TAG="${{ github.event.release.tag_name }}"
+          RELEASE_URL="${{ github.event.release.html_url }}"
+          BODY=$(gh release view "$TAG" --json body -q .body)
+
+          # Build Slack mrkdwn: convert "* title by @user in url" to "• <url|title>"
+          CHANGES=$(echo "$BODY" | grep '^\* ' | head -20 | sed 's/^\* \(.*\) by @.* in \(https:\/\/[^ ]*\)/• <\2|\1>/' | sed 's/^\* /• /')
+
+          # Build JSON safely with jq
+          PAYLOAD=$(jq -n \
+            --arg header "Prime CLI ${TAG} released" \
+            --arg changes "$CHANGES" \
+            --arg url "$RELEASE_URL" \
+            '{
+              blocks: [
+                {type: "header", text: {type: "plain_text", text: $header}},
+                {type: "section", text: {type: "mrkdwn", text: $changes}},
+                {type: "actions", elements: [{type: "button", text: {type: "plain_text", text: "View Release"}, url: $url}]}
+              ]
+            }')
+
+          curl -X POST "$SLACK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"

@@ -267,10 +267,11 @@ def list_images(
         elif all_images:
             title = "All Accessible Docker Images"
 
-        # Group images by (imageName, imageTag) to deduplicate rows
+        # Group images by (owner, imageName, imageTag) to deduplicate rows.
         grouped: dict[str, list] = {}
         for img in images:
-            key = f"{img.get('imageName', '')}:{img.get('imageTag', 'latest')}"
+            owner_scope = img.get("teamId") or img.get("ownerType", "personal")
+            key = f"{owner_scope}/{img.get('imageName', '')}:{img.get('imageTag', 'latest')}"
             grouped.setdefault(key, []).append(img)
 
         table = Table(title=title)
@@ -282,10 +283,10 @@ def list_images(
         table.add_column("Created", style="dim")
 
         for _key, artifacts in grouped.items():
-            # Build type display by combining artifact types
+            # Build type display by combining unique artifact types
+            artifact_types = {art.get("artifactType", "CONTAINER_IMAGE") for art in artifacts}
             type_parts = []
-            for art in artifacts:
-                at = art.get("artifactType", "CONTAINER_IMAGE")
+            for at in sorted(artifact_types):
                 if at == "VM_SANDBOX":
                     type_parts.append("[magenta]VM[/magenta]")
                 else:
@@ -294,7 +295,11 @@ def list_images(
 
             # Use the first artifact for shared fields, prefer container image
             img = next(
-                (a for a in artifacts if a.get("artifactType") == "CONTAINER_IMAGE"),
+                (
+                    a
+                    for a in artifacts
+                    if a.get("artifactType", "CONTAINER_IMAGE") == "CONTAINER_IMAGE"
+                ),
                 artifacts[0],
             )
 

@@ -25,7 +25,7 @@ config = Config()
 LIST_IMAGES_JSON_HELP = json_output_help(
     "Raw API response is printed unchanged.",
     ".data[] = {displayRef?, fullImagePath?, imageName, imageTag, status, "
-    "ownerType, sizeBytes?, createdAt, pushedAt?}",
+    "artifactType, ownerType, sizeBytes?, createdAt, pushedAt?}",
 )
 
 
@@ -267,28 +267,59 @@ def list_images(
         elif all_images:
             title = "All Accessible Docker Images"
 
+        # Group images by (owner, imageName, imageTag) to deduplicate rows.
+        grouped: dict[str, list] = {}
+        for img in images:
+            owner_scope = img.get("teamId") or img.get("ownerType", "personal")
+            key = f"{owner_scope}/{img.get('imageName', '')}:{img.get('imageTag', 'latest')}"
+            grouped.setdefault(key, []).append(img)
+
         table = Table(title=title)
         table.add_column("Image Reference", style="cyan")
+        table.add_column("Type", justify="center")
         table.add_column("Owner", justify="center")
         table.add_column("Status", justify="center")
         table.add_column("Size", justify="right")
         table.add_column("Created", style="dim")
 
-        for img in images:
-            # Status with color coding
-            status = img.get("status", "UNKNOWN")
-            if status == "COMPLETED":
-                status_display = "[green]Ready[/green]"
-            elif status == "BUILDING":
-                status_display = "[yellow]Building[/yellow]"
-            elif status == "PENDING":
-                status_display = "[blue]Pending[/blue]"
-            elif status == "FAILED":
-                status_display = "[red]Failed[/red]"
-            elif status == "CANCELLED":
-                status_display = "[dim]Cancelled[/dim]"
-            else:
-                status_display = f"[dim]{status}[/dim]"
+        for _key, artifacts in grouped.items():
+            # Build type display by combining unique artifact types
+            artifact_types = {art.get("artifactType", "CONTAINER_IMAGE") for art in artifacts}
+            type_parts = []
+            for at in sorted(artifact_types):
+                if at == "VM_SANDBOX":
+                    type_parts.append("[magenta]VM[/magenta]")
+                else:
+                    type_parts.append("[cyan]Container[/cyan]")
+            type_display = " / ".join(type_parts)
+
+            # Use the first artifact for shared fields, prefer container image
+            img = next(
+                (
+                    a
+                    for a in artifacts
+                    if a.get("artifactType", "CONTAINER_IMAGE") == "CONTAINER_IMAGE"
+                ),
+                artifacts[0],
+            )
+
+            # Status — show combined if they differ
+            statuses = {a.get("status", "UNKNOWN") for a in artifacts}
+            status_displays = []
+            for s in sorted(statuses):
+                if s == "COMPLETED":
+                    status_displays.append("[green]Ready[/green]")
+                elif s == "BUILDING":
+                    status_displays.append("[yellow]Building[/yellow]")
+                elif s == "PENDING":
+                    status_displays.append("[blue]Pending[/blue]")
+                elif s == "FAILED":
+                    status_displays.append("[red]Failed[/red]")
+                elif s == "CANCELLED":
+                    status_displays.append("[dim]Cancelled[/dim]")
+                else:
+                    status_displays.append(f"[dim]{s}[/dim]")
+            status_display = " / ".join(status_displays)
 
             # Owner type
             owner_type = img.get("ownerType", "personal")
@@ -297,10 +328,9 @@ def list_images(
             else:
                 owner_display = "[dim]Personal[/dim]"
 
-            # Size
-            size_mb = ""
-            if img.get("sizeBytes"):
-                size_mb = f"{img['sizeBytes'] / 1024 / 1024:.1f} MB"
+            # Size — sum across artifacts
+            total_bytes = sum(a.get("sizeBytes") or 0 for a in artifacts)
+            size_mb = f"{total_bytes / 1024 / 1024:.1f} MB" if total_bytes else ""
 
             # Date - use pushedAt for completed images, createdAt for builds
             try:
@@ -319,12 +349,12 @@ def list_images(
                 or f"{img.get('imageName', 'unknown')}:{img.get('imageTag', 'latest')}"
             )
 
-            table.add_row(image_ref, owner_display, status_display, size_mb, date_str)
+            table.add_row(image_ref, type_display, owner_display, status_display, size_mb, date_str)
 
         console.print()
         console.print(table)
         console.print()
-        console.print(f"[dim]Total: {len(images)} image(s)[/dim]")
+        console.print(f"[dim]Total: {len(grouped)} image(s)[/dim]")
         console.print()
 
     except UnauthorizedError:

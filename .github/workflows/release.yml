@@ -1,5 +1,8 @@
 name: Release Notification
 
+permissions:
+  contents: read
+
 on:
   release:
     types: [published]
@@ -24,7 +27,7 @@ jobs:
           BODY=$(gh release view "$TAG" --json body -q .body)
 
           # Build Slack mrkdwn: convert "* title by @user in url" to "• <url|title>"
-          CHANGES=$(echo "$BODY" | grep '^\* ' | head -20 | sed 's/^\* \(.*\) by @.* in \(https:\/\/[^ ]*\)/• <\2|\1>/' | sed 's/^\* /• /')
+          CHANGES=$(echo "$BODY" | grep '^\* ' | head -20 | sed 's/^\* \(.*\) by @.* in \(https:\/\/[^ ]*\)/• <\2|\1>/' | sed 's/^\* /• /' || true)
 
           # Build JSON safely with jq
           PAYLOAD=$(jq -n \

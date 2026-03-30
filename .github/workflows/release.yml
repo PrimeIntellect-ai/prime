@@ -19,22 +19,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           RELEASE_URL: ${{ github.event.release.html_url }}
-          RELEASE_NAME: ${{ github.event.release.name }}
         run: |
           if [ -z "$SLACK_WEBHOOK" ]; then
             echo "No Slack webhook configured, skipping"
             exit 0
           fi
 
-          # Derive package name from tag prefix
-          HEADER="$RELEASE_TAG released"
-          case "$RELEASE_TAG" in
-            prime-evals-*)   HEADER="Prime Evals $RELEASE_TAG released" ;;
-            prime-mcp-*)     HEADER="Prime MCP Server $RELEASE_TAG released" ;;
-            prime-sandboxes-*) HEADER="Prime Sandboxes $RELEASE_TAG released" ;;
-            prime-tunnel-*)  HEADER="Prime Tunnel $RELEASE_TAG released" ;;
-            v*)              HEADER="Prime CLI $RELEASE_TAG released" ;;
-          esac
+          HEADER="Prime CLI $RELEASE_TAG released"
 
           BODY=$(gh release view "$RELEASE_TAG" --json body -q .body)
 
@@ -57,6 +48,6 @@ jobs:
               ]
             }')
 
-          curl -X POST "$SLACK_WEBHOOK" \
+          curl --fail-with-body -X POST "$SLACK_WEBHOOK" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD"

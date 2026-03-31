@@ -70,6 +70,10 @@ RL_CHECKPOINTS_JSON_HELP = json_output_help(
     "size_bytes?, created_at, uploaded_at?}",
 )
 
+RL_CONFIGS_JSON_HELP = json_output_help(
+    ".configs[] = {section, key, type, default}",
+)
+
 
 # Progress bar pattern (tqdm-style progress bars)
 PROGRESS_BAR = re.compile(r".*\|[█▏▎▍▌▋▊▉ ]{10,}\|.*")
@@ -930,6 +934,284 @@ def list_models(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+_SCHEMA_URL = "https://raw.githubusercontent.com/PrimeIntellect-ai/prime-rl/main/docs/rl-config-schema.json"
+
+# Hosted platform allowlist: dot-separated field paths that `prime rl run` supports.
+# Fields not in this set are filtered out of `prime rl configs` output.
+# The full schema (all fields) is always available in the prime-rl docs.
+_HOSTED_FIELDS: set[str] = {
+    # Top-level
+    "model.name",
+    "max_steps",
+    "seq_len",
+    "max_async_level",
+    # Orchestrator
+    "orchestrator.batch_size",
+    "orchestrator.rollouts_per_example",
+    "orchestrator.oversampling_factor",
+    "orchestrator.env",
+    "orchestrator.env.id",
+    "orchestrator.env.name",
+    "orchestrator.env.args",
+    "orchestrator.sampling.temperature",
+    "orchestrator.sampling.max_tokens",
+    "orchestrator.sampling.min_tokens",
+    "orchestrator.sampling.repetition_penalty",
+    "orchestrator.sampling.seed",
+    "orchestrator.sampling.temp_scheduler",
+    "orchestrator.sampling.temp_scheduler.type",
+    "orchestrator.sampling.temp_scheduler.start_temperature",
+    "orchestrator.sampling.temp_scheduler.end_temperature",
+    "orchestrator.sampling.temp_scheduler.total_steps",
+    "orchestrator.eval",
+    "orchestrator.eval.interval",
+    "orchestrator.eval.num_examples",
+    "orchestrator.eval.rollouts_per_example",
+    "orchestrator.eval.eval_base_model",
+    "orchestrator.eval.env",
+    "orchestrator.eval.env.id",
+    "orchestrator.eval.env.name",
+    "orchestrator.eval.env.args",
+    "orchestrator.eval.env.num_examples",
+    "orchestrator.eval.env.rollouts_per_example",
+    "orchestrator.val",
+    "orchestrator.val.num_examples",
+    "orchestrator.val.rollouts_per_example",
+    "orchestrator.val.interval",
+    "orchestrator.buffer.easy_threshold",
+    "orchestrator.buffer.hard_threshold",
+    "orchestrator.buffer.easy_fraction",
+    "orchestrator.buffer.hard_fraction",
+    "orchestrator.buffer.online_difficulty_filtering",
+    "orchestrator.buffer.env_ratios",
+    "orchestrator.buffer.seed",
+    # W&B
+    "wandb.project",
+    "wandb.name",
+    # Checkpoints
+    "ckpt.interval",
+    "ckpt.keep_last",
+    "ckpt.keep_interval",
+    # Trainer
+    "trainer.optim.lr",
+    "trainer.model.lora.rank",
+    "trainer.model.lora.alpha",
+}
+
+
+def _fetch_schema(local_path: str | None = None) -> dict:
+    """Fetch the prime-rl config JSON schema from GitHub or a local file."""
+    if local_path:
+        return json.loads(Path(local_path).read_text())
+
+    import httpx
+
+    try:
+        resp = httpx.get(_SCHEMA_URL, timeout=10, follow_redirects=True)
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.HTTPError as e:
+        console.print(
+            "[red]Error:[/red] Could not fetch config schema from prime-rl. "
+            "Use [bold]--schema[/bold] to point to a local schema file."
+        )
+        raise typer.Exit(1) from e
+
+
+def _type_display(prop: dict, defs: dict) -> str:
+    """Convert a JSON schema property into a human-readable type string."""
+    if "$ref" in prop:
+        return prop["$ref"].rsplit("/", 1)[-1]
+    if "const" in prop:
+        return repr(prop["const"])
+    if "enum" in prop:
+        return " | ".join(repr(v) for v in prop["enum"])
+    if "anyOf" in prop:
+        parts = []
+        for v in prop["anyOf"]:
+            if v.get("type") == "null":
+                continue
+            parts.append(_type_display(v, defs))
+        result = " | ".join(parts)
+        if any(v.get("type") == "null" for v in prop["anyOf"]):
+            result += " | None"
+        return result
+    if "allOf" in prop:
+        return " & ".join(_type_display(v, defs) for v in prop["allOf"])
+    t = prop.get("type")
+    if t == "array":
+        inner = _type_display(prop.get("items", {}), defs)
+        return f"list[{inner}]"
+    type_map = {
+        "integer": "int", "number": "float", "boolean": "bool",
+        "string": "str", "object": "dict",
+    }
+    return type_map.get(t, str(t or "any"))
+
+
+def _default_display(prop: dict) -> str:
+    if "default" not in prop:
+        return "(required)"
+    val = prop["default"]
+    if val is None:
+        return ""
+    return str(val)
+
+
+def _resolve_ref(ref: str, defs: dict) -> dict:
+    name = ref.rsplit("/", 1)[-1]
+    return defs.get(name, {})
+
+
+def _resolve_to_object(prop: dict, defs: dict) -> dict | None:
+    """Resolve a property to an object schema with 'properties'."""
+    # Direct $ref
+    if "$ref" in prop:
+        resolved = _resolve_ref(prop["$ref"], defs)
+        if resolved.get("properties"):
+            return resolved
+
+    # allOf with a single $ref (common Pydantic pattern)
+    if "allOf" in prop:
+        for variant in prop["allOf"]:
+            if "$ref" in variant:
+                resolved = _resolve_ref(variant["$ref"], defs)
+                if resolved.get("properties"):
+                    return resolved
+
+    # anyOf (e.g. SomeConfig | None) — find the non-null variant
+    if "anyOf" in prop:
+        for variant in prop["anyOf"]:
+            if variant.get("type") == "null":
+                continue
+            result = _resolve_to_object(variant, defs)
+            if result:
+                return result
+
+    # Already an inline object
+    if prop.get("properties"):
+        return prop
+
+    return None
+
+
+def _resolve_array_items(prop: dict, defs: dict) -> dict | None:
+    """Try to resolve an array property's items to an object schema."""
+    resolved = _resolve_to_object(prop, defs) or prop
+    if resolved.get("type") == "array" and resolved.get("items"):
+        return _resolve_to_object(resolved["items"], defs)
+    return None
+
+
+def _has_hosted_children(prefix: str) -> bool:
+    """Check if any hosted field starts with this prefix."""
+    prefix_dot = prefix + "."
+    return any(f.startswith(prefix_dot) for f in _HOSTED_FIELDS)
+
+
+def _collect_schema_rows(
+    schema: dict,
+    defs: dict,
+    prefix: str,
+    section: str,
+    hosted_only: bool,
+) -> list[dict[str, str]]:
+    """Recursively collect rows from a JSON schema object."""
+    rows: list[dict[str, str]] = []
+    properties = schema.get("properties", {})
+
+    for field_name, prop in properties.items():
+        path = f"{prefix}.{field_name}" if prefix else field_name
+
+        # In hosted mode, skip entire subtrees with no relevant fields
+        if hosted_only and path not in _HOSTED_FIELDS and not _has_hosted_children(path):
+            continue
+
+        # Try to resolve as a sub-object with properties
+        obj_schema = _resolve_to_object(prop, defs)
+        if obj_schema:
+            sub_section = f"[{path}]"
+            rows.extend(_collect_schema_rows(obj_schema, defs, path, sub_section, hosted_only))
+            continue
+
+        # Try to resolve as an array of objects (like [[env]])
+        items_schema = _resolve_array_items(prop, defs)
+        if items_schema:
+            sub_section = f"[[{path}]]"
+            rows.extend(_collect_schema_rows(items_schema, defs, path, sub_section, hosted_only))
+            continue
+
+        # Leaf field
+        if hosted_only and path not in _HOSTED_FIELDS:
+            continue
+
+        rows.append({
+            "section": section,
+            "key": field_name,
+            "type": _type_display(prop, defs),
+            "default": _default_display(prop),
+            "description": prop.get("description", ""),
+        })
+
+    return rows
+
+
+@app.command("configs", rich_help_panel="Commands", epilog=RL_CONFIGS_JSON_HELP)
+def list_configs(
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    all_fields: bool = typer.Option(
+        False, "--all", "-a",
+        help="Show all prime-rl fields, not just hosted-supported ones",
+    ),
+    schema_path: str = typer.Option(
+        None, "--schema",
+        help="Path to a local schema JSON file (for testing)",
+        hidden=True,
+    ),
+) -> None:
+    """Show available config options for rl.toml.
+
+    By default shows only fields supported by the hosted platform (prime rl run).
+    Use --all to see every prime-rl config option.
+    """
+    validate_output_format(output, console)
+
+    if not schema_path:
+        console.print("[dim]Fetching config schema from prime-rl...[/dim]")
+    schema = _fetch_schema(schema_path)
+    defs = schema.get("$defs", {})
+
+    rows = _collect_schema_rows(schema, defs, "", "(top-level)", hosted_only=not all_fields)
+
+    if output == "json":
+        output_data_as_json({"configs": rows}, console)
+        return
+
+    title = "Prime RL — Config Options" if all_fields else "Prime RL — Config Options (hosted)"
+    table = Table(title=title)
+    table.add_column("Section", style="cyan")
+    table.add_column("Key", style="green")
+    table.add_column("Type")
+    table.add_column("Default", style="dim")
+    table.add_column("Description", style="dim", max_width=60)
+
+    for row in rows:
+        table.add_row(
+            rich_escape(row["section"]),
+            row["key"],
+            row["type"],
+            row["default"],
+            row.get("description", ""),
+        )
+
+    console.print(table)
+    if not all_fields:
+        console.print(
+            "\n[dim]Showing hosted-supported fields only. "
+            "Use [bold]--all[/bold] to see all prime-rl config options.[/dim]"
+        )
 
 
 def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> None:

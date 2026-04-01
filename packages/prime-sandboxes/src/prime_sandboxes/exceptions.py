@@ -1,5 +1,13 @@
 """Custom exceptions for Prime Sandboxes SDK."""
 
+from .core.client import APIError
+
+
+class SandboxFileNotFoundError(APIError):
+    """Raised when a file is not found in the sandbox (404)."""
+
+    pass
+
 
 class SandboxNotRunningError(RuntimeError):
     """Raised when an operation requires a RUNNING sandbox but it is not running."""

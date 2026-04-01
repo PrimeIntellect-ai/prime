@@ -29,6 +29,7 @@ from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
+    SandboxFileNotFoundError,
     SandboxImagePullError,
     SandboxNotRunningError,
     SandboxOOMError,
@@ -866,15 +867,13 @@ class SandboxClient:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
 
-        def read_or_cat(path: str, timeout: int = 60) -> str:
+        def read_or_empty(path: str) -> str:
             try:
                 return self.read_file(sandbox_id, path).content
-            except APIError:
-                return self.execute_command(
-                    sandbox_id, f"cat {shlex.quote(path)} 2>/dev/null", timeout=timeout
-                ).stdout
+            except SandboxFileNotFoundError:
+                return ""
 
-        exit_content = read_or_cat(job.exit_file, timeout=30)
+        exit_content = read_or_empty(job.exit_file)
         if not exit_content.strip():
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
@@ -887,8 +886,8 @@ class SandboxClient:
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
-            stdout=read_or_cat(job.stdout_log_file),
-            stderr=read_or_cat(job.stderr_log_file),
+            stdout=read_or_empty(job.stdout_log_file),
+            stderr=read_or_empty(job.stderr_log_file),
         )
 
     def run_background_job(
@@ -920,9 +919,7 @@ class SandboxClient:
         Raises:
             CommandTimeoutError: If command doesn't complete within timeout
         """
-        job = self.start_background_job(
-            sandbox_id, command, working_dir=working_dir, env=env
-        )
+        job = self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             status = self.get_background_job(sandbox_id, job)
@@ -1202,6 +1199,8 @@ class SandboxClient:
                     f"Read file timed out after {effective_timeout}s: {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    raise SandboxFileNotFoundError(f"File not found: {file_path}") from e
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
                         continue
@@ -1719,19 +1718,13 @@ class AsyncSandboxClient:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
 
-        async def read_or_cat(path: str, timeout: int = 60) -> str:
+        async def read_or_empty(path: str) -> str:
             try:
                 return (await self.read_file(sandbox_id, path)).content
-            except APIError:
-                return (
-                    await self.execute_command(
-                        sandbox_id,
-                        f"cat {shlex.quote(path)} 2>/dev/null",
-                        timeout=timeout,
-                    )
-                ).stdout
+            except SandboxFileNotFoundError:
+                return ""
 
-        exit_content = await read_or_cat(job.exit_file, timeout=30)
+        exit_content = await read_or_empty(job.exit_file)
         if not exit_content.strip():
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
@@ -1744,8 +1737,8 @@ class AsyncSandboxClient:
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
-            stdout=await read_or_cat(job.stdout_log_file),
-            stderr=await read_or_cat(job.stderr_log_file),
+            stdout=await read_or_empty(job.stdout_log_file),
+            stderr=await read_or_empty(job.stderr_log_file),
         )
 
     async def run_background_job(
@@ -1777,9 +1770,7 @@ class AsyncSandboxClient:
         Raises:
             CommandTimeoutError: If command doesn't complete within timeout
         """
-        job = await self.start_background_job(
-            sandbox_id, command, working_dir=working_dir, env=env
-        )
+        job = await self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             status = await self.get_background_job(sandbox_id, job)
@@ -2075,6 +2066,8 @@ class AsyncSandboxClient:
                     f"Read file timed out after {effective_timeout}s: {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    raise SandboxFileNotFoundError(f"File not found: {file_path}") from e
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
                         continue

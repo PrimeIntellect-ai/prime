@@ -239,8 +239,8 @@ id = "{env_value}"
 
 # Optional: buffer configuration for difficulty filtering
 # [buffer]
-# easy_threshold = 0.8
-# hard_threshold = 0.2
+# easy_threshold = 1.0
+# hard_threshold = 0.0
 # easy_fraction = 0.0
 # hard_fraction = 0.0
 # online_difficulty_filtering = false

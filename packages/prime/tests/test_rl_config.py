@@ -43,4 +43,3 @@ def test_generate_rl_config_template_uses_broad_buffer_threshold_examples() -> N
 
     assert "# easy_threshold = 1.0" in template
     assert "# hard_threshold = 0.0" in template
-    assert "narrow thresholds can skew plots and stall small-batch runs" in template

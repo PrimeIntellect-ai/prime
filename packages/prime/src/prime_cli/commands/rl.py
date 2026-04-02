@@ -239,8 +239,10 @@ id = "{env_value}"
 
 # Optional: buffer configuration for difficulty filtering
 # [buffer]
-# easy_threshold = 0.8
-# hard_threshold = 0.2
+# For typical reward ranges, start with broad thresholds and trust evals more than
+# reward plots here: narrow thresholds can skew plots and stall small-batch runs.
+# easy_threshold = 1.0
+# hard_threshold = 0.0
 # easy_fraction = 0.0
 # hard_fraction = 0.0
 # online_difficulty_filtering = false

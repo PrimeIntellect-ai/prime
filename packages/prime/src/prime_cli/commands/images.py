@@ -251,13 +251,17 @@ def list_images(
         response = client.request("GET", "/images", params=params if params else None)
         images = response.get("data", [])
 
+        # When in personal context (no team selected), filter to personal images only
+        if not config.team_id and not all_images:
+            images = [img for img in images if img.get("ownerType") == "personal"]
+
         if not images:
             console.print("[yellow]No images or builds found.[/yellow]")
             console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
             return
 
         if output == "json":
-            console.print(json.dumps(response, indent=2))
+            console.print(json.dumps({"data": images}, indent=2))
             return
 
         # Table output

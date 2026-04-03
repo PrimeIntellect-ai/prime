@@ -253,7 +253,8 @@ def list_images(
 
         # When in personal context (no team selected), filter to personal images only
         if not config.team_id and not all_images:
-            images = [img for img in images if img.get("ownerType") == "personal"]
+            images = [img for img in images if img.get("ownerType", "personal") == "personal"]
+            response["data"] = images
 
         if not images:
             console.print("[yellow]No images or builds found.[/yellow]")
@@ -261,7 +262,7 @@ def list_images(
             return
 
         if output == "json":
-            console.print(json.dumps({"data": images}, indent=2))
+            console.print(json.dumps(response, indent=2))
             return
 
         # Table output

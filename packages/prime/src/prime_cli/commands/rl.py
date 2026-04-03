@@ -194,7 +194,8 @@ max_tokens = 2048
 # repetition_penalty = 1.0
 # min_tokens = 0
 # seed = 42
-# extra_body = {{ }}
+# [sampling.extra_body]
+# enable_thinking = false
 
 # Optional: temperature scheduling (use instead of temperature)
 # [sampling.temp_scheduler]

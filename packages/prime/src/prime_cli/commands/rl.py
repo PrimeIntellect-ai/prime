@@ -1234,13 +1234,13 @@ def get_logs(
 
                             last_lines = formatted_lines
                 except APIError as e:
-                    consecutive_errors += 1
                     if "404" in str(e) and (
                         "queued" in str(e).lower() or "pending" in str(e).lower()
                     ):
                         console.print("[yellow]Run is queued, waiting for it to start...[/yellow]")
                         time.sleep(10)
                         continue
+                    consecutive_errors += 1
                     if "429" in str(e):
                         if consecutive_errors >= 3:
                             console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")

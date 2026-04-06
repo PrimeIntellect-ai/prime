@@ -869,7 +869,7 @@ def create_run(
         if run.status == "QUEUED":
             queue_msg = "✓ Run created and queued"
             if run.runs_ahead is not None:
-                queue_msg += f" (#{run.runs_ahead + 1} in queue)"
+                queue_msg += f" (~{run.runs_ahead} runs ahead)"
             console.print(f"[yellow]{queue_msg}[/yellow]")
             console.print("[dim]The run will start automatically when capacity is available.[/dim]")
         else:
@@ -1063,7 +1063,7 @@ def get_run(
         console.print(f"[bold]Run {run_id}[/bold]\n")
         status_text = run.status
         if run.status == "QUEUED" and run.runs_ahead is not None:
-            status_text += f" (#{run.runs_ahead + 1} in queue)"
+            status_text += f" (~{run.runs_ahead} runs ahead)"
         console.print(f"  Status: [{status_color}]{status_text}[/{status_color}]")
         console.print(f"  Model: [magenta]{run.base_model}[/magenta]")
         console.print(f"  Environments: [green]{formatted['environments']}[/green]")

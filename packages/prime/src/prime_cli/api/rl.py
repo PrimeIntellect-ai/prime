@@ -49,6 +49,9 @@ class RLRun(BaseModel):
     wandb_project: Optional[str] = Field(None, alias="wandbProject")
     wandb_run_name: Optional[str] = Field(None, alias="wandbRunName")
 
+    # Queue info
+    runs_ahead: Optional[int] = Field(None, alias="runsAhead")
+
     # Timestamps
     started_at: Optional[datetime] = Field(None, alias="startedAt")
     completed_at: Optional[datetime] = Field(None, alias="completedAt")

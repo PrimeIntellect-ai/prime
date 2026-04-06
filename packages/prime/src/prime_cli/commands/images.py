@@ -247,6 +247,8 @@ def list_images(
         params = {}
         if config.team_id and not all_images:
             params["teamId"] = config.team_id
+        elif not config.team_id and not all_images:
+            params["scope"] = "personal"
 
         response = client.request("GET", "/images", params=params if params else None)
         images = response.get("data", [])
@@ -261,11 +263,12 @@ def list_images(
             return
 
         # Table output
-        title = "Your Docker Images"
         if config.team_id and not all_images:
             title = f"Team Docker Images (team: {config.team_id})"
         elif all_images:
             title = "All Accessible Docker Images"
+        else:
+            title = "Personal Docker Images"
 
         # Group images by (owner, imageName, imageTag) to deduplicate rows.
         grouped: dict[str, list] = {}

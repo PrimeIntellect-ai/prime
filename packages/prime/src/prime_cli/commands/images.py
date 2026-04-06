@@ -223,20 +223,15 @@ def push_image(
 @app.command("list", epilog=LIST_IMAGES_JSON_HELP)
 def list_images(
     output: str = typer.Option("table", "--output", "-o", help="Output format (table or json)"),
-    all_images: bool = typer.Option(
-        False, "--all", "-a", help="Show all accessible images (personal + team)"
-    ),
 ):
     """
     List all images you've pushed to Prime Intellect registry.
 
-    By default, shows images in the current context (personal or team).
-    Use --all to show all accessible images including team images.
+    Shows personal images by default, or team images when a team is configured.
 
     \b
     Examples:
         prime images list
-        prime images list --all
         prime images list --output json
     """
     validate_output_format(output, console)
@@ -245,10 +240,8 @@ def list_images(
 
         # Build query params
         params = {}
-        if config.team_id and not all_images:
+        if config.team_id:
             params["teamId"] = config.team_id
-        elif not config.team_id and not all_images:
-            params["scope"] = "personal"
 
         response = client.request("GET", "/images", params=params if params else None)
         images = response.get("data", [])
@@ -263,10 +256,8 @@ def list_images(
             return
 
         # Table output
-        if config.team_id and not all_images:
+        if config.team_id:
             title = f"Team Docker Images (team: {config.team_id})"
-        elif all_images:
-            title = "All Accessible Docker Images"
         else:
             title = "Personal Docker Images"
 

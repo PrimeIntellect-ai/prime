@@ -223,6 +223,9 @@ def push_image(
 @app.command("list", epilog=LIST_IMAGES_JSON_HELP)
 def list_images(
     output: str = typer.Option("table", "--output", "-o", help="Output format (table or json)"),
+    all_images: bool = typer.Option(
+        False, "--all", "-a", help="[Deprecated] Show all accessible images (personal + team)"
+    ),
 ):
     """
     List all images you've pushed to Prime Intellect registry.
@@ -234,6 +237,13 @@ def list_images(
         prime images list
         prime images list --output json
     """
+    if all_images:
+        console.print(
+            "[yellow]Warning: --all flag is deprecated and will be removed in a future release. "
+            "Images are now scoped to your current context (personal or team).[/yellow]"
+        )
+        console.print()
+
     validate_output_format(output, console)
     try:
         client = APIClient()

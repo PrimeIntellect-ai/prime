@@ -237,14 +237,14 @@ def list_images(
         prime images list
         prime images list --output json
     """
-    if all_images:
+    validate_output_format(output, console)
+
+    if all_images and output != "json":
         console.print(
             "[yellow]Warning: --all flag is deprecated and will be removed in a future release. "
             "Images are now scoped to your current context (personal or team).[/yellow]"
         )
         console.print()
-
-    validate_output_format(output, console)
     try:
         client = APIClient()
 

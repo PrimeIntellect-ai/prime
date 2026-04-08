@@ -124,6 +124,9 @@ prime env list
 # View environment details
 prime env info <environment-name>
 
+# Inspect environment source without downloading the archive
+prime env inspect <environment-name>
+
 # Install an environment locally
 prime env install <environment-name>
 

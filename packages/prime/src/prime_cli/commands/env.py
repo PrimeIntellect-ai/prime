@@ -89,6 +89,12 @@ ENV_STATUS_JSON_HELP = json_output_help(
     ".action? = {status, job_id?}",
 )
 
+ENV_INSPECT_JSON_HELP = json_output_help(
+    ". = {kind, path, version_id, entry?, entries[]?, content?, truncated, total_bytes?}",
+    ".entry? = {name, path, is_directory, size?, modified_at?, content_hash?}",
+    ".entries[] = {name, path, is_directory, size?, modified_at?, content_hash?}",
+)
+
 ENV_SECRET_LIST_JSON_HELP = json_output_help(
     ".secrets[] = {id, name, source, description?, createdAt, updatedAt?}",
 )
@@ -579,6 +585,13 @@ def _format_action_status(status: Optional[str]) -> Text:
     }
     color = status_colors.get(status.upper(), "white")
     return Text(status, style=color)
+
+
+def _print_env_inspect_examples(owner: str, name: str, version: str) -> None:
+    """Print inspect commands for an environment version."""
+    console.print("[bold yellow]Inspect[/bold yellow]")
+    console.print(f"  [green]$[/green] prime env inspect {owner}/{name}@{version}")
+    console.print(f"  [green]$[/green] prime env inspect {owner}/{name}@{version} README.md")
 
 
 @app.command("list", rich_help_panel="Explore", epilog=ENV_LIST_JSON_HELP)
@@ -1959,6 +1972,9 @@ def info(
 
         # Display key installation commands based on availability
         simple_index_url = details.get("simple_index_url")
+        _print_env_inspect_examples(owner, name, target_version)
+        console.print()
+
         if wheel_url or simple_index_url:
             normalized_name = normalize_package_name(name)
 
@@ -2021,6 +2037,116 @@ def info(
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command(
+    "inspect", no_args_is_help=True, rich_help_panel="Explore", epilog=ENV_INSPECT_JSON_HELP
+)
+def inspect_cmd(
+    env_id: str = typer.Argument(..., help="Environment ID (owner/name or owner/name@version)"),
+    source_path: Optional[str] = typer.Argument(
+        None,
+        help="Optional file or directory path inside the environment source",
+    ),
+    version: str = typer.Option("latest", "--version", "-v", help="Version to inspect"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    max_bytes: int = typer.Option(
+        100000,
+        "--max-bytes",
+        min=1,
+        max=500000,
+        help="Maximum file bytes to return when inspecting a file",
+    ),
+) -> None:
+    """Inspect environment source without downloading the archive locally."""
+    validate_output_format(output, console)
+
+    try:
+        try:
+            env_id, parsed_version = validate_env_id(env_id)
+            target_version = parsed_version if parsed_version != "latest" else version
+        except ValueError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            raise typer.Exit(1)
+
+        owner, name = env_id.split("/")
+        client = APIClient(require_auth=False)
+        params: Dict[str, Any] = {"max_bytes": max_bytes}
+        if source_path:
+            params["path"] = source_path
+
+        response = client.get(
+            f"/environmentshub/{owner}/{name}/@{target_version}/inspect",
+            params=params,
+        )
+        data = response.get("data", response)
+
+        if output == "json":
+            output_data_as_json(data, console)
+            return
+
+        if data.get("kind") == "file":
+            inspected_path = data.get("path") or source_path or "/"
+            console.print()
+            console.print(f"[bold cyan]{owner}/{name}[/bold cyan][dim]@{target_version}[/dim]")
+            console.print(f"[dim]{inspected_path}[/dim]")
+            console.print()
+
+            content = data.get("content") or ""
+            if content:
+                console.print(content, markup=False, highlight=False)
+                if not content.endswith("\n"):
+                    console.print()
+            else:
+                console.print("[dim](empty file)[/dim]")
+
+            if data.get("truncated"):
+                total_bytes = data.get("total_bytes") or max_bytes
+                console.print(
+                    f"[yellow]Output truncated from {format_file_size(total_bytes)}. "
+                    f"Re-run with --max-bytes > {max_bytes} to view more.[/yellow]"
+                )
+            return
+
+        entries = data.get("entries", [])
+        title_path = data.get("path") or "/"
+        table = Table(title=f"Source: {owner}/{name}@{target_version} (path: {title_path})")
+        table.add_column("Type", style="blue", no_wrap=True)
+        table.add_column("Path", style="cyan")
+        table.add_column("Size", style="dim", justify="right")
+
+        for entry in entries:
+            is_directory = bool(entry.get("is_directory"))
+            entry_type = "dir" if is_directory else "file"
+            size_value = entry.get("size")
+            size_display = (
+                "-" if is_directory or size_value is None else format_file_size(size_value)
+            )
+            table.add_row(entry_type, entry.get("path", ""), size_display)
+
+        console.print(table)
+        if not entries:
+            console.print("[dim]No files found in this directory.[/dim]")
+            return
+
+        example_path = next(
+            (entry.get("path") for entry in entries if not entry.get("is_directory")),
+            entries[0].get("path"),
+        )
+        if example_path:
+            inspect_example = f"prime env inspect {owner}/{name}@{target_version} {example_path}"
+            console.print(f"\n[dim]Inspect a file with: {inspect_example}[/dim]")
+
+    except APIError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except typer.Exit:
+        raise
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
         raise typer.Exit(1)

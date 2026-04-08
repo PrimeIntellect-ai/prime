@@ -140,7 +140,7 @@ def test_eval_preflight_omits_max_tokens(monkeypatch):
         }
     ]
     assert len(seen_timeouts) == 1
-    assert seen_timeouts[0].read == 1800.0
+    assert seen_timeouts[0].read == 300.0
 
 
 def test_eval_run_continues_when_model_validation_times_out(monkeypatch):
@@ -178,7 +178,7 @@ def test_eval_run_continues_when_model_validation_times_out(monkeypatch):
 
     assert exc_info.value.exit_code == 0
     assert len(seen_model_timeouts) == 1
-    assert seen_model_timeouts[0].read == 1800.0
+    assert seen_model_timeouts[0].read == 300.0
 
 
 def test_eval_run_continues_when_billing_preflight_times_out(monkeypatch):
@@ -218,7 +218,7 @@ def test_eval_run_continues_when_billing_preflight_times_out(monkeypatch):
 
     assert exc_info.value.exit_code == 0
     assert len(seen_billing_timeouts) == 1
-    assert seen_billing_timeouts[0].read == 1800.0
+    assert seen_billing_timeouts[0].read == 300.0
 
 
 def test_inference_client_maps_timeout_to_inference_timeout_error():

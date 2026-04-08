@@ -36,7 +36,7 @@ DEFAULT_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_ENV_DIR_PATH = "./environments"
 PRIME_SLUG = "primeintellect"
 INTERNAL_ENV_DISPLAY_HEADER = "X-Prime-Eval-Env-Display"
-EVAL_PREFLIGHT_TIMEOUT = httpx.Timeout(connect=10.0, read=1800.0, write=60.0, pool=60.0)
+EVAL_PREFLIGHT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=60.0)
 MODULE_TO_PRIME_COMMAND = {
     "verifiers.cli.commands.eval": "prime eval run",
     "verifiers.cli.commands.gepa": "prime gepa run",

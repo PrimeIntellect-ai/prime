@@ -135,6 +135,47 @@ jobs:
           source .venv/bin/activate
           twine upload dist/*
 
+      - name: Notify Slack
+        if: steps.check_tag.outputs.exists != 'true'
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_RELEASE_WEBHOOK_URL }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "No Slack webhook configured, skipping"
+            exit 0
+          fi
+
+          HEADER="Prime CLI $RELEASE_TAG released"
+          RELEASE_URL="${{ github.server_url }}/${{ github.repository }}/releases/tag/${RELEASE_TAG}"
+
+          BODY=$(gh release view "$RELEASE_TAG" --json body -q .body)
+
+          # Build Slack mrkdwn: convert "* title by @user in url" to "• <url|title>"
+          CHANGES=$(echo "$BODY" | grep '^\* ' | head -20 | sed 's/^\* \(.*\) by @.* in \(https:\/\/[^ ]*\)/• <\2|\1>/' | sed 's/^\* /• /' || true)
+          if [ -z "$CHANGES" ]; then
+            CHANGES="No changelog entries."
+          fi
+
+          # Build JSON safely with jq
+          PAYLOAD=$(jq -n \
+            --arg header "$HEADER" \
+            --arg changes "$CHANGES" \
+            --arg url "$RELEASE_URL" \
+            '{
+              blocks: [
+                {type: "header", text: {type: "plain_text", text: $header}},
+                {type: "section", text: {type: "mrkdwn", text: $changes}},
+                {type: "actions", elements: [{type: "button", text: {type: "plain_text", text: "View Release"}, url: $url}]}
+              ]
+            }')
+
+          curl --fail-with-body -X POST "$SLACK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
+
       - name: Set release status
         id: release_status
         run: |

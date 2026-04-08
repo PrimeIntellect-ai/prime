@@ -498,6 +498,7 @@ class RLConfig(BaseModel):
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
     infrastructure: InfrastructureConfig = Field(default_factory=InfrastructureConfig)
+    run_config: Dict[str, Any] = Field(default_factory=dict)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
 
@@ -709,6 +710,8 @@ def create_run(
             console.print(f"  Oversampling Factor: {cfg.oversampling_factor}")
         if cfg.max_async_level is not None:
             console.print(f"  Max Async Level:     {cfg.max_async_level}")
+        if cfg.run_config:
+            console.print(f"  Run Config:          {cfg.run_config}")
 
         # Sampling
         has_sampling = (
@@ -860,6 +863,7 @@ def create_run(
             checkpoint_id=cfg.checkpoint_id,
             cluster_name=cfg.cluster_name,
             infrastructure_config=cfg.infrastructure.to_api_dict(),
+            run_config=cfg.run_config if cfg.run_config else None,
         )
 
         if output == "json":

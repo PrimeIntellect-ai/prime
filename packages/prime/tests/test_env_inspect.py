@@ -123,6 +123,15 @@ class TestEnvInspect:
         assert "README.md" in result.output
         assert "# literal [bold]README[/bold]" in result.output
 
+    def test_plain_file_output_preserves_literal_content(self, mock_env_inspect_api: None) -> None:
+        result = runner.invoke(
+            app,
+            ["--plain", "env", "inspect", "testuser/test-env", "README.md"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "# literal [bold]README[/bold]" in result.output
+
     def test_json_output(self, mock_env_inspect_api: None) -> None:
         result = runner.invoke(
             app,

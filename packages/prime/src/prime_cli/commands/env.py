@@ -587,6 +587,13 @@ def _format_action_status(status: Optional[str]) -> Text:
     return Text(status, style=color)
 
 
+def _print_env_inspect_examples(owner: str, name: str, version: str) -> None:
+    """Print inspect commands for an environment version."""
+    console.print("[bold yellow]Inspect[/bold yellow]")
+    console.print(f"  [green]$[/green] prime env inspect {owner}/{name}@{version}")
+    console.print(f"  [green]$[/green] prime env inspect {owner}/{name}@{version} README.md")
+
+
 @app.command("list", rich_help_panel="Explore", epilog=ENV_LIST_JSON_HELP)
 def list_cmd(
     num: int = typer.Option(DEFAULT_LIST_LIMIT, "--num", "-n", help="Items per page"),
@@ -1965,16 +1972,12 @@ def info(
 
         # Display key installation commands based on availability
         simple_index_url = details.get("simple_index_url")
+        _print_env_inspect_examples(owner, name, target_version)
+        console.print()
+
         if wheel_url or simple_index_url:
             normalized_name = normalize_package_name(name)
 
-            console.print("[bold yellow]Inspect[/bold yellow]")
-            console.print(f"  [green]$[/green] prime env inspect {owner}/{name}@{target_version}")
-            console.print(
-                f"  [green]$[/green] prime env inspect {owner}/{name}@{target_version} README.md"
-            )
-
-            console.print()
             console.print("[bold yellow]Install (choose one)[/bold yellow]")
             console.print(f"  [green]$[/green] prime env install {owner}/{name}@{target_version}")
 
@@ -2016,13 +2019,6 @@ def info(
             console.print("  [blue]>>>[/blue] from verifiers import load_environment")
             console.print(f"  [blue]>>>[/blue] env = load_environment('{name}')")
         elif details.get("visibility") == "PRIVATE":
-            console.print("[bold yellow]Inspect[/bold yellow]")
-            console.print(f"  [green]$[/green] prime env inspect {owner}/{name}@{target_version}")
-            console.print(
-                f"  [green]$[/green] prime env inspect {owner}/{name}@{target_version} README.md"
-            )
-
-            console.print()
             console.print("[bold yellow]Install (private environment)[/bold yellow]")
             console.print(f"  [green]$[/green] prime env pull {owner}/{name}@{target_version}")
             console.print(
@@ -2041,6 +2037,8 @@ def info(
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
+    except typer.Exit:
+        raise
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
         raise typer.Exit(1)
@@ -2147,6 +2145,8 @@ def inspect_cmd(
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
+    except typer.Exit:
+        raise
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
         raise typer.Exit(1)

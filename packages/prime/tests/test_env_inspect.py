@@ -154,3 +154,40 @@ class TestEnvInspect:
         assert "testuser/test-env@0.2.0" in result.output
         assert "(path: src)" in result.output
         assert "src/main.py" in result.output
+
+    def test_invalid_env_id_reports_validation_error(self) -> None:
+        result = runner.invoke(app, ["env", "inspect", "not-a-slug"])
+
+        assert result.exit_code == 1
+        assert "Invalid environment ID format" in result.output
+        assert "Unexpected error" not in result.output
+
+
+def test_env_info_shows_inspect_commands_without_wheel(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+
+    def mock_get(
+        self: Any, endpoint: str, params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        if endpoint.endswith("/@latest"):
+            return {
+                "data": {
+                    "id": "env-123",
+                    "name": "test-env",
+                    "owner": {"name": "testuser", "type": "user"},
+                    "visibility": "PUBLIC",
+                    "metadata": {"description": "Example environment"},
+                    "wheel_url": None,
+                    "package_url": "https://example.com/test-env.tar.gz",
+                    "simple_index_url": None,
+                }
+            }
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = runner.invoke(app, ["env", "info", "testuser/test-env"])
+
+    assert result.exit_code == 0, result.output
+    assert "prime env inspect testuser/test-env@latest" in result.output
+    assert "No wheel available for this version" in result.output

@@ -41,6 +41,7 @@ class InferenceClient:
         api_key: Optional[str] = None,
         team_id: Optional[str] = None,
         inference_url: Optional[str] = None,
+        timeout: Optional[float | httpx.Timeout] = None,
     ) -> None:
         # Load config
         self.config = Config()
@@ -64,7 +65,7 @@ class InferenceClient:
 
         self._client = httpx.Client(
             headers=headers,
-            timeout=httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=60.0),
+            timeout=timeout or httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=60.0),
         )
 
     def list_models(self) -> Dict[str, Any]:

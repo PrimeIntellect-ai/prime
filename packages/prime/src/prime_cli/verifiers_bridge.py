@@ -18,12 +18,7 @@ import typer
 
 from prime_cli.core import Config
 
-from .api.inference import (
-    InferenceAPIError,
-    InferenceClient,
-    InferencePaymentRequiredError,
-    InferenceTimeoutError,
-)
+from .api.inference import InferenceAPIError, InferenceClient, InferencePaymentRequiredError
 from .client import APIClient, APIError
 from .utils.env_metadata import find_environment_metadata, get_environment_metadata
 from .utils.eval_push import push_eval_results_to_hub
@@ -790,10 +785,10 @@ def _add_default_inference_and_key_args(
 def _validate_model(model: str, inference_base_url: str, configured_base_url: str) -> None:
     if inference_base_url != configured_base_url:
         return
-    client = InferenceClient()
+    client = InferenceClient(timeout=EVAL_PREFLIGHT_TIMEOUT)
     try:
-        client.retrieve_model(model, timeout=EVAL_PREFLIGHT_TIMEOUT)
-    except InferenceTimeoutError:
+        client.retrieve_model(model)
+    except httpx.TimeoutException:
         console.print(
             f"[yellow]Timed out validating model '{model}' during eval preflight.[/yellow] "
             "Continuing anyway because some thinking models take longer to warm up."
@@ -813,16 +808,15 @@ def _preflight_inference_billing(
     if inference_base_url != configured_base_url:
         return
 
-    client = InferenceClient()
+    client = InferenceClient(timeout=EVAL_PREFLIGHT_TIMEOUT)
     try:
         client.chat_completion(
             {
                 "model": model,
                 "messages": [{"role": "user", "content": "Reply with OK."}],
-            },
-            timeout=EVAL_PREFLIGHT_TIMEOUT,
+            }
         )
-    except InferenceTimeoutError:
+    except httpx.TimeoutException:
         console.print(
             f"[yellow]Timed out running the inference preflight probe for '{model}'.[/yellow] "
             "Continuing anyway because some thinking models take longer to warm up."

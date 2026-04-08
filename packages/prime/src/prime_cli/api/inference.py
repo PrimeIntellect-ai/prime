@@ -16,13 +16,6 @@ class InferencePaymentRequiredError(InferenceAPIError):
     pass
 
 
-class InferenceTimeoutError(InferenceAPIError):
-    pass
-
-
-RequestTimeout = float | httpx.Timeout | None
-
-
 def _extract_error_message(response: httpx.Response) -> str:
     text = response.text.strip()
     return text or response.reason_phrase or "Unknown error"
@@ -48,6 +41,7 @@ class InferenceClient:
         api_key: Optional[str] = None,
         team_id: Optional[str] = None,
         inference_url: Optional[str] = None,
+        timeout: Optional[float | httpx.Timeout] = None,
     ) -> None:
         # Load config
         self.config = Config()
@@ -71,17 +65,14 @@ class InferenceClient:
 
         self._client = httpx.Client(
             headers=headers,
-            timeout=httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=60.0),
+            timeout=timeout or httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=60.0),
         )
 
-    def list_models(self, timeout: RequestTimeout = None) -> Dict[str, Any]:
+    def list_models(self) -> Dict[str, Any]:
         url = f"{self.inference_url}/models"
-        request_kwargs = {"timeout": timeout} if timeout is not None else {}
+        resp = self._client.get(url)
         try:
-            resp = self._client.get(url, **request_kwargs)
             resp.raise_for_status()
-        except httpx.TimeoutException as e:
-            raise InferenceTimeoutError(f"GET {url} timed out") from e
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
             message = _extract_error_message(e.response)
@@ -92,14 +83,11 @@ class InferenceClient:
             raise InferenceAPIError(f"GET {url} failed: {status} {message}") from e
         return resp.json()
 
-    def retrieve_model(self, model_id: str, timeout: RequestTimeout = None) -> Dict[str, Any]:
+    def retrieve_model(self, model_id: str) -> Dict[str, Any]:
         url = f"{self.inference_url}/models/{model_id}"
-        request_kwargs = {"timeout": timeout} if timeout is not None else {}
+        resp = self._client.get(url)
         try:
-            resp = self._client.get(url, **request_kwargs)
             resp.raise_for_status()
-        except httpx.TimeoutException as e:
-            raise InferenceTimeoutError(f"GET {url} timed out") from e
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
             message = _extract_error_message(e.response)
@@ -116,20 +104,14 @@ class InferenceClient:
         return resp.json()
 
     def chat_completion(
-        self,
-        payload: Dict[str, Any],
-        stream: bool = False,
-        timeout: RequestTimeout = None,
+        self, payload: Dict[str, Any], stream: bool = False
     ) -> Dict[str, Any] | Iterable[Dict[str, Any]]:
         url = f"{self.inference_url}/chat/completions"
-        request_kwargs = {"timeout": timeout} if timeout is not None else {}
 
         if not stream:
+            resp = self._client.post(url, json=payload)
             try:
-                resp = self._client.post(url, json=payload, **request_kwargs)
                 resp.raise_for_status()
-            except httpx.TimeoutException as e:
-                raise InferenceTimeoutError(f"POST {url} timed out") from e
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
                 message = _extract_error_message(e.response)
@@ -142,39 +124,36 @@ class InferenceClient:
 
         # Streamed (SSE-style: lines prefixed with 'data: ')
         def _stream() -> Iterator[Dict[str, Any]]:
-            try:
-                with self._client.stream("POST", url, json=payload, **request_kwargs) as r:
-                    try:
-                        r.raise_for_status()
-                    except httpx.HTTPStatusError as e:
-                        e.response.read()
-                        status = e.response.status_code
-                        message = _extract_error_message(e.response)
-                        if status == 402:
-                            raise InferencePaymentRequiredError(
-                                f"Payment required. {_extract_payment_error_message(e.response)}"
-                            ) from e
-                        raise InferenceAPIError(f"POST {url} failed: {status} {message}") from e
-                    for line in r.iter_lines():
-                        if not line:
-                            continue
-                        if line.startswith("data: "):
-                            data = line[6:].strip()
-                        else:
-                            # Some servers don't prefix; try parsing anyway
-                            data = line.strip()
+            with self._client.stream("POST", url, json=payload) as r:
+                try:
+                    r.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    e.response.read()
+                    status = e.response.status_code
+                    message = _extract_error_message(e.response)
+                    if status == 402:
+                        raise InferencePaymentRequiredError(
+                            f"Payment required. {_extract_payment_error_message(e.response)}"
+                        ) from e
+                    raise InferenceAPIError(f"POST {url} failed: {status} {message}") from e
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    if line.startswith("data: "):
+                        data = line[6:].strip()
+                    else:
+                        # Some servers don't prefix; try parsing anyway
+                        data = line.strip()
 
-                        if not data or data == "[DONE]":
-                            if data == "[DONE]":
-                                return
-                            continue
-                        try:
-                            chunk = json.loads(data)
-                            yield chunk
-                        except json.JSONDecodeError:
-                            # Skip unparsable lines quietly
-                            continue
-            except httpx.TimeoutException as e:
-                raise InferenceTimeoutError(f"POST {url} timed out") from e
+                    if not data or data == "[DONE]":
+                        if data == "[DONE]":
+                            return
+                        continue
+                    try:
+                        chunk = json.loads(data)
+                        yield chunk
+                    except json.JSONDecodeError:
+                        # Skip unparsable lines quietly
+                        continue
 
         return _stream()

@@ -5,7 +5,6 @@ from prime_cli.api.inference import (
     InferenceAPIError,
     InferenceClient,
     InferencePaymentRequiredError,
-    InferenceTimeoutError,
 )
 from prime_cli.verifiers_bridge import run_eval_passthrough
 
@@ -73,18 +72,18 @@ def test_eval_run_blocks_when_inference_billing_is_missing(monkeypatch, error_me
         "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.InferenceClient.retrieve_model",
-        lambda self, model, timeout=None: {"id": model},
-    )
 
-    def fake_chat_completion(self, payload, stream=False, timeout=None):
-        raise InferencePaymentRequiredError(error_message)
+    class DummyInferenceClient:
+        def __init__(self, timeout=None):
+            self.timeout = timeout
 
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.InferenceClient.chat_completion",
-        fake_chat_completion,
-    )
+        def retrieve_model(self, model):
+            return {"id": model}
+
+        def chat_completion(self, payload, stream=False):
+            raise InferencePaymentRequiredError(error_message)
+
+    monkeypatch.setattr("prime_cli.verifiers_bridge.InferenceClient", DummyInferenceClient)
 
     with pytest.raises(typer.Exit) as exc_info:
         run_eval_passthrough(
@@ -102,23 +101,21 @@ def test_eval_preflight_omits_max_tokens(monkeypatch):
         "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.InferenceClient.retrieve_model",
-        lambda self, model, timeout=None: {"id": model},
-    )
-
     seen_payloads = []
     seen_timeouts = []
 
-    def fake_chat_completion(self, payload, stream=False, timeout=None):
-        seen_payloads.append(payload)
-        seen_timeouts.append(timeout)
-        return {"id": "cmpl-123", "choices": []}
+    class DummyInferenceClient:
+        def __init__(self, timeout=None):
+            seen_timeouts.append(timeout)
 
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.InferenceClient.chat_completion",
-        fake_chat_completion,
-    )
+        def retrieve_model(self, model):
+            return {"id": model}
+
+        def chat_completion(self, payload, stream=False):
+            seen_payloads.append(payload)
+            return {"id": "cmpl-123", "choices": []}
+
+    monkeypatch.setattr("prime_cli.verifiers_bridge.InferenceClient", DummyInferenceClient)
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._prepare_single_environment",
         lambda *args, **kwargs: (_ for _ in ()).throw(typer.Exit(0)),
@@ -139,8 +136,8 @@ def test_eval_preflight_omits_max_tokens(monkeypatch):
             "messages": [{"role": "user", "content": "Reply with OK."}],
         }
     ]
-    assert len(seen_timeouts) == 1
-    assert seen_timeouts[0].read == 300.0
+    assert len(seen_timeouts) == 2
+    assert all(timeout.read == 300.0 for timeout in seen_timeouts)
 
 
 def test_eval_run_continues_when_model_validation_times_out(monkeypatch):
@@ -151,18 +148,17 @@ def test_eval_run_continues_when_model_validation_times_out(monkeypatch):
 
     seen_model_timeouts = []
 
-    def fake_retrieve_model(self, model, timeout=None):
-        seen_model_timeouts.append(timeout)
-        raise InferenceTimeoutError("GET https://api.pinference.ai/api/v1/models/foo timed out")
+    class DummyInferenceClient:
+        def __init__(self, timeout=None):
+            seen_model_timeouts.append(timeout)
 
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.InferenceClient.retrieve_model",
-        fake_retrieve_model,
-    )
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.InferenceClient.chat_completion",
-        lambda self, payload, stream=False, timeout=None: {"id": "cmpl-123", "choices": []},
-    )
+        def retrieve_model(self, model):
+            raise httpx.ReadTimeout("timed out")
+
+        def chat_completion(self, payload, stream=False):
+            return {"id": "cmpl-123", "choices": []}
+
+    monkeypatch.setattr("prime_cli.verifiers_bridge.InferenceClient", DummyInferenceClient)
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._prepare_single_environment",
         lambda *args, **kwargs: (_ for _ in ()).throw(typer.Exit(0)),
@@ -177,7 +173,7 @@ def test_eval_run_continues_when_model_validation_times_out(monkeypatch):
         )
 
     assert exc_info.value.exit_code == 0
-    assert len(seen_model_timeouts) == 1
+    assert len(seen_model_timeouts) == 2
     assert seen_model_timeouts[0].read == 300.0
 
 
@@ -186,23 +182,20 @@ def test_eval_run_continues_when_billing_preflight_times_out(monkeypatch):
         "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.InferenceClient.retrieve_model",
-        lambda self, model, timeout=None: {"id": model},
-    )
 
     seen_billing_timeouts = []
 
-    def fake_chat_completion(self, payload, stream=False, timeout=None):
-        seen_billing_timeouts.append(timeout)
-        raise InferenceTimeoutError(
-            "POST https://api.pinference.ai/api/v1/chat/completions timed out"
-        )
+    class DummyInferenceClient:
+        def __init__(self, timeout=None):
+            seen_billing_timeouts.append(timeout)
 
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.InferenceClient.chat_completion",
-        fake_chat_completion,
-    )
+        def retrieve_model(self, model):
+            return {"id": model}
+
+        def chat_completion(self, payload, stream=False):
+            raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr("prime_cli.verifiers_bridge.InferenceClient", DummyInferenceClient)
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._prepare_single_environment",
         lambda *args, **kwargs: (_ for _ in ()).throw(typer.Exit(0)),
@@ -217,22 +210,16 @@ def test_eval_run_continues_when_billing_preflight_times_out(monkeypatch):
         )
 
     assert exc_info.value.exit_code == 0
-    assert len(seen_billing_timeouts) == 1
-    assert seen_billing_timeouts[0].read == 300.0
+    assert len(seen_billing_timeouts) == 2
+    assert seen_billing_timeouts[1].read == 300.0
 
 
-def test_inference_client_maps_timeout_to_inference_timeout_error():
-    client = InferenceClient.__new__(InferenceClient)
-    client.inference_url = "https://api.pinference.ai/api/v1"
+def test_inference_client_uses_custom_timeout(monkeypatch):
+    monkeypatch.setattr("prime_cli.api.inference.Config", lambda: DummyConfig())
 
-    class DummyHTTPClient:
-        def get(self, url, **kwargs):
-            raise httpx.ReadTimeout("timed out")
+    client = InferenceClient(timeout=httpx.Timeout(connect=5.0, read=7.0, write=9.0, pool=11.0))
 
-    client._client = DummyHTTPClient()
-
-    with pytest.raises(InferenceTimeoutError, match="GET .* timed out"):
-        client.retrieve_model("moonshotai/kimi-k2.5")
+    assert client._client.timeout.read == 7.0
 
 
 def test_streaming_error_reads_response_before_formatting(monkeypatch):

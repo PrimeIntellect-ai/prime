@@ -12,12 +12,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import toml
 import typer
 
 from prime_cli.core import Config
 
-from .api.inference import InferenceAPIError, InferenceClient, InferencePaymentRequiredError
+from .api.inference import (
+    InferenceAPIError,
+    InferenceClient,
+    InferencePaymentRequiredError,
+    InferenceTimeoutError,
+)
 from .client import APIClient, APIError
 from .utils.env_metadata import find_environment_metadata, get_environment_metadata
 from .utils.eval_push import push_eval_results_to_hub
@@ -30,6 +36,7 @@ DEFAULT_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_ENV_DIR_PATH = "./environments"
 PRIME_SLUG = "primeintellect"
 INTERNAL_ENV_DISPLAY_HEADER = "X-Prime-Eval-Env-Display"
+EVAL_PREFLIGHT_TIMEOUT = httpx.Timeout(connect=10.0, read=1800.0, write=60.0, pool=60.0)
 MODULE_TO_PRIME_COMMAND = {
     "verifiers.cli.commands.eval": "prime eval run",
     "verifiers.cli.commands.gepa": "prime gepa run",
@@ -785,7 +792,13 @@ def _validate_model(model: str, inference_base_url: str, configured_base_url: st
         return
     client = InferenceClient()
     try:
-        client.retrieve_model(model)
+        client.retrieve_model(model, timeout=EVAL_PREFLIGHT_TIMEOUT)
+    except InferenceTimeoutError:
+        console.print(
+            f"[yellow]Timed out validating model '{model}' during eval preflight.[/yellow] "
+            "Continuing anyway because some thinking models take longer to warm up."
+        )
+        return
     except InferenceAPIError as exc:
         console.print(
             f"[red]Invalid model:[/red] {exc} \n\n"
@@ -806,8 +819,15 @@ def _preflight_inference_billing(
             {
                 "model": model,
                 "messages": [{"role": "user", "content": "Reply with OK."}],
-            }
+            },
+            timeout=EVAL_PREFLIGHT_TIMEOUT,
         )
+    except InferenceTimeoutError:
+        console.print(
+            f"[yellow]Timed out running the inference preflight probe for '{model}'.[/yellow] "
+            "Continuing anyway because some thinking models take longer to warm up."
+        )
+        return
     except InferencePaymentRequiredError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc

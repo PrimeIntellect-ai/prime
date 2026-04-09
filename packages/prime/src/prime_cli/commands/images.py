@@ -1,6 +1,8 @@
 """Commands for managing Docker images in Prime Intellect registry."""
 
 import json
+import shutil
+import subprocess
 import tarfile
 import tempfile
 from datetime import datetime
@@ -29,10 +31,313 @@ LIST_IMAGES_JSON_HELP = json_output_help(
 )
 
 
+def _parse_image_reference(image_reference: str) -> tuple[str, str]:
+    """Split ``name:tag`` and default tag to ``latest``."""
+    if ":" in image_reference:
+        image_name, image_tag = image_reference.rsplit(":", 1)
+    else:
+        image_name = image_reference
+        image_tag = "latest"
+    return image_name, image_tag
+
+
+def _push_prebuilt_image(
+    image_name: str,
+    image_tag: str,
+    image_reference: str,
+    platform: str,
+) -> None:
+    """Push a locally-built Docker image to the Prime registry."""
+    if not shutil.which("docker"):
+        console.print(
+            "[red]Error: Docker CLI not found. "
+            "Install Docker (https://docs.docker.com/get-docker/) "
+            "and ensure 'docker' is on your PATH.[/red]"
+        )
+        raise typer.Exit(1)
+
+    result = subprocess.run(
+        ["docker", "inspect", "--type=image", image_reference],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        console.print(
+            f"[red]Error: Local image '{image_reference}' not found. "
+            "Build it first with 'docker build'.[/red]"
+        )
+        raise typer.Exit(1)
+
+    # Validate that the local image platform matches the declared target
+    inspect_result = subprocess.run(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            "{{.Os}}/{{.Architecture}}",
+            image_reference,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if inspect_result.returncode == 0:
+        local_platform = inspect_result.stdout.strip()
+        if local_platform and local_platform != platform:
+            console.print(
+                f"[red]Error: Platform mismatch — local image is "
+                f"{local_platform} but target platform is {platform}.[/red]"
+            )
+            console.print(f"[dim]Rebuild with: docker build --platform {platform} ...[/dim]")
+            raise typer.Exit(1)
+
+    client = APIClient()
+
+    console.print("[cyan]Requesting registry credentials...[/cyan]")
+    try:
+        push_payload: dict = {
+            "image_name": image_name,
+            "image_tag": image_tag,
+            "platform": platform,
+        }
+        if config.team_id:
+            push_payload["team_id"] = config.team_id
+
+        push_response = client.request("POST", "/images/push", json=push_payload)
+    except UnauthorizedError:
+        console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error: Failed to initiate push: {e}[/red]")
+        raise typer.Exit(1)
+
+    push_id = push_response.get("push_id")
+    registry = push_response.get("registry")
+    token = push_response.get("token")
+    full_image_path = push_response.get("fullImagePath")
+
+    if not all([push_id, registry, token, full_image_path]):
+        console.print("[red]Error: Invalid response from server (missing push credentials)[/red]")
+        raise typer.Exit(1)
+
+    console.print("[green]✓[/green] Credentials received")
+    console.print()
+
+    docker_config_dir = tempfile.mkdtemp(prefix="prime-docker-")
+    try:
+        console.print("[cyan]Authenticating with registry...[/cyan]")
+        login_result = subprocess.run(
+            [
+                "docker",
+                "--config",
+                docker_config_dir,
+                "login",
+                registry,
+                "-u",
+                "oauth2accesstoken",
+                "--password-stdin",
+            ],
+            input=token,
+            capture_output=True,
+            text=True,
+        )
+        if login_result.returncode != 0:
+            console.print(f"[red]Error: Docker login failed: {login_result.stderr.strip()}[/red]")
+            raise typer.Exit(1)
+        console.print("[green]✓[/green] Authenticated")
+        console.print()
+
+        console.print(f"[cyan]Tagging image as {full_image_path}...[/cyan]")
+        tag_result = subprocess.run(
+            ["docker", "tag", image_reference, full_image_path],
+            capture_output=True,
+            text=True,
+        )
+        if tag_result.returncode != 0:
+            console.print(f"[red]Error: Docker tag failed: {tag_result.stderr.strip()}[/red]")
+            raise typer.Exit(1)
+        console.print("[green]✓[/green] Tagged")
+        console.print()
+
+        console.print("[cyan]Pushing image to registry...[/cyan]")
+        push_result = subprocess.run(
+            ["docker", "--config", docker_config_dir, "push", full_image_path],
+            text=True,
+        )
+        if push_result.returncode != 0:
+            console.print("[red]Error: Docker push failed.[/red]")
+            raise typer.Exit(1)
+        console.print("[green]✓[/green] Image pushed")
+        console.print()
+
+        console.print("[cyan]Registering image...[/cyan]")
+        try:
+            client.request("POST", f"/images/push/{push_id}/complete")
+        except APIError as e:
+            console.print(f"[red]Error: Failed to register image: {e}[/red]")
+            raise typer.Exit(1)
+
+        display_ref = push_response.get(
+            "displayRef",
+            push_response.get("fullImagePath", f"{image_name}:{image_tag}"),
+        )
+
+        console.print("[bold green]Image pushed successfully![/bold green]")
+        console.print()
+        console.print(f"[bold]Image:[/bold] {display_ref}")
+        console.print()
+        console.print(f"[dim]Use it with: prime sandbox create {display_ref}[/dim]")
+        console.print()
+
+    finally:
+        subprocess.run(
+            ["docker", "rmi", full_image_path],
+            capture_output=True,
+        )
+        shutil.rmtree(docker_config_dir, ignore_errors=True)
+
+
+def _push_dockerfile_build(
+    image_name: str,
+    image_tag: str,
+    context: str,
+    dockerfile: Optional[str],
+    platform: str,
+) -> None:
+    """Upload a Dockerfile + context for server-side build via Kaniko."""
+    client = APIClient()
+
+    context_path = Path(context).resolve()
+    dockerfile_path = Path(dockerfile).resolve() if dockerfile else context_path / "Dockerfile"
+
+    if not context_path.exists():
+        console.print(f"[red]Error: Build context not found at {context_path}[/red]")
+        raise typer.Exit(1)
+
+    if not context_path.is_dir():
+        console.print(f"[red]Error: Build context must be a directory: {context_path}[/red]")
+        raise typer.Exit(1)
+
+    if not dockerfile_path.exists():
+        console.print(f"[red]Error: Dockerfile not found at {dockerfile_path}[/red]")
+        raise typer.Exit(1)
+
+    if not dockerfile_path.is_file():
+        console.print(f"[red]Error: Dockerfile must be a file: {dockerfile_path}[/red]")
+        raise typer.Exit(1)
+
+    console.print("[cyan]Preparing build context...[/cyan]")
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
+        tar_path = tmp_file.name
+
+    try:
+        with tarfile.open(tar_path, "w:gz") as tar:
+            tar.add(context_path, arcname=".")
+            tar.add(dockerfile_path, arcname=PACKAGED_DOCKERFILE_PATH)
+
+        tar_size_mb = Path(tar_path).stat().st_size / (1024 * 1024)
+        console.print(f"[green]✓[/green] Build context packaged ({tar_size_mb:.2f} MB)")
+        console.print()
+
+        console.print("[cyan]Initiating build...[/cyan]")
+        try:
+            build_payload: dict = {
+                "image_name": image_name,
+                "image_tag": image_tag,
+                "dockerfile_path": PACKAGED_DOCKERFILE_PATH,
+                "platform": platform,
+            }
+            if config.team_id:
+                build_payload["team_id"] = config.team_id
+
+            build_response = client.request(
+                "POST",
+                "/images/build",
+                json=build_payload,
+            )
+        except UnauthorizedError:
+            console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+            raise typer.Exit(1)
+        except APIError as e:
+            console.print(f"[red]Error: Failed to initiate build: {e}[/red]")
+            raise typer.Exit(1)
+
+        build_id = build_response.get("build_id")
+        upload_url = build_response.get("upload_url")
+        if not build_id or not upload_url:
+            console.print(
+                "[red]Error: Invalid response from server (missing build_id or upload_url)[/red]"
+            )
+            raise typer.Exit(1)
+        full_image_path = build_response.get("fullImagePath") or f"{image_name}:{image_tag}"
+
+        console.print("[green]✓[/green] Build initiated")
+        console.print()
+
+        console.print("[cyan]Uploading build context...[/cyan]")
+        try:
+            with open(tar_path, "rb") as f:
+                upload_response = httpx.put(
+                    upload_url,
+                    content=f,
+                    headers={"Content-Type": "application/octet-stream"},
+                    timeout=600.0,
+                )
+                upload_response.raise_for_status()
+        except httpx.HTTPError as e:
+            console.print(f"[red]Upload failed: {e}[/red]")
+            raise typer.Exit(1)
+
+        console.print("[green]✓[/green] Build context uploaded")
+        console.print()
+
+        console.print("[cyan]Starting build...[/cyan]")
+        try:
+            client.request(
+                "POST",
+                f"/images/build/{build_id}/start",
+                json={"context_uploaded": True},
+            )
+        except APIError as e:
+            console.print(f"[red]Error: Failed to start build: {e}[/red]")
+            raise typer.Exit(1)
+
+        console.print("[green]✓[/green] Build started")
+        console.print()
+
+        console.print("[bold green]Build initiated successfully![/bold green]")
+        console.print()
+        console.print(f"[bold]Build ID:[/bold] {build_id}")
+        console.print(f"[bold]Image:[/bold] {full_image_path}")
+        console.print()
+        console.print("[cyan]Your image is being built.[/cyan]")
+        console.print()
+        console.print("[bold]Check build status:[/bold]")
+        console.print("  prime images list")
+        console.print()
+        console.print(
+            "[dim]The build typically takes a few minutes depending on image complexity.[/dim]"
+        )
+        console.print(
+            "[dim]Once completed, you can use it with: "
+            f"prime sandbox create {full_image_path}[/dim]"
+        )
+        console.print()
+
+    finally:
+        try:
+            Path(tar_path).unlink()
+        except Exception:
+            pass
+
+
 @app.command("push")
 def push_image(
     image_reference: str = typer.Argument(
         ..., help="Image reference (e.g., 'myapp:v1.0.0' or 'myapp:latest')"
+    ),
+    prebuilt: bool = typer.Option(
+        False,
+        "--prebuilt",
+        help="Push a locally built Docker image instead of building from a Dockerfile",
     ),
     context: str = typer.Option(".", "--context", "-c", help="Build context directory"),
     dockerfile: Optional[str] = typer.Option(
@@ -52,21 +357,19 @@ def push_image(
     """
     Build and push a Docker image to Prime Intellect registry.
 
+    By default, uploads a Dockerfile and build context for server-side building.
+    Use --prebuilt to push a locally built image directly.
+
     \b
     Examples:
         prime images push myapp:v1.0.0
         prime images push myapp:latest --context ./app --dockerfile ../docker/Dockerfile.prod
         prime images push myapp:v1 --platform linux/arm64
+        prime images push myapp:v1.0.0 --prebuilt
     """
     try:
-        # Parse image reference
-        if ":" in image_reference:
-            image_name, image_tag = image_reference.rsplit(":", 1)
-        else:
-            image_name = image_reference
-            image_tag = "latest"
+        image_name, image_tag = _parse_image_reference(image_reference)
 
-        # Validate image name doesn't contain slashes
         if "/" in image_name:
             console.print(
                 "[red]Error: Image name cannot contain '/'. "
@@ -74,146 +377,16 @@ def push_image(
             )
             raise typer.Exit(1)
 
-        console.print(
-            f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
-        )
+        action = "Pushing prebuilt image" if prebuilt else "Building and pushing image"
+        console.print(f"[bold blue]{action}:[/bold blue] {image_name}:{image_tag}")
         if config.team_id:
             console.print(f"[dim]Team: {config.team_id}[/dim]")
         console.print()
 
-        # Initialize API client
-        client = APIClient()
-
-        context_path = Path(context).resolve()
-        dockerfile_path = Path(dockerfile).resolve() if dockerfile else context_path / "Dockerfile"
-
-        if not context_path.exists():
-            console.print(f"[red]Error: Build context not found at {context_path}[/red]")
-            raise typer.Exit(1)
-
-        if not context_path.is_dir():
-            console.print(f"[red]Error: Build context must be a directory: {context_path}[/red]")
-            raise typer.Exit(1)
-
-        if not dockerfile_path.exists():
-            console.print(f"[red]Error: Dockerfile not found at {dockerfile_path}[/red]")
-            raise typer.Exit(1)
-
-        if not dockerfile_path.is_file():
-            console.print(f"[red]Error: Dockerfile must be a file: {dockerfile_path}[/red]")
-            raise typer.Exit(1)
-
-        # Create tar.gz of build context
-        console.print("[cyan]Preparing build context...[/cyan]")
-        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
-            tar_path = tmp_file.name
-
-        try:
-            with tarfile.open(tar_path, "w:gz") as tar:
-                tar.add(context_path, arcname=".")
-                tar.add(dockerfile_path, arcname=PACKAGED_DOCKERFILE_PATH)
-
-            tar_size_mb = Path(tar_path).stat().st_size / (1024 * 1024)
-            console.print(f"[green]✓[/green] Build context packaged ({tar_size_mb:.2f} MB)")
-            console.print()
-
-            # Initialize build
-            console.print("[cyan]Initiating build...[/cyan]")
-            try:
-                build_payload = {
-                    "image_name": image_name,
-                    "image_tag": image_tag,
-                    "dockerfile_path": PACKAGED_DOCKERFILE_PATH,
-                    "platform": platform,
-                }
-                if config.team_id:
-                    build_payload["team_id"] = config.team_id
-
-                build_response = client.request(
-                    "POST",
-                    "/images/build",
-                    json=build_payload,
-                )
-            except UnauthorizedError:
-                console.print(
-                    "[red]Error: Not authenticated. Please run 'prime login' first.[/red]"
-                )
-                raise typer.Exit(1)
-            except APIError as e:
-                console.print(f"[red]Error: Failed to initiate build: {e}[/red]")
-                raise typer.Exit(1)
-
-            build_id = build_response.get("build_id")
-            upload_url = build_response.get("upload_url")
-            if not build_id or not upload_url:
-                console.print(
-                    "[red]Error: Invalid response from server "
-                    "(missing build_id or upload_url)[/red]"
-                )
-                raise typer.Exit(1)
-            full_image_path = build_response.get("fullImagePath") or f"{image_name}:{image_tag}"
-
-            console.print("[green]✓[/green] Build initiated")
-            console.print()
-
-            # Upload build context to GCS
-            console.print("[cyan]Uploading build context...[/cyan]")
-            try:
-                with open(tar_path, "rb") as f:
-                    upload_response = httpx.put(
-                        upload_url,
-                        content=f,
-                        headers={"Content-Type": "application/octet-stream"},
-                        timeout=600.0,
-                    )
-                    upload_response.raise_for_status()
-            except httpx.HTTPError as e:
-                console.print(f"[red]Upload failed: {e}[/red]")
-                raise typer.Exit(1)
-
-            console.print("[green]✓[/green] Build context uploaded")
-            console.print()
-
-            # Start the build
-            console.print("[cyan]Starting build...[/cyan]")
-            try:
-                client.request(
-                    "POST",
-                    f"/images/build/{build_id}/start",
-                    json={"context_uploaded": True},
-                )
-            except APIError as e:
-                console.print(f"[red]Error: Failed to start build: {e}[/red]")
-                raise typer.Exit(1)
-
-            console.print("[green]✓[/green] Build started")
-            console.print()
-
-            console.print("[bold green]Build initiated successfully![/bold green]")
-            console.print()
-            console.print(f"[bold]Build ID:[/bold] {build_id}")
-            console.print(f"[bold]Image:[/bold] {full_image_path}")
-            console.print()
-            console.print("[cyan]Your image is being built.[/cyan]")
-            console.print()
-            console.print("[bold]Check build status:[/bold]")
-            console.print("  prime images list")
-            console.print()
-            console.print(
-                "[dim]The build typically takes a few minutes depending on image complexity.[/dim]"
-            )
-            console.print(
-                "[dim]Once completed, you can use it with: "
-                f"prime sandbox create {full_image_path}[/dim]"
-            )
-            console.print()
-
-        finally:
-            # Clean up temporary tar file
-            try:
-                Path(tar_path).unlink()
-            except Exception:
-                pass
+        if prebuilt:
+            _push_prebuilt_image(image_name, image_tag, image_reference, platform)
+        else:
+            _push_dockerfile_build(image_name, image_tag, context, dockerfile, platform)
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled by user[/yellow]")

@@ -350,8 +350,8 @@ metadatas.binding_secret = "{self._tunnel_info.binding_secret}"
 
 # Transport settings
 transport.tcpMux = true
-transport.tcpMuxKeepaliveInterval = 30
-transport.poolCount = 10
+transport.tcpMuxKeepaliveInterval = 60
+transport.poolCount = 50
 transport.dialServerKeepalive = 60
 
 # Logging - always use console so we can detect connection via stdout

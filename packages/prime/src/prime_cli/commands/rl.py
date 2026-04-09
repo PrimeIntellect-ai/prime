@@ -489,6 +489,8 @@ class RLConfig(BaseModel):
     max_async_level: int | None = None
     checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
     cluster_name: str | None = None  # Admin-only: target a specific cluster by name
+    env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
+    env_files: List[str] = Field(default_factory=list)
     env: List[EnvConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
@@ -498,8 +500,6 @@ class RLConfig(BaseModel):
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
     infrastructure: InfrastructureConfig = Field(default_factory=InfrastructureConfig)
-    env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
-    env_files: List[str] = Field(default_factory=list)
 
 
 def _format_validation_errors(errors: list[Any]) -> list[str]:
@@ -940,6 +940,132 @@ def list_models(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+def _flatten_config_schema(
+    schema: Dict[str, Any],
+    defs: Dict[str, Any],
+    prefix: str = "",
+) -> list[tuple[str, str, str]]:
+    """Walk a JSON schema and return (dotted_path, type, default) for each leaf field."""
+    leaf_rows: list[tuple[str, str, str]] = []
+    nested_rows: list[tuple[str, str, str]] = []
+    props = schema.get("properties", {})
+    for name, prop in props.items():
+        if name in ("model_config", "env_file"):
+            continue
+        path = f"{prefix}{name}" if not prefix else f"{prefix}.{name}"
+
+        # Resolve $ref or anyOf with a single non-null $ref (optional nested models)
+        resolved = prop
+        if "$ref" in prop:
+            ref_name = prop["$ref"].rsplit("/", 1)[-1]
+            resolved = defs.get(ref_name, prop)
+        elif "anyOf" in prop:
+            non_null = [v for v in prop["anyOf"] if v.get("type") != "null"]
+            if len(non_null) == 1 and "$ref" in non_null[0]:
+                ref_name = non_null[0]["$ref"].rsplit("/", 1)[-1]
+                resolved = defs.get(ref_name, prop)
+
+        # If it's an object with properties, recurse
+        if resolved.get("type") == "object" and "properties" in resolved:
+            nested_rows.extend(_flatten_config_schema(resolved, defs, path))
+            continue
+
+        # If it's an array of objects (like env), show as section hint
+        if resolved.get("type") == "array":
+            items = resolved.get("items", {})
+            if "$ref" in items:
+                ref_name = items["$ref"].rsplit("/", 1)[-1]
+                items = defs.get(ref_name, items)
+            if items.get("type") == "object" and "properties" in items:
+                nested_rows.extend(_flatten_config_schema(items, defs, f"{path}[]"))
+                continue
+
+        # Leaf field — extract type and default
+        type_str = _schema_type_str(resolved, defs)
+        default = str(prop.get("default", "")) if "default" in prop else ""
+        leaf_rows.append((path, type_str, default))
+
+    return leaf_rows + nested_rows
+
+
+def _schema_type_str(prop: Dict[str, Any], defs: Dict[str, Any]) -> str:
+    """Produce a human-readable type string from a JSON schema property."""
+    if "anyOf" in prop:
+        parts = []
+        for variant in prop["anyOf"]:
+            if variant.get("type") == "null":
+                continue
+            if "$ref" in variant:
+                ref_name = variant["$ref"].rsplit("/", 1)[-1]
+                parts.append(ref_name)
+            else:
+                parts.append(variant.get("type", "?"))
+        return " | ".join(parts) if parts else "any"
+    if "allOf" in prop and len(prop["allOf"]) == 1 and "$ref" in prop["allOf"][0]:
+        ref_name = prop["allOf"][0]["$ref"].rsplit("/", 1)[-1]
+        return ref_name
+    if prop.get("type") == "array":
+        items = prop.get("items", {})
+        inner = items.get("type", "any")
+        return f"list[{inner}]"
+    return prop.get("type", "any")
+
+
+RL_CONFIGS_JSON_HELP = json_output_help(
+    ".configs[] = {section, name, type, default}",
+)
+
+
+@app.command("configs", rich_help_panel="Commands", epilog=RL_CONFIGS_JSON_HELP)
+def list_configs(
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List available configuration options for RL training."""
+    validate_output_format(output, console)
+
+    schema = RLConfig.model_json_schema()
+    defs = schema.get("$defs", {})
+    rows = _flatten_config_schema(schema, defs)
+    if output == "json":
+        output_data_as_json(
+            {
+                "configs": [
+                    {
+                        "section": r[0].rsplit(".", 1)[0] if "." in r[0] else "",
+                        "name": r[0].rsplit(".", 1)[-1],
+                        "type": r[1],
+                        "default": r[2],
+                    }
+                    for r in rows
+                ]
+            },
+            console,
+        )
+        return
+
+    table = Table(title="Prime RL — Config Options")
+    table.add_column("Section", style="magenta")
+    table.add_column("Config", style="cyan")
+    table.add_column("Type", style="green")
+    table.add_column("Default", style="yellow")
+
+    prev_section = None
+    for path, type_str, default in rows:
+        section = path.rsplit(".", 1)[0] if "." in path else ""
+        name = path.rsplit(".", 1)[-1]
+        if prev_section is not None and section != prev_section:
+            table.add_section()
+        display_section = section if section != prev_section else ""
+        prev_section = section
+        table.add_row(display_section, name, type_str, default)
+
+    console.print(table)
+    console.print(
+        "\n[dim]Use these in your TOML config file. "
+        "See 'prime rl init' to generate a template.[/dim]"
+    )
 
 
 def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> None:

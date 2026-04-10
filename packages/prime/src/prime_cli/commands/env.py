@@ -1971,7 +1971,7 @@ def info(
                 if target_version and target_version != "latest":
                     console.print(
                         f"  [green]$[/green] uv pip install {normalized_name}=={target_version} "
-                        f"--index-url {simple_index_url}"
+                        f"--index-url {simple_index_url} --extra-index-url https://pypi.org/simple/"
                     )
                     console.print(
                         f"  [green]$[/green] uv add {normalized_name}=={target_version} "
@@ -1979,19 +1979,19 @@ def info(
                     )
                     console.print(
                         f"  [green]$[/green] pip install {normalized_name}=={target_version} "
-                        f"--index-url {simple_index_url}"
+                        f"--index-url {simple_index_url} --extra-index-url https://pypi.org/simple/"
                     )
                 else:
                     console.print(
                         f"  [green]$[/green] uv pip install {normalized_name} "
-                        f"--index-url {simple_index_url}"
+                        f"--index-url {simple_index_url} --extra-index-url https://pypi.org/simple/"
                     )
                     console.print(
                         f"  [green]$[/green] uv add {normalized_name} --index {simple_index_url}"
                     )
                     console.print(
                         f"  [green]$[/green] pip install {normalized_name} "
-                        f"--index-url {simple_index_url}"
+                        f"--index-url {simple_index_url} --extra-index-url https://pypi.org/simple/"
                     )
             elif wheel_url:
                 console.print(f"  [green]$[/green] uv pip install {wheel_url}")
@@ -2939,7 +2939,9 @@ def _build_install_command(
             # Add URL dependencies as direct requirements (uv requires this)
             if url_dependencies:
                 cmd.extend(url_dependencies)
-            cmd.extend(["--index-url", simple_index_url])
+            cmd.extend(
+                ["--index-url", simple_index_url, "--extra-index-url", "https://pypi.org/simple/"]
+            )
             return cmd
         else:  # pip
             cmd = ["pip", "install"]
@@ -2952,7 +2954,9 @@ def _build_install_command(
             # Add URL dependencies for consistency
             if url_dependencies:
                 cmd.extend(url_dependencies)
-            cmd.extend(["--index-url", simple_index_url])
+            cmd.extend(
+                ["--index-url", simple_index_url, "--extra-index-url", "https://pypi.org/simple/"]
+            )
             return cmd
     elif wheel_url:
         try:

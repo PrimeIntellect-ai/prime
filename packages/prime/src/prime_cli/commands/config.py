@@ -1,6 +1,7 @@
 import os
 import re
 from typing import Optional
+from urllib.parse import urlparse
 
 import typer
 from rich.table import Table
@@ -134,13 +135,21 @@ def set_api_key(
         # Try to fetch user id like in login flow
         try:
             client = APIClient(api_key=api_key)
-            whoami_resp = client.get("/user/whoami")
-            data = whoami_resp.get("data") if isinstance(whoami_resp, dict) else None
-            if isinstance(data, dict):
-                user_id = data.get("id")
-                if user_id:
-                    config.set_user_id(user_id)
-                    config.update_current_environment_file()
+            # Only send API key to known Prime Intellect domains
+            parsed = urlparse(client.base_url)
+            hostname = parsed.hostname or ""
+            if hostname.endswith(".primeintellect.ai") or hostname == "primeintellect.ai":
+                whoami_resp = client.get("/user/whoami")
+                data = whoami_resp.get("data") if isinstance(whoami_resp, dict) else None
+                if isinstance(data, dict):
+                    user_id = data.get("id")
+                    if user_id:
+                        config.set_user_id(user_id)
+                        config.update_current_environment_file()
+            else:
+                console.print(
+                    "[yellow]Skipping user verification: custom base URL detected[/yellow]"
+                )
         except (APIError, Exception):
             pass
 

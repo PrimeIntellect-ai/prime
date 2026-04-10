@@ -1758,11 +1758,13 @@ def is_valid_url(url: str) -> bool:
 
 
 def _is_trusted_url(url: str, base_url: str) -> bool:
-    """Check if a URL belongs to the same host as the trusted API base URL."""
+    """Check if a URL belongs to the same host as the trusted API base URL over HTTPS."""
     try:
-        url_host = urlparse(url).netloc.lower()
-        base_host = urlparse(base_url).netloc.lower()
-        return url_host == base_host
+        parsed_url = urlparse(url)
+        parsed_base = urlparse(base_url)
+        if parsed_url.scheme != "https":
+            return False
+        return parsed_url.netloc.lower() == parsed_base.netloc.lower()
     except Exception:
         return False
 

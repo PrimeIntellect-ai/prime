@@ -169,6 +169,7 @@ class BulkDeleteSandboxRequest(BaseModel):
     sandbox_ids: Optional[List[str]] = None
     labels: Optional[List[str]] = None
     only_mine: bool = True
+    team_id: Optional[str] = None
 
 
 class BulkDeleteSandboxResponse(BaseModel):

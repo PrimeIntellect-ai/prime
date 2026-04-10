@@ -657,15 +657,11 @@ def delete(
                 console.print("Delete cancelled")
                 return
 
-            # only_mine applies to --all and --label
-            # explicit IDs use standard team-membership ownership checks
-            effective_only_mine = only_mine if (all or labels) else False
-
             with console.status("[bold blue]Deleting sandboxes...", spinner="dots"):
                 result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(
                     sandbox_ids=sandbox_ids if sandbox_ids else None,
                     labels=labels if labels else None,
-                    only_mine=effective_only_mine,
+                    only_mine=only_mine,
                 )
 
             console.print(f"\n[green]{result.message}[/green]")

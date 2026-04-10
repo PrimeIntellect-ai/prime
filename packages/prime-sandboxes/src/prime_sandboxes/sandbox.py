@@ -596,10 +596,17 @@ class SandboxClient:
         sandbox_ids: Optional[List[str]] = None,
         labels: Optional[List[str]] = None,
         only_mine: bool = True,
+        team_id: Optional[str] = None,
     ) -> BulkDeleteSandboxResponse:
         """Bulk delete multiple sandboxes by IDs or labels (must specify one, not both)"""
+        # Auto-populate team_id from config if not specified
+        if team_id is None:
+            team_id = self.client.config.team_id
         request = BulkDeleteSandboxRequest(
-            sandbox_ids=sandbox_ids, labels=labels, only_mine=only_mine
+            sandbox_ids=sandbox_ids,
+            labels=labels,
+            only_mine=only_mine,
+            team_id=team_id,
         )
         response = self.client.request(
             "DELETE",
@@ -1450,10 +1457,17 @@ class AsyncSandboxClient:
         sandbox_ids: Optional[List[str]] = None,
         labels: Optional[List[str]] = None,
         only_mine: bool = True,
+        team_id: Optional[str] = None,
     ) -> BulkDeleteSandboxResponse:
         """Bulk delete multiple sandboxes by IDs or labels"""
+        # Auto-populate team_id from config if not specified
+        if team_id is None:
+            team_id = self.client.config.team_id
         request = BulkDeleteSandboxRequest(
-            sandbox_ids=sandbox_ids, labels=labels, only_mine=only_mine
+            sandbox_ids=sandbox_ids,
+            labels=labels,
+            only_mine=only_mine,
+            team_id=team_id,
         )
         response = await self.client.request(
             "DELETE",

@@ -39,8 +39,7 @@ def _validate_tunnel_id(value: str) -> str:
     """Validate tunnel_id is safe for use as a filename and TOML value."""
     if not isinstance(value, str) or not _SAFE_ID_RE.match(value):
         raise TunnelError(
-            f"Invalid tunnel_id '{value}': must be alphanumeric"
-            " with optional dots, hyphens, underscores"
+            "Invalid tunnel_id: must be alphanumeric with optional dots, hyphens, underscores"
         )
     return value
 
@@ -358,11 +357,11 @@ class Tunnel:
 
         # Validate server-provided values before using in file path and config
         tunnel_id = _validate_tunnel_id(self._tunnel_info.tunnel_id)
-        _validate_tunnel_field(self._tunnel_info.frp_token, "frp_token")
-        _validate_tunnel_field(self._tunnel_info.binding_secret, "binding_secret", allow_empty=True)
-        _validate_tunnel_field(self._tunnel_info.server_host, "server_host")
-
-        server_host = self._tunnel_info.server_host
+        frp_token = _validate_tunnel_field(self._tunnel_info.frp_token, "frp_token")
+        binding_secret = _validate_tunnel_field(
+            self._tunnel_info.binding_secret, "binding_secret", allow_empty=True
+        )
+        server_host = _validate_tunnel_field(self._tunnel_info.server_host, "server_host")
         server_port = self._tunnel_info.server_port
 
         # Generate config content
@@ -375,10 +374,10 @@ serverPort = {server_port}
 # Authentication
 user = "{tunnel_id}"
 auth.method = "token"
-auth.token = "{self._tunnel_info.frp_token}"
+auth.token = "{frp_token}"
 
 # Per-tunnel binding secret
-metadatas.binding_secret = "{self._tunnel_info.binding_secret}"
+metadatas.binding_secret = "{binding_secret}"
 
 # Transport settings
 transport.tcpMux = true

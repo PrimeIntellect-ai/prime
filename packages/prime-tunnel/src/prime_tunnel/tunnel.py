@@ -19,6 +19,28 @@ from prime_tunnel.exceptions import (
 )
 from prime_tunnel.models import TunnelInfo
 
+_SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
+
+
+def _validate_tunnel_field(value: str, field_name: str) -> str:
+    """Validate a server-provided field is safe for use in file paths and TOML config."""
+    if not isinstance(value, str) or not value:
+        raise TunnelError(f"Invalid {field_name}: must be a non-empty string")
+    if "\n" in value or "\r" in value or '"' in value or "\\" in value:
+        raise TunnelError(f"Invalid {field_name}: contains unsafe characters")
+    return value
+
+
+def _validate_tunnel_id(value: str) -> str:
+    """Validate tunnel_id is safe for use as a filename and TOML value."""
+    if not isinstance(value, str) or not _SAFE_ID_RE.match(value):
+        raise TunnelError(
+            f"Invalid tunnel_id '{value}': must be alphanumeric"
+            " with optional dots, hyphens, underscores"
+        )
+    return value
+
+
 # timestamp + level + caller prefix + message
 _LOG_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\.\d{3}\s"
@@ -330,6 +352,12 @@ class Tunnel:
         if self._tunnel_info is None:
             raise TunnelError("Tunnel not registered")
 
+        # Validate server-provided values before using in file path and config
+        tunnel_id = _validate_tunnel_id(self._tunnel_info.tunnel_id)
+        _validate_tunnel_field(self._tunnel_info.frp_token, "frp_token")
+        _validate_tunnel_field(self._tunnel_info.binding_secret, "binding_secret")
+        _validate_tunnel_field(self._tunnel_info.server_host, "server_host")
+
         server_host = self._tunnel_info.server_host
         server_port = self._tunnel_info.server_port
 
@@ -371,7 +399,7 @@ subdomain = "{self._tunnel_info.tunnel_id}"
         config_dir = Path.home() / ".prime" / "tunnels"
         config_dir.mkdir(parents=True, exist_ok=True)
         config_dir.chmod(0o700)
-        config_file = config_dir / f"{self._tunnel_info.tunnel_id}.toml"
+        config_file = config_dir / f"{tunnel_id}.toml"
 
         # Create file with 0600 permissions
         fd = os.open(str(config_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

@@ -1633,7 +1633,7 @@ def pull(
                 try:
                     if is_valid_url(download_url):
                         headers = {}
-                        if client.api_key:
+                        if client.api_key and _is_trusted_url(download_url, client.base_url):
                             headers["Authorization"] = f"Bearer {client.api_key}"
                         with httpx.stream(
                             "GET", download_url, headers=headers, timeout=60.0
@@ -1753,6 +1753,16 @@ def is_valid_url(url: str) -> bool:
     try:
         result = urlparse(url)
         return all([result.scheme in ("http", "https"), result.netloc])
+    except Exception:
+        return False
+
+
+def _is_trusted_url(url: str, base_url: str) -> bool:
+    """Check if a URL belongs to the same host as the trusted API base URL."""
+    try:
+        url_host = urlparse(url).netloc.lower()
+        base_host = urlparse(base_url).netloc.lower()
+        return url_host == base_host
     except Exception:
         return False
 
@@ -2790,7 +2800,7 @@ def _pull_and_build_private_env(
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             temp_file_path = tmp.name
             headers = {}
-            if client.api_key:
+            if client.api_key and _is_trusted_url(download_url, client.base_url):
                 headers["Authorization"] = f"Bearer {client.api_key}"
 
             with httpx.stream("GET", download_url, headers=headers, timeout=60.0) as resp:

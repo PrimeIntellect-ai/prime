@@ -19,7 +19,7 @@ from prime_tunnel.exceptions import (
 )
 from prime_tunnel.models import TunnelInfo
 
-_SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
+_SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\Z")
 
 
 def _validate_tunnel_field(value: str, field_name: str, allow_empty: bool = False) -> str:
@@ -367,13 +367,13 @@ class Tunnel:
 
         # Generate config content
         config = f"""# Prime Tunnel frpc configuration
-# Tunnel ID: {self._tunnel_info.tunnel_id}
+# Tunnel ID: {tunnel_id}
 
 serverAddr = "{server_host}"
 serverPort = {server_port}
 
 # Authentication
-user = "{self._tunnel_info.tunnel_id}"
+user = "{tunnel_id}"
 auth.method = "token"
 auth.token = "{self._tunnel_info.frp_token}"
 
@@ -392,11 +392,11 @@ log.level = "{self.log_level}"
 
 # HTTP proxy configuration
 [[proxies]]
-name = "{self._tunnel_info.tunnel_id}"
+name = "{tunnel_id}"
 type = "http"
 localIP = "{self.local_addr}"
 localPort = {self.local_port}
-subdomain = "{self._tunnel_info.tunnel_id}"
+subdomain = "{tunnel_id}"
 """
 
         # Write to config directory

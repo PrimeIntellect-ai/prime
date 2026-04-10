@@ -1633,7 +1633,7 @@ def pull(
                 try:
                     if is_valid_url(download_url):
                         headers = {}
-                        if client.api_key:
+                        if client.api_key and _is_trusted_url(download_url, client.base_url):
                             headers["Authorization"] = f"Bearer {client.api_key}"
                         with httpx.stream(
                             "GET", download_url, headers=headers, timeout=60.0
@@ -1654,8 +1654,8 @@ def pull(
 
                 try:
                     with tarfile.open(tmp.name, "r:gz") as tar:
-                        tar.extractall(target_dir)
-                except tarfile.TarError as e:
+                        _safe_tar_extract(tar, target_dir)
+                except (tarfile.TarError, ValueError) as e:
                     console.print(f"[red]Failed to extract archive: {e}[/red]")
                     raise typer.Exit(1)
                 except IOError as e:
@@ -1753,6 +1753,18 @@ def is_valid_url(url: str) -> bool:
     try:
         result = urlparse(url)
         return all([result.scheme in ("http", "https"), result.netloc])
+    except Exception:
+        return False
+
+
+def _is_trusted_url(url: str, base_url: str) -> bool:
+    """Check if a URL belongs to the same host as the trusted API base URL over HTTPS."""
+    try:
+        parsed_url = urlparse(url)
+        parsed_base = urlparse(base_url)
+        if parsed_url.scheme != "https":
+            return False
+        return parsed_url.netloc.lower() == parsed_base.netloc.lower()
     except Exception:
         return False
 
@@ -2790,7 +2802,7 @@ def _pull_and_build_private_env(
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             temp_file_path = tmp.name
             headers = {}
-            if client.api_key:
+            if client.api_key and _is_trusted_url(download_url, client.base_url):
                 headers["Authorization"] = f"Bearer {client.api_key}"
 
             with httpx.stream("GET", download_url, headers=headers, timeout=60.0) as resp:

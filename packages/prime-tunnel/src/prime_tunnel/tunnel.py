@@ -22,9 +22,13 @@ from prime_tunnel.models import TunnelInfo
 _SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 
 
-def _validate_tunnel_field(value: str, field_name: str) -> str:
+def _validate_tunnel_field(value: str, field_name: str, allow_empty: bool = False) -> str:
     """Validate a server-provided field is safe for use in file paths and TOML config."""
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str):
+        raise TunnelError(f"Invalid {field_name}: must be a string")
+    if not value:
+        if allow_empty:
+            return value
         raise TunnelError(f"Invalid {field_name}: must be a non-empty string")
     if "\n" in value or "\r" in value or '"' in value or "\\" in value:
         raise TunnelError(f"Invalid {field_name}: contains unsafe characters")
@@ -355,7 +359,7 @@ class Tunnel:
         # Validate server-provided values before using in file path and config
         tunnel_id = _validate_tunnel_id(self._tunnel_info.tunnel_id)
         _validate_tunnel_field(self._tunnel_info.frp_token, "frp_token")
-        _validate_tunnel_field(self._tunnel_info.binding_secret, "binding_secret")
+        _validate_tunnel_field(self._tunnel_info.binding_secret, "binding_secret", allow_empty=True)
         _validate_tunnel_field(self._tunnel_info.server_host, "server_host")
 
         server_host = self._tunnel_info.server_host

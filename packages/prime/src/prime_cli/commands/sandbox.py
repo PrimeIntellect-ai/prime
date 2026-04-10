@@ -648,6 +648,7 @@ def delete(
                     f"This action cannot be undone."
                 )
             else:
+                assert sandbox_ids
                 confirmation_msg = (
                     f"Are you sure you want to delete {len(sandbox_ids)} sandbox(es)?"
                 )

@@ -1654,8 +1654,8 @@ def pull(
 
                 try:
                     with tarfile.open(tmp.name, "r:gz") as tar:
-                        tar.extractall(target_dir)
-                except tarfile.TarError as e:
+                        _safe_tar_extract(tar, target_dir)
+                except (tarfile.TarError, ValueError) as e:
                     console.print(f"[red]Failed to extract archive: {e}[/red]")
                     raise typer.Exit(1)
                 except IOError as e:

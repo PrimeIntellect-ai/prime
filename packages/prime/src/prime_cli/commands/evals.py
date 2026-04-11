@@ -95,6 +95,7 @@ HOSTED_EVAL_CONFIG_ALLOWED_FIELDS = {
     "allow_sandbox_access",
     "allow_instances_access",
     "sampling_args",
+    "extra_env_kwargs",
     "api_base_url",
     "api_key_var",
     "eval_name",
@@ -324,6 +325,7 @@ def _validate_single_hosted_eval_config(
 
     _validate_string_map_field(merged, "env_args")
     _validate_json_object_field(merged, "sampling_args")
+    _validate_json_object_field(merged, "extra_env_kwargs")
 
     for field_name, (expected_type, description) in HOSTED_EVAL_CONFIG_FIELD_TYPES.items():
         _validate_hosted_config_field(merged, field_name, expected_type, description)
@@ -395,6 +397,8 @@ def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]
         eval_config["custom_secrets"] = config.custom_secrets
     if config.sampling_args:
         eval_config["sampling_args"] = config.sampling_args
+    if config.extra_env_kwargs:
+        eval_config["extra_env_kwargs"] = config.extra_env_kwargs
     if config.api_base_url:
         eval_config["api_base_url"] = config.api_base_url
     if config.api_key_var:
@@ -1295,6 +1299,7 @@ def run_eval_cmd(
                     "allow_sandbox_access": False,
                     "allow_instances_access": False,
                     "sampling_args": None,
+                    "extra_env_kwargs": None,
                     "api_base_url": None,
                     "api_key_var": None,
                     "eval_name": None,
@@ -1309,6 +1314,11 @@ def run_eval_cmd(
             "-r",
         )
         raw_env_args = _parse_value_option(passthrough_args, "--env-args", "")
+        raw_extra_env_kwargs = _parse_value_option(
+            passthrough_args,
+            "--extra-env-kwargs",
+            "-x",
+        )
         raw_api_base_url = _parse_value_option(passthrough_args, "--api-base-url", "-b")
         raw_api_key_var = _parse_value_option(passthrough_args, "--api-key-var", "-k")
         parsed_cli_env_args = (
@@ -1318,6 +1328,10 @@ def run_eval_cmd(
         )
         parsed_custom_secrets = _parse_string_map_option(custom_secrets, "--custom-secrets")
         parsed_sampling_args = _parse_json_object_option(sampling_args, "--sampling-args")
+        parsed_cli_extra_env_kwargs = _parse_json_object_option(
+            raw_extra_env_kwargs,
+            "--extra-env-kwargs",
+        )
 
         effective_targets: list[dict[str, Any]] = []
         for target_config in hosted_target_configs:
@@ -1383,6 +1397,11 @@ def run_eval_cmd(
                         if parsed_sampling_args is not None
                         else target_config.get("sampling_args")
                     ),
+                    "extra_env_kwargs": (
+                        parsed_cli_extra_env_kwargs
+                        if raw_extra_env_kwargs is not None
+                        else target_config.get("extra_env_kwargs")
+                    ),
                     "api_base_url": raw_api_base_url or target_config.get("api_base_url"),
                     "api_key_var": raw_api_key_var or target_config.get("api_key_var"),
                     "eval_name": eval_name or target_config.get("eval_name"),
@@ -1407,6 +1426,7 @@ def run_eval_cmd(
                 target.get("allow_sandbox_access", False),
                 target.get("allow_instances_access", False),
                 _freeze_json_value(target.get("sampling_args")),
+                _freeze_json_value(target.get("extra_env_kwargs")),
                 target.get("api_base_url"),
                 target.get("api_key_var"),
                 target.get("eval_name"),
@@ -1454,6 +1474,7 @@ def run_eval_cmd(
                     allow_instances_access=target.get("allow_instances_access", False),
                     custom_secrets=target.get("custom_secrets"),
                     sampling_args=target.get("sampling_args"),
+                    extra_env_kwargs=target.get("extra_env_kwargs"),
                     api_base_url=target.get("api_base_url"),
                     api_key_var=target.get("api_key_var"),
                 )

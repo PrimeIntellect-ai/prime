@@ -179,6 +179,48 @@ def test_eval_run_hosted_passes_api_base_url_and_key_var(monkeypatch):
     assert captured["api_key_var"] == "OPENAI_API_KEY"
 
 
+def test_eval_run_hosted_passes_extra_env_kwargs(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_hosted_environment",
+        lambda environment, env_dir_path=None, env_path=None: (
+            "primeintellect/gsm8k",
+            "env-123",
+        ),
+    )
+
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        captured["extra_env_kwargs"] = config.extra_env_kwargs
+        return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_run_hosted_evaluation,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run",
+            "primeintellect/gsm8k",
+            "--hosted",
+            "-m",
+            "openai/gpt-4.1-mini",
+            "-x",
+            '{"task_library":"ronig","keep_remote_artifacts":true}',
+        ],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["extra_env_kwargs"] == {
+        "task_library": "ronig",
+        "keep_remote_artifacts": True,
+    }
+
+
 def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
     captured = {}
 
@@ -256,6 +298,43 @@ def test_create_hosted_evaluation_includes_sampling_args_in_payload(monkeypatch)
                 "require_parameters": True,
             }
         },
+    }
+
+
+def test_create_hosted_evaluation_includes_extra_env_kwargs_in_payload(monkeypatch):
+    captured = {}
+
+    class DummyConfig:
+        team_id = None
+
+    class DummyAPIClient:
+        def __init__(self):
+            self.config = DummyConfig()
+
+        def post(self, endpoint, json=None):
+            captured["endpoint"] = endpoint
+            captured["json"] = json
+            return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+
+    _create_hosted_evaluations(
+        HostedEvalConfig(
+            environment_id="env-123",
+            inference_model="openai/gpt-4.1-mini",
+            num_examples=5,
+            rollouts_per_example=3,
+            extra_env_kwargs={
+                "task_library": "ronig",
+                "keep_remote_artifacts": True,
+            },
+        )
+    )
+
+    assert captured["endpoint"] == "/hosted-evaluations"
+    assert captured["json"]["eval_config"]["extra_env_kwargs"] == {
+        "task_library": "ronig",
+        "keep_remote_artifacts": True,
     }
 
 
@@ -390,7 +469,8 @@ eval_name = "math500 smoke test"
 """
             + "sampling_args = { "
             + 'extra_body = { provider = { order = ["azure"], '
-            + "allow_fallbacks = false, require_parameters = true } } }\n\n"
+            + "allow_fallbacks = false, require_parameters = true } } }\n"
+            + 'extra_env_kwargs = { task_library = "ronig", keep_remote_artifacts = true }\n\n'
             + "[[eval]]\n"
             + 'env_id = "gsm8k"\n'
             + 'env_args = { split = "test" }'
@@ -414,6 +494,7 @@ eval_name = "math500 smoke test"
         captured["allow_sandbox_access"] = config.allow_sandbox_access
         captured["allow_instances_access"] = config.allow_instances_access
         captured["sampling_args"] = config.sampling_args
+        captured["extra_env_kwargs"] = config.extra_env_kwargs
         captured["name"] = config.name
         return {"evaluation_id": "eval-123"}
 
@@ -452,6 +533,10 @@ eval_name = "math500 smoke test"
                 }
             }
         },
+        "extra_env_kwargs": {
+            "task_library": "ronig",
+            "keep_remote_artifacts": True,
+        },
         "name": "math500 smoke test",
     }
 
@@ -488,6 +573,7 @@ env_args = { split = "test" }
         captured["allow_sandbox_access"] = config.allow_sandbox_access
         captured["allow_instances_access"] = config.allow_instances_access
         captured["sampling_args"] = config.sampling_args
+        captured["extra_env_kwargs"] = config.extra_env_kwargs
         captured["name"] = config.name
         return {"evaluation_id": "eval-123"}
 
@@ -516,6 +602,8 @@ env_args = { split = "test" }
             "240",
             "--sampling-args",
             '{"temperature":0.2,"extra_body":{"provider":{"order":["azure"],"allow_fallbacks":false,"require_parameters":true}}}',
+            "--extra-env-kwargs",
+            '{"task_library":"ronig","keep_remote_artifacts":true}',
             "--eval-name",
             "from cli",
         ],
@@ -541,6 +629,10 @@ env_args = { split = "test" }
                     "require_parameters": True,
                 }
             },
+        },
+        "extra_env_kwargs": {
+            "task_library": "ronig",
+            "keep_remote_artifacts": True,
         },
         "name": "from cli",
     }
@@ -707,6 +799,28 @@ env_id = "gsm8k"
 
     assert result.exit_code == 1
     assert "`sampling_args`" in result.output
+    assert "JSON-serializable" in result.output
+
+
+def test_eval_run_hosted_rejects_non_json_serializable_extra_env_kwargs_in_toml(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+extra_env_kwargs = { until = 1979-05-27T07:32:00Z }
+
+[[eval]]
+env_id = "gsm8k"
+""".strip()
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "`extra_env_kwargs`" in result.output
     assert "JSON-serializable" in result.output
 
 

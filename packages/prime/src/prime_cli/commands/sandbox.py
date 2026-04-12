@@ -564,6 +564,115 @@ def create(
         raise typer.Exit(1)
 
 
+def _fetch_and_filter_sandboxes(
+    sandbox_client: SandboxClient,
+    only_mine: bool,
+    labels: Optional[List[str]] = None,
+    flag_name: str = "--all",
+) -> Optional[List[str]]:
+    """Fetch sandboxes (optionally by label), filter by only_mine.
+
+    Returns a list of sandbox IDs to delete, or None if there are
+    no matching sandboxes (after printing appropriate messages).
+    Raises typer.Exit(1) if only_mine is set but user_id is missing.
+    """
+    status_msg = (
+        "[bold blue]Fetching sandboxes by labels..."
+        if labels
+        else "[bold blue]Fetching all sandboxes..."
+    )
+    with console.status(status_msg, spinner="dots"):
+        all_sandboxes = []
+        page = 1
+        while True:
+            list_response = sandbox_client.list(
+                per_page=100,
+                page=page,
+                labels=labels,
+                exclude_terminated=True,
+            )
+            all_sandboxes.extend(list_response.sandboxes)
+            if not list_response.has_next:
+                break
+            page += 1
+
+        if only_mine:
+            current_user_id = config.user_id
+            if not current_user_id:
+                console.print(
+                    "[red]Error:[/red] Cannot filter by user"
+                    " - no user_id configured. Use --all-users"
+                    " to delete all sandboxes, or configure"
+                    " your user_id."
+                )
+                raise typer.Exit(1)
+            sandboxes_to_delete = [s for s in all_sandboxes if s.user_id == current_user_id]
+        else:
+            sandboxes_to_delete = all_sandboxes
+
+        sandbox_ids = [s.id for s in sandboxes_to_delete]
+
+        if not sandbox_ids:
+            console.print("[yellow]No sandboxes to delete[/yellow]")
+            if only_mine and all_sandboxes:
+                console.print(
+                    f"\n[dim]Note: {flag_name} only deletes your"
+                    " own sandboxes by default. Use --all-users"
+                    " to delete sandboxes from all team"
+                    " members.[/dim]"
+                )
+            return None
+
+    return sandbox_ids
+
+
+def _bulk_delete_and_display(
+    sandbox_client: SandboxClient,
+    sandbox_ids: List[str],
+) -> None:
+    """Batch-delete sandbox IDs and print results."""
+    batch_size = 100
+    all_succeeded: List[str] = []
+    all_failed: List[Dict[str, Any]] = []
+
+    with console.status("[bold blue]Deleting sandboxes...", spinner="dots"):
+        for i in range(0, len(sandbox_ids), batch_size):
+            batch = sandbox_ids[i : i + batch_size]
+            batch_num = (i // batch_size) + 1
+            total_batches = (len(sandbox_ids) + batch_size - 1) // batch_size
+
+            if total_batches > 1:
+                console.print(
+                    f"[dim]Processing batch {batch_num}/"
+                    f"{total_batches} "
+                    f"({len(batch)} sandboxes)...[/dim]"
+                )
+
+            result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(sandbox_ids=batch)
+
+            if result.succeeded:
+                all_succeeded.extend(result.succeeded)
+            if result.failed:
+                all_failed.extend(result.failed)
+
+    total = len(all_succeeded) + len(all_failed)
+    console.print(f"\n[green]Processed {total} sandbox(es)[/green]")
+
+    if all_succeeded:
+        console.print(
+            f"\n[bold green]Successfully deleted {len(all_succeeded)} sandbox(es):[/bold green]"
+        )
+        for sid in all_succeeded:
+            console.print(f"  ✓ {sid}")
+
+    if all_failed:
+        console.print(f"\n[bold red]Failed to delete {len(all_failed)} sandbox(es):[/bold red]")
+        for failure in all_failed:
+            sid = failure.get("sandbox_id", "unknown")
+            error = failure.get("error", "unknown error")
+            console.print(f"  ✗ {sid}: {error}")
+
+
 @app.command(no_args_is_help=True)
 def delete(
     sandbox_ids: Optional[List[str]] = typer.Argument(
@@ -604,40 +713,18 @@ def delete(
             raise typer.Exit(1)
 
         if all:
-            with console.status("[bold blue]Fetching all sandboxes...", spinner="dots"):
-                all_sandboxes = []
-                page = 1
-                while True:
-                    list_response = sandbox_client.list(
-                        per_page=100, page=page, exclude_terminated=True
-                    )
-                    all_sandboxes.extend(list_response.sandboxes)
-                    if not list_response.has_next:
-                        break
-                    page += 1
-
-                if only_mine:
-                    current_user_id = config.user_id
-                    if not current_user_id:
-                        console.print(
-                            "[red]Error:[/red] Cannot filter by user - no user_id configured. "
-                            "Use --all-users to delete all sandboxes, or configure your user_id."
-                        )
-                        raise typer.Exit(1)
-                    sandboxes_to_delete = [s for s in all_sandboxes if s.user_id == current_user_id]
-                else:
-                    sandboxes_to_delete = all_sandboxes
-
-                sandbox_ids = [s.id for s in sandboxes_to_delete]
-
-                if not sandbox_ids:
-                    console.print("[yellow]No sandboxes to delete[/yellow]")
-                    if only_mine and all_sandboxes:
-                        console.print(
-                            "\n[dim]Note: --all only deletes your own sandboxes by default. "
-                            "Use --all-users to delete sandboxes from all team members.[/dim]"
-                        )
-                    return
+            sandbox_ids = _fetch_and_filter_sandboxes(sandbox_client, only_mine, flag_name="--all")
+            if sandbox_ids is None:
+                return
+        elif labels:
+            sandbox_ids = _fetch_and_filter_sandboxes(
+                sandbox_client,
+                only_mine,
+                labels=labels,
+                flag_name="--label",
+            )
+            if sandbox_ids is None:
+                return
         else:
             parsed_ids = []
             for id_string in sandbox_ids or []:
@@ -655,97 +742,18 @@ def delete(
             sandbox_ids = cleaned_ids
 
         if labels:
-            with console.status("[bold blue]Fetching sandboxes by labels...", spinner="dots"):
-                label_sandboxes = []
-                page = 1
-                while True:
-                    list_response = sandbox_client.list(
-                        per_page=100, page=page, labels=labels, exclude_terminated=True
-                    )
-                    label_sandboxes.extend(list_response.sandboxes)
-                    if not list_response.has_next:
-                        break
-                    page += 1
-
-                if only_mine:
-                    current_user_id = config.user_id
-                    if not current_user_id:
-                        console.print(
-                            "[red]Error:[/red] Cannot filter by user - no user_id configured. "
-                            "Use --all-users to delete all sandboxes, or configure your user_id."
-                        )
-                        raise typer.Exit(1)
-                    sandboxes_to_delete = [
-                        s for s in label_sandboxes if s.user_id == current_user_id
-                    ]
-                else:
-                    sandboxes_to_delete = label_sandboxes
-
-                sandbox_ids = [s.id for s in sandboxes_to_delete]
-
-                if not sandbox_ids:
-                    console.print("[yellow]No sandboxes to delete[/yellow]")
-                    if only_mine and label_sandboxes:
-                        console.print(
-                            "\n[dim]Note: --label only deletes your own sandboxes by default. "
-                            "Use --all-users to delete sandboxes from all team members.[/dim]"
-                        )
-                    return
-
             labels_str = ", ".join(labels)
             confirmation_msg = (
-                f"Are you sure you want to delete {len(sandbox_ids)} sandbox(es) "
-                f"with labels: {labels_str}? This action cannot be undone."
+                f"Are you sure you want to delete {len(sandbox_ids)} "
+                f"sandbox(es) with labels: {labels_str}? "
+                f"This action cannot be undone."
             )
 
             if not confirm_or_skip(confirmation_msg, yes):
                 console.print("Delete cancelled")
                 return
 
-            batch_size = 100
-            all_succeeded = []
-            all_failed = []
-
-            with console.status("[bold blue]Deleting sandboxes...", spinner="dots"):
-                for i in range(0, len(sandbox_ids), batch_size):
-                    batch = sandbox_ids[i : i + batch_size]
-                    batch_num = (i // batch_size) + 1
-                    total_batches = (len(sandbox_ids) + batch_size - 1) // batch_size
-
-                    if total_batches > 1:
-                        console.print(
-                            f"[dim]Processing batch {batch_num}/{total_batches} "
-                            f"({len(batch)} sandboxes)...[/dim]"
-                        )
-
-                    result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(
-                        sandbox_ids=batch
-                    )
-
-                    if result.succeeded:
-                        all_succeeded.extend(result.succeeded)
-                    if result.failed:
-                        all_failed.extend(result.failed)
-
-            total_processed = len(all_succeeded) + len(all_failed)
-            console.print(f"\n[green]Processed {total_processed} sandbox(es)[/green]")
-
-            if all_succeeded:
-                console.print(
-                    f"\n[bold green]Successfully deleted {len(all_succeeded)} "
-                    f"sandbox(es):[/bold green]"
-                )
-                for sid in all_succeeded:
-                    console.print(f"  ✓ {sid}")
-
-            if all_failed:
-                console.print(
-                    f"\n[bold red]Failed to delete {len(all_failed)} sandbox(es):[/bold red]"
-                )
-                for failure in all_failed:
-                    sid = failure.get("sandbox_id", "unknown")
-                    error = failure.get("error", "unknown error")
-                    console.print(f"  ✗ {sid}: {error}")
+            _bulk_delete_and_display(sandbox_client, sandbox_ids)
 
         elif len(sandbox_ids) == 1 and not all:
             sandbox_id = sandbox_ids[0]
@@ -775,50 +783,7 @@ def delete(
                 console.print(cancel_msg)
                 return
 
-            batch_size = 100
-            all_succeeded = []
-            all_failed = []
-
-            with console.status("[bold blue]Deleting sandboxes...", spinner="dots"):
-                for i in range(0, len(sandbox_ids), batch_size):
-                    batch = sandbox_ids[i : i + batch_size]
-                    batch_num = (i // batch_size) + 1
-                    total_batches = (len(sandbox_ids) + batch_size - 1) // batch_size
-
-                    console.print(
-                        f"[dim]Processing batch {batch_num}/{total_batches} "
-                        f"({len(batch)} sandboxes)...[/dim]"
-                    )
-
-                    result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(
-                        sandbox_ids=batch
-                    )
-
-                    if result.succeeded:
-                        all_succeeded.extend(result.succeeded)
-                    if result.failed:
-                        all_failed.extend(result.failed)
-
-            # Display combined results
-            total_processed = len(all_succeeded) + len(all_failed)
-            console.print(f"\n[green]Processed {total_processed} sandbox(es)[/green]")
-
-            if all_succeeded:
-                console.print(
-                    f"\n[bold green]Successfully deleted {len(all_succeeded)} "
-                    f"sandbox(es):[/bold green]"
-                )
-                for sandbox_id in all_succeeded:
-                    console.print(f"  ✓ {sandbox_id}")
-
-            if all_failed:
-                console.print(
-                    f"\n[bold red]Failed to delete {len(all_failed)} sandbox(es):[/bold red]"
-                )
-                for failure in all_failed:
-                    sandbox_id = failure.get("sandbox_id", "unknown")
-                    error = failure.get("error", "unknown error")
-                    console.print(f"  ✗ {sandbox_id}: {error}")
+            _bulk_delete_and_display(sandbox_client, sandbox_ids)
 
     except typer.Exit:
         raise

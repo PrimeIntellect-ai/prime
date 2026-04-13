@@ -486,7 +486,7 @@ class RLConfig(BaseModel):
     learning_rate: float | None = None
     lora_alpha: int | None = None
     oversampling_factor: float | None = 1.5
-    max_async_level: int | None = 2
+    max_async_level: int | None = None
     checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
     cluster_name: str | None = None  # Admin-only: target a specific cluster by name
     env: List[EnvConfig] = Field(default_factory=list)

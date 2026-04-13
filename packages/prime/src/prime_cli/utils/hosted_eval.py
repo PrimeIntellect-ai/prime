@@ -46,6 +46,11 @@ class HostedEvalConfig:
     allow_instances_access: bool = False
     custom_secrets: Optional[dict[str, str]] = None
     sampling_args: Optional[dict[str, Any]] = None
+    max_concurrent: Optional[int] = None
+    max_retries: Optional[int] = None
+    state_columns: Optional[list[str]] = None
+    independent_scoring: bool = False
+    headers: Optional[list[str]] = None
     extra_env_kwargs: Optional[dict[str, Any]] = None
     api_base_url: Optional[str] = None
     api_key_var: Optional[str] = None

@@ -3,7 +3,7 @@ import re
 import time
 from functools import wraps
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import typer
 from click.core import ParameterSource
@@ -33,6 +33,7 @@ from ..utils.hosted_eval import (
 from ..verifiers_bridge import (
     DEFAULT_ENV_DIR_PATH,
     DEFAULT_MODEL,
+    _has_flag,
     _is_config_target,
     _parse_value_option,
     _resolve_environment_reference,
@@ -95,6 +96,17 @@ HOSTED_EVAL_CONFIG_ALLOWED_FIELDS = {
     "allow_sandbox_access",
     "allow_instances_access",
     "sampling_args",
+    "max_tokens",
+    "temperature",
+    "provider",
+    "max_concurrent",
+    "max_retries",
+    "state_columns",
+    "independent_scoring",
+    "header",
+    "headers",
+    "debug",
+    "verbose",
     "extra_env_kwargs",
     "api_base_url",
     "api_key_var",
@@ -107,9 +119,52 @@ HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
     "timeout_minutes": (int, "an integer"),
     "allow_sandbox_access": (bool, "a boolean"),
     "allow_instances_access": (bool, "a boolean"),
+    "max_tokens": (int, "an integer"),
+    "max_concurrent": (int, "an integer"),
+    "max_retries": (int, "an integer"),
+    "independent_scoring": (bool, "a boolean"),
+    "debug": (bool, "a boolean"),
+    "verbose": (bool, "a boolean"),
     "api_base_url": (str, "a non-empty string"),
     "api_key_var": (str, "a non-empty string"),
     "eval_name": (str, "a non-empty string"),
+}
+HOSTED_SUPPORTED_PASSTHROUGH_FLAGS = {
+    "--env-args": True,
+    "-a": True,
+    "--env-dir-path": True,
+    "-p": True,
+    "--model": True,
+    "-m": True,
+    "--api-key-var": True,
+    "-k": True,
+    "--api-base-url": True,
+    "-b": True,
+    "--header": True,
+    "--num-examples": True,
+    "-n": True,
+    "--rollouts-per-example": True,
+    "-r": True,
+    "--max-concurrent": True,
+    "-c": True,
+    "--max-tokens": True,
+    "-t": True,
+    "--temperature": True,
+    "-T": True,
+    "--sampling-args": True,
+    "-S": True,
+    "--verbose": False,
+    "-v": False,
+    "--state-columns": True,
+    "-C": True,
+    "--independent-scoring": False,
+    "-i": False,
+    "--extra-env-kwargs": True,
+    "-x": True,
+    "--debug": False,
+    "-d": False,
+    "--max-retries": True,
+    "--provider": True,
 }
 
 
@@ -218,6 +273,191 @@ def _validate_json_object_field(merged: dict[str, Any], field_name: str) -> None
         raise typer.Exit(1) from exc
 
 
+def _validate_json_serializable_field(merged: dict[str, Any], field_name: str) -> None:
+    field_value = merged.get(field_name)
+    if field_value is None:
+        return
+
+    try:
+        json.dumps(field_value)
+    except (TypeError, ValueError) as exc:
+        console.print(
+            "[red]Error:[/red] hosted eval config "
+            f"`{field_name}` must contain only JSON-serializable values"
+        )
+        raise typer.Exit(1) from exc
+
+
+def _normalize_string_list_field(
+    merged: dict[str, Any],
+    field_name: str,
+    *,
+    allow_single_string: bool = False,
+    split_commas: bool = False,
+) -> list[str] | None:
+    field_value = merged.get(field_name)
+    if field_value is None:
+        return None
+
+    if allow_single_string and type(field_value) is str:
+        normalized = [field_value]
+    elif split_commas and type(field_value) is str:
+        normalized = [item.strip() for item in field_value.split(",") if item.strip()]
+    elif isinstance(field_value, list) and all(type(item) is str for item in field_value):
+        normalized = field_value
+    else:
+        description = "a string or list of strings" if allow_single_string else "a list of strings"
+        console.print(f"[red]Error:[/red] `{field_name}` must be {description}")
+        raise typer.Exit(1)
+
+    if any(not item for item in normalized):
+        console.print(f"[red]Error:[/red] `{field_name}` entries must be non-empty strings")
+        raise typer.Exit(1)
+
+    merged[field_name] = normalized
+    return normalized
+
+
+def _normalize_hosted_headers_field(merged: dict[str, Any]) -> None:
+    normalized_headers: list[str] = []
+
+    for field_name in ("header", "headers"):
+        field_value = merged.get(field_name)
+        if field_value is None:
+            continue
+
+        if type(field_value) is str:
+            normalized_headers.append(field_value)
+            continue
+
+        if isinstance(field_value, list) and all(type(item) is str for item in field_value):
+            normalized_headers.extend(field_value)
+            continue
+
+        console.print(f"[red]Error:[/red] `{field_name}` must be a string or list of strings")
+        raise typer.Exit(1)
+
+    for header_value in normalized_headers:
+        _validate_header_option_value(header_value, config_field_name="headers")
+
+    merged.pop("header", None)
+    if normalized_headers:
+        merged["headers"] = normalized_headers
+    else:
+        merged.pop("headers", None)
+
+
+def _normalize_provider_alias(value: Any) -> Any:
+    if isinstance(value, str):
+        return {"order": [value]}
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return {"order": value}
+    return value
+
+
+def _merge_sampling_aliases(
+    sampling_args: dict[str, Any] | None,
+    *,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    provider: Any = None,
+    prefer_existing_keys: bool,
+) -> dict[str, Any] | None:
+    merged_sampling_args = dict(sampling_args or {})
+
+    if max_tokens is not None and (
+        not prefer_existing_keys or "max_tokens" not in merged_sampling_args
+    ):
+        merged_sampling_args["max_tokens"] = max_tokens
+
+    if temperature is not None and (
+        not prefer_existing_keys or "temperature" not in merged_sampling_args
+    ):
+        merged_sampling_args["temperature"] = temperature
+
+    if provider is not None:
+        existing_extra_body = merged_sampling_args.get("extra_body")
+        if existing_extra_body is None:
+            existing_extra_body = {}
+            merged_sampling_args["extra_body"] = existing_extra_body
+        if not isinstance(existing_extra_body, dict):
+            console.print(
+                "[red]Error:[/red] `sampling_args.extra_body` must be a JSON object "
+                "when using `provider`"
+            )
+            raise typer.Exit(1)
+        if not prefer_existing_keys or "provider" not in existing_extra_body:
+            existing_extra_body["provider"] = _normalize_provider_alias(provider)
+
+    return merged_sampling_args or None
+
+
+def _parse_json_value_or_string_option(raw: Optional[str], option_name: str) -> Any:
+    if raw is None:
+        return None
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _parse_repeatable_option_values(args: list[str], long_flag: str) -> list[str]:
+    values: list[str] = []
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg == long_flag:
+            if idx + 1 >= len(args):
+                console.print(f"[red]Error:[/red] {long_flag} requires a value")
+                raise typer.Exit(1)
+            values.append(args[idx + 1])
+            idx += 2
+            continue
+        if arg.startswith(f"{long_flag}="):
+            values.append(arg.split("=", 1)[1])
+        idx += 1
+    return values
+
+
+def _validate_header_option_value(header_value: str, *, config_field_name: str) -> None:
+    if ":" not in header_value:
+        console.print(
+            f"[red]Error:[/red] `{config_field_name}` entries must be in the format 'Name: Value'"
+        )
+        raise typer.Exit(1)
+
+    name, _value = header_value.split(":", 1)
+    if not name.strip():
+        console.print(f"[red]Error:[/red] `{config_field_name}` header names must be non-empty")
+        raise typer.Exit(1)
+
+
+def _validate_hosted_passthrough_args(args: list[str]) -> None:
+    unsupported_flags: list[str] = []
+    for arg in args:
+        if not arg.startswith("-"):
+            continue
+
+        matched = False
+        for flag, takes_value in HOSTED_SUPPORTED_PASSTHROUGH_FLAGS.items():
+            if arg == flag or arg.startswith(f"{flag}="):
+                matched = True
+                break
+            if takes_value and len(flag) == 2 and arg.startswith(flag) and len(arg) > len(flag):
+                matched = True
+                break
+        if not matched:
+            unsupported_flags.append(arg)
+
+    if unsupported_flags:
+        console.print(
+            "[red]Error:[/red] hosted eval CLI does not support: "
+            + ", ".join(f"`{flag}`" for flag in unsupported_flags)
+        )
+        raise typer.Exit(1)
+
+
 def _freeze_json_value(value: Any) -> Any:
     if isinstance(value, dict):
         return tuple(sorted((key, _freeze_json_value(nested)) for key, nested in value.items()))
@@ -323,12 +563,30 @@ def _validate_single_hosted_eval_config(
         console.print("[red]Error:[/red] hosted eval config requires a non-empty `env_id`")
         raise typer.Exit(1)
 
+    _normalize_hosted_headers_field(merged)
     _validate_string_map_field(merged, "env_args")
     _validate_json_object_field(merged, "sampling_args")
     _validate_json_object_field(merged, "extra_env_kwargs")
+    _validate_json_serializable_field(merged, "provider")
+    _normalize_string_list_field(merged, "state_columns", split_commas=True)
 
     for field_name, (expected_type, description) in HOSTED_EVAL_CONFIG_FIELD_TYPES.items():
         _validate_hosted_config_field(merged, field_name, expected_type, description)
+
+    temperature = merged.get("temperature")
+    if temperature is not None and type(temperature) not in {int, float}:
+        console.print("[red]Error:[/red] `temperature` must be a number")
+        raise typer.Exit(1)
+    if type(temperature) is int:
+        merged["temperature"] = float(temperature)
+
+    merged["sampling_args"] = _merge_sampling_aliases(
+        merged.get("sampling_args"),
+        max_tokens=merged.pop("max_tokens", None),
+        temperature=merged.pop("temperature", None),
+        provider=merged.pop("provider", None),
+        prefer_existing_keys=True,
+    )
 
     merged["model"] = _resolve_hosted_config_model(merged, config_path)
     return merged
@@ -397,6 +655,16 @@ def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]
         eval_config["custom_secrets"] = config.custom_secrets
     if config.sampling_args:
         eval_config["sampling_args"] = config.sampling_args
+    if config.max_concurrent is not None:
+        eval_config["max_concurrent"] = config.max_concurrent
+    if config.max_retries is not None:
+        eval_config["max_retries"] = config.max_retries
+    if config.state_columns:
+        eval_config["state_columns"] = config.state_columns
+    if config.independent_scoring:
+        eval_config["independent_scoring"] = True
+    if config.headers:
+        eval_config["headers"] = config.headers
     if config.extra_env_kwargs:
         eval_config["extra_env_kwargs"] = config.extra_env_kwargs
     if config.api_base_url:
@@ -1299,12 +1567,19 @@ def run_eval_cmd(
                     "allow_sandbox_access": False,
                     "allow_instances_access": False,
                     "sampling_args": None,
+                    "max_concurrent": None,
+                    "max_retries": None,
+                    "state_columns": None,
+                    "independent_scoring": False,
+                    "headers": None,
                     "extra_env_kwargs": None,
                     "api_base_url": None,
                     "api_key_var": None,
                     "eval_name": None,
                 }
             ]
+
+        _validate_hosted_passthrough_args(passthrough_args)
 
         raw_model = _parse_value_option(passthrough_args, "--model", "-m")
         raw_num_examples = _parse_value_option(passthrough_args, "--num-examples", "-n")
@@ -1314,13 +1589,23 @@ def run_eval_cmd(
             "-r",
         )
         raw_env_args = _parse_value_option(passthrough_args, "--env-args", "")
+        raw_max_concurrent = _parse_value_option(passthrough_args, "--max-concurrent", "-c")
+        raw_max_tokens = _parse_value_option(passthrough_args, "--max-tokens", "-t")
+        raw_temperature = _parse_value_option(passthrough_args, "--temperature", "-T")
+        raw_state_columns = _parse_value_option(passthrough_args, "--state-columns", "-C")
         raw_extra_env_kwargs = _parse_value_option(
             passthrough_args,
             "--extra-env-kwargs",
             "-x",
         )
+        raw_max_retries = _parse_value_option(passthrough_args, "--max-retries", "")
         raw_api_base_url = _parse_value_option(passthrough_args, "--api-base-url", "-b")
         raw_api_key_var = _parse_value_option(passthrough_args, "--api-key-var", "-k")
+        raw_provider = _parse_value_option(passthrough_args, "--provider", "")
+        cli_headers = _parse_repeatable_option_values(passthrough_args, "--header")
+        for header_value in cli_headers:
+            _validate_header_option_value(header_value, config_field_name="headers")
+
         parsed_cli_env_args = (
             _parse_string_map_option(raw_env_args, "--env-args")
             if raw_env_args is not None
@@ -1331,6 +1616,33 @@ def run_eval_cmd(
         parsed_cli_extra_env_kwargs = _parse_json_object_option(
             raw_extra_env_kwargs,
             "--extra-env-kwargs",
+        )
+        parsed_cli_provider = _parse_json_value_or_string_option(raw_provider, "--provider")
+        cli_independent_scoring = _has_flag(passthrough_args, "--independent-scoring", "-i")
+
+        try:
+            parsed_cli_max_tokens = int(raw_max_tokens) if raw_max_tokens is not None else None
+            parsed_cli_max_concurrent = (
+                int(raw_max_concurrent) if raw_max_concurrent is not None else None
+            )
+            parsed_cli_max_retries = int(raw_max_retries) if raw_max_retries is not None else None
+        except ValueError as exc:
+            console.print(
+                "[red]Error:[/red] --max-tokens, --max-concurrent, and "
+                "--max-retries must be integers"
+            )
+            raise typer.Exit(1) from exc
+
+        try:
+            parsed_cli_temperature = float(raw_temperature) if raw_temperature is not None else None
+        except ValueError as exc:
+            console.print("[red]Error:[/red] --temperature must be a number")
+            raise typer.Exit(1) from exc
+
+        parsed_cli_state_columns = (
+            [item.strip() for item in raw_state_columns.split(",") if item.strip()]
+            if raw_state_columns is not None
+            else None
         )
 
         effective_targets: list[dict[str, Any]] = []
@@ -1364,6 +1676,29 @@ def run_eval_cmd(
                 )
                 raise typer.Exit(1)
 
+            base_sampling_args = cast(
+                dict[str, Any] | None,
+                parsed_sampling_args
+                if parsed_sampling_args is not None
+                else target_config.get("sampling_args"),
+            )
+            if parsed_sampling_args is None:
+                effective_sampling_args = _merge_sampling_aliases(
+                    base_sampling_args,
+                    max_tokens=parsed_cli_max_tokens,
+                    temperature=parsed_cli_temperature,
+                    provider=parsed_cli_provider,
+                    prefer_existing_keys=False,
+                )
+            else:
+                effective_sampling_args = _merge_sampling_aliases(
+                    base_sampling_args,
+                    max_tokens=parsed_cli_max_tokens,
+                    temperature=parsed_cli_temperature,
+                    provider=parsed_cli_provider,
+                    prefer_existing_keys=True,
+                )
+
             effective_targets.append(
                 {
                     "env_id": target_config["env_id"],
@@ -1392,11 +1727,28 @@ def run_eval_cmd(
                         else target_config.get("allow_instances_access", False)
                     ),
                     "custom_secrets": parsed_custom_secrets,
-                    "sampling_args": (
-                        parsed_sampling_args
-                        if parsed_sampling_args is not None
-                        else target_config.get("sampling_args")
+                    "sampling_args": effective_sampling_args,
+                    "max_concurrent": (
+                        parsed_cli_max_concurrent
+                        if parsed_cli_max_concurrent is not None
+                        else target_config.get("max_concurrent")
                     ),
+                    "max_retries": (
+                        parsed_cli_max_retries
+                        if parsed_cli_max_retries is not None
+                        else target_config.get("max_retries")
+                    ),
+                    "state_columns": (
+                        parsed_cli_state_columns
+                        if parsed_cli_state_columns is not None
+                        else target_config.get("state_columns")
+                    ),
+                    "independent_scoring": (
+                        True
+                        if cli_independent_scoring
+                        else target_config.get("independent_scoring", False)
+                    ),
+                    "headers": cli_headers or target_config.get("headers"),
                     "extra_env_kwargs": (
                         parsed_cli_extra_env_kwargs
                         if raw_extra_env_kwargs is not None
@@ -1426,6 +1778,11 @@ def run_eval_cmd(
                 target.get("allow_sandbox_access", False),
                 target.get("allow_instances_access", False),
                 _freeze_json_value(target.get("sampling_args")),
+                target.get("max_concurrent"),
+                target.get("max_retries"),
+                _freeze_json_value(target.get("state_columns")),
+                target.get("independent_scoring", False),
+                _freeze_json_value(target.get("headers")),
                 _freeze_json_value(target.get("extra_env_kwargs")),
                 target.get("api_base_url"),
                 target.get("api_key_var"),
@@ -1474,6 +1831,11 @@ def run_eval_cmd(
                     allow_instances_access=target.get("allow_instances_access", False),
                     custom_secrets=target.get("custom_secrets"),
                     sampling_args=target.get("sampling_args"),
+                    max_concurrent=target.get("max_concurrent"),
+                    max_retries=target.get("max_retries"),
+                    state_columns=target.get("state_columns"),
+                    independent_scoring=target.get("independent_scoring", False),
+                    headers=target.get("headers"),
                     extra_env_kwargs=target.get("extra_env_kwargs"),
                     api_base_url=target.get("api_base_url"),
                     api_key_var=target.get("api_key_var"),

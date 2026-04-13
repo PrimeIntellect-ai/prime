@@ -115,6 +115,20 @@ class Tunnel:
             return False
         return self._process.poll() is None
 
+    async def check_registered(self) -> bool:
+        """Check if the tunnel is still registered server-side.
+
+        Calls get_tunnel() on the backend API. Returns True if the
+        registration exists, False if it returns 404 (gone).
+
+        Raises TunnelError/TunnelTimeoutError on transient API failures
+        so the caller can distinguish "tunnel gone" from "API unreachable".
+        """
+        if self._tunnel_info is None:
+            return False
+        info = await self._client.get_tunnel(self._tunnel_info.tunnel_id)
+        return info is not None
+
     async def start(self) -> str:
         """
         Start the tunnel.

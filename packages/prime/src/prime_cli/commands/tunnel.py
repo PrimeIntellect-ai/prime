@@ -3,7 +3,6 @@ import signal
 from typing import List, Optional
 
 import typer
-from prime_tunnel import Tunnel
 from prime_tunnel.core.client import TunnelClient
 from prime_tunnel.exceptions import (
     TunnelConnectionError,
@@ -30,6 +29,8 @@ def start_tunnel(
     """Start a tunnel to expose a local port."""
 
     async def run_tunnel():
+        from prime_tunnel import Tunnel
+
         tunnel = Tunnel(local_port=port, name=name, team_id=team_id)
 
         shutdown_event = asyncio.Event()

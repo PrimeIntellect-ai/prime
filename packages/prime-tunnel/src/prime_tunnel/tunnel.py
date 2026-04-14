@@ -1,5 +1,4 @@
 import asyncio
-import fcntl
 import os
 import re
 import subprocess
@@ -18,6 +17,11 @@ from prime_tunnel.exceptions import (
     TunnelTimeoutError,
 )
 from prime_tunnel.models import TunnelInfo
+
+if os.name == "posix":
+    import fcntl
+else:
+    fcntl = None
 
 # timestamp + level + caller prefix + message
 _LOG_RE = re.compile(

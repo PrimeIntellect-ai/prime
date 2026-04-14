@@ -1,6 +1,6 @@
 from mcp.server.fastmcp import FastMCP
 
-from prime_mcp.tools import availability, pods, ssh
+from prime_mcp.tools import availability, pods, rl, ssh
 
 mcp = FastMCP("primeintellect")
 
@@ -251,6 +251,64 @@ async def manage_ssh_keys(
         SSH key operation result
     """
     return await ssh.manage_ssh_keys(action, key_name, public_key, key_id, offset, limit)
+
+
+@mcp.tool()
+async def list_rl_runs(team_id: str | None = None) -> dict:
+    """List hosted training runs available to the authenticated user.
+
+    This surfaces Prime hosted RL training runs to coding agents.
+    If team_id is omitted, the API returns personal runs plus runs from teams the user belongs to.
+
+    Args:
+        team_id: Optional team ID to limit the results to a single team context
+
+    Returns:
+        Hosted training runs with status, configuration, and metadata
+    """
+    return await rl.list_rl_runs(team_id)
+
+
+@mcp.tool()
+async def get_rl_run_progress(run_id: str) -> dict:
+    """Get progress metadata for a hosted training run.
+
+    Use this before fetching rollouts to discover:
+    - latestStep: newest training step seen by the backend
+    - stepsWithSamples: steps that currently have rollout samples available
+    - stepsWithDistributions: steps that currently have histogram data available
+
+    Args:
+        run_id: Unique identifier of the hosted training run
+
+    Returns:
+        Progress metadata for the run
+    """
+    return await rl.get_rl_run_progress(run_id)
+
+
+@mcp.tool()
+async def get_rl_run_rollouts(
+    run_id: str,
+    step: int,
+    page: int = 1,
+    limit: int = 100,
+) -> dict:
+    """Get rollout samples for a hosted training run step.
+
+    This exposes the same rollout samples shown for hosted training in the CLI/product so coding
+    agents can inspect concrete prompt/completion trajectories.
+
+    Args:
+        run_id: Unique identifier of the hosted training run
+        step: Training step to fetch rollouts for
+        page: Page number to fetch (1-indexed)
+        limit: Maximum number of rollout samples to return for the page
+
+    Returns:
+        Rollout samples and pagination metadata for the requested step
+    """
+    return await rl.get_rl_run_rollouts(run_id, step=step, page=page, limit=limit)
 
 
 if __name__ == "__main__":

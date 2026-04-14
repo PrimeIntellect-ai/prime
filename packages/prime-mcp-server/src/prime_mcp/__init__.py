@@ -1,6 +1,6 @@
 from prime_mcp.client import make_prime_request
 from prime_mcp.mcp import mcp
-from prime_mcp.tools import availability, pods, ssh
+from prime_mcp.tools import availability, pods, rl, ssh
 
 __version__ = "0.1.2"
 
@@ -9,5 +9,6 @@ __all__ = [
     "make_prime_request",
     "availability",
     "pods",
+    "rl",
     "ssh",
 ]

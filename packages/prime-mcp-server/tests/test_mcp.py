@@ -82,6 +82,7 @@ async def test_create_pod_validation():
         cloud_id="test-cloud-id",
         gpu_type="A100_80GB",
         provider_type="runpod",
+        data_center_id="test-dc",
         gpu_count=0,  # Invalid
     )
 
@@ -96,6 +97,7 @@ async def test_create_pod_disk_size_validation():
         cloud_id="test-cloud-id",
         gpu_type="A100_80GB",
         provider_type="runpod",
+        data_center_id="test-dc",
         disk_size=0,  # Invalid
     )
 
@@ -110,6 +112,7 @@ async def test_create_pod_vcpus_validation():
         cloud_id="test-cloud-id",
         gpu_type="A100_80GB",
         provider_type="runpod",
+        data_center_id="test-dc",
         vcpus=0,  # Invalid
     )
 
@@ -124,6 +127,7 @@ async def test_create_pod_memory_validation():
         cloud_id="test-cloud-id",
         gpu_type="A100_80GB",
         provider_type="runpod",
+        data_center_id="test-dc",
         memory=0,  # Invalid
     )
 
@@ -180,10 +184,11 @@ async def test_manage_ssh_keys_invalid_action():
 
 def test_imports():
     """Test that all main modules can be imported"""
-    from prime_mcp import make_prime_request, mcp
+    from prime_mcp import make_prime_request, mcp, rl
 
     assert mcp is not None
     assert make_prime_request is not None
+    assert rl is not None
 
 
 if __name__ == "__main__":

@@ -167,6 +167,24 @@ prime sandbox download <sandbox-id> /remote/file.txt ./local/
 prime sandbox delete <sandbox-id>
 ```
 
+### Hosted RL Training Monitoring
+
+Inspect hosted training runs and rollout samples from the CLI; these commands emit machine-readable JSON and work well for coding agents and scripts.
+
+```bash
+# List hosted training runs
+prime rl list
+
+# See which steps currently have rollout samples available
+prime rl progress <run-id>
+
+# Fetch rollout samples for a specific training step
+prime rl rollouts <run-id> --step 50
+
+# Inspect a single sample with jq
+prime rl rollouts <run-id> --step 50 --num 20 | jq '.samples[0]'
+```
+
 ### Team Management
 
 Manage resources across personal and team contexts:

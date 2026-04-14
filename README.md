@@ -162,6 +162,24 @@ prime pods terminate <pod-id>
 prime pods ssh <pod-id>
 ```
 
+### Hosted RL Training Monitoring
+
+Inspect hosted training runs and rollout samples from the CLI; these commands return JSON, so they also work well for coding agents and scripts.
+
+```bash
+# List hosted training runs
+prime rl list
+
+# See which steps currently have rollout samples available
+prime rl progress <run-id>
+
+# Fetch rollout samples for a specific training step
+prime rl rollouts <run-id> --step 50
+
+# Inspect a single sample with jq
+prime rl rollouts <run-id> --step 50 --num 20 | jq '.samples[0]'
+```
+
 ### Evaluations
 
 Push and manage evaluation results to the Environments Hub.

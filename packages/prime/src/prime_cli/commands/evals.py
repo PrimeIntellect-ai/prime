@@ -435,20 +435,41 @@ def _validate_header_option_value(header_value: str, *, config_field_name: str) 
 
 def _validate_hosted_passthrough_args(args: list[str]) -> None:
     unsupported_flags: list[str] = []
-    for arg in args:
+    index = 0
+
+    while index < len(args):
+        arg = args[index]
         if not arg.startswith("-"):
+            index += 1
             continue
 
-        matched = False
-        for flag, takes_value in HOSTED_SUPPORTED_PASSTHROUGH_FLAGS.items():
+        matched_flag: str | None = None
+        takes_value = False
+        for flag, flag_takes_value in HOSTED_SUPPORTED_PASSTHROUGH_FLAGS.items():
             if arg == flag or arg.startswith(f"{flag}="):
-                matched = True
+                matched_flag = flag
+                takes_value = flag_takes_value
                 break
-            if takes_value and len(flag) == 2 and arg.startswith(flag) and len(arg) > len(flag):
-                matched = True
+            if (
+                flag_takes_value
+                and len(flag) == 2
+                and arg.startswith(flag)
+                and len(arg) > len(flag)
+            ):
+                matched_flag = flag
+                takes_value = True
                 break
-        if not matched:
+
+        if matched_flag is None:
             unsupported_flags.append(arg)
+            index += 1
+            continue
+
+        if takes_value and arg == matched_flag and index + 1 < len(args):
+            index += 2
+            continue
+
+        index += 1
 
     if unsupported_flags:
         console.print(

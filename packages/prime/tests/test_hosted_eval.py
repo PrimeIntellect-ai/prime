@@ -1275,6 +1275,32 @@ def test_eval_run_hosted_rejects_unsupported_passthrough_flags():
     assert "`--save-results`" in result.output
 
 
+def test_eval_run_hosted_accepts_negative_num_examples_value(monkeypatch):
+    captured = {}
+
+    def fake_create_hosted_evaluations(config, environment_ids=None):
+        captured["num_examples"] = config.num_examples
+        return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_create_hosted_evaluations,
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_hosted_environment",
+        lambda environment, env_dir_path=None, env_path=None: ("primeintellect/gsm8k", "env-123"),
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k", "--hosted", "--num-examples", "-1"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["num_examples"] == -1
+
+
 def test_eval_run_rejects_hosted_only_flags_without_hosted():
     result = runner.invoke(
         app,

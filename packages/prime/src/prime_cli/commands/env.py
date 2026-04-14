@@ -2127,6 +2127,11 @@ def install(
         "--no-upgrade",
         help="Don't upgrade existing packages. Useful with locked dependencies (uv.lock).",
     ),
+    prerelease: bool = typer.Option(
+        False,
+        "--prerelease",
+        help="Allow pre-release versions (e.g., verifiers>=0.1.12.dev3).",
+    ),
 ) -> None:
     """Install a verifiers environment.
 
@@ -2276,6 +2281,7 @@ def install(
                 with_tool,
                 no_upgrade,
                 url_dependencies,
+                prerelease=prerelease,
             )
             if not cmd_parts:
                 skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
@@ -2912,6 +2918,7 @@ def _build_install_command(
     tool: str = "uv",
     no_upgrade: bool = False,
     url_dependencies: Optional[List[str]] = None,
+    prerelease: bool = False,
 ) -> Optional[List[str]]:
     """Build install command for an environment. Returns None if no install method available.
 
@@ -2940,11 +2947,15 @@ def _build_install_command(
             if url_dependencies:
                 cmd.extend(url_dependencies)
             cmd.extend(["--extra-index-url", simple_index_url])
+            if prerelease:
+                cmd.append("--prerelease=allow")
             return cmd
         else:  # pip
             cmd = ["pip", "install"]
             if not no_upgrade:
                 cmd.append("--upgrade")
+            if prerelease:
+                cmd.append("--pre")
             if version and version != "latest":
                 cmd.append(f"{normalized_name}=={version}")
             else:
@@ -2967,7 +2978,7 @@ def _build_install_command(
     return None
 
 
-def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
+def _install_single_environment(env_slug: str, tool: str = "uv", prerelease: bool = False) -> bool:
     """Install a single environment from the hub. Returns True on success."""
     try:
         env_id, target_version = validate_env_id(env_slug)
@@ -3014,7 +3025,8 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
         return False
 
     cmd_parts = _build_install_command(
-        name, target_version, simple_index_url, wheel_url, tool, url_dependencies=url_dependencies
+        name, target_version, simple_index_url, wheel_url, tool, url_dependencies=url_dependencies,
+        prerelease=prerelease,
     )
     if not cmd_parts:
         console.print(f"[red]Failed to build install command for {env_slug}[/red]")

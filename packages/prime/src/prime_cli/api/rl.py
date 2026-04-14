@@ -205,6 +205,8 @@ class RLClient:
         enable_thinking: Optional[bool] = None,
         reasoning_effort: Optional[Literal["low", "medium", "high"]] = None,
         run_config: Optional[Dict[str, Any]] = None,
+        loss: Literal["rl", "sft"] = "rl",
+        teacher: Optional[Dict[str, Any]] = None,
     ) -> RLRun:
         """Create a new RL training run."""
         try:
@@ -219,6 +221,7 @@ class RLClient:
                 "rollouts_per_example": rollouts_per_example,
                 "max_steps": max_steps,
                 "batch_size": batch_size,
+                "loss": loss,
                 "secrets": secrets_list,
             }
 
@@ -308,6 +311,9 @@ class RLClient:
 
             if run_config:
                 payload["run_config"] = run_config
+
+            if teacher:
+                payload["teacher"] = teacher
 
             response = self.client.post("/rft/runs", json=payload)
             return RLRun.model_validate(response.get("run"))

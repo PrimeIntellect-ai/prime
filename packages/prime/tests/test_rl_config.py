@@ -1,13 +1,39 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
 import typer
+from prime_cli.api.rl import RLClient
 from prime_cli.commands.rl import (
     RLConfig,
     _flatten_config_schema,
     generate_rl_config_template,
     load_config,
 )
+
+
+def _rl_run_payload() -> dict[str, Any]:
+    return {
+        "id": "rft_test",
+        "name": None,
+        "userId": "user_test",
+        "teamId": None,
+        "rftClusterId": None,
+        "status": "RUNNING",
+        "rolloutsPerExample": 1,
+        "seqLen": 2048,
+        "maxSteps": 100,
+        "maxTokens": None,
+        "batchSize": 128,
+        "baseModel": "openai/gpt-oss-20b",
+        "environments": [],
+        "runConfig": None,
+        "evalConfig": None,
+        "valConfig": None,
+        "bufferConfig": None,
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-01T00:00:00Z",
+    }
 
 
 def test_load_config_warns_and_ignores_deprecated_trajectory_strategy(
@@ -109,6 +135,132 @@ def test_load_config_rejects_top_level_reasoning_effort(tmp_path: Path) -> None:
 
     with pytest.raises(typer.Exit):
         load_config(str(config_path))
+
+
+def test_load_config_accepts_sft_teacher_config_and_defaults_rollouts(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "openai/gpt-oss-20b"\n'
+        'loss = "sft"\n'
+        "[teacher]\n"
+        'model = "openai/gpt-oss-120b"\n'
+        "save = false\n"
+        "[teacher.sampling]\n"
+        "max_tokens = 2048\n"
+        'reasoning_effort = "medium"\n'
+        "[[env]]\n"
+        'id = "primeintellect/wordle"\n'
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.loss == "sft"
+    assert cfg.rollouts_per_example == 1
+    assert cfg.teacher is not None
+    assert cfg.teacher.to_api_dict() == {
+        "model": "openai/gpt-oss-120b",
+        "save": False,
+        "sampling": {
+            "max_tokens": 2048,
+            "reasoning_effort": "medium",
+        },
+    }
+
+
+def test_load_config_preserves_explicit_sft_rollouts(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "openai/gpt-oss-20b"\n'
+        'loss = "sft"\n'
+        "rollouts_per_example = 4\n"
+        "[teacher]\n"
+        'model = "openai/gpt-oss-120b"\n'
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.rollouts_per_example == 4
+
+
+def test_load_config_rejects_sft_without_teacher(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "openai/gpt-oss-20b"\nloss = "sft"\n')
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_rejects_teacher_for_rl(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "openai/gpt-oss-20b"\n'
+        "[teacher]\n"
+        'model = "openai/gpt-oss-120b"\n'
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_rejects_teacher_save_true(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "openai/gpt-oss-20b"\n'
+        'loss = "sft"\n'
+        "[teacher]\n"
+        'model = "openai/gpt-oss-120b"\n'
+        "save = true\n"
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_rejects_private_teacher_endpoint_fields(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "openai/gpt-oss-20b"\n'
+        'loss = "sft"\n'
+        "[teacher]\n"
+        'model = "openai/gpt-oss-120b"\n'
+        'base_url = ["https://api.openai.com/v1"]\n'
+        'api_key_var = "OPENAI_API_KEY"\n'
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_rl_client_create_run_forwards_loss_and_teacher_payload() -> None:
+    captured: dict[str, Any] = {}
+
+    class DummyClient:
+        def post(self, endpoint: str, json: dict[str, Any]) -> dict[str, Any]:
+            captured["endpoint"] = endpoint
+            captured["json"] = json
+            return {"run": _rl_run_payload()}
+
+    teacher = {
+        "model": "openai/gpt-oss-120b",
+        "save": False,
+        "sampling": {
+            "max_tokens": 2048,
+            "reasoning_effort": "medium",
+        },
+    }
+
+    RLClient(DummyClient()).create_run(
+        model_name="openai/gpt-oss-20b",
+        environments=[{"id": "primeintellect/wordle"}],
+        rollouts_per_example=1,
+        loss="sft",
+        teacher=teacher,
+    )
+
+    assert captured["endpoint"] == "/rft/runs"
+    assert captured["json"]["loss"] == "sft"
+    assert captured["json"]["teacher"] == teacher
+    assert "teacher_rollout_model" not in captured["json"]
 
 
 def test_tailscale_config_disabled_by_default() -> None:

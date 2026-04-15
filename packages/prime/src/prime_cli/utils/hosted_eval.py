@@ -45,6 +45,7 @@ class HostedEvalConfig:
     allow_sandbox_access: bool = False
     allow_instances_access: bool = False
     custom_secrets: Optional[dict[str, str]] = None
+    provider: Optional[str | dict[str, Any]] = None
     sampling_args: Optional[dict[str, Any]] = None
     max_concurrent: Optional[int] = None
     max_retries: Optional[int] = None

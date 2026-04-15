@@ -1095,10 +1095,10 @@ env_id = "gsm8k"
         }
 
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.resolve_endpoints_file",
+        "prime_cli.commands.evals.resolve_endpoints_file",
         fake_resolve_endpoints_file,
     )
-    monkeypatch.setattr("verifiers.utils.eval_utils.load_endpoints", fake_load_endpoints)
+    monkeypatch.setattr("prime_cli.commands.evals.load_endpoints", fake_load_endpoints)
 
     loaded = _load_hosted_eval_configs(str(config_path))[0]
 
@@ -1121,11 +1121,11 @@ endpoint_id = "test-endpoint"
     )
 
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.resolve_endpoints_file",
+        "prime_cli.commands.evals.resolve_endpoints_file",
         lambda path: Path(path),
     )
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.load_endpoints",
+        "prime_cli.commands.evals.load_endpoints",
         lambda path: {
             "test-endpoint": [
                 {
@@ -1157,49 +1157,17 @@ model = "anthropic/claude-sonnet-4"
     )
 
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.resolve_endpoints_file",
+        "prime_cli.commands.evals.resolve_endpoints_file",
         lambda path: (_ for _ in ()).throw(AssertionError("should not resolve endpoint_id")),
     )
     monkeypatch.setattr(
-        "verifiers.utils.eval_utils.load_endpoints",
+        "prime_cli.commands.evals.load_endpoints",
         lambda path: (_ for _ in ()).throw(AssertionError("should not load endpoints")),
     )
 
     loaded = _load_hosted_eval_configs(str(config_path))[0]
 
     assert loaded["model"] == "anthropic/claude-sonnet-4"
-
-
-def test_hosted_eval_config_endpoint_id_reports_missing_verifiers(monkeypatch, tmp_path):
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-endpoint_id = "test-endpoint"
-
-[[eval]]
-env_id = "gsm8k"
-""".strip()
-    )
-
-    import builtins
-
-    original_import = builtins.__import__
-
-    def raise_import_error(name, *args, **kwargs):
-        if name == "verifiers.utils.eval_utils":
-            raise ImportError("missing verifiers")
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", raise_import_error)
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", str(config_path), "--hosted"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 1
-    assert "verifiers is required to resolve `endpoint_id`" in result.output
 
 
 def test_eval_run_local_toml_passthrough(monkeypatch, tmp_path):

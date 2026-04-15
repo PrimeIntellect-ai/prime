@@ -52,6 +52,7 @@ class HostedEvalConfig:
     independent_scoring: bool = False
     headers: Optional[list[str]] = None
     extra_env_kwargs: Optional[dict[str, Any]] = None
+    api_client_type: Optional[str] = None
     api_base_url: Optional[str] = None
     api_key_var: Optional[str] = None
 

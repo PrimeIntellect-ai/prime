@@ -498,6 +498,7 @@ class RLConfig(BaseModel):
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
     infrastructure: InfrastructureConfig = Field(default_factory=InfrastructureConfig)
+    run_config: Dict[str, Any] = Field(default_factory=dict)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
 
@@ -709,6 +710,8 @@ def create_run(
             console.print(f"  Oversampling Factor: {cfg.oversampling_factor}")
         if cfg.max_async_level is not None:
             console.print(f"  Max Async Level:     {cfg.max_async_level}")
+        if cfg.run_config:
+            console.print(f"  Run Config:          {cfg.run_config}")
 
         # Sampling
         has_sampling = (
@@ -860,6 +863,7 @@ def create_run(
             checkpoint_id=cfg.checkpoint_id,
             cluster_name=cfg.cluster_name,
             infrastructure_config=cfg.infrastructure.to_api_dict(),
+            run_config=cfg.run_config if cfg.run_config else None,
         )
 
         if output == "json":
@@ -940,6 +944,150 @@ def list_models(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+def _unwrap_single_schema_variant(prop: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the concrete schema when a field is an optional/single wrapped variant."""
+    if "anyOf" in prop:
+        non_null = [variant for variant in prop["anyOf"] if variant.get("type") != "null"]
+        if len(non_null) == 1:
+            return _unwrap_single_schema_variant(non_null[0])
+
+    if "allOf" in prop and len(prop["allOf"]) == 1:
+        return _unwrap_single_schema_variant(prop["allOf"][0])
+
+    return prop
+
+
+def _resolve_schema_ref(prop: Dict[str, Any], defs: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve a local JSON schema ref into its concrete schema when possible."""
+    if "$ref" not in prop:
+        return prop
+
+    ref_name = prop["$ref"].rsplit("/", 1)[-1]
+    return defs.get(ref_name, prop)
+
+
+def _flatten_config_schema(
+    schema: Dict[str, Any],
+    defs: Dict[str, Any],
+    prefix: str = "",
+) -> list[tuple[str, str, str]]:
+    """Walk a JSON schema and return (dotted_path, type, default) for each leaf field."""
+    leaf_rows: list[tuple[str, str, str]] = []
+    nested_rows: list[tuple[str, str, str]] = []
+    props = schema.get("properties", {})
+    for name, prop in props.items():
+        if name in ("model_config", "env_file"):
+            continue
+        path = f"{prefix}{name}" if not prefix else f"{prefix}.{name}"
+        resolved = _resolve_schema_ref(_unwrap_single_schema_variant(prop), defs)
+
+        if resolved.get("type") == "object" and "properties" in resolved:
+            nested_rows.extend(_flatten_config_schema(resolved, defs, path))
+            continue
+
+        if resolved.get("type") == "array":
+            items = _resolve_schema_ref(
+                _unwrap_single_schema_variant(resolved.get("items", {})),
+                defs,
+            )
+            if items.get("type") == "object" and "properties" in items:
+                nested_rows.extend(_flatten_config_schema(items, defs, f"{path}[]"))
+                continue
+
+        type_str = _schema_type_str(prop, defs)
+        default = str(prop.get("default", "")) if "default" in prop else ""
+        leaf_rows.append((path, type_str, default))
+
+    return leaf_rows + nested_rows
+
+
+def _schema_type_str(prop: Dict[str, Any], defs: Dict[str, Any]) -> str:
+    """Produce a human-readable type string from a JSON schema property."""
+    unwrapped = _unwrap_single_schema_variant(prop)
+    if unwrapped is not prop:
+        return _schema_type_str(unwrapped, defs)
+
+    if "$ref" in prop:
+        return prop["$ref"].rsplit("/", 1)[-1]
+
+    if "anyOf" in prop:
+        parts = [
+            _schema_type_str(variant, defs)
+            for variant in prop["anyOf"]
+            if variant.get("type") != "null"
+        ]
+        return " | ".join(parts) if parts else "any"
+
+    if "allOf" in prop:
+        parts = [_schema_type_str(variant, defs) for variant in prop["allOf"]]
+        return " & ".join(part for part in parts if part) or "any"
+
+    if prop.get("type") == "array":
+        inner = _schema_type_str(prop.get("items", {}), defs)
+        return f"list[{inner}]"
+
+    resolved = _resolve_schema_ref(prop, defs)
+    if resolved is not prop:
+        return _schema_type_str(resolved, defs)
+
+    return prop.get("type", "any")
+
+
+RL_CONFIGS_JSON_HELP = json_output_help(
+    ".configs[] = {section, name, type, default}",
+)
+
+
+@app.command("configs", rich_help_panel="Commands", epilog=RL_CONFIGS_JSON_HELP)
+def list_configs(
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List available configuration options for RL training."""
+    validate_output_format(output, console)
+
+    schema = RLConfig.model_json_schema()
+    defs = schema.get("$defs", {})
+    rows = _flatten_config_schema(schema, defs)
+    if output == "json":
+        output_data_as_json(
+            {
+                "configs": [
+                    {
+                        "section": r[0].rsplit(".", 1)[0] if "." in r[0] else "",
+                        "name": r[0].rsplit(".", 1)[-1],
+                        "type": r[1],
+                        "default": r[2],
+                    }
+                    for r in rows
+                ]
+            },
+            console,
+        )
+        return
+
+    table = Table(title="Prime RL — Config Options")
+    table.add_column("Section", style="magenta")
+    table.add_column("Config", style="cyan")
+    table.add_column("Type", style="green")
+    table.add_column("Default", style="yellow")
+
+    prev_section = None
+    for path, type_str, default in rows:
+        section = path.rsplit(".", 1)[0] if "." in path else ""
+        name = path.rsplit(".", 1)[-1]
+        if prev_section is not None and section != prev_section:
+            table.add_section()
+        display_section = section if section != prev_section else ""
+        prev_section = section
+        table.add_row(display_section, name, type_str, default)
+
+    console.print(table)
+    console.print(
+        "\n[dim]Use these in your TOML config file. "
+        "See 'prime rl init' to generate a template.[/dim]"
+    )
 
 
 def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> None:

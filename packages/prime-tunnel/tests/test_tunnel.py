@@ -1,7 +1,10 @@
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from prime_tunnel import Config, Tunnel, TunnelClient
+from prime_tunnel.exceptions import TunnelTimeoutError
 from prime_tunnel.models import TunnelInfo
 
 
@@ -124,3 +127,38 @@ def test_sync_stop_survives_delete_failure():
 
     assert tunnel._started is False
     assert tunnel._tunnel_info is None
+
+
+# -- check_registered tests --
+
+
+@pytest.mark.asyncio
+async def test_check_registered_returns_true():
+    tunnel = _make_started_tunnel()
+    tunnel._client = AsyncMock()
+    tunnel._client.get_tunnel.return_value = tunnel._tunnel_info
+    assert await tunnel.check_registered() is True
+    tunnel._client.get_tunnel.assert_awaited_once_with("t-test123")
+
+
+@pytest.mark.asyncio
+async def test_check_registered_returns_false_on_404():
+    tunnel = _make_started_tunnel()
+    tunnel._client = AsyncMock()
+    tunnel._client.get_tunnel.return_value = None
+    assert await tunnel.check_registered() is False
+
+
+@pytest.mark.asyncio
+async def test_check_registered_returns_false_when_no_tunnel_info():
+    tunnel = Tunnel(local_port=8080)
+    assert await tunnel.check_registered() is False
+
+
+@pytest.mark.asyncio
+async def test_check_registered_propagates_api_errors():
+    tunnel = _make_started_tunnel()
+    tunnel._client = AsyncMock()
+    tunnel._client.get_tunnel.side_effect = TunnelTimeoutError("timeout")
+    with pytest.raises(TunnelTimeoutError):
+        await tunnel.check_registered()

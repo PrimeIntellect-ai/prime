@@ -763,9 +763,6 @@ temperature = 0.2
             + 'sampling_args = { extra_body = { provider = { order = ["azure"], '
             + "allow_fallbacks = false, require_parameters = true } } }\n"
             + """
-debug = true
-verbose = true
-
 [[eval]]
 env_id = "gsm8k"
 """
@@ -1003,35 +1000,19 @@ env_id = "gsm8k"
     assert "JSON-serializable" in result.output
 
 
-def test_eval_run_hosted_rejects_unsupported_toml_fields(tmp_path):
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-resume = true
-
-[[eval]]
-env_id = "gsm8k"
-""".strip()
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", str(config_path), "--hosted"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-    assert result.exit_code == 1
-    assert "does not support" in result.output
-    assert "`resume`" in result.output
-
-
 @pytest.mark.parametrize(
     ("field_assignment", "expected_field"),
     [
+        ('provider = "azure"', "provider"),
+        ("verbose = true", "verbose"),
+        ("debug = true", "debug"),
         ("save_results = false", "save_results"),
+        ("resume = true", "resume"),
+        ('resume_path = ""', "resume_path"),
         ("save_to_hf_hub = false", "save_to_hf_hub"),
-        ("disable_env_server = false", "disable_env_server"),
         ('hf_hub_dataset_name = ""', "hf_hub_dataset_name"),
         ('output_dir = ""', "output_dir"),
+        ("disable_env_server = false", "disable_env_server"),
         ('num_workers = "auto"', "num_workers"),
     ],
 )
@@ -1057,28 +1038,6 @@ env_id = "gsm8k"
     assert result.exit_code == 1
     assert "does not support" in result.output
     assert f"`{expected_field}`" in result.output
-
-
-def test_eval_run_hosted_rejects_provider_alias_in_toml(tmp_path):
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        """
-provider = "azure"
-
-[[eval]]
-env_id = "gsm8k"
-""".strip()
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", str(config_path), "--hosted"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 1
-    assert "does not support" in result.output
-    assert "`provider`" in result.output
 
 
 def test_eval_run_hosted_toml_preserves_cli_env_dir_path(monkeypatch, tmp_path):
@@ -1294,28 +1253,36 @@ def test_eval_run_local_sampling_args_passthrough(monkeypatch):
     }
 
 
-def test_eval_run_hosted_rejects_unsupported_passthrough_flags():
+@pytest.mark.parametrize(
+    ("extra_args", "expected_flag"),
+    [
+        (["--provider", "openai"], "--provider"),
+        (["--endpoints-path", "./configs/endpoints.toml"], "--endpoints-path"),
+        (["--output-dir", "/tmp/results"], "--output-dir"),
+        (["--verbose"], "--verbose"),
+        (["--no-interleave-scoring"], "--no-interleave-scoring"),
+        (["--save-results"], "--save-results"),
+        (["--resume", "/tmp/results.json"], "--resume"),
+        (["--save-to-hf-hub"], "--save-to-hf-hub"),
+        (["--hf-hub-dataset-name", "dataset-name"], "--hf-hub-dataset-name"),
+        (["--tui"], "--tui"),
+        (["--debug"], "--debug"),
+        (["--disable-env-server"], "--disable-env-server"),
+        (["--num-workers", "auto"], "--num-workers"),
+        (["--abbreviated-summary"], "--abbreviated-summary"),
+        (["--heartbeat-url", "https://example.com/heartbeat"], "--heartbeat-url"),
+    ],
+)
+def test_eval_run_hosted_rejects_unsupported_passthrough_flags(extra_args, expected_flag):
     result = runner.invoke(
         app,
-        ["eval", "run", "gsm8k", "--hosted", "--save-results"],
+        ["eval", "run", "gsm8k", "--hosted", *extra_args],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
     assert result.exit_code == 1
     assert "hosted eval CLI does not support" in result.output
-    assert "`--save-results`" in result.output
-
-
-def test_eval_run_hosted_rejects_provider_passthrough_flag():
-    result = runner.invoke(
-        app,
-        ["eval", "run", "gsm8k", "--hosted", "--provider", "openai"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 1
-    assert "hosted eval CLI does not support" in result.output
-    assert "`--provider`" in result.output
+    assert f"`{expected_flag}`" in result.output
 
 
 def test_eval_run_hosted_accepts_negative_num_examples_value(monkeypatch):

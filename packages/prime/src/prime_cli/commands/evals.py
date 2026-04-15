@@ -108,36 +108,56 @@ HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
     "max_concurrent": (int, "an integer"),
     "max_retries": (int, "an integer"),
     "independent_scoring": (bool, "a boolean"),
-    "debug": (bool, "a boolean"),
-    "verbose": (bool, "a boolean"),
     "api_client_type": (str, "a non-empty string"),
     "api_base_url": (str, "a non-empty string"),
     "api_key_var": (str, "a non-empty string"),
     "eval_name": (str, "a non-empty string"),
 }
-HOSTED_UNSUPPORTED_VERIFIERS_FLAGS = {
-    "--provider": lambda parsed: parsed.provider is not None,
-    "--save-results": lambda parsed: parsed.save_results,
-    "--resume": lambda parsed: parsed.resume is not None,
-    "--save-to-hf-hub": lambda parsed: parsed.save_to_hf_hub,
-    "--hf-hub-dataset-name": lambda parsed: bool(parsed.hf_hub_dataset_name),
-    "--output-dir": lambda parsed: parsed.output_dir is not None,
-    "--tui": lambda parsed: parsed.tui,
-    "--disable-env-server": lambda parsed: parsed.disable_env_server,
-    "--num-workers": lambda parsed: parsed.num_workers != "auto",
-    "--heartbeat-url": lambda parsed: parsed.heartbeat_url is not None,
-    "--abbreviated-summary": lambda parsed: parsed.abbreviated_summary,
-    "--no-interleave-scoring": lambda parsed: parsed.no_interleave_scoring,
+HOSTED_SUPPORTED_VERIFIERS_FIELDS = {
+    "api_base_url",
+    "api_client_type",
+    "api_key_var",
+    "env_args",
+    "env_dir_path",
+    "extra_env_kwargs",
+    "header",
+    "independent_scoring",
+    "max_concurrent",
+    "max_retries",
+    "max_tokens",
+    "model",
+    "num_examples",
+    "rollouts_per_example",
+    "sampling_args",
+    "state_columns",
+    "temperature",
 }
-HOSTED_UNSUPPORTED_TOML_FIELDS = {
-    "provider": lambda config: "provider" in config,
-    "save_results": lambda config: "save_results" in config,
-    "resume": lambda config: "resume" in config or "resume_path" in config,
-    "save_to_hf_hub": lambda config: "save_to_hf_hub" in config,
-    "hf_hub_dataset_name": lambda config: "hf_hub_dataset_name" in config,
-    "output_dir": lambda config: "output_dir" in config,
-    "disable_env_server": lambda config: "disable_env_server" in config,
-    "num_workers": lambda config: "num_workers" in config,
+HOSTED_SUPPORTED_TOML_FIELDS = {
+    "allow_instances_access",
+    "allow_sandbox_access",
+    "api_base_url",
+    "api_client_type",
+    "api_key_var",
+    "endpoint_id",
+    "endpoints_path",
+    "env_id",
+    "env_args",
+    "env_dir_path",
+    "eval_name",
+    "extra_env_kwargs",
+    "header",
+    "headers",
+    "independent_scoring",
+    "max_concurrent",
+    "max_retries",
+    "max_tokens",
+    "model",
+    "num_examples",
+    "rollouts_per_example",
+    "sampling_args",
+    "state_columns",
+    "temperature",
+    "timeout_minutes",
 }
 
 
@@ -246,15 +266,20 @@ def _coerce_hosted_headers(raw: dict[str, Any]) -> list[str] | None:
 
 def _parse_verifiers_eval_namespace(
     environment: str, passthrough_args: list[str], sampling_args: Optional[str]
-) -> tuple[argparse.Namespace, set[str]]:
+) -> tuple[argparse.Namespace, set[str], dict[str, str]]:
     argv = [environment, *passthrough_args]
     if sampling_args is not None:
         argv.extend(["--sampling-args", sampling_args])
 
     explicit_parser = build_parser()
+    option_names_by_dest = {}
     for action in explicit_parser._actions:
         if action.option_strings:
             action.default = argparse.SUPPRESS
+            option_names_by_dest[action.dest] = next(
+                (option for option in action.option_strings if option.startswith("--")),
+                action.option_strings[0],
+            )
 
     try:
         parsed = build_parser().parse_args(argv)
@@ -263,12 +288,16 @@ def _parse_verifiers_eval_namespace(
         raise typer.Exit(exc.code) from exc
 
     provided_dests = {dest for dest, value in vars(explicit).items() if dest != "env_id_or_config"}
-    return parsed, provided_dests
+    return parsed, provided_dests, option_names_by_dest
 
 
-def _reject_unsupported_hosted_verifiers_args(parsed: argparse.Namespace) -> None:
+def _reject_unsupported_hosted_verifiers_args(
+    provided_dests: set[str], option_names_by_dest: dict[str, str]
+) -> None:
     unsupported_flags = [
-        flag for flag, is_used in HOSTED_UNSUPPORTED_VERIFIERS_FLAGS.items() if is_used(parsed)
+        option_name
+        for dest, option_name in option_names_by_dest.items()
+        if dest in provided_dests and dest not in HOSTED_SUPPORTED_VERIFIERS_FIELDS
     ]
     if not unsupported_flags:
         return
@@ -363,11 +392,9 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
 def _validate_single_hosted_eval_config(
     merged: dict[str, Any], config_path: Path
 ) -> dict[str, Any]:
-    unsupported_fields = [
-        field_name
-        for field_name, is_used in HOSTED_UNSUPPORTED_TOML_FIELDS.items()
-        if is_used(merged)
-    ]
+    unsupported_fields = sorted(
+        field_name for field_name in merged if field_name not in HOSTED_SUPPORTED_TOML_FIELDS
+    )
     if unsupported_fields:
         console.print(
             "[red]Error:[/red] hosted eval config does not support: "
@@ -1360,12 +1387,14 @@ def run_eval_cmd(
             raise typer.Exit(1)
 
     if hosted:
-        parsed_verifiers_args, cli_overrides = _parse_verifiers_eval_namespace(
-            environment,
-            passthrough_args,
-            sampling_args,
+        parsed_verifiers_args, cli_overrides, option_names_by_dest = (
+            _parse_verifiers_eval_namespace(
+                environment,
+                passthrough_args,
+                sampling_args,
+            )
         )
-        _reject_unsupported_hosted_verifiers_args(parsed_verifiers_args)
+        _reject_unsupported_hosted_verifiers_args(cli_overrides, option_names_by_dest)
         env_dir_path = (
             parsed_verifiers_args.env_dir_path if "env_dir_path" in cli_overrides else None
         )

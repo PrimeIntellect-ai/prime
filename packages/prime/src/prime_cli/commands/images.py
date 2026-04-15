@@ -224,28 +224,33 @@ def push_image(
 def list_images(
     output: str = typer.Option("table", "--output", "-o", help="Output format (table or json)"),
     all_images: bool = typer.Option(
-        False, "--all", "-a", help="Show all accessible images (personal + team)"
+        False, "--all", "-a", help="[Deprecated] Show all accessible images (personal + team)"
     ),
 ):
     """
     List all images you've pushed to Prime Intellect registry.
 
-    By default, shows images in the current context (personal or team).
-    Use --all to show all accessible images including team images.
+    Shows personal images by default, or team images when a team is configured.
 
     \b
     Examples:
         prime images list
-        prime images list --all
         prime images list --output json
     """
     validate_output_format(output, console)
+
+    if all_images and output != "json":
+        console.print(
+            "[yellow]Warning: --all flag is deprecated and will be removed in a future release. "
+            "Images are now scoped to your current context (personal or team).[/yellow]"
+        )
+        console.print()
     try:
         client = APIClient()
 
         # Build query params
         params = {}
-        if config.team_id and not all_images:
+        if config.team_id:
             params["teamId"] = config.team_id
 
         response = client.request("GET", "/images", params=params if params else None)
@@ -261,11 +266,10 @@ def list_images(
             return
 
         # Table output
-        title = "Your Docker Images"
-        if config.team_id and not all_images:
+        if config.team_id:
             title = f"Team Docker Images (team: {config.team_id})"
-        elif all_images:
-            title = "All Accessible Docker Images"
+        else:
+            title = "Personal Docker Images"
 
         # Group images by (owner, imageName, imageTag) to deduplicate rows.
         grouped: dict[str, list] = {}

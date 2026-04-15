@@ -194,7 +194,8 @@ max_tokens = 2048
 # repetition_penalty = 1.0
 # min_tokens = 0
 # seed = 42
-# extra_body = {{ }}
+# [sampling.extra_body]
+# enable_thinking = false
 
 # Optional: temperature scheduling (use instead of temperature)
 # [sampling.temp_scheduler]
@@ -499,6 +500,9 @@ class RLConfig(BaseModel):
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
     infrastructure: InfrastructureConfig = Field(default_factory=InfrastructureConfig)
+    run_config: Dict[str, Any] = Field(default_factory=dict)
+    env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
+    env_files: List[str] = Field(default_factory=list)
 
 
 def _format_validation_errors(errors: list[Any]) -> list[str]:
@@ -553,6 +557,7 @@ def load_config(path: str) -> RLConfig:
 
 # Status color mapping
 RUN_STATUS_COLORS = {
+    "QUEUED": "white",
     "PENDING": "yellow",
     "RUNNING": "green",
     "COMPLETED": "cyan",
@@ -707,6 +712,8 @@ def create_run(
             console.print(f"  Oversampling Factor: {cfg.oversampling_factor}")
         if cfg.max_async_level is not None:
             console.print(f"  Max Async Level:     {cfg.max_async_level}")
+        if cfg.run_config:
+            console.print(f"  Run Config:          {cfg.run_config}")
 
         # Sampling
         has_sampling = (
@@ -858,20 +865,29 @@ def create_run(
             checkpoint_id=cfg.checkpoint_id,
             cluster_name=cfg.cluster_name,
             infrastructure_config=cfg.infrastructure.to_api_dict(),
+            run_config=cfg.run_config if cfg.run_config else None,
         )
 
         if output == "json":
             output_data_as_json({"run": run.model_dump()}, console)
             return
 
-        console.print("[green]✓ Run created successfully![/green]")
+        if run.status == "QUEUED":
+            queue_msg = "✓ Run created and queued"
+            if run.runs_ahead is not None:
+                queue_msg += f" (~{run.runs_ahead} runs ahead)"
+            console.print(f"[yellow]{queue_msg}[/yellow]")
+            console.print("[dim]The run will start automatically when capacity is available.[/dim]")
+        else:
+            console.print("[green]✓ Run created successfully![/green]")
 
         dashboard_url = f"{app_config.frontend_url}/dashboard/training/{run.id}"
         console.print("\n[cyan]Monitor run at:[/cyan]")
         console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
 
-        console.print("\n[dim]View logs with:[/dim]")
-        console.print(f"  prime rl logs {run.id} -f")
+        if run.status != "QUEUED":
+            console.print("\n[dim]View logs with:[/dim]")
+            console.print(f"  prime rl logs {run.id} -f")
 
     except ValidationError as e:
         console.print("[red]Configuration Error:[/red]")
@@ -1177,7 +1193,10 @@ def get_run(
         status_color = _get_status_color(run.status)
 
         console.print(f"[bold]Run {run_id}[/bold]\n")
-        console.print(f"  Status: [{status_color}]{run.status}[/{status_color}]")
+        status_text = run.status
+        if run.status == "QUEUED" and run.runs_ahead is not None:
+            status_text += f" (~{run.runs_ahead} runs ahead)"
+        console.print(f"  Status: [{status_color}]{status_text}[/{status_color}]")
         console.print(f"  Model: [magenta]{run.base_model}[/magenta]")
         console.print(f"  Environments: [green]{formatted['environments']}[/green]")
         console.print(f"  Max Steps: {run.max_steps}")
@@ -1347,6 +1366,12 @@ def get_logs(
 
                             last_lines = formatted_lines
                 except APIError as e:
+                    if "404" in str(e) and (
+                        "queued" in str(e).lower() or "pending" in str(e).lower()
+                    ):
+                        console.print("[yellow]Run is queued, waiting for it to start...[/yellow]")
+                        time.sleep(10)
+                        continue
                     consecutive_errors += 1
                     if "429" in str(e):
                         if consecutive_errors >= 3:
@@ -1376,6 +1401,11 @@ def get_logs(
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped watching logs.[/dim]")
     except APIError as e:
+        err_str = str(e).lower()
+        if "404" in str(e) and ("queued" in err_str or "pending" in err_str):
+            msg = "Run has not started yet. Logs will be available once running."
+            console.print(f"[yellow]{msg}[/yellow]")
+            raise typer.Exit(0)
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 

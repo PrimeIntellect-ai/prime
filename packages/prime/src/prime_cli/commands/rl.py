@@ -349,6 +349,24 @@ class SamplingConfig(BaseModel):
     temp_scheduler: TemperatureSchedulerConfig | None = None
     extra_body: Dict[str, Any] | None = None
 
+    @model_validator(mode="after")
+    def wrap_enable_thinking(self) -> "SamplingConfig":
+        """Allow `enable_thinking` as a top-level shorthand in extra_body.
+
+        Transforms:
+            [sampling.extra_body]
+            enable_thinking = false
+
+        Into what the backend expects:
+            [sampling.extra_body]
+            chat_template_kwargs = { enable_thinking = false }
+        """
+        if self.extra_body and "enable_thinking" in self.extra_body:
+            value = self.extra_body.pop("enable_thinking")
+            kwargs = self.extra_body.setdefault("chat_template_kwargs", {})
+            kwargs["enable_thinking"] = value
+        return self
+
 
 class EvalConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")

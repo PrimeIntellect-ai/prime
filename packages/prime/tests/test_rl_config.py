@@ -38,6 +38,59 @@ def test_load_config_still_rejects_other_unknown_keys(tmp_path: Path) -> None:
         load_config(str(config_path))
 
 
+def test_enable_thinking_shorthand_wraps_in_chat_template_kwargs(tmp_path: Path) -> None:
+    """enable_thinking in extra_body should be wrapped into chat_template_kwargs."""
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "Qwen/Qwen3.5-397B-A17B"\n'
+        "\n"
+        "[sampling.extra_body]\n"
+        "enable_thinking = false\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.sampling.extra_body == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
+
+
+def test_enable_thinking_shorthand_preserves_other_extra_body_keys(tmp_path: Path) -> None:
+    """Other keys in extra_body should be preserved alongside the wrapped value."""
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "Qwen/Qwen3.5-397B-A17B"\n'
+        "\n"
+        "[sampling.extra_body]\n"
+        "enable_thinking = false\n"
+        "some_other_key = 42\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.sampling.extra_body == {
+        "chat_template_kwargs": {"enable_thinking": False},
+        "some_other_key": 42,
+    }
+
+
+def test_chat_template_kwargs_still_works_directly(tmp_path: Path) -> None:
+    """The explicit chat_template_kwargs form should still work."""
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "Qwen/Qwen3.5-397B-A17B"\n'
+        "\n"
+        "[sampling.extra_body]\n"
+        "chat_template_kwargs = { enable_thinking = false }\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.sampling.extra_body == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
+
+
 def test_generate_rl_config_template_uses_broad_buffer_threshold_examples() -> None:
     template = generate_rl_config_template()
 

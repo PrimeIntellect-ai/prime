@@ -11,7 +11,11 @@ from click.core import ParameterSource
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
 from rich.syntax import Syntax
 from rich.table import Table
-from verifiers.cli.commands.eval import build_parser
+from verifiers.cli.commands.eval import (
+    build_extra_headers,
+    build_parser,
+    merge_sampling_args,
+)
 from verifiers.utils.eval_utils import (
     load_endpoints,
     load_toml_config,
@@ -112,6 +116,7 @@ HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
     "eval_name": (str, "a non-empty string"),
 }
 HOSTED_UNSUPPORTED_VERIFIERS_FLAGS = {
+    "--provider": lambda parsed: parsed.provider is not None,
     "--save-results": lambda parsed: parsed.save_results,
     "--resume": lambda parsed: parsed.resume is not None,
     "--save-to-hf-hub": lambda parsed: parsed.save_to_hf_hub,
@@ -125,6 +130,7 @@ HOSTED_UNSUPPORTED_VERIFIERS_FLAGS = {
     "--no-interleave-scoring": lambda parsed: parsed.no_interleave_scoring,
 }
 HOSTED_UNSUPPORTED_TOML_FIELDS = {
+    "provider": lambda config: config.get("provider") is not None,
     "save_results": lambda config: config.get("save_results", False),
     "resume": lambda config: (
         config.get("resume") is not None or config.get("resume_path") is not None
@@ -210,20 +216,6 @@ def _parse_string_map_option(raw: Optional[str], option_name: str) -> Optional[d
     return parsed
 
 
-def _validate_string_map_field(merged: dict[str, Any], field_name: str) -> None:
-    field_value = merged.get(field_name)
-    if field_value is None:
-        return
-    if not isinstance(field_value, dict) or any(
-        type(key) is not str or type(value) is not str for key, value in field_value.items()
-    ):
-        console.print(
-            "[red]Error:[/red] hosted eval config "
-            f"`{field_name}` must contain only string keys and values"
-        )
-        raise typer.Exit(1)
-
-
 def _validate_json_object_field(merged: dict[str, Any], field_name: str) -> None:
     field_value = merged.get(field_name)
     if field_value is None:
@@ -242,136 +234,16 @@ def _validate_json_object_field(merged: dict[str, Any], field_name: str) -> None
         raise typer.Exit(1) from exc
 
 
-def _validate_json_serializable_field(merged: dict[str, Any], field_name: str) -> None:
-    field_value = merged.get(field_name)
-    if field_value is None:
-        return
-
+def _coerce_hosted_headers(raw: dict[str, Any]) -> list[str] | None:
     try:
-        json.dumps(field_value)
-    except (TypeError, ValueError) as exc:
-        console.print(
-            "[red]Error:[/red] hosted eval config "
-            f"`{field_name}` must contain only JSON-serializable values"
-        )
+        normalized = build_extra_headers(raw)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
 
-
-def _normalize_string_list_field(
-    merged: dict[str, Any],
-    field_name: str,
-    *,
-    allow_single_string: bool = False,
-    split_commas: bool = False,
-) -> list[str] | None:
-    field_value = merged.get(field_name)
-    if field_value is None:
+    if not normalized:
         return None
-
-    if allow_single_string and type(field_value) is str:
-        normalized = [field_value]
-    elif split_commas and type(field_value) is str:
-        normalized = [item.strip() for item in field_value.split(",") if item.strip()]
-    elif isinstance(field_value, list) and all(type(item) is str for item in field_value):
-        normalized = field_value
-    else:
-        description = "a string or list of strings" if allow_single_string else "a list of strings"
-        console.print(f"[red]Error:[/red] `{field_name}` must be {description}")
-        raise typer.Exit(1)
-
-    if any(not item for item in normalized):
-        console.print(f"[red]Error:[/red] `{field_name}` entries must be non-empty strings")
-        raise typer.Exit(1)
-
-    merged[field_name] = normalized
-    return normalized
-
-
-def _normalize_hosted_headers_field(merged: dict[str, Any]) -> None:
-    normalized_headers: list[str] = []
-
-    for field_name in ("header", "headers"):
-        field_value = merged.get(field_name)
-        if field_value is None:
-            continue
-
-        if type(field_value) is str:
-            normalized_headers.append(field_value)
-            continue
-
-        if isinstance(field_value, list) and all(type(item) is str for item in field_value):
-            normalized_headers.extend(field_value)
-            continue
-
-        console.print(f"[red]Error:[/red] `{field_name}` must be a string or list of strings")
-        raise typer.Exit(1)
-
-    for header_value in normalized_headers:
-        _validate_header_option_value(header_value, config_field_name="headers")
-
-    merged.pop("header", None)
-    if normalized_headers:
-        merged["headers"] = normalized_headers
-    else:
-        merged.pop("headers", None)
-
-
-def _normalize_provider_alias(value: Any) -> Any:
-    if isinstance(value, str):
-        return {"order": [value]}
-    if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        return {"order": value}
-    return value
-
-
-def _merge_sampling_aliases(
-    sampling_args: dict[str, Any] | None,
-    *,
-    max_tokens: int | None = None,
-    temperature: float | None = None,
-    provider: Any = None,
-    prefer_existing_keys: bool,
-) -> dict[str, Any] | None:
-    merged_sampling_args = dict(sampling_args or {})
-
-    if max_tokens is not None and (
-        not prefer_existing_keys or "max_tokens" not in merged_sampling_args
-    ):
-        merged_sampling_args["max_tokens"] = max_tokens
-
-    if temperature is not None and (
-        not prefer_existing_keys or "temperature" not in merged_sampling_args
-    ):
-        merged_sampling_args["temperature"] = temperature
-
-    if provider is not None:
-        existing_extra_body = merged_sampling_args.get("extra_body")
-        if existing_extra_body is None:
-            existing_extra_body = {}
-            merged_sampling_args["extra_body"] = existing_extra_body
-        if not isinstance(existing_extra_body, dict):
-            console.print(
-                "[red]Error:[/red] `sampling_args.extra_body` must be a JSON object "
-                "when using `provider`"
-            )
-            raise typer.Exit(1)
-        if not prefer_existing_keys or "provider" not in existing_extra_body:
-            existing_extra_body["provider"] = _normalize_provider_alias(provider)
-
-    return merged_sampling_args or None
-
-
-def _validate_header_option_value(header_value: str, *, config_field_name: str) -> None:
-    if ":" not in header_value:
-        console.print(
-            f"[red]Error:[/red] `{config_field_name}` entries must be in the format 'Name: Value'"
-        )
-        raise typer.Exit(1)
-
-    name, _value = header_value.split(":", 1)
-    if not name.strip():
-        console.print(f"[red]Error:[/red] `{config_field_name}` header names must be non-empty")
-        raise typer.Exit(1)
+    return [f"{name}: {value}" for name, value in normalized.items()]
 
 
 def _parse_verifiers_eval_namespace(
@@ -510,12 +382,22 @@ def _validate_single_hosted_eval_config(
         console.print("[red]Error:[/red] hosted eval config requires a non-empty `env_id`")
         raise typer.Exit(1)
 
-    _normalize_hosted_headers_field(merged)
-    _validate_string_map_field(merged, "env_args")
+    _validate_json_object_field(merged, "env_args")
     _validate_json_object_field(merged, "sampling_args")
     _validate_json_object_field(merged, "extra_env_kwargs")
-    _validate_json_serializable_field(merged, "provider")
-    _normalize_string_list_field(merged, "state_columns", split_commas=True)
+    state_columns = merged.get("state_columns")
+    if state_columns is not None and (
+        not isinstance(state_columns, list)
+        or any(type(item) is not str or not item for item in state_columns)
+    ):
+        console.print("[red]Error:[/red] `state_columns` must be a list of non-empty strings")
+        raise typer.Exit(1)
+
+    headers = _coerce_hosted_headers(merged)
+    merged.pop("header", None)
+    merged.pop("headers", None)
+    if headers is not None:
+        merged["headers"] = headers
 
     for field_name, (expected_type, description) in HOSTED_EVAL_CONFIG_FIELD_TYPES.items():
         _validate_hosted_config_field(merged, field_name, expected_type, description)
@@ -527,12 +409,14 @@ def _validate_single_hosted_eval_config(
     if type(temperature) is int:
         merged["temperature"] = float(temperature)
 
-    merged["sampling_args"] = _merge_sampling_aliases(
-        merged.get("sampling_args"),
-        max_tokens=merged.pop("max_tokens", None),
-        temperature=merged.pop("temperature", None),
-        provider=merged.pop("provider", None),
-        prefer_existing_keys=True,
+    merged["sampling_args"] = (
+        merge_sampling_args(
+            merged.get("sampling_args"),
+            max_tokens=merged.pop("max_tokens", None),
+            temperature=merged.pop("temperature", None),
+            prefer_existing_keys=True,
+        )
+        or None
     )
 
     merged["model"] = _resolve_hosted_config_model(merged, config_path)
@@ -1488,8 +1372,9 @@ def run_eval_cmd(
             parsed_verifiers_args.env_dir_path if "env_dir_path" in cli_overrides else None
         )
 
-        for header_value in parsed_verifiers_args.header or []:
-            _validate_header_option_value(header_value, config_field_name="headers")
+        cli_headers = None
+        if "header" in cli_overrides:
+            cli_headers = _coerce_hosted_headers({"header": parsed_verifiers_args.header})
 
         hosted_target_configs: list[dict[str, Any]] = []
         if _is_config_target(environment):
@@ -1563,16 +1448,20 @@ def run_eval_cmd(
                 if explicit_sampling_args
                 else target_config.get("sampling_args")
             )
-            effective_sampling_args = _merge_sampling_aliases(
-                base_sampling_args,
-                max_tokens=(
-                    parsed_verifiers_args.max_tokens if "max_tokens" in cli_overrides else None
-                ),
-                temperature=(
-                    parsed_verifiers_args.temperature if "temperature" in cli_overrides else None
-                ),
-                provider=(parsed_verifiers_args.provider if "provider" in cli_overrides else None),
-                prefer_existing_keys=explicit_sampling_args,
+            effective_sampling_args = (
+                merge_sampling_args(
+                    base_sampling_args,
+                    max_tokens=(
+                        parsed_verifiers_args.max_tokens if "max_tokens" in cli_overrides else None
+                    ),
+                    temperature=(
+                        parsed_verifiers_args.temperature
+                        if "temperature" in cli_overrides
+                        else None
+                    ),
+                    prefer_existing_keys=explicit_sampling_args,
+                )
+                or None
             )
 
             effective_targets.append(
@@ -1629,9 +1518,7 @@ def run_eval_cmd(
                         else target_config.get("independent_scoring", False)
                     ),
                     "headers": (
-                        parsed_verifiers_args.header
-                        if "header" in cli_overrides
-                        else target_config.get("headers")
+                        cli_headers if "header" in cli_overrides else target_config.get("headers")
                     ),
                     "extra_env_kwargs": (
                         parsed_verifiers_args.extra_env_kwargs

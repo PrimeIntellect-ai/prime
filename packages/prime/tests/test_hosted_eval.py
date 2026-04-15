@@ -746,7 +746,8 @@ def test_eval_run_hosted_supports_additional_toml_fields_and_sampling_aliases(
     captured = {}
     config_path = tmp_path / "eval.toml"
     config_path.write_text(
-        """
+        (
+            """
 model = "openai/gpt-4.1-mini"
 num_examples = 7
 rollouts_per_example = 2
@@ -754,16 +755,20 @@ max_concurrent = 100
 max_retries = 3
 state_columns = ["turn", "timing"]
 independent_scoring = true
-headers = ["X-Test: one"]
+header = ["X-Test: one"]
 max_tokens = 4096
 temperature = 0.2
-provider = { order = ["azure"], allow_fallbacks = false, require_parameters = true }
+"""
+            + 'sampling_args = { extra_body = { provider = { order = ["azure"], '
+            + "allow_fallbacks = false, require_parameters = true } } }\n"
+            + """
 debug = true
 verbose = true
 
 [[eval]]
 env_id = "gsm8k"
-""".strip()
+"""
+        ).strip()
     )
 
     def fake_resolve(environment, env_dir_path=None, env_path=None):
@@ -1018,6 +1023,28 @@ env_id = "gsm8k"
     assert "`resume`" in result.output
 
 
+def test_eval_run_hosted_rejects_provider_alias_in_toml(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+provider = "azure"
+
+[[eval]]
+env_id = "gsm8k"
+""".strip()
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "does not support" in result.output
+    assert "`provider`" in result.output
+
+
 def test_eval_run_hosted_toml_preserves_cli_env_dir_path(monkeypatch, tmp_path):
     captured = {}
     config_path = tmp_path / "eval.toml"
@@ -1241,6 +1268,18 @@ def test_eval_run_hosted_rejects_unsupported_passthrough_flags():
     assert result.exit_code == 1
     assert "hosted eval CLI does not support" in result.output
     assert "`--save-results`" in result.output
+
+
+def test_eval_run_hosted_rejects_provider_passthrough_flag():
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k", "--hosted", "--provider", "openai"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "hosted eval CLI does not support" in result.output
+    assert "`--provider`" in result.output
 
 
 def test_eval_run_hosted_accepts_negative_num_examples_value(monkeypatch):

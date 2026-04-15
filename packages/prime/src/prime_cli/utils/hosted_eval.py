@@ -39,7 +39,7 @@ class HostedEvalConfig:
     inference_model: str
     num_examples: int
     rollouts_per_example: int
-    env_args: Optional[dict[str, str]] = None
+    env_args: Optional[dict[str, Any]] = None
     name: Optional[str] = None
     timeout_minutes: Optional[int] = None
     allow_sandbox_access: bool = False

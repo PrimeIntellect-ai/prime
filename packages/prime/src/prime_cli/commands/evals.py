@@ -130,16 +130,14 @@ HOSTED_UNSUPPORTED_VERIFIERS_FLAGS = {
     "--no-interleave-scoring": lambda parsed: parsed.no_interleave_scoring,
 }
 HOSTED_UNSUPPORTED_TOML_FIELDS = {
-    "provider": lambda config: config.get("provider") is not None,
-    "save_results": lambda config: config.get("save_results", False),
-    "resume": lambda config: (
-        config.get("resume") is not None or config.get("resume_path") is not None
-    ),
-    "save_to_hf_hub": lambda config: config.get("save_to_hf_hub", False),
-    "hf_hub_dataset_name": lambda config: bool(config.get("hf_hub_dataset_name")),
-    "output_dir": lambda config: config.get("output_dir") is not None,
-    "disable_env_server": lambda config: config.get("disable_env_server", False),
-    "num_workers": lambda config: config.get("num_workers", "auto") != "auto",
+    "provider": lambda config: "provider" in config,
+    "save_results": lambda config: "save_results" in config,
+    "resume": lambda config: "resume" in config or "resume_path" in config,
+    "save_to_hf_hub": lambda config: "save_to_hf_hub" in config,
+    "hf_hub_dataset_name": lambda config: "hf_hub_dataset_name" in config,
+    "output_dir": lambda config: "output_dir" in config,
+    "disable_env_server": lambda config: "disable_env_server" in config,
+    "num_workers": lambda config: "num_workers" in config,
 }
 
 

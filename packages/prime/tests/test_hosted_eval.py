@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from prime_cli.client import APIError
 from prime_cli.commands.evals import (
     _create_hosted_evaluations,
@@ -1021,6 +1022,41 @@ env_id = "gsm8k"
     assert result.exit_code == 1
     assert "does not support" in result.output
     assert "`resume`" in result.output
+
+
+@pytest.mark.parametrize(
+    ("field_assignment", "expected_field"),
+    [
+        ("save_results = false", "save_results"),
+        ("save_to_hf_hub = false", "save_to_hf_hub"),
+        ("disable_env_server = false", "disable_env_server"),
+        ('hf_hub_dataset_name = ""', "hf_hub_dataset_name"),
+        ('output_dir = ""', "output_dir"),
+        ('num_workers = "auto"', "num_workers"),
+    ],
+)
+def test_eval_run_hosted_rejects_explicit_unsupported_toml_fields(
+    tmp_path, field_assignment, expected_field
+):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        f"""
+{field_assignment}
+
+[[eval]]
+env_id = "gsm8k"
+""".strip()
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "does not support" in result.output
+    assert f"`{expected_field}`" in result.output
 
 
 def test_eval_run_hosted_rejects_provider_alias_in_toml(tmp_path):

@@ -1443,11 +1443,18 @@ def run_eval_cmd(
                 raise typer.Exit(1)
 
             explicit_sampling_args = "sampling_args" in cli_overrides
-            base_sampling_args = (
+            base_sampling_args_raw = (
                 parsed_verifiers_args.sampling_args
                 if explicit_sampling_args
                 else target_config.get("sampling_args")
             )
+            if base_sampling_args_raw is None:
+                base_sampling_args = None
+            elif isinstance(base_sampling_args_raw, dict):
+                base_sampling_args = base_sampling_args_raw
+            else:
+                console.print("[red]Error:[/red] `sampling_args` must be a JSON object")
+                raise typer.Exit(1)
             effective_sampling_args = (
                 merge_sampling_args(
                     base_sampling_args,

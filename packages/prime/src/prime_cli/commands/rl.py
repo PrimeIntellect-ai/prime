@@ -489,8 +489,6 @@ class RLConfig(BaseModel):
     max_async_level: int | None = None
     checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
     cluster_name: str | None = None  # Admin-only: target a specific cluster by name
-    env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
-    env_files: List[str] = Field(default_factory=list)
     env: List[EnvConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)

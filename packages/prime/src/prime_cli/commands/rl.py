@@ -946,6 +946,28 @@ def list_models(
         raise typer.Exit(1)
 
 
+def _unwrap_single_schema_variant(prop: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the concrete schema when a field is an optional/single wrapped variant."""
+    if "anyOf" in prop:
+        non_null = [variant for variant in prop["anyOf"] if variant.get("type") != "null"]
+        if len(non_null) == 1:
+            return _unwrap_single_schema_variant(non_null[0])
+
+    if "allOf" in prop and len(prop["allOf"]) == 1:
+        return _unwrap_single_schema_variant(prop["allOf"][0])
+
+    return prop
+
+
+def _resolve_schema_ref(prop: Dict[str, Any], defs: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve a local JSON schema ref into its concrete schema when possible."""
+    if "$ref" not in prop:
+        return prop
+
+    ref_name = prop["$ref"].rsplit("/", 1)[-1]
+    return defs.get(ref_name, prop)
+
+
 def _flatten_config_schema(
     schema: Dict[str, Any],
     defs: Dict[str, Any],
@@ -959,35 +981,22 @@ def _flatten_config_schema(
         if name in ("model_config", "env_file"):
             continue
         path = f"{prefix}{name}" if not prefix else f"{prefix}.{name}"
+        resolved = _resolve_schema_ref(_unwrap_single_schema_variant(prop), defs)
 
-        # Resolve $ref or anyOf with a single non-null $ref (optional nested models)
-        resolved = prop
-        if "$ref" in prop:
-            ref_name = prop["$ref"].rsplit("/", 1)[-1]
-            resolved = defs.get(ref_name, prop)
-        elif "anyOf" in prop:
-            non_null = [v for v in prop["anyOf"] if v.get("type") != "null"]
-            if len(non_null) == 1 and "$ref" in non_null[0]:
-                ref_name = non_null[0]["$ref"].rsplit("/", 1)[-1]
-                resolved = defs.get(ref_name, prop)
-
-        # If it's an object with properties, recurse
         if resolved.get("type") == "object" and "properties" in resolved:
             nested_rows.extend(_flatten_config_schema(resolved, defs, path))
             continue
 
-        # If it's an array of objects (like env), show as section hint
         if resolved.get("type") == "array":
-            items = resolved.get("items", {})
-            if "$ref" in items:
-                ref_name = items["$ref"].rsplit("/", 1)[-1]
-                items = defs.get(ref_name, items)
+            items = _resolve_schema_ref(
+                _unwrap_single_schema_variant(resolved.get("items", {})),
+                defs,
+            )
             if items.get("type") == "object" and "properties" in items:
                 nested_rows.extend(_flatten_config_schema(items, defs, f"{path}[]"))
                 continue
 
-        # Leaf field — extract type and default
-        type_str = _schema_type_str(resolved, defs)
+        type_str = _schema_type_str(prop, defs)
         default = str(prop.get("default", "")) if "default" in prop else ""
         leaf_rows.append((path, type_str, default))
 
@@ -996,24 +1005,33 @@ def _flatten_config_schema(
 
 def _schema_type_str(prop: Dict[str, Any], defs: Dict[str, Any]) -> str:
     """Produce a human-readable type string from a JSON schema property."""
+    unwrapped = _unwrap_single_schema_variant(prop)
+    if unwrapped is not prop:
+        return _schema_type_str(unwrapped, defs)
+
+    if "$ref" in prop:
+        return prop["$ref"].rsplit("/", 1)[-1]
+
     if "anyOf" in prop:
-        parts = []
-        for variant in prop["anyOf"]:
-            if variant.get("type") == "null":
-                continue
-            if "$ref" in variant:
-                ref_name = variant["$ref"].rsplit("/", 1)[-1]
-                parts.append(ref_name)
-            else:
-                parts.append(variant.get("type", "?"))
+        parts = [
+            _schema_type_str(variant, defs)
+            for variant in prop["anyOf"]
+            if variant.get("type") != "null"
+        ]
         return " | ".join(parts) if parts else "any"
-    if "allOf" in prop and len(prop["allOf"]) == 1 and "$ref" in prop["allOf"][0]:
-        ref_name = prop["allOf"][0]["$ref"].rsplit("/", 1)[-1]
-        return ref_name
+
+    if "allOf" in prop:
+        parts = [_schema_type_str(variant, defs) for variant in prop["allOf"]]
+        return " & ".join(part for part in parts if part) or "any"
+
     if prop.get("type") == "array":
-        items = prop.get("items", {})
-        inner = items.get("type", "any")
+        inner = _schema_type_str(prop.get("items", {}), defs)
         return f"list[{inner}]"
+
+    resolved = _resolve_schema_ref(prop, defs)
+    if resolved is not prop:
+        return _schema_type_str(resolved, defs)
+
     return prop.get("type", "any")
 
 

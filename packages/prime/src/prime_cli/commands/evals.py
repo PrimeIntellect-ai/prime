@@ -116,6 +116,7 @@ HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
     "eval_name": (str, "a non-empty string"),
 }
 HOSTED_UNSUPPORTED_VERIFIERS_FLAGS = {
+    "--provider": lambda parsed: parsed.provider is not None,
     "--save-results": lambda parsed: parsed.save_results,
     "--resume": lambda parsed: parsed.resume is not None,
     "--save-to-hf-hub": lambda parsed: parsed.save_to_hf_hub,
@@ -129,6 +130,7 @@ HOSTED_UNSUPPORTED_VERIFIERS_FLAGS = {
     "--no-interleave-scoring": lambda parsed: parsed.no_interleave_scoring,
 }
 HOSTED_UNSUPPORTED_TOML_FIELDS = {
+    "provider": lambda config: config.get("provider") is not None,
     "save_results": lambda config: config.get("save_results", False),
     "resume": lambda config: (
         config.get("resume") is not None or config.get("resume_path") is not None
@@ -383,16 +385,6 @@ def _validate_single_hosted_eval_config(
     _validate_json_object_field(merged, "env_args")
     _validate_json_object_field(merged, "sampling_args")
     _validate_json_object_field(merged, "extra_env_kwargs")
-    provider = merged.get("provider")
-    if provider is not None and not isinstance(provider, (str, dict)):
-        console.print("[red]Error:[/red] `provider` must be a string or TOML table")
-        raise typer.Exit(1)
-    if isinstance(provider, dict):
-        try:
-            json.dumps(provider)
-        except (TypeError, ValueError) as exc:
-            console.print("[red]Error:[/red] `provider` must contain only JSON-serializable values")
-            raise typer.Exit(1) from exc
     state_columns = merged.get("state_columns")
     if state_columns is not None and (
         not isinstance(state_columns, list)
@@ -470,8 +462,6 @@ def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]
         eval_config["timeout_minutes"] = config.timeout_minutes
     if config.custom_secrets:
         eval_config["custom_secrets"] = config.custom_secrets
-    if config.provider is not None:
-        eval_config["provider"] = config.provider
     if config.sampling_args:
         eval_config["sampling_args"] = config.sampling_args
     if config.max_concurrent is not None:
@@ -1402,7 +1392,6 @@ def run_eval_cmd(
                     "allow_sandbox_access": False,
                     "allow_instances_access": False,
                     "sampling_args": None,
-                    "provider": None,
                     "max_concurrent": None,
                     "max_retries": None,
                     "state_columns": None,
@@ -1514,11 +1503,6 @@ def run_eval_cmd(
                         else target_config.get("allow_instances_access", False)
                     ),
                     "custom_secrets": parsed_custom_secrets,
-                    "provider": (
-                        parsed_verifiers_args.provider
-                        if "provider" in cli_overrides
-                        else target_config.get("provider")
-                    ),
                     "sampling_args": effective_sampling_args,
                     "max_concurrent": (
                         parsed_verifiers_args.max_concurrent
@@ -1638,7 +1622,6 @@ def run_eval_cmd(
                     allow_sandbox_access=target.get("allow_sandbox_access", False),
                     allow_instances_access=target.get("allow_instances_access", False),
                     custom_secrets=target.get("custom_secrets"),
-                    provider=target.get("provider"),
                     sampling_args=target.get("sampling_args"),
                     max_concurrent=target.get("max_concurrent"),
                     max_retries=target.get("max_retries"),

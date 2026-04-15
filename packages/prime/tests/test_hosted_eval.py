@@ -1023,30 +1023,15 @@ env_id = "gsm8k"
     assert "`resume`" in result.output
 
 
-def test_eval_run_hosted_supports_provider_alias_in_toml(monkeypatch, tmp_path):
-    captured = {}
+def test_eval_run_hosted_rejects_provider_alias_in_toml(tmp_path):
     config_path = tmp_path / "eval.toml"
     config_path.write_text(
         """
-provider = { order = ["azure"], allow_fallbacks = false, require_parameters = true }
+provider = "azure"
 
 [[eval]]
 env_id = "gsm8k"
 """.strip()
-    )
-
-    def fake_resolve(environment, env_dir_path=None, env_path=None):
-        return ("primeintellect/gsm8k", "env-123")
-
-    def fake_create_hosted_evaluations(config, environment_ids=None):
-        captured["provider"] = config.provider
-        captured["sampling_args"] = config.sampling_args
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_create_hosted_evaluations,
     )
 
     result = runner.invoke(
@@ -1055,13 +1040,9 @@ env_id = "gsm8k"
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
-    assert result.exit_code == 0, result.output
-    assert captured["provider"] == {
-        "order": ["azure"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    }
-    assert captured["sampling_args"] is None
+    assert result.exit_code == 1
+    assert "does not support" in result.output
+    assert "`provider`" in result.output
 
 
 def test_eval_run_hosted_toml_preserves_cli_env_dir_path(monkeypatch, tmp_path):
@@ -1289,46 +1270,16 @@ def test_eval_run_hosted_rejects_unsupported_passthrough_flags():
     assert "`--save-results`" in result.output
 
 
-def test_eval_run_hosted_supports_provider_passthrough_flag(monkeypatch):
-    captured = {}
-
-    def fake_create_hosted_evaluations(config, environment_ids=None):
-        captured["provider"] = config.provider
-        captured["sampling_args"] = config.sampling_args
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_hosted_environment",
-        lambda environment, env_dir_path=None, env_path=None: ("primeintellect/gsm8k", "env-123"),
-    )
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_create_hosted_evaluations,
-    )
-
+def test_eval_run_hosted_rejects_provider_passthrough_flag():
     result = runner.invoke(
         app,
-        [
-            "eval",
-            "run",
-            "gsm8k",
-            "--hosted",
-            "--sampling-args",
-            '{"temperature":0.2,"extra_body":{"route":"fast"}}',
-            "--provider",
-            "openai",
-        ],
+        ["eval", "run", "gsm8k", "--hosted", "--provider", "openai"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
-    assert result.exit_code == 0, result.output
-    assert captured["provider"] == "openai"
-    assert captured["sampling_args"] == {
-        "temperature": 0.2,
-        "extra_body": {
-            "route": "fast",
-        },
-    }
+    assert result.exit_code == 1
+    assert "hosted eval CLI does not support" in result.output
+    assert "`--provider`" in result.output
 
 
 def test_eval_run_hosted_accepts_negative_num_examples_value(monkeypatch):

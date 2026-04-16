@@ -1,7 +1,7 @@
 """Hosted RL (Reinforcement Learning) API client."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -143,6 +143,8 @@ class RLClient:
         checkpoint_id: Optional[str] = None,
         cluster_name: Optional[str] = None,
         infrastructure_config: Optional[Dict[str, Any]] = None,
+        enable_thinking: Optional[bool] = None,
+        reasoning_effort: Optional[Literal["low", "medium", "high"]] = None,
         run_config: Optional[Dict[str, Any]] = None,
     ) -> RLRun:
         """Create a new RL training run."""
@@ -235,6 +237,12 @@ class RLClient:
             if infrastructure_config:
                 if "compute_size" in infrastructure_config:
                     payload["compute_size"] = infrastructure_config["compute_size"]
+
+            if enable_thinking is not None:
+                payload["enable_thinking"] = enable_thinking
+
+            if reasoning_effort is not None:
+                payload["reasoning_effort"] = reasoning_effort
 
             if run_config:
                 payload["run_config"] = run_config

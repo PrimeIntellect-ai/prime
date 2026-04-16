@@ -240,6 +240,63 @@ def test_eval_run_hosted_passes_api_base_url_and_key_var(monkeypatch):
     assert captured["api_key_var"] == "OPENAI_API_KEY"
 
 
+def test_eval_run_hosted_accepts_backend_alias(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_hosted_environment",
+        lambda environment, env_dir_path=None, env_path=None: (
+            "primeintellect/gsm8k",
+            "env-123",
+        ),
+    )
+
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        captured["api_client_type"] = config.api_client_type
+        return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_run_hosted_evaluation,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run",
+            "primeintellect/gsm8k",
+            "--hosted",
+            "--backend",
+            "anthropic_messages",
+        ],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["api_client_type"] == "anthropic_messages"
+
+
+def test_eval_run_hosted_rejects_backend_and_api_client_type_together():
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run",
+            "primeintellect/gsm8k",
+            "--hosted",
+            "--backend",
+            "anthropic_messages",
+            "--api-client-type",
+            "openai_chat_completions",
+        ],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "use either `--backend` or `--api-client-type`, not both" in result.output
+
+
 def test_eval_run_hosted_passes_extra_env_kwargs(monkeypatch):
     captured = {}
 
@@ -956,6 +1013,27 @@ env_id = "gsm8k"
     assert "`timeout_minutes` must be an integer" in result.output
 
 
+def test_eval_run_hosted_rejects_toml_timeout_minutes_below_backend_minimum(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+timeout_minutes = 60
+
+[[eval]]
+env_id = "gsm8k"
+""".strip()
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "`timeout_minutes` must be at least 120 for hosted evaluations" in result.output
+
+
 def test_eval_run_hosted_rejects_non_json_serializable_sampling_args_in_toml(tmp_path):
     config_path = tmp_path / "eval.toml"
     config_path.write_text(
@@ -1192,6 +1270,45 @@ model = "anthropic/claude-sonnet-4"
     assert loaded["model"] == "anthropic/claude-sonnet-4"
 
 
+def test_hosted_eval_config_accepts_backend_alias(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+backend = "anthropic_messages"
+
+[[eval]]
+env_id = "gsm8k"
+""".strip()
+    )
+
+    loaded = _load_hosted_eval_configs(str(config_path))[0]
+
+    assert loaded["api_client_type"] == "anthropic_messages"
+    assert "backend" not in loaded
+
+
+def test_hosted_eval_config_rejects_backend_and_api_client_type_together(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+backend = "anthropic_messages"
+api_client_type = "openai_chat_completions"
+
+[[eval]]
+env_id = "gsm8k"
+""".strip()
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", str(config_path), "--hosted"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "cannot set both `backend` and `api_client_type`" in result.output
+
+
 def test_eval_run_local_toml_passthrough(monkeypatch, tmp_path):
     captured = {}
     config_path = tmp_path / "eval.toml"
@@ -1253,6 +1370,32 @@ def test_eval_run_local_sampling_args_passthrough(monkeypatch):
     }
 
 
+def test_eval_run_local_backend_alias_passthrough(monkeypatch):
+    captured = {}
+
+    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
+        captured["environment"] = environment
+        captured["passthrough_args"] = passthrough_args
+        captured["skip_upload"] = skip_upload
+        captured["env_path"] = env_path
+
+    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k", "--backend", "anthropic_messages"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "environment": "gsm8k",
+        "passthrough_args": ["--api-client-type", "anthropic_messages"],
+        "skip_upload": False,
+        "env_path": None,
+    }
+
+
 @pytest.mark.parametrize(
     ("extra_args", "expected_flag"),
     [
@@ -1309,6 +1452,17 @@ def test_eval_run_hosted_accepts_negative_num_examples_value(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["num_examples"] == -1
+
+
+def test_eval_run_hosted_rejects_timeout_minutes_below_backend_minimum():
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k", "--hosted", "--timeout-minutes", "60"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "`timeout_minutes` must be at least 120 for hosted evaluations" in result.output
 
 
 def test_eval_run_rejects_hosted_only_flags_without_hosted():

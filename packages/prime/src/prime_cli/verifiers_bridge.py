@@ -132,6 +132,7 @@ def _append_eval_options(help_text: str) -> str:
         "Allow instance creation and management for hosted evaluations.",
         "  --custom-secrets JSON       Custom sandbox secrets for hosted evaluations.",
         "  --eval-name TEXT            Custom name for the hosted evaluation.",
+        "  --backend TEXT              Alias for --api-client-type.",
     ]
     lines = help_text.rstrip("\n").splitlines()
     for extra_line in extra_lines:

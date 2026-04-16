@@ -4,7 +4,7 @@ import re
 import time
 from functools import wraps
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import typer
 from click.core import ParameterSource
@@ -83,6 +83,7 @@ HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 HOSTED_RUN_DEFAULT_POLL_INTERVAL_SECONDS = 10.0
 HOSTED_RUN_DEFAULT_NUM_EXAMPLES = 5
 HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE = 3
+HOSTED_TIMEOUT_MINUTES_MINIMUM = 120
 HOSTED_LOGS_RATE_LIMIT_THRESHOLD = 3
 HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS = 30
 HOSTED_LOGS_RETRY_WAIT_SECONDS = 10
@@ -96,6 +97,7 @@ HOSTED_EVAL_CONFIG_EXTRA_FIELDS = {
     "allow_sandbox_access",
     "allow_instances_access",
     "eval_name",
+    "backend",
 }
 HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
     "env_dir_path": (str, "a non-empty string"),
@@ -138,6 +140,7 @@ HOSTED_SUPPORTED_TOML_FIELDS = {
     "api_base_url",
     "api_client_type",
     "api_key_var",
+    "backend",
     "endpoint_id",
     "endpoints_path",
     "env_id",
@@ -264,6 +267,42 @@ def _coerce_hosted_headers(raw: dict[str, Any]) -> list[str] | None:
     return [f"{name}: {value}" for name, value in normalized.items()]
 
 
+def _normalize_backend_alias_args(args: list[str]) -> list[str]:
+    normalized: list[str] = []
+    saw_backend = False
+    saw_api_client_type = False
+    index = 0
+
+    while index < len(args):
+        arg = args[index]
+        if arg == "--backend":
+            saw_backend = True
+            normalized.append("--api-client-type")
+            if index + 1 < len(args):
+                normalized.append(args[index + 1])
+                index += 2
+                continue
+            index += 1
+            continue
+        if arg.startswith("--backend="):
+            saw_backend = True
+            normalized.extend(["--api-client-type", arg.split("=", 1)[1]])
+            index += 1
+            continue
+
+        if arg == "--api-client-type" or arg.startswith("--api-client-type="):
+            saw_api_client_type = True
+
+        normalized.append(arg)
+        index += 1
+
+    if saw_backend and saw_api_client_type:
+        console.print("[red]Error:[/red] use either `--backend` or `--api-client-type`, not both")
+        raise typer.Exit(1)
+
+    return normalized
+
+
 def _parse_verifiers_eval_namespace(
     environment: str, passthrough_args: list[str], sampling_args: Optional[str]
 ) -> tuple[argparse.Namespace, set[str], dict[str, str]]:
@@ -331,6 +370,17 @@ def _validate_hosted_config_field(
         raise typer.Exit(1)
 
 
+def _validate_hosted_timeout_minutes(timeout_minutes: Optional[int], field_name: str) -> None:
+    if timeout_minutes is None:
+        return
+    if timeout_minutes < HOSTED_TIMEOUT_MINUTES_MINIMUM:
+        console.print(
+            f"[red]Error:[/red] `{field_name}` must be at least "
+            f"{HOSTED_TIMEOUT_MINUTES_MINIMUM} for hosted evaluations"
+        )
+        raise typer.Exit(1)
+
+
 def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) -> str:
     raw_endpoint_id = raw_config.get("endpoint_id")
     raw_model = raw_config.get("model")
@@ -389,9 +439,22 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
     return endpoint_group[0]["model"]
 
 
+def _normalize_hosted_backend_alias(merged: dict[str, Any]) -> None:
+    backend = merged.pop("backend", None)
+    if backend is None:
+        return
+    if "api_client_type" in merged:
+        console.print(
+            "[red]Error:[/red] hosted eval config cannot set both `backend` and `api_client_type`"
+        )
+        raise typer.Exit(1)
+    merged["api_client_type"] = backend
+
+
 def _validate_single_hosted_eval_config(
     merged: dict[str, Any], config_path: Path
 ) -> dict[str, Any]:
+    _normalize_hosted_backend_alias(merged)
     unsupported_fields = sorted(
         field_name for field_name in merged if field_name not in HOSTED_SUPPORTED_TOML_FIELDS
     )
@@ -426,6 +489,8 @@ def _validate_single_hosted_eval_config(
 
     for field_name, (expected_type, description) in HOSTED_EVAL_CONFIG_FIELD_TYPES.items():
         _validate_hosted_config_field(merged, field_name, expected_type, description)
+
+    _validate_hosted_timeout_minutes(merged.get("timeout_minutes"), "timeout_minutes")
 
     temperature = merged.get("temperature")
     if temperature is not None and type(temperature) not in {int, float}:
@@ -1344,7 +1409,7 @@ def run_eval_cmd(
     ),
 ) -> None:
     """Run an evaluation with local-first environment resolution."""
-    passthrough_args = list(ctx.args)
+    passthrough_args = _normalize_backend_alias_args(list(ctx.args))
 
     if is_help_request(environment or "", passthrough_args):
         print_eval_run_help()
@@ -1498,6 +1563,13 @@ def run_eval_cmd(
                 or None
             )
 
+            effective_timeout_minutes = (
+                timeout_minutes
+                if timeout_minutes is not None
+                else cast(Optional[int], target_config.get("timeout_minutes"))
+            )
+            _validate_hosted_timeout_minutes(effective_timeout_minutes, "timeout_minutes")
+
             effective_targets.append(
                 {
                     "env_id": target_config["env_id"],
@@ -1514,11 +1586,7 @@ def run_eval_cmd(
                         if "env_args" in cli_overrides
                         else target_config.get("env_args")
                     ),
-                    "timeout_minutes": (
-                        timeout_minutes
-                        if timeout_minutes is not None
-                        else target_config.get("timeout_minutes")
-                    ),
+                    "timeout_minutes": effective_timeout_minutes,
                     "allow_sandbox_access": (
                         allow_sandbox_access
                         if allow_sandbox_access

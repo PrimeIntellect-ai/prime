@@ -62,6 +62,7 @@ app.add_typer(config_app, name="config", rich_help_panel="Account")
 app.add_typer(teams_app, name="teams", rich_help_panel="Account")
 app.add_typer(secret_app, name="secret", rich_help_panel="Account")
 app.add_typer(upgrade_app, name="upgrade", rich_help_panel="Account")
+app.add_typer(upgrade_app, name="update", rich_help_panel="Account", hidden=True)
 
 
 @app.callback(invoke_without_command=True)

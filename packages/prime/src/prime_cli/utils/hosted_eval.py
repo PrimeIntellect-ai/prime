@@ -54,6 +54,7 @@ class HostedEvalConfig:
     extra_env_kwargs: Optional[dict[str, Any]] = None
     api_client_type: Optional[str] = None
     api_base_url: Optional[str] = None
+    tunnel_id: Optional[str] = None
     api_key_var: Optional[str] = None
 
 

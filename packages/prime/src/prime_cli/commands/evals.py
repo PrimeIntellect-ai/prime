@@ -95,6 +95,7 @@ HOSTED_EVAL_CONFIG_EXTRA_FIELDS = {
     "timeout_minutes",
     "allow_sandbox_access",
     "allow_instances_access",
+    "tunnel_id",
     "eval_name",
 }
 HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
@@ -110,6 +111,7 @@ HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
     "independent_scoring": (bool, "a boolean"),
     "api_client_type": (str, "a non-empty string"),
     "api_base_url": (str, "a non-empty string"),
+    "tunnel_id": (str, "a non-empty string"),
     "api_key_var": (str, "a non-empty string"),
     "eval_name": (str, "a non-empty string"),
 }
@@ -138,6 +140,7 @@ HOSTED_SUPPORTED_TOML_FIELDS = {
     "api_base_url",
     "api_client_type",
     "api_key_var",
+    "tunnel_id",
     "endpoint_id",
     "endpoints_path",
     "env_id",
@@ -481,6 +484,9 @@ def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]
         "allow_instances_access": config.allow_instances_access,
     }
 
+    if config.api_base_url and config.tunnel_id:
+        raise APIError("use either `--api-base-url` or `--tunnel-id`, not both")
+
     if config.env_args:
         eval_config["env_args"] = config.env_args
     if config.timeout_minutes is not None:
@@ -505,6 +511,8 @@ def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]
         eval_config["api_client_type"] = config.api_client_type
     if config.api_base_url:
         eval_config["api_base_url"] = config.api_base_url
+    if config.tunnel_id:
+        eval_config["tunnel_id"] = config.tunnel_id
     if config.api_key_var:
         eval_config["api_key_var"] = config.api_key_var
 
@@ -1329,6 +1337,11 @@ def run_eval_cmd(
         "--custom-secrets",
         help='Custom secrets for hosted eval as JSON (e.g. \'{"API_KEY":"xxx"}\')',
     ),
+    tunnel_id: Optional[str] = typer.Option(
+        None,
+        "--tunnel-id",
+        help="Prime Tunnel ID to use as the hosted eval inference endpoint",
+    ),
     sampling_args: Optional[str] = typer.Option(
         None,
         "--sampling-args",
@@ -1376,6 +1389,7 @@ def run_eval_cmd(
             "--allow-sandbox-access": allow_sandbox_access,
             "--allow-instances-access": allow_instances_access,
             "--custom-secrets": custom_secrets is not None,
+            "--tunnel-id": tunnel_id is not None,
             "--eval-name": eval_name is not None,
         }
         used_hosted_only_args = [flag for flag, used in hosted_only_args.items() if used]
@@ -1427,6 +1441,7 @@ def run_eval_cmd(
                     "extra_env_kwargs": None,
                     "api_client_type": None,
                     "api_base_url": None,
+                    "tunnel_id": None,
                     "api_key_var": None,
                     "eval_name": None,
                 }
@@ -1569,6 +1584,7 @@ def run_eval_cmd(
                         if "api_base_url" in cli_overrides
                         else target_config.get("api_base_url")
                     ),
+                    "tunnel_id": tunnel_id or target_config.get("tunnel_id"),
                     "api_key_var": (
                         parsed_verifiers_args.api_key_var
                         if "api_key_var" in cli_overrides
@@ -1604,6 +1620,7 @@ def run_eval_cmd(
                 _freeze_json_value(target.get("extra_env_kwargs")),
                 target.get("api_client_type"),
                 target.get("api_base_url"),
+                target.get("tunnel_id"),
                 target.get("api_key_var"),
                 target.get("eval_name"),
             )
@@ -1658,6 +1675,7 @@ def run_eval_cmd(
                     extra_env_kwargs=target.get("extra_env_kwargs"),
                     api_client_type=target.get("api_client_type"),
                     api_base_url=target.get("api_base_url"),
+                    tunnel_id=target.get("tunnel_id"),
                     api_key_var=target.get("api_key_var"),
                 )
                 result = _create_hosted_evaluations(

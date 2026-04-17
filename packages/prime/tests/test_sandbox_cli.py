@@ -242,9 +242,15 @@ def test_sandbox_create_vm_without_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["request"].gpu_count == 0
 
 
-def test_sandbox_delete_by_label_only_deletes_owned_sandboxes(
+def test_sandbox_delete_by_label_scopes_to_caller(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Default --label delete scopes to the caller's user_id server-side.
+
+    The CLI now makes a single ``list(per_page=1)`` call to preview the count,
+    then a single ``bulk_delete`` with the scope/labels — the server does the
+    filtering, so no pagination and no client-side user_id filter.
+    """
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
     monkeypatch.setenv("PRIME_USER_ID", "user-1")
@@ -254,17 +260,17 @@ def test_sandbox_delete_by_label_only_deletes_owned_sandboxes(
     def mock_list(self: Any, **kwargs: Any) -> Any:
         captured["list_kwargs"] = kwargs
         return SimpleNamespace(
-            sandboxes=[
-                SimpleNamespace(id="sbx-owned", user_id="user-1"),
-                SimpleNamespace(id="sbx-other", user_id="user-2"),
-            ],
+            sandboxes=[SimpleNamespace(id="sbx-owned", user_id="user-1")],
+            total=1,
+            page=1,
+            per_page=1,
             has_next=False,
         )
 
-    def mock_bulk_delete(self: Any, sandbox_ids: list[str] | None = None, **_: Any) -> Any:
-        captured["sandbox_ids"] = sandbox_ids
+    def mock_bulk_delete(self: Any, **kwargs: Any) -> Any:
+        captured["bulk_delete_kwargs"] = kwargs
         return SimpleNamespace(
-            succeeded=sandbox_ids or [],
+            succeeded=["sbx-owned"],
             failed=[],
             message="deleted",
         )
@@ -276,29 +282,46 @@ def test_sandbox_delete_by_label_only_deletes_owned_sandboxes(
 
     output = strip_ansi(result.output)
     assert result.exit_code == 0, f"Failed: {result.output}"
-    assert captured["list_kwargs"]["labels"] == ["keep"]
-    assert captured["list_kwargs"]["exclude_terminated"] is True
-    assert captured["sandbox_ids"] == ["sbx-owned"]
+
+    # Preview call: scoped to caller + labels, only active sandboxes
+    list_kwargs = captured["list_kwargs"]
+    assert list_kwargs["labels"] == ["keep"]
+    assert list_kwargs["user_id"] == "user-1"
+    assert list_kwargs["exclude_terminated"] is True
+    assert list_kwargs["per_page"] == 1
+
+    # Delete call: server-side scope, no client-side ID list
+    bulk_kwargs = captured["bulk_delete_kwargs"]
+    assert bulk_kwargs["labels"] == ["keep"]
+    assert bulk_kwargs["user_id"] == "user-1"
+    assert bulk_kwargs["all_users"] is False
+    assert bulk_kwargs.get("sandbox_ids") is None
+
     assert "Successfully deleted 1 sandbox(es):" in output
 
 
-def test_sandbox_delete_by_label_aligns_with_all_active_only_filter(
+def test_sandbox_delete_by_label_all_users_passes_admin_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """--all-users flips user_id scoping to all_users=True (server admin-gated)."""
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
     monkeypatch.setenv("PRIME_USER_ID", "user-1")
 
+    captured: dict[str, Any] = {}
+
     def mock_list(self: Any, **kwargs: Any) -> Any:
-        assert kwargs["labels"] == ["archive"]
-        assert kwargs["exclude_terminated"] is True
+        captured["list_kwargs"] = kwargs
         return SimpleNamespace(
             sandboxes=[SimpleNamespace(id="sbx-active", user_id="user-1")],
+            total=1,
+            page=1,
+            per_page=1,
             has_next=False,
         )
 
-    def mock_bulk_delete(self: Any, sandbox_ids: list[str] | None = None, **_: Any) -> Any:
-        assert sandbox_ids == ["sbx-active"]
+    def mock_bulk_delete(self: Any, **kwargs: Any) -> Any:
+        captured["bulk_delete_kwargs"] = kwargs
         return SimpleNamespace(
             succeeded=["sbx-active"],
             failed=[],
@@ -308,8 +331,19 @@ def test_sandbox_delete_by_label_aligns_with_all_active_only_filter(
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.bulk_delete", mock_bulk_delete)
 
-    result = runner.invoke(app, ["sandbox", "delete", "--label", "archive", "--yes"])
+    result = runner.invoke(app, ["sandbox", "delete", "--label", "archive", "--all-users", "--yes"])
 
     output = strip_ansi(result.output)
     assert result.exit_code == 0, f"Failed: {result.output}"
+
+    list_kwargs = captured["list_kwargs"]
+    assert list_kwargs["labels"] == ["archive"]
+    assert list_kwargs["exclude_terminated"] is True
+    assert list_kwargs["user_id"] is None
+
+    bulk_kwargs = captured["bulk_delete_kwargs"]
+    assert bulk_kwargs["labels"] == ["archive"]
+    assert bulk_kwargs["all_users"] is True
+    assert bulk_kwargs["user_id"] is None
+
     assert "Processed 1 sandbox(es)" in output

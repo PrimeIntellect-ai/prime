@@ -3,9 +3,10 @@
 import json
 import tarfile
 import tempfile
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Iterable, Optional
 
 import click
 import httpx
@@ -27,6 +28,322 @@ LIST_IMAGES_JSON_HELP = json_output_help(
     ".data[] = {displayRef?, fullImagePath?, imageName, imageTag, status, "
     "artifactType, ownerType, sizeBytes?, createdAt, pushedAt?}",
 )
+
+# ---------------------------------------------------------------------------
+# Helpers for rendering `prime images list`
+# ---------------------------------------------------------------------------
+
+# Raw artifact row as returned by ``GET /v1/images``. The backend schema is
+# documented in ``LIST_IMAGES_JSON_HELP`` above; we keep the dict shape loose
+# here because the server may add new optional fields over time.
+ImageRow = dict[str, Any]
+
+
+@dataclass
+class ArtifactPartition:
+    """Per-artifact-type view of a grouped image.
+
+    All three fields may be ``None``. ``failed_only`` is populated exclusively
+    when there is no completed artifact for that type — i.e. stale failures
+    that still belong in the Status column.
+    """
+
+    completed: Optional[ImageRow] = None
+    active: Optional[ImageRow] = None
+    failed_only: Optional[ImageRow] = None
+
+    def is_empty(self) -> bool:
+        """True when the bucket has no completed, active, or failed row."""
+        return self.completed is None and self.active is None and self.failed_only is None
+
+
+# Mapping of artifact type (e.g. ``CONTAINER_IMAGE``) to its partition bucket.
+PartitionMap = dict[str, ArtifactPartition]
+
+_ACTIVE_STATUSES: set[str] = {"PENDING", "UPLOADING", "BUILDING"}
+_FAILED_STATUSES: set[str] = {"FAILED", "CANCELLED"}
+
+
+def _parse_ts(value: Any) -> Optional[datetime]:
+    """Parse an ISO8601 timestamp (possibly ``Z`` suffixed) as a tz-aware UTC datetime.
+
+    Naive timestamps (the backend emits ``createdAt`` as naive UTC, e.g. from
+    ``datetime.utcnow()``) are treated as UTC so comparisons across the dataset
+    are consistent. Returns ``None`` on failure.
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _latest(rows: list[ImageRow], *keys: str) -> Optional[ImageRow]:
+    """Return the row whose first non-null parsed timestamp (across ``keys``) is newest."""
+    best: Optional[ImageRow] = None
+    best_ts: Optional[datetime] = None
+    for row in rows:
+        ts: Optional[datetime] = None
+        for k in keys:
+            ts = _parse_ts(row.get(k))
+            if ts is not None:
+                break
+        if ts is None:
+            continue
+        if best_ts is None or ts > best_ts:
+            best = row
+            best_ts = ts
+    if best is None and rows:
+        best = rows[0]
+    return best
+
+
+def _partition_group(artifacts: list[ImageRow]) -> PartitionMap:
+    """Partition a group of artifact rows (all for the same ``imageName:imageTag``) by
+    artifact type into a ``completed`` / ``active`` / ``failed_only`` bucket.
+
+    ``failed_only`` is populated only when no completed artifact exists for that type;
+    once a user has a working image, stale failed rows are intentionally suppressed so
+    they don't pollute the Status column.
+    """
+    by_type: dict[str, list[ImageRow]] = {}
+    for art in artifacts:
+        t = art.get("artifactType", "CONTAINER_IMAGE")
+        by_type.setdefault(t, []).append(art)
+
+    result: PartitionMap = {}
+    for art_type, rows in by_type.items():
+        completed = [r for r in rows if r.get("status") == "COMPLETED"]
+        active = [r for r in rows if r.get("status") in _ACTIVE_STATUSES]
+        failed = [r for r in rows if r.get("status") in _FAILED_STATUSES]
+
+        result[art_type] = ArtifactPartition(
+            completed=(
+                _latest(completed, "pushedAt", "completedAt", "createdAt") if completed else None
+            ),
+            active=_latest(active, "createdAt") if active else None,
+            failed_only=(
+                _latest(failed, "completedAt", "createdAt") if failed and not completed else None
+            ),
+        )
+    return result
+
+
+_TYPE_LABELS: tuple[tuple[str, str], ...] = (
+    ("CONTAINER_IMAGE", "[cyan]Container[/cyan]"),
+    ("VM_SANDBOX", "[magenta]VM[/magenta]"),
+)
+
+
+def _ordered_present_types(partition: PartitionMap) -> list[tuple[str, str]]:
+    """Return artifact types present in ``partition`` in display order.
+
+    Container first, then VM, then any future types in sorted order. Types
+    whose per-artifact partition bucket is completely empty (no completed,
+    no active, no failed_only) are skipped so we don't render dead slots.
+    """
+    ordered: list[tuple[str, str]] = []
+    for art_type, label in _TYPE_LABELS:
+        part = partition.get(art_type)
+        if part is not None and not part.is_empty():
+            ordered.append((art_type, label))
+    for art_type in sorted(partition):
+        if art_type in {"CONTAINER_IMAGE", "VM_SANDBOX"}:
+            continue
+        if not partition[art_type].is_empty():
+            ordered.append((art_type, f"[white]{art_type.replace('_', ' ').title()}[/white]"))
+    return ordered
+
+
+def _render_type_column(partition: PartitionMap) -> str:
+    """Build the Type cell: ``Container / VM`` with color, only for types present."""
+    parts = [label for _art_type, label in _ordered_present_types(partition)]
+    return " / ".join(parts) if parts else "[dim]—[/dim]"
+
+
+def _render_status_slot(part: Optional[ArtifactPartition]) -> str:
+    """Return the status word for a single artifact slot (no label prefix).
+
+    When a completed artifact coexists with an active build row, the slot is
+    rendered as ``(rebuilding)`` to communicate that an update is in flight
+    while the previous build is still the usable version.
+    """
+    if part is None:
+        return "[dim]—[/dim]"
+
+    if part.completed and part.active:
+        return "[yellow italic](rebuilding)[/yellow italic]"
+    if part.completed:
+        return "[green]Ready[/green]"
+    if part.active:
+        status = part.active.get("status", "UNKNOWN")
+        if status == "BUILDING":
+            return "[yellow]Building[/yellow]"
+        if status == "UPLOADING":
+            return "[yellow]Uploading[/yellow]"
+        if status == "PENDING":
+            return "[blue]Pending[/blue]"
+        return f"[dim]{status.title()}[/dim]"
+    if part.failed_only:
+        status = part.failed_only.get("status", "FAILED")
+        if status == "CANCELLED":
+            return "[dim]Cancelled[/dim]"
+        return "[red]Failed[/red]"
+    return "[dim]—[/dim]"
+
+
+def _render_status_column(partition: PartitionMap) -> str:
+    """Build the Status cell as positional slots aligned with the Type column.
+
+    Example: if Type is ``Container / VM``, Status for ``rehl:latest`` with a
+    container that's Ready and a VM that's Failed becomes ``Ready / Failed``.
+    When an artifact has an active rebuild on top of a completed image, its
+    slot is ``(rebuilding)``.
+    """
+    ordered = _ordered_present_types(partition)
+    if not ordered:
+        return "[dim]—[/dim]"
+    return " / ".join(_render_status_slot(partition.get(art_type)) for art_type, _ in ordered)
+
+
+def _render_image_reference(img: ImageRow, *, is_team_listing: bool) -> str:
+    """Render the user-facing image reference.
+
+    The owner prefix (``{userId}/`` or ``team-{teamId}/``) is **always**
+    preserved so the full string is a valid reference that can be pasted
+    directly into downstream commands (e.g. ``prime sandbox create``),
+    which require the fully-qualified ``<userId>/<imageName>:<tag>`` form.
+
+    Visual truncation (if any) is applied separately by
+    :func:`_truncate_ref_left` so that when the terminal is too narrow the
+    *owner prefix* is what gets clipped, not the image ``name:tag``.
+    """
+    del is_team_listing
+    return (
+        img.get("displayRef")
+        or img.get("fullImagePath")
+        or f"{img.get('imageName', 'unknown')}:{img.get('imageTag', 'latest')}"
+    )
+
+
+def _truncate_ref_left(ref: str, max_width: Optional[int]) -> str:
+    """Left-ellipsize ``ref`` so the tail (``name:tag``) stays visible.
+
+    If ``ref`` fits within ``max_width`` it's returned unchanged. Otherwise,
+    the head of the string (the owner prefix) is dropped and replaced with a
+    single ``…`` character. This matches the requested display style:
+
+        cmkrcib4x00004kjyxq48…/nvidia-basic-dev:latest → …/nvidia-basic-dev:latest
+
+    ``max_width`` must be at least 2; smaller values are clamped.
+    """
+    if max_width is None or max_width <= 0:
+        return ref
+    if len(ref) <= max_width:
+        return ref
+    max_width = max(max_width, 2)
+    return "…" + ref[-(max_width - 1) :]
+
+
+def _image_ref_column_width(console_width: int, is_team_listing: bool) -> int:
+    """Compute a budget for the Image Reference column based on terminal width.
+
+    The remaining columns have roughly fixed widths (worst-case labels):
+
+        Type     ~14 chars ("Container / VM")
+        Status   ~26 chars ("(rebuilding) / (rebuilding)")
+        Size     ~10 chars
+        Created  ~17 chars ("YYYY-MM-DD HH:MM ")
+        Owner    ~10 chars (team listings only)
+        borders + padding ~ 3 chars per column
+
+    We subtract these from the terminal width and clamp to a reasonable range
+    so the column is neither absurdly wide on large terminals nor unusable on
+    tiny ones.
+    """
+    reserved = 14 + 26 + 10 + 17 + (10 if is_team_listing else 0)
+    num_cols = 5 + (1 if is_team_listing else 0)
+    reserved += 3 * num_cols
+    budget = console_width - reserved
+    return max(30, min(80, budget))
+
+
+def _completed_size_mb(artifacts: Iterable[ImageRow]) -> str:
+    """Sum sizes of COMPLETED artifacts only and format as a MB string."""
+    total = sum((a.get("sizeBytes") or 0) for a in artifacts if a.get("status") == "COMPLETED")
+    if total <= 0:
+        return "[dim]—[/dim]"
+    return f"{total / 1024 / 1024:.1f} MB"
+
+
+def _display_created(partition: PartitionMap, artifacts: list[ImageRow]) -> str:
+    """Pick the most meaningful timestamp for the Created column.
+
+    Preference order:
+      1. Newest ``pushedAt`` across completed artifacts (stable "last published" time).
+      2. Newest ``createdAt`` across active build rows (for first-time builds).
+      3. Newest ``createdAt`` across all rows (fallback for failed-only groups).
+    """
+    completed_rows: list[ImageRow] = [
+        p.completed for p in partition.values() if p.completed is not None
+    ]
+    if completed_rows:
+        chosen = _latest(completed_rows, "pushedAt", "completedAt", "createdAt")
+        if chosen is not None:
+            ts = _parse_ts(
+                chosen.get("pushedAt") or chosen.get("completedAt") or chosen.get("createdAt")
+            )
+            if ts:
+                return ts.strftime("%Y-%m-%d %H:%M")
+
+    active_rows: list[ImageRow] = [p.active for p in partition.values() if p.active is not None]
+    if active_rows:
+        chosen = _latest(active_rows, "createdAt")
+        if chosen is not None:
+            ts = _parse_ts(chosen.get("createdAt"))
+            if ts:
+                return ts.strftime("%Y-%m-%d %H:%M")
+
+    chosen = _latest(artifacts, "createdAt")
+    if chosen is not None:
+        ts = _parse_ts(chosen.get("createdAt"))
+        if ts:
+            return ts.strftime("%Y-%m-%d %H:%M")
+    return ""
+
+
+def _group_sort_key(partition: PartitionMap, artifacts: list[ImageRow]) -> datetime:
+    """Key function to sort groups newest-first by their display timestamp."""
+    completed_rows: list[ImageRow] = [
+        p.completed for p in partition.values() if p.completed is not None
+    ]
+    if completed_rows:
+        chosen = _latest(completed_rows, "pushedAt", "completedAt", "createdAt")
+        if chosen is not None:
+            ts = _parse_ts(
+                chosen.get("pushedAt") or chosen.get("completedAt") or chosen.get("createdAt")
+            )
+            if ts:
+                return ts
+
+    active_rows: list[ImageRow] = [p.active for p in partition.values() if p.active is not None]
+    if active_rows:
+        chosen = _latest(active_rows, "createdAt")
+        if chosen is not None:
+            ts = _parse_ts(chosen.get("createdAt"))
+            if ts:
+                return ts
+
+    chosen = _latest(artifacts, "createdAt")
+    if chosen is not None:
+        ts = _parse_ts(chosen.get("createdAt"))
+        if ts:
+            return ts
+    return datetime.min.replace(tzinfo=timezone.utc)
 
 
 @app.command("push")
@@ -249,12 +566,12 @@ def list_images(
         client = APIClient()
 
         # Build query params
-        params = {}
+        params: dict[str, str] = {}
         if config.team_id:
             params["teamId"] = config.team_id
 
         response = client.request("GET", "/images", params=params if params else None)
-        images = response.get("data", [])
+        images: list[ImageRow] = response.get("data", [])
 
         if not images:
             console.print("[yellow]No images or builds found.[/yellow]")
@@ -266,94 +583,74 @@ def list_images(
             return
 
         # Table output
-        if config.team_id:
+        is_team_listing: bool = bool(config.team_id)
+        title: str
+        if is_team_listing:
             title = f"Team Docker Images (team: {config.team_id})"
         else:
             title = "Personal Docker Images"
 
-        # Group images by (owner, imageName, imageTag) to deduplicate rows.
-        grouped: dict[str, list] = {}
+        grouped: dict[str, list[ImageRow]] = {}
         for img in images:
             owner_scope = img.get("teamId") or img.get("ownerType", "personal")
             key = f"{owner_scope}/{img.get('imageName', '')}:{img.get('imageTag', 'latest')}"
             grouped.setdefault(key, []).append(img)
 
+        ref_max_width: int = _image_ref_column_width(
+            console.size.width, is_team_listing=is_team_listing
+        )
+
         table = Table(title=title)
-        table.add_column("Image Reference", style="cyan")
-        table.add_column("Type", justify="center")
-        table.add_column("Owner", justify="center")
-        table.add_column("Status", justify="center")
-        table.add_column("Size", justify="right")
-        table.add_column("Created", style="dim")
+        table.add_column(
+            "Image Reference",
+            style="cyan",
+            no_wrap=True,
+            overflow="crop",
+            min_width=ref_max_width,
+            max_width=ref_max_width,
+        )
+        table.add_column("Type", justify="center", no_wrap=True)
+        if is_team_listing:
+            table.add_column("Owner", justify="center")
+        table.add_column("Status", justify="center", no_wrap=True, min_width=27)
+        table.add_column("Size", justify="right", no_wrap=True)
+        table.add_column("Created", style="dim", no_wrap=True, min_width=16)
 
+        sortable: list[tuple[datetime, list[ImageRow], PartitionMap]] = []
         for _key, artifacts in grouped.items():
-            # Build type display by combining unique artifact types
-            artifact_types = {art.get("artifactType", "CONTAINER_IMAGE") for art in artifacts}
-            type_parts = []
-            for at in sorted(artifact_types):
-                if at == "VM_SANDBOX":
-                    type_parts.append("[magenta]VM[/magenta]")
-                else:
-                    type_parts.append("[cyan]Container[/cyan]")
-            type_display = " / ".join(type_parts)
+            partition = _partition_group(artifacts)
+            sortable.append((_group_sort_key(partition, artifacts), artifacts, partition))
+        sortable.sort(key=lambda item: item[0], reverse=True)
 
-            # Use the first artifact for shared fields, prefer container image
-            img = next(
-                (
-                    a
-                    for a in artifacts
-                    if a.get("artifactType", "CONTAINER_IMAGE") == "CONTAINER_IMAGE"
-                ),
-                artifacts[0],
+        for _ts, artifacts, partition in sortable:
+            container_part = partition.get("CONTAINER_IMAGE") or ArtifactPartition()
+            preferred: ImageRow = (
+                container_part.completed
+                or container_part.active
+                or container_part.failed_only
+                or next(iter(artifacts), {})
             )
 
-            # Status — show combined if they differ
-            statuses = {a.get("status", "UNKNOWN") for a in artifacts}
-            status_displays = []
-            for s in sorted(statuses):
-                if s == "COMPLETED":
-                    status_displays.append("[green]Ready[/green]")
-                elif s == "BUILDING":
-                    status_displays.append("[yellow]Building[/yellow]")
-                elif s == "PENDING":
-                    status_displays.append("[blue]Pending[/blue]")
-                elif s == "FAILED":
-                    status_displays.append("[red]Failed[/red]")
-                elif s == "CANCELLED":
-                    status_displays.append("[dim]Cancelled[/dim]")
-                else:
-                    status_displays.append(f"[dim]{s}[/dim]")
-            status_display = " / ".join(status_displays)
-
-            # Owner type
-            owner_type = img.get("ownerType", "personal")
-            if owner_type == "team":
-                owner_display = "[blue]Team[/blue]"
-            else:
-                owner_display = "[dim]Personal[/dim]"
-
-            # Size — sum across artifacts
-            total_bytes = sum(a.get("sizeBytes") or 0 for a in artifacts)
-            size_mb = f"{total_bytes / 1024 / 1024:.1f} MB" if total_bytes else ""
-
-            # Date - use pushedAt for completed images, createdAt for builds
-            try:
-                if img.get("pushedAt"):
-                    date_dt = datetime.fromisoformat(img["pushedAt"].replace("Z", "+00:00"))
-                else:
-                    date_dt = datetime.fromisoformat(img["createdAt"].replace("Z", "+00:00"))
-                date_str = date_dt.strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                date_str = img.get("pushedAt") or img.get("createdAt", "")
-
-            # Image reference - prefer displayRef for user-friendly format
-            image_ref = (
-                img.get("displayRef")
-                or img.get("fullImagePath")
-                or f"{img.get('imageName', 'unknown')}:{img.get('imageTag', 'latest')}"
+            image_ref: str = _truncate_ref_left(
+                _render_image_reference(preferred, is_team_listing=is_team_listing),
+                ref_max_width,
             )
+            type_display: str = _render_type_column(partition)
+            status_display: str = _render_status_column(partition)
+            size_mb: str = _completed_size_mb(artifacts)
+            date_str: str = _display_created(partition, artifacts)
 
-            table.add_row(image_ref, type_display, owner_display, status_display, size_mb, date_str)
+            row: list[str] = [image_ref, type_display]
+            if is_team_listing:
+                owner_type = preferred.get(
+                    "ownerType", "team" if preferred.get("teamId") else "personal"
+                )
+                owner_display: str = (
+                    "[blue]Team[/blue]" if owner_type == "team" else "[dim]Personal[/dim]"
+                )
+                row.append(owner_display)
+            row.extend([status_display, size_mb, date_str])
+            table.add_row(*row)
 
         console.print()
         console.print(table)

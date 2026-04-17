@@ -253,6 +253,7 @@ def test_eval_run_hosted_passes_tunnel_id(monkeypatch):
 
     def fake_run_hosted_evaluation(config, environment_ids=None):
         captured["tunnel_id"] = config.tunnel_id
+        captured["api_base_url"] = config.api_base_url
         return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr(
@@ -275,6 +276,7 @@ def test_eval_run_hosted_passes_tunnel_id(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["tunnel_id"] == "t-0-0123456789abcdef"
+    assert captured["api_base_url"] is None
 
 
 def test_eval_run_hosted_passes_extra_env_kwargs(monkeypatch):
@@ -540,6 +542,112 @@ def test_create_hosted_evaluation_includes_tunnel_id_in_payload(monkeypatch):
 
     assert captured["endpoint"] == "/hosted-evaluations"
     assert captured["json"]["eval_config"]["tunnel_id"] == "t-0-0123456789abcdef"
+
+
+def test_eval_run_hosted_tunnel_id_override_clears_config_api_base_url(monkeypatch, tmp_path):
+    captured = {}
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'model = "openai/gpt-4.1-mini"',
+                'api_base_url = "https://api.openai.com/v1"',
+                "",
+                "[[eval]]",
+                'env_id = "gsm8k"',
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_hosted_environment",
+        lambda environment, env_dir_path=None, env_path=None: (
+            "primeintellect/gsm8k",
+            "env-123",
+        ),
+    )
+
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        captured["tunnel_id"] = config.tunnel_id
+        captured["api_base_url"] = config.api_base_url
+        return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_run_hosted_evaluation,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run",
+            str(config_path),
+            "--hosted",
+            "--tunnel-id",
+            "t-0-0123456789abcdef",
+        ],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "tunnel_id": "t-0-0123456789abcdef",
+        "api_base_url": None,
+    }
+
+
+def test_eval_run_hosted_api_base_url_override_clears_config_tunnel_id(monkeypatch, tmp_path):
+    captured = {}
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'model = "openai/gpt-4.1-mini"',
+                'tunnel_id = "t-0-0123456789abcdef"',
+                "",
+                "[[eval]]",
+                'env_id = "gsm8k"',
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_hosted_environment",
+        lambda environment, env_dir_path=None, env_path=None: (
+            "primeintellect/gsm8k",
+            "env-123",
+        ),
+    )
+
+    def fake_run_hosted_evaluation(config, environment_ids=None):
+        captured["tunnel_id"] = config.tunnel_id
+        captured["api_base_url"] = config.api_base_url
+        return {"evaluation_id": "eval-123"}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._create_hosted_evaluations",
+        fake_run_hosted_evaluation,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run",
+            str(config_path),
+            "--hosted",
+            "--api-base-url",
+            "https://api.openai.com/v1",
+        ],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "tunnel_id": None,
+        "api_base_url": "https://api.openai.com/v1",
+    }
 
 
 def test_create_hosted_evaluation_rejects_api_base_url_and_tunnel_id_together(monkeypatch):

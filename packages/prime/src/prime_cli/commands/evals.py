@@ -1513,6 +1513,19 @@ def run_eval_cmd(
                 or None
             )
 
+            effective_api_base_url = (
+                parsed_verifiers_args.api_base_url
+                if "api_base_url" in cli_overrides
+                else target_config.get("api_base_url")
+            )
+            effective_tunnel_id = (
+                tunnel_id if tunnel_id is not None else target_config.get("tunnel_id")
+            )
+            if tunnel_id is not None:
+                effective_api_base_url = None
+            if "api_base_url" in cli_overrides:
+                effective_tunnel_id = None
+
             effective_targets.append(
                 {
                     "env_id": target_config["env_id"],
@@ -1579,12 +1592,8 @@ def run_eval_cmd(
                         if "api_client_type" in cli_overrides
                         else target_config.get("api_client_type")
                     ),
-                    "api_base_url": (
-                        parsed_verifiers_args.api_base_url
-                        if "api_base_url" in cli_overrides
-                        else target_config.get("api_base_url")
-                    ),
-                    "tunnel_id": tunnel_id or target_config.get("tunnel_id"),
+                    "api_base_url": effective_api_base_url,
+                    "tunnel_id": effective_tunnel_id,
                     "api_key_var": (
                         parsed_verifiers_args.api_key_var
                         if "api_key_var" in cli_overrides

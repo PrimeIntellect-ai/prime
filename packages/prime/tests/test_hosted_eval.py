@@ -1,11 +1,13 @@
 from pathlib import Path
 
 import pytest
+import typer
 from prime_cli.client import APIError
 from prime_cli.commands.evals import (
     _create_hosted_evaluations,
     _load_hosted_eval_configs,
     _print_eval_status,
+    _resolve_hosted_environment,
 )
 from prime_cli.main import app
 from prime_cli.utils.hosted_eval import (
@@ -14,6 +16,7 @@ from prime_cli.utils.hosted_eval import (
     filter_progress_bars,
     strip_ansi,
 )
+from prime_cli.verifiers_bridge import ResolvedEnvironment
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -1490,6 +1493,97 @@ def test_eval_run_hosted_passes_env_path_to_resolver(monkeypatch):
         "env_dir_path": None,
         "env_path": "/tmp/local-env",
     }
+
+
+def test_resolve_hosted_environment_warns_when_local_code_differs(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_environment_reference",
+        lambda environment, env_dir_path: ResolvedEnvironment(
+            original=environment,
+            env_name="gsm8k",
+            install_mode="local",
+            env_display_id="gsm8k (local - ahead of primeintellect/gsm8k)",
+            platform_slug="primeintellect/gsm8k",
+            recommend_push=True,
+            push_reason="ahead",
+        ),
+    )
+
+    class DummyAPIClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get(self, endpoint):
+            assert endpoint == "/environmentshub/primeintellect/gsm8k/@latest"
+            return {"data": {"id": "env-123"}}
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+
+    assert _resolve_hosted_environment("gsm8k", env_dir_path=None, env_path=None) == (
+        "primeintellect/gsm8k",
+        "env-123",
+    )
+
+    output = capsys.readouterr().out
+    assert "Local environment code differs from the latest published version of" in output
+    assert "Hosted evaluations always use the latest published version of" in output
+    assert "primeintellect/gsm8k" in output
+    assert "Using hosted environment primeintellect/gsm8k@latest" in output
+
+
+def test_resolve_hosted_environment_requires_a_published_environment(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_environment_reference",
+        lambda environment, env_dir_path: ResolvedEnvironment(
+            original=environment,
+            env_name="gsm8k",
+            install_mode="local",
+            env_display_id="gsm8k (local only)",
+            recommend_push=True,
+            push_reason="local_only",
+        ),
+    )
+
+    with pytest.raises(typer.Exit) as exc_info:
+        _resolve_hosted_environment("gsm8k", env_dir_path=None, env_path=None)
+
+    assert exc_info.value.exit_code == 1
+    output = capsys.readouterr().out
+    assert "hosted evaluations require an upstream environment on the platform" in output
+    assert "publish the local environment with `prime env push`" in output
+
+
+def test_resolve_hosted_environment_requires_a_pushed_hub_version(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "prime_cli.commands.evals._resolve_environment_reference",
+        lambda environment, env_dir_path: ResolvedEnvironment(
+            original=environment,
+            env_name="gsm8k",
+            install_mode="local",
+            env_display_id="gsm8k (local - ahead of primeintellect/gsm8k)",
+            platform_slug="primeintellect/gsm8k",
+            recommend_push=True,
+            push_reason="ahead",
+        ),
+    )
+
+    class DummyAPIClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get(self, endpoint):
+            raise APIError("404 not found")
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
+
+    with pytest.raises(typer.Exit) as exc_info:
+        _resolve_hosted_environment("gsm8k", env_dir_path=None, env_path=None)
+
+    assert exc_info.value.exit_code == 1
+    output = capsys.readouterr().out
+    assert "hosted evaluations require an environment that is published to the" in output
+    assert "platform" in output
+    assert "Publish primeintellect/gsm8k with `prime env push` first." in output
 
 
 def test_eval_run_hosted_reports_resolve_api_errors(monkeypatch):

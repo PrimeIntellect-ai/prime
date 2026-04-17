@@ -683,20 +683,6 @@ def _resolve_hosted_environment(
 ) -> tuple[str, str]:
     resolved = _resolve_environment_reference(environment, env_dir_path or DEFAULT_ENV_DIR_PATH)
 
-    if resolved.recommend_push:
-        console.print(
-            "[red]Error:[/red] hosted evaluations require an environment "
-            "that is published to the platform"
-        )
-        if resolved.platform_slug:
-            console.print(
-                "[yellow]Publish the latest local changes for "
-                f"{resolved.platform_slug} first.[/yellow]"
-            )
-        else:
-            console.print("[yellow]Publish the environment with `prime env push` first.[/yellow]")
-        raise typer.Exit(1)
-
     platform_slug = resolved.platform_slug or resolved.upstream_slug
     if platform_slug is None and env_path:
         metadata = find_environment_metadata(
@@ -726,14 +712,34 @@ def _resolve_hosted_environment(
 
     owner, env_name = parts
     api_client = APIClient()
-    response = api_client.get(f"/environmentshub/{owner}/{env_name}/@latest")
+    try:
+        response = api_client.get(f"/environmentshub/{owner}/{env_name}/@latest")
+    except APIError as exc:
+        message = str(exc).lower()
+        if "404" in message or "not found" in message:
+            console.print(
+                "[red]Error:[/red] hosted evaluations require an environment "
+                "that is published to the platform"
+            )
+            console.print(f"[yellow]Publish {platform_slug} with `prime env push` first.[/yellow]")
+            raise typer.Exit(1) from exc
+        raise
+
     details = response.get("data", response)
     environment_id = details.get("id")
     if not environment_id:
         console.print(f"[red]Error:[/red] could not resolve environment id for {platform_slug}")
         raise typer.Exit(1)
 
-    console.print(f"[dim]Using hosted environment {platform_slug}[/dim]")
+    if resolved.install_mode == "local" and resolved.recommend_push:
+        console.print(
+            "[yellow]Local environment code differs from the latest published version of "
+            f"{platform_slug}.[/yellow]"
+        )
+    console.print(
+        f"[dim]Hosted evaluations always use the latest published version of {platform_slug}.[/dim]"
+    )
+    console.print(f"[dim]Using hosted environment {platform_slug}@latest[/dim]")
     return platform_slug, str(environment_id)
 
 

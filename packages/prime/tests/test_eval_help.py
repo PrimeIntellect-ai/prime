@@ -39,7 +39,7 @@ def test_sanitize_help_removes_vf_eval_aliases():
     assert "env_id_or_config" not in help_text
 
 
-def test_append_eval_options_mentions_api_base_url_for_tunnels():
+def test_append_eval_options_mentions_tunnel_access():
     help_text = _append_eval_options("Usage: prime eval run [-h] environment\n")
 
-    assert "for any public tunnel URL use --api-base-url" in help_text
+    assert "--allow-tunnel-access" in help_text

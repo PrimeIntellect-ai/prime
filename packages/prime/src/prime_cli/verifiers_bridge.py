@@ -130,9 +130,9 @@ def _append_eval_options(help_text: str) -> str:
         "  --allow-sandbox-access      Allow sandbox read/write access for hosted evaluations.",
         "  --allow-instances-access    "
         "Allow instance creation and management for hosted evaluations.",
+        "  --allow-tunnel-access       "
+        "Allow tunnel creation and management for hosted evaluations.",
         "  --custom-secrets JSON       Custom sandbox secrets for hosted evaluations.",
-        "  --tunnel-id TEXT            "
-        "Optional Prime Tunnel ID convenience; for any public tunnel URL use --api-base-url.",
         "  --eval-name TEXT            Custom name for the hosted evaluation.",
     ]
     lines = help_text.rstrip("\n").splitlines()

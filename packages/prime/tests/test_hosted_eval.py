@@ -240,7 +240,7 @@ def test_eval_run_hosted_passes_api_base_url_and_key_var(monkeypatch):
     assert captured["api_key_var"] == "OPENAI_API_KEY"
 
 
-def test_eval_run_hosted_passes_tunnel_id(monkeypatch):
+def test_eval_run_hosted_passes_allow_tunnel_access(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(
@@ -252,8 +252,7 @@ def test_eval_run_hosted_passes_tunnel_id(monkeypatch):
     )
 
     def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["tunnel_id"] = config.tunnel_id
-        captured["api_base_url"] = config.api_base_url
+        captured["allow_tunnel_access"] = config.allow_tunnel_access
         return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr(
@@ -268,15 +267,13 @@ def test_eval_run_hosted_passes_tunnel_id(monkeypatch):
             "run",
             "primeintellect/gsm8k",
             "--hosted",
-            "--tunnel-id",
-            "t-0-0123456789abcdef",
+            "--allow-tunnel-access",
         ],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["tunnel_id"] == "t-0-0123456789abcdef"
-    assert captured["api_base_url"] is None
+    assert captured["allow_tunnel_access"] is True
 
 
 def test_eval_run_hosted_passes_extra_env_kwargs(monkeypatch):
@@ -513,7 +510,7 @@ def test_create_hosted_evaluation_includes_api_base_url_and_key_var_in_payload(m
     assert captured["json"]["eval_config"]["api_key_var"] == "OPENAI_API_KEY"
 
 
-def test_create_hosted_evaluation_includes_tunnel_id_in_payload(monkeypatch):
+def test_create_hosted_evaluation_includes_tunnel_access_in_payload(monkeypatch):
     captured = {}
 
     class DummyConfig:
@@ -536,144 +533,12 @@ def test_create_hosted_evaluation_includes_tunnel_id_in_payload(monkeypatch):
             inference_model="openai/gpt-4.1-mini",
             num_examples=5,
             rollouts_per_example=3,
-            tunnel_id="t-0-0123456789abcdef",
+            allow_tunnel_access=True,
         )
     )
 
     assert captured["endpoint"] == "/hosted-evaluations"
-    assert captured["json"]["eval_config"]["tunnel_id"] == "t-0-0123456789abcdef"
-
-
-def test_eval_run_hosted_tunnel_id_override_clears_config_api_base_url(monkeypatch, tmp_path):
-    captured = {}
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        "\n".join(
-            [
-                'model = "openai/gpt-4.1-mini"',
-                'api_base_url = "https://api.openai.com/v1"',
-                "",
-                "[[eval]]",
-                'env_id = "gsm8k"',
-            ]
-        )
-    )
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_hosted_environment",
-        lambda environment, env_dir_path=None, env_path=None: (
-            "primeintellect/gsm8k",
-            "env-123",
-        ),
-    )
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["tunnel_id"] = config.tunnel_id
-        captured["api_base_url"] = config.api_base_url
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    result = runner.invoke(
-        app,
-        [
-            "eval",
-            "run",
-            str(config_path),
-            "--hosted",
-            "--tunnel-id",
-            "t-0-0123456789abcdef",
-        ],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "tunnel_id": "t-0-0123456789abcdef",
-        "api_base_url": None,
-    }
-
-
-def test_eval_run_hosted_api_base_url_override_clears_config_tunnel_id(monkeypatch, tmp_path):
-    captured = {}
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        "\n".join(
-            [
-                'model = "openai/gpt-4.1-mini"',
-                'tunnel_id = "t-0-0123456789abcdef"',
-                "",
-                "[[eval]]",
-                'env_id = "gsm8k"',
-            ]
-        )
-    )
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_hosted_environment",
-        lambda environment, env_dir_path=None, env_path=None: (
-            "primeintellect/gsm8k",
-            "env-123",
-        ),
-    )
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["tunnel_id"] = config.tunnel_id
-        captured["api_base_url"] = config.api_base_url
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    result = runner.invoke(
-        app,
-        [
-            "eval",
-            "run",
-            str(config_path),
-            "--hosted",
-            "--api-base-url",
-            "https://api.openai.com/v1",
-        ],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured == {
-        "tunnel_id": None,
-        "api_base_url": "https://api.openai.com/v1",
-    }
-
-
-def test_create_hosted_evaluation_rejects_api_base_url_and_tunnel_id_together(monkeypatch):
-    class DummyConfig:
-        team_id = None
-
-    class DummyAPIClient:
-        def __init__(self):
-            self.config = DummyConfig()
-
-        def post(self, endpoint, json=None):
-            return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient", DummyAPIClient)
-
-    with pytest.raises(APIError, match="use either `--api-base-url` or `--tunnel-id`, not both"):
-        _create_hosted_evaluations(
-            HostedEvalConfig(
-                environment_id="env-123",
-                inference_model="openai/gpt-4.1-mini",
-                num_examples=5,
-                rollouts_per_example=3,
-                api_base_url="https://api.openai.com/v1",
-                tunnel_id="t-0-0123456789abcdef",
-            )
-        )
+    assert captured["json"]["eval_config"]["allow_tunnel_access"] is True
 
 
 def test_create_hosted_evaluation_accepts_plural_ids_response(monkeypatch):
@@ -758,48 +623,6 @@ def test_eval_run_hosted_follow_streams_logs(monkeypatch):
     assert captured["display_poll_interval"] == 10.0
 
 
-def test_eval_run_hosted_supports_tunnel_id_from_toml(monkeypatch, tmp_path):
-    captured = {}
-    config_path = tmp_path / "eval.toml"
-    config_path.write_text(
-        "\n".join(
-            [
-                'model = "openai/gpt-4.1-mini"',
-                'tunnel_id = "t-0-0123456789abcdef"',
-                "",
-                "[[eval]]",
-                'env_id = "gsm8k"',
-            ]
-        )
-    )
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._resolve_hosted_environment",
-        lambda environment, env_dir_path=None, env_path=None: (
-            "primeintellect/gsm8k",
-            "env-123",
-        ),
-    )
-
-    def fake_run_hosted_evaluation(config, environment_ids=None):
-        captured["tunnel_id"] = config.tunnel_id
-        return {"evaluation_id": "eval-123"}
-
-    monkeypatch.setattr(
-        "prime_cli.commands.evals._create_hosted_evaluations",
-        fake_run_hosted_evaluation,
-    )
-
-    result = runner.invoke(
-        app,
-        ["eval", "run", str(config_path), "--hosted"],
-        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured["tunnel_id"] == "t-0-0123456789abcdef"
-
-
 def test_eval_run_hosted_supports_single_eval_toml(monkeypatch, tmp_path):
     captured = {}
     config_path = tmp_path / "eval.toml"
@@ -812,6 +635,7 @@ rollouts_per_example = 2
 timeout_minutes = 180
 allow_sandbox_access = true
 allow_instances_access = true
+allow_tunnel_access = true
 eval_name = "math500 smoke test"
 """
             + "sampling_args = { "
@@ -840,6 +664,7 @@ eval_name = "math500 smoke test"
         captured["timeout_minutes"] = config.timeout_minutes
         captured["allow_sandbox_access"] = config.allow_sandbox_access
         captured["allow_instances_access"] = config.allow_instances_access
+        captured["allow_tunnel_access"] = config.allow_tunnel_access
         captured["sampling_args"] = config.sampling_args
         captured["extra_env_kwargs"] = config.extra_env_kwargs
         captured["name"] = config.name
@@ -871,6 +696,7 @@ eval_name = "math500 smoke test"
         "timeout_minutes": 180,
         "allow_sandbox_access": True,
         "allow_instances_access": True,
+        "allow_tunnel_access": True,
         "sampling_args": {
             "extra_body": {
                 "provider": {
@@ -899,6 +725,7 @@ rollouts_per_example = 2
 timeout_minutes = 180
 allow_sandbox_access = true
 allow_instances_access = true
+allow_tunnel_access = true
 eval_name = "from toml"
 
 [[eval]]
@@ -919,6 +746,7 @@ env_args = { split = "test" }
         captured["timeout_minutes"] = config.timeout_minutes
         captured["allow_sandbox_access"] = config.allow_sandbox_access
         captured["allow_instances_access"] = config.allow_instances_access
+        captured["allow_tunnel_access"] = config.allow_tunnel_access
         captured["sampling_args"] = config.sampling_args
         captured["extra_env_kwargs"] = config.extra_env_kwargs
         captured["name"] = config.name
@@ -967,6 +795,7 @@ env_args = { split = "test" }
         "timeout_minutes": 240,
         "allow_sandbox_access": True,
         "allow_instances_access": True,
+        "allow_tunnel_access": True,
         "sampling_args": {
             "temperature": 0.2,
             "extra_body": {
@@ -1565,20 +1394,20 @@ def test_eval_run_rejects_hosted_only_flags_without_hosted():
     assert "hosted-only options require `--hosted`" in result.output
 
 
-def test_eval_run_rejects_tunnel_id_without_hosted():
+def test_eval_run_rejects_explicit_poll_interval_without_hosted():
     result = runner.invoke(
         app,
-        ["eval", "run", "gsm8k", "--tunnel-id", "t-0-0123456789abcdef"],
+        ["eval", "run", "gsm8k", "--poll-interval", "10"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
     assert result.exit_code == 1
     assert "hosted-only options require `--hosted`" in result.output
 
 
-def test_eval_run_rejects_explicit_poll_interval_without_hosted():
+def test_eval_run_rejects_tunnel_access_without_hosted():
     result = runner.invoke(
         app,
-        ["eval", "run", "gsm8k", "--poll-interval", "10"],
+        ["eval", "run", "gsm8k", "--allow-tunnel-access"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
     assert result.exit_code == 1

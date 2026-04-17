@@ -61,12 +61,27 @@ from .rpc_command_session import (
     collect_command_session_start_event,
 )
 
-# Retry configuration for transient connection errors on gateway requests
-# Note: ReadTimeout is NOT included because the request may have been processed
-GATEWAY_RETRYABLE_EXCEPTIONS = (
+# Connection-level errors: request never reached the server, so retry is safe
+# for any HTTP method (including non-idempotent POSTs).
+# Note: ReadTimeout / ReadError are NOT in this tuple because they occur after
+# the server has (at least partially) started responding — meaning the request
+# was already processed and a retry would duplicate side effects on POST.
+GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
     httpx.RemoteProtocolError,  # Server disconnected unexpectedly
     httpx.ConnectError,  # Connection refused/failed
     httpx.PoolTimeout,  # No connection available in pool
+)
+
+# Response-read failures: the server may have already processed the request
+# (TCP connection dropped mid-response body). Only safe to retry on idempotent
+# methods (GET/HEAD/PUT/DELETE), where a duplicate request is a no-op.
+# ReadTimeout is STILL excluded even for idempotent methods — we can't
+# distinguish "server hanging" from "server mid-processing", and retrying a
+# hung request compounds load on an already-stressed server instead of
+# recovering. ReadError (TCP reset / connection drop during read) is different:
+# the connection is definitively gone, so retrying doesn't pile on.
+GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS = GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS + (
+    httpx.ReadError,  # TCP connection broken while reading response
 )
 
 # Retryable HTTP 5xx status codes (e.g. Cloudflare 524 timeout, server errors)
@@ -78,8 +93,8 @@ RETRY_409_BASE_DELAY = 0.25  # 250ms, 500ms, 1000ms, 2000ms with exponential bac
 
 
 def _is_retryable_gateway_error(exc: BaseException) -> bool:
-    """Check if an exception is retryable for gateway requests."""
-    if isinstance(exc, GATEWAY_RETRYABLE_EXCEPTIONS):
+    """Check if an exception is retryable for idempotent gateway requests."""
+    if isinstance(exc, GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS):
         return True
     if (
         isinstance(exc, httpx.HTTPStatusError)
@@ -91,7 +106,8 @@ def _is_retryable_gateway_error(exc: BaseException) -> bool:
     return False
 
 
-# Retry decorator for idempotent gateway requests (connection errors + 5xx responses)
+# Retry decorator for idempotent gateway requests (connection errors, ReadError,
+# and 5xx responses). Safe for GET/HEAD/PUT/DELETE since duplicate requests are no-ops.
 _gateway_retry = retry(
     retry=retry_if_exception(_is_retryable_gateway_error),
     stop=stop_after_attempt(4),
@@ -100,9 +116,10 @@ _gateway_retry = retry(
 )
 
 # Retry decorator for non-idempotent gateway requests (connection errors only —
-# 5xx means the server received the request, so retrying risks duplicate side effects)
+# ReadError and 5xx both imply the server received/processed the request, so
+# retrying POSTs on those risks duplicate side effects).
 _gateway_post_retry = retry(
-    retry=retry_if_exception_type(GATEWAY_RETRYABLE_EXCEPTIONS),
+    retry=retry_if_exception_type(GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS),
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=1, min=1, max=30),
     reraise=True,

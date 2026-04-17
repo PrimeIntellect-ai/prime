@@ -322,19 +322,6 @@ class RLClient:
                 raise APIError(f"Failed to get RL run logs: {e.response.text}")
             raise APIError(f"Failed to get RL run logs: {str(e)}")
 
-    def list_env_servers(self, run_id: str) -> List[Dict[str, Any]]:
-        """List environment server pods for an RL run.
-
-        Each entry has: env_name, env_index, pod_name, status.
-        """
-        try:
-            response = self.client.get(f"/rft/runs/{run_id}/env-servers")
-            return list(response.get("env_servers", []))
-        except Exception as e:
-            if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to list env servers: {e.response.text}")
-            raise APIError(f"Failed to list env servers: {str(e)}")
-
     def get_env_server_logs(
         self,
         run_id: str,

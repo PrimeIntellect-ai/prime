@@ -10,6 +10,7 @@ from prime_cli.commands.images import (
     ImageRow,
     _completed_size_mb,
     _display_created,
+    _group_sort_key,
     _image_ref_column_width,
     _partition_group,
     _render_image_reference,
@@ -47,6 +48,8 @@ def _art(
     image_name: str = "nvidia-basic-dev",
     image_tag: str = "latest",
     pushed_at: str | None = None,
+    completed_at: str | None = None,
+    started_at: str | None = None,
     created_at: str = "2026-04-01T10:00:00",
     size_bytes: int | None = None,
     team_id: str | None = None,
@@ -68,8 +71,8 @@ def _art(
         "errorMessage": None,
         "sizeBytes": size_bytes,
         "createdAt": created_at,
-        "startedAt": None,
-        "completedAt": None,
+        "startedAt": started_at,
+        "completedAt": completed_at,
         "pushedAt": pushed_at,
         "teamId": team_id,
         "ownerType": owner_type or ("team" if team_id else "personal"),
@@ -79,102 +82,159 @@ def _art(
 
 
 # ---------------------------------------------------------------------------
-# _partition_group
+# _partition_group — only the newest row per artifact type survives
 # ---------------------------------------------------------------------------
 
 
-def test_partition_healthy_image_has_completed_only():
+def test_partition_keeps_newest_completed_per_type():
     arts = [
         _art("CONTAINER_IMAGE", "COMPLETED", pushed_at="2026-04-16T22:24:07"),
         _art("VM_SANDBOX", "COMPLETED", pushed_at="2026-04-16T22:24:07"),
     ]
     part = _partition_group(arts)
-    assert part["CONTAINER_IMAGE"].completed is not None
-    assert part["CONTAINER_IMAGE"].active is None
-    assert part["CONTAINER_IMAGE"].failed_only is None
-    assert part["VM_SANDBOX"].completed is not None
+    assert part["CONTAINER_IMAGE"].latest is not None
+    assert part["CONTAINER_IMAGE"].latest["status"] == "COMPLETED"
+    assert part["VM_SANDBOX"].latest is not None
+    assert part["VM_SANDBOX"].latest["status"] == "COMPLETED"
 
 
-def test_partition_hides_failed_rows_when_completed_exists():
+def test_partition_newer_completed_beats_older_failed():
     arts = [
+        _art("CONTAINER_IMAGE", "FAILED", completed_at="2026-04-16T21:00:00"),
         _art("CONTAINER_IMAGE", "COMPLETED", pushed_at="2026-04-16T22:24:07"),
-        _art("CONTAINER_IMAGE", "FAILED", created_at="2026-04-16T21:00:00"),
-        _art("CONTAINER_IMAGE", "FAILED", created_at="2026-04-16T20:55:00"),
-        _art("VM_SANDBOX", "COMPLETED", pushed_at="2026-04-16T22:24:07"),
-        _art("VM_SANDBOX", "FAILED", created_at="2026-04-16T21:00:00"),
+        _art("CONTAINER_IMAGE", "FAILED", completed_at="2026-04-16T20:55:00"),
     ]
     part = _partition_group(arts)
-    assert part["CONTAINER_IMAGE"].completed is not None
-    assert part["CONTAINER_IMAGE"].failed_only is None
-    assert part["VM_SANDBOX"].failed_only is None
+    assert part["CONTAINER_IMAGE"].latest["status"] == "COMPLETED"
 
 
-def test_partition_surfaces_failure_when_no_completed():
+def test_partition_fresh_completed_wins_over_stale_building_zombie():
+    # The real-world case observed in production: a stale BUILDING row from
+    # days ago (never reaped) alongside a fresh COMPLETED push. The fresh
+    # COMPLETED row has a later pushedAt, so it wins — no misleading
+    # "(rebuilding)" signal.
     arts = [
-        _art("CONTAINER_IMAGE", "FAILED", created_at="2026-04-16T21:00:00"),
-        _art("VM_SANDBOX", "FAILED", created_at="2026-04-16T21:00:00"),
+        _art(
+            "VM_SANDBOX",
+            "BUILDING",
+            started_at="2026-04-09 20:52:01",
+            created_at="2026-04-09T20:52:00",
+        ),
+        _art(
+            "VM_SANDBOX",
+            "COMPLETED",
+            pushed_at="2026-04-17T18:21:28",
+            completed_at="2026-04-17T18:21:28",
+            created_at="2026-04-17T18:19:01",
+        ),
     ]
     part = _partition_group(arts)
-    assert part["CONTAINER_IMAGE"].completed is None
-    assert part["CONTAINER_IMAGE"].failed_only is not None
-    assert part["CONTAINER_IMAGE"].failed_only["status"] == "FAILED"
+    assert part["VM_SANDBOX"].latest["status"] == "COMPLETED"
 
 
-def test_partition_marks_active_rebuild_alongside_completed():
+def test_partition_active_build_wins_over_older_completed():
+    # If a genuinely-new build started *after* the last completed push, it's
+    # the truth and should be reflected in the status.
     arts = [
         _art("CONTAINER_IMAGE", "COMPLETED", pushed_at="2026-04-15T20:57:52"),
-        _art("CONTAINER_IMAGE", "BUILDING", created_at="2026-04-16T10:00:00"),
-        _art("VM_SANDBOX", "COMPLETED", pushed_at="2026-04-15T20:57:52"),
-        _art("VM_SANDBOX", "BUILDING", created_at="2026-04-16T10:00:00"),
+        _art(
+            "CONTAINER_IMAGE",
+            "BUILDING",
+            started_at="2026-04-17T10:00:05",
+            created_at="2026-04-17T10:00:00",
+        ),
     ]
     part = _partition_group(arts)
-    assert part["CONTAINER_IMAGE"].completed is not None
-    assert part["CONTAINER_IMAGE"].active is not None
-    assert part["CONTAINER_IMAGE"].active["status"] == "BUILDING"
+    assert part["CONTAINER_IMAGE"].latest["status"] == "BUILDING"
+
+
+def test_partition_surfaces_failure_when_only_failed_rows_exist():
+    arts = [
+        _art("CONTAINER_IMAGE", "FAILED", completed_at="2026-04-16T21:00:00"),
+        _art("VM_SANDBOX", "FAILED", completed_at="2026-04-16T21:00:00"),
+    ]
+    part = _partition_group(arts)
+    assert part["CONTAINER_IMAGE"].latest["status"] == "FAILED"
+    assert part["VM_SANDBOX"].latest["status"] == "FAILED"
+
+
+def test_partition_keeps_unknown_status_row_as_latest():
+    arts = [_art("CONTAINER_IMAGE", "QUEUED", created_at="2026-04-17T12:00:00")]
+    part = _partition_group(arts)
+    assert part["CONTAINER_IMAGE"].latest is not None
+    assert part["CONTAINER_IMAGE"].latest["status"] == "QUEUED"
+
+
+def test_partition_coerces_null_artifact_type_to_container_image():
+    arts = [
+        {
+            "id": "x",
+            "artifactType": None,
+            "imageName": "myimage",
+            "imageTag": "latest",
+            "status": "COMPLETED",
+            "pushedAt": "2026-04-17T12:00:00",
+            "createdAt": "2026-04-17T12:00:00",
+            "displayRef": f"{USER_ID}/myimage:latest",
+        }
+    ]
+    part = _partition_group(arts)
+    assert "CONTAINER_IMAGE" in part
+    assert None not in part
+    assert part["CONTAINER_IMAGE"].latest is not None
+
+
+def test_partition_coerces_non_string_artifact_type():
+    arts = [
+        {
+            "id": "x",
+            "artifactType": 42,  # defensive: server could send a number
+            "imageName": "myimage",
+            "imageTag": "latest",
+            "status": "COMPLETED",
+            "pushedAt": "2026-04-17T12:00:00",
+            "createdAt": "2026-04-17T12:00:00",
+            "displayRef": f"{USER_ID}/myimage:latest",
+        }
+    ]
+    part = _partition_group(arts)
+    assert "CONTAINER_IMAGE" in part
+    # ``sorted(partition)`` must not raise on mixed key types.
+    _render_status_column(part)
 
 
 # ---------------------------------------------------------------------------
-# _render_status_slot
+# _render_status_slot — renders the raw status of the latest row
 # ---------------------------------------------------------------------------
 
 
 def test_render_status_slot_ready():
-    part = ArtifactPartition(completed={"status": "COMPLETED"})
+    part = ArtifactPartition(latest={"status": "COMPLETED"})
     assert _render_status_slot(part) == "[green]Ready[/green]"
 
 
-def test_render_status_slot_rebuilding_replaces_status():
-    part = ArtifactPartition(
-        completed={"status": "COMPLETED"},
-        active={"status": "BUILDING"},
-    )
-    out = _render_status_slot(part)
-    assert "rebuilding" in out
-    assert "Ready" not in out
-
-
-def test_render_status_slot_first_time_build():
-    part = ArtifactPartition(active={"status": "BUILDING"})
+def test_render_status_slot_building():
+    part = ArtifactPartition(latest={"status": "BUILDING"})
     assert _render_status_slot(part) == "[yellow]Building[/yellow]"
 
 
 def test_render_status_slot_uploading():
-    part = ArtifactPartition(active={"status": "UPLOADING"})
+    part = ArtifactPartition(latest={"status": "UPLOADING"})
     assert _render_status_slot(part) == "[yellow]Uploading[/yellow]"
 
 
 def test_render_status_slot_pending():
-    part = ArtifactPartition(active={"status": "PENDING"})
+    part = ArtifactPartition(latest={"status": "PENDING"})
     assert _render_status_slot(part) == "[blue]Pending[/blue]"
 
 
-def test_render_status_slot_failed_only():
-    part = ArtifactPartition(failed_only={"status": "FAILED"})
+def test_render_status_slot_failed():
+    part = ArtifactPartition(latest={"status": "FAILED"})
     assert _render_status_slot(part) == "[red]Failed[/red]"
 
 
 def test_render_status_slot_cancelled():
-    part = ArtifactPartition(failed_only={"status": "CANCELLED"})
+    part = ArtifactPartition(latest={"status": "CANCELLED"})
     assert _render_status_slot(part) == "[dim]Cancelled[/dim]"
 
 
@@ -184,6 +244,13 @@ def test_render_status_slot_none_part_returns_dash():
 
 def test_render_status_slot_empty_part_returns_dash():
     assert _render_status_slot(ArtifactPartition()) == "[dim]—[/dim]"
+
+
+def test_render_status_slot_unknown_status_renders_dim_title_case():
+    # A status outside the recognised enum set (e.g. the backend adds
+    # ``QUEUED`` later) is surfaced as a dim title-cased label.
+    part = ArtifactPartition(latest={"status": "QUEUED"})
+    assert _render_status_slot(part) == "[dim]Queued[/dim]"
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +294,7 @@ def test_render_status_column_healthy_slots():
 def test_render_status_column_partial_failure_aligned():
     arts = [
         _art("CONTAINER_IMAGE", "COMPLETED", pushed_at="2026-04-16T22:24:07"),
-        _art("VM_SANDBOX", "FAILED", created_at="2026-04-16T22:00:00"),
+        _art("VM_SANDBOX", "FAILED", completed_at="2026-04-16T22:00:00"),
     ]
     text = _render_status_column(_partition_group(arts))
     assert text == "[green]Ready[/green] / [red]Failed[/red]"
@@ -240,41 +307,62 @@ def test_render_status_column_container_only_legacy():
     assert " / " not in text
 
 
-def test_render_status_column_rebuild_replaces_status():
+def test_render_status_column_stale_zombie_hidden_by_fresh_completed():
+    # Mirrors the real nvidia-basic-dev:latest payload: a week-old stuck
+    # BUILDING VM row + a fresh successful build. The fresh COMPLETED row has
+    # a newer pushedAt, so only "Ready" is shown — no false "rebuilding".
     arts = [
-        _art("CONTAINER_IMAGE", "COMPLETED", pushed_at="2026-04-15T20:57:52"),
-        _art("CONTAINER_IMAGE", "BUILDING", created_at="2026-04-16T10:00:00"),
-        _art("VM_SANDBOX", "COMPLETED", pushed_at="2026-04-15T20:57:52"),
-        _art("VM_SANDBOX", "BUILDING", created_at="2026-04-16T10:00:00"),
+        _art("CONTAINER_IMAGE", "COMPLETED", pushed_at="2026-04-17T18:21:28"),
+        _art("VM_SANDBOX", "COMPLETED", pushed_at="2026-04-17T18:21:28"),
+        # Old stuck BUILDING row that should be ignored because it's older.
+        _art(
+            "VM_SANDBOX",
+            "BUILDING",
+            started_at="2026-04-09T20:52:01",
+            created_at="2026-04-09T20:52:00",
+        ),
+        # Recent failed attempts before the successful build.
+        _art("CONTAINER_IMAGE", "FAILED", completed_at="2026-04-16T21:00:00"),
+        _art("VM_SANDBOX", "FAILED", completed_at="2026-04-16T21:00:00"),
     ]
     text = _render_status_column(_partition_group(arts))
-    assert text.count("rebuilding") == 2
-    assert "Ready" not in text
+    assert text == "[green]Ready[/green] / [green]Ready[/green]"
+    assert "rebuilding" not in text
+    assert "Failed" not in text
+    assert "Building" not in text
 
 
-def test_render_status_column_rebuild_vm_only():
+def test_render_status_column_active_build_on_top_of_older_completed():
+    # Container has been rebuilt recently (BUILDING started *after* the last
+    # completed push); status should reflect the new build rather than the
+    # stale Ready.
     arts = [
         _art("CONTAINER_IMAGE", "COMPLETED", pushed_at="2026-04-15T20:57:52"),
+        _art(
+            "CONTAINER_IMAGE",
+            "BUILDING",
+            started_at="2026-04-17T10:00:05",
+            created_at="2026-04-17T10:00:00",
+        ),
         _art("VM_SANDBOX", "COMPLETED", pushed_at="2026-04-15T20:57:52"),
-        _art("VM_SANDBOX", "BUILDING", created_at="2026-04-16T10:00:00"),
+        _art(
+            "VM_SANDBOX",
+            "BUILDING",
+            started_at="2026-04-17T10:00:05",
+            created_at="2026-04-17T10:00:00",
+        ),
     ]
     text = _render_status_column(_partition_group(arts))
-    assert text.startswith("[green]Ready[/green]")
-    assert "rebuilding" in text
-    assert text.count("rebuilding") == 1
+    assert text == "[yellow]Building[/yellow] / [yellow]Building[/yellow]"
 
 
-def test_render_status_column_stale_failures_hidden_by_completed():
+def test_render_status_column_surfaces_unknown_status_alongside_known():
     arts = [
         _art("CONTAINER_IMAGE", "COMPLETED", pushed_at="2026-04-16T22:24:07"),
-        _art("VM_SANDBOX", "COMPLETED", pushed_at="2026-04-16T22:24:07"),
+        _art("VM_SANDBOX", "QUEUED", created_at="2026-04-16T22:00:00"),
     ]
-    for i in range(5):
-        arts.append(_art("CONTAINER_IMAGE", "FAILED", created_at=f"2026-04-16T20:{i:02d}:00"))
-        arts.append(_art("VM_SANDBOX", "FAILED", created_at=f"2026-04-16T20:{i:02d}:00"))
     text = _render_status_column(_partition_group(arts))
-    assert "Failed" not in text
-    assert text.count("Ready") == 2
+    assert text == "[green]Ready[/green] / [dim]Queued[/dim]"
 
 
 # ---------------------------------------------------------------------------
@@ -357,22 +445,51 @@ def test_image_ref_column_width_scales_with_available_space():
 # ---------------------------------------------------------------------------
 
 
-def test_completed_size_sums_only_completed_artifacts():
+def test_completed_size_sums_only_latest_completed_rows():
     arts = [
-        _art("CONTAINER_IMAGE", "COMPLETED", size_bytes=1024 * 1024 * 100),
-        _art("VM_SANDBOX", "COMPLETED", size_bytes=1024 * 1024 * 200),
-        _art("CONTAINER_IMAGE", "BUILDING"),
-        _art("VM_SANDBOX", "FAILED"),
+        _art(
+            "CONTAINER_IMAGE",
+            "COMPLETED",
+            pushed_at="2026-04-16T22:00:00",
+            size_bytes=1024 * 1024 * 100,
+        ),
+        _art(
+            "VM_SANDBOX", "COMPLETED", pushed_at="2026-04-16T22:00:00", size_bytes=1024 * 1024 * 200
+        ),
     ]
-    assert _completed_size_mb(arts) == "300.0 MB"
+    part = _partition_group(arts)
+    assert _completed_size_mb(part) == "300.0 MB"
+
+
+def test_completed_size_ignores_older_completed_if_newer_is_not_completed():
+    # Size reflects the *current* picture: if the latest CONTAINER_IMAGE row
+    # is BUILDING (in flight), its size is unknown, so its contribution is 0
+    # even though an older COMPLETED row has a size.
+    arts = [
+        _art(
+            "CONTAINER_IMAGE",
+            "COMPLETED",
+            pushed_at="2026-04-15T20:00:00",
+            size_bytes=1024 * 1024 * 100,
+        ),
+        _art(
+            "CONTAINER_IMAGE",
+            "BUILDING",
+            started_at="2026-04-17T10:00:05",
+            created_at="2026-04-17T10:00:00",
+        ),
+    ]
+    part = _partition_group(arts)
+    assert _completed_size_mb(part) == "[dim]—[/dim]"
 
 
 def test_completed_size_returns_dash_when_no_completed():
     arts = [
-        _art("CONTAINER_IMAGE", "BUILDING"),
-        _art("VM_SANDBOX", "PENDING"),
+        _art("CONTAINER_IMAGE", "BUILDING", started_at="2026-04-17T09:00:00"),
+        _art("VM_SANDBOX", "PENDING", created_at="2026-04-17T08:00:00"),
     ]
-    assert _completed_size_mb(arts) == "[dim]—[/dim]"
+    part = _partition_group(arts)
+    assert _completed_size_mb(part) == "[dim]—[/dim]"
 
 
 # ---------------------------------------------------------------------------
@@ -384,28 +501,64 @@ def test_display_created_uses_latest_pushed_at_when_completed_exists():
     arts = [
         _art("CONTAINER_IMAGE", "COMPLETED", pushed_at="2026-04-15T20:57:52"),
         _art("VM_SANDBOX", "COMPLETED", pushed_at="2026-04-16T22:24:07"),
-        _art("CONTAINER_IMAGE", "BUILDING", created_at="2026-04-17T09:00:00"),
     ]
     part = _partition_group(arts)
-    assert _display_created(part, arts) == "2026-04-16 22:24"
+    assert _display_created(part) == "2026-04-16 22:24"
 
 
-def test_display_created_falls_back_to_active_when_no_completed():
+def test_display_created_falls_back_to_started_at_for_active_builds():
     arts = [
-        _art("CONTAINER_IMAGE", "BUILDING", created_at="2026-04-17T09:00:00"),
+        _art(
+            "CONTAINER_IMAGE",
+            "BUILDING",
+            started_at="2026-04-17T09:00:00",
+            created_at="2026-04-17T08:59:00",
+        ),
         _art("VM_SANDBOX", "PENDING", created_at="2026-04-17T08:00:00"),
     ]
     part = _partition_group(arts)
-    assert _display_created(part, arts) == "2026-04-17 09:00"
+    assert _display_created(part) == "2026-04-17 09:00"
 
 
-def test_display_created_falls_back_to_any_row_when_only_failed():
+def test_display_created_falls_back_to_completed_at_for_failures():
     arts = [
-        _art("CONTAINER_IMAGE", "FAILED", created_at="2026-04-16T12:00:00"),
-        _art("VM_SANDBOX", "FAILED", created_at="2026-04-16T13:00:00"),
+        _art("CONTAINER_IMAGE", "FAILED", completed_at="2026-04-16T12:00:00"),
+        _art("VM_SANDBOX", "FAILED", completed_at="2026-04-16T13:00:00"),
     ]
     part = _partition_group(arts)
-    assert _display_created(part, arts) == "2026-04-16 13:00"
+    assert _display_created(part) == "2026-04-16 13:00"
+
+
+def test_display_created_skips_truthy_but_unparseable_pushed_at():
+    # Regression for the original bugbot finding: if pushedAt is a malformed
+    # but truthy string, ``_latest`` skips it and chooses the next parseable
+    # key. The tuple-returning _latest reuses *its* parsed timestamp so the
+    # display never silently empties.
+    arts = [
+        _art(
+            "CONTAINER_IMAGE",
+            "COMPLETED",
+            pushed_at="definitely-not-a-date",
+            completed_at="2026-04-16T22:24:07",
+        )
+    ]
+    part = _partition_group(arts)
+    assert _display_created(part) == "2026-04-16 22:24"
+
+
+def test_group_sort_key_matches_display_created():
+    arts = [
+        _art(
+            "CONTAINER_IMAGE",
+            "COMPLETED",
+            pushed_at="definitely-not-a-date",
+            completed_at="2026-04-16T22:24:07",
+        )
+    ]
+    part = _partition_group(arts)
+    display = _display_created(part)
+    sort_key = _group_sort_key(part)
+    assert sort_key.strftime("%Y-%m-%d %H:%M") == display
 
 
 # ---------------------------------------------------------------------------
@@ -451,10 +604,13 @@ def test_list_cli_shows_type_and_positional_status(monkeypatch):
             size_bytes=100 * 1024 * 1024,
         ),
         _art(
-            "VM_SANDBOX", "COMPLETED", pushed_at="2026-04-16T22:24:07", size_bytes=200 * 1024 * 1024
+            "VM_SANDBOX",
+            "COMPLETED",
+            pushed_at="2026-04-16T22:24:07",
+            size_bytes=200 * 1024 * 1024,
         ),
-        _art("CONTAINER_IMAGE", "FAILED", created_at="2026-04-16T20:00:00"),
-        _art("VM_SANDBOX", "FAILED", created_at="2026-04-16T20:00:00"),
+        _art("CONTAINER_IMAGE", "FAILED", completed_at="2026-04-16T20:00:00"),
+        _art("VM_SANDBOX", "FAILED", completed_at="2026-04-16T20:00:00"),
     ]
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", _build_dummy_client(payload))
@@ -466,12 +622,52 @@ def test_list_cli_shows_type_and_positional_status(monkeypatch):
     assert "Ready / Ready" in result.output
     assert "Container:" not in result.output
     assert "VM:" not in result.output
+    # Stale failures are older than the completed rows → hidden.
     assert "Failed" not in result.output
     assert f"{USER_ID}/nvidia-basic-dev:latest" in result.output
     assert "300.0 MB" in result.output
 
 
-def test_list_cli_shows_rebuilding_marker(monkeypatch):
+def test_list_cli_ignores_stale_building_zombie_when_completed_is_newer(monkeypatch):
+    # Production-observed case: a week-old BUILDING VM row that was never
+    # reaped sits alongside today's successful build. The CLI must use the
+    # newer COMPLETED row, not the zombie.
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    _patch_config(monkeypatch, team_id=None)
+
+    payload = [
+        _art(
+            "CONTAINER_IMAGE",
+            "COMPLETED",
+            pushed_at="2026-04-17T18:21:28",
+            size_bytes=992_290_762,
+        ),
+        _art(
+            "VM_SANDBOX",
+            "COMPLETED",
+            pushed_at="2026-04-17T18:21:28",
+            size_bytes=2_585_571_832,
+        ),
+        _art(
+            "VM_SANDBOX",
+            "BUILDING",
+            started_at="2026-04-09T20:52:01",
+            created_at="2026-04-09T20:52:00",
+        ),
+    ]
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", _build_dummy_client(payload))
+
+    result = runner.invoke(app, ["images", "list"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert "Ready / Ready" in result.output
+    assert "rebuilding" not in result.output
+    assert "Building" not in result.output
+
+
+def test_list_cli_shows_building_when_build_is_newer_than_last_completed(monkeypatch):
+    # Real rebuild in progress: BUILDING row has a later startedAt than the
+    # previous successful build's pushedAt, so Building is the current truth.
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     _patch_config(monkeypatch, team_id=None)
 
@@ -483,18 +679,33 @@ def test_list_cli_shows_rebuilding_marker(monkeypatch):
             size_bytes=50 * 1024 * 1024,
         ),
         _art(
-            "VM_SANDBOX", "COMPLETED", pushed_at="2026-04-15T20:57:52", size_bytes=50 * 1024 * 1024
+            "VM_SANDBOX",
+            "COMPLETED",
+            pushed_at="2026-04-15T20:57:52",
+            size_bytes=50 * 1024 * 1024,
         ),
-        _art("CONTAINER_IMAGE", "BUILDING", created_at="2026-04-16T10:00:00"),
-        _art("VM_SANDBOX", "BUILDING", created_at="2026-04-16T10:00:00"),
+        _art(
+            "CONTAINER_IMAGE",
+            "BUILDING",
+            started_at="2026-04-17T10:00:05",
+            created_at="2026-04-17T10:00:00",
+        ),
+        _art(
+            "VM_SANDBOX",
+            "BUILDING",
+            started_at="2026-04-17T10:00:05",
+            created_at="2026-04-17T10:00:00",
+        ),
     ]
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", _build_dummy_client(payload))
 
     result = runner.invoke(app, ["images", "list"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
-    assert "rebuilding" in result.output
-    assert "2026-04-15 20:57" in result.output
+    assert "Building / Building" in result.output
+    # Created reflects the newer startedAt of the active build rather than
+    # the older pushedAt of the previous release.
+    assert "2026-04-17 10:00" in result.output
 
 
 def test_list_cli_team_listing_keeps_owner_column_and_prefix(monkeypatch):
@@ -556,8 +767,18 @@ def test_list_cli_first_time_build_shows_building(monkeypatch):
     _patch_config(monkeypatch, team_id=None)
 
     payload = [
-        _art("CONTAINER_IMAGE", "BUILDING", created_at="2026-04-17T09:00:00"),
-        _art("VM_SANDBOX", "BUILDING", created_at="2026-04-17T09:00:00"),
+        _art(
+            "CONTAINER_IMAGE",
+            "BUILDING",
+            started_at="2026-04-17T09:00:05",
+            created_at="2026-04-17T09:00:00",
+        ),
+        _art(
+            "VM_SANDBOX",
+            "BUILDING",
+            started_at="2026-04-17T09:00:05",
+            created_at="2026-04-17T09:00:00",
+        ),
     ]
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", _build_dummy_client(payload))

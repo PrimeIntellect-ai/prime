@@ -132,7 +132,7 @@ def _append_eval_options(help_text: str) -> str:
         "Allow instance creation and management for hosted evaluations.",
         "  --custom-secrets JSON       Custom sandbox secrets for hosted evaluations.",
         "  --tunnel-id TEXT            "
-        "Prime Tunnel ID to use as the hosted eval inference endpoint.",
+        "Optional Prime Tunnel ID convenience; for any public tunnel URL use --api-base-url.",
         "  --eval-name TEXT            Custom name for the hosted evaluation.",
     ]
     lines = help_text.rstrip("\n").splitlines()

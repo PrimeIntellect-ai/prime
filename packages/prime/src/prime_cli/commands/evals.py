@@ -1340,7 +1340,7 @@ def run_eval_cmd(
     tunnel_id: Optional[str] = typer.Option(
         None,
         "--tunnel-id",
-        help="Prime Tunnel ID to use as the hosted eval inference endpoint",
+        help=("Optional Prime Tunnel ID convenience; for any public tunnel URL use --api-base-url"),
     ),
     sampling_args: Optional[str] = typer.Option(
         None,

@@ -727,20 +727,25 @@ def delete(
                     )
                 return
 
-            count_str = str(total) if total is not None else "all matching"
             scope_suffix = "" if only_mine else " across ALL users"
             if labels:
                 labels_str = ", ".join(labels)
+                count_phrase = (
+                    f"{total} sandbox(es)" if total is not None else "all matching sandboxes"
+                )
                 confirmation_msg = (
-                    f"Are you sure you want to delete {count_str} sandbox(es)"
+                    f"Are you sure you want to delete {count_phrase}"
                     f" with labels: {labels_str}{scope_suffix}? This action"
                     " cannot be undone."
                 )
                 cancel_msg = "Delete cancelled"
             else:
+                count_phrase = (
+                    f"ALL {total} sandbox(es)" if total is not None else "EVERY matching sandbox"
+                )
                 confirmation_msg = (
-                    f"Are you sure you want to delete ALL {count_str}"
-                    f" sandbox(es){scope_suffix}? This action cannot be undone."
+                    f"Are you sure you want to delete {count_phrase}"
+                    f"{scope_suffix}? This action cannot be undone."
                 )
                 cancel_msg = "Delete all cancelled"
 

@@ -562,6 +562,7 @@ class SandboxClient:
         page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
+        user_id: Optional[str] = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         # Auto-populate team_id from config if not specified
@@ -571,6 +572,8 @@ class SandboxClient:
         params: Dict[str, Any] = {"page": page, "per_page": per_page}
         if team_id:
             params["team_id"] = team_id
+        if user_id:
+            params["user_id"] = user_id
         if status:
             params["status"] = status
         if labels:
@@ -595,13 +598,23 @@ class SandboxClient:
         self,
         sandbox_ids: Optional[List[str]] = None,
         labels: Optional[List[str]] = None,
+        team_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        all_users: bool = False,
     ) -> BulkDeleteSandboxResponse:
-        """Bulk delete multiple sandboxes by IDs or labels (must specify one, not both)"""
-        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids, labels=labels)
+        """Bulk delete multiple sandboxes."""
+        request = BulkDeleteSandboxRequest(
+            sandbox_ids=sandbox_ids,
+            labels=labels,
+            team_id=team_id,
+            user_id=user_id,
+            all_users=all_users,
+        )
+        payload = request.model_dump(by_alias=False, exclude_none=True)
         response = self.client.request(
             "DELETE",
             "/sandbox",
-            json=request.model_dump(by_alias=False, exclude_none=True),
+            json=payload,
         )
         return BulkDeleteSandboxResponse.model_validate(response)
 

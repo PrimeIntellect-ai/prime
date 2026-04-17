@@ -240,3 +240,76 @@ def test_sandbox_create_vm_without_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "Successfully created sandbox sbx-vm-123" in output
     assert captured["request"].vm is True
     assert captured["request"].gpu_count == 0
+
+
+def test_sandbox_delete_by_label_only_deletes_owned_sandboxes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setenv("PRIME_USER_ID", "user-1")
+
+    captured: dict[str, Any] = {}
+
+    def mock_list(self: Any, **kwargs: Any) -> Any:
+        captured["list_kwargs"] = kwargs
+        return SimpleNamespace(
+            sandboxes=[
+                SimpleNamespace(id="sbx-owned", user_id="user-1"),
+                SimpleNamespace(id="sbx-other", user_id="user-2"),
+            ],
+            has_next=False,
+        )
+
+    def mock_bulk_delete(self: Any, sandbox_ids: list[str] | None = None, **_: Any) -> Any:
+        captured["sandbox_ids"] = sandbox_ids
+        return SimpleNamespace(
+            succeeded=sandbox_ids or [],
+            failed=[],
+            message="deleted",
+        )
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.bulk_delete", mock_bulk_delete)
+
+    result = runner.invoke(app, ["sandbox", "delete", "--label", "keep", "--yes"])
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, f"Failed: {result.output}"
+    assert captured["list_kwargs"]["labels"] == ["keep"]
+    assert captured["list_kwargs"]["exclude_terminated"] is True
+    assert captured["sandbox_ids"] == ["sbx-owned"]
+    assert "Successfully deleted 1 sandbox(es):" in output
+
+
+def test_sandbox_delete_by_label_aligns_with_all_active_only_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setenv("PRIME_USER_ID", "user-1")
+
+    def mock_list(self: Any, **kwargs: Any) -> Any:
+        assert kwargs["labels"] == ["archive"]
+        assert kwargs["exclude_terminated"] is True
+        return SimpleNamespace(
+            sandboxes=[SimpleNamespace(id="sbx-active", user_id="user-1")],
+            has_next=False,
+        )
+
+    def mock_bulk_delete(self: Any, sandbox_ids: list[str] | None = None, **_: Any) -> Any:
+        assert sandbox_ids == ["sbx-active"]
+        return SimpleNamespace(
+            succeeded=["sbx-active"],
+            failed=[],
+            message="deleted",
+        )
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.bulk_delete", mock_bulk_delete)
+
+    result = runner.invoke(app, ["sandbox", "delete", "--label", "archive", "--yes"])
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, f"Failed: {result.output}"
+    assert "Processed 1 sandbox(es)" in output

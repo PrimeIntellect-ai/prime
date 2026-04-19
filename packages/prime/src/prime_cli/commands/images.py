@@ -10,6 +10,7 @@ from typing import Optional
 import click
 import httpx
 import typer
+from gitignore_parser import parse_gitignore
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
 from rich.table import Table
 
@@ -108,9 +109,30 @@ def push_image(
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
             tar_path = tmp_file.name
 
+        # Build a .dockerignore matcher so we don't upload ignored paths
+        # (e.g. local .venv, node_modules) with the context.
+        dockerignore_path = context_path / ".dockerignore"
+        ignore_matcher = (
+            parse_gitignore(str(dockerignore_path), base_dir=str(context_path))
+            if dockerignore_path.is_file()
+            else None
+        )
+
+        def tar_filter(tarinfo: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
+            if ignore_matcher is None:
+                return tarinfo
+            rel = tarinfo.name
+            if rel.startswith("./"):
+                rel = rel[2:]
+            if not rel or rel == ".":
+                return tarinfo
+            if ignore_matcher(str(context_path / rel)):
+                return None
+            return tarinfo
+
         try:
             with tarfile.open(tar_path, "w:gz") as tar:
-                tar.add(context_path, arcname=".")
+                tar.add(context_path, arcname=".", filter=tar_filter)
                 tar.add(dockerfile_path, arcname=PACKAGED_DOCKERFILE_PATH)
 
             tar_size_mb = Path(tar_path).stat().st_size / (1024 * 1024)

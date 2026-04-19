@@ -144,6 +144,7 @@ class RLClient:
         cluster_name: Optional[str] = None,
         infrastructure_config: Optional[Dict[str, Any]] = None,
         run_config: Optional[Dict[str, Any]] = None,
+        install_prerelease: Optional[bool] = None,
     ) -> RLRun:
         """Create a new RL training run."""
         try:
@@ -238,6 +239,9 @@ class RLClient:
 
             if run_config:
                 payload["run_config"] = run_config
+
+            if install_prerelease is not None:
+                payload["install_prerelease"] = install_prerelease
 
             response = self.client.post("/rft/runs", json=payload)
             return RLRun.model_validate(response.get("run"))

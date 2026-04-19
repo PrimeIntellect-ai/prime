@@ -499,6 +499,7 @@ class RLConfig(BaseModel):
     adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
     infrastructure: InfrastructureConfig = Field(default_factory=InfrastructureConfig)
     run_config: Dict[str, Any] = Field(default_factory=dict)
+    install_prerelease: bool | None = None
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
 
@@ -864,6 +865,7 @@ def create_run(
             cluster_name=cfg.cluster_name,
             infrastructure_config=cfg.infrastructure.to_api_dict(),
             run_config=cfg.run_config if cfg.run_config else None,
+            install_prerelease=cfg.install_prerelease,
         )
 
         if output == "json":

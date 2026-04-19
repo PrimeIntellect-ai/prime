@@ -68,3 +68,24 @@ def test_flatten_config_schema_preserves_optional_array_item_types() -> None:
     }
 
     assert rows["buffer.env_ratios"] == "list[number]"
+
+
+def test_load_config_accepts_install_prerelease(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\n'
+        "install_prerelease = true\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.install_prerelease is True
+
+
+def test_load_config_install_prerelease_defaults_to_none(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\n')
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.install_prerelease is None

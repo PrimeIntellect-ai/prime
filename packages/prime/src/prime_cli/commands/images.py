@@ -110,11 +110,20 @@ def push_image(
             tar_path = tmp_file.name
 
         # Build a .dockerignore matcher so we don't upload ignored paths
-        # (e.g. local .venv, node_modules) with the context.
-        dockerignore_path = context_path / ".dockerignore"
+        # (e.g. local .venv, node_modules) with the context. BuildKit
+        # looks for <Dockerfile>.dockerignore next to the Dockerfile first
+        # and falls back to <context>/.dockerignore, so mirror that.
+        per_dockerfile_ignore = dockerfile_path.with_name(dockerfile_path.name + ".dockerignore")
+        root_dockerignore = context_path / ".dockerignore"
+        if per_dockerfile_ignore.is_file():
+            dockerignore_path: Optional[Path] = per_dockerfile_ignore
+        elif root_dockerignore.is_file():
+            dockerignore_path = root_dockerignore
+        else:
+            dockerignore_path = None
         ignore_matcher = (
             parse_gitignore(str(dockerignore_path), base_dir=str(context_path))
-            if dockerignore_path.is_file()
+            if dockerignore_path is not None
             else None
         )
 

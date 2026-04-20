@@ -130,6 +130,8 @@ def _append_eval_options(help_text: str) -> str:
         "  --allow-sandbox-access      Allow sandbox read/write access for hosted evaluations.",
         "  --allow-instances-access    "
         "Allow instance creation and management for hosted evaluations.",
+        "  --allow-tunnel-access       "
+        "Allow tunnel creation and management for hosted evaluations.",
         "  --custom-secrets JSON       Custom sandbox secrets for hosted evaluations.",
         "  --eval-name TEXT            Custom name for the hosted evaluation.",
     ]

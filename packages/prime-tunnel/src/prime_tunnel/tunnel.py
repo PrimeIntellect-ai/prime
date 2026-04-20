@@ -6,7 +6,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 
@@ -67,6 +67,7 @@ class Tunnel:
         connection_timeout: float = 30.0,
         log_level: str = "info",
         team_id: Optional[str] = None,
+        log_callback: Optional[Callable[[str], None]] = None,
     ):
         """
         Initialize a tunnel.
@@ -78,6 +79,10 @@ class Tunnel:
             team_id: Optional team ID for team tunnels
             connection_timeout: Timeout for establishing connection (seconds)
             log_level: frpc log level (trace, debug, info, warn, error)
+            log_callback: Optional callback invoked with each line of frpc
+                output (stdout+stderr) from a background thread. Exceptions
+                raised by the callback are swallowed so the drain thread
+                stays alive.
         """
         self.local_port = local_port
         self.local_addr = local_addr
@@ -85,6 +90,7 @@ class Tunnel:
         self.team_id = team_id
         self.connection_timeout = connection_timeout
         self.log_level = log_level
+        self._log_callback = log_callback
 
         self._client = TunnelClient()
         self._process: Optional[subprocess.Popen] = None
@@ -330,6 +336,11 @@ class Tunnel:
                             self._recent_output.append(line)
                             if len(self._recent_output) > max_lines:
                                 self._recent_output.pop(0)
+                        if self._log_callback is not None:
+                            try:
+                                self._log_callback(line)
+                            except Exception:
+                                pass
             except (OSError, ValueError):
                 pass  # Pipe closed
 

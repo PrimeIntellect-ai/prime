@@ -900,8 +900,12 @@ def _load_eval_directory(directory: Path) -> dict:
         else:
             metadata_copy[key] = value
 
+    eval_name = metadata.get("eval_name") or metadata.get("name")
+    if type(eval_name) is not str or not eval_name:
+        eval_name = f"{env_field}-{metadata['model']}"
+
     return {
-        "eval_name": f"{env_field}-{metadata['model']}",
+        "eval_name": eval_name,
         "model_name": metadata["model"],
         "env": env_field,
         "metrics": metrics,

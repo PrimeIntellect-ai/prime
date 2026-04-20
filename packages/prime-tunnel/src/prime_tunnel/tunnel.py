@@ -80,9 +80,7 @@ class Tunnel:
             connection_timeout: Timeout for establishing connection (seconds)
             log_level: frpc log level (trace, debug, info, warn, error)
             log_callback: Optional callback invoked with each line of frpc
-                output (stdout+stderr) from a background thread. Exceptions
-                raised by the callback are swallowed so the drain thread
-                stays alive.
+                output (stdout+stderr) from a background thread.
         """
         self.local_port = local_port
         self.local_addr = local_addr

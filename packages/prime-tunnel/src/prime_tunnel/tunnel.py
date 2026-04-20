@@ -5,8 +5,10 @@ import re
 import subprocess
 import threading
 import time
+import traceback
+from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 
@@ -28,6 +30,25 @@ _LOG_RE = re.compile(
     r"(.+)"
 )
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+class TunnelState(str, Enum):
+    """Lifecycle state of a tunnel's frpc process."""
+
+    STOPPED = "stopped"
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
+
+
+StateCallback = Callable[[TunnelState, TunnelState], None]
+
+_DISCONNECT_SIGNALS = (
+    "heartbeat timeout",
+    "pong message contains error",
+    "try to connect to server",
+)
+_CONNECTED_SIGNAL = "start proxy success"
 
 
 def _parse_frpc_error(
@@ -93,6 +114,10 @@ class Tunnel:
         self._started = False
         self._output_lines: list[str] = []
 
+        self._state: TunnelState = TunnelState.STOPPED
+        self._state_lock = threading.Lock()
+        self._state_callbacks: list[StateCallback] = []
+
     @property
     def tunnel_id(self) -> Optional[str]:
         """Get the tunnel ID."""
@@ -114,6 +139,52 @@ class Tunnel:
         if self._process is None:
             return False
         return self._process.poll() is None
+
+    @property
+    def state(self) -> TunnelState:
+        """Current tunnel state."""
+        with self._state_lock:
+            return self._state
+
+    def on_state_change(self, callback: StateCallback) -> StateCallback:
+        """Register a callback fired on state transitions."""
+        with self._state_lock:
+            self._state_callbacks.append(callback)
+        return callback
+
+    def off_state_change(self, callback: StateCallback) -> None:
+        """Unregister a previously-registered state callback."""
+        with self._state_lock:
+            try:
+                self._state_callbacks.remove(callback)
+            except ValueError:
+                pass
+
+    def _set_state(self, new_state: TunnelState) -> None:
+        with self._state_lock:
+            if self._state == new_state:
+                return
+            old_state = self._state
+            self._state = new_state
+            callbacks = list(self._state_callbacks)
+
+        for cb in callbacks:
+            try:
+                cb(old_state, new_state)
+            except Exception:
+                traceback.print_exc()
+
+    def _handle_log_line(self, line: str) -> None:
+        """Scan a drained frpc log line for state transition signals."""
+        clean = _ANSI_RE.sub("", line)
+        if _CONNECTED_SIGNAL in clean:
+            self._set_state(TunnelState.CONNECTED)
+            return
+        if self._state == TunnelState.CONNECTED:
+            for signal in _DISCONNECT_SIGNALS:
+                if signal in clean:
+                    self._set_state(TunnelState.DISCONNECTED)
+                    return
 
     async def check_registered(self) -> bool:
         """Check if the tunnel is still registered server-side.
@@ -143,6 +214,8 @@ class Tunnel:
         """
         if self._started:
             raise TunnelError("Tunnel is already started")
+
+        self._set_state(TunnelState.CONNECTING)
 
         # 1. Get frpc binary
         frpc_path = await asyncio.to_thread(get_frpc_path)
@@ -200,6 +273,7 @@ class Tunnel:
             raise TunnelConnectionError(message=f"Failed to start pipe drain: {e}") from e
 
         self._started = True
+        self._set_state(TunnelState.CONNECTED)
 
         return self.url
 
@@ -251,6 +325,7 @@ class Tunnel:
                 self._config_file = None
 
         self._started = False
+        self._set_state(TunnelState.STOPPED)
 
     async def _cleanup(self) -> None:
         """Clean up tunnel resources."""
@@ -293,6 +368,8 @@ class Tunnel:
         except Exception:
             pass
 
+        self._set_state(TunnelState.STOPPED)
+
     @property
     def recent_output(self) -> list[str]:
         """Last N lines of frpc output (thread-safe). Falls back to startup output."""
@@ -319,7 +396,7 @@ class Tunnel:
         self._recent_output: list[str] = list(self._output_lines[-max_lines:])
 
         def drain_pipe(pipe):
-            """Read output from a pipe, retaining recent lines."""
+            """Read output from a pipe, retaining recent lines and firing state events."""
             if pipe is None:
                 return
             try:
@@ -330,8 +407,15 @@ class Tunnel:
                             self._recent_output.append(line)
                             if len(self._recent_output) > max_lines:
                                 self._recent_output.pop(0)
+                        self._handle_log_line(line)
             except (OSError, ValueError):
                 pass  # Pipe closed
+            finally:
+                # If the process has exited, reflect it in state. Either pipe
+                # closing implies frpc is shutting down.
+                proc = self._process
+                if proc is None or proc.poll() is not None:
+                    self._set_state(TunnelState.STOPPED)
 
         self._drain_threads: list[threading.Thread] = []
         for pipe in (self._process.stdout, self._process.stderr):

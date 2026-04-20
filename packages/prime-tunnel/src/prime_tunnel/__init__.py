@@ -12,7 +12,7 @@ from prime_tunnel.exceptions import (
     TunnelTimeoutError,
 )
 from prime_tunnel.models import TunnelInfo
-from prime_tunnel.tunnel import Tunnel
+from prime_tunnel.tunnel import StateCallback, Tunnel, TunnelState
 
 __all__ = [
     "__version__",
@@ -21,6 +21,8 @@ __all__ = [
     "TunnelClient",
     # Main interface
     "Tunnel",
+    "TunnelState",
+    "StateCallback",
     # Models
     "TunnelInfo",
     # Exceptions

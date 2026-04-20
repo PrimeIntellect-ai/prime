@@ -873,12 +873,16 @@ class SandboxClient:
         self,
         sandbox_id: str,
         job: BackgroundJob,
+        timeout: Optional[int] = None,
     ) -> BackgroundJobStatus:
         """Check the status of a background job.
 
         Args:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
+            timeout: Optional per-call timeout (in seconds) forwarded to the
+                underlying read_file calls. When None, the APIClient default
+                applies.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
@@ -886,7 +890,7 @@ class SandboxClient:
 
         def read_or_empty(path: str) -> str:
             try:
-                return self.read_file(sandbox_id, path).content
+                return self.read_file(sandbox_id, path, timeout=timeout).content
             except SandboxFileNotFoundError:
                 return ""
 
@@ -1724,12 +1728,16 @@ class AsyncSandboxClient:
         self,
         sandbox_id: str,
         job: BackgroundJob,
+        timeout: Optional[int] = None,
     ) -> BackgroundJobStatus:
         """Check the status of a background job (async).
 
         Args:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
+            timeout: Optional per-call timeout (in seconds) forwarded to the
+                underlying read_file calls. When None, the APIClient default
+                applies.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
@@ -1737,7 +1745,7 @@ class AsyncSandboxClient:
 
         async def read_or_empty(path: str) -> str:
             try:
-                return (await self.read_file(sandbox_id, path)).content
+                return (await self.read_file(sandbox_id, path, timeout=timeout)).content
             except SandboxFileNotFoundError:
                 return ""
 

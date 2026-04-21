@@ -816,6 +816,50 @@ def delete(
 
 
 @app.command(no_args_is_help=True)
+def extend(
+    sandbox_id: str = typer.Argument(..., help="Sandbox ID to extend"),
+    timeout_minutes: int = typer.Option(
+        ...,
+        "--timeout-minutes",
+        "-t",
+        min=1,
+        max=1440,
+        help=(
+            "New total lifetime in minutes, measured from when the sandbox"
+            " started. Absolute, not a delta. Max 1440."
+        ),
+    ),
+) -> None:
+    """Extend the total lifetime of a running sandbox."""
+    try:
+        base_client = APIClient()
+        sandbox_client = SandboxClient(base_client)
+
+        with console.status("[bold blue]Extending sandbox...", spinner="dots"):
+            updated: Sandbox = sandbox_client.extend(sandbox_id, timeout_minutes)
+
+        console.print(
+            f"[green]Extended sandbox {sandbox_id} →"
+            f" total lifetime {updated.timeout_minutes}m[/green]"
+        )
+    except typer.Exit:
+        raise
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {str(e)}")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=True)
+        raise typer.Exit(1)
+
+
+@app.command(no_args_is_help=True)
 def logs(sandbox_id: str) -> None:
     """Get logs from a sandbox"""
     try:

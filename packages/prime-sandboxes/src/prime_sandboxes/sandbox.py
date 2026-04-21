@@ -630,6 +630,19 @@ class SandboxClient:
         response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
 
+    def extend(self, sandbox_id: str, timeout_minutes: int) -> Sandbox:
+        """Set a new total lifetime for a sandbox.
+
+        `timeout_minutes` is absolute (minutes from startedAt), not a delta.
+        Capped at 1440.
+        """
+        response = self.client.request(
+            "PATCH",
+            f"/sandbox/{sandbox_id}",
+            json={"timeout_minutes": timeout_minutes},
+        )
+        return Sandbox.model_validate(response)
+
     def bulk_delete(
         self,
         sandbox_ids: Optional[List[str]] = None,
@@ -1521,6 +1534,19 @@ class AsyncSandboxClient:
         """Delete a sandbox"""
         response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
         return response
+
+    async def extend(self, sandbox_id: str, timeout_minutes: int) -> Sandbox:
+        """Set a new total lifetime for a sandbox.
+
+        ``timeout_minutes`` is absolute (minutes from startedAt), not a delta.
+        Capped at 1440.
+        """
+        response = await self.client.request(
+            "PATCH",
+            f"/sandbox/{sandbox_id}",
+            json={"timeout_minutes": timeout_minutes},
+        )
+        return Sandbox.model_validate(response)
 
     async def bulk_delete(
         self,

@@ -633,7 +633,7 @@ class SandboxClient:
     def extend(self, sandbox_id: str, timeout_minutes: int) -> Sandbox:
         """Set a new total lifetime for a sandbox.
 
-        `timeout_minutes` is absolute (minutes from startedAt), not a delta.
+        timeout_minutes is absolute (minutes from startedAt), not a delta.
         Capped at 1440.
         """
         response = self.client.request(

@@ -964,6 +964,13 @@ def _discover_eval_outputs() -> list[Path]:
     return sorted(eval_dirs)
 
 
+def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, Any]] = None) -> str:
+    viewer_url = response.get("viewer_url") if response else None
+    if viewer_url:
+        return str(viewer_url)
+    return get_eval_viewer_url(evaluation_id)
+
+
 def _push_single_eval(
     config_path: str,
     env_slug: Optional[str],
@@ -1049,14 +1056,16 @@ def _push_single_eval(
         console.print()
 
     console.print("[blue]Finalizing evaluation...[/blue]")
-    client.finalize_evaluation(eval_id, metrics=eval_data.get("metrics"))
+    finalize_response = client.finalize_evaluation(eval_id, metrics=eval_data.get("metrics"))
+    viewer_url = _resolve_eval_viewer_url(eval_id, finalize_response)
     console.print("[green]✓ Evaluation finalized[/green]")
     console.print()
 
     console.print("[green]✓ Success[/green]")
     console.print(f"[blue]Evaluation ID:[/blue] {eval_id}")
+    console.print(f"[dim]View results:[/dim] {viewer_url}")
     console.print()
-    console.print("[dim]View your evaluation:[/dim]")
+    console.print("[dim]Inspect evaluation data:[/dim]")
     console.print(f"  prime eval get {eval_id}")
     console.print(f"  prime eval samples {eval_id}")
 

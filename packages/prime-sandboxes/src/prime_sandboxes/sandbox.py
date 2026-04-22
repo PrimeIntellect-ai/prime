@@ -61,12 +61,27 @@ from .rpc_command_session import (
     collect_command_session_start_event,
 )
 
-# Retry configuration for transient connection errors on gateway requests
-# Note: ReadTimeout is NOT included because the request may have been processed
-GATEWAY_RETRYABLE_EXCEPTIONS = (
+# Connection-level errors: request never reached the server, so retry is safe
+# for any HTTP method (including non-idempotent POSTs).
+# Note: ReadTimeout / ReadError are NOT in this tuple because they occur after
+# the server has (at least partially) started responding — meaning the request
+# was already processed and a retry would duplicate side effects on POST.
+GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
     httpx.RemoteProtocolError,  # Server disconnected unexpectedly
     httpx.ConnectError,  # Connection refused/failed
     httpx.PoolTimeout,  # No connection available in pool
+)
+
+# Response-read failures: the server may have already processed the request
+# (TCP connection dropped mid-response body). Only safe to retry on idempotent
+# methods (GET/HEAD/PUT/DELETE), where a duplicate request is a no-op.
+# ReadTimeout is STILL excluded even for idempotent methods — we can't
+# distinguish "server hanging" from "server mid-processing", and retrying a
+# hung request compounds load on an already-stressed server instead of
+# recovering. ReadError (TCP reset / connection drop during read) is different:
+# the connection is definitively gone, so retrying doesn't pile on.
+GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS = GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS + (
+    httpx.ReadError,  # TCP connection broken while reading response
 )
 
 # Retryable HTTP 5xx status codes (e.g. Cloudflare 524 timeout, server errors)
@@ -78,8 +93,8 @@ RETRY_409_BASE_DELAY = 0.25  # 250ms, 500ms, 1000ms, 2000ms with exponential bac
 
 
 def _is_retryable_gateway_error(exc: BaseException) -> bool:
-    """Check if an exception is retryable for gateway requests."""
-    if isinstance(exc, GATEWAY_RETRYABLE_EXCEPTIONS):
+    """Check if an exception is retryable for idempotent gateway requests."""
+    if isinstance(exc, GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS):
         return True
     if (
         isinstance(exc, httpx.HTTPStatusError)
@@ -91,7 +106,8 @@ def _is_retryable_gateway_error(exc: BaseException) -> bool:
     return False
 
 
-# Retry decorator for idempotent gateway requests (connection errors + 5xx responses)
+# Retry decorator for idempotent gateway requests (connection errors, ReadError,
+# and 5xx responses). Safe for GET/HEAD/PUT/DELETE since duplicate requests are no-ops.
 _gateway_retry = retry(
     retry=retry_if_exception(_is_retryable_gateway_error),
     stop=stop_after_attempt(4),
@@ -100,9 +116,10 @@ _gateway_retry = retry(
 )
 
 # Retry decorator for non-idempotent gateway requests (connection errors only —
-# 5xx means the server received the request, so retrying risks duplicate side effects)
+# ReadError and 5xx both imply the server received/processed the request, so
+# retrying POSTs on those risks duplicate side effects).
 _gateway_post_retry = retry(
-    retry=retry_if_exception_type(GATEWAY_RETRYABLE_EXCEPTIONS),
+    retry=retry_if_exception_type(GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS),
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=1, min=1, max=30),
     reraise=True,
@@ -541,6 +558,25 @@ class SandboxClient:
         """Clear all cached auth tokens"""
         self._auth_cache.clear()
 
+    def is_vm(self, sandbox_id: str) -> bool:
+        """Return True if the sandbox is VM-backed.
+
+        Uses the internal auth cache when available and falls back to a
+        ``GET /sandbox/<id>`` lookup on a cold cache. The result is cached
+        alongside the auth token so subsequent calls are essentially free.
+        """
+        return self._auth_cache.is_vm(sandbox_id)
+
+    def _guard_vm_unsupported(self, sandbox_id: str, feature_name: str) -> None:
+        """Raise APIError if the operation is not supported on VM sandboxes.
+
+        Mirrors the CLI behavior of short-circuiting operations the backend
+        does not currently support for VM-backed sandboxes, so callers fail
+        fast with a clear message instead of an opaque gateway error.
+        """
+        if self._auth_cache.is_vm(sandbox_id):
+            raise APIError(f"{feature_name} is not yet supported for VM sandboxes.")
+
     def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
         # Auto-populate team_id from config if not specified
@@ -562,6 +598,7 @@ class SandboxClient:
         page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
+        user_id: Optional[str] = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         # Auto-populate team_id from config if not specified
@@ -571,6 +608,8 @@ class SandboxClient:
         params: Dict[str, Any] = {"page": page, "per_page": per_page}
         if team_id:
             params["team_id"] = team_id
+        if user_id:
+            params["user_id"] = user_id
         if status:
             params["status"] = status
         if labels:
@@ -595,13 +634,23 @@ class SandboxClient:
         self,
         sandbox_ids: Optional[List[str]] = None,
         labels: Optional[List[str]] = None,
+        team_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        all_users: bool = False,
     ) -> BulkDeleteSandboxResponse:
-        """Bulk delete multiple sandboxes by IDs or labels (must specify one, not both)"""
-        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids, labels=labels)
+        """Bulk delete multiple sandboxes."""
+        request = BulkDeleteSandboxRequest(
+            sandbox_ids=sandbox_ids,
+            labels=labels,
+            team_id=team_id,
+            user_id=user_id,
+            all_users=all_users,
+        )
+        payload = request.model_dump(by_alias=False, exclude_none=True)
         response = self.client.request(
             "DELETE",
             "/sandbox",
-            json=request.model_dump(by_alias=False, exclude_none=True),
+            json=payload,
         )
         return BulkDeleteSandboxResponse.model_validate(response)
 
@@ -856,12 +905,16 @@ class SandboxClient:
         self,
         sandbox_id: str,
         job: BackgroundJob,
+        timeout: Optional[int] = None,
     ) -> BackgroundJobStatus:
         """Check the status of a background job.
 
         Args:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
+            timeout: Optional per-call timeout (in seconds) forwarded to the
+                underlying read_file calls. When None, the APIClient default
+                applies.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
@@ -869,7 +922,7 @@ class SandboxClient:
 
         def read_or_empty(path: str) -> str:
             try:
-                return self.read_file(sandbox_id, path).content
+                return self.read_file(sandbox_id, path, timeout=timeout).content
             except SandboxFileNotFoundError:
                 return ""
 
@@ -1229,6 +1282,7 @@ class SandboxClient:
         protocol: str = "HTTP",
     ) -> ExposedPort:
         """Expose a port from a sandbox."""
+        self._guard_vm_unsupported(sandbox_id, "Port exposure")
         request = ExposePortRequest(port=port, name=name, protocol=protocol)
         response = self.client.request(
             "POST",
@@ -1239,10 +1293,12 @@ class SandboxClient:
 
     def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
         """Unexpose a port from a sandbox."""
+        self._guard_vm_unsupported(sandbox_id, "Port unexpose")
         self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
 
     def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
         """List all exposed ports for a sandbox"""
+        self._guard_vm_unsupported(sandbox_id, "Port listing")
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
         return ListExposedPortsResponse.model_validate(response)
 
@@ -1257,6 +1313,7 @@ class SandboxClient:
         ttl_seconds: Optional[int] = None,
     ) -> SSHSession:
         """Create an SSH session"""
+        self._guard_vm_unsupported(sandbox_id, "SSH")
         payload: Dict[str, Any] = {}
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
@@ -1269,6 +1326,7 @@ class SandboxClient:
 
     def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
         """Close an SSH session and remove its exposure"""
+        self._guard_vm_unsupported(sandbox_id, "SSH")
         self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
 
@@ -1394,6 +1452,25 @@ class AsyncSandboxClient:
         """Clear all cached auth tokens."""
         await self._auth_cache.clear()
 
+    async def is_vm(self, sandbox_id: str) -> bool:
+        """Return True if the sandbox is VM-backed.
+
+        Uses the internal auth cache when available and falls back to a
+        ``GET /sandbox/<id>`` lookup on a cold cache. The result is cached
+        alongside the auth token so subsequent calls are essentially free.
+        """
+        return await self._auth_cache.is_vm(sandbox_id)
+
+    async def _guard_vm_unsupported(self, sandbox_id: str, feature_name: str) -> None:
+        """Raise APIError if the operation is not supported on VM sandboxes.
+
+        Mirrors the CLI behavior of short-circuiting operations the backend
+        does not currently support for VM-backed sandboxes, so callers fail
+        fast with a clear message instead of an opaque gateway error.
+        """
+        if await self._auth_cache.is_vm(sandbox_id):
+            raise APIError(f"{feature_name} is not yet supported for VM sandboxes.")
+
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
         if request.team_id is None:
@@ -1414,6 +1491,7 @@ class AsyncSandboxClient:
         page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
+        user_id: Optional[str] = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         if team_id is None:
@@ -1422,6 +1500,8 @@ class AsyncSandboxClient:
         params: Dict[str, Any] = {"page": page, "per_page": per_page}
         if team_id:
             params["team_id"] = team_id
+        if user_id:
+            params["user_id"] = user_id
         if status:
             params["status"] = status
         if labels:
@@ -1446,13 +1526,23 @@ class AsyncSandboxClient:
         self,
         sandbox_ids: Optional[List[str]] = None,
         labels: Optional[List[str]] = None,
+        team_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        all_users: bool = False,
     ) -> BulkDeleteSandboxResponse:
-        """Bulk delete multiple sandboxes by IDs or labels"""
-        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids, labels=labels)
+        """Bulk delete multiple sandboxes."""
+        request = BulkDeleteSandboxRequest(
+            sandbox_ids=sandbox_ids,
+            labels=labels,
+            team_id=team_id,
+            user_id=user_id,
+            all_users=all_users,
+        )
+        payload = request.model_dump(by_alias=False, exclude_none=True)
         response = await self.client.request(
             "DELETE",
             "/sandbox",
-            json=request.model_dump(by_alias=False, exclude_none=True),
+            json=payload,
         )
         return BulkDeleteSandboxResponse.model_validate(response)
 
@@ -1707,12 +1797,16 @@ class AsyncSandboxClient:
         self,
         sandbox_id: str,
         job: BackgroundJob,
+        timeout: Optional[int] = None,
     ) -> BackgroundJobStatus:
         """Check the status of a background job (async).
 
         Args:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
+            timeout: Optional per-call timeout (in seconds) forwarded to the
+                underlying read_file calls. When None, the APIClient default
+                applies.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
@@ -1720,7 +1814,7 @@ class AsyncSandboxClient:
 
         async def read_or_empty(path: str) -> str:
             try:
-                return (await self.read_file(sandbox_id, path)).content
+                return (await self.read_file(sandbox_id, path, timeout=timeout)).content
             except SandboxFileNotFoundError:
                 return ""
 
@@ -2110,6 +2204,7 @@ class AsyncSandboxClient:
         protocol: str = "HTTP",
     ) -> ExposedPort:
         """Expose a port from a sandbox."""
+        await self._guard_vm_unsupported(sandbox_id, "Port exposure")
         request = ExposePortRequest(port=port, name=name, protocol=protocol)
         response = await self.client.request(
             "POST",
@@ -2120,10 +2215,12 @@ class AsyncSandboxClient:
 
     async def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
         """Unexpose a port from a sandbox."""
+        await self._guard_vm_unsupported(sandbox_id, "Port unexpose")
         await self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
 
     async def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
         """List all exposed ports for a sandbox"""
+        await self._guard_vm_unsupported(sandbox_id, "Port listing")
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
         return ListExposedPortsResponse.model_validate(response)
 
@@ -2138,6 +2235,7 @@ class AsyncSandboxClient:
         ttl_seconds: Optional[int] = None,
     ) -> SSHSession:
         """Create an SSH session"""
+        await self._guard_vm_unsupported(sandbox_id, "SSH")
         payload: Dict[str, Any] = {}
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
@@ -2150,6 +2248,7 @@ class AsyncSandboxClient:
 
     async def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
         """Close an SSH session and remove its exposure"""
+        await self._guard_vm_unsupported(sandbox_id, "SSH")
         await self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
 

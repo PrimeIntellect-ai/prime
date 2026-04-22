@@ -44,3 +44,9 @@ def test_append_eval_options_includes_env_loading_flags() -> None:
 
     assert "--env-file PATH" in help_text
     assert "--env-var TEXT" in help_text
+
+
+def test_append_eval_options_mentions_tunnel_access():
+    help_text = _append_eval_options("Usage: prime eval run [-h] environment\n")
+
+    assert "--allow-tunnel-access" in help_text

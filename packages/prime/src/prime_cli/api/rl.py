@@ -49,6 +49,9 @@ class RLRun(BaseModel):
     wandb_project: Optional[str] = Field(None, alias="wandbProject")
     wandb_run_name: Optional[str] = Field(None, alias="wandbRunName")
 
+    # Queue info
+    runs_ahead: Optional[int] = Field(None, alias="runsAhead")
+
     # Timestamps
     started_at: Optional[datetime] = Field(None, alias="startedAt")
     completed_at: Optional[datetime] = Field(None, alias="completedAt")
@@ -140,6 +143,7 @@ class RLClient:
         checkpoint_id: Optional[str] = None,
         cluster_name: Optional[str] = None,
         infrastructure_config: Optional[Dict[str, Any]] = None,
+        run_config: Optional[Dict[str, Any]] = None,
     ) -> RLRun:
         """Create a new RL training run."""
         try:
@@ -231,6 +235,9 @@ class RLClient:
             if infrastructure_config:
                 if "compute_size" in infrastructure_config:
                     payload["compute_size"] = infrastructure_config["compute_size"]
+
+            if run_config:
+                payload["run_config"] = run_config
 
             response = self.client.post("/rft/runs", json=payload)
             return RLRun.model_validate(response.get("run"))

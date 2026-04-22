@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import toml
 import typer
 
@@ -30,6 +31,7 @@ DEFAULT_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_ENV_DIR_PATH = "./environments"
 PRIME_SLUG = "primeintellect"
 INTERNAL_ENV_DISPLAY_HEADER = "X-Prime-Eval-Env-Display"
+EVAL_PREFLIGHT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=60.0)
 MODULE_TO_PRIME_COMMAND = {
     "verifiers.cli.commands.eval": "prime eval run",
     "verifiers.cli.commands.gepa": "prime gepa run",
@@ -130,6 +132,8 @@ def _append_eval_options(help_text: str) -> str:
         "  --allow-sandbox-access      Allow sandbox read/write access for hosted evaluations.",
         "  --allow-instances-access    "
         "Allow instance creation and management for hosted evaluations.",
+        "  --allow-tunnel-access       "
+        "Allow tunnel creation and management for hosted evaluations.",
         "  --custom-secrets JSON       Custom sandbox secrets for hosted evaluations.",
         "  --eval-name TEXT            Custom name for the hosted evaluation.",
     ]
@@ -785,9 +789,15 @@ def _add_default_inference_and_key_args(
 def _validate_model(model: str, inference_base_url: str, configured_base_url: str) -> None:
     if inference_base_url != configured_base_url:
         return
-    client = InferenceClient()
+    client = InferenceClient(timeout=EVAL_PREFLIGHT_TIMEOUT)
     try:
         client.retrieve_model(model)
+    except httpx.TimeoutException:
+        console.print(
+            f"[yellow]Timed out validating model '{model}' during eval preflight.[/yellow] "
+            "Continuing anyway because some thinking models take longer to warm up."
+        )
+        return
     except InferenceAPIError as exc:
         console.print(
             f"[red]Invalid model:[/red] {exc} \n\n"
@@ -802,7 +812,7 @@ def _preflight_inference_billing(
     if inference_base_url != configured_base_url:
         return
 
-    client = InferenceClient()
+    client = InferenceClient(timeout=EVAL_PREFLIGHT_TIMEOUT)
     try:
         client.chat_completion(
             {
@@ -810,6 +820,12 @@ def _preflight_inference_billing(
                 "messages": [{"role": "user", "content": "Reply with OK."}],
             }
         )
+    except httpx.TimeoutException:
+        console.print(
+            f"[yellow]Timed out running the inference preflight probe for '{model}'.[/yellow] "
+            "Continuing anyway because some thinking models take longer to warm up."
+        )
+        return
     except InferencePaymentRequiredError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc

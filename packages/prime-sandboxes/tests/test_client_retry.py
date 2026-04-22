@@ -184,6 +184,33 @@ class TestSyncGatewayRetry:
         assert result == "success"
         assert call_count == 2
 
+    def test_gateway_retry_on_read_error(self):
+        """Test retry on ReadError (TCP drop mid-response) — idempotent path."""
+        from prime_sandboxes.sandbox import _gateway_retry
+
+        call_count = 0
+
+        @_gateway_retry
+        def read_error_then_succeed():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise httpx.ReadError(
+                    "Connection broken", request=httpx.Request("GET", "http://test")
+                )
+            return "success"
+
+        result = read_error_then_succeed()
+        assert result == "success"
+        assert call_count == 2
+
+    def test_is_retryable_gateway_error_accepts_read_error(self):
+        """Predicate reports True for ReadError so idempotent GETs retry."""
+        from prime_sandboxes.sandbox import _is_retryable_gateway_error
+
+        exc = httpx.ReadError("Connection broken", request=httpx.Request("GET", "http://test"))
+        assert _is_retryable_gateway_error(exc) is True
+
     def test_gateway_retry_on_5xx(self):
         """Test retry on 5xx HTTPStatusError (e.g. Cloudflare 524 timeout)."""
         from prime_sandboxes.sandbox import _gateway_retry
@@ -358,5 +385,26 @@ class TestSyncGatewayPostRetry:
 
         with pytest.raises(httpx.HTTPStatusError):
             cf_timeout()
+
+        assert call_count == 1  # no retry
+
+    def test_post_no_retry_on_read_error(self):
+        """ReadError is NOT retried for POST — server may have processed the request,
+        and a retry would duplicate side effects (same hazard as ReadTimeout / 5xx)."""
+        from prime_sandboxes.sandbox import _gateway_post_retry
+
+        call_count = 0
+
+        @_gateway_post_retry
+        def read_error_on_post():
+            nonlocal call_count
+            call_count += 1
+            raise httpx.ReadError(
+                "Connection broken mid-response",
+                request=httpx.Request("POST", "http://test"),
+            )
+
+        with pytest.raises(httpx.ReadError):
+            read_error_on_post()
 
         assert call_count == 1  # no retry

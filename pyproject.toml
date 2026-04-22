@@ -9,9 +9,11 @@ dev-dependencies = [
     "ty>=0.0.1a21",
     "pre-commit>=3.5.0"
 ]
+override-dependencies = ["prime-tunnel>=0.1.6"]
 
 [tool.uv.sources]
-verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.1.10" }
+prime-tunnel = { workspace = true }
+verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.1.12.dev6" }
 
 [tool.pytest.ini_options]
 pythonpath = [

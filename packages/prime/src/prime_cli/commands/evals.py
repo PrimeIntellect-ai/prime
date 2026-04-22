@@ -110,6 +110,7 @@ HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
     "max_concurrent": (int, "an integer"),
     "max_retries": (int, "an integer"),
     "independent_scoring": (bool, "a boolean"),
+    "verbose": (bool, "a boolean"),
     "api_client_type": (str, "a non-empty string"),
     "api_base_url": (str, "a non-empty string"),
     "api_key_var": (str, "a non-empty string"),
@@ -125,6 +126,7 @@ HOSTED_SUPPORTED_VERIFIERS_FIELDS = {
     "header",
     "independent_scoring",
     "max_concurrent",
+    "verbose",
     "max_retries",
     "max_tokens",
     "model",
@@ -152,6 +154,7 @@ HOSTED_SUPPORTED_TOML_FIELDS = {
     "headers",
     "independent_scoring",
     "max_concurrent",
+    "verbose",
     "max_retries",
     "max_tokens",
     "model",
@@ -501,6 +504,8 @@ def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]
         eval_config["state_columns"] = config.state_columns
     if config.independent_scoring:
         eval_config["independent_scoring"] = True
+    if config.verbose:
+        eval_config["verbose"] = True
     if config.headers:
         eval_config["headers"] = config.headers
     if config.extra_env_kwargs:
@@ -1448,6 +1453,7 @@ def run_eval_cmd(
                     "max_retries": None,
                     "state_columns": None,
                     "independent_scoring": False,
+                    "verbose": False,
                     "headers": None,
                     "extra_env_kwargs": None,
                     "api_client_type": None,
@@ -1581,6 +1587,11 @@ def run_eval_cmd(
                         if "independent_scoring" in cli_overrides
                         else target_config.get("independent_scoring", False)
                     ),
+                    "verbose": (
+                        parsed_verifiers_args.verbose
+                        if "verbose" in cli_overrides
+                        else target_config.get("verbose", False)
+                    ),
                     "headers": (
                         cli_headers if "header" in cli_overrides else target_config.get("headers")
                     ),
@@ -1631,6 +1642,7 @@ def run_eval_cmd(
                 target.get("max_retries"),
                 _freeze_json_value(target.get("state_columns")),
                 target.get("independent_scoring", False),
+                target.get("verbose", False),
                 _freeze_json_value(target.get("headers")),
                 _freeze_json_value(target.get("extra_env_kwargs")),
                 target.get("api_client_type"),
@@ -1686,6 +1698,7 @@ def run_eval_cmd(
                     max_retries=target.get("max_retries"),
                     state_columns=target.get("state_columns"),
                     independent_scoring=target.get("independent_scoring", False),
+                    verbose=target.get("verbose", False),
                     headers=target.get("headers"),
                     extra_env_kwargs=target.get("extra_env_kwargs"),
                     api_client_type=target.get("api_client_type"),

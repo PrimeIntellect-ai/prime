@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 from functools import wraps
@@ -23,6 +24,7 @@ from ..utils import (
 )
 from ..utils.display import get_eval_viewer_url
 from ..utils.env_metadata import find_environment_metadata
+from ..utils.env_vars import EnvParseError, collect_env_vars
 from ..utils.eval_push import load_results_jsonl
 from ..utils.hosted_eval import (
     EvalStatus,
@@ -377,6 +379,31 @@ def _fetch_eval_status(client: APIClient, eval_id: str) -> dict[str, Any]:
 def _fetch_logs(client: APIClient, eval_id: str) -> str:
     response = client.get(f"/hosted-evaluations/{eval_id}/logs")
     return response.get("logs") or ""
+
+
+def _apply_eval_cli_env_overrides(
+    env_var: Optional[list[str]],
+    env_file: Optional[list[str]],
+) -> None:
+    """Load explicit eval CLI env inputs into the current process environment."""
+    if not env_var and not env_file:
+        return
+
+    def _warn(message: str) -> None:
+        console.print(f"[yellow]Warning:[/yellow] {message}")
+
+    try:
+        env_overrides = collect_env_vars(
+            env_args=env_var,
+            env_files=env_file,
+            on_warning=_warn,
+        )
+    except EnvParseError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    for key, value in env_overrides.items():
+        os.environ[key] = value
 
 
 def _build_hosted_evaluation_payload(config: HostedEvalConfig) -> dict[str, Any]:
@@ -1186,6 +1213,23 @@ def run_eval_cmd(
             "(used to locate .prime/.env-metadata.json for upstream resolution)"
         ),
     ),
+    env_var: Optional[list[str]] = typer.Option(
+        None,
+        "--env-var",
+        help=(
+            "Environment variable to load before Prime auth/model resolution. "
+            "Accepts: KEY=VALUE (direct value), KEY (reads from $KEY), "
+            "or path/to/file.env (loads env file)."
+        ),
+    ),
+    env_file: Optional[list[str]] = typer.Option(
+        None,
+        "--env-file",
+        help=(
+            "Path to .env file to load before Prime auth/model resolution. "
+            "Supports ${VAR} expansion from local env."
+        ),
+    ),
     hosted: bool = typer.Option(
         False,
         "--hosted",
@@ -1251,6 +1295,8 @@ def run_eval_cmd(
         console.print("[red]Error:[/red] Environment/config must be the first argument.")
         console.print(f"[dim]Example: {EVAL_RUN_EXAMPLE_COMMAND}[/dim]")
         raise typer.Exit(2)
+
+    _apply_eval_cli_env_overrides(env_var=env_var, env_file=env_file)
 
     env_dir_path = _parse_value_option(passthrough_args, "--env-dir-path", "-p")
     poll_interval_was_provided = (

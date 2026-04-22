@@ -1,5 +1,5 @@
 from prime_cli.main import app
-from prime_cli.verifiers_bridge import _sanitize_help_text
+from prime_cli.verifiers_bridge import _append_eval_options, _sanitize_help_text
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -37,3 +37,10 @@ def test_sanitize_help_removes_vf_eval_aliases():
     assert "verifiers.cli.commands.eval" not in help_text
     assert "vf-eval" not in help_text
     assert "env_id_or_config" not in help_text
+
+
+def test_append_eval_options_includes_env_loading_flags() -> None:
+    help_text = _append_eval_options("Usage: prime eval run\n")
+
+    assert "--env-file PATH" in help_text
+    assert "--env-var TEXT" in help_text

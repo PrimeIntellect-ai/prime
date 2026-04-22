@@ -1,5 +1,7 @@
+import os
 from pathlib import Path
 
+import typer
 from prime_cli.client import APIError
 from prime_cli.commands.evals import (
     _create_hosted_evaluations,
@@ -974,6 +976,120 @@ def test_eval_run_local_sampling_args_passthrough(monkeypatch):
         "skip_upload": False,
         "env_path": None,
     }
+
+
+def patch_local_eval_bridge(monkeypatch, captured):
+    class DummyPlugin:
+        eval_module = "verifiers.cli.commands.eval"
+
+        def build_module_command(self, module, args):
+            return [module, *args]
+
+    class DummyConfig:
+        def __init__(self):
+            captured["config_api_key"] = os.environ.get("PRIME_API_KEY")
+            captured["config_inference_url"] = os.environ.get("PRIME_INFERENCE_URL")
+            self.api_key = captured["config_api_key"] or ""
+            self.inference_url = (
+                captured["config_inference_url"] or "https://configured.example/v1"
+            )
+            self.team_id = None
+
+    class DummyResolvedEnvironment:
+        def __init__(self, env_name):
+            self.env_name = env_name
+            self.upstream_slug = None
+            self.env_display_id = None
+
+    def fake_prepare_single_environment(_plugin, env_reference, _env_dir_path):
+        return DummyResolvedEnvironment(env_reference)
+
+    def fake_run_command(command, env=None):
+        captured["command"] = command
+        captured["run_env"] = env or {}
+        raise typer.Exit(0)
+
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin",
+        lambda console: DummyPlugin(),
+    )
+    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
+    monkeypatch.setattr("prime_cli.verifiers_bridge._validate_model", lambda *_args: None)
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._preflight_inference_billing",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._prepare_single_environment",
+        fake_prepare_single_environment,
+    )
+    monkeypatch.setattr("prime_cli.verifiers_bridge._run_command", fake_run_command)
+
+
+def test_eval_run_env_file_overrides_process_env(monkeypatch, tmp_path):
+    captured = {}
+    patch_local_eval_bridge(monkeypatch, captured)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "PRIME_API_KEY=from-env-file\n"
+        "PRIME_INFERENCE_URL=https://from-env-file.example/v1\n"
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k", "--env-file", str(env_file)],
+        env={
+            "PRIME_DISABLE_VERSION_CHECK": "1",
+            "PRIME_API_KEY": "from-process-env",
+            "PRIME_INFERENCE_URL": "https://from-process.example/v1",
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["config_api_key"] == "from-env-file"
+    assert captured["config_inference_url"] == "https://from-env-file.example/v1"
+    assert captured["run_env"]["PRIME_API_KEY"] == "from-env-file"
+    assert captured["run_env"]["PRIME_INFERENCE_URL"] == "https://from-env-file.example/v1"
+    assert "--env-file" not in captured["command"]
+
+
+def test_eval_run_env_var_overrides_env_file(monkeypatch, tmp_path):
+    captured = {}
+    patch_local_eval_bridge(monkeypatch, captured)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "PRIME_API_KEY=from-env-file\n"
+        "PRIME_INFERENCE_URL=https://from-env-file.example/v1\n"
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run",
+            "gsm8k",
+            "--env-file",
+            str(env_file),
+            "--env-var",
+            "PRIME_API_KEY=from-env-var",
+            "--env-var",
+            "PRIME_INFERENCE_URL=https://from-env-var.example/v1",
+        ],
+        env={
+            "PRIME_DISABLE_VERSION_CHECK": "1",
+            "PRIME_API_KEY": "from-process-env",
+            "PRIME_INFERENCE_URL": "https://from-process.example/v1",
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["config_api_key"] == "from-env-var"
+    assert captured["config_inference_url"] == "https://from-env-var.example/v1"
+    assert captured["run_env"]["PRIME_API_KEY"] == "from-env-var"
+    assert captured["run_env"]["PRIME_INFERENCE_URL"] == "https://from-env-var.example/v1"
+    assert "--env-var" not in captured["command"]
 
 
 def test_eval_run_rejects_hosted_only_flags_without_hosted():

@@ -266,7 +266,7 @@ class Config:
             raise ValueError("Cannot delete built-in environment 'production'")
 
         sanitized_name = self._sanitize_environment_name(name)
-        if self.current_environment == name:
+        if self.current_environment.casefold() == sanitized_name.casefold():
             raise ValueError(
                 f"Cannot delete currently active environment '{name}'. "
                 "Use 'prime config use production' or another saved environment first."

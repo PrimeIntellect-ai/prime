@@ -67,3 +67,18 @@ def test_delete_current_environment_requires_switching_first(temp_home: Path) ->
     assert "Cannot delete currently active environment 'staging'" in result.output
     assert "prime config use production" in result.output
     assert (temp_home / ".prime" / "environments" / "staging.json").exists()
+
+
+def test_delete_current_environment_normalizes_name_before_guard(temp_home: Path) -> None:
+    save_result = runner.invoke(app, ["config", "save", "staging"], env=TEST_ENV)
+    assert save_result.exit_code == 0, save_result.output
+
+    use_result = runner.invoke(app, ["config", "use", "staging"], env=TEST_ENV)
+    assert use_result.exit_code == 0, use_result.output
+
+    result = runner.invoke(app, ["config", "delete", "STAGING"], env=TEST_ENV)
+
+    assert result.exit_code == 1, result.output
+    assert "Cannot delete currently active environment 'STAGING'" in result.output
+    assert "prime config use production" in result.output
+    assert (temp_home / ".prime" / "environments" / "staging.json").exists()

@@ -27,7 +27,7 @@ config = Config()
 LIST_IMAGES_JSON_HELP = json_output_help(
     "Raw API response is printed unchanged.",
     ".data[] = {displayRef?, fullImagePath?, imageName, imageTag, status, "
-    "artifactType, ownerType, sizeBytes?, createdAt, pushedAt?}",
+    "artifactType, ownerType, buildId?, sizeBytes?, createdAt, pushedAt?}",
 )
 
 # ---------------------------------------------------------------------------
@@ -44,11 +44,10 @@ ImageRow = dict[str, Any]
 class ArtifactPartition:
     """Per-artifact-type view of a grouped image.
 
-    Holds the single most recently updated row for this artifact type. The
-    status of that row is what gets rendered — we intentionally ignore older
-    rows (including stale ``BUILDING`` / ``PENDING`` entries the backend may
-    have orphaned) so the display reflects the current truth rather than a
-    composite derived from history.
+    Holds the current row for this artifact type. The backend is responsible
+    for returning only the current logical image state; the client still keeps
+    a conservative fallback selector for older API responses that include
+    historical rows.
     """
 
     latest: Optional[ImageRow] = None
@@ -61,11 +60,15 @@ class ArtifactPartition:
 # Mapping of artifact type (e.g. ``CONTAINER_IMAGE``) to its partition bucket.
 PartitionMap = dict[str, ArtifactPartition]
 
-# Timestamp priority used when picking the single latest row per artifact
-# type. ``pushedAt`` wins for completed uploads; ``completedAt`` covers
-# failed/cancelled terminal states; ``startedAt`` and ``createdAt`` are
-# ultimate fallbacks for rows that never finished.
-_LATEST_ROW_KEYS: tuple[str, ...] = ("pushedAt", "completedAt", "startedAt", "createdAt")
+# Timestamp priority used when picking the current row per artifact type from
+# a historical payload. ``pushedAt`` identifies completed image rows, while
+# active/terminal build rows are ordered by attempt time before completion time
+# so a late older failure does not hide a newer pending/building attempt.
+_ROW_SELECTION_KEYS: tuple[str, ...] = ("pushedAt", "startedAt", "createdAt", "completedAt")
+
+# Display/sort timestamps prefer the visible lifecycle event for the row that
+# survived selection.
+_DISPLAY_ROW_KEYS: tuple[str, ...] = ("pushedAt", "completedAt", "startedAt", "createdAt")
 
 
 def _parse_ts(value: Any) -> Optional[datetime]:
@@ -141,14 +144,11 @@ def _pick_row(rows: list[ImageRow], *keys: str) -> Optional[ImageRow]:
 
 
 def _partition_group(artifacts: list[ImageRow]) -> PartitionMap:
-    """Group artifact rows by type, keeping only the most recent row per type.
+    """Group artifact rows by type, keeping one current row per type.
 
-    For a single ``imageName:imageTag`` the backend returns one row per
-    (build, artifact type) plus any completed artifacts from the user images
-    table. We pick the single newest row per artifact type (ordered by
-    ``pushedAt → completedAt → startedAt → createdAt``) and render its raw
-    ``status`` verbatim. Older rows — including stuck ``BUILDING`` zombies
-    and stale failures — are simply not considered.
+    Modern backends already return the current rows. If an older backend sends
+    historical rows, this fallback orders active build attempts by
+    ``startedAt``/``createdAt`` before terminal ``completedAt``.
     """
     by_type: dict[str, list[ImageRow]] = {}
     for art in artifacts:
@@ -157,7 +157,7 @@ def _partition_group(artifacts: list[ImageRow]) -> PartitionMap:
 
     result: PartitionMap = {}
     for art_type, rows in by_type.items():
-        latest_row = _pick_row(rows, *_LATEST_ROW_KEYS)
+        latest_row = _pick_row(rows, *_ROW_SELECTION_KEYS)
         result[art_type] = ArtifactPartition(latest=latest_row)
     return result
 
@@ -223,8 +223,7 @@ def _render_status_column(partition: PartitionMap) -> str:
 
     Example: if Type is ``Container / VM``, Status for ``rehl:latest`` with a
     container that's Ready and a VM that's Failed becomes ``Ready / Failed``.
-    When an artifact has an active rebuild on top of a completed image, its
-    slot is ``(rebuilding)``.
+    Each slot renders the raw status of the selected artifact row.
     """
     ordered = _ordered_present_types(partition)
     if not ordered:
@@ -319,7 +318,7 @@ def _pick_display_datetime(partition: PartitionMap) -> Optional[datetime]:
     ]
     if not latest_rows:
         return None
-    result = _latest(latest_rows, *_LATEST_ROW_KEYS)
+    result = _latest(latest_rows, *_DISPLAY_ROW_KEYS)
     if result is None:
         return None
     return result[1]

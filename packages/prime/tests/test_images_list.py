@@ -136,6 +136,23 @@ def test_partition_active_build_wins_over_older_completed():
     assert part["CONTAINER_IMAGE"].latest["status"] == "BUILDING"
 
 
+def test_partition_newer_active_build_beats_older_failure_completed_later():
+    part = _partition_group(
+        [
+            _container(
+                status="FAILED",
+                created_at="2026-04-17T09:00:00",
+                completed_at="2026-04-17T12:00:00",
+            ),
+            _container(
+                status="PENDING",
+                created_at="2026-04-17T10:00:00",
+            ),
+        ]
+    )
+    assert part["CONTAINER_IMAGE"].latest["status"] == "PENDING"
+
+
 def test_partition_surfaces_failure_when_only_failed_rows_exist():
     part = _partition_group(
         [
@@ -564,6 +581,25 @@ def test_list_cli_shows_building_when_build_is_newer_than_last_completed(run_ima
     assert result.exit_code == 0, result.output
     assert "Building / Building" in result.output
     assert "2026-04-17 10:00" in result.output
+
+
+def test_list_cli_shows_pending_when_newer_than_previous_failure(run_images_list):
+    result = run_images_list(
+        [
+            _container(
+                status="FAILED",
+                created_at="2026-04-17T09:00:00",
+                completed_at="2026-04-17T12:00:00",
+            ),
+            _container(
+                status="PENDING",
+                created_at="2026-04-17T10:00:00",
+            ),
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Pending" in result.output
+    assert "Failed" not in result.output
 
 
 def test_list_cli_team_listing_keeps_owner_column_and_prefix(run_images_list):

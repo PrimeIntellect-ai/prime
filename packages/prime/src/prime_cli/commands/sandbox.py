@@ -5,6 +5,7 @@ import shlex
 import shutil
 import string
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any, Dict, List, Optional
@@ -1354,7 +1355,7 @@ def ssh_connect(
         with console.status("[bold blue]Checking sandbox status...", spinner="dots"):
             sandbox = sandbox_client.get(sandbox_id)
 
-        _guard_vm_unsupported(sandbox, "SSH")
+        is_vm_sandbox = bool(getattr(sandbox, "vm", False))
 
         if sandbox.status != "RUNNING":
             console.print(f"[red]Error:[/red] Sandbox is not running (status: {sandbox.status})")
@@ -1374,29 +1375,33 @@ def ssh_connect(
         with open(f"{key_path}.pub", "r") as f:
             public_key = f.read().strip()
 
-        # Create SSH session
+        # VM sandboxes take the public key here; containers authorize it below.
         console.print("[bold blue]Creating SSH session...[/bold blue]")
         with console.status("[bold blue]Setting up SSH session...", spinner="dots"):
-            session = sandbox_client.create_ssh_session(sandbox_id)
+            if is_vm_sandbox:
+                session = sandbox_client.create_ssh_session(sandbox_id, public_key=public_key)
+            else:
+                session = sandbox_client.create_ssh_session(sandbox_id)
         session_id = session.session_id
 
-        # Authorize the key
-        authorize_url = (
-            f"{session.gateway_url.rstrip('/')}/{session.user_ns}/{session.job_id}/authorize"
-        )
-        headers = {"Authorization": f"Bearer {session.token}"}
-        payload = {
-            "session_id": session.session_id,
-            "public_key": public_key,
-            "ttl_seconds": session.ttl_seconds,
-        }
-        try:
-            with httpx.Client(timeout=30) as client:
-                client.post(authorize_url, json=payload, headers=headers).raise_for_status()
-        except Exception as e:
-            console.print(f"[red]Error:[/red] Failed to authorize SSH key: {e}")
-            cleanup()
-            raise typer.Exit(1)
+        if not is_vm_sandbox:
+            # Containers authorize the key through the sidecar endpoint.
+            authorize_url = (
+                f"{session.gateway_url.rstrip('/')}/{session.user_ns}/{session.job_id}/authorize"
+            )
+            headers = {"Authorization": f"Bearer {session.token}"}
+            payload = {
+                "session_id": session.session_id,
+                "public_key": public_key,
+                "ttl_seconds": session.ttl_seconds,
+            }
+            try:
+                with httpx.Client(timeout=30) as client:
+                    client.post(authorize_url, json=payload, headers=headers).raise_for_status()
+            except Exception as e:
+                console.print(f"[red]Error:[/red] Failed to authorize SSH key: {e}")
+                cleanup()
+                raise typer.Exit(1)
 
         ssh_host = session.host
         ssh_port = session.port
@@ -1420,6 +1425,26 @@ def ssh_connect(
         ssh_cmd.extend(["-o", "StrictHostKeyChecking=no"])
         ssh_cmd.extend(["-o", "UserKnownHostsFile=/dev/null"])
         ssh_cmd.extend(["-o", "LogLevel=ERROR"])
+
+        # VM SSH connections need a session prefix before the handshake, so
+        # route them through a small ProxyCommand that writes it first.
+        if is_vm_sandbox:
+            prefix = f"PRIME-SSH-SESSION {session.session_id}\n"
+            python_exec = sys.executable or "python3"
+            # Use `read1` for responsive stdin forwarding and flush each
+            # chunk received from the remote side.
+            proxy_script = (
+                "import socket, sys, threading;"
+                f"s=socket.create_connection(({ssh_host!r},{int(ssh_port)}));"
+                f"s.sendall({prefix!r}.encode());"
+                "t=threading.Thread(target=lambda:["
+                "(sys.stdout.buffer.write(b), sys.stdout.buffer.flush()) "
+                "for b in iter(lambda:s.recv(4096),b'')]);"
+                "t.daemon=True;t.start();"
+                "[s.sendall(b) for b in iter(lambda:sys.stdin.buffer.read1(4096),b'')]"
+            )
+            proxy_cmd = f"{python_exec} -c {shlex.quote(proxy_script)}"
+            ssh_cmd.extend(["-o", f"ProxyCommand={proxy_cmd}"])
 
         # Add identity file if specified
         if key_path:

@@ -1294,12 +1294,18 @@ class SandboxClient:
         self,
         sandbox_id: str,
         ttl_seconds: Optional[int] = None,
+        public_key: Optional[str] = None,
     ) -> SSHSession:
-        """Create an SSH session"""
-        self._guard_vm_unsupported(sandbox_id, "SSH")
+        """Create an SSH session.
+
+        Pass ``public_key`` for VM sandboxes; container sandboxes authorize
+        keys separately after session creation.
+        """
         payload: Dict[str, Any] = {}
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
+        if public_key is not None:
+            payload["public_key"] = public_key
         response = self.client.request(
             "POST",
             f"/sandbox/{sandbox_id}/ssh-session",
@@ -1308,8 +1314,7 @@ class SandboxClient:
         return SSHSession.model_validate(response)
 
     def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
-        """Close an SSH session and remove its exposure"""
-        self._guard_vm_unsupported(sandbox_id, "SSH")
+        """Close an SSH session."""
         self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
 
@@ -2199,12 +2204,18 @@ class AsyncSandboxClient:
         self,
         sandbox_id: str,
         ttl_seconds: Optional[int] = None,
+        public_key: Optional[str] = None,
     ) -> SSHSession:
-        """Create an SSH session"""
-        await self._guard_vm_unsupported(sandbox_id, "SSH")
+        """Create an SSH session.
+
+        Pass ``public_key`` for VM sandboxes; container sandboxes authorize
+        keys separately after session creation.
+        """
         payload: Dict[str, Any] = {}
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
+        if public_key is not None:
+            payload["public_key"] = public_key
         response = await self.client.request(
             "POST",
             f"/sandbox/{sandbox_id}/ssh-session",
@@ -2213,8 +2224,7 @@ class AsyncSandboxClient:
         return SSHSession.model_validate(response)
 
     async def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
-        """Close an SSH session and remove its exposure"""
-        await self._guard_vm_unsupported(sandbox_id, "SSH")
+        """Close an SSH session."""
         await self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
 

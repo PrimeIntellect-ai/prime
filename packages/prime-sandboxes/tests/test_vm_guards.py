@@ -119,20 +119,35 @@ def test_sync_list_exposed_ports_blocked_for_vm():
     assert recording.calls == []
 
 
-def test_sync_create_ssh_session_blocked_for_vm():
+def test_sync_create_ssh_session_allowed_for_vm():
     client, recording = _make_sync_client(is_vm=True)
-    with pytest.raises(APIError) as exc_info:
-        client.create_ssh_session("sbx-vm")
-    assert "SSH" in str(exc_info.value)
-    assert recording.calls == []
+    cast(Any, recording)._response = {
+        "session_id": "s",
+        "exposure_id": "s",
+        "sandbox_id": "sbx-vm",
+        "host": "h",
+        "port": 2222,
+        "external_endpoint": "h:2222",
+        "expires_at": datetime.now(timezone.utc).isoformat(),
+        "ttl_seconds": 300,
+        "gateway_url": "",
+        "user_ns": "",
+        "job_id": "sbx-vm",
+        "token": "",
+    }
+    client.create_ssh_session("sbx-vm", public_key="ssh-ed25519 AAAA...")
+    assert any(
+        method == "POST" and path.endswith("/ssh-session") for method, path, _ in recording.calls
+    )
 
 
-def test_sync_close_ssh_session_blocked_for_vm():
+def test_sync_close_ssh_session_allowed_for_vm():
     client, recording = _make_sync_client(is_vm=True)
-    with pytest.raises(APIError) as exc_info:
-        client.close_ssh_session("sbx-vm", "sess-1")
-    assert "SSH" in str(exc_info.value)
-    assert recording.calls == []
+    client.close_ssh_session("sbx-vm", "sess-1")
+    assert any(
+        method == "DELETE" and path.endswith("/ssh-session/sess-1")
+        for method, path, _ in recording.calls
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -327,25 +342,41 @@ async def test_async_list_exposed_ports_blocked_for_vm():
 
 
 @pytest.mark.asyncio
-async def test_async_create_ssh_session_blocked_for_vm():
+async def test_async_create_ssh_session_allowed_for_vm():
     client, recording = _make_async_client(is_vm=True)
+    cast(Any, recording)._response = {
+        "session_id": "s",
+        "exposure_id": "s",
+        "sandbox_id": "sbx-vm",
+        "host": "h",
+        "port": 2222,
+        "external_endpoint": "h:2222",
+        "expires_at": datetime.now(timezone.utc).isoformat(),
+        "ttl_seconds": 300,
+        "gateway_url": "",
+        "user_ns": "",
+        "job_id": "sbx-vm",
+        "token": "",
+    }
     try:
-        with pytest.raises(APIError) as exc_info:
-            await client.create_ssh_session("sbx-vm")
-        assert "SSH" in str(exc_info.value)
-        assert recording.calls == []
+        await client.create_ssh_session("sbx-vm", public_key="ssh-ed25519 AAAA...")
+        assert any(
+            method == "POST" and path.endswith("/ssh-session")
+            for method, path, _ in recording.calls
+        )
     finally:
         await client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_async_close_ssh_session_blocked_for_vm():
+async def test_async_close_ssh_session_allowed_for_vm():
     client, recording = _make_async_client(is_vm=True)
     try:
-        with pytest.raises(APIError) as exc_info:
-            await client.close_ssh_session("sbx-vm", "sess-1")
-        assert "SSH" in str(exc_info.value)
-        assert recording.calls == []
+        await client.close_ssh_session("sbx-vm", "sess-1")
+        assert any(
+            method == "DELETE" and path.endswith("/ssh-session/sess-1")
+            for method, path, _ in recording.calls
+        )
     finally:
         await client.aclose()
 

@@ -1445,18 +1445,41 @@ def ssh_connect(
             prefix = f"PRIME-SSH-SESSION {session.session_id}\n"
             python_exec = sys.executable or "python3"
             # Use `read1` for responsive stdin forwarding and flush each
-            # chunk received from the remote side.
+            # chunk received from the remote side. Relay loops are plain
+            # while-loops (not list comprehensions) so forwarded bytes are
+            # not accumulated in memory for the lifetime of the session.
             proxy_script = (
-                "import socket, sys, threading;"
-                f"s=socket.create_connection(({ssh_host!r},{int(ssh_port)}));"
-                f"s.sendall({prefix!r}.encode());"
-                "t=threading.Thread(target=lambda:["
-                "(sys.stdout.buffer.write(b), sys.stdout.buffer.flush()) "
-                "for b in iter(lambda:s.recv(4096),b'')]);"
-                "t.daemon=True;t.start();"
-                "[s.sendall(b) for b in iter(lambda:sys.stdin.buffer.read1(4096),b'')]"
+                "import socket, sys, threading\n"
+                f"s = socket.create_connection(({ssh_host!r}, {int(ssh_port)}))\n"
+                f"s.sendall({prefix!r}.encode())\n"
+                "def _reader():\n"
+                "    try:\n"
+                "        while True:\n"
+                "            b = s.recv(4096)\n"
+                "            if not b:\n"
+                "                break\n"
+                "            sys.stdout.buffer.write(b)\n"
+                "            sys.stdout.buffer.flush()\n"
+                "    except OSError:\n"
+                "        pass\n"
+                "t = threading.Thread(target=_reader, daemon=True)\n"
+                "t.start()\n"
+                "try:\n"
+                "    while True:\n"
+                "        b = sys.stdin.buffer.read1(4096)\n"
+                "        if not b:\n"
+                "            break\n"
+                "        s.sendall(b)\n"
+                "except OSError:\n"
+                "    pass\n"
+                "finally:\n"
+                "    try:\n"
+                "        s.shutdown(socket.SHUT_WR)\n"
+                "    except OSError:\n"
+                "        pass\n"
+                "    s.close()\n"
             )
-            proxy_cmd = f"{python_exec} -c {shlex.quote(proxy_script)}"
+            proxy_cmd = f"{shlex.quote(python_exec)} -c {shlex.quote(proxy_script)}"
             ssh_cmd.extend(["-o", f"ProxyCommand={proxy_cmd}"])
 
         # Add identity file if specified

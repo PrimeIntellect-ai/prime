@@ -706,6 +706,10 @@ def create_run(
         console.print(f"  Environments: {', '.join(e.id for e in cfg.env)}")
         if app_config.team_id:
             console.print(f"  Team:         {app_config.team_id}")
+        if cfg.enable_thinking is not None:
+            console.print(f"  Enable Thinking:  {cfg.enable_thinking}")
+        if cfg.reasoning_effort is not None:
+            console.print(f"  Reasoning Effort: {cfg.reasoning_effort}")
 
         # Training
         console.print("\n[cyan]Training[/cyan]")

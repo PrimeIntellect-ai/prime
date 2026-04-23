@@ -356,6 +356,11 @@ def push_image(
         click_type=click.Choice(["linux/amd64", "linux/arm64"]),
         help="Target platform (defaults to linux/amd64 for Kubernetes compatibility)",
     ),
+    is_public: bool = typer.Option(
+        False,
+        "--public",
+        help="Push as a public Prime image under the primeintellect/ namespace.",
+    ),
 ):
     """
     Build and push a Docker image to Prime Intellect registry.
@@ -365,6 +370,7 @@ def push_image(
         prime images push myapp:v1.0.0
         prime images push myapp:latest --context ./app --dockerfile ../docker/Dockerfile.prod
         prime images push myapp:v1 --platform linux/arm64
+        prime images push python:3.11 --public
     """
     try:
         # Parse image reference
@@ -382,11 +388,20 @@ def push_image(
             )
             raise typer.Exit(1)
 
+        if is_public and config.team_id:
+            console.print(
+                "[red]Error: Public images cannot be pushed from a team context. "
+                "Run 'prime switch personal' first.[/red]"
+            )
+            raise typer.Exit(1)
+
         console.print(
             f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
         )
         if config.team_id:
             console.print(f"[dim]Team: {config.team_id}[/dim]")
+        if is_public:
+            console.print("[dim]Visibility: public (primeintellect namespace)[/dim]")
         console.print()
 
         # Initialize API client
@@ -466,6 +481,8 @@ def push_image(
                 }
                 if config.team_id:
                     build_payload["team_id"] = config.team_id
+                if is_public:
+                    build_payload["is_public"] = True
 
                 build_response = client.request(
                     "POST",

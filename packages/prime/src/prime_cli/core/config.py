@@ -260,6 +260,24 @@ class Config:
         }
         env_file.write_text(json.dumps(env_config, indent=2))
 
+    def delete_environment(self, name: str) -> None:
+        """Delete a saved environment configuration."""
+        if name.lower() == "production":
+            raise ValueError("Cannot delete built-in environment 'production'")
+
+        sanitized_name = self._sanitize_environment_name(name)
+        if self.current_environment.casefold() == sanitized_name.casefold():
+            raise ValueError(
+                f"Cannot delete currently active environment '{name}'. "
+                "Use 'prime config use production' or another saved environment first."
+            )
+
+        env_file = self.environments_dir / f"{sanitized_name}.json"
+        if not env_file.exists():
+            raise ValueError(f"Unknown environment: {name}")
+
+        env_file.unlink()
+
     def load_environment(self, name: str, persist: bool = True) -> bool:
         """Load a named environment configuration.
 

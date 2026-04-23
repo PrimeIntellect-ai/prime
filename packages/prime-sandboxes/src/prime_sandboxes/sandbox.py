@@ -598,6 +598,7 @@ class SandboxClient:
         page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
+        user_id: Optional[str] = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         # Auto-populate team_id from config if not specified
@@ -607,6 +608,8 @@ class SandboxClient:
         params: Dict[str, Any] = {"page": page, "per_page": per_page}
         if team_id:
             params["team_id"] = team_id
+        if user_id:
+            params["user_id"] = user_id
         if status:
             params["status"] = status
         if labels:
@@ -631,13 +634,23 @@ class SandboxClient:
         self,
         sandbox_ids: Optional[List[str]] = None,
         labels: Optional[List[str]] = None,
+        team_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        all_users: bool = False,
     ) -> BulkDeleteSandboxResponse:
-        """Bulk delete multiple sandboxes by IDs or labels (must specify one, not both)"""
-        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids, labels=labels)
+        """Bulk delete multiple sandboxes."""
+        request = BulkDeleteSandboxRequest(
+            sandbox_ids=sandbox_ids,
+            labels=labels,
+            team_id=team_id,
+            user_id=user_id,
+            all_users=all_users,
+        )
+        payload = request.model_dump(by_alias=False, exclude_none=True)
         response = self.client.request(
             "DELETE",
             "/sandbox",
-            json=request.model_dump(by_alias=False, exclude_none=True),
+            json=payload,
         )
         return BulkDeleteSandboxResponse.model_validate(response)
 
@@ -892,12 +905,16 @@ class SandboxClient:
         self,
         sandbox_id: str,
         job: BackgroundJob,
+        timeout: Optional[int] = None,
     ) -> BackgroundJobStatus:
         """Check the status of a background job.
 
         Args:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
+            timeout: Optional per-call timeout (in seconds) forwarded to the
+                underlying read_file calls. When None, the APIClient default
+                applies.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
@@ -905,7 +922,7 @@ class SandboxClient:
 
         def read_or_empty(path: str) -> str:
             try:
-                return self.read_file(sandbox_id, path).content
+                return self.read_file(sandbox_id, path, timeout=timeout).content
             except SandboxFileNotFoundError:
                 return ""
 
@@ -1479,6 +1496,7 @@ class AsyncSandboxClient:
         page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
+        user_id: Optional[str] = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         if team_id is None:
@@ -1487,6 +1505,8 @@ class AsyncSandboxClient:
         params: Dict[str, Any] = {"page": page, "per_page": per_page}
         if team_id:
             params["team_id"] = team_id
+        if user_id:
+            params["user_id"] = user_id
         if status:
             params["status"] = status
         if labels:
@@ -1511,13 +1531,23 @@ class AsyncSandboxClient:
         self,
         sandbox_ids: Optional[List[str]] = None,
         labels: Optional[List[str]] = None,
+        team_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        all_users: bool = False,
     ) -> BulkDeleteSandboxResponse:
-        """Bulk delete multiple sandboxes by IDs or labels"""
-        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids, labels=labels)
+        """Bulk delete multiple sandboxes."""
+        request = BulkDeleteSandboxRequest(
+            sandbox_ids=sandbox_ids,
+            labels=labels,
+            team_id=team_id,
+            user_id=user_id,
+            all_users=all_users,
+        )
+        payload = request.model_dump(by_alias=False, exclude_none=True)
         response = await self.client.request(
             "DELETE",
             "/sandbox",
-            json=request.model_dump(by_alias=False, exclude_none=True),
+            json=payload,
         )
         return BulkDeleteSandboxResponse.model_validate(response)
 
@@ -1772,12 +1802,16 @@ class AsyncSandboxClient:
         self,
         sandbox_id: str,
         job: BackgroundJob,
+        timeout: Optional[int] = None,
     ) -> BackgroundJobStatus:
         """Check the status of a background job (async).
 
         Args:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
+            timeout: Optional per-call timeout (in seconds) forwarded to the
+                underlying read_file calls. When None, the APIClient default
+                applies.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
@@ -1785,7 +1819,7 @@ class AsyncSandboxClient:
 
         async def read_or_empty(path: str) -> str:
             try:
-                return (await self.read_file(sandbox_id, path)).content
+                return (await self.read_file(sandbox_id, path, timeout=timeout)).content
             except SandboxFileNotFoundError:
                 return ""
 

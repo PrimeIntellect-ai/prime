@@ -4,7 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import toml
 import typer
@@ -188,14 +188,16 @@ rollouts_per_example = 8
 # Optional: warm-start from an existing checkpoint
 # checkpoint_id = "..."
 
+# Optional: hosted RL reasoning controls (mutually exclusive)
+# enable_thinking = false    # supported models: Qwen3.5, Nemotron
+# reasoning_effort = "high"  # supported models: GPT-OSS ("low" | "medium" | "high")
+
 [sampling]
 max_tokens = 2048
 # temperature = 0.7
 # repetition_penalty = 1.0
 # min_tokens = 0
 # seed = 42
-# [sampling.extra_body]
-# enable_thinking = false
 
 # Optional: temperature scheduling (use instead of temperature)
 # [sampling.temp_scheduler]
@@ -498,9 +500,17 @@ class RLConfig(BaseModel):
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
     infrastructure: InfrastructureConfig = Field(default_factory=InfrastructureConfig)
+    enable_thinking: bool | None = None
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
     run_config: Dict[str, Any] = Field(default_factory=dict)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _reasoning_controls_mutually_exclusive(self) -> "RLConfig":
+        if self.enable_thinking is not None and self.reasoning_effort is not None:
+            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
+        return self
 
 
 def _format_validation_errors(errors: list[Any]) -> list[str]:
@@ -696,6 +706,10 @@ def create_run(
         console.print(f"  Environments: {', '.join(e.id for e in cfg.env)}")
         if app_config.team_id:
             console.print(f"  Team:         {app_config.team_id}")
+        if cfg.enable_thinking is not None:
+            console.print(f"  Enable Thinking:  {cfg.enable_thinking}")
+        if cfg.reasoning_effort is not None:
+            console.print(f"  Reasoning Effort: {cfg.reasoning_effort}")
 
         # Training
         console.print("\n[cyan]Training[/cyan]")
@@ -863,6 +877,8 @@ def create_run(
             checkpoint_id=cfg.checkpoint_id,
             cluster_name=cfg.cluster_name,
             infrastructure_config=cfg.infrastructure.to_api_dict(),
+            enable_thinking=cfg.enable_thinking,
+            reasoning_effort=cfg.reasoning_effort,
             run_config=cfg.run_config if cfg.run_config else None,
         )
 

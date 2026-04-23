@@ -970,9 +970,11 @@ def _push_single_eval(
     run_id: Optional[str],
     eval_id: Optional[str],
     is_public: bool = False,
+    name: Optional[str] = None,
 ) -> str:
     path = _validate_eval_path(config_path)
     eval_data = _load_eval_directory(path)
+    eval_name = name or eval_data["eval_name"]
     console.print(f"[blue]✓ Loaded eval data:[/blue] {path}")
 
     detected_env = eval_data.get("env_id") or eval_data.get("env")
@@ -1004,7 +1006,7 @@ def _push_single_eval(
             console.print("[blue]Updating evaluation...[/blue]")
             client.update_evaluation(
                 evaluation_id=eval_id,
-                name=eval_data.get("eval_name"),
+                name=eval_name,
                 model_name=eval_data.get("model_name"),
                 framework=eval_data.get("metadata", {}).get("framework", "verifiers"),
                 task_type=eval_data.get("metadata", {}).get("task_type"),
@@ -1020,7 +1022,7 @@ def _push_single_eval(
     else:
         console.print("[blue]Creating evaluation...[/blue]")
         create_response = client.create_evaluation(
-            name=eval_data["eval_name"],
+            name=eval_name,
             environments=environments,
             run_id=run_id,
             model_name=eval_data.get("model_name"),
@@ -1103,6 +1105,11 @@ def push_eval(
         "--eval-id",
         help="Push to existing evaluation id",
     ),
+    name: Optional[str] = typer.Option(
+        None,
+        "--name",
+        help="Explicit evaluation name override",
+    ),
     output: str = typer.Option("pretty", "--output", "-o", help="json|pretty"),
     is_public: bool = typer.Option(
         False,
@@ -1119,8 +1126,9 @@ def push_eval(
         prime eval push                                    # Push current dir or auto-discover
         prime eval push outputs/evals/gsm8k--gpt-4/abc123  # Push specific directory
         prime eval push --env gsm8k                        # Push with environment override
+        prime eval push --name "gsm8k smoke test"         # Override evaluation display name
         prime eval push --public                           # Create a public evaluation
-        prime eval push --eval xyz789                      # Push to existing evaluation
+        prime eval push --eval xyz789 --name "rerun"      # Update an existing evaluation name
     """
     try:
         if eval_id and is_public:
@@ -1141,7 +1149,7 @@ def push_eval(
         if config_path is None:
             current_dir = Path(".")
             if _has_eval_files(current_dir):
-                result_eval_id = _push_single_eval(".", env_id, run_id, eval_id, is_public)
+                result_eval_id = _push_single_eval(".", env_id, run_id, eval_id, is_public, name)
                 if output == "json":
                     console.print()
                     output_data_as_json({"evaluation_id": result_eval_id}, console)
@@ -1165,7 +1173,7 @@ def push_eval(
             for eval_dir in eval_dirs:
                 try:
                     result_eval_id = _push_single_eval(
-                        str(eval_dir), env_id, run_id, eval_id, is_public
+                        str(eval_dir), env_id, run_id, eval_id, is_public, name
                     )
                     results.append(
                         {"path": str(eval_dir), "eval_id": result_eval_id, "status": "success"}
@@ -1189,7 +1197,7 @@ def push_eval(
 
             return
 
-        result_eval_id = _push_single_eval(config_path, env_id, run_id, eval_id, is_public)
+        result_eval_id = _push_single_eval(config_path, env_id, run_id, eval_id, is_public, name)
 
         if output == "json":
             console.print()

@@ -142,6 +142,47 @@ def test_push_eval_rejects_public_with_eval_id(monkeypatch, tmp_path):
     assert "cannot be used with --eval-id" in result.output
 
 
+def test_push_eval_forwards_name_override(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    captured = {}
+
+    def fake_push_single_eval(config_path, env_slug, run_id, eval_id, is_public, name):
+        captured.update(
+            {
+                "config_path": config_path,
+                "env_slug": env_slug,
+                "run_id": run_id,
+                "eval_id": eval_id,
+                "is_public": is_public,
+                "name": name,
+            }
+        )
+        return "eval-123"
+
+    monkeypatch.setattr("prime_cli.commands.evals._push_single_eval", fake_push_single_eval)
+
+    (tmp_path / "metadata.json").write_text(json.dumps({"env": "gsm8k", "model": "gpt-4"}))
+    (tmp_path / "results.jsonl").write_text("")
+
+    result = runner.invoke(
+        app,
+        ["eval", "push", ".", "--eval-id", "eval-123", "--name", "custom eval"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "config_path": ".",
+        "env_slug": None,
+        "run_id": None,
+        "eval_id": "eval-123",
+        "is_public": False,
+        "name": "custom eval",
+    }
+
+
 class TestPushSingleEval:
     def test_create_evaluation_defaults_to_private(self, tmp_path, monkeypatch):
         metadata = {"env": "gsm8k", "model": "gpt-4"}
@@ -196,6 +237,64 @@ class TestPushSingleEval:
 
         assert eval_id == "eval-123"
         assert captured["is_public"] is True
+
+    def test_create_evaluation_prefers_explicit_name_override(self, tmp_path, monkeypatch):
+        metadata = {"env": "gsm8k", "model": "gpt-4", "eval_name": "metadata name"}
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+        (tmp_path / "results.jsonl").write_text("")
+
+        captured = {}
+
+        class DummyEvalsClient:
+            def __init__(self, _api_client):
+                pass
+
+            def create_evaluation(self, **kwargs):
+                captured.update(kwargs)
+                return {"evaluation_id": "eval-123"}
+
+            def finalize_evaluation(self, evaluation_id, metrics=None):
+                captured["finalized_evaluation_id"] = evaluation_id
+                captured["finalized_metrics"] = metrics
+
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
+
+        eval_id = _push_single_eval(str(tmp_path), None, None, None, name="explicit override")
+
+        assert eval_id == "eval-123"
+        assert captured["name"] == "explicit override"
+
+    def test_update_evaluation_prefers_explicit_name_override(self, tmp_path, monkeypatch):
+        metadata = {"env": "gsm8k", "model": "gpt-4", "eval_name": "metadata name"}
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+        (tmp_path / "results.jsonl").write_text("")
+
+        captured = {}
+
+        class DummyEvalsClient:
+            def __init__(self, _api_client):
+                pass
+
+            def get_evaluation(self, evaluation_id):
+                captured["checked_evaluation_id"] = evaluation_id
+                return {"evaluation_id": evaluation_id}
+
+            def update_evaluation(self, **kwargs):
+                captured.update(kwargs)
+
+            def finalize_evaluation(self, evaluation_id, metrics=None):
+                captured["finalized_evaluation_id"] = evaluation_id
+                captured["finalized_metrics"] = metrics
+
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
+
+        eval_id = _push_single_eval(str(tmp_path), None, None, "eval-123", name="explicit override")
+
+        assert eval_id == "eval-123"
+        assert captured["checked_evaluation_id"] == "eval-123"
+        assert captured["name"] == "explicit override"
 
 
 class TestLoadEvalDirectory:

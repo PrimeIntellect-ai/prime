@@ -565,73 +565,57 @@ def create(
         raise typer.Exit(1)
 
 
-def _fetch_and_filter_sandboxes(
+def _preview_bulk_delete_count(
     sandbox_client: SandboxClient,
-    only_mine: bool,
-    labels: Optional[List[str]] = None,
-    flag_name: str = "--all",
-) -> Optional[List[str]]:
-    """Fetch sandboxes (optionally by label), filter by only_mine.
+    team_id: Optional[str],
+    user_id: Optional[str],
+    labels: Optional[List[str]],
+) -> Optional[int]:
+    """Fetch the total number of sandboxes matching the scope, cheaply.
 
-    Returns a list of sandbox IDs to delete, or None if there are
-    no matching sandboxes (after printing appropriate messages).
-    Raises typer.Exit(1) if only_mine is set but user_id is missing.
+    Uses a single list(per_page=1) call and reads the total field.
+    Returns None on API error so the caller can still proceed (server will
+    re-evaluate the filter on delete).
     """
-    status_msg = (
-        "[bold blue]Fetching sandboxes by labels..."
-        if labels
-        else "[bold blue]Fetching all sandboxes..."
-    )
-    with console.status(status_msg, spinner="dots"):
-        all_sandboxes = []
-        page = 1
-        while True:
-            list_response = sandbox_client.list(
-                per_page=100,
-                page=page,
-                labels=labels,
-                exclude_terminated=True,
-            )
-            all_sandboxes.extend(list_response.sandboxes)
-            if not list_response.has_next:
-                break
-            page += 1
+    try:
+        response = sandbox_client.list(
+            per_page=1,
+            page=1,
+            team_id=team_id,
+            user_id=user_id,
+            labels=labels or None,
+            exclude_terminated=True,
+        )
+    except APIError:
+        return None
+    return response.total
 
-        if only_mine:
-            current_user_id = config.user_id
-            if not current_user_id:
-                console.print(
-                    "[red]Error:[/red] Cannot filter by user"
-                    " - no user_id configured. Use --all-users"
-                    " to delete all sandboxes, or configure"
-                    " your user_id."
-                )
-                raise typer.Exit(1)
-            sandboxes_to_delete = [s for s in all_sandboxes if s.user_id == current_user_id]
-        else:
-            sandboxes_to_delete = all_sandboxes
 
-        sandbox_ids = [s.id for s in sandboxes_to_delete]
+def _display_bulk_delete_result(result: BulkDeleteSandboxResponse) -> None:
+    """Pretty-print a single bulk_delete response."""
+    total = len(result.succeeded) + len(result.failed)
+    console.print(f"\n[green]Processed {total} sandbox(es)[/green]")
 
-        if not sandbox_ids:
-            console.print("[yellow]No sandboxes to delete[/yellow]")
-            if only_mine and all_sandboxes:
-                console.print(
-                    f"\n[dim]Note: {flag_name} only deletes your"
-                    " own sandboxes by default. Use --all-users"
-                    " to delete sandboxes from all team"
-                    " members.[/dim]"
-                )
-            return None
+    if result.succeeded:
+        console.print(
+            f"\n[bold green]Successfully deleted {len(result.succeeded)} sandbox(es):[/bold green]"
+        )
+        for sid in result.succeeded:
+            console.print(f"  ✓ {sid}")
 
-    return sandbox_ids
+    if result.failed:
+        console.print(f"\n[bold red]Failed to delete {len(result.failed)} sandbox(es):[/bold red]")
+        for failure in result.failed:
+            sid = failure.get("sandbox_id", "unknown")
+            error = failure.get("error", "unknown error")
+            console.print(f"  ✗ {sid}: {error}")
 
 
 def _bulk_delete_and_display(
     sandbox_client: SandboxClient,
     sandbox_ids: List[str],
 ) -> None:
-    """Batch-delete sandbox IDs and print results."""
+    """Batch-delete explicit sandbox IDs (up to 500 per request) and print results."""
     batch_size = 100
     all_succeeded: List[str] = []
     all_failed: List[Dict[str, Any]] = []
@@ -656,22 +640,13 @@ def _bulk_delete_and_display(
             if result.failed:
                 all_failed.extend(result.failed)
 
-    total = len(all_succeeded) + len(all_failed)
-    console.print(f"\n[green]Processed {total} sandbox(es)[/green]")
-
-    if all_succeeded:
-        console.print(
-            f"\n[bold green]Successfully deleted {len(all_succeeded)} sandbox(es):[/bold green]"
+    _display_bulk_delete_result(
+        BulkDeleteSandboxResponse(
+            succeeded=all_succeeded,
+            failed=all_failed,
+            message="",
         )
-        for sid in all_succeeded:
-            console.print(f"  ✓ {sid}")
-
-    if all_failed:
-        console.print(f"\n[bold red]Failed to delete {len(all_failed)} sandbox(es):[/bold red]")
-        for failure in all_failed:
-            sid = failure.get("sandbox_id", "unknown")
-            error = failure.get("error", "unknown error")
-            console.print(f"  ✗ {sid}: {error}")
+    )
 
 
 @app.command(no_args_is_help=True)
@@ -688,14 +663,19 @@ def delete(
         True,
         "--only-mine/--all-users",
         "-m/-A",
-        help="Restrict '--all' and '--label' deletes to only your sandboxes",
+        help=(
+            "Restrict '--all' and '--label' deletes to your own sandboxes."
+            " --all-users deletes across every user in the team and requires"
+            " team admin role."
+        ),
         show_default=True,
     ),
 ) -> None:
     """Delete one or more sandboxes by ID, by label, or all sandboxes with --all
 
-    --only-mine controls whether '--all' and '--label' will restrict
-    to your sandboxes or delete for all users.
+    '--all' and '--label' perform a single server-side scoped delete: by
+    default it is scoped to your own sandboxes in the configured team.
+    Pass '--all-users' to delete across the whole team (team admin only).
     """
     try:
         base_client = APIClient()
@@ -713,50 +693,94 @@ def delete(
             )
             raise typer.Exit(1)
 
-        if all:
-            sandbox_ids = _fetch_and_filter_sandboxes(sandbox_client, only_mine, flag_name="--all")
-            if sandbox_ids is None:
-                return
-        elif labels:
-            sandbox_ids = _fetch_and_filter_sandboxes(
+        if all or labels:
+            team_id = config.team_id
+            if only_mine:
+                scope_user_id = config.user_id
+                all_users_flag = False
+                if not scope_user_id:
+                    console.print(
+                        "[red]Error:[/red] Cannot scope to your sandboxes -"
+                        " no user_id configured. Use --all-users to delete"
+                        " sandboxes across the team (requires team admin), or"
+                        " configure your user_id."
+                    )
+                    raise typer.Exit(1)
+            else:
+                scope_user_id = None
+                all_users_flag = True
+
+            total = _preview_bulk_delete_count(
                 sandbox_client,
-                only_mine,
+                team_id=team_id,
+                user_id=scope_user_id,
                 labels=labels,
-                flag_name="--label",
             )
-            if sandbox_ids is None:
+
+            if total == 0:
+                console.print("[yellow]No sandboxes to delete[/yellow]")
+                if only_mine:
+                    console.print(
+                        "\n[dim]Note: --all/--label only deletes your own"
+                        " sandboxes by default. Use --all-users to delete"
+                        " sandboxes from all team members (requires team"
+                        " admin).[/dim]"
+                    )
                 return
-        else:
-            parsed_ids = []
-            for id_string in sandbox_ids or []:
-                if "," in id_string:
-                    parsed_ids.extend([id.strip() for id in id_string.split(",") if id.strip()])
-                else:
-                    parsed_ids.append(id_string.strip())
 
-            cleaned_ids = []
-            seen = set()
-            for id in parsed_ids:
-                if id and id not in seen:
-                    cleaned_ids.append(id)
-                    seen.add(id)
-            sandbox_ids = cleaned_ids
-
-        if labels:
-            labels_str = ", ".join(labels)
-            confirmation_msg = (
-                f"Are you sure you want to delete {len(sandbox_ids)} "
-                f"sandbox(es) with labels: {labels_str}? "
-                f"This action cannot be undone."
-            )
+            scope_suffix = "" if only_mine else " across ALL users"
+            if labels:
+                labels_str = ", ".join(labels)
+                count_phrase = (
+                    f"{total} sandbox(es)" if total is not None else "all matching sandboxes"
+                )
+                confirmation_msg = (
+                    f"Are you sure you want to delete {count_phrase}"
+                    f" with labels: {labels_str}{scope_suffix}? This action"
+                    " cannot be undone."
+                )
+                cancel_msg = "Delete cancelled"
+            else:
+                count_phrase = (
+                    f"ALL {total} sandbox(es)" if total is not None else "EVERY matching sandbox"
+                )
+                confirmation_msg = (
+                    f"Are you sure you want to delete {count_phrase}"
+                    f"{scope_suffix}? This action cannot be undone."
+                )
+                cancel_msg = "Delete all cancelled"
 
             if not confirm_or_skip(confirmation_msg, yes):
-                console.print("Delete cancelled")
+                console.print(cancel_msg)
                 return
 
-            _bulk_delete_and_display(sandbox_client, sandbox_ids)
+            with console.status("[bold blue]Deleting sandboxes...", spinner="dots"):
+                result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(
+                    team_id=team_id,
+                    user_id=scope_user_id,
+                    all_users=all_users_flag,
+                    labels=labels or None,
+                )
 
-        elif len(sandbox_ids) == 1 and not all:
+            _display_bulk_delete_result(result)
+            return
+
+        parsed_ids = []
+        for id_string in sandbox_ids or []:
+            if "," in id_string:
+                parsed_ids.extend([id.strip() for id in id_string.split(",") if id.strip()])
+            else:
+                parsed_ids.append(id_string.strip())
+
+        cleaned_ids = []
+        seen = set()
+        for id in parsed_ids:
+            if id and id not in seen:
+                cleaned_ids.append(id)
+                seen.add(id)
+        sandbox_ids = cleaned_ids
+
+        if len(sandbox_ids) == 1:
             sandbox_id = sandbox_ids[0]
             if not confirm_or_skip(f"Are you sure you want to delete sandbox {sandbox_id}?", yes):
                 console.print("Delete cancelled")
@@ -766,25 +790,14 @@ def delete(
                 sandbox_client.delete(sandbox_id)
 
             console.print(f"[green]Successfully deleted sandbox {sandbox_id}[/green]")
+            return
 
-        else:
-            if all:
-                confirmation_msg = (
-                    f"Are you sure you want to delete ALL {len(sandbox_ids)} "
-                    f"sandbox(es)? This action cannot be undone."
-                )
-                cancel_msg = "Delete all cancelled"
-            else:
-                confirmation_msg = (
-                    f"Are you sure you want to delete {len(sandbox_ids)} sandbox(es)?"
-                )
-                cancel_msg = "Bulk delete cancelled"
+        confirmation_msg = f"Are you sure you want to delete {len(sandbox_ids)} sandbox(es)?"
+        if not confirm_or_skip(confirmation_msg, yes):
+            console.print("Bulk delete cancelled")
+            return
 
-            if not confirm_or_skip(confirmation_msg, yes):
-                console.print(cancel_msg)
-                return
-
-            _bulk_delete_and_display(sandbox_client, sandbox_ids)
+        _bulk_delete_and_display(sandbox_client, sandbox_ids)
 
     except typer.Exit:
         raise

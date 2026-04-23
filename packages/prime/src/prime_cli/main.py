@@ -10,6 +10,7 @@ from .commands.deployments import app as deployments_app
 from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
+from .commands.feedback import app as feedback_app
 from .commands.gepa import app as gepa_app
 from .commands.images import app as images_app
 from .commands.inference import app as inference_app
@@ -63,6 +64,7 @@ app.add_typer(teams_app, name="teams", rich_help_panel="Account")
 app.add_typer(secret_app, name="secret", rich_help_panel="Account")
 app.add_typer(upgrade_app, name="upgrade", rich_help_panel="Account")
 app.add_typer(upgrade_app, name="update", rich_help_panel="Account", hidden=True)
+app.add_typer(feedback_app, name="feedback", rich_help_panel="Account")
 
 
 @app.callback(invoke_without_command=True)

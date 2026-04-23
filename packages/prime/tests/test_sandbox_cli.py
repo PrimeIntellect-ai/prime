@@ -1,3 +1,6 @@
+import shlex
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -347,3 +350,83 @@ def test_sandbox_delete_by_label_all_users_passes_admin_scope(
     assert bulk_kwargs["user_id"] is None
 
     assert "Processed 1 sandbox(es)" in output
+
+
+def test_sandbox_ssh_vm_proxy_command_quotes_python_and_streams_without_list_comprehensions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+    temp_dir = tmp_path / "prime-ssh"
+    temp_dir.mkdir()
+    pub_key_path = temp_dir / "id_ed25519.pub"
+    pub_key_path.write_text("ssh-ed25519 AAAA-test-key user@test\n")
+
+    captured: dict[str, Any] = {"ssh_cmd": None, "public_key": None}
+
+    class FakeSandboxClient:
+        def __init__(self, _base_client: Any) -> None:
+            pass
+
+        def get(self, _sandbox_id: str) -> Any:
+            return SimpleNamespace(status="RUNNING", vm=True)
+
+        def create_ssh_session(
+            self, _sandbox_id: str, ttl_seconds: int | None = None, public_key: str | None = None
+        ) -> Any:
+            captured["public_key"] = public_key
+            assert ttl_seconds is None
+            return SimpleNamespace(
+                session_id="sess-123",
+                host="vm-host.example",
+                port=2222,
+                gateway_url="https://gateway.example",
+                user_ns="ns",
+                job_id="job",
+                token="token",
+                ttl_seconds=300,
+            )
+
+        def close_ssh_session(self, _sandbox_id: str, _session_id: str) -> None:
+            return None
+
+    fake_python_exec = "/tmp/my python/bin/python3"
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.APIClient", lambda: object())
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient", FakeSandboxClient)
+    monkeypatch.setattr("prime_cli.commands.sandbox.tempfile.mkdtemp", lambda prefix: str(temp_dir))
+    monkeypatch.setattr("prime_cli.commands.sandbox.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("prime_cli.commands.sandbox.sys.executable", fake_python_exec)
+    monkeypatch.setattr("prime_cli.commands.sandbox.shutil.which", lambda _name: "/usr/bin/fake")
+
+    def _mock_subprocess_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if cmd and cmd[0] == "ssh-keygen":
+            return subprocess.CompletedProcess(cmd, 0)
+        if cmd and cmd[0] == "ssh":
+            captured["ssh_cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0)
+        raise AssertionError(f"Unexpected subprocess call: {cmd!r}, kwargs={kwargs!r}")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.subprocess.run", _mock_subprocess_run)
+
+    result = runner.invoke(app, ["sandbox", "ssh", "sbx-vm-1"])
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, f"Failed: {output}"
+    assert captured["public_key"] == "ssh-ed25519 AAAA-test-key user@test"
+
+    ssh_cmd = captured["ssh_cmd"]
+    assert isinstance(ssh_cmd, list)
+    proxy_opt = next((arg for arg in ssh_cmd if arg.startswith("ProxyCommand=")), None)
+    assert proxy_opt is not None
+
+    proxy_cmd = proxy_opt[len("ProxyCommand=") :]
+    assert proxy_cmd.startswith(f"{shlex.quote(fake_python_exec)} -c ")
+    parsed_proxy = shlex.split(proxy_cmd)
+    assert parsed_proxy[0] == fake_python_exec
+    assert parsed_proxy[1] == "-c"
+    proxy_script = parsed_proxy[2]
+
+    assert "while True:" in proxy_script
+    assert "for b in iter(" not in proxy_script

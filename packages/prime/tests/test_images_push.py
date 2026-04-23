@@ -1,6 +1,8 @@
 import io
 import tarfile
+from types import SimpleNamespace
 
+from prime_cli.commands import images as images_cmd
 from prime_cli.commands.images import PACKAGED_DOCKERFILE_PATH
 from prime_cli.main import app
 from typer.testing import CliRunner
@@ -59,6 +61,7 @@ def test_push_image_defaults_dockerfile_to_context(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["build_payload"]["dockerfile_path"] == PACKAGED_DOCKERFILE_PATH
+    assert "is_public" not in captured["build_payload"]
 
     with tarfile.open(fileobj=io.BytesIO(captured["tar_bytes"]), mode="r:gz") as tar:
         names = set(tar.getnames())
@@ -138,3 +141,76 @@ def test_push_image_accepts_dockerfile_outside_context(tmp_path, monkeypatch):
         dockerfile_member = tar.extractfile(PACKAGED_DOCKERFILE_PATH)
         assert dockerfile_member is not None
         assert dockerfile_member.read().decode() == dockerfile_path.read_text()
+
+
+def test_push_image_public_forwards_is_public(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    monkeypatch.setattr(images_cmd, "config", SimpleNamespace(team_id=None))
+
+    context_path = tmp_path / "context"
+    context_path.mkdir()
+    (context_path / "Dockerfile").write_text("FROM busybox\n")
+
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            if method == "POST" and path == "/images/build":
+                captured["build_payload"] = json
+                return {
+                    "build_id": "build-123",
+                    "upload_url": "https://example.test/upload",
+                    "fullImagePath": "primeintellect/rehl:latest",
+                }
+
+            if method == "POST" and path == "/images/build/build-123/start":
+                return {}
+
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    class DummyUploadResponse:
+        def raise_for_status(self):
+            return None
+
+    def fake_put(url, content, headers, timeout):
+        content.read()
+        return DummyUploadResponse()
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.commands.images.httpx.put", fake_put)
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "rehl:latest", "--context", "context", "--public"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["build_payload"]["is_public"] is True
+    assert "team_id" not in captured["build_payload"]
+    assert "primeintellect/rehl:latest" in result.output
+
+
+def test_push_image_public_rejects_team_context(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    monkeypatch.setattr(images_cmd, "config", SimpleNamespace(team_id="team-123"))
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            raise AssertionError("API should not be called")
+
+    def fake_put(url, content, headers, timeout):
+        raise AssertionError("Upload should not be called")
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.commands.images.httpx.put", fake_put)
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "rehl:latest", "--public"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "Public images cannot be pushed from a team context" in result.output

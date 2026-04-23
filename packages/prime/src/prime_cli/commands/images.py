@@ -27,7 +27,7 @@ config = Config()
 LIST_IMAGES_JSON_HELP = json_output_help(
     "Raw API response is printed unchanged.",
     ".data[] = {displayRef?, fullImagePath?, imageName, imageTag, status, "
-    "artifactType, ownerType, buildId?, sizeBytes?, createdAt, pushedAt?}",
+    "artifactType, ownerType, sizeBytes?, createdAt, pushedAt?}",
 )
 
 # ---------------------------------------------------------------------------

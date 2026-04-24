@@ -296,6 +296,69 @@ class TestPushSingleEval:
         assert captured["checked_evaluation_id"] == "eval-123"
         assert captured["name"] == "explicit override"
 
+    def test_push_single_eval_prints_returned_viewer_url(self, tmp_path, monkeypatch, capsys):
+        metadata = {"env": "gsm8k", "model": "gpt-4"}
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+        (tmp_path / "results.jsonl").write_text("")
+
+        class DummyEvalsClient:
+            def __init__(self, _api_client):
+                pass
+
+            def create_evaluation(self, **_kwargs):
+                return {"evaluation_id": "eval-123"}
+
+            def finalize_evaluation(self, evaluation_id, metrics=None):
+                assert evaluation_id == "eval-123"
+                assert metrics == {}
+                return {
+                    "viewer_url": "https://app.primeintellect.ai/dashboard/evaluations/eval-123"
+                }
+
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
+        monkeypatch.setattr(
+            "prime_cli.commands.evals.get_eval_viewer_url",
+            lambda _eval_id: "https://fallback.example/eval-123",
+        )
+
+        _push_single_eval(str(tmp_path), None, None, None)
+
+        output = capsys.readouterr().out
+        assert "https://app.primeintellect.ai/dashboard/evaluations/eval-123" in output
+        assert "https://fallback.example/eval-123" not in output
+
+    def test_push_single_eval_falls_back_to_configured_viewer_url(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        metadata = {"env": "gsm8k", "model": "gpt-4"}
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+        (tmp_path / "results.jsonl").write_text("")
+
+        class DummyEvalsClient:
+            def __init__(self, _api_client):
+                pass
+
+            def create_evaluation(self, **_kwargs):
+                return {"evaluation_id": "eval-123"}
+
+            def finalize_evaluation(self, evaluation_id, metrics=None):
+                assert evaluation_id == "eval-123"
+                assert metrics == {}
+                return {}
+
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
+        monkeypatch.setattr(
+            "prime_cli.commands.evals.get_eval_viewer_url",
+            lambda _eval_id: "https://fallback.example/eval-123",
+        )
+
+        _push_single_eval(str(tmp_path), None, None, None)
+
+        output = capsys.readouterr().out
+        assert "https://fallback.example/eval-123" in output
+
 
 class TestLoadEvalDirectory:
     """Tests for _load_eval_directory function"""

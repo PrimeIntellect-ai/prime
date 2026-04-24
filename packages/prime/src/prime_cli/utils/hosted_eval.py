@@ -51,6 +51,7 @@ class HostedEvalConfig:
     max_retries: Optional[int] = None
     state_columns: Optional[list[str]] = None
     independent_scoring: bool = False
+    verbose: bool = False
     headers: Optional[list[str]] = None
     extra_env_kwargs: Optional[dict[str, Any]] = None
     api_client_type: Optional[str] = None

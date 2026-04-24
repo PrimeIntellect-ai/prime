@@ -156,6 +156,7 @@ def test_eval_run_hosted_passes_runtime_args_from_cli(monkeypatch):
         captured["max_retries"] = config.max_retries
         captured["state_columns"] = config.state_columns
         captured["independent_scoring"] = config.independent_scoring
+        captured["verbose"] = config.verbose
         captured["headers"] = config.headers
         captured["sampling_args"] = config.sampling_args
         return {"evaluation_id": "eval-123"}
@@ -179,6 +180,7 @@ def test_eval_run_hosted_passes_runtime_args_from_cli(monkeypatch):
             "--state-columns",
             "turn,timing",
             "--independent-scoring",
+            "--verbose",
             "--header",
             "X-Test: one",
             "--max-tokens",
@@ -195,6 +197,7 @@ def test_eval_run_hosted_passes_runtime_args_from_cli(monkeypatch):
         "max_retries": 3,
         "state_columns": ["turn", "timing"],
         "independent_scoring": True,
+        "verbose": True,
         "headers": ["X-Test: one"],
         "sampling_args": {"max_tokens": 4096, "temperature": 0.2},
     }
@@ -465,6 +468,7 @@ def test_create_hosted_evaluation_includes_hosted_runtime_args_in_payload(monkey
             max_retries=3,
             state_columns=["turn", "timing"],
             independent_scoring=True,
+            verbose=True,
             headers=["X-Test: one", "X-Second: two"],
         )
     )
@@ -474,6 +478,7 @@ def test_create_hosted_evaluation_includes_hosted_runtime_args_in_payload(monkey
     assert captured["json"]["eval_config"]["max_retries"] == 3
     assert captured["json"]["eval_config"]["state_columns"] == ["turn", "timing"]
     assert captured["json"]["eval_config"]["independent_scoring"] is True
+    assert captured["json"]["eval_config"]["verbose"] is True
     assert captured["json"]["eval_config"]["headers"] == [
         "X-Test: one",
         "X-Second: two",
@@ -832,6 +837,7 @@ max_concurrent = 100
 max_retries = 3
 state_columns = ["turn", "timing"]
 independent_scoring = true
+verbose = true
 header = ["X-Test: one"]
 max_tokens = 4096
 temperature = 0.2
@@ -853,6 +859,7 @@ env_id = "gsm8k"
         captured["max_retries"] = config.max_retries
         captured["state_columns"] = config.state_columns
         captured["independent_scoring"] = config.independent_scoring
+        captured["verbose"] = config.verbose
         captured["headers"] = config.headers
         captured["sampling_args"] = config.sampling_args
         return {"evaluation_id": "eval-123"}
@@ -875,6 +882,7 @@ env_id = "gsm8k"
         "max_retries": 3,
         "state_columns": ["turn", "timing"],
         "independent_scoring": True,
+        "verbose": True,
         "headers": ["X-Test: one"],
         "sampling_args": {
             "max_tokens": 4096,
@@ -1080,7 +1088,6 @@ env_id = "gsm8k"
     ("field_assignment", "expected_field"),
     [
         ('provider = "azure"', "provider"),
-        ("verbose = true", "verbose"),
         ("debug = true", "debug"),
         ("save_results = false", "save_results"),
         ("resume = true", "resume"),
@@ -1335,7 +1342,6 @@ def test_eval_run_local_sampling_args_passthrough(monkeypatch):
         (["--provider", "openai"], "--provider"),
         (["--endpoints-path", "./configs/endpoints.toml"], "--endpoints-path"),
         (["--output-dir", "/tmp/results"], "--output-dir"),
-        (["--verbose"], "--verbose"),
         (["--no-interleave-scoring"], "--no-interleave-scoring"),
         (["--save-results"], "--save-results"),
         (["--resume", "/tmp/results.json"], "--resume"),

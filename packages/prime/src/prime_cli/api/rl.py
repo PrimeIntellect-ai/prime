@@ -60,6 +60,10 @@ class RLRun(BaseModel):
     created_at: datetime = Field(..., alias="createdAt")
     updated_at: datetime = Field(..., alias="updatedAt")
 
+    # Automated failure classification (only set for terminal FAILED runs).
+    # Stored as a dict to stay forward-compatible if the API adds new fields.
+    failure_analysis: Optional[Dict[str, Any]] = Field(None, alias="failureAnalysis")
+
     model_config = ConfigDict(populate_by_name=True)
 
 

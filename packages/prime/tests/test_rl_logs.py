@@ -173,17 +173,43 @@ def test_logs_env_server_qualified_name_parses_index(monkeypatch: pytest.MonkeyP
     assert env[0]["env_index"] == 2
 
 
-def test_logs_env_server_bad_qualifier(monkeypatch: pytest.MonkeyPatch) -> None:
-    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        raise AssertionError(f"Should not be called: {endpoint}")
+def test_logs_env_server_owner_name_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--env primeintellect/reverse-text` is a valid name, not a qualifier.
 
+    Only a trailing ``/<int>`` should be treated as a replica index.
+    """
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    mock_get = _make_mock_get({"env_server_logs": "ok"}, orch, env, lst)
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
     result = CliRunner().invoke(
         app,
-        ["rl", "logs", RUN_ID, "-c", "env-server", "--env", "reverse-text/abc", "--raw"],
+        ["rl", "logs", RUN_ID, "--env", "primeintellect/reverse-text", "--raw"],
     )
-    assert result.exit_code != 0
+
+    assert result.exit_code == 0, result.output
+    assert env[0]["env_name"] == "primeintellect/reverse-text"
+    assert env[0]["env_index"] == 0
+
+
+def test_logs_env_server_owner_name_with_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--env primeintellect/reverse-text/1` should split at the last slash."""
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    mock_get = _make_mock_get({"env_server_logs": "ok"}, orch, env, lst)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(
+        app,
+        ["rl", "logs", RUN_ID, "--env", "primeintellect/reverse-text/1", "--raw"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert env[0]["env_name"] == "primeintellect/reverse-text"
+    assert env[0]["env_index"] == 1
 
 
 def test_logs_env_server_requires_env_flag(monkeypatch: pytest.MonkeyPatch) -> None:

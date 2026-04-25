@@ -1456,24 +1456,15 @@ def _handle_logs_api_error(e: APIError) -> None:
 
 
 def _parse_env_qualifier(env: str) -> tuple[str, int]:
-    """Parse 'name' or 'name/N' into (env_name, env_index).
+    """Parse 'name' or 'name/<int>' into (env_name, env_index).
 
-    A trailing ``/<int>`` is treated as a replica index; index defaults to 0.
+    Only a trailing ``/<int>`` is treated as a replica index. Any other slashes
+    are part of the env name itself (e.g. owner/name IDs like
+    ``primeintellect/reverse-text``).
     """
-    if "/" in env:
-        name, _, idx_str = env.rpartition("/")
-        if not name:
-            raise typer.BadParameter(
-                f"Invalid env qualifier '{env}'. Expected 'name' or 'name/<index>'.",
-                param_hint="--env",
-            )
-        try:
-            return name, int(idx_str)
-        except ValueError:
-            raise typer.BadParameter(
-                f"Invalid env qualifier '{env}'. Expected 'name' or 'name/<index>'.",
-                param_hint="--env",
-            )
+    name, sep, idx_str = env.rpartition("/")
+    if sep and name and idx_str.isdigit():
+        return name, int(idx_str)
     return env, 0
 
 

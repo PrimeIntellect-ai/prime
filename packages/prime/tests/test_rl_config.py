@@ -70,31 +70,42 @@ def test_flatten_config_schema_preserves_optional_array_item_types() -> None:
     assert rows["buffer.env_ratios"] == "list[number]"
 
 
-def test_load_config_accepts_top_level_reasoning_effort(tmp_path: Path) -> None:
+def test_load_config_accepts_sampling_reasoning_effort(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
-    config_path.write_text('model = "openai/gpt-oss-20b"\nreasoning_effort = "high"\n')
+    config_path.write_text('model = "openai/gpt-oss-20b"\n[sampling]\nreasoning_effort = "high"\n')
 
     cfg = load_config(str(config_path))
 
-    assert cfg.reasoning_effort == "high"
-    assert cfg.enable_thinking is None
+    assert cfg.sampling.reasoning_effort == "high"
+    assert cfg.sampling.enable_thinking is None
 
 
-def test_load_config_accepts_top_level_enable_thinking(tmp_path: Path) -> None:
+def test_load_config_accepts_sampling_enable_thinking(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
-    config_path.write_text('model = "Qwen/Qwen3.5-35B-A3B"\nenable_thinking = false\n')
+    config_path.write_text('model = "Qwen/Qwen3.5-35B-A3B"\n[sampling]\nenable_thinking = false\n')
 
     cfg = load_config(str(config_path))
 
-    assert cfg.enable_thinking is False
-    assert cfg.reasoning_effort is None
+    assert cfg.sampling.enable_thinking is False
+    assert cfg.sampling.reasoning_effort is None
 
 
 def test_load_config_rejects_both_reasoning_controls(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text(
-        'model = "openai/gpt-oss-20b"\nenable_thinking = false\nreasoning_effort = "low"\n'
+        'model = "openai/gpt-oss-20b"\n'
+        "[sampling]\n"
+        "enable_thinking = false\n"
+        'reasoning_effort = "low"\n'
     )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_rejects_top_level_reasoning_effort(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "openai/gpt-oss-20b"\nreasoning_effort = "high"\n')
 
     with pytest.raises(typer.Exit):
         load_config(str(config_path))

@@ -578,6 +578,32 @@ def _get_status_color(status: str) -> str:
     return RUN_STATUS_COLORS.get(status.upper(), "white")
 
 
+def _render_failure_analysis(analysis: Dict[str, Any]) -> None:
+    """Render the automated failure-classifier output below run details.
+
+    The backend only returns this for RUN_ISSUE classifications, so we don't
+    surface the internal classifier tag — just the diagnosis itself.
+    """
+    root_cause = analysis.get("rootCause")
+    evidence = analysis.get("evidence")
+    if not root_cause and not (isinstance(evidence, list) and evidence):
+        return
+
+    header = "\n[bold]Failure Analysis[/bold]"
+    confidence = analysis.get("confidence")
+    if isinstance(confidence, (int, float)):
+        header += f" [dim](confidence {confidence * 100:.0f}%)[/dim]"
+    console.print(header)
+
+    if root_cause:
+        console.print(f"  Root Cause: {rich_escape(str(root_cause))}")
+
+    if isinstance(evidence, list) and evidence:
+        console.print("  Evidence:")
+        for line in evidence:
+            console.print(f"    - [dim]{rich_escape(str(line))}[/dim]")
+
+
 def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     created_at = run.created_at.strftime("%Y-%m-%d %H:%M") if run.created_at else ""
     env_names = [
@@ -1251,6 +1277,9 @@ def get_run(
             console.print(f"  Completed: [dim]{run.completed_at.strftime('%Y-%m-%d %H:%M')}[/dim]")
         if run.error_message:
             console.print(f"  Error: [red]{run.error_message}[/red]")
+
+        if run.failure_analysis:
+            _render_failure_analysis(run.failure_analysis)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

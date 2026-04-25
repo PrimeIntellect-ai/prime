@@ -1480,17 +1480,20 @@ def _parse_env_qualifier(env: str) -> tuple[str, int]:
 @app.command("logs", rich_help_panel="Monitoring")
 def get_logs(
     run_id: str = typer.Argument(..., help="Run ID to get logs for"),
-    component: str = typer.Option(
-        "orchestrator",
+    component: Optional[str] = typer.Option(
+        None,
         "--component",
         "-c",
-        help="Pod to read logs from: 'orchestrator' (default) or 'env-server'.",
+        help=(
+            "Pod to read logs from: 'orchestrator' (default) or 'env-server'. "
+            "Inferred from --env when omitted."
+        ),
     ),
     env: Optional[str] = typer.Option(
         None,
         "--env",
         help=(
-            "Env-server name (required when --component=env-server). "
+            "Env-server name. Implies --component=env-server. "
             "Use 'name/N' to disambiguate when multiple env-servers share a name. "
             "List with 'prime rl components <run_id>'."
         ),
@@ -1501,9 +1504,10 @@ def get_logs(
 ) -> None:
     """Get logs for a run.
 
-    Defaults to the orchestrator pod. Pass ``-c env-server --env <name>`` when
-    an env-server is crash-looping (e.g. ``ModuleNotFoundError``) and the
-    orchestrator has stalled at "Starting orchestrator step 0".
+    Defaults to the orchestrator pod. Pass ``--env <name>`` to read an
+    env-server pod instead — useful when an env-server is crash-looping
+    (e.g. ``ModuleNotFoundError``) and the orchestrator has stalled at
+    "Starting orchestrator step 0".
 
     List available pods first with ``prime rl components <run_id>``.
 
@@ -1511,22 +1515,24 @@ def get_logs(
 
         prime rl logs <run_id>
         prime rl logs <run_id> -f
-        prime rl logs <run_id> -c env-server --env reverse-text
-        prime rl logs <run_id> -c env-server --env reverse-text/1 -f
+        prime rl logs <run_id> --env reverse-text
+        prime rl logs <run_id> --env reverse-text/1 -f
     """
-    if component not in ("orchestrator", "env-server"):
+    if component is None:
+        component = "env-server" if env is not None else "orchestrator"
+    elif component not in ("orchestrator", "env-server"):
         raise typer.BadParameter(
             f"Invalid component '{component}'. Use 'orchestrator' or 'env-server'.",
             param_hint="--component",
         )
     if component == "orchestrator" and env is not None:
         raise typer.BadParameter(
-            "--env only applies with --component=env-server.",
+            "--env applies only to env-server logs. Drop --component=orchestrator or drop --env.",
             param_hint="--env",
         )
     if component == "env-server" and env is None:
         raise typer.BadParameter(
-            "--env is required when --component=env-server. "
+            "--env is required when reading env-server logs. "
             "Run 'prime rl components <run_id>' to list available env-servers.",
             param_hint="--env",
         )

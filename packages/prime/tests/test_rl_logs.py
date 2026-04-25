@@ -84,15 +84,35 @@ def test_logs_default_hits_orchestrator(monkeypatch: pytest.MonkeyPatch) -> None
     assert env == []
 
 
-def test_logs_orchestrator_rejects_env_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`--env` is meaningless for orchestrator logs; must error rather than be ignored."""
+def test_logs_env_flag_alone_infers_env_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Passing --env without -c should infer component=env-server."""
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    mock_get = _make_mock_get({"env_server_logs": "inferred line"}, orch, env, lst)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--env", "reverse-text", "--raw"])
+
+    assert result.exit_code == 0, result.output
+    assert "inferred line" in result.output
+    assert orch == []
+    assert len(env) == 1
+    assert env[0]["env_name"] == "reverse-text"
+    assert env[0]["env_index"] == 0
+
+
+def test_logs_explicit_orchestrator_with_env_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit `-c orchestrator --env x` is a real conflict; must error."""
 
     def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
         raise AssertionError(f"Should not be called: {endpoint}")
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--env", "reverse-text"])
+    result = CliRunner().invoke(
+        app, ["rl", "logs", RUN_ID, "-c", "orchestrator", "--env", "reverse-text"]
+    )
     assert result.exit_code != 0
 
 

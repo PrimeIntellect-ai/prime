@@ -82,6 +82,17 @@ class RLCheckpoint(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class EnvServerInfo(BaseModel):
+    """Env-server pod info for an RL run."""
+
+    env_name: Optional[str] = Field(None, description="Environment name")
+    env_index: Optional[int] = Field(None, description="Environment server index")
+    pod_name: str = Field(..., description="Kubernetes pod name")
+    status: str = Field(..., description="Pod status")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class RLClient:
     """Client for hosted RL API."""
 
@@ -324,7 +335,7 @@ class RLClient:
             raise APIError(f"Failed to get RL run: {str(e)}")
 
     def get_logs(self, run_id: str, tail_lines: int = 1000) -> str:
-        """Get logs for an RL run."""
+        """Get orchestrator logs for an RL run."""
         try:
             response = self.client.get(
                 f"/rft/runs/{run_id}/logs", params={"tail_lines": tail_lines}
@@ -334,6 +345,39 @@ class RLClient:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to get RL run logs: {e.response.text}")
             raise APIError(f"Failed to get RL run logs: {str(e)}")
+
+    def list_env_servers(self, run_id: str) -> List[EnvServerInfo]:
+        """List env-server pods for an RL run."""
+        try:
+            response = self.client.get(f"/rft/runs/{run_id}/env-servers")
+            return [EnvServerInfo.model_validate(p) for p in response.get("env_servers", [])]
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to list env servers: {e.response.text}")
+            raise APIError(f"Failed to list env servers: {str(e)}")
+
+    def get_env_server_logs(
+        self,
+        run_id: str,
+        env_name: str,
+        env_index: int = 0,
+        tail_lines: int = 1000,
+    ) -> str:
+        """Get logs for a specific env-server pod of an RL run."""
+        try:
+            response = self.client.get(
+                f"/rft/runs/{run_id}/env-server-logs",
+                params={
+                    "env_name": env_name,
+                    "env_index": env_index,
+                    "tail_lines": tail_lines,
+                },
+            )
+            return response.get("logs", "")
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to get env server logs: {e.response.text}")
+            raise APIError(f"Failed to get env server logs: {str(e)}")
 
     def get_metrics(
         self,

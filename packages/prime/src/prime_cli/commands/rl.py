@@ -15,7 +15,7 @@ from rich.table import Table
 
 from prime_cli.core import Config
 
-from ..api.rl import RLClient, RLRun
+from ..api.rl import EnvServerInfo, RLClient, RLRun
 from ..client import APIClient, APIError, ValidationError
 from ..utils import (
     DefaultCommandGroup,
@@ -1372,107 +1372,253 @@ def restart_run(
         raise typer.Exit(1)
 
 
+def _print_new_lines(last_lines: list[str], current_lines: list[str]) -> None:
+    """Print only lines in current_lines that aren't in the tail of last_lines.
+
+    Uses suffix-prefix overlap detection to avoid reprinting lines between polls.
+    """
+    if current_lines == last_lines:
+        return
+    if not last_lines:
+        for line in current_lines:
+            console.print(line)
+        return
+    overlap = 0
+    max_overlap = min(len(last_lines), len(current_lines))
+    for i in range(1, max_overlap + 1):
+        if last_lines[-i:] == current_lines[:i]:
+            overlap = i
+    for line in current_lines[overlap:]:
+        console.print(line)
+
+
+def _stream_logs(
+    fetch_fn: Any,
+    tail: int,
+    raw: bool,
+    follow: bool,
+    label: str,
+) -> None:
+    """Common print loop for orchestrator and env-server log fetches."""
+
+    def render(raw_logs: str) -> list[str]:
+        if raw:
+            return raw_logs.splitlines()
+        return clean_logs(raw_logs)
+
+    if follow:
+        console.print(f"[dim]Watching {label} logs... (Ctrl+C to stop)[/dim]\n")
+        last_lines: list[str] = []
+        consecutive_errors = 0
+
+        while True:
+            try:
+                raw_logs = fetch_fn(tail)
+                consecutive_errors = 0
+            except APIError as e:
+                err_str = str(e).lower()
+                if "404" in str(e) and ("queued" in err_str or "pending" in err_str):
+                    console.print("[yellow]Run is queued, waiting for it to start...[/yellow]")
+                    time.sleep(10)
+                    continue
+                consecutive_errors += 1
+                if "429" in str(e):
+                    if consecutive_errors >= 3:
+                        console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
+                        time.sleep(30)
+                    else:
+                        time.sleep(10)
+                    continue
+                raise
+
+            current_lines = render(raw_logs)
+            _print_new_lines(last_lines, current_lines)
+            last_lines = current_lines
+            time.sleep(5)
+    else:
+        raw_logs = fetch_fn(tail)
+        rendered = render(raw_logs)
+        if rendered:
+            for line in rendered:
+                console.print(line)
+        else:
+            console.print("[yellow]No logs available yet.[/yellow]")
+
+
+def _handle_logs_api_error(e: APIError) -> None:
+    err_str = str(e).lower()
+    if "404" in str(e) and ("queued" in err_str or "pending" in err_str):
+        msg = "Run has not started yet. Logs will be available once running."
+        console.print(f"[yellow]{msg}[/yellow]")
+        raise typer.Exit(0)
+    console.print(f"[red]Error:[/red] {e}")
+    raise typer.Exit(1)
+
+
+def _parse_env_qualifier(env: str) -> tuple[str, int]:
+    """Parse 'name' or 'name/N' into (env_name, env_index).
+
+    A trailing ``/<int>`` is treated as a replica index; index defaults to 0.
+    """
+    if "/" in env:
+        name, _, idx_str = env.rpartition("/")
+        if not name:
+            raise typer.BadParameter(
+                f"Invalid env qualifier '{env}'. Expected 'name' or 'name/<index>'.",
+                param_hint="--env",
+            )
+        try:
+            return name, int(idx_str)
+        except ValueError:
+            raise typer.BadParameter(
+                f"Invalid env qualifier '{env}'. Expected 'name' or 'name/<index>'.",
+                param_hint="--env",
+            )
+    return env, 0
+
+
 @app.command("logs", rich_help_panel="Monitoring")
 def get_logs(
     run_id: str = typer.Argument(..., help="Run ID to get logs for"),
+    component: str = typer.Option(
+        "orchestrator",
+        "--component",
+        "-c",
+        help="Pod to read logs from: 'orchestrator' (default) or 'env-server'.",
+    ),
+    env: Optional[str] = typer.Option(
+        None,
+        "--env",
+        help=(
+            "Env-server name (required when --component=env-server). "
+            "Use 'name/N' to disambiguate when multiple env-servers share a name. "
+            "List with 'prime rl components <run_id>'."
+        ),
+    ),
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
     raw: bool = typer.Option(False, "--raw", "-r", help="Show raw logs without formatting"),
 ) -> None:
-    """Get logs for a run."""
+    """Get logs for a run.
+
+    Defaults to the orchestrator pod. Pass ``-c env-server --env <name>`` when
+    an env-server is crash-looping (e.g. ``ModuleNotFoundError``) and the
+    orchestrator has stalled at "Starting orchestrator step 0".
+
+    List available pods first with ``prime rl components <run_id>``.
+
+    Examples:
+
+        prime rl logs <run_id>
+        prime rl logs <run_id> -f
+        prime rl logs <run_id> -c env-server --env reverse-text
+        prime rl logs <run_id> -c env-server --env reverse-text/1 -f
+    """
+    if component not in ("orchestrator", "env-server"):
+        raise typer.BadParameter(
+            f"Invalid component '{component}'. Use 'orchestrator' or 'env-server'.",
+            param_hint="--component",
+        )
+    if component == "orchestrator" and env is not None:
+        raise typer.BadParameter(
+            "--env only applies with --component=env-server.",
+            param_hint="--env",
+        )
+    if component == "env-server" and env is None:
+        raise typer.BadParameter(
+            "--env is required when --component=env-server. "
+            "Run 'prime rl components <run_id>' to list available env-servers.",
+            param_hint="--env",
+        )
+
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
 
-        if follow:
-            console.print(f"[dim]Watching logs for run {run_id}... (Ctrl+C to stop)[/dim]\n")
-            last_lines: list[str] = []
-            consecutive_errors = 0
+        if component == "orchestrator":
 
-            while True:
-                try:
-                    raw_logs = rl_client.get_logs(run_id, tail_lines=tail)
-                    consecutive_errors = 0
+            def fetch(t: int) -> str:
+                return rl_client.get_logs(run_id, tail_lines=t)
 
-                    if raw:
-                        # Raw mode with overlap detection
-                        current_lines = raw_logs.splitlines()
-                        if current_lines != last_lines:
-                            if not last_lines:
-                                for line in current_lines:
-                                    console.print(line)
-                            else:
-                                # Find new lines by comparing with previous
-                                overlap = 0
-                                max_overlap = min(len(last_lines), len(current_lines))
-                                for i in range(1, max_overlap + 1):
-                                    if last_lines[-i:] == current_lines[:i]:
-                                        overlap = i
-                                for line in current_lines[overlap:]:
-                                    console.print(line)
-                            last_lines = current_lines
-                    else:
-                        # Formatted mode
-                        formatted_lines = clean_logs(raw_logs)
-
-                        if formatted_lines != last_lines:
-                            if not last_lines:
-                                for line in formatted_lines:
-                                    console.print(line)
-                            else:
-                                # Find new lines by comparing with previous
-                                overlap = 0
-                                max_overlap = min(len(last_lines), len(formatted_lines))
-                                for i in range(1, max_overlap + 1):
-                                    if last_lines[-i:] == formatted_lines[:i]:
-                                        overlap = i
-                                for line in formatted_lines[overlap:]:
-                                    console.print(line)
-
-                            last_lines = formatted_lines
-                except APIError as e:
-                    if "404" in str(e) and (
-                        "queued" in str(e).lower() or "pending" in str(e).lower()
-                    ):
-                        console.print("[yellow]Run is queued, waiting for it to start...[/yellow]")
-                        time.sleep(10)
-                        continue
-                    consecutive_errors += 1
-                    if "429" in str(e):
-                        if consecutive_errors >= 3:
-                            console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
-                            time.sleep(30)
-                        else:
-                            time.sleep(10)
-                        continue
-                    raise
-
-                time.sleep(5)
+            label = "orchestrator"
         else:
-            raw_logs = rl_client.get_logs(run_id, tail_lines=tail)
-            if raw:
-                if raw_logs:
-                    console.print(raw_logs)
-                else:
-                    console.print("[yellow]No logs available yet.[/yellow]")
-            else:
-                formatted_lines = clean_logs(raw_logs)
-                if formatted_lines:
-                    for line in formatted_lines:
-                        console.print(line)
-                else:
-                    console.print("[yellow]No logs available yet.[/yellow]")
+            assert env is not None  # narrowed by validation above
+            env_name, env_index = _parse_env_qualifier(env)
+
+            def fetch(t: int) -> str:
+                return rl_client.get_env_server_logs(
+                    run_id,
+                    env_name=env_name,
+                    env_index=env_index,
+                    tail_lines=t,
+                )
+
+            label = f"env-server {env}"
+
+        _stream_logs(
+            fetch_fn=fetch,
+            tail=tail,
+            raw=raw,
+            follow=follow,
+            label=label,
+        )
 
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped watching logs.[/dim]")
     except APIError as e:
-        err_str = str(e).lower()
-        if "404" in str(e) and ("queued" in err_str or "pending" in err_str):
-            msg = "Run has not started yet. Logs will be available once running."
-            console.print(f"[yellow]{msg}[/yellow]")
-            raise typer.Exit(0)
+        _handle_logs_api_error(e)
+
+
+@app.command("components", rich_help_panel="Monitoring")
+def list_components(
+    run_id: str = typer.Argument(..., help="Run ID to list components for"),
+) -> None:
+    """List pods (orchestrator + env-servers) for a run.
+
+    Use the env name shown here with
+    ``prime rl logs <run_id> -c env-server --env <name>``. When multiple
+    env-servers share a name, the qualified form ``name/N`` is shown — pass
+    that exact string to ``--env``.
+
+    Example:
+
+        prime rl components <run_id>
+    """
+    try:
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+        run = rl_client.get_run(run_id)
+        env_servers: List[EnvServerInfo] = rl_client.list_env_servers(run_id)
+    except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+    table = Table(title=f"Components for {run_id}")
+    table.add_column("Component", style="cyan")
+    table.add_column("Env", style="green")
+    table.add_column("Status")
+    table.add_column("Pod", style="dim")
+
+    table.add_row("orchestrator", "-", run.status, "-")
+
+    name_counts: Dict[str, int] = {}
+    for es in env_servers:
+        if es.env_name:
+            name_counts[es.env_name] = name_counts.get(es.env_name, 0) + 1
+
+    for es in env_servers:
+        if es.env_name and name_counts.get(es.env_name, 0) > 1:
+            env_label = f"{es.env_name}/{es.env_index}"
+        else:
+            env_label = es.env_name or "?"
+        table.add_row("env-server", env_label, es.status, es.pod_name)
+
+    console.print(table)
+    if env_servers:
+        console.print(
+            "\n[dim]View env-server logs with:[/dim] "
+            "[bold]prime rl logs <run_id> -c env-server --env <env>[/bold]"
+        )
 
 
 @app.command("init", rich_help_panel="Commands")

@@ -1594,9 +1594,8 @@ def list_components(
     table.add_column("Component", style="cyan")
     table.add_column("Env", style="green")
     table.add_column("Status")
-    table.add_column("Pod", style="dim")
 
-    table.add_row("orchestrator", "-", run.status, "-")
+    table.add_row("orchestrator", "-", run.status)
 
     name_counts: Dict[str, int] = {}
     for es in env_servers:
@@ -1608,7 +1607,7 @@ def list_components(
             env_label = f"{es.env_name}/{es.env_index}"
         else:
             env_label = es.env_name or "?"
-        table.add_row("env-server", env_label, es.status, es.pod_name)
+        table.add_row("env-server", env_label, es.status)
 
     console.print(table)
     if env_servers:

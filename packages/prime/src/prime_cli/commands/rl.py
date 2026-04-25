@@ -584,7 +584,7 @@ def _render_failure_analysis(analysis: Dict[str, Any]) -> None:
     The backend only returns this for RUN_ISSUE classifications, so we don't
     surface the internal classifier tag — just the diagnosis itself.
     """
-    root_cause = analysis.get("root_cause")
+    root_cause = analysis.get("rootCause")
     evidence = analysis.get("evidence")
     if not root_cause and not (isinstance(evidence, list) and evidence):
         return

@@ -893,6 +893,8 @@ def create_run(
             if run.runs_ahead is not None:
                 queue_msg += f" (~{run.runs_ahead} runs ahead)"
             console.print(f"[yellow]{queue_msg}[/yellow]")
+            if run.queue_reason:
+                console.print(f"[yellow]Reason:[/yellow] {run.queue_reason}")
             console.print("[dim]The run will start automatically when capacity is available.[/dim]")
         else:
             console.print("[green]✓ Run created successfully![/green]")

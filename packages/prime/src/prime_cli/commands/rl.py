@@ -578,30 +578,26 @@ def _get_status_color(status: str) -> str:
     return RUN_STATUS_COLORS.get(status.upper(), "white")
 
 
-FAILURE_TAG_COLORS = {
-    "PLATFORM_ISSUE": "red",
-    "RUN_ISSUE": "yellow",
-    "UNCLASSIFIED": "white",
-}
-
-
 def _render_failure_analysis(analysis: Dict[str, Any]) -> None:
-    """Render the automated failure-classifier output below run details."""
-    tag = analysis.get("user_tag") or "UNCLASSIFIED"
-    color = FAILURE_TAG_COLORS.get(tag, "white")
-    confidence = analysis.get("confidence")
-    tag_line = f"[{color}]{tag}[/{color}]"
-    if isinstance(confidence, (int, float)):
-        tag_line += f" [dim](confidence {confidence * 100:.0f}%)[/dim]"
+    """Render the automated failure-classifier output below run details.
 
-    console.print("\n[bold]Failure Analysis[/bold]")
-    console.print(f"  Tag: {tag_line}")
-
+    The backend only returns this for RUN_ISSUE classifications, so we don't
+    surface the internal classifier tag — just the diagnosis itself.
+    """
     root_cause = analysis.get("root_cause")
+    evidence = analysis.get("evidence")
+    if not root_cause and not (isinstance(evidence, list) and evidence):
+        return
+
+    header = "\n[bold]Failure Analysis[/bold]"
+    confidence = analysis.get("confidence")
+    if isinstance(confidence, (int, float)):
+        header += f" [dim](confidence {confidence * 100:.0f}%)[/dim]"
+    console.print(header)
+
     if root_cause:
         console.print(f"  Root Cause: {rich_escape(str(root_cause))}")
 
-    evidence = analysis.get("evidence")
     if isinstance(evidence, list) and evidence:
         console.print("  Evidence:")
         for line in evidence:

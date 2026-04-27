@@ -11,6 +11,8 @@ from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
 from .commands.feedback import app as feedback_app
+from .commands.fork import FORK_JSON_HELP
+from .commands.fork import fork as fork_command
 from .commands.gepa import app as gepa_app
 from .commands.images import app as images_app
 from .commands.inference import app as inference_app
@@ -40,6 +42,7 @@ app = PlainTyper(
 # Lab commands
 app.add_typer(lab_app, name="lab", rich_help_panel="Lab")
 app.add_typer(env_app, name="env", rich_help_panel="Lab")
+app.command("fork", rich_help_panel="Lab", epilog=FORK_JSON_HELP)(fork_command)
 app.add_typer(evals_app, name="eval", rich_help_panel="Lab")
 app.add_typer(gepa_app, name="gepa", rich_help_panel="Lab")
 app.add_typer(rl_app, name="rl", rich_help_panel="Lab")

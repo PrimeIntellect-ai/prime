@@ -709,49 +709,58 @@ def delete(
                 scope_user_id = None
                 all_users_flag = True
 
-            total = _preview_bulk_delete_count(
-                sandbox_client,
-                team_id=team_id,
-                user_id=scope_user_id,
-                labels=labels,
-            )
-
-            if total == 0:
-                console.print("[yellow]No sandboxes to delete[/yellow]")
-                if only_mine:
-                    console.print(
-                        "\n[dim]Note: --all/--label only deletes your own"
-                        " sandboxes by default. Use --all-users to delete"
-                        " sandboxes from all team members (requires team"
-                        " admin).[/dim]"
-                    )
-                return
-
-            scope_suffix = "" if only_mine else " across ALL users"
-            if labels:
-                labels_str = ", ".join(labels)
-                count_phrase = (
-                    f"{total} sandbox(es)" if total is not None else "all matching sandboxes"
-                )
-                confirmation_msg = (
-                    f"Are you sure you want to delete {count_phrase}"
-                    f" with labels: {labels_str}{scope_suffix}? This action"
-                    " cannot be undone."
-                )
-                cancel_msg = "Delete cancelled"
+            # Skip the preview list call when --yes is set: it's only used for
+            # the confirmation prompt and zero-match short-circuit, and on
+            # large teams the server-side count(*) takes 10+ seconds. The bulk
+            # delete itself reports the succeeded/failed counts.
+            if yes:
+                total: Optional[int] = None
             else:
-                count_phrase = (
-                    f"ALL {total} sandbox(es)" if total is not None else "EVERY matching sandbox"
+                total = _preview_bulk_delete_count(
+                    sandbox_client,
+                    team_id=team_id,
+                    user_id=scope_user_id,
+                    labels=labels,
                 )
-                confirmation_msg = (
-                    f"Are you sure you want to delete {count_phrase}"
-                    f"{scope_suffix}? This action cannot be undone."
-                )
-                cancel_msg = "Delete all cancelled"
 
-            if not confirm_or_skip(confirmation_msg, yes):
-                console.print(cancel_msg)
-                return
+                if total == 0:
+                    console.print("[yellow]No sandboxes to delete[/yellow]")
+                    if only_mine:
+                        console.print(
+                            "\n[dim]Note: --all/--label only deletes your own"
+                            " sandboxes by default. Use --all-users to delete"
+                            " sandboxes from all team members (requires team"
+                            " admin).[/dim]"
+                        )
+                    return
+
+                scope_suffix = "" if only_mine else " across ALL users"
+                if labels:
+                    labels_str = ", ".join(labels)
+                    count_phrase = (
+                        f"{total} sandbox(es)" if total is not None else "all matching sandboxes"
+                    )
+                    confirmation_msg = (
+                        f"Are you sure you want to delete {count_phrase}"
+                        f" with labels: {labels_str}{scope_suffix}? This action"
+                        " cannot be undone."
+                    )
+                    cancel_msg = "Delete cancelled"
+                else:
+                    count_phrase = (
+                        f"ALL {total} sandbox(es)"
+                        if total is not None
+                        else "EVERY matching sandbox"
+                    )
+                    confirmation_msg = (
+                        f"Are you sure you want to delete {count_phrase}"
+                        f"{scope_suffix}? This action cannot be undone."
+                    )
+                    cancel_msg = "Delete all cancelled"
+
+                if not confirm_or_skip(confirmation_msg, yes):
+                    console.print(cancel_msg)
+                    return
 
             with console.status("[bold blue]Deleting sandboxes...", spinner="dots"):
                 result: BulkDeleteSandboxResponse = sandbox_client.bulk_delete(

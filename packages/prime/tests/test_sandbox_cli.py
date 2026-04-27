@@ -247,9 +247,8 @@ def test_sandbox_delete_by_label_scopes_to_caller(
 ) -> None:
     """Default --label delete scopes to the caller's user_id server-side.
 
-    The CLI now makes a single ``list(per_page=1)`` call to preview the count,
-    then a single ``bulk_delete`` with the scope/labels — the server does the
-    filtering, so no pagination and no client-side user_id filter.
+    With --yes the CLI skips the preview list call (which can take 10+ seconds
+    on large teams) and goes straight to ``bulk_delete``.
     """
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
@@ -283,12 +282,8 @@ def test_sandbox_delete_by_label_scopes_to_caller(
     output = strip_ansi(result.output)
     assert result.exit_code == 0, f"Failed: {result.output}"
 
-    # Preview call: scoped to caller + labels, only active sandboxes
-    list_kwargs = captured["list_kwargs"]
-    assert list_kwargs["labels"] == ["keep"]
-    assert list_kwargs["user_id"] == "user-1"
-    assert list_kwargs["exclude_terminated"] is True
-    assert list_kwargs["per_page"] == 1
+    # Preview list call is skipped under --yes
+    assert "list_kwargs" not in captured
 
     # Delete call: server-side scope, no client-side ID list
     bulk_kwargs = captured["bulk_delete_kwargs"]
@@ -336,10 +331,8 @@ def test_sandbox_delete_by_label_all_users_passes_admin_scope(
     output = strip_ansi(result.output)
     assert result.exit_code == 0, f"Failed: {result.output}"
 
-    list_kwargs = captured["list_kwargs"]
-    assert list_kwargs["labels"] == ["archive"]
-    assert list_kwargs["exclude_terminated"] is True
-    assert list_kwargs["user_id"] is None
+    # Preview list call is skipped under --yes
+    assert "list_kwargs" not in captured
 
     bulk_kwargs = captured["bulk_delete_kwargs"]
     assert bulk_kwargs["labels"] == ["archive"]

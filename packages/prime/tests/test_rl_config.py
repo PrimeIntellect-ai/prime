@@ -69,6 +69,43 @@ def test_load_config_still_rejects_other_unknown_keys(tmp_path: Path) -> None:
         load_config(str(config_path))
 
 
+def test_load_config_rejects_legacy_sft_distill_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\n'
+        'loss_type = "sft"\n'
+        "[teacher_rollout_model]\n"
+        'base_url = ["https://api.example.com/v1"]\n'
+        'api_key_var = "TEACHER_API_KEY"\n'
+        'name = "teacher-model"\n'
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+@pytest.mark.parametrize(
+    "config_body",
+    [
+        'loss_type = "sft"\n',
+        (
+            "[teacher_rollout_model]\n"
+            'base_url = ["https://api.example.com/v1"]\n'
+            'api_key_var = "TEACHER_API_KEY"\n'
+            'name = "teacher-model"\n'
+        ),
+    ],
+)
+def test_load_config_rejects_legacy_sft_distill_fields(
+    tmp_path: Path, config_body: str
+) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\n' + config_body)
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
 def test_generate_rl_config_template_uses_broad_buffer_threshold_examples() -> None:
     template = generate_rl_config_template()
 

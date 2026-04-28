@@ -163,6 +163,10 @@ def chat(
         console.print(f"[red]Error:[/red] invalid output format '{output}'. Supported: text, json")
         raise typer.Exit(1)
 
+    if stream and output == "json":
+        console.print("[red]Error:[/red] --stream is not supported with --output json.")
+        raise typer.Exit(1)
+
     if message is None:
         if sys.stdin.isatty():
             console.print("[red]Error:[/red] no message provided (pass as arg or via stdin).")
@@ -186,9 +190,6 @@ def chat(
     try:
         client = InferenceClient()
         if stream:
-            if output == "json":
-                console.print("[red]Error:[/red] --stream is not supported with --output json.")
-                raise typer.Exit(1)
             stream_result = client.chat_completion(payload, stream=True)
             _print_stream(stream_result)  # type: ignore[arg-type]
             return
@@ -214,6 +215,8 @@ def chat(
             sys.stdout.write("\n")
         sys.stdout.flush()
 
+    except typer.Exit:
+        raise
     except InferenceAPIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

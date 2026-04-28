@@ -159,6 +159,7 @@ class RLClient:
         checkpoint_id: Optional[str] = None,
         cluster_name: Optional[str] = None,
         infrastructure_config: Optional[Dict[str, Any]] = None,
+        tailscale_config: Optional[Dict[str, Any]] = None,
         enable_thinking: Optional[bool] = None,
         reasoning_effort: Optional[Literal["low", "medium", "high"]] = None,
         run_config: Optional[Dict[str, Any]] = None,
@@ -253,6 +254,9 @@ class RLClient:
             if infrastructure_config:
                 if "compute_size" in infrastructure_config:
                     payload["compute_size"] = infrastructure_config["compute_size"]
+
+            if tailscale_config:
+                payload["tailscale"] = tailscale_config
 
             if enable_thinking is not None:
                 payload["enable_thinking"] = enable_thinking

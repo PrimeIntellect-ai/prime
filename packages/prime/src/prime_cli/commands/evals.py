@@ -11,16 +11,6 @@ from click.core import ParameterSource
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
 from rich.syntax import Syntax
 from rich.table import Table
-from verifiers.cli.commands.eval import (
-    build_extra_headers,
-    build_parser,
-    merge_sampling_args,
-)
-from verifiers.utils.eval_utils import (
-    load_endpoints,
-    load_toml_config,
-    resolve_endpoints_file,
-)
 
 from ..client import APIClient, APIError
 from ..core import Config
@@ -53,6 +43,27 @@ from ..verifiers_bridge import (
 )
 
 console = get_console()
+
+
+def _lazy(module_path: str, name: str):
+    def stub(*args, **kwargs):
+        import importlib
+
+        fn = getattr(importlib.import_module(module_path), name)
+        globals()[name] = fn
+        return fn(*args, **kwargs)
+
+    stub.__name__ = name
+    return stub
+
+
+build_extra_headers = _lazy("verifiers.cli.commands.eval", "build_extra_headers")
+build_parser = _lazy("verifiers.cli.commands.eval", "build_parser")
+merge_sampling_args = _lazy("verifiers.cli.commands.eval", "merge_sampling_args")
+load_endpoints = _lazy("verifiers.utils.eval_utils", "load_endpoints")
+load_toml_config = _lazy("verifiers.utils.eval_utils", "load_toml_config")
+resolve_endpoints_file = _lazy("verifiers.utils.eval_utils", "resolve_endpoints_file")
+
 
 LIST_EVALS_JSON_HELP = json_output_help(
     ".evaluations[] = {evaluation_id|id, environment_names[], model_name, status, metadata}",

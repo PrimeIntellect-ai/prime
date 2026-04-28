@@ -17,7 +17,7 @@ def _parse_fork_source(environment: str) -> Tuple[str, str]:
     if "@" in environment:
         raise ValueError("Forking a specific version is not supported; omit the @version suffix")
 
-    parts = environment.split("/", 1)
+    parts = environment.split("/")
     if len(parts) != 2 or not parts[0] or not parts[1]:
         raise ValueError("Invalid environment format. Expected: owner/name")
 

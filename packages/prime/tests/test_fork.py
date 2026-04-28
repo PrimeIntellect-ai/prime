@@ -108,3 +108,22 @@ def test_prime_fork_rejects_versioned_sources():
 
     assert result.exit_code == 1
     assert "Forking a specific version is not supported" in result.output
+
+
+def test_prime_fork_rejects_extra_path_segments(monkeypatch):
+    class DummyAPIClient:
+        config = SimpleNamespace(team_id=None)
+
+        def post(self, endpoint, json=None):
+            raise AssertionError("invalid fork source should not call the API")
+
+    monkeypatch.setattr("prime_cli.commands.fork.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["fork", "openai/gsm8k/extra"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "Invalid environment format. Expected: owner/name" in result.output

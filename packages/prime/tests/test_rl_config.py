@@ -129,12 +129,28 @@ def test_tailscale_config_enabled_emits_payload(tmp_path: Path) -> None:
     cfg = load_config(str(config_path))
     assert cfg.tailscale.enabled is True
     payload = cfg.tailscale.to_api_dict()
+    # Match the file-wide convention: drop unset Optional fields rather than
+    # sending explicit nulls.
     assert payload == {
         "enabled": True,
         "auth_key": "tskey-auth-abc123",
         "hostname_prefix": "rft",
-        "extra_args": None,
     }
+
+
+def test_tailscale_to_api_dict_includes_extra_args_when_set(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "dummy"\n'
+        "[tailscale]\n"
+        "enabled = true\n"
+        'auth_key = "tskey-auth-abc"\n'
+        'extra_args = "--advertise-tags=tag:rft-debug"\n'
+    )
+    cfg = load_config(str(config_path))
+    payload = cfg.tailscale.to_api_dict()
+    assert payload is not None
+    assert payload["extra_args"] == "--advertise-tags=tag:rft-debug"
 
 
 def test_tailscale_enabled_without_auth_key_rejected(tmp_path: Path) -> None:

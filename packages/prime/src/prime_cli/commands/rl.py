@@ -531,12 +531,14 @@ class TailscaleConfig(BaseModel):
     def to_api_dict(self) -> Dict[str, Any] | None:
         if not self.enabled:
             return None
-        return {
+        d: Dict[str, Any] = {
             "enabled": True,
             "auth_key": self.auth_key,
             "hostname_prefix": self.hostname_prefix,
-            "extra_args": self.extra_args,
         }
+        if self.extra_args is not None:
+            d["extra_args"] = self.extra_args
+        return d
 
 
 class RLConfig(BaseModel):

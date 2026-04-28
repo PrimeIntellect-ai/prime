@@ -16,6 +16,9 @@ prime-tunnel = { workspace = true }
 verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.1.12.dev6" }
 
 [tool.pytest.ini_options]
+markers = [
+    "integration: opt-in tests that call live Prime services",
+]
 pythonpath = [
     "packages/prime/src",
     "packages/prime-sandboxes/src",

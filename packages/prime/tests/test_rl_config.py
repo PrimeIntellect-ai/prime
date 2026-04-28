@@ -109,3 +109,117 @@ def test_load_config_rejects_top_level_reasoning_effort(tmp_path: Path) -> None:
 
     with pytest.raises(typer.Exit):
         load_config(str(config_path))
+
+
+def test_tailscale_config_disabled_by_default() -> None:
+    cfg = RLConfig(model="dummy")
+    assert cfg.tailscale.enabled is False
+    assert cfg.tailscale.to_api_dict() is None
+
+
+def test_tailscale_config_enabled_emits_payload(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "dummy"\n[tailscale]\nenabled = true\nauth_key = "tskey-auth-abc123"\n'
+    )
+    cfg = load_config(str(config_path))
+    assert cfg.tailscale.enabled is True
+    # Default hostname_prefix matches the platform default so the rename
+    # actually lands on CLI-driven runs.
+    assert cfg.tailscale.hostname_prefix == "prime-hosted-training"
+    payload = cfg.tailscale.to_api_dict()
+    assert payload == {
+        "enabled": True,
+        "auth_key": "tskey-auth-abc123",
+        "hostname_prefix": "prime-hosted-training",
+    }
+
+
+def test_tailscale_extra_args_field_rejected(tmp_path: Path) -> None:
+    """extra_args is intentionally not exposed — the platform always boots the
+    sidecar with a locked-down arg set for tenant isolation."""
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "dummy"\n'
+        "[tailscale]\n"
+        "enabled = true\n"
+        'auth_key = "tskey-auth-abc"\n'
+        'extra_args = "--ssh"\n'
+    )
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_tailscale_enabled_without_auth_key_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\n[tailscale]\nenabled = true\n')
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_tailscale_invalid_hostname_prefix_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "dummy"\n'
+        "[tailscale]\n"
+        "enabled = true\n"
+        'auth_key = "tskey-auth-abc"\n'
+        'hostname_prefix = "rft-"\n'
+    )
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_tailscale_invalid_auth_key_format_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "dummy"\n[tailscale]\nenabled = true\nauth_key = "not-a-real-key"\n'
+    )
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_tailscale_oauth_client_secret_rejected(tmp_path: Path) -> None:
+    """Only pre-authenticated keys (tskey-auth-) are supported. OAuth client
+    secrets (tskey-client-) are rejected because the platform validator
+    only accepts auth keys."""
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "dummy"\n[tailscale]\nenabled = true\nauth_key = "tskey-client-abc123"\n'
+    )
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_tailscale_auth_key_from_env(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TAILSCALE_AUTH_KEY", "tskey-auth-fromenv")
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\n[tailscale]\nenabled = true\n')
+    cfg = load_config(str(config_path))
+    assert cfg.tailscale.auth_key == "tskey-auth-fromenv"
+
+
+def test_tailscale_auth_key_in_config_overrides_env(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TAILSCALE_AUTH_KEY", "tskey-auth-fromenv")
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "dummy"\n[tailscale]\nenabled = true\nauth_key = "tskey-auth-fromfile"\n'
+    )
+    cfg = load_config(str(config_path))
+    assert cfg.tailscale.auth_key == "tskey-auth-fromfile"
+
+
+def test_tailscale_env_auth_key_format_validated(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TAILSCALE_AUTH_KEY", "not-a-real-key")
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\n[tailscale]\nenabled = true\n')
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_tailscale_no_auth_key_anywhere_rejected(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("TAILSCALE_AUTH_KEY", raising=False)
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\n[tailscale]\nenabled = true\n')
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))

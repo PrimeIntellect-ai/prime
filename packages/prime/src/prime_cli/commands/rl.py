@@ -1,6 +1,7 @@
 """RL (Reinforcement Learning) training commands."""
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import toml
 import typer
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic import ValidationError as PydanticValidationError
 from rich.markup import escape as rich_escape
 from rich.table import Table
@@ -485,6 +486,80 @@ class InfrastructureConfig(BaseModel):
         return d if d else None
 
 
+class TailscaleConfig(BaseModel):
+    """Optional per-run tailscale sidecar (enterprise-only feature).
+
+    When enabled, every env-server (training + eval) for this run joins the
+    user's tailnet via a sidecar. The orchestrator and other runs are
+    untouched.
+
+    The auth key must be supplied via the ``auth_key`` field or, preferably,
+    via the ``TAILSCALE_AUTH_KEY`` environment variable so the secret never
+    has to live in ``rl.toml``. Only pre-authenticated keys (``tskey-auth-``)
+    are accepted; OAuth client secrets are not supported. Free-form
+    ``tailscale up`` flags are also not accepted — the platform always
+    boots the sidecar with a locked-down arg set to keep tenant isolation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    auth_key: str | None = None
+    hostname_prefix: str = "prime-hosted-training"
+
+    @field_validator("hostname_prefix")
+    @classmethod
+    def validate_hostname_prefix(cls, v: str) -> str:
+        # Must end in alphanumeric — otherwise the derived sidecar hostname
+        # (e.g. f"{prefix}-env-{idx}-{run_id}") would contain consecutive
+        # hyphens which Tailscale rejects. Length cap matches the platform
+        # (backend/app/packages/rft/k8s_resources/tailscale.py).
+        if not re.fullmatch(r"[a-z]([a-z0-9-]{0,28}[a-z0-9])?", v):
+            raise ValueError(
+                "hostname_prefix must be 1-30 chars, lowercase alphanumeric or "
+                "hyphens, starting with a letter and ending with a letter or digit"
+            )
+        return v
+
+    @field_validator("auth_key")
+    @classmethod
+    def validate_auth_key(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not v.startswith("tskey-auth-"):
+            raise ValueError(
+                "auth_key must be a Tailscale pre-authenticated auth key "
+                "(starting with 'tskey-auth-')"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def fill_auth_key_from_env_and_validate(self) -> "TailscaleConfig":
+        if not self.enabled:
+            return self
+        if self.auth_key is None:
+            env_value = os.environ.get("TAILSCALE_AUTH_KEY")
+            if env_value:
+                if not env_value.startswith("tskey-auth-"):
+                    raise ValueError("TAILSCALE_AUTH_KEY must start with 'tskey-auth-'")
+                self.auth_key = env_value
+        if not self.auth_key:
+            raise ValueError(
+                "auth_key is required when tailscale.enabled is true. "
+                "Set [tailscale] auth_key in your config or export TAILSCALE_AUTH_KEY."
+            )
+        return self
+
+    def to_api_dict(self) -> Dict[str, Any] | None:
+        if not self.enabled:
+            return None
+        return {
+            "enabled": True,
+            "auth_key": self.auth_key,
+            "hostname_prefix": self.hostname_prefix,
+        }
+
+
 class RLConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -508,6 +583,7 @@ class RLConfig(BaseModel):
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
     infrastructure: InfrastructureConfig = Field(default_factory=InfrastructureConfig)
+    tailscale: TailscaleConfig = Field(default_factory=TailscaleConfig)
     run_config: Dict[str, Any] = Field(default_factory=dict)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
@@ -905,6 +981,7 @@ def create_run(
             checkpoint_id=cfg.checkpoint_id,
             cluster_name=cfg.cluster_name,
             infrastructure_config=cfg.infrastructure.to_api_dict(),
+            tailscale_config=cfg.tailscale.to_api_dict(),
             enable_thinking=cfg.sampling.enable_thinking,
             reasoning_effort=cfg.sampling.reasoning_effort,
             run_config=cfg.run_config if cfg.run_config else None,

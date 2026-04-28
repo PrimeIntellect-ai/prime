@@ -1200,10 +1200,10 @@ env_id = "gsm8k"
         }
 
     monkeypatch.setattr(
-        "prime_cli.commands.evals.resolve_endpoints_file",
+        "verifiers.utils.eval_utils.resolve_endpoints_file",
         fake_resolve_endpoints_file,
     )
-    monkeypatch.setattr("prime_cli.commands.evals.load_endpoints", fake_load_endpoints)
+    monkeypatch.setattr("verifiers.utils.eval_utils.load_endpoints", fake_load_endpoints)
 
     loaded = _load_hosted_eval_configs(str(config_path))[0]
 
@@ -1226,11 +1226,11 @@ endpoint_id = "test-endpoint"
     )
 
     monkeypatch.setattr(
-        "prime_cli.commands.evals.resolve_endpoints_file",
+        "verifiers.utils.eval_utils.resolve_endpoints_file",
         lambda path: Path(path),
     )
     monkeypatch.setattr(
-        "prime_cli.commands.evals.load_endpoints",
+        "verifiers.utils.eval_utils.load_endpoints",
         lambda path: {
             "test-endpoint": [
                 {
@@ -1262,11 +1262,11 @@ model = "anthropic/claude-sonnet-4"
     )
 
     monkeypatch.setattr(
-        "prime_cli.commands.evals.resolve_endpoints_file",
+        "verifiers.utils.eval_utils.resolve_endpoints_file",
         lambda path: (_ for _ in ()).throw(AssertionError("should not resolve endpoint_id")),
     )
     monkeypatch.setattr(
-        "prime_cli.commands.evals.load_endpoints",
+        "verifiers.utils.eval_utils.load_endpoints",
         lambda path: (_ for _ in ()).throw(AssertionError("should not load endpoints")),
     )
 

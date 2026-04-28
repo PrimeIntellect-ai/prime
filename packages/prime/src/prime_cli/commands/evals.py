@@ -44,26 +44,9 @@ from ..verifiers_bridge import (
 
 console = get_console()
 
-
-def _lazy(module_path: str, name: str):
-    def stub(*args, **kwargs):
-        import importlib
-
-        fn = getattr(importlib.import_module(module_path), name)
-        globals()[name] = fn
-        return fn(*args, **kwargs)
-
-    stub.__name__ = name
-    return stub
-
-
-build_extra_headers = _lazy("verifiers.cli.commands.eval", "build_extra_headers")
-build_parser = _lazy("verifiers.cli.commands.eval", "build_parser")
-merge_sampling_args = _lazy("verifiers.cli.commands.eval", "merge_sampling_args")
-load_endpoints = _lazy("verifiers.utils.eval_utils", "load_endpoints")
-load_toml_config = _lazy("verifiers.utils.eval_utils", "load_toml_config")
-resolve_endpoints_file = _lazy("verifiers.utils.eval_utils", "resolve_endpoints_file")
-
+# verifiers.* must be imported inside functions (not at module top): top-level
+# imports drag in huggingface_hub/datasets/pyarrow/pandas/numpy and triple
+# `prime --version` startup time. Same convention as the rest of prime_cli.
 
 LIST_EVALS_JSON_HELP = json_output_help(
     ".evaluations[] = {evaluation_id|id, environment_names[], model_name, status, metadata}",
@@ -270,6 +253,8 @@ def _validate_json_object_field(merged: dict[str, Any], field_name: str) -> None
 
 
 def _coerce_hosted_headers(raw: dict[str, Any]) -> list[str] | None:
+    from verifiers.cli.commands.eval import build_extra_headers
+
     try:
         normalized = build_extra_headers(raw)
     except ValueError as exc:
@@ -284,6 +269,8 @@ def _coerce_hosted_headers(raw: dict[str, Any]) -> list[str] | None:
 def _parse_verifiers_eval_namespace(
     environment: str, passthrough_args: list[str], sampling_args: Optional[str]
 ) -> tuple[argparse.Namespace, set[str], dict[str, str]]:
+    from verifiers.cli.commands.eval import build_parser
+
     argv = [environment, *passthrough_args]
     if sampling_args is not None:
         argv.extend(["--sampling-args", sampling_args])
@@ -379,6 +366,15 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
     if "endpoints_path" in raw_config and not endpoints_path_obj.is_absolute():
         endpoints_path = str((config_path.parent / endpoints_path_obj).resolve())
 
+    try:
+        from verifiers.utils.eval_utils import load_endpoints, resolve_endpoints_file
+    except ImportError as exc:
+        console.print(
+            "[red]Error:[/red] verifiers is required to resolve `endpoint_id`. "
+            "Install the `verifiers` package or use `model` instead."
+        )
+        raise typer.Exit(1) from exc
+
     resolved_endpoints_file = resolve_endpoints_file(endpoints_path)
     if resolved_endpoints_file is None or resolved_endpoints_file.suffix != ".toml":
         console.print(
@@ -409,6 +405,8 @@ def _resolve_hosted_config_model(raw_config: dict[str, Any], config_path: Path) 
 def _validate_single_hosted_eval_config(
     merged: dict[str, Any], config_path: Path
 ) -> dict[str, Any]:
+    from verifiers.cli.commands.eval import merge_sampling_args
+
     unsupported_fields = sorted(
         field_name for field_name in merged if field_name not in HOSTED_SUPPORTED_TOML_FIELDS
     )
@@ -466,6 +464,8 @@ def _validate_single_hosted_eval_config(
 
 
 def _load_hosted_eval_configs(config_path_str: str) -> list[dict[str, Any]]:
+    from verifiers.utils.eval_utils import load_toml_config
+
     config_path = Path(config_path_str)
     try:
         loaded_configs = load_toml_config(
@@ -1533,6 +1533,8 @@ def run_eval_cmd(
             else:
                 console.print("[red]Error:[/red] `sampling_args` must be a JSON object")
                 raise typer.Exit(1)
+            from verifiers.cli.commands.eval import merge_sampling_args
+
             effective_sampling_args = (
                 merge_sampling_args(
                     base_sampling_args,

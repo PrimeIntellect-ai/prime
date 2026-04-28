@@ -518,8 +518,11 @@ class TailscaleConfig(BaseModel):
     def validate_auth_key(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        if not v.startswith("tskey-auth-"):
-            raise ValueError("auth_key must be a Tailscale auth key starting with 'tskey-auth-'")
+        if not v.startswith(("tskey-auth-", "tskey-client-")):
+            raise ValueError(
+                "auth_key must be a Tailscale auth key (starting with 'tskey-auth-') "
+                "or OAuth client secret (starting with 'tskey-client-')"
+            )
         return v
 
     @model_validator(mode="after")

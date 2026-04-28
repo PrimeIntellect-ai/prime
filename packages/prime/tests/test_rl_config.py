@@ -180,3 +180,12 @@ def test_tailscale_invalid_auth_key_format_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(typer.Exit):
         load_config(str(config_path))
+
+
+def test_tailscale_accepts_oauth_client_secret(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "dummy"\n[tailscale]\nenabled = true\nauth_key = "tskey-client-abc123"\n'
+    )
+    cfg = load_config(str(config_path))
+    assert cfg.tailscale.auth_key == "tskey-client-abc123"

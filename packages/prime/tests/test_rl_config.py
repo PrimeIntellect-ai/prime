@@ -189,3 +189,37 @@ def test_tailscale_accepts_oauth_client_secret(tmp_path: Path) -> None:
     )
     cfg = load_config(str(config_path))
     assert cfg.tailscale.auth_key == "tskey-client-abc123"
+
+
+def test_tailscale_auth_key_from_env(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TAILSCALE_AUTH_KEY", "tskey-auth-fromenv")
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\n[tailscale]\nenabled = true\n')
+    cfg = load_config(str(config_path))
+    assert cfg.tailscale.auth_key == "tskey-auth-fromenv"
+
+
+def test_tailscale_auth_key_in_config_overrides_env(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TAILSCALE_AUTH_KEY", "tskey-auth-fromenv")
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "dummy"\n[tailscale]\nenabled = true\nauth_key = "tskey-auth-fromfile"\n'
+    )
+    cfg = load_config(str(config_path))
+    assert cfg.tailscale.auth_key == "tskey-auth-fromfile"
+
+
+def test_tailscale_env_auth_key_format_validated(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TAILSCALE_AUTH_KEY", "not-a-real-key")
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\n[tailscale]\nenabled = true\n')
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_tailscale_no_auth_key_anywhere_rejected(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("TAILSCALE_AUTH_KEY", raising=False)
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\n[tailscale]\nenabled = true\n')
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))

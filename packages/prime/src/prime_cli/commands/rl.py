@@ -1,6 +1,7 @@
 """RL (Reinforcement Learning) training commands."""
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -486,11 +487,15 @@ class InfrastructureConfig(BaseModel):
 
 
 class TailscaleConfig(BaseModel):
-    """Optional per-run tailscale sidecar (ADMIN/MANAGER-only on the platform).
+    """Optional per-run tailscale sidecar (enterprise-only feature).
 
     When enabled, every env-server (training + eval) for this run joins the
     user's tailnet via a userspace sidecar. The orchestrator and other runs
     are untouched.
+
+    The auth key may be supplied via the ``auth_key`` field or, preferably,
+    via the ``TAILSCALE_AUTH_KEY`` environment variable so the secret never
+    has to live in ``rl.toml``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -526,9 +531,22 @@ class TailscaleConfig(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def validate_enabled_requires_auth_key(self) -> "TailscaleConfig":
-        if self.enabled and not self.auth_key:
-            raise ValueError("auth_key is required when tailscale.enabled is true")
+    def fill_auth_key_from_env_and_validate(self) -> "TailscaleConfig":
+        if not self.enabled:
+            return self
+        if self.auth_key is None:
+            env_value = os.environ.get("TAILSCALE_AUTH_KEY")
+            if env_value:
+                if not env_value.startswith(("tskey-auth-", "tskey-client-")):
+                    raise ValueError(
+                        "TAILSCALE_AUTH_KEY must start with 'tskey-auth-' or 'tskey-client-'"
+                    )
+                self.auth_key = env_value
+        if not self.auth_key:
+            raise ValueError(
+                "auth_key is required when tailscale.enabled is true. "
+                "Set [tailscale] auth_key in your config or export TAILSCALE_AUTH_KEY."
+            )
         return self
 
     def to_api_dict(self) -> Dict[str, Any] | None:

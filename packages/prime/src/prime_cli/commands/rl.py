@@ -490,30 +490,33 @@ class TailscaleConfig(BaseModel):
     """Optional per-run tailscale sidecar (enterprise-only feature).
 
     When enabled, every env-server (training + eval) for this run joins the
-    user's tailnet via a userspace sidecar. The orchestrator and other runs
-    are untouched.
+    user's tailnet via a sidecar. The orchestrator and other runs are
+    untouched.
 
-    The auth key may be supplied via the ``auth_key`` field or, preferably,
+    The auth key must be supplied via the ``auth_key`` field or, preferably,
     via the ``TAILSCALE_AUTH_KEY`` environment variable so the secret never
-    has to live in ``rl.toml``.
+    has to live in ``rl.toml``. Only pre-authenticated keys (``tskey-auth-``)
+    are accepted; OAuth client secrets are not supported. Free-form
+    ``tailscale up`` flags are also not accepted — the platform always
+    boots the sidecar with a locked-down arg set to keep tenant isolation.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     auth_key: str | None = None
-    hostname_prefix: str = "rft"
-    extra_args: str | None = None
+    hostname_prefix: str = "prime-hosted-training"
 
     @field_validator("hostname_prefix")
     @classmethod
     def validate_hostname_prefix(cls, v: str) -> str:
         # Must end in alphanumeric — otherwise the derived sidecar hostname
         # (e.g. f"{prefix}-env-{idx}-{run_id}") would contain consecutive
-        # hyphens which Tailscale rejects.
-        if not re.fullmatch(r"[a-z]([a-z0-9-]{0,14}[a-z0-9])?", v):
+        # hyphens which Tailscale rejects. Length cap matches the platform
+        # (backend/app/packages/rft/k8s_resources/tailscale.py).
+        if not re.fullmatch(r"[a-z]([a-z0-9-]{0,28}[a-z0-9])?", v):
             raise ValueError(
-                "hostname_prefix must be 1-16 chars, lowercase alphanumeric or "
+                "hostname_prefix must be 1-30 chars, lowercase alphanumeric or "
                 "hyphens, starting with a letter and ending with a letter or digit"
             )
         return v
@@ -523,10 +526,10 @@ class TailscaleConfig(BaseModel):
     def validate_auth_key(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        if not v.startswith(("tskey-auth-", "tskey-client-")):
+        if not v.startswith("tskey-auth-"):
             raise ValueError(
-                "auth_key must be a Tailscale auth key (starting with 'tskey-auth-') "
-                "or OAuth client secret (starting with 'tskey-client-')"
+                "auth_key must be a Tailscale pre-authenticated auth key "
+                "(starting with 'tskey-auth-')"
             )
         return v
 
@@ -537,10 +540,8 @@ class TailscaleConfig(BaseModel):
         if self.auth_key is None:
             env_value = os.environ.get("TAILSCALE_AUTH_KEY")
             if env_value:
-                if not env_value.startswith(("tskey-auth-", "tskey-client-")):
-                    raise ValueError(
-                        "TAILSCALE_AUTH_KEY must start with 'tskey-auth-' or 'tskey-client-'"
-                    )
+                if not env_value.startswith("tskey-auth-"):
+                    raise ValueError("TAILSCALE_AUTH_KEY must start with 'tskey-auth-'")
                 self.auth_key = env_value
         if not self.auth_key:
             raise ValueError(
@@ -552,14 +553,11 @@ class TailscaleConfig(BaseModel):
     def to_api_dict(self) -> Dict[str, Any] | None:
         if not self.enabled:
             return None
-        d: Dict[str, Any] = {
+        return {
             "enabled": True,
             "auth_key": self.auth_key,
             "hostname_prefix": self.hostname_prefix,
         }
-        if self.extra_args is not None:
-            d["extra_args"] = self.extra_args
-        return d
 
 
 class RLConfig(BaseModel):

@@ -193,7 +193,8 @@ def chat(
             _print_stream(stream_result)  # type: ignore[arg-type]
             return
 
-        raw = client.chat_completion(payload)
+        with console.status(f"[bold blue]Waiting for {model}...", spinner="dots"):
+            raw = client.chat_completion(payload)
         if not isinstance(raw, dict):
             console.print("[red]Error:[/red] unexpected non-JSON response from inference.")
             raise typer.Exit(1)

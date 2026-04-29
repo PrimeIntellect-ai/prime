@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -99,6 +100,30 @@ LEVEL_STYLES = {
 
 # Sentinel to indicate "this is JSON but should be skipped"
 _SKIP_LINE = "__SKIP__"
+
+_MODEL_PARAM_COUNT_PATTERN = re.compile(
+    r"-(?P<total>\d+(?:\.\d)?)[bB](?:-[aA](?P<active>\d+(?:\.\d)?)[bB])?(?=$|-)"
+)
+
+
+def _model_name_sort_key(name: str) -> tuple[tuple[Any, ...], ...]:
+    """Sort model names lexically, with recognized billion-parameter counts numeric."""
+    segments: list[tuple[Any, ...]] = []
+    start = 0
+
+    for match in _MODEL_PARAM_COUNT_PATTERN.finditer(name):
+        if match.start() > start:
+            segments.append((0, name[start : match.start()]))
+
+        total_params = Decimal(match.group("total"))
+        active_params = Decimal(match.group("active") or match.group("total"))
+        segments.append((1, total_params, active_params))
+        start = match.end()
+
+    if start < len(name):
+        segments.append((0, name[start:]))
+
+    return tuple(segments)
 
 
 def format_json_log_line(line: str) -> str | None:
@@ -1160,7 +1185,7 @@ def list_models(
         table.add_column("Train", style="green", justify="right")
 
         promo_labels: List[str] = []
-        for model in models:
+        for model in sorted(models, key=lambda model: _model_name_sort_key(model.name)):
             if model.at_capacity:
                 status = "[red]At Capacity[/red]"
             else:

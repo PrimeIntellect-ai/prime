@@ -137,18 +137,29 @@ def test_push_gepa_run_constructs_request_without_task_fields(tmp_path, monkeypa
     assert "task_type" not in captured["samples"][0]
 
 
-def test_gepa_push_cli_uses_push_command(tmp_path, monkeypatch):
+def test_gepa_push_cli_json_outputs_only_json(tmp_path, monkeypatch):
     run_dir = _write_gepa_run(tmp_path)
     captured = {}
 
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
-    def fake_push(path, is_public=False):
-        captured["path"] = path
-        captured["is_public"] = is_public
-        return "eval-123"
+    class DummyEvalsClient:
+        def __init__(self, _api_client):
+            pass
 
-    monkeypatch.setattr("prime_cli.commands.gepa._push_gepa_run", fake_push)
+        def create_evaluation(self, **kwargs):
+            captured["create"] = kwargs
+            return {"evaluation_id": "eval-123"}
+
+        def push_samples(self, evaluation_id, samples):
+            captured["pushed_evaluation_id"] = evaluation_id
+            captured["samples"] = samples
+
+        def finalize_evaluation(self, evaluation_id):
+            captured["finalized_evaluation_id"] = evaluation_id
+
+    monkeypatch.setattr("prime_cli.commands.gepa.APIClient", lambda: object())
+    monkeypatch.setattr("prime_cli.commands.gepa.EvalsClient", DummyEvalsClient)
 
     result = runner.invoke(
         app,
@@ -157,8 +168,10 @@ def test_gepa_push_cli_uses_push_command(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
-    assert captured == {"path": str(run_dir), "is_public": True}
-    assert '"evaluation_id": "eval-123"' in result.output
+    assert json.loads(result.output) == {"evaluation_id": "eval-123"}
+    assert captured["create"]["is_public"] is True
+    assert captured["pushed_evaluation_id"] == "eval-123"
+    assert captured["finalized_evaluation_id"] == "eval-123"
 
 
 def test_push_gepa_run_sends_eval_kind_when_client_supports_it(tmp_path, monkeypatch):

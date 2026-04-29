@@ -223,41 +223,48 @@ def _create_gepa_evaluation(
     )
 
 
-def _push_gepa_run(config_path: str, is_public: bool = False) -> str:
+def _push_gepa_run(config_path: str, is_public: bool = False, verbose: bool = True) -> str:
     run_dir = _validate_gepa_run_dir(config_path)
     eval_data = _load_gepa_run(run_dir)
-    console.print(f"[blue]✓ Loaded GEPA run:[/blue] {run_dir}")
-    console.print()
+    if verbose:
+        console.print(f"[blue]✓ Loaded GEPA run:[/blue] {run_dir}")
+        console.print()
 
     api_client = APIClient()
     client = EvalsClient(api_client)
     environments = _build_gepa_environments(eval_data["env_id"])
 
-    console.print("[blue]Creating GEPA evaluation...[/blue]")
+    if verbose:
+        console.print("[blue]Creating GEPA evaluation...[/blue]")
     create_response = _create_gepa_evaluation(client, eval_data, environments, is_public)
     eval_id = create_response.get("evaluation_id")
     if not eval_id:
         raise EvalsAPIError("Failed to get evaluation ID from create_evaluation response")
 
-    console.print(f"[green]✓ Created evaluation:[/green] {eval_id}")
-    console.print()
+    if verbose:
+        console.print(f"[green]✓ Created evaluation:[/green] {eval_id}")
+        console.print()
 
     results = eval_data["results"]
     if results:
-        console.print(f"[blue]Pushing {len(results)} GEPA samples...[/blue]")
+        if verbose:
+            console.print(f"[blue]Pushing {len(results)} GEPA samples...[/blue]")
         client.push_samples(eval_id, results)
-        console.print("[green]✓ Samples pushed successfully[/green]")
+        if verbose:
+            console.print("[green]✓ Samples pushed successfully[/green]")
+            console.print()
+
+    if verbose:
+        console.print("[blue]Finalizing evaluation...[/blue]")
+    client.finalize_evaluation(eval_id)
+    if verbose:
+        console.print("[green]✓ Evaluation finalized[/green]")
         console.print()
 
-    console.print("[blue]Finalizing evaluation...[/blue]")
-    client.finalize_evaluation(eval_id)
-    console.print("[green]✓ Evaluation finalized[/green]")
-    console.print()
-
-    console.print("[green]✓ Success[/green]")
-    console.print(f"[blue]Evaluation ID:[/blue] {eval_id}")
-    eval_url = get_eval_viewer_url(eval_id)
-    console.print(f"[dim]View results:[/dim] {eval_url}")
+        console.print("[green]✓ Success[/green]")
+        console.print(f"[blue]Evaluation ID:[/blue] {eval_id}")
+        eval_url = get_eval_viewer_url(eval_id)
+        console.print(f"[dim]View results:[/dim] {eval_url}")
 
     return eval_id
 
@@ -281,9 +288,8 @@ def push_gepa_cmd(
         raise typer.Exit(1)
 
     try:
-        eval_id = _push_gepa_run(run_dir, is_public=is_public)
+        eval_id = _push_gepa_run(run_dir, is_public=is_public, verbose=output != "json")
         if output == "json":
-            console.print()
             output_data_as_json({"evaluation_id": eval_id}, console)
     except FileNotFoundError as e:
         console.print(f"[red]Error:[/red] {e}")

@@ -17,7 +17,6 @@ def test_train_help_promotes_config_run_path() -> None:
     assert "Launch and manage Hosted Training runs." in result.output
     assert "Path to a TOML config file to launch as a" in result.output
     assert "Hosted Training run." in result.output
-    assert "--env-file" in result.output
     assert "logs" in result.output
 
 

@@ -724,7 +724,8 @@ class DefaultGroup(DefaultCommandGroup):
         if default_command is None:
             return params
 
-        return [*default_command.params, *params]
+        seen = {p.name for p in default_command.params}
+        return [*default_command.params, *(p for p in params if p.name not in seen)]
 
     def format_help(self, ctx, formatter):
         self._show_default_command_params = True

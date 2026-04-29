@@ -3,16 +3,16 @@ import re
 from typing import Optional
 
 import typer
-from rich.console import Console
 from rich.table import Table
 
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
+from ..utils import PlainTyper, get_console
 from .teams import fetch_teams
 
-app = typer.Typer(help="Configure the CLI", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="Configure the CLI", no_args_is_help=True)
+console = get_console()
 
 # Team ID validation pattern: CUID (v1)
 TEAM_ID_PATTERN = re.compile(r"^c[a-z0-9]{24}$")
@@ -328,6 +328,19 @@ def _list_environments() -> None:
     console.print(table)
 
 
+def _delete_environment(
+    name: str,
+) -> None:
+    """Delete a named saved environment."""
+    try:
+        config = Config()
+        config.delete_environment(name)
+        console.print(f"[green]Deleted environment '{name}'![/green]")
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
 @app.command(no_args_is_help=True)
 def set_share_resources_with_team(
     enabled: str = typer.Argument(
@@ -390,6 +403,12 @@ def use_environment(
 def save_env(name: str = typer.Argument(..., help="Name for the environment")) -> None:
     """Save current config as environment (including API key)"""
     _save_environment(name)
+
+
+@app.command(name="delete", no_args_is_help=True)
+def delete_env(name: str = typer.Argument(..., help="Name of the saved environment")) -> None:
+    """Delete a saved environment"""
+    _delete_environment(name)
 
 
 @app.command(name="envs")

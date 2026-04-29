@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ from .core import APIClient, APIError, AsyncAPIClient
 from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
+    SandboxFileNotFoundError,
     SandboxImagePullError,
     SandboxNotRunningError,
     SandboxOOMError,
@@ -59,12 +61,27 @@ from .rpc_command_session import (
     collect_command_session_start_event,
 )
 
-# Retry configuration for transient connection errors on gateway requests
-# Note: ReadTimeout is NOT included because the request may have been processed
-GATEWAY_RETRYABLE_EXCEPTIONS = (
+# Connection-level errors: request never reached the server, so retry is safe
+# for any HTTP method (including non-idempotent POSTs).
+# Note: ReadTimeout / ReadError are NOT in this tuple because they occur after
+# the server has (at least partially) started responding — meaning the request
+# was already processed and a retry would duplicate side effects on POST.
+GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
     httpx.RemoteProtocolError,  # Server disconnected unexpectedly
     httpx.ConnectError,  # Connection refused/failed
     httpx.PoolTimeout,  # No connection available in pool
+)
+
+# Response-read failures: the server may have already processed the request
+# (TCP connection dropped mid-response body). Only safe to retry on idempotent
+# methods (GET/HEAD/PUT/DELETE), where a duplicate request is a no-op.
+# ReadTimeout is STILL excluded even for idempotent methods — we can't
+# distinguish "server hanging" from "server mid-processing", and retrying a
+# hung request compounds load on an already-stressed server instead of
+# recovering. ReadError (TCP reset / connection drop during read) is different:
+# the connection is definitively gone, so retrying doesn't pile on.
+GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS = GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS + (
+    httpx.ReadError,  # TCP connection broken while reading response
 )
 
 # Retryable HTTP 5xx status codes (e.g. Cloudflare 524 timeout, server errors)
@@ -76,8 +93,8 @@ RETRY_409_BASE_DELAY = 0.25  # 250ms, 500ms, 1000ms, 2000ms with exponential bac
 
 
 def _is_retryable_gateway_error(exc: BaseException) -> bool:
-    """Check if an exception is retryable for gateway requests."""
-    if isinstance(exc, GATEWAY_RETRYABLE_EXCEPTIONS):
+    """Check if an exception is retryable for idempotent gateway requests."""
+    if isinstance(exc, GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS):
         return True
     if (
         isinstance(exc, httpx.HTTPStatusError)
@@ -89,7 +106,8 @@ def _is_retryable_gateway_error(exc: BaseException) -> bool:
     return False
 
 
-# Retry decorator for idempotent gateway requests (connection errors + 5xx responses)
+# Retry decorator for idempotent gateway requests (connection errors, ReadError,
+# and 5xx responses). Safe for GET/HEAD/PUT/DELETE since duplicate requests are no-ops.
 _gateway_retry = retry(
     retry=retry_if_exception(_is_retryable_gateway_error),
     stop=stop_after_attempt(4),
@@ -98,9 +116,10 @@ _gateway_retry = retry(
 )
 
 # Retry decorator for non-idempotent gateway requests (connection errors only —
-# 5xx means the server received the request, so retrying risks duplicate side effects)
+# ReadError and 5xx both imply the server received/processed the request, so
+# retrying POSTs on those risks duplicate side effects).
 _gateway_post_retry = retry(
-    retry=retry_if_exception_type(GATEWAY_RETRYABLE_EXCEPTIONS),
+    retry=retry_if_exception_type(GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS),
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=1, min=1, max=30),
     reraise=True,
@@ -198,44 +217,59 @@ def _raise_not_running_error(
     raise exc
 
 
+def _load_auth_cache(cache_file: Any) -> tuple[Dict[str, Any], bool]:
+    """Load auth cache from file and clean expired entries."""
+    try:
+        if cache_file.exists():
+            with open(cache_file, "r") as f:
+                cache = json.load(f)
+            cleaned_cache = {}
+            now = datetime.now(timezone.utc)
+            for sandbox_id, auth_info in cache.items():
+                try:
+                    expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
+                    expires_at = datetime.fromisoformat(expires_at_str)
+                    if expires_at.tzinfo is None:
+                        expires_at = expires_at.replace(tzinfo=timezone.utc)
+                    if now < expires_at:
+                        cleaned_cache[sandbox_id] = auth_info
+                except Exception:
+                    pass
+
+            return cleaned_cache, len(cleaned_cache) != len(cache)
+    except Exception:
+        pass
+    return {}, False
+
+
+def _check_cached_auth(cache: Dict[str, Any], sandbox_id: str) -> Optional[Dict[str, Any]]:
+    """Return a copy of cached auth if still valid, else evict and return None."""
+    if sandbox_id in cache:
+        auth_info = cache[sandbox_id]
+        expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
+        expires_at = datetime.fromisoformat(expires_at_str)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) < expires_at:
+            return dict(auth_info)
+        del cache[sandbox_id]
+    return None
+
+
 class SandboxAuthCache:
-    """Shared auth cache management for sandbox clients"""
+    """Thread-safe auth cache for sync SandboxClient."""
 
     def __init__(self, cache_file_path: Any, client: Any) -> None:
         self._cache_file = cache_file_path
-        self._auth_cache = self._load_cache()
         self.client = client
-
-    def _load_cache(self) -> Dict[str, Any]:
-        """Load auth cache from file and clean expired entries"""
-        try:
-            if self._cache_file.exists():
-                with open(self._cache_file, "r") as f:
-                    cache = json.load(f)
-                cleaned_cache = {}
-                for sandbox_id, auth_info in cache.items():
-                    try:
-                        expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
-                        expires_at = datetime.fromisoformat(expires_at_str)
-                        if expires_at.tzinfo is None:
-                            expires_at = expires_at.replace(tzinfo=timezone.utc)
-                        now = datetime.now(timezone.utc)
-                        if now < expires_at:
-                            cleaned_cache[sandbox_id] = auth_info
-                    except Exception:
-                        pass
-
-                if len(cleaned_cache) != len(cache):
-                    self._auth_cache = cleaned_cache
-                    self._save_cache()
-
-                return cleaned_cache
-        except Exception:
-            pass
-        return {}
+        self._lock = threading.Lock()
+        self._inflight: Dict[str, threading.Event] = {}
+        self._auth_cache, needs_save = _load_auth_cache(self._cache_file)
+        if needs_save:
+            self._save_cache()
 
     def _save_cache(self) -> None:
-        """Save auth cache to file"""
+        """Write current in-memory cache to disk. Must be called under self._lock."""
         try:
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self._cache_file, "w") as f:
@@ -243,111 +277,175 @@ class SandboxAuthCache:
         except Exception:
             pass
 
-    async def _save_cache_async(self) -> None:
-        """Save auth cache to file (async version)"""
-        try:
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            async with aiofiles.open(self._cache_file, "w") as f:
-                await f.write(json.dumps(self._auth_cache))
-        except Exception:
-            pass
-
-    def _check_cached_auth(self, sandbox_id: str) -> Optional[Dict[str, Any]]:
-        """Check if cached auth info exists and is valid"""
-        if sandbox_id in self._auth_cache:
-            auth_info = self._auth_cache[sandbox_id]
-            expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
-            expires_at = datetime.fromisoformat(expires_at_str)
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-            if datetime.now(timezone.utc) < expires_at:
-                return dict(auth_info)
-            else:
-                del self._auth_cache[sandbox_id]
-                self._save_cache()
-        return None
-
-    async def _check_cached_auth_async(self, sandbox_id: str) -> Optional[Dict[str, Any]]:
-        """Check if cached auth info exists and is valid (async version)"""
-        if sandbox_id in self._auth_cache:
-            auth_info = self._auth_cache[sandbox_id]
-            expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
-            expires_at = datetime.fromisoformat(expires_at_str)
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-            if datetime.now(timezone.utc) < expires_at:
-                return dict(auth_info)
-            else:
-                del self._auth_cache[sandbox_id]
-                await self._save_cache_async()
-        return None
-
     def get_or_refresh(self, sandbox_id: str) -> Dict[str, Any]:
-        """Get cached auth info or fetch new token if expired/missing"""
-        cached_auth = self._check_cached_auth(sandbox_id)
-        if cached_auth:
-            return cached_auth
+        """Get cached auth or fetch a new token.
 
-        response = self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
-        self.set(sandbox_id, response)
-        self._save_cache()
-        return dict(response)
+        Coalesces concurrent requests for the same sandbox_id so only one
+        auth POST is issued while others wait for the result.
+        """
+        while True:
+            with self._lock:
+                cached = _check_cached_auth(self._auth_cache, sandbox_id)
+                if cached:
+                    return cached
 
-    async def get_or_refresh_async(self, sandbox_id: str) -> Dict[str, Any]:
-        """Get cached auth info or fetch new token if expired/missing (async)"""
-        cached_auth = await self._check_cached_auth_async(sandbox_id)
-        if cached_auth:
-            return cached_auth
-        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
-        self._auth_cache[sandbox_id] = response
-        await self._save_cache_async()
-        return dict(response)
+                if sandbox_id in self._inflight:
+                    event = self._inflight[sandbox_id]
+                else:
+                    event = None
+                    self._inflight[sandbox_id] = threading.Event()
 
-    def is_gpu(self, sandbox_id: str) -> bool:
-        """Return True if sandbox is GPU-backed, cached alongside auth token data."""
-        cached_auth = self._check_cached_auth(sandbox_id)
-        if cached_auth and isinstance(cached_auth.get("is_gpu"), bool):
-            return bool(cached_auth["is_gpu"])
+            if event is not None:
+                event.wait()
+                with self._lock:
+                    cached = _check_cached_auth(self._auth_cache, sandbox_id)
+                    if cached:
+                        return cached
+                continue
+
+            try:
+                response = self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+                with self._lock:
+                    self._auth_cache[sandbox_id] = response
+                    self._save_cache()
+                return dict(response)
+            finally:
+                with self._lock:
+                    ev = self._inflight.pop(sandbox_id, None)
+                if ev is not None:
+                    ev.set()
+
+    def is_vm(self, sandbox_id: str) -> bool:
+        """Return True if sandbox is VM-backed, cached alongside auth token data."""
+        with self._lock:
+            cached = _check_cached_auth(self._auth_cache, sandbox_id)
+            if cached and isinstance(cached.get("is_vm"), bool):
+                return bool(cached["is_vm"])
 
         sandbox_data = self.client.request("GET", f"/sandbox/{sandbox_id}")
         sandbox = Sandbox.model_validate(sandbox_data)
-        is_gpu = sandbox.gpu_count > 0
+        is_vm = sandbox.vm
 
-        if sandbox_id in self._auth_cache:
-            self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
+        with self._lock:
+            if sandbox_id in self._auth_cache:
+                self._auth_cache[sandbox_id]["is_vm"] = is_vm
+                self._save_cache()
+
+        return is_vm
+
+    def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
+        with self._lock:
+            self._auth_cache[sandbox_id] = auth_info
             self._save_cache()
 
-        return is_gpu
+    def clear(self) -> None:
+        with self._lock:
+            self._auth_cache = {}
+            self._save_cache()
 
-    async def is_gpu_async(self, sandbox_id: str) -> bool:
-        """Return True if sandbox is GPU-backed, cached alongside auth token data."""
-        cached_auth = await self._check_cached_auth_async(sandbox_id)
-        if cached_auth and isinstance(cached_auth.get("is_gpu"), bool):
-            return bool(cached_auth["is_gpu"])
+
+class AsyncSandboxAuthCache:
+    """Async auth cache for AsyncSandboxClient."""
+
+    def __init__(self, cache_file_path: Any, client: Any) -> None:
+        self._cache_file = cache_file_path
+        self.client = client
+        self._lock = asyncio.Lock()
+        self._inflight: Dict[str, asyncio.Event] = {}
+        self._auth_cache: Dict[str, Any] = {}
+        self._loaded = False
+
+    async def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        self._auth_cache, needs_save = await asyncio.to_thread(_load_auth_cache, self._cache_file)
+        self._loaded = True
+        if needs_save:
+            await self._save_cache()
+
+    async def _save_cache(self) -> None:
+        """Write current in-memory cache to disk. Must be called under self._lock."""
+        data = json.dumps(self._auth_cache)
+
+        def _write() -> None:
+            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._cache_file, "w") as f:
+                f.write(data)
+
+        try:
+            await asyncio.to_thread(_write)
+        except Exception:
+            pass
+
+    async def get_or_refresh(self, sandbox_id: str) -> Dict[str, Any]:
+        """Get cached auth or fetch a new token.
+
+        Coalesces concurrent requests for the same sandbox_id so only one
+        auth POST is issued while others await the result.
+        """
+        while True:
+            async with self._lock:
+                await self._ensure_loaded()
+                cached = _check_cached_auth(self._auth_cache, sandbox_id)
+                if cached:
+                    return cached
+
+                if sandbox_id in self._inflight:
+                    event = self._inflight[sandbox_id]
+                else:
+                    event = None
+                    self._inflight[sandbox_id] = asyncio.Event()
+
+            if event is not None:
+                await event.wait()
+                async with self._lock:
+                    cached = _check_cached_auth(self._auth_cache, sandbox_id)
+                    if cached:
+                        return cached
+                continue
+
+            try:
+                response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+                async with self._lock:
+                    self._auth_cache[sandbox_id] = response
+                    await self._save_cache()
+                return dict(response)
+            finally:
+                async with self._lock:
+                    ev = self._inflight.pop(sandbox_id, None)
+                if ev is not None:
+                    ev.set()
+
+    async def is_vm(self, sandbox_id: str) -> bool:
+        """Return True if sandbox is VM-backed, cached alongside auth token data."""
+        async with self._lock:
+            await self._ensure_loaded()
+            cached = _check_cached_auth(self._auth_cache, sandbox_id)
+            if cached and isinstance(cached.get("is_vm"), bool):
+                return bool(cached["is_vm"])
 
         sandbox_data = await self.client.request("GET", f"/sandbox/{sandbox_id}")
         sandbox = Sandbox.model_validate(sandbox_data)
-        is_gpu = sandbox.gpu_count > 0
+        is_vm = sandbox.vm
 
-        if sandbox_id in self._auth_cache:
-            self._auth_cache[sandbox_id]["is_gpu"] = is_gpu
-            await self._save_cache_async()
+        async with self._lock:
+            if sandbox_id in self._auth_cache:
+                self._auth_cache[sandbox_id]["is_vm"] = is_vm
+                await self._save_cache()
 
-        return is_gpu
+        return is_vm
 
-    def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
-        """Cache auth info"""
-        self._auth_cache[sandbox_id] = auth_info
-        self._save_cache()
+    async def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
+        async with self._lock:
+            await self._ensure_loaded()
+            self._auth_cache[sandbox_id] = auth_info
+            await self._save_cache()
 
-    def clear(self) -> None:
-        """Clear all cached auth tokens"""
-        self._auth_cache = {}
-        try:
-            if self._cache_file.exists():
-                self._cache_file.unlink()
-        except Exception:
-            pass
+    async def clear(self) -> None:
+        async with self._lock:
+            self._auth_cache = {}
+            self._loaded = True
+            await self._save_cache()
 
 
 def _check_sandbox_statuses(
@@ -460,6 +558,25 @@ class SandboxClient:
         """Clear all cached auth tokens"""
         self._auth_cache.clear()
 
+    def is_vm(self, sandbox_id: str) -> bool:
+        """Return True if the sandbox is VM-backed.
+
+        Uses the internal auth cache when available and falls back to a
+        ``GET /sandbox/<id>`` lookup on a cold cache. The result is cached
+        alongside the auth token so subsequent calls are essentially free.
+        """
+        return self._auth_cache.is_vm(sandbox_id)
+
+    def _guard_vm_unsupported(self, sandbox_id: str, feature_name: str) -> None:
+        """Raise APIError if the operation is not supported on VM sandboxes.
+
+        Mirrors the CLI behavior of short-circuiting operations the backend
+        does not currently support for VM-backed sandboxes, so callers fail
+        fast with a clear message instead of an opaque gateway error.
+        """
+        if self._auth_cache.is_vm(sandbox_id):
+            raise APIError(f"{feature_name} is not yet supported for VM sandboxes.")
+
     def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
         # Auto-populate team_id from config if not specified
@@ -481,6 +598,7 @@ class SandboxClient:
         page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
+        user_id: Optional[str] = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         # Auto-populate team_id from config if not specified
@@ -490,6 +608,8 @@ class SandboxClient:
         params: Dict[str, Any] = {"page": page, "per_page": per_page}
         if team_id:
             params["team_id"] = team_id
+        if user_id:
+            params["user_id"] = user_id
         if status:
             params["status"] = status
         if labels:
@@ -514,13 +634,23 @@ class SandboxClient:
         self,
         sandbox_ids: Optional[List[str]] = None,
         labels: Optional[List[str]] = None,
+        team_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        all_users: bool = False,
     ) -> BulkDeleteSandboxResponse:
-        """Bulk delete multiple sandboxes by IDs or labels (must specify one, not both)"""
-        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids, labels=labels)
+        """Bulk delete multiple sandboxes."""
+        request = BulkDeleteSandboxRequest(
+            sandbox_ids=sandbox_ids,
+            labels=labels,
+            team_id=team_id,
+            user_id=user_id,
+            all_users=all_users,
+        )
+        payload = request.model_dump(by_alias=False, exclude_none=True)
         response = self.client.request(
             "DELETE",
             "/sandbox",
-            json=request.model_dump(by_alias=False, exclude_none=True),
+            json=payload,
         )
         return BulkDeleteSandboxResponse.model_validate(response)
 
@@ -541,7 +671,7 @@ class SandboxClient:
         """Execute command directly via gateway."""
         auth = self._auth_cache.get_or_refresh(sandbox_id)
 
-        if self._auth_cache.is_gpu(sandbox_id):
+        if self._auth_cache.is_vm(sandbox_id):
             return self._execute_command_connect_rpc(
                 sandbox_id=sandbox_id,
                 command=command,
@@ -775,26 +905,28 @@ class SandboxClient:
         self,
         sandbox_id: str,
         job: BackgroundJob,
+        timeout: Optional[int] = None,
     ) -> BackgroundJobStatus:
         """Check the status of a background job.
 
         Args:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
+            timeout: Optional per-call timeout (in seconds) forwarded to the
+                underlying read_file calls. When None, the APIClient default
+                applies.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
 
-        def read_or_cat(path: str, timeout: int = 60) -> str:
+        def read_or_empty(path: str) -> str:
             try:
-                return self.read_file(sandbox_id, path).content
-            except APIError:
-                return self.execute_command(
-                    sandbox_id, f"cat {shlex.quote(path)} 2>/dev/null", timeout=timeout
-                ).stdout
+                return self.read_file(sandbox_id, path, timeout=timeout).content
+            except SandboxFileNotFoundError:
+                return ""
 
-        exit_content = read_or_cat(job.exit_file, timeout=30)
+        exit_content = read_or_empty(job.exit_file)
         if not exit_content.strip():
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
@@ -807,9 +939,47 @@ class SandboxClient:
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
-            stdout=read_or_cat(job.stdout_log_file),
-            stderr=read_or_cat(job.stderr_log_file),
+            stdout=read_or_empty(job.stdout_log_file),
+            stderr=read_or_empty(job.stderr_log_file),
         )
+
+    def run_background_job(
+        self,
+        sandbox_id: str,
+        command: str,
+        timeout: int = 900,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        poll_interval: int = 3,
+    ) -> BackgroundJobStatus:
+        """Run a command in the background and wait for completion.
+
+        Combines start_background_job() + polling into a single call.
+        Use this for long-running commands that would exceed HTTP timeouts
+        with execute_command().
+
+        Args:
+            sandbox_id: The sandbox ID
+            command: Command to execute
+            timeout: Maximum seconds to wait for completion
+            working_dir: Working directory for command execution
+            env: Environment variables
+            poll_interval: Seconds between status polls
+
+        Returns:
+            BackgroundJobStatus with exit_code, stdout, stderr
+
+        Raises:
+            CommandTimeoutError: If command doesn't complete within timeout
+        """
+        job = self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = self.get_background_job(sandbox_id, job)
+            if status.completed:
+                return status
+            time.sleep(poll_interval)
+        raise CommandTimeoutError(sandbox_id, command, timeout)
 
     def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1
@@ -1082,6 +1252,8 @@ class SandboxClient:
                     f"Read file timed out after {effective_timeout}s: {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    raise SandboxFileNotFoundError(f"File not found: {file_path}") from e
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
                         continue
@@ -1110,6 +1282,7 @@ class SandboxClient:
         protocol: str = "HTTP",
     ) -> ExposedPort:
         """Expose a port from a sandbox."""
+        self._guard_vm_unsupported(sandbox_id, "Port exposure")
         request = ExposePortRequest(port=port, name=name, protocol=protocol)
         response = self.client.request(
             "POST",
@@ -1120,10 +1293,12 @@ class SandboxClient:
 
     def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
         """Unexpose a port from a sandbox."""
+        self._guard_vm_unsupported(sandbox_id, "Port unexpose")
         self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
 
     def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
         """List all exposed ports for a sandbox"""
+        self._guard_vm_unsupported(sandbox_id, "Port listing")
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
         return ListExposedPortsResponse.model_validate(response)
 
@@ -1138,6 +1313,7 @@ class SandboxClient:
         ttl_seconds: Optional[int] = None,
     ) -> SSHSession:
         """Create an SSH session"""
+        self._guard_vm_unsupported(sandbox_id, "SSH")
         payload: Dict[str, Any] = {}
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
@@ -1150,6 +1326,7 @@ class SandboxClient:
 
     def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
         """Close an SSH session and remove its exposure"""
+        self._guard_vm_unsupported(sandbox_id, "SSH")
         self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
 
@@ -1170,7 +1347,7 @@ class AsyncSandboxClient:
             max_keepalive_connections: Maximum keep-alive connections (default: 200)
         """
         self.client = AsyncAPIClient(api_key=api_key, user_agent=_build_user_agent())
-        self._auth_cache = SandboxAuthCache(
+        self._auth_cache = AsyncSandboxAuthCache(
             self.client.config.config_dir / "sandbox_auth_cache.json",
             self.client,
         )
@@ -1271,9 +1448,28 @@ class AsyncSandboxClient:
         # Sandbox is not running
         _raise_not_running_error(sandbox_id, ctx, command=command, cause=error)
 
-    def clear_auth_cache(self) -> None:
-        """Clear all cached auth tokens"""
-        self._auth_cache.clear()
+    async def clear_auth_cache(self) -> None:
+        """Clear all cached auth tokens."""
+        await self._auth_cache.clear()
+
+    async def is_vm(self, sandbox_id: str) -> bool:
+        """Return True if the sandbox is VM-backed.
+
+        Uses the internal auth cache when available and falls back to a
+        ``GET /sandbox/<id>`` lookup on a cold cache. The result is cached
+        alongside the auth token so subsequent calls are essentially free.
+        """
+        return await self._auth_cache.is_vm(sandbox_id)
+
+    async def _guard_vm_unsupported(self, sandbox_id: str, feature_name: str) -> None:
+        """Raise APIError if the operation is not supported on VM sandboxes.
+
+        Mirrors the CLI behavior of short-circuiting operations the backend
+        does not currently support for VM-backed sandboxes, so callers fail
+        fast with a clear message instead of an opaque gateway error.
+        """
+        if await self._auth_cache.is_vm(sandbox_id):
+            raise APIError(f"{feature_name} is not yet supported for VM sandboxes.")
 
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
@@ -1295,6 +1491,7 @@ class AsyncSandboxClient:
         page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
+        user_id: Optional[str] = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         if team_id is None:
@@ -1303,6 +1500,8 @@ class AsyncSandboxClient:
         params: Dict[str, Any] = {"page": page, "per_page": per_page}
         if team_id:
             params["team_id"] = team_id
+        if user_id:
+            params["user_id"] = user_id
         if status:
             params["status"] = status
         if labels:
@@ -1327,13 +1526,23 @@ class AsyncSandboxClient:
         self,
         sandbox_ids: Optional[List[str]] = None,
         labels: Optional[List[str]] = None,
+        team_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        all_users: bool = False,
     ) -> BulkDeleteSandboxResponse:
-        """Bulk delete multiple sandboxes by IDs or labels"""
-        request = BulkDeleteSandboxRequest(sandbox_ids=sandbox_ids, labels=labels)
+        """Bulk delete multiple sandboxes."""
+        request = BulkDeleteSandboxRequest(
+            sandbox_ids=sandbox_ids,
+            labels=labels,
+            team_id=team_id,
+            user_id=user_id,
+            all_users=all_users,
+        )
+        payload = request.model_dump(by_alias=False, exclude_none=True)
         response = await self.client.request(
             "DELETE",
             "/sandbox",
-            json=request.model_dump(by_alias=False, exclude_none=True),
+            json=payload,
         )
         return BulkDeleteSandboxResponse.model_validate(response)
 
@@ -1352,9 +1561,9 @@ class AsyncSandboxClient:
         timeout: Optional[int] = None,
     ) -> CommandResponse:
         """Execute command directly via gateway (async)."""
-        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
+        auth = await self._auth_cache.get_or_refresh(sandbox_id)
 
-        if await self._auth_cache.is_gpu_async(sandbox_id):
+        if await self._auth_cache.is_vm(sandbox_id):
             return await self._execute_command_connect_rpc(
                 sandbox_id=sandbox_id,
                 command=command,
@@ -1588,30 +1797,28 @@ class AsyncSandboxClient:
         self,
         sandbox_id: str,
         job: BackgroundJob,
+        timeout: Optional[int] = None,
     ) -> BackgroundJobStatus:
         """Check the status of a background job (async).
 
         Args:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
+            timeout: Optional per-call timeout (in seconds) forwarded to the
+                underlying read_file calls. When None, the APIClient default
+                applies.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
         """
 
-        async def read_or_cat(path: str, timeout: int = 60) -> str:
+        async def read_or_empty(path: str) -> str:
             try:
-                return (await self.read_file(sandbox_id, path)).content
-            except APIError:
-                return (
-                    await self.execute_command(
-                        sandbox_id,
-                        f"cat {shlex.quote(path)} 2>/dev/null",
-                        timeout=timeout,
-                    )
-                ).stdout
+                return (await self.read_file(sandbox_id, path, timeout=timeout)).content
+            except SandboxFileNotFoundError:
+                return ""
 
-        exit_content = await read_or_cat(job.exit_file, timeout=30)
+        exit_content = await read_or_empty(job.exit_file)
         if not exit_content.strip():
             return BackgroundJobStatus(job_id=job.job_id, completed=False)
 
@@ -1624,9 +1831,47 @@ class AsyncSandboxClient:
             job_id=job.job_id,
             completed=True,
             exit_code=exit_code,
-            stdout=await read_or_cat(job.stdout_log_file),
-            stderr=await read_or_cat(job.stderr_log_file),
+            stdout=await read_or_empty(job.stdout_log_file),
+            stderr=await read_or_empty(job.stderr_log_file),
         )
+
+    async def run_background_job(
+        self,
+        sandbox_id: str,
+        command: str,
+        timeout: int = 900,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        poll_interval: int = 3,
+    ) -> BackgroundJobStatus:
+        """Run a command in the background and wait for completion (async).
+
+        Combines start_background_job() + polling into a single call.
+        Use this for long-running commands that would exceed HTTP timeouts
+        with execute_command().
+
+        Args:
+            sandbox_id: The sandbox ID
+            command: Command to execute
+            timeout: Maximum seconds to wait for completion
+            working_dir: Working directory for command execution
+            env: Environment variables
+            poll_interval: Seconds between status polls
+
+        Returns:
+            BackgroundJobStatus with exit_code, stdout, stderr
+
+        Raises:
+            CommandTimeoutError: If command doesn't complete within timeout
+        """
+        job = await self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = await self.get_background_job(sandbox_id, job)
+            if status.completed:
+                return status
+            await asyncio.sleep(poll_interval)
+        raise CommandTimeoutError(sandbox_id, command, timeout)
 
     async def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1
@@ -1741,10 +1986,10 @@ class AsyncSandboxClient:
             local_file_path: Local file path to upload
             timeout: Optional timeout in seconds
         """
-        if not os.path.exists(local_file_path):
+        if not await asyncio.to_thread(os.path.exists, local_file_path):
             raise FileNotFoundError(f"Local file not found: {local_file_path}")
 
-        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
+        auth = await self._auth_cache.get_or_refresh(sandbox_id)
 
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
@@ -1803,7 +2048,7 @@ class AsyncSandboxClient:
             filename: Name for the file (used in multipart form)
             timeout: Optional timeout in seconds
         """
-        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
+        auth = await self._auth_cache.get_or_refresh(sandbox_id)
 
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/upload"
@@ -1841,7 +2086,7 @@ class AsyncSandboxClient:
         timeout: Optional[int] = None,
     ) -> None:
         """Download a file from a sandbox via gateway (async)"""
-        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
+        auth = await self._auth_cache.get_or_refresh(sandbox_id)
 
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/download"
@@ -1860,7 +2105,7 @@ class AsyncSandboxClient:
 
                 dir_path = os.path.dirname(local_file_path)
                 if dir_path:
-                    os.makedirs(dir_path, exist_ok=True)
+                    await asyncio.to_thread(os.makedirs, dir_path, exist_ok=True)
 
                 # Write file asynchronously (non-blocking I/O)
                 async with aiofiles.open(local_file_path, "wb") as f:
@@ -1894,7 +2139,7 @@ class AsyncSandboxClient:
         timeout: Optional[int] = None,
     ) -> ReadFileResponse:
         """Read a file from a sandbox via gateway (async)"""
-        auth = await self._auth_cache.get_or_refresh_async(sandbox_id)
+        auth = await self._auth_cache.get_or_refresh(sandbox_id)
 
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/read-file"
@@ -1915,6 +2160,8 @@ class AsyncSandboxClient:
                     f"Read file timed out after {effective_timeout}s: {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    raise SandboxFileNotFoundError(f"File not found: {file_path}") from e
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
                         continue
@@ -1957,6 +2204,7 @@ class AsyncSandboxClient:
         protocol: str = "HTTP",
     ) -> ExposedPort:
         """Expose a port from a sandbox."""
+        await self._guard_vm_unsupported(sandbox_id, "Port exposure")
         request = ExposePortRequest(port=port, name=name, protocol=protocol)
         response = await self.client.request(
             "POST",
@@ -1967,10 +2215,12 @@ class AsyncSandboxClient:
 
     async def unexpose(self, sandbox_id: str, exposure_id: str) -> None:
         """Unexpose a port from a sandbox."""
+        await self._guard_vm_unsupported(sandbox_id, "Port unexpose")
         await self.client.request("DELETE", f"/sandbox/{sandbox_id}/expose/{exposure_id}")
 
     async def list_exposed_ports(self, sandbox_id: str) -> ListExposedPortsResponse:
         """List all exposed ports for a sandbox"""
+        await self._guard_vm_unsupported(sandbox_id, "Port listing")
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/expose")
         return ListExposedPortsResponse.model_validate(response)
 
@@ -1985,6 +2235,7 @@ class AsyncSandboxClient:
         ttl_seconds: Optional[int] = None,
     ) -> SSHSession:
         """Create an SSH session"""
+        await self._guard_vm_unsupported(sandbox_id, "SSH")
         payload: Dict[str, Any] = {}
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
@@ -1997,6 +2248,7 @@ class AsyncSandboxClient:
 
     async def close_ssh_session(self, sandbox_id: str, session_id: str) -> None:
         """Close an SSH session and remove its exposure"""
+        await self._guard_vm_unsupported(sandbox_id, "SSH")
         await self.client.request("DELETE", f"/sandbox/{sandbox_id}/ssh-session/{session_id}")
 
 

@@ -1,13 +1,19 @@
 from typing import Any, Dict, List, Optional
 
 import typer
-from rich.console import Console
 from rich.table import Table
 
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
-from ..utils import optional_team_params, output_data_as_json, validate_output_format
+from ..utils import (
+    PlainTyper,
+    get_console,
+    json_output_help,
+    optional_team_params,
+    output_data_as_json,
+    validate_output_format,
+)
 from ..utils.prompt import (
     any_provided,
     prompt_for_value,
@@ -16,8 +22,16 @@ from ..utils.prompt import (
 )
 from ..utils.time_utils import format_time_ago
 
-app = typer.Typer(help="Manage global secrets", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="Manage global secrets", no_args_is_help=True)
+console = get_console()
+
+SECRET_LIST_JSON_HELP = json_output_help(
+    ".secrets[] = {id, name, description?, createdAt, updatedAt?}",
+)
+
+SECRET_DETAIL_JSON_HELP = json_output_help(
+    ". = {id, name, description?, value?, createdAt, updatedAt?}",
+)
 
 
 def _fetch_secrets(client: APIClient, config: Config) -> List[Dict[str, Any]]:
@@ -26,7 +40,7 @@ def _fetch_secrets(client: APIClient, config: Config) -> List[Dict[str, Any]]:
     return response.get("data", [])
 
 
-@app.command("list")
+@app.command("list", epilog=SECRET_LIST_JSON_HELP)
 def secret_list(
     output: str = typer.Option(
         "table",
@@ -75,7 +89,7 @@ def secret_list(
         raise typer.Exit(1)
 
 
-@app.command("create")
+@app.command("create", epilog=SECRET_DETAIL_JSON_HELP)
 def secret_create(
     name: Optional[str] = typer.Option(
         None,
@@ -157,7 +171,7 @@ def secret_create(
         raise typer.Exit(1)
 
 
-@app.command("update")
+@app.command("update", epilog=SECRET_DETAIL_JSON_HELP)
 def secret_update(
     secret_id: Optional[str] = typer.Argument(
         None,
@@ -289,7 +303,7 @@ def secret_delete(
         raise typer.Exit(1)
 
 
-@app.command("get")
+@app.command("get", epilog=SECRET_DETAIL_JSON_HELP)
 def secret_get(
     secret_id: str = typer.Argument(
         ...,

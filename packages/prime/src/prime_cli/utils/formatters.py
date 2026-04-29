@@ -45,6 +45,17 @@ def format_price(value: float) -> str:
     return f"${value:.2f}"
 
 
+def format_price_per_mtok(value: Any) -> str:
+    """Format USD per 1M tokens for display, trimming trailing zeros."""
+    if value is None:
+        return ""
+    try:
+        f = float(value)
+        return f"${f:.6f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def format_resources(cpu_cores: float, memory_gb: float, gpu_count: int = 0) -> str:
     """Format resource specifications as compact string."""
     resources = f"{cpu_cores:g}CPU/{memory_gb:g}GB"

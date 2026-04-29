@@ -1,7 +1,7 @@
 """Hosted RL (Reinforcement Learning) API client."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,6 +13,13 @@ class RLModel(BaseModel):
 
     name: str = Field(..., description="Model name")
     at_capacity: bool = Field(False, alias="atCapacity")
+    training_price_per_mtok: Optional[float] = Field(None, alias="trainingPricePerMtok")
+    inference_input_price_per_mtok: Optional[float] = Field(
+        None, alias="inferenceInputPricePerMtok"
+    )
+    inference_output_price_per_mtok: Optional[float] = Field(
+        None, alias="inferenceOutputPricePerMtok"
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -49,12 +56,20 @@ class RLRun(BaseModel):
     wandb_project: Optional[str] = Field(None, alias="wandbProject")
     wandb_run_name: Optional[str] = Field(None, alias="wandbRunName")
 
+    # Queue info
+    runs_ahead: Optional[int] = Field(None, alias="runsAhead")
+    queue_reason: Optional[str] = Field(None, alias="queueReason")
+
     # Timestamps
     started_at: Optional[datetime] = Field(None, alias="startedAt")
     completed_at: Optional[datetime] = Field(None, alias="completedAt")
     error_message: Optional[str] = Field(None, alias="errorMessage")
     created_at: datetime = Field(..., alias="createdAt")
     updated_at: datetime = Field(..., alias="updatedAt")
+
+    # Automated failure classification (only set for terminal FAILED runs).
+    # Stored as a dict to stay forward-compatible if the API adds new fields.
+    failure_analysis: Optional[Dict[str, Any]] = Field(None, alias="failureAnalysis")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -70,6 +85,17 @@ class RLCheckpoint(BaseModel):
     size_bytes: Optional[int] = Field(None, alias="sizeBytes")
     created_at: datetime = Field(..., alias="createdAt")
     uploaded_at: Optional[datetime] = Field(None, alias="uploadedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class EnvServerInfo(BaseModel):
+    """Env-server pod info for an RL run."""
+
+    env_name: Optional[str] = Field(None, description="Environment name")
+    env_index: Optional[int] = Field(None, description="Environment server index")
+    pod_name: str = Field(..., description="Kubernetes pod name")
+    status: str = Field(..., description="Pod status")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -116,6 +142,11 @@ class RLClient:
         max_steps: int = 100,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        repetition_penalty: Optional[float] = None,
+        min_tokens: Optional[int] = None,
+        seed: Optional[int] = None,
+        temp_scheduler: Optional[Dict[str, Any]] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
         batch_size: int = 128,
         name: Optional[str] = None,
         wandb_entity: Optional[str] = None,
@@ -135,6 +166,10 @@ class RLClient:
         checkpoint_id: Optional[str] = None,
         cluster_name: Optional[str] = None,
         infrastructure_config: Optional[Dict[str, Any]] = None,
+        tailscale_config: Optional[Dict[str, Any]] = None,
+        enable_thinking: Optional[bool] = None,
+        reasoning_effort: Optional[Literal["low", "medium", "high"]] = None,
+        run_config: Optional[Dict[str, Any]] = None,
     ) -> RLRun:
         """Create a new RL training run."""
         try:
@@ -175,6 +210,21 @@ class RLClient:
             if temperature is not None:
                 payload["temperature"] = temperature
 
+            if repetition_penalty is not None:
+                payload["repetition_penalty"] = repetition_penalty
+
+            if min_tokens is not None:
+                payload["min_tokens"] = min_tokens
+
+            if seed is not None:
+                payload["seed"] = seed
+
+            if temp_scheduler is not None:
+                payload["temp_scheduler"] = temp_scheduler
+
+            if extra_body is not None:
+                payload["extra_body"] = extra_body
+
             if eval_config:
                 payload["eval"] = eval_config
 
@@ -211,6 +261,18 @@ class RLClient:
             if infrastructure_config:
                 if "compute_size" in infrastructure_config:
                     payload["compute_size"] = infrastructure_config["compute_size"]
+
+            if tailscale_config:
+                payload["tailscale"] = tailscale_config
+
+            if enable_thinking is not None:
+                payload["enable_thinking"] = enable_thinking
+
+            if reasoning_effort is not None:
+                payload["reasoning_effort"] = reasoning_effort
+
+            if run_config:
+                payload["run_config"] = run_config
 
             response = self.client.post("/rft/runs", json=payload)
             return RLRun.model_validate(response.get("run"))
@@ -284,7 +346,7 @@ class RLClient:
             raise APIError(f"Failed to get RL run: {str(e)}")
 
     def get_logs(self, run_id: str, tail_lines: int = 1000) -> str:
-        """Get logs for an RL run."""
+        """Get orchestrator logs for an RL run."""
         try:
             response = self.client.get(
                 f"/rft/runs/{run_id}/logs", params={"tail_lines": tail_lines}
@@ -294,6 +356,39 @@ class RLClient:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to get RL run logs: {e.response.text}")
             raise APIError(f"Failed to get RL run logs: {str(e)}")
+
+    def list_env_servers(self, run_id: str) -> List[EnvServerInfo]:
+        """List env-server pods for an RL run."""
+        try:
+            response = self.client.get(f"/rft/runs/{run_id}/env-servers")
+            return [EnvServerInfo.model_validate(p) for p in response.get("env_servers", [])]
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to list env servers: {e.response.text}")
+            raise APIError(f"Failed to list env servers: {str(e)}")
+
+    def get_env_server_logs(
+        self,
+        run_id: str,
+        env_name: str,
+        env_index: int = 0,
+        tail_lines: int = 1000,
+    ) -> str:
+        """Get logs for a specific env-server pod of an RL run."""
+        try:
+            response = self.client.get(
+                f"/rft/runs/{run_id}/env-server-logs",
+                params={
+                    "env_name": env_name,
+                    "env_index": env_index,
+                    "tail_lines": tail_lines,
+                },
+            )
+            return response.get("logs", "")
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to get env server logs: {e.response.text}")
+            raise APIError(f"Failed to get env server logs: {str(e)}")
 
     def get_metrics(
         self,

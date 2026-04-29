@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -13,18 +14,24 @@ from datetime import datetime
 # Wheel METADATA files use RFC 822 format (PEP 566), same as email headers
 from email.parser import Parser as EmailParser
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
 import toml
 import typer
-from rich.console import Console
+from gitignore_parser import parse_gitignore
 from rich.table import Table
 from rich.text import Text
 
 from ..client import APIClient, APIError
-from ..utils import output_data_as_json, validate_output_format
+from ..utils import (
+    PlainTyper,
+    get_console,
+    json_output_help,
+    output_data_as_json,
+    validate_output_format,
+)
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.formatters import format_file_size
 from ..utils.formatters import strip_ansi as _strip_ansi
@@ -38,8 +45,8 @@ from ..utils.time_utils import format_time_ago, iso_timestamp
 from ..verifiers_bridge import is_help_request, print_env_build_help, print_env_init_help
 from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
 
-app = typer.Typer(help="Manage verifiers environments", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="Manage verifiers environments", no_args_is_help=True)
+console = get_console()
 
 # Constants
 MAX_FILES_TO_SHOW = 10
@@ -48,16 +55,59 @@ DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 
 # Action subcommand app
-action_app = typer.Typer(help="Manage environment actions (CI jobs)", no_args_is_help=True)
+action_app = PlainTyper(help="Manage environment actions (CI jobs)", no_args_is_help=True)
 app.add_typer(action_app, name="action", rich_help_panel="Manage")
 
 # Secret subcommand app
-secret_app = typer.Typer(help="Manage environment secrets", no_args_is_help=True)
+secret_app = PlainTyper(help="Manage environment secrets", no_args_is_help=True)
 app.add_typer(secret_app, name="secret", rich_help_panel="Manage")
 
 # Variable subcommand app
-var_app = typer.Typer(help="Manage environment variables", no_args_is_help=True)
+var_app = PlainTyper(help="Manage environment variables", no_args_is_help=True)
 app.add_typer(var_app, name="var", rich_help_panel="Manage")
+
+ACTION_LIST_JSON_HELP = json_output_help(
+    ".actions[] = {id, name|job_type, status, version, trigger, created_at}",
+    ".total = number",
+)
+
+ACTION_RETRY_JSON_HELP = json_output_help(
+    ". = {success, job_id?, version_id?, message?}",
+)
+
+ENV_LIST_JSON_HELP = json_output_help(
+    ".environments[] = {environment, description, visibility, version, stars, "
+    "updated_at, action_status?, tags[]?}",
+    ".total = number",
+    ".page = number",
+    ".per_page = number",
+)
+
+ENV_STATUS_JSON_HELP = json_output_help(
+    ". = {name, description?, visibility, latest_version?, action?}",
+    ".latest_version? = {semantic_version?, content_hash?, created_at?}",
+    ".action? = {status, job_id?}",
+)
+
+ENV_SECRET_LIST_JSON_HELP = json_output_help(
+    ".secrets[] = {id, name, source, description?, createdAt, updatedAt?}",
+)
+
+ENV_SECRET_DETAIL_JSON_HELP = json_output_help(
+    ". = {id, name, source, description?, value?, createdAt, updatedAt?}",
+)
+
+ENV_SECRET_LINK_JSON_HELP = json_output_help(
+    ". = {id, secretId, secretName, environmentId, createdAt}",
+)
+
+ENV_VAR_LIST_JSON_HELP = json_output_help(
+    ".variables[] = {id, name, value, description?, createdAt, updatedAt?}",
+)
+
+ENV_VAR_DETAIL_JSON_HELP = json_output_help(
+    ". = {id, name, value, description?, createdAt, updatedAt?}",
+)
 
 
 def _uv_pip_command(subcommand: str, *args: str) -> List[str]:
@@ -110,7 +160,7 @@ def _resolve_environment(environment: Optional[str]) -> Tuple[str, str]:
     raise typer.Exit(1)
 
 
-@action_app.command("list")
+@action_app.command("list", epilog=ACTION_LIST_JSON_HELP)
 def actions_list(
     environment: str = typer.Argument(
         ...,
@@ -153,7 +203,7 @@ def actions_list(
     try:
         client = APIClient()
         offset = (page - 1) * num
-        params = {
+        params: dict[str, int | str] = {
             "limit": num,
             "offset": offset,
         }
@@ -305,7 +355,7 @@ def actions_logs(
         raise typer.Exit(1)
 
 
-@action_app.command("retry")
+@action_app.command("retry", epilog=ACTION_RETRY_JSON_HELP)
 def actions_retry(
     environment: str = typer.Argument(
         ...,
@@ -408,12 +458,14 @@ def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
     if file_path.is_symlink():
         return False
 
+    rel_path = file_path.relative_to(base_path)
+
     # Skip hidden files
     if file_path.name.startswith("."):
         return False
 
     # Skip files in __pycache__ directories
-    if "__pycache__" in str(file_path.relative_to(base_path)):
+    if "__pycache__" in rel_path.parts:
         return False
 
     return True
@@ -439,6 +491,57 @@ def should_include_directory_in_archive(dir_path: Path) -> bool:
     return True
 
 
+def _build_gitignore_matcher(env_path: Path) -> Optional[Callable[[str], bool]]:
+    """Build a matcher for the root .gitignore file, if present."""
+    gitignore_path = env_path / ".gitignore"
+    if not gitignore_path.exists():
+        return None
+    return parse_gitignore(str(gitignore_path), base_dir=str(env_path))
+
+
+def _collect_archive_files(env_path: Path) -> List[Path]:
+    """Collect archive file paths in deterministic order, honoring .gitignore."""
+    ignore_matcher = _build_gitignore_matcher(env_path)
+    files_by_rel_path: Dict[str, Path] = {}
+
+    def maybe_add_file(file_path: Path) -> None:
+        if not should_include_file_in_archive(file_path, env_path):
+            return
+        if ignore_matcher is not None and ignore_matcher(str(file_path)):
+            return
+
+        rel_path = str(file_path.relative_to(env_path)).replace("\\", "/")
+        files_by_rel_path[rel_path] = file_path
+
+    for pattern in ["README.md", "pyproject.toml", "*.py"]:
+        for file_path in sorted(env_path.glob(pattern), key=lambda p: p.name):
+            maybe_add_file(file_path)
+
+    def is_nested_dir_ignored(dir_path: Path) -> bool:
+        """Check if a nested directory should be pruned from traversal."""
+        if not should_include_directory_in_archive(dir_path):
+            return True
+        if ignore_matcher is not None and ignore_matcher(str(dir_path)):
+            return True
+        return False
+
+    for subdir in sorted(env_path.iterdir(), key=lambda path: path.name):
+        if not should_include_directory_in_archive(subdir):
+            continue
+        if is_nested_dir_ignored(subdir):
+            continue
+
+        for root, dirnames, filenames in os.walk(subdir):
+            root_path = Path(root)
+            dirnames[:] = sorted(
+                dirname for dirname in dirnames if not is_nested_dir_ignored(root_path / dirname)
+            )
+            for filename in sorted(filenames):
+                maybe_add_file(root_path / filename)
+
+    return [files_by_rel_path[rel_path] for rel_path in sorted(files_by_rel_path)]
+
+
 def compute_content_hash(env_path: Path) -> str:
     """Compute deterministic, cross-platform content hash for environment files.
 
@@ -450,45 +553,15 @@ def compute_content_hash(env_path: Path) -> str:
     """
     content_hasher = hashlib.sha256()
 
-    # Collect all items to hash in a deterministic order
-    items_to_hash = []
-
-    # Add root-level files
-    for pattern in ["pyproject.toml", "*.py", "README.md"]:
-        for file_path in env_path.glob(pattern):
-            if file_path.is_file():
-                items_to_hash.append(("file", file_path))
-
-    # Add subdirectory contents
-    for subdir in sorted(env_path.iterdir(), key=lambda x: x.name):
-        if should_include_directory_in_archive(subdir):
-            # Add directory marker
-            items_to_hash.append(("dir", subdir))
-
-            # Add files in subdirectory
-            for file_path in subdir.rglob("*"):
-                if should_include_file_in_archive(file_path, env_path):
-                    items_to_hash.append(("file", file_path))
-
-    # Sort all items by their relative path for deterministic ordering
-    items_to_hash.sort(key=lambda item: str(item[1].relative_to(env_path)).replace("\\", "/"))
-
-    # Hash items in sorted order
-    for item_type, item_path in items_to_hash:
-        rel_path = item_path.relative_to(env_path)
-        # Use forward slashes for cross-platform consistency
-        normalized_path = str(rel_path).replace("\\", "/")
-
-        if item_type == "dir":
-            content_hasher.update(f"dir:{normalized_path}".encode("utf-8"))
-        elif item_type == "file":
-            content_hasher.update(f"file:{normalized_path}".encode("utf-8"))
-            try:
-                with open(item_path, "rb") as f:
-                    content_hasher.update(f.read())
-            except IOError:
-                # Skip files that can't be read
-                pass
+    for file_path in _collect_archive_files(env_path):
+        normalized_path = str(file_path.relative_to(env_path)).replace("\\", "/")
+        content_hasher.update(f"file:{normalized_path}".encode("utf-8"))
+        try:
+            with open(file_path, "rb") as f:
+                content_hasher.update(f.read())
+        except IOError:
+            # Skip files that can't be read
+            pass
 
     return content_hasher.hexdigest()
 
@@ -508,7 +581,7 @@ def _format_action_status(status: Optional[str]) -> Text:
     return Text(status, style=color)
 
 
-@app.command("list", rich_help_panel="Explore")
+@app.command("list", rich_help_panel="Explore", epilog=ENV_LIST_JSON_HELP)
 def list_cmd(
     num: int = typer.Option(DEFAULT_LIST_LIMIT, "--num", "-n", help="Items per page"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
@@ -689,7 +762,7 @@ def list_cmd(
         raise typer.Exit(1)
 
 
-@app.command("status", rich_help_panel="Explore")
+@app.command("status", rich_help_panel="Explore", epilog=ENV_STATUS_JSON_HELP)
 def status_cmd(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     output: str = typer.Option("table", "--output", help="Output format: table or json"),
@@ -1141,6 +1214,7 @@ def push(
                             wheel_upload_url,
                             content=f.read(),
                             headers={"Content-Type": "application/octet-stream"},
+                            timeout=300.0,
                         )
                         upload_response.raise_for_status()
                 except httpx.RequestError as e:
@@ -1162,21 +1236,9 @@ def push(
                 with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
                     temp_file_path = tmp.name
                     with tarfile.open(tmp.name, "w:gz") as tar:
-                        for pattern in ["README.md", "pyproject.toml", "*.py"]:
-                            for file in env_path.glob(pattern):
-                                if file.is_file():
-                                    tar.add(file, arcname=file.name)
-
-                        # Sort subdirectories for deterministic ordering and apply filtering
-                        for subdir in sorted(env_path.iterdir(), key=lambda x: x.name):
-                            if should_include_directory_in_archive(subdir):
-                                # Add directory with custom filtering instead of entire subdirectory
-                                for file in subdir.rglob("*"):
-                                    if should_include_file_in_archive(file, env_path):
-                                        # Calculate relative path from env_path for consistent
-                                        # archive structure
-                                        arcname = file.relative_to(env_path)
-                                        tar.add(file, arcname=str(arcname))
+                        for file_path in _collect_archive_files(env_path):
+                            arcname = file_path.relative_to(env_path)
+                            tar.add(file_path, arcname=str(arcname))
 
                     # Check tarball size
                     tarball_size = Path(tmp.name).stat().st_size
@@ -2065,6 +2127,11 @@ def install(
         "--no-upgrade",
         help="Don't upgrade existing packages. Useful with locked dependencies (uv.lock).",
     ),
+    prerelease: bool = typer.Option(
+        False,
+        "--prerelease",
+        help="Allow pre-release versions (e.g., verifiers>=0.1.12.dev3).",
+    ),
 ) -> None:
     """Install a verifiers environment.
 
@@ -2179,10 +2246,14 @@ def install(
                             # Use -P to only upgrade this package, not its dependencies
                             cmd_parts.extend(["-P", normalized_name])
                         cmd_parts.append(str(wheel_path))
+                        if prerelease:
+                            cmd_parts.append("--prerelease=allow")
                     else:
                         cmd_parts = ["pip", "install", str(wheel_path)]
                         if not no_upgrade:
                             cmd_parts.append("--upgrade")
+                        if prerelease:
+                            cmd_parts.append("--pre")
                     installable_envs.append((cmd_parts, env_id, resolved_version, name))
                     console.print(f"[green]✓ Built {env_id}@{resolved_version}[/green]")
                 except Exception as e:
@@ -2214,6 +2285,7 @@ def install(
                 with_tool,
                 no_upgrade,
                 url_dependencies,
+                prerelease=prerelease,
             )
             if not cmd_parts:
                 skipped_envs.append((f"{env_id}@{target_version}", "No installation method"))
@@ -2392,7 +2464,7 @@ def uninstall(
         raise typer.Exit(1)
 
 
-version_app = typer.Typer(help="Manage environment versions", no_args_is_help=True)
+version_app = PlainTyper(help="Manage environment versions", no_args_is_help=True)
 app.add_typer(version_app, name="version", rich_help_panel="Manage")
 
 
@@ -2850,6 +2922,7 @@ def _build_install_command(
     tool: str = "uv",
     no_upgrade: bool = False,
     url_dependencies: Optional[List[str]] = None,
+    prerelease: bool = False,
 ) -> Optional[List[str]]:
     """Build install command for an environment. Returns None if no install method available.
 
@@ -2878,11 +2951,15 @@ def _build_install_command(
             if url_dependencies:
                 cmd.extend(url_dependencies)
             cmd.extend(["--extra-index-url", simple_index_url])
+            if prerelease:
+                cmd.append("--prerelease=allow")
             return cmd
         else:  # pip
             cmd = ["pip", "install"]
             if not no_upgrade:
                 cmd.append("--upgrade")
+            if prerelease:
+                cmd.append("--pre")
             if version and version != "latest":
                 cmd.append(f"{normalized_name}=={version}")
             else:
@@ -2898,6 +2975,11 @@ def _build_install_command(
             # Add URL dependencies for wheel-only installs too
             if url_dependencies:
                 cmd.extend(url_dependencies)
+            if prerelease:
+                if tool == "uv":
+                    cmd.append("--prerelease=allow")
+                else:
+                    cmd.append("--pre")
             return cmd
         except ValueError:
             return None
@@ -2905,7 +2987,7 @@ def _build_install_command(
     return None
 
 
-def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
+def _install_single_environment(env_slug: str, tool: str = "uv", prerelease: bool = False) -> bool:
     """Install a single environment from the hub. Returns True on success."""
     try:
         env_id, target_version = validate_env_id(env_slug)
@@ -2939,8 +3021,12 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
             normalized_name = normalize_package_name(name)
             if tool == "uv":
                 cmd_parts = _uv_pip_command("install", "-P", normalized_name, str(wheel_path))
+                if prerelease:
+                    cmd_parts.append("--prerelease=allow")
             else:
                 cmd_parts = ["pip", "install", "--upgrade", str(wheel_path)]
+                if prerelease:
+                    cmd_parts.append("--pre")
             execute_install_command(cmd_parts, env_id, resolved_version, tool)
             return True
         except Exception as e:
@@ -2952,7 +3038,8 @@ def _install_single_environment(env_slug: str, tool: str = "uv") -> bool:
         return False
 
     cmd_parts = _build_install_command(
-        name, target_version, simple_index_url, wheel_url, tool, url_dependencies=url_dependencies
+        name, target_version, simple_index_url, wheel_url, tool, url_dependencies=url_dependencies,
+        prerelease=prerelease,
     )
     if not cmd_parts:
         console.print(f"[red]Failed to build install command for {env_slug}[/red]")
@@ -2982,7 +3069,7 @@ def _fetch_env_secrets(client: APIClient, env_id: str) -> List[Dict[str, Any]]:
     return response.get("data", [])
 
 
-@secret_app.command("list")
+@secret_app.command("list", epilog=ENV_SECRET_LIST_JSON_HELP)
 def env_secret_list(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3036,7 +3123,7 @@ def env_secret_list(
         raise typer.Exit(1)
 
 
-@secret_app.command("create")
+@secret_app.command("create", epilog=ENV_SECRET_DETAIL_JSON_HELP)
 def env_secret_create(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3113,7 +3200,7 @@ def env_secret_create(
         raise typer.Exit(1)
 
 
-@secret_app.command("update")
+@secret_app.command("update", epilog=ENV_SECRET_DETAIL_JSON_HELP)
 def env_secret_update(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3258,7 +3345,7 @@ def env_secret_delete(
         raise typer.Exit(1)
 
 
-@secret_app.command("link")
+@secret_app.command("link", epilog=ENV_SECRET_LINK_JSON_HELP)
 def env_secret_link(
     global_secret_id: str = typer.Argument(
         ...,
@@ -3345,7 +3432,7 @@ def env_secret_unlink(
         raise typer.Exit(1)
 
 
-@var_app.command("list")
+@var_app.command("list", epilog=ENV_VAR_LIST_JSON_HELP)
 def var_list(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3402,7 +3489,7 @@ def var_list(
         raise typer.Exit(1)
 
 
-@var_app.command("create")
+@var_app.command("create", epilog=ENV_VAR_DETAIL_JSON_HELP)
 def var_create(
     environment: Optional[str] = typer.Argument(
         None,
@@ -3479,7 +3566,7 @@ def var_create(
         raise typer.Exit(1)
 
 
-@var_app.command("update")
+@var_app.command("update", epilog=ENV_VAR_DETAIL_JSON_HELP)
 def var_update(
     var_id: str = typer.Argument(
         ...,

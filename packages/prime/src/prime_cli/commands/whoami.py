@@ -1,15 +1,15 @@
 from typing import Any, Dict
 
 import typer
-from rich.console import Console
 from rich.table import Table
 
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
+from ..utils import PlainTyper, get_console
 
-app = typer.Typer(help="Show current authenticated user and update config", no_args_is_help=False)
-console = Console()
+app = PlainTyper(help="Show current authenticated user and update config", no_args_is_help=False)
+console = get_console()
 
 
 @app.callback(invoke_without_command=True)

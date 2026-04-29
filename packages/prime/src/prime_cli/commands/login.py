@@ -9,15 +9,15 @@ from click.exceptions import Abort
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.asymmetric import rsa
-from rich.console import Console
 
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
+from ..utils import PlainTyper, get_console
 from .teams import fetch_teams
 
-app = typer.Typer(help="Login to Prime Intellect")
-console = Console()
+app = PlainTyper(help="Login to Prime Intellect")
+console = get_console()
 
 
 def fetch_and_select_team(client: APIClient, config: Config) -> None:

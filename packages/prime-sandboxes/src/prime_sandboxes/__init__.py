@@ -16,6 +16,7 @@ from .core import (
 from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
+    SandboxFileNotFoundError,
     SandboxImagePullError,
     SandboxNotRunningError,
     SandboxOOMError,
@@ -46,7 +47,7 @@ from .models import (
 )
 from .sandbox import AsyncSandboxClient, AsyncTemplateClient, SandboxClient, TemplateClient
 
-__version__ = "0.2.16"
+__version__ = "0.2.22"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -87,6 +88,7 @@ __all__ = [
     "APIError",
     "UnauthorizedError",
     "PaymentRequiredError",
+    "SandboxFileNotFoundError",
     "APITimeoutError",
     "TimeoutError",  # Deprecated alias
     "SandboxOOMError",

@@ -4,14 +4,14 @@ from pathlib import Path
 from typing import Optional
 
 from prime_evals import EvalsAPIError, EvalsClient
-from rich.console import Console
 
 from prime_cli.core import APIClient
 
 from .display import get_eval_viewer_url
 from .env_metadata import find_environment_metadata
+from .plain import get_console
 
-console = Console()
+console = get_console()
 
 
 def load_results_jsonl(path: Path) -> list[dict]:

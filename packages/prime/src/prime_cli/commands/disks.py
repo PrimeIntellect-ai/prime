@@ -6,7 +6,6 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 import typer
-from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
@@ -16,18 +15,35 @@ from prime_cli.helper.short_id import generate_short_id_disk
 
 from ..api.disks import Disk, DisksClient
 from ..utils import (
+    PlainTyper,
     confirm_or_skip,
+    get_console,
     human_age,
+    is_plain_mode,
     iso_timestamp,
+    json_output_help,
     output_data_as_json,
     status_color,
     validate_output_format,
 )
 from ..utils.display import DISK_STATUS_COLORS
 
-app = typer.Typer(help="Manage storage", no_args_is_help=True)
-console = Console()
+app = PlainTyper(help="Manage storage", no_args_is_help=True)
+console = get_console()
 config = Config()
+
+LIST_DISKS_JSON_HELP = json_output_help(
+    ".disks[] = {id, name, size, status, provider, location, created_at, price_hr}",
+    ".total_count = number",
+    ".offset = number",
+    ".limit = number",
+)
+
+DISK_DETAIL_JSON_HELP = json_output_help(
+    ". = {id, name, size, status, provider, created_at, updated_at, "
+    "terminated_at?, price_hr?, stopped_price_hr?, user_id?, team_id?, "
+    "wallet_id?, info?, pods[], clusters[]}",
+)
 
 
 def _format_disk_for_list(disk: Disk) -> Dict[str, Any]:
@@ -88,7 +104,7 @@ def _format_disk_for_detail(disk: Disk) -> Dict[str, Any]:
     }
 
 
-@app.command()
+@app.command(epilog=LIST_DISKS_JSON_HELP)
 def list(
     limit: int = typer.Option(100, help="Maximum number of disks to list"),
     offset: int = typer.Option(0, help="Number of disks to skip"),
@@ -119,8 +135,10 @@ def list(
             # Only update display if data changed or first run
             if current_disks_hash != last_disks_hash:
                 # Clear screen if watching
-                if watch:
+                if watch and not is_plain_mode():
                     os.system("cls" if os.name == "nt" else "clear")
+                elif watch and is_plain_mode() and last_disks_hash is not None:
+                    console.print()
 
                 # Sort disks by created_at (oldest first)
                 sorted_disks = sorted(
@@ -234,7 +252,7 @@ def list(
         raise typer.Exit(1)
 
 
-@app.command(no_args_is_help=True)
+@app.command(no_args_is_help=True, epilog=DISK_DETAIL_JSON_HELP)
 def get(
     disk_id: str,
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),

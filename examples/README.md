@@ -168,10 +168,11 @@ prime sandbox list [--team_id TEAM] [--status STATUS] [--page N] [--per_page N]
 # Create sandbox
 prime sandbox create IMAGE [OPTIONS]
 
-# Create GPU sandbox
-prime sandbox create --gpu-count 1 --gpu-type H100_80GB
+# Create VM sandbox with GPUs
+prime sandbox create user-1/vm-image:latest --vm --gpu-count 1 --gpu-type H100_80GB
 
-# Note: DOCKER_IMAGE is not supported for GPU sandboxes
+# Create CPU-only VM sandbox
+prime sandbox create user-1/vm-image:latest --vm
 
 # With environment variables and secrets:
 prime sandbox create python:3.11-slim --env KEY=VALUE --secret API_KEY=secret123

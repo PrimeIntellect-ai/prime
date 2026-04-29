@@ -1,30 +1,76 @@
 """RL (Reinforcement Learning) training commands."""
 
 import json
+import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import toml
 import typer
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic import ValidationError as PydanticValidationError
-from rich.console import Console
 from rich.markup import escape as rich_escape
 from rich.table import Table
-from typer.core import TyperGroup
 
 from prime_cli.core import Config
 
-from ..api.rl import RLClient, RLRun
+from ..api.rl import EnvServerInfo, RLClient, RLRun
 from ..client import APIClient, APIError, ValidationError
-from ..utils import output_data_as_json, validate_output_format
+from ..utils import (
+    DefaultCommandGroup,
+    PlainTyper,
+    get_console,
+    json_help,
+    json_output_help,
+    output_data_as_json,
+    validate_output_format,
+)
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.env_vars import EnvParseError, collect_env_vars
-from ..utils.formatters import format_file_size, strip_ansi
+from ..utils.formatters import format_file_size, format_price_per_mtok, strip_ansi
 
-console = Console()
+console = get_console()
+
+RL_RUN_JSON_HELP = json_output_help(
+    ".run = {id, name?, status, base_model, environments[], "
+    "rollouts_per_example, max_steps, batch_size, created_at, updated_at, ...}",
+)
+
+RL_MODELS_JSON_HELP = json_output_help(
+    ".models[] = {name, at_capacity, training_price_per_mtok, "
+    "inference_input_price_per_mtok, inference_output_price_per_mtok}",
+)
+
+RL_LIST_JSON_HELP = json_output_help(
+    ".runs[] = {id, name?, status, base_model, environments[], max_steps, "
+    "batch_size, created_at, updated_at, ...}",
+    ".total = number",
+    ".page = number",
+    ".per_page = number",
+)
+
+RL_METRICS_JSON_HELP = json_help(
+    ".metrics[] = metric record from the RL API",
+)
+
+RL_ROLLOUTS_JSON_HELP = json_help(
+    ". = {run_id, samples[], total, page, limit, total_pages}",
+)
+
+RL_PROGRESS_JSON_HELP = json_help(
+    ". = {latest_step, steps_with_samples[], steps_with_distributions[], last_updated_at}",
+)
+
+RL_DISTRIBUTIONS_JSON_HELP = json_help(
+    ". = {bins[], step}",
+)
+
+RL_CHECKPOINTS_JSON_HELP = json_output_help(
+    ".checkpoints[] = {id, rft_run_id, step, storage_url, status, "
+    "size_bytes?, created_at, uploaded_at?}",
+)
 
 
 # Progress bar pattern (tqdm-style progress bars)
@@ -147,6 +193,20 @@ rollouts_per_example = 8
 [sampling]
 max_tokens = 2048
 # temperature = 0.7
+# repetition_penalty = 1.0
+# min_tokens = 0
+# seed = 42
+
+# Optional: hosted RL reasoning controls (mutually exclusive)
+# enable_thinking = false    # supported models: Qwen3.5, Nemotron
+# reasoning_effort = "high"  # supported models: GPT-OSS ("low" | "medium" | "high")
+
+# Optional: temperature scheduling (use instead of temperature)
+# [sampling.temp_scheduler]
+# type = "linear"               # "linear" or "cosine"
+# start_temperature = 1.5
+# end_temperature = 0.3
+# total_steps = 1000            # defaults to max_steps if not set
 
 [[env]]
 id = "{env_value}"
@@ -184,8 +244,8 @@ id = "{env_value}"
 
 # Optional: buffer configuration for difficulty filtering
 # [buffer]
-# easy_threshold = 0.8
-# hard_threshold = 0.2
+# easy_threshold = 1.0
+# hard_threshold = 0.0
 # easy_fraction = 0.0
 # hard_fraction = 0.0
 # online_difficulty_filtering = false
@@ -273,11 +333,33 @@ class EvalEnvConfig(BaseModel):
         return result
 
 
+class TemperatureSchedulerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: str = "linear"  # "linear" or "cosine"
+    start_temperature: float
+    end_temperature: float
+    total_steps: int | None = None
+
+
 class SamplingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_tokens: int | None = None
     temperature: float | None = None
+    repetition_penalty: float | None = None
+    min_tokens: int | None = None
+    seed: int | None = None
+    temp_scheduler: TemperatureSchedulerConfig | None = None
+    extra_body: Dict[str, Any] | None = None
+    enable_thinking: bool | None = None
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+
+    @model_validator(mode="after")
+    def _reasoning_controls_mutually_exclusive(self) -> "SamplingConfig":
+        if self.enable_thinking is not None and self.reasoning_effort is not None:
+            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
+        return self
 
 
 class EvalConfig(BaseModel):
@@ -405,6 +487,80 @@ class InfrastructureConfig(BaseModel):
         return d if d else None
 
 
+class TailscaleConfig(BaseModel):
+    """Optional per-run tailscale sidecar (enterprise-only feature).
+
+    When enabled, every env-server (training + eval) for this run joins the
+    user's tailnet via a sidecar. The orchestrator and other runs are
+    untouched.
+
+    The auth key must be supplied via the ``auth_key`` field or, preferably,
+    via the ``TAILSCALE_AUTH_KEY`` environment variable so the secret never
+    has to live in ``rl.toml``. Only pre-authenticated keys (``tskey-auth-``)
+    are accepted; OAuth client secrets are not supported. Free-form
+    ``tailscale up`` flags are also not accepted — the platform always
+    boots the sidecar with a locked-down arg set to keep tenant isolation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    auth_key: str | None = None
+    hostname_prefix: str = "prime-hosted-training"
+
+    @field_validator("hostname_prefix")
+    @classmethod
+    def validate_hostname_prefix(cls, v: str) -> str:
+        # Must end in alphanumeric — otherwise the derived sidecar hostname
+        # (e.g. f"{prefix}-env-{idx}-{run_id}") would contain consecutive
+        # hyphens which Tailscale rejects. Length cap matches the platform
+        # (backend/app/packages/rft/k8s_resources/tailscale.py).
+        if not re.fullmatch(r"[a-z]([a-z0-9-]{0,28}[a-z0-9])?", v):
+            raise ValueError(
+                "hostname_prefix must be 1-30 chars, lowercase alphanumeric or "
+                "hyphens, starting with a letter and ending with a letter or digit"
+            )
+        return v
+
+    @field_validator("auth_key")
+    @classmethod
+    def validate_auth_key(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not v.startswith("tskey-auth-"):
+            raise ValueError(
+                "auth_key must be a Tailscale pre-authenticated auth key "
+                "(starting with 'tskey-auth-')"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def fill_auth_key_from_env_and_validate(self) -> "TailscaleConfig":
+        if not self.enabled:
+            return self
+        if self.auth_key is None:
+            env_value = os.environ.get("TAILSCALE_AUTH_KEY")
+            if env_value:
+                if not env_value.startswith("tskey-auth-"):
+                    raise ValueError("TAILSCALE_AUTH_KEY must start with 'tskey-auth-'")
+                self.auth_key = env_value
+        if not self.auth_key:
+            raise ValueError(
+                "auth_key is required when tailscale.enabled is true. "
+                "Set [tailscale] auth_key in your config or export TAILSCALE_AUTH_KEY."
+            )
+        return self
+
+    def to_api_dict(self) -> Dict[str, Any] | None:
+        if not self.enabled:
+            return None
+        return {
+            "enabled": True,
+            "auth_key": self.auth_key,
+            "hostname_prefix": self.hostname_prefix,
+        }
+
+
 class RLConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -428,11 +584,13 @@ class RLConfig(BaseModel):
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
     infrastructure: InfrastructureConfig = Field(default_factory=InfrastructureConfig)
+    tailscale: TailscaleConfig = Field(default_factory=TailscaleConfig)
+    run_config: Dict[str, Any] = Field(default_factory=dict)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
 
 
-def _format_validation_errors(errors: list[dict]) -> list[str]:
+def _format_validation_errors(errors: list[Any]) -> list[str]:
     """Format Pydantic validation errors into user-friendly messages."""
     messages = []
     for error in errors:
@@ -484,6 +642,7 @@ def load_config(path: str) -> RLConfig:
 
 # Status color mapping
 RUN_STATUS_COLORS = {
+    "QUEUED": "white",
     "PENDING": "yellow",
     "RUNNING": "green",
     "COMPLETED": "cyan",
@@ -494,6 +653,32 @@ RUN_STATUS_COLORS = {
 
 def _get_status_color(status: str) -> str:
     return RUN_STATUS_COLORS.get(status.upper(), "white")
+
+
+def _render_failure_analysis(analysis: Dict[str, Any]) -> None:
+    """Render the automated failure-classifier output below run details.
+
+    The backend only returns this for RUN_ISSUE classifications, so we don't
+    surface the internal classifier tag — just the diagnosis itself.
+    """
+    root_cause = analysis.get("rootCause")
+    evidence = analysis.get("evidence")
+    if not root_cause and not (isinstance(evidence, list) and evidence):
+        return
+
+    header = "\n[bold]Failure Analysis[/bold]"
+    confidence = analysis.get("confidence")
+    if isinstance(confidence, (int, float)):
+        header += f" [dim](confidence {confidence * 100:.0f}%)[/dim]"
+    console.print(header)
+
+    if root_cause:
+        console.print(f"  Root Cause: {rich_escape(str(root_cause))}")
+
+    if isinstance(evidence, list) and evidence:
+        console.print("  Evidence:")
+        for line in evidence:
+            console.print(f"    - [dim]{rich_escape(str(line))}[/dim]")
 
 
 def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
@@ -517,18 +702,8 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     }
 
 
-class DefaultGroup(TyperGroup):
+class DefaultGroup(DefaultCommandGroup):
     """Makes 'run' the default command when a config file is passed."""
-
-    def parse_args(self, ctx, args):
-        if not args:
-            return super().parse_args(ctx, args)
-        if args[0] in ("--help", "-h"):
-            return super().parse_args(ctx, args)
-        if args[0] in self.commands:
-            return super().parse_args(ctx, args)
-        args = ["run"] + list(args)
-        return super().parse_args(ctx, args)
 
     def format_usage(self, ctx, formatter):
         formatter.write_usage(
@@ -537,14 +712,14 @@ class DefaultGroup(TyperGroup):
         )
 
 
-app = typer.Typer(
+app = PlainTyper(
     cls=DefaultGroup,
     help="Manage hosted RL training runs.",
     no_args_is_help=True,
 )
 
 
-@app.command("run", rich_help_panel="Commands")
+@app.command("run", rich_help_panel="Commands", epilog=RL_RUN_JSON_HELP)
 def create_run(
     config_path: str = typer.Argument(
         ...,
@@ -648,14 +823,43 @@ def create_run(
             console.print(f"  Oversampling Factor: {cfg.oversampling_factor}")
         if cfg.max_async_level is not None:
             console.print(f"  Max Async Level:     {cfg.max_async_level}")
+        if cfg.run_config:
+            console.print(f"  Run Config:          {cfg.run_config}")
 
         # Sampling
-        if cfg.sampling.max_tokens or cfg.sampling.temperature is not None:
+        has_sampling = (
+            cfg.sampling.max_tokens
+            or cfg.sampling.temperature is not None
+            or cfg.sampling.repetition_penalty is not None
+            or cfg.sampling.min_tokens is not None
+            or cfg.sampling.seed is not None
+            or cfg.sampling.temp_scheduler is not None
+            or cfg.sampling.extra_body is not None
+            or cfg.sampling.enable_thinking is not None
+            or cfg.sampling.reasoning_effort is not None
+        )
+        if has_sampling:
             console.print("\n[cyan]Sampling[/cyan]")
             if cfg.sampling.max_tokens:
-                console.print(f"  Max Tokens:  {cfg.sampling.max_tokens}")
+                console.print(f"  Max Tokens:          {cfg.sampling.max_tokens}")
             if cfg.sampling.temperature is not None:
-                console.print(f"  Temperature: {cfg.sampling.temperature}")
+                console.print(f"  Temperature:         {cfg.sampling.temperature}")
+            if cfg.sampling.repetition_penalty is not None:
+                console.print(f"  Repetition Penalty:  {cfg.sampling.repetition_penalty}")
+            if cfg.sampling.min_tokens is not None:
+                console.print(f"  Min Tokens:          {cfg.sampling.min_tokens}")
+            if cfg.sampling.seed is not None:
+                console.print(f"  Seed:                {cfg.sampling.seed}")
+            if cfg.sampling.temp_scheduler is not None:
+                ts = cfg.sampling.temp_scheduler
+                sched = f"{ts.type} ({ts.start_temperature} → {ts.end_temperature})"
+                console.print(f"  Temp Scheduler:      {sched}")
+            if cfg.sampling.extra_body is not None:
+                console.print(f"  Extra Body:          {cfg.sampling.extra_body}")
+            if cfg.sampling.enable_thinking is not None:
+                console.print(f"  Enable Thinking:     {cfg.sampling.enable_thinking}")
+            if cfg.sampling.reasoning_effort is not None:
+                console.print(f"  Reasoning Effort:    {cfg.sampling.reasoning_effort}")
 
         # W&B
         if cfg.wandb.entity or cfg.wandb.project:
@@ -752,6 +956,13 @@ def create_run(
             max_steps=cfg.max_steps,
             max_tokens=cfg.sampling.max_tokens,
             temperature=cfg.sampling.temperature,
+            repetition_penalty=cfg.sampling.repetition_penalty,
+            min_tokens=cfg.sampling.min_tokens,
+            seed=cfg.sampling.seed,
+            temp_scheduler=cfg.sampling.temp_scheduler.model_dump(exclude_none=True)
+            if cfg.sampling.temp_scheduler
+            else None,
+            extra_body=cfg.sampling.extra_body,
             batch_size=cfg.batch_size,
             name=cfg.name,
             wandb_entity=cfg.wandb.entity,
@@ -771,20 +982,34 @@ def create_run(
             checkpoint_id=cfg.checkpoint_id,
             cluster_name=cfg.cluster_name,
             infrastructure_config=cfg.infrastructure.to_api_dict(),
+            tailscale_config=cfg.tailscale.to_api_dict(),
+            enable_thinking=cfg.sampling.enable_thinking,
+            reasoning_effort=cfg.sampling.reasoning_effort,
+            run_config=cfg.run_config if cfg.run_config else None,
         )
 
         if output == "json":
             output_data_as_json({"run": run.model_dump()}, console)
             return
 
-        console.print("[green]✓ Run created successfully![/green]")
+        if run.status == "QUEUED":
+            queue_msg = "✓ Run created and queued"
+            if run.runs_ahead is not None:
+                queue_msg += f" (~{run.runs_ahead} runs ahead)"
+            console.print(f"[yellow]{queue_msg}[/yellow]")
+            if run.queue_reason:
+                console.print(f"[yellow]Reason:[/yellow] {run.queue_reason}")
+            console.print("[dim]The run will start automatically when capacity is available.[/dim]")
+        else:
+            console.print("[green]✓ Run created successfully![/green]")
 
         dashboard_url = f"{app_config.frontend_url}/dashboard/training/{run.id}"
         console.print("\n[cyan]Monitor run at:[/cyan]")
         console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")
 
-        console.print("\n[dim]View logs with:[/dim]")
-        console.print(f"  prime rl logs {run.id} -f")
+        if run.status != "QUEUED":
+            console.print("\n[dim]View logs with:[/dim]")
+            console.print(f"  prime rl logs {run.id} -f")
 
     except ValidationError as e:
         console.print("[red]Configuration Error:[/red]")
@@ -804,7 +1029,7 @@ def create_run(
         raise typer.Exit(1)
 
 
-@app.command("models", rich_help_panel="Commands")
+@app.command("models", rich_help_panel="Commands", epilog=RL_MODELS_JSON_HELP)
 def list_models(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
@@ -830,19 +1055,172 @@ def list_models(
         table = Table(title="Prime RL — Models")
         table.add_column("Model", style="cyan")
         table.add_column("Status")
+        table.add_column("Training $/M tok", style="green", justify="right")
+        table.add_column("Inference In $/M tok", style="green", justify="right")
+        table.add_column("Inference Out $/M tok", style="green", justify="right")
 
         for model in models:
             if model.at_capacity:
                 status = "[red]At Capacity[/red]"
             else:
                 status = "[green]Available[/green]"
-            table.add_row(model.name, status)
+            table.add_row(
+                model.name,
+                status,
+                format_price_per_mtok(model.training_price_per_mtok) or "-",
+                format_price_per_mtok(model.inference_input_price_per_mtok) or "-",
+                format_price_per_mtok(model.inference_output_price_per_mtok) or "-",
+            )
 
         console.print(table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+def _unwrap_single_schema_variant(prop: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the concrete schema when a field is an optional/single wrapped variant."""
+    if "anyOf" in prop:
+        non_null = [variant for variant in prop["anyOf"] if variant.get("type") != "null"]
+        if len(non_null) == 1:
+            return _unwrap_single_schema_variant(non_null[0])
+
+    if "allOf" in prop and len(prop["allOf"]) == 1:
+        return _unwrap_single_schema_variant(prop["allOf"][0])
+
+    return prop
+
+
+def _resolve_schema_ref(prop: Dict[str, Any], defs: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve a local JSON schema ref into its concrete schema when possible."""
+    if "$ref" not in prop:
+        return prop
+
+    ref_name = prop["$ref"].rsplit("/", 1)[-1]
+    return defs.get(ref_name, prop)
+
+
+def _flatten_config_schema(
+    schema: Dict[str, Any],
+    defs: Dict[str, Any],
+    prefix: str = "",
+) -> list[tuple[str, str, str]]:
+    """Walk a JSON schema and return (dotted_path, type, default) for each leaf field."""
+    leaf_rows: list[tuple[str, str, str]] = []
+    nested_rows: list[tuple[str, str, str]] = []
+    props = schema.get("properties", {})
+    for name, prop in props.items():
+        if name in ("model_config", "env_file"):
+            continue
+        path = f"{prefix}{name}" if not prefix else f"{prefix}.{name}"
+        resolved = _resolve_schema_ref(_unwrap_single_schema_variant(prop), defs)
+
+        if resolved.get("type") == "object" and "properties" in resolved:
+            nested_rows.extend(_flatten_config_schema(resolved, defs, path))
+            continue
+
+        if resolved.get("type") == "array":
+            items = _resolve_schema_ref(
+                _unwrap_single_schema_variant(resolved.get("items", {})),
+                defs,
+            )
+            if items.get("type") == "object" and "properties" in items:
+                nested_rows.extend(_flatten_config_schema(items, defs, f"{path}[]"))
+                continue
+
+        type_str = _schema_type_str(prop, defs)
+        default = str(prop.get("default", "")) if "default" in prop else ""
+        leaf_rows.append((path, type_str, default))
+
+    return leaf_rows + nested_rows
+
+
+def _schema_type_str(prop: Dict[str, Any], defs: Dict[str, Any]) -> str:
+    """Produce a human-readable type string from a JSON schema property."""
+    unwrapped = _unwrap_single_schema_variant(prop)
+    if unwrapped is not prop:
+        return _schema_type_str(unwrapped, defs)
+
+    if "$ref" in prop:
+        return prop["$ref"].rsplit("/", 1)[-1]
+
+    if "anyOf" in prop:
+        parts = [
+            _schema_type_str(variant, defs)
+            for variant in prop["anyOf"]
+            if variant.get("type") != "null"
+        ]
+        return " | ".join(parts) if parts else "any"
+
+    if "allOf" in prop:
+        parts = [_schema_type_str(variant, defs) for variant in prop["allOf"]]
+        return " & ".join(part for part in parts if part) or "any"
+
+    if prop.get("type") == "array":
+        inner = _schema_type_str(prop.get("items", {}), defs)
+        return f"list[{inner}]"
+
+    resolved = _resolve_schema_ref(prop, defs)
+    if resolved is not prop:
+        return _schema_type_str(resolved, defs)
+
+    return prop.get("type", "any")
+
+
+RL_CONFIGS_JSON_HELP = json_output_help(
+    ".configs[] = {section, name, type, default}",
+)
+
+
+@app.command("configs", rich_help_panel="Commands", epilog=RL_CONFIGS_JSON_HELP)
+def list_configs(
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List available configuration options for RL training."""
+    validate_output_format(output, console)
+
+    schema = RLConfig.model_json_schema()
+    defs = schema.get("$defs", {})
+    rows = _flatten_config_schema(schema, defs)
+    if output == "json":
+        output_data_as_json(
+            {
+                "configs": [
+                    {
+                        "section": r[0].rsplit(".", 1)[0] if "." in r[0] else "",
+                        "name": r[0].rsplit(".", 1)[-1],
+                        "type": r[1],
+                        "default": r[2],
+                    }
+                    for r in rows
+                ]
+            },
+            console,
+        )
+        return
+
+    table = Table(title="Prime RL — Config Options")
+    table.add_column("Section", style="magenta")
+    table.add_column("Config", style="cyan")
+    table.add_column("Type", style="green")
+    table.add_column("Default", style="yellow")
+
+    prev_section = None
+    for path, type_str, default in rows:
+        section = path.rsplit(".", 1)[0] if "." in path else ""
+        name = path.rsplit(".", 1)[-1]
+        if prev_section is not None and section != prev_section:
+            table.add_section()
+        display_section = section if section != prev_section else ""
+        prev_section = section
+        table.add_row(display_section, name, type_str, default)
+
+    console.print(table)
+    console.print(
+        "\n[dim]Use these in your TOML config file. "
+        "See 'prime rl init' to generate a template.[/dim]"
+    )
 
 
 def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> None:
@@ -922,7 +1300,7 @@ def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> No
         raise typer.Exit(1)
 
 
-@app.command("list", rich_help_panel="Commands")
+@app.command("list", rich_help_panel="Commands", epilog=RL_LIST_JSON_HELP)
 @app.command("ls", rich_help_panel="Commands", hidden=True)
 def list_runs(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
@@ -934,7 +1312,7 @@ def list_runs(
     _list_runs_impl(team, num, page, output)
 
 
-@app.command("get", rich_help_panel="Commands")
+@app.command("get", rich_help_panel="Commands", epilog=RL_RUN_JSON_HELP)
 def get_run(
     run_id: str = typer.Argument(..., help="Run ID to get details for"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
@@ -964,7 +1342,10 @@ def get_run(
         status_color = _get_status_color(run.status)
 
         console.print(f"[bold]Run {run_id}[/bold]\n")
-        console.print(f"  Status: [{status_color}]{run.status}[/{status_color}]")
+        status_text = run.status
+        if run.status == "QUEUED" and run.runs_ahead is not None:
+            status_text += f" (~{run.runs_ahead} runs ahead)"
+        console.print(f"  Status: [{status_color}]{status_text}[/{status_color}]")
         console.print(f"  Model: [magenta]{run.base_model}[/magenta]")
         console.print(f"  Environments: [green]{formatted['environments']}[/green]")
         console.print(f"  Max Steps: {run.max_steps}")
@@ -983,6 +1364,9 @@ def get_run(
             console.print(f"  Completed: [dim]{run.completed_at.strftime('%Y-%m-%d %H:%M')}[/dim]")
         if run.error_message:
             console.print(f"  Error: [red]{run.error_message}[/red]")
+
+        if run.failure_analysis:
+            _render_failure_analysis(run.failure_analysis)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -1075,96 +1459,249 @@ def restart_run(
         raise typer.Exit(1)
 
 
+def _print_new_lines(last_lines: list[str], current_lines: list[str]) -> None:
+    """Print only lines in current_lines that aren't in the tail of last_lines.
+
+    Uses suffix-prefix overlap detection to avoid reprinting lines between polls.
+    """
+    if current_lines == last_lines:
+        return
+    if not last_lines:
+        for line in current_lines:
+            console.print(line)
+        return
+    overlap = 0
+    max_overlap = min(len(last_lines), len(current_lines))
+    for i in range(1, max_overlap + 1):
+        if last_lines[-i:] == current_lines[:i]:
+            overlap = i
+    for line in current_lines[overlap:]:
+        console.print(line)
+
+
+def _stream_logs(
+    fetch_fn: Any,
+    tail: int,
+    raw: bool,
+    follow: bool,
+    label: str,
+) -> None:
+    """Common print loop for orchestrator and env-server log fetches."""
+
+    def render(raw_logs: str) -> list[str]:
+        if raw:
+            return raw_logs.splitlines()
+        return clean_logs(raw_logs)
+
+    if follow:
+        console.print(f"[dim]Watching {label} logs... (Ctrl+C to stop)[/dim]\n")
+        last_lines: list[str] = []
+        consecutive_errors = 0
+
+        while True:
+            try:
+                raw_logs = fetch_fn(tail)
+                consecutive_errors = 0
+            except APIError as e:
+                err_str = str(e).lower()
+                if "404" in str(e) and ("queued" in err_str or "pending" in err_str):
+                    console.print("[yellow]Run is queued, waiting for it to start...[/yellow]")
+                    time.sleep(10)
+                    continue
+                consecutive_errors += 1
+                if "429" in str(e):
+                    if consecutive_errors >= 3:
+                        console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
+                        time.sleep(30)
+                    else:
+                        time.sleep(10)
+                    continue
+                raise
+
+            current_lines = render(raw_logs)
+            _print_new_lines(last_lines, current_lines)
+            last_lines = current_lines
+            time.sleep(5)
+    else:
+        raw_logs = fetch_fn(tail)
+        rendered = render(raw_logs)
+        if rendered:
+            for line in rendered:
+                console.print(line)
+        else:
+            console.print("[yellow]No logs available yet.[/yellow]")
+
+
+def _handle_logs_api_error(e: APIError) -> None:
+    err_str = str(e).lower()
+    if "404" in str(e) and ("queued" in err_str or "pending" in err_str):
+        msg = "Run has not started yet. Logs will be available once running."
+        console.print(f"[yellow]{msg}[/yellow]")
+        raise typer.Exit(0)
+    console.print(f"[red]Error:[/red] {e}")
+    raise typer.Exit(1)
+
+
+def _parse_env_qualifier(env: str) -> tuple[str, int]:
+    """Parse 'name' or 'name/<int>' into (env_name, env_index).
+
+    Only a trailing ``/<int>`` is treated as a replica index. Any other slashes
+    are part of the env name itself (e.g. owner/name IDs like
+    ``primeintellect/reverse-text``).
+    """
+    name, sep, idx_str = env.rpartition("/")
+    if sep and name and idx_str.isdigit():
+        return name, int(idx_str)
+    return env, 0
+
+
 @app.command("logs", rich_help_panel="Monitoring")
 def get_logs(
     run_id: str = typer.Argument(..., help="Run ID to get logs for"),
+    component: Optional[str] = typer.Option(
+        None,
+        "--component",
+        "-c",
+        help=(
+            "Pod to read logs from: 'orchestrator' (default) or 'env-server'. "
+            "Inferred from --env when omitted."
+        ),
+    ),
+    env: Optional[str] = typer.Option(
+        None,
+        "--env",
+        help=(
+            "Env-server name. Implies --component=env-server. "
+            "Use 'name/N' to disambiguate when multiple env-servers share a name. "
+            "List with 'prime rl components <run_id>'."
+        ),
+    ),
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
     raw: bool = typer.Option(False, "--raw", "-r", help="Show raw logs without formatting"),
 ) -> None:
-    """Get logs for a run."""
+    """Get logs for a run.
+
+    Defaults to the orchestrator pod. Pass ``--env <name>`` to read an
+    env-server pod instead — useful when an env-server is crash-looping
+    (e.g. ``ModuleNotFoundError``) and the orchestrator has stalled at
+    "Starting orchestrator step 0".
+
+    List available pods first with ``prime rl components <run_id>``.
+
+    Examples:
+
+        prime rl logs <run_id>
+        prime rl logs <run_id> -f
+        prime rl logs <run_id> --env reverse-text
+        prime rl logs <run_id> --env reverse-text/1 -f
+    """
+    if component is None:
+        component = "env-server" if env is not None else "orchestrator"
+    elif component not in ("orchestrator", "env-server"):
+        raise typer.BadParameter(
+            f"Invalid component '{component}'. Use 'orchestrator' or 'env-server'.",
+            param_hint="--component",
+        )
+    if component == "orchestrator" and env is not None:
+        raise typer.BadParameter(
+            "--env applies only to env-server logs. Drop --component=orchestrator or drop --env.",
+            param_hint="--env",
+        )
+    if component == "env-server" and env is None:
+        raise typer.BadParameter(
+            "--env is required when reading env-server logs. "
+            "Run 'prime rl components <run_id>' to list available env-servers.",
+            param_hint="--env",
+        )
+
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
 
-        if follow:
-            console.print(f"[dim]Watching logs for run {run_id}... (Ctrl+C to stop)[/dim]\n")
-            last_lines: list[str] = []
-            consecutive_errors = 0
+        if component == "orchestrator":
 
-            while True:
-                try:
-                    raw_logs = rl_client.get_logs(run_id, tail_lines=tail)
-                    consecutive_errors = 0
+            def fetch(t: int) -> str:
+                return rl_client.get_logs(run_id, tail_lines=t)
 
-                    if raw:
-                        # Raw mode with overlap detection
-                        current_lines = raw_logs.splitlines()
-                        if current_lines != last_lines:
-                            if not last_lines:
-                                for line in current_lines:
-                                    console.print(line)
-                            else:
-                                # Find new lines by comparing with previous
-                                overlap = 0
-                                max_overlap = min(len(last_lines), len(current_lines))
-                                for i in range(1, max_overlap + 1):
-                                    if last_lines[-i:] == current_lines[:i]:
-                                        overlap = i
-                                for line in current_lines[overlap:]:
-                                    console.print(line)
-                            last_lines = current_lines
-                    else:
-                        # Formatted mode
-                        formatted_lines = clean_logs(raw_logs)
-
-                        if formatted_lines != last_lines:
-                            if not last_lines:
-                                for line in formatted_lines:
-                                    console.print(line)
-                            else:
-                                # Find new lines by comparing with previous
-                                overlap = 0
-                                max_overlap = min(len(last_lines), len(formatted_lines))
-                                for i in range(1, max_overlap + 1):
-                                    if last_lines[-i:] == formatted_lines[:i]:
-                                        overlap = i
-                                for line in formatted_lines[overlap:]:
-                                    console.print(line)
-
-                            last_lines = formatted_lines
-                except APIError as e:
-                    consecutive_errors += 1
-                    if "429" in str(e):
-                        if consecutive_errors >= 3:
-                            console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
-                            time.sleep(30)
-                        else:
-                            time.sleep(10)
-                        continue
-                    raise
-
-                time.sleep(5)
+            label = "orchestrator"
         else:
-            raw_logs = rl_client.get_logs(run_id, tail_lines=tail)
-            if raw:
-                if raw_logs:
-                    console.print(raw_logs)
-                else:
-                    console.print("[yellow]No logs available yet.[/yellow]")
-            else:
-                formatted_lines = clean_logs(raw_logs)
-                if formatted_lines:
-                    for line in formatted_lines:
-                        console.print(line)
-                else:
-                    console.print("[yellow]No logs available yet.[/yellow]")
+            assert env is not None  # narrowed by validation above
+            env_name, env_index = _parse_env_qualifier(env)
+
+            def fetch(t: int) -> str:
+                return rl_client.get_env_server_logs(
+                    run_id,
+                    env_name=env_name,
+                    env_index=env_index,
+                    tail_lines=t,
+                )
+
+            label = f"env-server {env}"
+
+        _stream_logs(
+            fetch_fn=fetch,
+            tail=tail,
+            raw=raw,
+            follow=follow,
+            label=label,
+        )
 
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped watching logs.[/dim]")
     except APIError as e:
+        _handle_logs_api_error(e)
+
+
+@app.command("components", rich_help_panel="Monitoring")
+def list_components(
+    run_id: str = typer.Argument(..., help="Run ID to list components for"),
+) -> None:
+    """List pods (orchestrator + env-servers) for a run.
+
+    Use the env name shown here with
+    ``prime rl logs <run_id> -c env-server --env <name>``. When multiple
+    env-servers share a name, the qualified form ``name/N`` is shown — pass
+    that exact string to ``--env``.
+
+    Example:
+
+        prime rl components <run_id>
+    """
+    try:
+        api_client = APIClient()
+        rl_client = RLClient(api_client)
+        run = rl_client.get_run(run_id)
+        env_servers: List[EnvServerInfo] = rl_client.list_env_servers(run_id)
+    except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+    table = Table(title=f"Components for {run_id}")
+    table.add_column("Component", style="cyan")
+    table.add_column("Env", style="green")
+    table.add_column("Status")
+
+    table.add_row("orchestrator", "-", run.status)
+
+    name_counts: Dict[str, int] = {}
+    for es in env_servers:
+        if es.env_name:
+            name_counts[es.env_name] = name_counts.get(es.env_name, 0) + 1
+
+    for es in env_servers:
+        if es.env_name and name_counts.get(es.env_name, 0) > 1:
+            env_label = f"{es.env_name}/{es.env_index}"
+        else:
+            env_label = es.env_name or "?"
+        table.add_row("env-server", env_label, es.status)
+
+    console.print(table)
+    if env_servers:
+        console.print(
+            "\n[dim]View env-server logs with:[/dim] "
+            "[bold]prime rl logs <run_id> -c env-server --env <env>[/bold]"
+        )
 
 
 @app.command("init", rich_help_panel="Commands")
@@ -1208,7 +1745,7 @@ def init_config(
     console.print(f"\n[dim]Run with:[/dim] prime rl run {output_path}")
 
 
-@app.command("metrics", rich_help_panel="Monitoring")
+@app.command("metrics", rich_help_panel="Monitoring", epilog=RL_METRICS_JSON_HELP)
 def get_metrics(
     run_id: str = typer.Argument(..., help="Run ID to get metrics for"),
     min_step: Optional[int] = typer.Option(None, "--min-step", help="Minimum step (inclusive)"),
@@ -1243,7 +1780,7 @@ def get_metrics(
         raise typer.Exit(1)
 
 
-@app.command("rollouts", rich_help_panel="Monitoring")
+@app.command("rollouts", rich_help_panel="Monitoring", epilog=RL_ROLLOUTS_JSON_HELP)
 def get_rollouts(
     run_id: str = typer.Argument(..., help="Run ID to get rollouts for"),
     step: int = typer.Option(..., "--step", "-s", help="Step number to get rollouts for"),
@@ -1276,7 +1813,7 @@ def get_rollouts(
         raise typer.Exit(1)
 
 
-@app.command("progress", rich_help_panel="Monitoring")
+@app.command("progress", rich_help_panel="Monitoring", epilog=RL_PROGRESS_JSON_HELP)
 def get_progress(
     run_id: str = typer.Argument(..., help="Run ID to get progress for"),
 ) -> None:
@@ -1301,7 +1838,7 @@ def get_progress(
         raise typer.Exit(1)
 
 
-@app.command("distributions", rich_help_panel="Monitoring")
+@app.command("distributions", rich_help_panel="Monitoring", epilog=RL_DISTRIBUTIONS_JSON_HELP)
 def get_distributions(
     run_id: str = typer.Argument(..., help="Run ID to get distributions for"),
     distribution_type: Optional[str] = typer.Option(
@@ -1336,7 +1873,7 @@ def get_distributions(
         raise typer.Exit(1)
 
 
-@app.command("checkpoints", rich_help_panel="Monitoring")
+@app.command("checkpoints", rich_help_panel="Monitoring", epilog=RL_CHECKPOINTS_JSON_HELP)
 def list_checkpoints(
     run_id: str = typer.Argument(..., help="Run ID to list checkpoints for"),
     status_filter: Optional[str] = typer.Option(

@@ -93,6 +93,17 @@ def test_load_gepa_run_preserves_metadata_and_samples(tmp_path):
     ]
 
 
+def test_load_gepa_run_normalizes_falsy_eval_kind_and_framework(tmp_path):
+    run_dir = _write_gepa_run(tmp_path, metadata={"eval_kind": "", "framework": ""})
+
+    data = _load_gepa_run(run_dir)
+
+    assert data["eval_kind"] == "gepa"
+    assert data["framework"] == "verifiers"
+    assert data["metadata"]["eval_kind"] == "gepa"
+    assert data["metadata"]["framework"] == "verifiers"
+
+
 def test_push_gepa_run_constructs_request_without_task_fields(tmp_path, monkeypatch):
     run_dir = _write_gepa_run(tmp_path)
     captured = {}

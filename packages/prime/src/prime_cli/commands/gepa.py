@@ -167,19 +167,21 @@ def _load_gepa_run(run_dir: Path) -> GepaRunData:
 
     env_id = _require_metadata_string(metadata, "env_id", metadata_path)
     model = _require_metadata_string(metadata, "model", metadata_path)
+    framework = metadata.get("framework") or GEPA_FRAMEWORK
+    eval_kind = metadata.get("eval_kind") or GEPA_EVAL_KIND
 
     results = load_results_jsonl(run_dir / "results.jsonl")
     eval_metadata = dict(metadata)
-    eval_metadata.setdefault("eval_kind", GEPA_EVAL_KIND)
-    eval_metadata.setdefault("framework", GEPA_FRAMEWORK)
+    eval_metadata["eval_kind"] = eval_kind
+    eval_metadata["framework"] = framework
     eval_metadata["artifacts"] = _load_gepa_artifacts(run_dir)
 
     return {
         "eval_name": _build_gepa_eval_name(metadata, env_id, model),
         "model_name": model,
         "env_id": env_id,
-        "framework": metadata.get("framework") or GEPA_FRAMEWORK,
-        "eval_kind": metadata.get("eval_kind") or GEPA_EVAL_KIND,
+        "framework": framework,
+        "eval_kind": eval_kind,
         "metadata": eval_metadata,
         "results": results,
     }

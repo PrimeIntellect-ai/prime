@@ -582,12 +582,12 @@ class RolloutViewer(Container):
     }
 
     RolloutViewer .history-section > CollapsibleTitle:hover {
-        background: $primary 12%;
+        background: $secondary 12%;
         color: $text;
     }
 
     RolloutViewer .history-section > CollapsibleTitle:focus {
-        background: $primary 28%;
+        background: $secondary 24%;
         color: $text;
     }
 
@@ -600,6 +600,14 @@ class RolloutViewer(Container):
         color: $success;
     }
 
+    RolloutViewer .assistant-section > CollapsibleTitle:hover {
+        background: $success 12%;
+    }
+
+    RolloutViewer .assistant-section > CollapsibleTitle:focus {
+        background: $success 24%;
+    }
+
     RolloutViewer .tool-section {
         background: $warning 6%;
         border: round $warning;
@@ -609,6 +617,14 @@ class RolloutViewer(Container):
         color: $warning;
     }
 
+    RolloutViewer .tool-section > CollapsibleTitle:hover {
+        background: $warning 12%;
+    }
+
+    RolloutViewer .tool-section > CollapsibleTitle:focus {
+        background: $warning 24%;
+    }
+
     RolloutViewer .prompt-section {
         background: $secondary 4%;
         border: round $secondary;
@@ -616,6 +632,14 @@ class RolloutViewer(Container):
 
     RolloutViewer .prompt-section > CollapsibleTitle {
         color: $secondary;
+    }
+
+    RolloutViewer .prompt-section > CollapsibleTitle:hover {
+        background: $secondary 12%;
+    }
+
+    RolloutViewer .prompt-section > CollapsibleTitle:focus {
+        background: $secondary 24%;
     }
 
     RolloutViewer .prompt-section .section-body {
@@ -631,6 +655,14 @@ class RolloutViewer(Container):
         color: $accent;
     }
 
+    RolloutViewer .tool-call-section > CollapsibleTitle:hover {
+        background: $accent 12%;
+    }
+
+    RolloutViewer .tool-call-section > CollapsibleTitle:focus {
+        background: $accent 24%;
+    }
+
     RolloutViewer .reasoning-section {
         background: $primary 6%;
         border: round $primary;
@@ -638,6 +670,38 @@ class RolloutViewer(Container):
 
     RolloutViewer .reasoning-section > CollapsibleTitle {
         color: $primary;
+    }
+
+    RolloutViewer .reasoning-section > CollapsibleTitle:hover {
+        background: $primary 12%;
+    }
+
+    RolloutViewer .reasoning-section > CollapsibleTitle:focus {
+        background: $primary 24%;
+    }
+
+    RolloutViewer .assistant-section .nested-section > CollapsibleTitle:hover {
+        background: $success 12%;
+    }
+
+    RolloutViewer .assistant-section .nested-section > CollapsibleTitle:focus {
+        background: $success 24%;
+    }
+
+    RolloutViewer .tool-section .nested-section > CollapsibleTitle:hover {
+        background: $warning 12%;
+    }
+
+    RolloutViewer .tool-section .nested-section > CollapsibleTitle:focus {
+        background: $warning 24%;
+    }
+
+    RolloutViewer .prompt-section .nested-section > CollapsibleTitle:hover {
+        background: $secondary 12%;
+    }
+
+    RolloutViewer .prompt-section .nested-section > CollapsibleTitle:focus {
+        background: $secondary 24%;
     }
 
     RolloutViewer .nested-section {

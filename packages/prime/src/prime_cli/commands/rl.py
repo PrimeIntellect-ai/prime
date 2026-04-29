@@ -1212,7 +1212,7 @@ RL_CONFIGS_JSON_HELP = json_output_help(
 def list_configs(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List available configuration options for RL training."""
+    """List available configuration options for Hosted Training."""
     validate_output_format(output, console)
 
     schema = RLConfig.model_json_schema()
@@ -1235,7 +1235,7 @@ def list_configs(
         )
         return
 
-    table = Table(title="Prime RL — Config Options")
+    table = Table(title="Hosted Training - Config Options")
     table.add_column("Section", style="magenta")
     table.add_column("Config", style="cyan")
     table.add_column("Type", style="green")
@@ -1254,7 +1254,7 @@ def list_configs(
     console.print(table)
     console.print(
         "\n[dim]Use these in your TOML config file. "
-        "See 'prime rl init' to generate a template.[/dim]"
+        "See 'prime train init' to generate a template.[/dim]"
     )
 
 
@@ -1608,7 +1608,7 @@ def get_logs(
         help=(
             "Env-server name. Implies --component=env-server. "
             "Use 'name/N' to disambiguate when multiple env-servers share a name. "
-            "List with 'prime rl components <run_id>'."
+            "List with 'prime train components <run_id>'."
         ),
     ),
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
@@ -1622,14 +1622,14 @@ def get_logs(
     (e.g. ``ModuleNotFoundError``) and the orchestrator has stalled at
     "Starting orchestrator step 0".
 
-    List available pods first with ``prime rl components <run_id>``.
+    List available pods first with ``prime train components <run_id>``.
 
     Examples:
 
-        prime rl logs <run_id>
-        prime rl logs <run_id> -f
-        prime rl logs <run_id> --env reverse-text
-        prime rl logs <run_id> --env reverse-text/1 -f
+        prime train logs <run_id>
+        prime train logs <run_id> -f
+        prime train logs <run_id> --env reverse-text
+        prime train logs <run_id> --env reverse-text/1 -f
     """
     if component is None:
         component = "env-server" if env is not None else "orchestrator"
@@ -1646,7 +1646,7 @@ def get_logs(
     if component == "env-server" and env is None:
         raise typer.BadParameter(
             "--env is required when reading env-server logs. "
-            "Run 'prime rl components <run_id>' to list available env-servers.",
+            "Run 'prime train components <run_id>' to list available env-servers.",
             param_hint="--env",
         )
 
@@ -1695,13 +1695,13 @@ def list_components(
     """List pods (orchestrator + env-servers) for a run.
 
     Use the env name shown here with
-    ``prime rl logs <run_id> -c env-server --env <name>``. When multiple
+    ``prime train logs <run_id> -c env-server --env <name>``. When multiple
     env-servers share a name, the qualified form ``name/N`` is shown — pass
     that exact string to ``--env``.
 
     Example:
 
-        prime rl components <run_id>
+        prime train components <run_id>
     """
     try:
         api_client = APIClient()
@@ -1735,7 +1735,7 @@ def list_components(
     if env_servers:
         console.print(
             "\n[dim]View env-server logs with:[/dim] "
-            "[bold]prime rl logs <run_id> -c env-server --env <env>[/bold]"
+            "[bold]prime train logs <run_id> -c env-server --env <env>[/bold]"
         )
 
 

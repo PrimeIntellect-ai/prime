@@ -17,11 +17,12 @@ from prime_lab_view.app import (
     _next_log_tail_lines,
     _parse_log_records,
     _training_config_toml,
+    _training_run_widgets,
 )
 from prime_lab_view.data import LabDataSource, LabLoadOptions, discover_local_eval_runs
 from prime_lab_view.eval_records import LazyRunResults, LocalEvalRun
 from prime_lab_view.eval_render import compute_run_overview_stats, history_groups
-from prime_lab_view.eval_screen import LocalEvalRunScreen
+from prime_lab_view.eval_screen import LocalEvalRunScreen, RolloutViewer
 from rich.console import Console
 
 
@@ -209,6 +210,30 @@ class FakeRLClient:
         assert step is None
         return {"step": 12, "bins": [{"range": "0.0-1.0", "count": 8}]}
 
+    def get_rollouts(
+        self,
+        run_id: str,
+        step: int,
+        page: int = 1,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        assert run_id == "run-1"
+        assert step == 12
+        assert page == 1
+        assert limit == 50
+        return {
+            "samples": [
+                {
+                    "reward": 0.8,
+                    "prompt": [{"role": "user", "content": "2+2?"}],
+                    "completion": [{"role": "assistant", "content": "4"}],
+                }
+            ],
+            "total": 1,
+            "page": page,
+            "limit": limit,
+        }
+
     def get_environment_status(self, owner: str, name: str) -> dict[str, Any]:
         return {"environment": f"{owner}/{name}", "status": "SUCCESS"}
 
@@ -322,9 +347,23 @@ def test_lab_view_loads_training_logs_and_environment_status() -> None:
         "step": 12,
         "bins": [{"range": "0.0-1.0", "count": 8}],
     }
+    assert item.raw["rollout_samples_step"] == 12
+    assert item.raw["rollout_samples"]["samples"][0]["reward"] == 0.8
     assert item.raw["environment_statuses"] == [
         {"environment": "primeintellect/gsm8k", "status": "SUCCESS"}
     ]
+
+
+def test_training_data_tab_uses_rollout_viewer() -> None:
+    source = make_source()
+    snapshot = source.load(LabLoadOptions(limit=10))
+    training = snapshot.section("training")
+    assert training is not None
+    item = source.load_item_detail(training.items[0])
+
+    widgets = _training_run_widgets(item, include_logs=False, active_tab="data")
+
+    assert any(isinstance(widget, RolloutViewer) for widget in widgets)
 
 
 def test_lab_view_renders_platform_histogram_data() -> None:
@@ -678,6 +717,51 @@ async def test_prime_lab_view_opens_local_eval_run_screen(tmp_path: Path) -> Non
         )
         app._show_item(local_item)
         app.action_load_detail()
+        await pilot.pause()
+
+        assert isinstance(app.screen, LocalEvalRunScreen)
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_view_click_opens_local_eval_run_screen(tmp_path: Path) -> None:
+    run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        '{"avg_reward": 0.5, "num_examples": 1, "rollouts_per_example": 1}',
+        encoding="utf-8",
+    )
+    (run_dir / "results.jsonl").write_text(
+        '{"reward": 0.5, "prompt": [{"role": "user", "content": "2+2?"}], '
+        '"completion": [{"role": "assistant", "content": "4"}]}\n',
+        encoding="utf-8",
+    )
+    source = make_source()
+    snapshot = source.load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(
+        lambda: snapshot,
+        lambda item, include_logs, log_tail_lines, metrics_limit, metrics_min_step: (
+            source.load_item_detail(
+                item,
+                include_logs=include_logs,
+                log_tail_lines=log_tail_lines,
+                metrics_limit=metrics_limit,
+                metrics_min_step=metrics_min_step,
+            )
+        ),
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._active_section_key = "evaluations"
+        app._render_active_section()
+        await pilot.pause()
+        local_index = next(
+            idx
+            for idx, item in enumerate(app._visible_items)
+            if item.raw.get("type") == "local_eval"
+        )
+        option_list = app.query_one("#item-list", LabOptionList)
+        assert await pilot.click(option_list, offset=(2, local_index * 2 + 1))
         await pilot.pause()
 
         assert isinstance(app.screen, LocalEvalRunScreen)

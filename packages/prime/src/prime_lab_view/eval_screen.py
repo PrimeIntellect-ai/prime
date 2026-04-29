@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -496,126 +497,94 @@ class RolloutCopyScreen(ModalScreen[None]):
         self.query_one("#rollout-copy-preview", TextArea).load_text(item.body)
 
 
-class LocalEvalRunScreen(Screen[None]):
-    """Full-page local eval run viewer with rollout and log panes."""
-
-    COMPACT_LAYOUT_WIDTH = 150
+class RolloutViewer(Container):
+    """Reusable rollout transcript viewer for evals and training samples."""
 
     BINDINGS = [
-        Binding("b,backspace", "back", "Back"),
-        Binding("q", "quit", "Quit"),
         Binding("p", "prev_record", "Prev rollout"),
         Binding("n", "next_record", "Next rollout"),
-        Binding("l", "show_logs", "Logs"),
-        Binding("r", "show_rollouts", "Rollouts"),
         Binding("pageup", "history_page_up", show=False),
         Binding("pagedown", "history_page_down", show=False),
         Binding("home", "history_home", show=False),
         Binding("end", "history_end", show=False),
-        Binding("tab", "focus_next_pane", "Next pane"),
-        Binding("shift+tab", "focus_prev_pane", show=False),
         Binding("e", "expand_all", "Expand all"),
         Binding("x", "collapse_all", "Collapse all"),
         Binding("/", "search", "Search"),
         Binding("c", "copy", "Copy"),
     ]
 
-    CSS = """
-    LocalEvalRunScreen {
-        background: $background;
-        color: $foreground;
-        layout: vertical;
+    DEFAULT_CSS = """
+    RolloutViewer {
+        layout: horizontal;
+        height: 1fr;
+        min-height: 24;
     }
 
-    #eval-view-container {
-        layout: vertical;
-        height: 100%;
-    }
-
-    EvalPanel {
+    RolloutViewer EvalPanel {
         border: round $primary;
         padding: 0 1;
         background: $surface;
     }
 
-    .metadata-panel {
-        height: auto;
-        min-height: 6;
-        max-height: 9;
-    }
-
-    .metadata-layout {
-        height: auto;
-        width: 100%;
-    }
-
-    .metadata-layout > Static {
-        width: 1fr;
-    }
-
-    .view-columns {
-        height: 1fr;
-    }
-
-    .rollouts-panel {
+    RolloutViewer .rollouts-panel {
         width: 28;
         min-width: 24;
     }
 
-    .history-panel,
-    .logs-panel {
+    RolloutViewer .history-panel {
         width: 2fr;
         min-width: 50;
     }
 
-    .details-panel {
+    RolloutViewer .details-panel {
         width: 1fr;
         min-width: 36;
     }
 
-    .column-header {
+    RolloutViewer .column-header {
         height: 1;
     }
 
-    .subtitle {
+    RolloutViewer .subtitle {
         height: auto;
         color: $text-muted;
     }
 
-    #rollout-list {
-        height: 1fr;
-    }
-
-    #completion-scroll,
-    #logs-scroll,
-    .details-scroll {
+    RolloutViewer #viewer-rollout-list,
+    RolloutViewer #viewer-completion-scroll,
+    RolloutViewer .details-scroll {
         height: 1fr;
         background: $surface;
     }
 
-    .history-section {
+    RolloutViewer .history-section {
         margin-bottom: 1;
     }
 
-    .nested-section {
+    RolloutViewer .nested-section {
         margin-left: 2;
     }
 
-    .section-body,
-    .log-content {
+    RolloutViewer .section-body {
         padding: 0 1 1 1;
-    }
-
-    .logs-panel {
-        display: none;
     }
     """
 
-    def __init__(self, run: LocalEvalRun) -> None:
-        super().__init__()
-        self.run = run
-        self.records = LazyRunResults(run)
-        self._record_count = self.records.count_hint()
+    def __init__(
+        self,
+        records: Sequence[dict[str, Any]],
+        *,
+        metadata: dict[str, Any] | None = None,
+        title: str = "Rollouts",
+        on_record_changed: Callable[[int, dict[str, Any]], None] | None = None,
+        classes: str | None = None,
+        id: str | None = None,
+    ) -> None:
+        super().__init__(id=id, classes=classes)
+        self.records = [record for record in records if isinstance(record, dict)]
+        self.metadata = metadata or {}
+        self.title = title
+        self._on_record_changed = on_record_changed
         self.current_record_idx = 0
         self._prompt_text = ""
         self._completion_text = ""
@@ -624,97 +593,57 @@ class LocalEvalRunScreen(Screen[None]):
         self._highlight_timer: Any = None
         self._highlight_section_index = 0
         self._highlight_nested_index = -1
-        self._log_files: list[Path] = discover_log_files(run.path)
-        self._log_loaders: dict[int, LazyLogFile] = {}
-        self._merged_log_lines: list[str] | None = None
-        self._active_log_tab = 0
-        self._view_mode: Literal["rollouts", "logs"] = "rollouts"
-        self._log_highlight_regex: re.Pattern[str] | None = None
-        self._log_highlight_timer: Any = None
         if self.records:
-            self._set_record_text_state(self.records[self.current_record_idx])
+            self._set_record_text_state(self.records[0])
 
     def compose(self) -> ComposeResult:
-        record = self.records[self.current_record_idx] if self.records else {}
-        completion_sections = self._completion_sections(record)
-        with Container(id="eval-view-container"):
-            with EvalPanel(classes="metadata-panel"):
-                with Horizontal(classes="metadata-layout"):
-                    yield Static("", id="metadata-summary", markup=False)
-                    yield Static("", id="metadata-metrics", markup=False)
-                    yield Static("", id="metadata-reward", markup=False)
-            with Horizontal(classes="view-columns"):
-                with EvalPanel(id="rollouts-panel", classes="rollouts-panel"):
-                    yield Label(Text("Rollouts", style="bold"), classes="column-header")
-                    yield Label("", id="rollout-summary", classes="subtitle")
-                    yield OptionList(id="rollout-list")
-                with EvalPanel(id="history-panel", classes="history-panel"):
-                    yield Label(
-                        Text("Completion History", style="bold"),
-                        classes="column-header",
+        if not self.records:
+            yield Static(Text("No rollout samples loaded.", style="dim"))
+            return
+        record = self.records[self.current_record_idx]
+        with EvalPanel(classes="rollouts-panel"):
+            yield Label(Text(self.title, style="bold"), classes="column-header")
+            yield Label("", id="viewer-rollout-summary", classes="subtitle")
+            yield OptionList(id="viewer-rollout-list")
+        with EvalPanel(classes="history-panel"):
+            yield Label(Text("Completion History", style="bold"), classes="column-header")
+            yield Static("", id="viewer-history-summary", classes="subtitle", markup=False)
+            yield VerticalScroll(
+                *self._completion_sections(record),
+                id="viewer-completion-scroll",
+            )
+        with EvalPanel(classes="details-panel"):
+            yield Label(Text("Details", style="bold"), classes="column-header")
+            with TabbedContent(initial="viewer-details-task", id="viewer-details-tabs"):
+                with TabPane("Task", id="viewer-details-task"):
+                    yield TabbedScrollPane(
+                        Static("", id="viewer-task-content", markup=False),
+                        classes="details-scroll",
                     )
-                    yield Static("", id="history-summary", classes="subtitle", markup=False)
-                    yield VerticalScroll(*completion_sections, id="completion-scroll")
-                with EvalPanel(id="logs-panel", classes="logs-panel"):
-                    yield Label(
-                        Text("Logs", style="bold"),
-                        id="logs-header",
-                        classes="column-header",
+                with TabPane("Score", id="viewer-details-score"):
+                    yield TabbedScrollPane(
+                        Static("", id="viewer-score-content", markup=False),
+                        classes="details-scroll",
                     )
-                    yield Static("", id="logs-tab-bar", classes="subtitle", markup=False)
-                    yield LogScrollPane(id="logs-scroll")
-                with EvalPanel(id="details-panel", classes="details-panel"):
-                    yield Label(Text("Details", style="bold"), classes="column-header")
-                    with TabbedContent(initial="details-task", id="details-tabs"):
-                        with TabPane("Task", id="details-task"):
-                            yield TabbedScrollPane(
-                                Static("", id="task-content", markup=False),
-                                classes="details-scroll",
-                            )
-                        with TabPane("Score", id="details-score"):
-                            yield TabbedScrollPane(
-                                Static("", id="score-content", markup=False),
-                                classes="details-scroll",
-                            )
-                        with TabPane("Usage", id="details-usage"):
-                            yield TabbedScrollPane(
-                                Static("", id="usage-content", markup=False),
-                                classes="details-scroll",
-                            )
-                        with TabPane("Info", id="details-info"):
-                            yield TabbedScrollPane(
-                                Static("", id="info-content", markup=False),
-                                classes="details-scroll",
-                            )
-        yield Footer()
-
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if self._view_mode == "logs" and action in {
-            "expand_all",
-            "collapse_all",
-            "show_logs",
-        }:
-            return False
-        if self._view_mode == "rollouts" and action == "show_rollouts":
-            return False
-        return True
+                with TabPane("Usage", id="viewer-details-usage"):
+                    yield TabbedScrollPane(
+                        Static("", id="viewer-usage-content", markup=False),
+                        classes="details-scroll",
+                    )
+                with TabPane("Info", id="viewer-details-info"):
+                    yield TabbedScrollPane(
+                        Static("", id="viewer-info-content", markup=False),
+                        classes="details-scroll",
+                    )
 
     def on_mount(self) -> None:
+        if not self.records:
+            return
         self._populate_rollout_list()
+        if self._on_record_changed is not None:
+            self._on_record_changed(self.current_record_idx, self.records[self.current_record_idx])
         self.update_display()
         self.call_after_refresh(self._focus_primary_content)
-        self._update_responsive_layout(self.size.width)
-
-    def on_resize(self, event: events.Resize) -> None:
-        self._update_responsive_layout(event.size.width)
-
-    def on_unmount(self) -> None:
-        self.records.close()
-        for loader in self._log_loaders.values():
-            loader.close()
-
-    def action_back(self) -> None:
-        self.app.pop_screen()
 
     def action_prev_record(self) -> None:
         self._move_record_cursor(-1)
@@ -722,62 +651,43 @@ class LocalEvalRunScreen(Screen[None]):
     def action_next_record(self) -> None:
         self._move_record_cursor(1)
 
-    def action_show_logs(self) -> None:
-        if not self._log_files:
-            self.notify("No log files available for this run", severity="warning")
-            return
-        if self._view_mode == "logs":
-            return
-        self._view_mode = "logs"
-        self.query_one("#history-panel", EvalPanel).display = False
-        self.query_one("#logs-panel", EvalPanel).display = True
-        self._populate_logs_view()
-        self.query_one("#logs-scroll", LogScrollPane).focus()
-        self.refresh_bindings()
-
-    def action_show_rollouts(self) -> None:
-        if self._view_mode == "rollouts":
-            return
-        self._view_mode = "rollouts"
-        self.query_one("#logs-panel", EvalPanel).display = False
-        self.query_one("#history-panel", EvalPanel).display = True
-        self._focus_primary_content()
-        self.refresh_bindings()
-
     def action_expand_all(self) -> None:
-        container = self.query_one("#completion-scroll", VerticalScroll)
+        if not self.records:
+            return
+        container = self.query_one("#viewer-completion-scroll", VerticalScroll)
         for section in container.query(Collapsible):
             section.collapsed = False
         self._focus_primary_content()
 
     def action_collapse_all(self) -> None:
-        container = self.query_one("#completion-scroll", VerticalScroll)
+        if not self.records:
+            return
+        container = self.query_one("#viewer-completion-scroll", VerticalScroll)
         for section in container.query(Collapsible):
             section.collapsed = True
         self._focus_primary_content(prefer_expanded=False)
 
     def action_history_page_up(self) -> None:
-        self._center_scroll_target().scroll_page_up(animate=False)
+        if self.records:
+            self.query_one("#viewer-completion-scroll", VerticalScroll).scroll_page_up(
+                animate=False
+            )
 
     def action_history_page_down(self) -> None:
-        self._center_scroll_target().scroll_page_down(animate=False)
+        if self.records:
+            self.query_one("#viewer-completion-scroll", VerticalScroll).scroll_page_down(
+                animate=False
+            )
 
     def action_history_home(self) -> None:
-        self._center_scroll_target().scroll_home(animate=False)
+        if self.records:
+            self.query_one("#viewer-completion-scroll", VerticalScroll).scroll_home(animate=False)
 
     def action_history_end(self) -> None:
-        self._center_scroll_target().scroll_end(animate=False)
-
-    def action_focus_next_pane(self) -> None:
-        self.focus_next()
-
-    def action_focus_prev_pane(self) -> None:
-        self.focus_previous()
+        if self.records:
+            self.query_one("#viewer-completion-scroll", VerticalScroll).scroll_end(animate=False)
 
     def action_search(self) -> None:
-        if self._view_mode == "logs":
-            self._search_logs()
-            return
         if not self.records:
             return
         record = self.records[self.current_record_idx]
@@ -788,9 +698,6 @@ class LocalEvalRunScreen(Screen[None]):
         )
 
     def action_copy(self) -> None:
-        if self._view_mode == "logs":
-            self._copy_logs()
-            return
         if not self.records:
             return
         record = self.records[self.current_record_idx]
@@ -802,54 +709,35 @@ class LocalEvalRunScreen(Screen[None]):
             )
         )
 
-    def cycle_log_tab(self, delta: int) -> None:
-        num_tabs = self._log_tab_count()
-        if num_tabs < 2:
-            return
-        self._active_log_tab = (self._active_log_tab + delta) % num_tabs
-        self._populate_logs_view()
-
-    def _available_record_count(self) -> int:
-        if self.is_mounted:
-            return self.query_one("#rollout-list", OptionList).option_count
-        if self._record_count is not None:
-            return self._record_count
-        return 1 if self.records else 0
-
     def _record_progress_label(self) -> str:
-        total = "?" if self._record_count is None else str(self._record_count)
-        return f"{self.current_record_idx + 1}/{total}"
+        return f"{self.current_record_idx + 1}/{len(self.records)}"
 
     def _populate_rollout_list(self) -> None:
-        rollout_list = self.query_one("#rollout-list", OptionList)
+        rollout_list = self.query_one("#viewer-rollout-list", OptionList)
         rollout_list.clear_options()
-        if not self.records:
-            return
-        self._record_count = len(self.records)
-        for idx in range(self._record_count):
-            rollout_list.add_option(
-                Option(build_rollout_prompt(idx, self.records[idx]), id=str(idx))
-            )
+        for idx, record in enumerate(self.records):
+            rollout_list.add_option(Option(build_rollout_prompt(idx, record), id=str(idx)))
         rollout_list.highlighted = self.current_record_idx
         rollout_list.scroll_to_highlight()
 
     def _move_record_cursor(self, delta: int) -> None:
-        record_count = self._available_record_count()
-        if record_count <= 0:
+        if not self.records:
             return
-        new_index = (self.current_record_idx + delta) % record_count
-        rollout_list = self.query_one("#rollout-list", OptionList)
+        new_index = (self.current_record_idx + delta) % len(self.records)
+        rollout_list = self.query_one("#viewer-rollout-list", OptionList)
         rollout_list.highlighted = new_index
         rollout_list.scroll_to_highlight()
         self._set_current_record(new_index)
 
     def _set_current_record(self, index: int, *, focus_history: bool = False) -> None:
-        if not (0 <= index < self._available_record_count()):
+        if not (0 <= index < len(self.records)):
             return
         self.current_record_idx = index
         self._set_highlight(None, repaint=False)
+        if self._on_record_changed is not None:
+            self._on_record_changed(index, self.records[index])
         self.update_display(focus_history=focus_history)
-        self.query_one("#completion-scroll", VerticalScroll).scroll_y = 0
+        self.query_one("#viewer-completion-scroll", VerticalScroll).scroll_y = 0
         for scroll in self.query(".details-scroll"):
             if isinstance(scroll, VerticalScroll):
                 scroll.scroll_y = 0
@@ -870,23 +758,21 @@ class LocalEvalRunScreen(Screen[None]):
             return
         record = self.records[self.current_record_idx]
         self._set_record_text_state(record)
-        metadata = self.run.load_metadata()
-        self.query_one("#metadata-summary", Static).update(
-            build_run_summary_text(self.run, record_progress_label=self._record_progress_label())
+        self.query_one("#viewer-history-summary", Static).update(
+            self._build_history_summary_text(record)
         )
-        self.query_one("#metadata-metrics", Static).update(build_run_metric_text(self.run))
-        self.query_one("#metadata-reward", Static).update(
-            build_reward_text(record, heading="Current Reward", multiline=False, limit=3)
+        self.query_one("#viewer-task-content", Static).update(build_task_text(record))
+        self.query_one("#viewer-score-content", Static).update(build_score_text(record))
+        self.query_one("#viewer-usage-content", Static).update(build_usage_text(record))
+        self.query_one("#viewer-info-content", Static).update(
+            build_info_text(record, self.metadata)
         )
-        self.query_one("#history-summary", Static).update(self._build_history_summary_text(record))
-        self.query_one("#task-content", Static).update(build_task_text(record))
-        self.query_one("#score-content", Static).update(build_score_text(record))
-        self.query_one("#usage-content", Static).update(build_usage_text(record))
-        self.query_one("#info-content", Static).update(build_info_text(record, metadata))
-        self.query_one("#rollout-summary", Label).update(self._build_rollout_summary_text(record))
+        self.query_one("#viewer-rollout-summary", Label).update(
+            self._build_rollout_summary_text(record)
+        )
         self._rebuild_completion_sections(record, focus_history)
 
-    @on(OptionList.OptionHighlighted, "#rollout-list")
+    @on(OptionList.OptionHighlighted, "#viewer-rollout-list")
     def on_rollout_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if event.option_id is None:
             return
@@ -894,7 +780,7 @@ class LocalEvalRunScreen(Screen[None]):
         if idx != self.current_record_idx:
             self._set_current_record(idx)
 
-    @on(OptionList.OptionSelected, "#rollout-list")
+    @on(OptionList.OptionSelected, "#viewer-rollout-list")
     def on_rollout_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_id is None:
             return
@@ -908,7 +794,7 @@ class LocalEvalRunScreen(Screen[None]):
     ) -> None:
         if not self.is_mounted:
             return
-        container = self.query_one("#completion-scroll", VerticalScroll)
+        container = self.query_one("#viewer-completion-scroll", VerticalScroll)
         container.remove_children()
         container.mount(*self._completion_sections(record))
         if focus_history:
@@ -1135,7 +1021,7 @@ class LocalEvalRunScreen(Screen[None]):
         if repaint and self.is_mounted and (had_highlight or result is not None):
             self._swap_section_bodies()
             if result is not None:
-                container = self.query_one("#completion-scroll", VerticalScroll)
+                container = self.query_one("#viewer-completion-scroll", VerticalScroll)
                 self._expand_and_scroll_to_match(container)
 
     def _swap_section_bodies(self) -> None:
@@ -1164,10 +1050,10 @@ class LocalEvalRunScreen(Screen[None]):
         self.call_after_refresh(lambda target=scroll_target: target.scroll_visible(animate=False))
 
     def _focus_primary_content(self, *, prefer_expanded: bool = True) -> None:
-        container = self.query_one("#completion-scroll", VerticalScroll)
+        container = self.query_one("#viewer-completion-scroll", VerticalScroll)
         sections = [child for child in container.children if isinstance(child, Collapsible)]
         if not sections:
-            self.query_one("#rollout-list", OptionList).focus()
+            self.query_one("#viewer-rollout-list", OptionList).focus()
             return
         target = sections[0]
         if prefer_expanded:
@@ -1176,19 +1062,367 @@ class LocalEvalRunScreen(Screen[None]):
         if title_widget is not None and getattr(title_widget, "can_focus", False):
             title_widget.focus()
 
+    def _render_history_section_copy_text(
+        self, section: HistorySectionData, *, depth: int = 0
+    ) -> str:
+        heading = f"{'#' * (depth + 2)} {section.title}"
+        parts = [heading]
+        if section.body:
+            parts.append(indent_block(section.body, "  "))
+        parts.extend(
+            self._render_history_section_copy_text(child, depth=depth + 1)
+            for child in section.nested_sections
+        )
+        return "\n\n".join(part for part in parts if part)
+
+    def _render_history_copy_text(self, sections: list[HistorySectionData]) -> str:
+        return "\n\n".join(self._render_history_section_copy_text(section) for section in sections)
+
+    def _build_rollout_copy_items(self, record: dict[str, Any]) -> list[RolloutCopyItem]:
+        history_sections = self._history_section_data(record)
+        raw_text = text_to_plain(format_prompt_or_completion(record))
+        history_text = self._render_history_copy_text(history_sections)
+        snapshot_parts = [
+            f"Current Rollout\n{build_rollout_prompt(self.current_record_idx, record).plain}",
+            f"Completion History\n\n{history_text}" if history_text else "",
+            f"Raw\n\n{raw_text}" if raw_text else "",
+        ]
+        items = [
+            RolloutCopyItem(
+                key="snapshot",
+                label="Full rollout snapshot",
+                body="\n\n".join(part for part in snapshot_parts if part).strip(),
+            ),
+            RolloutCopyItem(
+                key="rollout",
+                label="Rollout row",
+                body=build_rollout_prompt(self.current_record_idx, record).plain,
+            ),
+        ]
+        if history_text:
+            items.append(
+                RolloutCopyItem(
+                    key="history",
+                    label="Completion history",
+                    body=history_text,
+                )
+            )
+        if raw_text:
+            items.append(RolloutCopyItem(key="raw", label="Raw JSON", body=raw_text))
+        return items
+
+
+class LocalEvalRunScreen(Screen[None]):
+    """Full-page local eval run viewer with rollout and log panes."""
+
+    COMPACT_LAYOUT_WIDTH = 150
+
+    BINDINGS = [
+        Binding("b,backspace", "back", "Back"),
+        Binding("q", "quit", "Quit"),
+        Binding("p", "prev_record", "Prev rollout"),
+        Binding("n", "next_record", "Next rollout"),
+        Binding("l", "show_logs", "Logs"),
+        Binding("r", "show_rollouts", "Rollouts"),
+        Binding("pageup", "history_page_up", show=False),
+        Binding("pagedown", "history_page_down", show=False),
+        Binding("home", "history_home", show=False),
+        Binding("end", "history_end", show=False),
+        Binding("tab", "focus_next_pane", "Next pane"),
+        Binding("shift+tab", "focus_prev_pane", show=False),
+        Binding("e", "expand_all", "Expand all"),
+        Binding("x", "collapse_all", "Collapse all"),
+        Binding("/", "search", "Search"),
+        Binding("c", "copy", "Copy"),
+    ]
+
+    CSS = """
+    LocalEvalRunScreen {
+        background: $background;
+        color: $foreground;
+        layout: vertical;
+    }
+
+    #eval-view-container {
+        layout: vertical;
+        height: 100%;
+    }
+
+    EvalPanel {
+        border: round $primary;
+        padding: 0 1;
+        background: $surface;
+    }
+
+    .metadata-panel {
+        height: auto;
+        min-height: 6;
+        max-height: 9;
+    }
+
+    .metadata-layout {
+        height: auto;
+        width: 100%;
+    }
+
+    .metadata-layout > Static {
+        width: 1fr;
+    }
+
+    .view-columns {
+        height: 1fr;
+    }
+
+    .rollouts-panel {
+        width: 28;
+        min-width: 24;
+    }
+
+    .history-panel,
+    .logs-panel {
+        width: 2fr;
+        min-width: 50;
+    }
+
+    .details-panel {
+        width: 1fr;
+        min-width: 36;
+    }
+
+    .column-header {
+        height: 1;
+    }
+
+    .subtitle {
+        height: auto;
+        color: $text-muted;
+    }
+
+    #rollout-list {
+        height: 1fr;
+    }
+
+    #completion-scroll,
+    #logs-scroll,
+    .details-scroll {
+        height: 1fr;
+        background: $surface;
+    }
+
+    .history-section {
+        margin-bottom: 1;
+    }
+
+    .nested-section {
+        margin-left: 2;
+    }
+
+    .section-body,
+    .log-content {
+        padding: 0 1 1 1;
+    }
+
+    .logs-panel {
+        display: none;
+    }
+    """
+
+    def __init__(self, run: LocalEvalRun) -> None:
+        super().__init__()
+        self.run = run
+        self.records = LazyRunResults(run)
+        self._record_count = self.records.count_hint()
+        self.current_record_idx = 0
+        self._rollout_records = (
+            [self.records[idx] for idx in range(len(self.records))] if self.records else []
+        )
+        self._prompt_text = ""
+        self._completion_text = ""
+        self._highlight_regex: re.Pattern[str] | None = None
+        self._highlight_column: str | None = None
+        self._highlight_timer: Any = None
+        self._highlight_section_index = 0
+        self._highlight_nested_index = -1
+        self._log_files: list[Path] = discover_log_files(run.path)
+        self._log_loaders: dict[int, LazyLogFile] = {}
+        self._merged_log_lines: list[str] | None = None
+        self._active_log_tab = 0
+        self._view_mode: Literal["rollouts", "logs"] = "rollouts"
+        self._log_highlight_regex: re.Pattern[str] | None = None
+        self._log_highlight_timer: Any = None
+        if self._rollout_records:
+            self._set_record_text_state(self._rollout_records[self.current_record_idx])
+
+    def compose(self) -> ComposeResult:
+        with Container(id="eval-view-container"):
+            with EvalPanel(classes="metadata-panel"):
+                with Horizontal(classes="metadata-layout"):
+                    yield Static("", id="metadata-summary", markup=False)
+                    yield Static("", id="metadata-metrics", markup=False)
+                    yield Static("", id="metadata-reward", markup=False)
+            with Horizontal(classes="view-columns"):
+                yield RolloutViewer(
+                    self._rollout_records,
+                    metadata=self.run.load_metadata(),
+                    title="Rollouts",
+                    on_record_changed=self._handle_rollout_changed,
+                    id="local-rollout-viewer",
+                )
+                with EvalPanel(id="logs-panel", classes="logs-panel"):
+                    yield Label(
+                        Text("Logs", style="bold"),
+                        id="logs-header",
+                        classes="column-header",
+                    )
+                    yield Static("", id="logs-tab-bar", classes="subtitle", markup=False)
+                    yield LogScrollPane(id="logs-scroll")
+        yield Footer()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if self._view_mode == "logs" and action in {
+            "expand_all",
+            "collapse_all",
+            "show_logs",
+        }:
+            return False
+        if self._view_mode == "rollouts" and action == "show_rollouts":
+            return False
+        return True
+
+    def on_mount(self) -> None:
+        self.update_display()
+        self.call_after_refresh(lambda: self._rollout_viewer()._focus_primary_content())
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._update_responsive_layout(event.size.width)
+
+    def on_unmount(self) -> None:
+        self.records.close()
+        for loader in self._log_loaders.values():
+            loader.close()
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+    def action_prev_record(self) -> None:
+        if self._view_mode == "rollouts":
+            self._rollout_viewer().action_prev_record()
+
+    def action_next_record(self) -> None:
+        if self._view_mode == "rollouts":
+            self._rollout_viewer().action_next_record()
+
+    def action_show_logs(self) -> None:
+        if not self._log_files:
+            self.notify("No log files available for this run", severity="warning")
+            return
+        if self._view_mode == "logs":
+            return
+        self._view_mode = "logs"
+        self._rollout_viewer().display = False
+        self.query_one("#logs-panel", EvalPanel).display = True
+        self._populate_logs_view()
+        self.query_one("#logs-scroll", LogScrollPane).focus()
+        self.refresh_bindings()
+
+    def action_show_rollouts(self) -> None:
+        if self._view_mode == "rollouts":
+            return
+        self._view_mode = "rollouts"
+        self.query_one("#logs-panel", EvalPanel).display = False
+        self._rollout_viewer().display = True
+        self._rollout_viewer()._focus_primary_content()
+        self.refresh_bindings()
+
+    def action_expand_all(self) -> None:
+        if self._view_mode == "rollouts":
+            self._rollout_viewer().action_expand_all()
+
+    def action_collapse_all(self) -> None:
+        if self._view_mode == "rollouts":
+            self._rollout_viewer().action_collapse_all()
+
+    def action_history_page_up(self) -> None:
+        self._center_scroll_target().scroll_page_up(animate=False)
+
+    def action_history_page_down(self) -> None:
+        self._center_scroll_target().scroll_page_down(animate=False)
+
+    def action_history_home(self) -> None:
+        self._center_scroll_target().scroll_home(animate=False)
+
+    def action_history_end(self) -> None:
+        self._center_scroll_target().scroll_end(animate=False)
+
+    def action_focus_next_pane(self) -> None:
+        self.focus_next()
+
+    def action_focus_prev_pane(self) -> None:
+        self.focus_previous()
+
+    def action_search(self) -> None:
+        if self._view_mode == "logs":
+            self._search_logs()
+            return
+        self._rollout_viewer().action_search()
+
+    def action_copy(self) -> None:
+        if self._view_mode == "logs":
+            self._copy_logs()
+            return
+        self._rollout_viewer().action_copy()
+
+    def _rollout_viewer(self) -> RolloutViewer:
+        return self.query_one("#local-rollout-viewer", RolloutViewer)
+
+    def _handle_rollout_changed(self, index: int, record: dict[str, Any]) -> None:
+        self.current_record_idx = index
+        self._set_record_text_state(record)
+        if self.is_mounted:
+            self.update_display()
+
+    def cycle_log_tab(self, delta: int) -> None:
+        num_tabs = self._log_tab_count()
+        if num_tabs < 2:
+            return
+        self._active_log_tab = (self._active_log_tab + delta) % num_tabs
+        self._populate_logs_view()
+
+    def _record_progress_label(self) -> str:
+        total = "?" if self._record_count is None else str(self._record_count)
+        return f"{self.current_record_idx + 1}/{total}"
+
+    def _set_record_text_state(self, record: dict[str, Any]) -> None:
+        prompt_text = format_prompt_or_completion(record.get("prompt", ""))
+        completion_text = format_prompt_or_completion(record.get("completion", ""))
+        error = record.get("error")
+        if error is not None:
+            completion_text.append("\n\n")
+            completion_text.append("error: ", style="bold red")
+            completion_text.append(str(error), style="red")
+        self._prompt_text = prompt_text.plain
+        self._completion_text = completion_text.plain
+
+    def update_display(self, *, focus_history: bool = False) -> None:
+        if not self._rollout_records:
+            return
+        record = self._rollout_records[self.current_record_idx]
+        self._set_record_text_state(record)
+        self.query_one("#metadata-summary", Static).update(
+            build_run_summary_text(self.run, record_progress_label=self._record_progress_label())
+        )
+        self.query_one("#metadata-metrics", Static).update(build_run_metric_text(self.run))
+        self.query_one("#metadata-reward", Static).update(
+            build_reward_text(record, heading="Current Reward", multiline=False, limit=3)
+        )
+
     def _center_scroll_target(self) -> VerticalScroll:
         if self._view_mode == "logs":
             return self.query_one("#logs-scroll", LogScrollPane)
-        return self.query_one("#completion-scroll", VerticalScroll)
+        return self.query_one("#viewer-completion-scroll", VerticalScroll)
 
     def _update_responsive_layout(self, width: int) -> None:
-        compact = width < self.COMPACT_LAYOUT_WIDTH
-        rollouts_panel = self.query_one("#rollouts-panel", EvalPanel)
-        details_panel = self.query_one("#details-panel", EvalPanel)
-        rollouts_panel.display = not compact
-        details_panel.display = not compact
-        if compact and (rollouts_panel.has_focus_within or details_panel.has_focus_within):
-            self.call_after_refresh(lambda: self._focus_primary_content(prefer_expanded=False))
+        _ = width
 
     def _log_tab_count(self) -> int:
         if len(self._log_files) >= 2:
@@ -1321,95 +1555,6 @@ class LocalEvalRunScreen(Screen[None]):
             file_idx = self._active_log_tab - 1 if has_merged else self._active_log_tab
             current_key = f"log-file-{file_idx}"
         self.app.push_screen(RolloutCopyScreen(items, start_key=current_key, title="Copy Logs"))
-
-    def _detail_copy_sections(self, record: dict[str, Any]) -> list[tuple[str, str, str]]:
-        metadata = self.run.load_metadata()
-        sections = [
-            ("details-task", "Task", text_to_plain(build_task_text(record))),
-            ("details-score", "Score", text_to_plain(build_score_text(record))),
-            ("details-usage", "Usage", text_to_plain(build_usage_text(record))),
-            ("details-info", "Info", text_to_plain(build_info_text(record, metadata))),
-        ]
-        return [section for section in sections if section[2]]
-
-    def _render_history_section_copy_text(
-        self, section: HistorySectionData, *, depth: int = 0
-    ) -> str:
-        indent = "  " * depth
-        parts = [f"{indent}{section.title}"]
-        body = [indent_block(section.body, f"{indent}  ")] if section.body else []
-        nested = [
-            self._render_history_section_copy_text(child, depth=depth + 1)
-            for child in section.nested_sections
-        ]
-        if section.body_first:
-            parts.extend(body)
-            parts.extend(nested)
-        else:
-            parts.extend(nested)
-            parts.extend(body)
-        return "\n\n".join(part for part in parts if part)
-
-    def _render_history_copy_text(self, sections: list[HistorySectionData]) -> str:
-        return "\n\n".join(self._render_history_section_copy_text(section) for section in sections)
-
-    def _build_rollout_copy_items(self, record: dict[str, Any]) -> list[RolloutCopyItem]:
-        history_sections = self._history_section_data(record)
-        detail_sections = self._detail_copy_sections(record)
-        history_text = self._render_history_copy_text(history_sections)
-        detail_text = "\n\n".join(f"{label}\n{body}" for _, label, body in detail_sections)
-        blocks = [
-            text_to_plain(
-                build_run_summary_text(
-                    self.run,
-                    record_progress_label=self._record_progress_label(),
-                )
-            ),
-            text_to_plain(build_run_metric_text(self.run)),
-            text_to_plain(build_reward_text(record, heading="Current Reward", multiline=False)),
-            f"Current Rollout\n{build_rollout_prompt(self.current_record_idx, record).plain}",
-            f"Completion History\n\n{history_text}" if history_text else "",
-            f"Details\n\n{detail_text}" if detail_text else "",
-        ]
-        items = [
-            RolloutCopyItem(
-                key="snapshot",
-                label="Full rollout snapshot",
-                body="\n\n".join(block for block in blocks if block),
-            ),
-            RolloutCopyItem(
-                key="rollout",
-                label="Rollout card",
-                body=build_rollout_prompt(self.current_record_idx, record).plain,
-            ),
-            RolloutCopyItem(
-                key="summary",
-                label="Run summary",
-                body=text_to_plain(
-                    build_run_summary_text(
-                        self.run,
-                        record_progress_label=self._record_progress_label(),
-                    )
-                ),
-            ),
-        ]
-        if history_text:
-            items.append(
-                RolloutCopyItem(
-                    key="history",
-                    label="Completion history",
-                    body=history_text,
-                )
-            )
-        if detail_text:
-            items.append(
-                RolloutCopyItem(
-                    key="details",
-                    label="Details panel",
-                    body=detail_text,
-                )
-            )
-        return items
 
     def overview_renderables(self) -> list[Any]:
         """Return reusable overview renderables for this run."""

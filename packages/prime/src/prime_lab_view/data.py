@@ -389,6 +389,9 @@ class LabDataSource:
         environment_statuses: list[dict[str, Any]] = []
         reward_distribution: dict[str, Any] = {}
         reward_distribution_loaded = False
+        rollout_samples: dict[str, Any] = {}
+        rollout_samples_loaded = False
+        rollout_samples_step: int | None = None
         logs = ""
         logs_loaded = False
 
@@ -412,6 +415,19 @@ class LabDataSource:
             reward_distribution_loaded = True
         except Exception as exc:
             reward_distribution = {"error": str(exc)}
+
+        sample_steps = progress.get("steps_with_samples") or progress.get("stepsWithSamples")
+        rollout_samples_step = _latest_int(sample_steps)
+        if rollout_samples_step is not None:
+            try:
+                rollout_samples = client.get_rollouts(run_id, step=rollout_samples_step, limit=50)
+                rollout_samples_loaded = True
+            except Exception as exc:
+                rollout_samples = {"error": str(exc), "samples": []}
+                rollout_samples_loaded = True
+        else:
+            rollout_samples = {"samples": [], "total": 0}
+            rollout_samples_loaded = True
 
         if include_logs:
             try:
@@ -443,6 +459,9 @@ class LabDataSource:
             "environment_statuses": environment_statuses,
             "reward_distribution": reward_distribution,
             "reward_distribution_loaded": reward_distribution_loaded,
+            "rollout_samples": rollout_samples,
+            "rollout_samples_loaded": rollout_samples_loaded,
+            "rollout_samples_step": rollout_samples_step,
         }
         if include_logs:
             raw["logs_tail"] = logs
@@ -1180,6 +1199,18 @@ def _workspace_config_subtitle(config_kind: str, parsed: dict[str, Any]) -> str:
         return " · ".join(str(value) for value in (env, model) if value)
     env = parsed.get("env_id") or parsed.get("environment") or parsed.get("task")
     return str(env or "")
+
+
+def _latest_int(values: Any) -> int | None:
+    if not isinstance(values, list):
+        return None
+    parsed = []
+    for value in values:
+        try:
+            parsed.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return max(parsed) if parsed else None
 
 
 def _auth_required_section(key: str, title: str, description: str) -> LabSection:

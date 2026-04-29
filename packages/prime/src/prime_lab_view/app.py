@@ -31,7 +31,7 @@ from textual_plot.axis_formatter import CategoricalAxisFormatter
 
 from .data import LabLoadOptions
 from .eval_records import LocalEvalRun
-from .eval_screen import LocalEvalRunScreen
+from .eval_screen import LocalEvalRunScreen, RolloutViewer
 from .models import LabItem, LabSection, LabSnapshot
 
 
@@ -529,6 +529,11 @@ class TrainingRunScreen(Screen[None]):
         padding: 1 2;
         border: round $primary;
         background: $surface;
+    }
+
+    .training-data-viewer {
+        height: 34;
+        min-height: 24;
     }
 
     PlotWidget.chart-plot > .plot--axis {
@@ -1662,18 +1667,20 @@ class PrimeLabView(App[None]):
         self._prefetch_training_detail_worker(item)
 
     def _load_selected_detail(self, *, include_logs: bool) -> None:
-        if self._detail_loader is None or self._selected_item is None:
+        if self._selected_item is None:
             return
         item = self._detail_cache.get(self._selected_item.key, self._selected_item)
         if item.raw.get("loading"):
+            return
+        if item.section == "evaluations" and item.raw.get("type") == "local_eval":
+            self.push_screen(LocalEvalRunScreen(LocalEvalRun.from_item(item)))
+            return
+        if self._detail_loader is None:
             return
         if item.section == "training":
             self.push_screen(
                 TrainingRunScreen(item, self._detail_loader, include_logs=include_logs)
             )
-            return
-        if item.section == "evaluations" and item.raw.get("type") == "local_eval":
-            self.push_screen(LocalEvalRunScreen(LocalEvalRun.from_item(item)))
             return
         if item.section not in {"training", "environments", "evaluations"}:
             return
@@ -2388,7 +2395,7 @@ def _training_run_widgets(
     summary = _training_progress_summary(raw, progress, metrics)
 
     if active_tab == "data":
-        return _training_data_page(progress)
+        return _training_data_page(raw, progress)
 
     if active_tab == "system":
         if not include_logs:
@@ -2721,14 +2728,43 @@ def _chart_heading_from_specs(
     return heading
 
 
-def _training_data_page(progress: dict[str, Any]) -> list[Widget]:
+def _training_data_page(raw: dict[str, Any], progress: dict[str, Any]) -> list[Widget]:
     steps = progress.get("steps_with_samples") or progress.get("stepsWithSamples")
     step_count = len(steps) if isinstance(steps, list) else 0
+    rollout_samples = _dict_value(raw.get("rollout_samples"))
+    samples = _list_value(rollout_samples.get("samples"))
+    step = raw.get("rollout_samples_step")
+
     text = Text()
     text.append("Rollouts", style="bold")
     text.append(f"\n{step_count} sample steps available", style="dim")
-    text.append("\n\nRollout viewer is the next piece to wire into this tab.", style="dim")
-    return [Static(text)]
+    if step is not None:
+        text.append(f" · showing step {step}", style="dim")
+
+    if raw.get("rollout_samples_loaded") is not True:
+        return [Static(text), LoadingMessage("Loading rollout samples ...")]
+
+    error = rollout_samples.get("error")
+    if error:
+        text.append(f"\n\nFailed to load rollout samples: {error}", style="red")
+        return [Static(text)]
+
+    records = [sample for sample in samples if isinstance(sample, dict)]
+    if not records:
+        text.append("\n\nNo rollout samples found for sampled steps.", style="dim")
+        return [Static(text)]
+
+    metadata = {
+        "run_id": raw.get("id"),
+        "step": step,
+        "total": rollout_samples.get("total"),
+        "page": rollout_samples.get("page"),
+        "limit": rollout_samples.get("limit"),
+    }
+    return [
+        Static(text),
+        RolloutViewer(records, metadata=metadata, title="Samples", classes="training-data-viewer"),
+    ]
 
 
 def _chart_count(raw: dict[str, Any]) -> int:

@@ -527,8 +527,8 @@ class RolloutViewer(Container):
     }
 
     RolloutViewer .rollouts-panel {
-        width: 28;
-        min-width: 24;
+        width: 34;
+        min-width: 30;
     }
 
     RolloutViewer .history-panel {
@@ -537,8 +537,8 @@ class RolloutViewer(Container):
     }
 
     RolloutViewer .details-panel {
-        width: 1fr;
-        min-width: 36;
+        width: 34;
+        min-width: 30;
     }
 
     RolloutViewer .column-header {
@@ -555,18 +555,97 @@ class RolloutViewer(Container):
     RolloutViewer .details-scroll {
         height: 1fr;
         background: $surface;
+        scrollbar-size-vertical: 2;
+        scrollbar-color: $primary 40%;
+        scrollbar-color-hover: $primary 70%;
+        scrollbar-color-active: $accent;
+        scrollbar-background: $surface;
+        scrollbar-background-hover: $surface;
+        scrollbar-background-active: $surface;
+        scrollbar-corner-color: $panel;
     }
 
     RolloutViewer .history-section {
-        margin-bottom: 1;
+        margin: 0 0 1 0;
+        background: $surface;
+        border: round $secondary;
+    }
+
+    RolloutViewer .history-section:focus-within {
+        background-tint: $foreground 4%;
+    }
+
+    RolloutViewer .history-section > CollapsibleTitle {
+        text-style: bold;
+        padding: 0 1;
+    }
+
+    RolloutViewer .history-section > CollapsibleTitle:hover {
+        background: $primary 12%;
+        color: $text;
+    }
+
+    RolloutViewer .history-section > CollapsibleTitle:focus {
+        background: $primary 28%;
+        color: $text;
+    }
+
+    RolloutViewer .assistant-section {
+        background: $success 6%;
+        border: round $success;
+    }
+
+    RolloutViewer .assistant-section > CollapsibleTitle {
+        color: $success;
+    }
+
+    RolloutViewer .tool-section {
+        background: $warning 6%;
+        border: round $warning;
+    }
+
+    RolloutViewer .tool-section > CollapsibleTitle {
+        color: $warning;
+    }
+
+    RolloutViewer .prompt-section {
+        background: $secondary 4%;
+        border: round $secondary;
+    }
+
+    RolloutViewer .prompt-section > CollapsibleTitle {
+        color: $secondary;
+    }
+
+    RolloutViewer .prompt-section .section-body {
+        color: $text-muted;
+    }
+
+    RolloutViewer .tool-call-section {
+        background: $accent 8%;
+        border: round $accent;
+    }
+
+    RolloutViewer .tool-call-section > CollapsibleTitle {
+        color: $accent;
+    }
+
+    RolloutViewer .reasoning-section {
+        background: $primary 6%;
+        border: round $primary;
+    }
+
+    RolloutViewer .reasoning-section > CollapsibleTitle {
+        color: $primary;
     }
 
     RolloutViewer .nested-section {
-        margin-left: 2;
+        margin: 0 0 0 1;
     }
 
     RolloutViewer .section-body {
-        padding: 0 1 1 1;
+        padding: 0 1 0 1;
+        color: $text;
     }
     """
 

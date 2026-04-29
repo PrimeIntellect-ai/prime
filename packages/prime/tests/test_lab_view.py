@@ -19,6 +19,9 @@ from prime_lab_view.app import (
     _training_config_toml,
 )
 from prime_lab_view.data import LabDataSource, LabLoadOptions, discover_local_eval_runs
+from prime_lab_view.eval_records import LazyRunResults, LocalEvalRun
+from prime_lab_view.eval_render import compute_run_overview_stats, history_groups
+from prime_lab_view.eval_screen import LocalEvalRunScreen
 from rich.console import Console
 
 
@@ -482,6 +485,63 @@ def test_discover_local_eval_runs(tmp_path: Path) -> None:
     ]
 
 
+def test_local_eval_lazy_records_and_overview_stats(tmp_path: Path) -> None:
+    run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        '{"avg_reward": 0.75, "num_examples": 1, "rollouts_per_example": 2}',
+        encoding="utf-8",
+    )
+    (run_dir / "results.jsonl").write_text(
+        "\n".join(
+            [
+                '{"reward": 0.5, "metrics": {"accuracy": 0.0}}',
+                '{"reward": 1.0, "metrics": {"accuracy": 1.0}, "num_turns": 3}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    run = LocalEvalRun(env_id="gsm8k", model="openai/gpt-4", run_id="run-a", path=run_dir)
+
+    records = LazyRunResults(run)
+    try:
+        assert records.count_hint() == 2
+        assert records[1]["reward"] == 1.0
+    finally:
+        records.close()
+
+    stats = compute_run_overview_stats(run)
+    assert stats.rewards == [0.5, 1.0]
+    assert {summary.name: summary.avg for summary in stats.metric_summaries} == {
+        "accuracy": 0.5,
+        "num_turns": 3.0,
+    }
+
+
+def test_local_eval_history_groups_pair_tool_calls_with_outputs() -> None:
+    completion = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {"name": "search", "arguments": '{"query":"prime"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "found it"},
+        {"role": "assistant", "content": "done"},
+    ]
+
+    groups = history_groups(completion)
+
+    assert groups[0]["kind"] == "assistant-tools"
+    assert groups[0]["tool_outputs"][0]["content"] == "found it"
+    assert groups[1]["kind"] == "message"
+
+
 def test_lab_view_ladder_limits() -> None:
     assert _ladder_limits(3) == (3,)
     assert _ladder_limits(30) == (5, 10, 20, 30)
@@ -578,6 +638,49 @@ async def test_prime_lab_view_opens_training_run_screen(tmp_path: Path) -> None:
         await pilot.pause()
 
         assert isinstance(app.screen, TrainingRunScreen)
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_view_opens_local_eval_run_screen(tmp_path: Path) -> None:
+    run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        '{"avg_reward": 0.5, "num_examples": 1, "rollouts_per_example": 1}',
+        encoding="utf-8",
+    )
+    (run_dir / "results.jsonl").write_text(
+        '{"reward": 0.5, "prompt": [{"role": "user", "content": "2+2?"}], '
+        '"completion": [{"role": "assistant", "content": "4"}]}\n',
+        encoding="utf-8",
+    )
+    source = make_source()
+    snapshot = source.load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(
+        lambda: snapshot,
+        lambda item, include_logs, log_tail_lines, metrics_limit, metrics_min_step: (
+            source.load_item_detail(
+                item,
+                include_logs=include_logs,
+                log_tail_lines=log_tail_lines,
+                metrics_limit=metrics_limit,
+                metrics_min_step=metrics_min_step,
+            )
+        ),
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._active_section_key = "evaluations"
+        app._render_active_section()
+        await pilot.pause()
+        local_item = next(
+            item for item in app._visible_items if item.raw.get("type") == "local_eval"
+        )
+        app._show_item(local_item)
+        app.action_load_detail()
+        await pilot.pause()
+
+        assert isinstance(app.screen, LocalEvalRunScreen)
 
 
 @pytest.mark.asyncio

@@ -30,6 +30,8 @@ from textual_plot import HiResMode, PlotWidget
 from textual_plot.axis_formatter import CategoricalAxisFormatter
 
 from .data import LabLoadOptions
+from .eval_records import LocalEvalRun
+from .eval_screen import LocalEvalRunScreen
 from .models import LabItem, LabSection, LabSnapshot
 
 
@@ -1258,7 +1260,7 @@ class PrimeLabView(App[None]):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action in {"search", "load_more_rows"} and isinstance(
-            self.screen, TrainingRunScreen | ChartPickerScreen
+            self.screen, TrainingRunScreen | ChartPickerScreen | LocalEvalRunScreen
         ):
             return False
         if action == "clear_filter":
@@ -1669,6 +1671,9 @@ class PrimeLabView(App[None]):
             self.push_screen(
                 TrainingRunScreen(item, self._detail_loader, include_logs=include_logs)
             )
+            return
+        if item.section == "evaluations" and item.raw.get("type") == "local_eval":
+            self.push_screen(LocalEvalRunScreen(LocalEvalRun.from_item(item)))
             return
         if item.section not in {"training", "environments", "evaluations"}:
             return

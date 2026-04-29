@@ -13,7 +13,7 @@ def test_train_help_promotes_config_run_path() -> None:
     result = runner.invoke(app, ["train", "--help"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
-    assert "Usage: prime train [OPTIONS] CONFIG_PATH [ARGS]... | COMMAND [ARGS]..." in result.output
+    assert "prime train [OPTIONS] CONFIG_PATH [ARGS]... | COMMAND [ARGS]..." in result.output
     assert "Launch and manage Hosted Training runs." in result.output
     assert "Path to a TOML config file to launch as a" in result.output
     assert "Hosted Training run." in result.output

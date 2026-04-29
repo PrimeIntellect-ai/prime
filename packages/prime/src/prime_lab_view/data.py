@@ -11,12 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import toml
-from prime_evals import EvalsClient
-
 from prime_cli.api.rl import RLClient
 from prime_cli.client import APIClient, APIError
 from prime_cli.core import Config
 from prime_cli.utils.time_utils import format_time_ago
+from prime_evals import EvalsClient
 
 from .models import LabItem, LabSection, LabSnapshot
 

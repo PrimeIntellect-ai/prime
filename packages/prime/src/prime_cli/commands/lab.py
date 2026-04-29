@@ -53,7 +53,7 @@ def view(
         console.print("[red]Error:[/red] --limit must be at least 1")
         raise typer.Exit(1)
 
-    from ..lab_view import run_lab_view
+    from prime_lab_view import run_lab_view
 
     run_lab_view(
         limit=limit,

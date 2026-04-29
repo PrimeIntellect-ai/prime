@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from prime_cli.lab_view.app import (
+from prime_lab_view.app import (
     LabOptionList,
     PrimeLabView,
     TrainingRunScreen,
@@ -18,7 +18,7 @@ from prime_cli.lab_view.app import (
     _parse_log_records,
     _training_config_toml,
 )
-from prime_cli.lab_view.data import LabDataSource, LabLoadOptions, discover_local_eval_runs
+from prime_lab_view.data import LabDataSource, LabLoadOptions, discover_local_eval_runs
 from rich.console import Console
 
 

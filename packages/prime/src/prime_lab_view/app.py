@@ -30,7 +30,12 @@ from textual_plot.axis_formatter import CategoricalAxisFormatter
 
 from .data import LabLoadOptions
 from .eval_records import LocalEvalRun, RunOverviewStats
-from .eval_render import compute_run_overview_stats
+from .eval_render import (
+    compute_run_overview_stats,
+    format_reward_value,
+    numeric_reward,
+    reward_style,
+)
 from .eval_screen import LocalEvalRunScreen, RolloutViewer
 from .evaluation_browser import (
     EVALUATION_VIEWS,
@@ -38,6 +43,8 @@ from .evaluation_browser import (
     evaluation_group_selection_details,
     evaluation_index,
     evaluation_model_tree_label,
+    evaluation_reward,
+    evaluation_run_id,
     evaluation_run_selection_details,
     evaluation_run_tree_label,
     local_eval_stats_key,
@@ -1471,18 +1478,43 @@ class PrimeLabView(App[None]):
             total_runs = sum(len(runs) for runs in models.values())
             env_node = root.add(
                 evaluation_env_tree_label(env_id, models, total_runs),
-                data=EvaluationNodeData(kind="env", env_id=env_id),
+                data=EvaluationNodeData(
+                    kind="env",
+                    env_id=env_id,
+                    tree_name=env_id,
+                    tree_suffix=(
+                        ("  ", ""),
+                        (f"{len(models)} models", "dim"),
+                        ("  ", ""),
+                        (f"{total_runs} runs", "dim"),
+                    ),
+                ),
                 expand=env_index == 0,
             )
             for model_index, model in enumerate(sorted(models)):
                 runs = sorted_evaluation_runs(models[model])
                 model_node = env_node.add(
                     evaluation_model_tree_label(model, runs),
-                    data=EvaluationNodeData(kind="model", env_id=env_id, model=model),
+                    data=EvaluationNodeData(
+                        kind="model",
+                        env_id=env_id,
+                        model=model,
+                        tree_name=model,
+                        tree_suffix=(("  ", ""), (f"{len(runs)} runs", "dim")),
+                    ),
                     expand=env_index == 0 and model_index == 0,
                 )
                 for item in runs:
                     self._items_by_key[item.key] = item
+                    tree_suffix: tuple[tuple[str, str], ...] = ()
+                    reward = evaluation_reward(item)
+                    if reward is not None:
+                        tree_suffix = (
+                            ("  ", ""),
+                            (format_reward_value(reward), reward_style(reward)),
+                        )
+                    elif item.status and numeric_reward(item.status) is None:
+                        tree_suffix = (("  ", ""), (item.status, item.status_style))
                     run_node = model_node.add(
                         evaluation_run_tree_label(item),
                         data=EvaluationNodeData(
@@ -1490,6 +1522,8 @@ class PrimeLabView(App[None]):
                             env_id=env_id,
                             model=model,
                             item_key=item.key,
+                            tree_name=evaluation_run_id(item),
+                            tree_suffix=tree_suffix,
                         ),
                         allow_expand=False,
                     )

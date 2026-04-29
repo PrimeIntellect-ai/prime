@@ -4,14 +4,24 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from rich.text import Text
 from textual import events
 from textual.binding import Binding
+from textual.style import Style
 from textual.widgets import OptionList, Static, Tree
+from textual.widgets._tree import TreeNode
 
 from .palette import PRIMARY
+
+TreeBinding = Binding | tuple[str, str] | tuple[str, str, str]
+
+
+def _binding_key(binding: TreeBinding) -> str:
+    if isinstance(binding, Binding):
+        return binding.key
+    return binding[0]
 
 
 class LabOptionList(OptionList):
@@ -66,15 +76,129 @@ class EvaluationNodeData:
     env_id: str = ""
     model: str = ""
     item_key: str = ""
+    tree_name: str = ""
+    tree_suffix: tuple[tuple[str, str], ...] = ()
 
 
 class EvaluationTree(Tree[EvaluationNodeData]):
     """Folder-organized evaluation selector."""
 
     BINDINGS = [
-        Binding("enter", "select_cursor", "Open/toggle", key_display="Enter"),
+        *(
+            binding
+            for binding in Tree.BINDINGS
+            if _binding_key(binding) not in {"enter", "space", "left", "right"}
+        ),
+        Binding("left", "cursor_parent", "Parent", key_display="Left"),
+        Binding("right", "cursor_right", "Expand/next", key_display="Right"),
+        Binding("enter", "enter_cursor", "Open/toggle", key_display="Enter"),
         Binding("space", "toggle_node", "Toggle", key_display="Space"),
     ]
+
+    def _visible_depth(self, node: TreeNode[Any]) -> int:
+        depth = 0
+        parent = node.parent
+        while parent is not None and (self.show_root or not parent.is_root):
+            depth += 1
+            parent = parent.parent
+        return depth
+
+    def _render_browser_label(
+        self, payload: EvaluationNodeData, style: Style, max_width: int
+    ) -> Text:
+        label = Text()
+        label.append(payload.tree_name or "", style="bold")
+        for text, segment_style in payload.tree_suffix:
+            label.append(text, style=segment_style or None)
+
+        if max_width <= 0:
+            label.truncate(1, overflow="ellipsis")
+            label.stylize(cast(Any, style))
+            return label
+
+        suffix = Text()
+        for text, segment_style in payload.tree_suffix:
+            suffix.append(text, style=segment_style or None)
+
+        if suffix.cell_len < max_width:
+            name = Text(payload.tree_name or "", style="bold")
+            name.truncate(max_width - suffix.cell_len, overflow="ellipsis")
+            label = Text.assemble(name, suffix)
+        else:
+            label.truncate(max_width, overflow="ellipsis")
+
+        label.stylize(cast(Any, style))
+        return label
+
+    def render_label(
+        self,
+        node: TreeNode[Any],
+        base_style: Style,
+        style: Style,
+    ) -> Text:
+        payload = node.data
+        available_width = self.size.width - (self._visible_depth(node) * self.guide_depth)
+        prefix_text = (
+            self.ICON_NODE_EXPANDED
+            if node.allow_expand and node.is_expanded
+            else self.ICON_NODE
+            if node.allow_expand
+            else ""
+        )
+        content_width = max(1, available_width - len(prefix_text))
+
+        if isinstance(payload, EvaluationNodeData) and payload.tree_name:
+            label = self._render_browser_label(payload, style, content_width)
+        else:
+            label = node._label.copy()
+            label.stylize(cast(Any, style))
+            label.truncate(content_width, overflow="ellipsis")
+
+        return Text.assemble((prefix_text, cast(Any, base_style)), label)
+
+    def action_cursor_parent(self) -> None:
+        cursor_node = self.cursor_node
+        if cursor_node is None:
+            return
+        parent = cursor_node.parent
+        if parent is None or (not self.show_root and parent.parent is None):
+            return
+        self.move_cursor(parent, animate=True)
+
+    def action_cursor_right(self) -> None:
+        cursor_node = self.cursor_node
+        if cursor_node is None:
+            return
+        if cursor_node.allow_expand:
+            if cursor_node.is_collapsed:
+                cursor_node.expand()
+                return
+            if cursor_node.children:
+                self.move_cursor(cursor_node.children[0], animate=True)
+                return
+
+        node = cursor_node.parent if not cursor_node.allow_expand else cursor_node
+        while node is not None:
+            next_sibling = node.next_sibling
+            if next_sibling is not None:
+                self.move_cursor(next_sibling, animate=True)
+                return
+            node = node.parent
+            if node is not None and not self.show_root and node.is_root:
+                return
+
+    def action_toggle_node(self) -> None:
+        node = self.cursor_node
+        while node is not None and not node.allow_expand:
+            node = node.parent
+        if node is None or (not self.show_root and node.parent is None):
+            return
+        if node is not self.cursor_node:
+            self.move_cursor(node, animate=False)
+        self._toggle_node(node)
+
+    def action_enter_cursor(self) -> None:
+        _call_app(self.app, "action_load_detail")
 
 
 class SegmentedToggle(Static, can_focus=True):

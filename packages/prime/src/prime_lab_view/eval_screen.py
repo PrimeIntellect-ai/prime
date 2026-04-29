@@ -12,6 +12,7 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
+from textual.dom import DOMNode
 from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
 from textual.widgets import (
@@ -28,6 +29,7 @@ from textual.widgets import (
 from textual.widgets._option_list import Option
 from textual.widgets._tabbed_content import ContentTabs
 
+from .eval_markdown import MathMarkdown
 from .eval_records import (
     HistorySectionData,
     LazyLogFile,
@@ -55,8 +57,12 @@ from .eval_render import (
     compute_run_overview_stats,
     format_message_preview,
     format_prompt_or_completion,
+    format_reward_value,
     history_groups,
     indent_block,
+    normalize_rollout_record,
+    pretty_json_or_str,
+    reward_style,
     stringify_message,
     stringify_message_content,
     stringify_message_reasoning,
@@ -511,6 +517,7 @@ class RolloutViewer(Container):
         Binding("e", "expand_all", "Expand all"),
         Binding("x", "collapse_all", "Collapse all"),
         Binding("/", "search", "Search"),
+        Binding("m", "toggle_markdown_math", "Toggle markdown"),
         Binding("c", "copy", "Copy"),
     ]
 
@@ -725,7 +732,9 @@ class RolloutViewer(Container):
         id: str | None = None,
     ) -> None:
         super().__init__(id=id, classes=classes)
-        self.records = [record for record in records if isinstance(record, dict)]
+        self.records = [
+            normalize_rollout_record(record) for record in records if isinstance(record, dict)
+        ]
         self.metadata = metadata or {}
         self.title = title
         self._on_record_changed = on_record_changed
@@ -737,6 +746,7 @@ class RolloutViewer(Container):
         self._highlight_timer: Any = None
         self._highlight_section_index = 0
         self._highlight_nested_index = -1
+        self._render_markdown_math = True
         if self.records:
             self._set_record_text_state(self.records[0])
 
@@ -830,6 +840,10 @@ class RolloutViewer(Container):
     def action_history_end(self) -> None:
         if self.records:
             self.query_one("#viewer-completion-scroll", VerticalScroll).scroll_end(animate=False)
+
+    def action_toggle_markdown_math(self) -> None:
+        self._render_markdown_math = not self._render_markdown_math
+        self._swap_section_bodies()
 
     def action_search(self) -> None:
         if not self.records:
@@ -1004,6 +1018,25 @@ class RolloutViewer(Container):
             if preview:
                 title += f"  {preview}"
             body = stringify_message_content(message.get("content", "")).strip()
+            collapsed = True
+            if self._highlight_regex and self._highlight_column == "completion":
+                collapsed = not (body and self._highlight_regex.search(body))
+                if collapsed:
+                    for tool_call in tool_calls:
+                        name, arguments, _ = tool_call_parts(tool_call)
+                        if self._highlight_regex.search(name) or self._highlight_regex.search(
+                            arguments
+                        ):
+                            collapsed = False
+                            break
+                if collapsed:
+                    for output in tool_outputs:
+                        output_text = (
+                            stringify_message(output) if isinstance(output, dict) else str(output)
+                        )
+                        if self._highlight_regex.search(output_text):
+                            collapsed = False
+                            break
             nested_sections: list[HistorySectionData] = list(self._reasoning_section_data(message))
             used_output_indexes: set[int] = set()
             for tool_idx, tool_call in enumerate(tool_calls, start=1):
@@ -1031,16 +1064,38 @@ class RolloutViewer(Container):
                         title=f"tool {tool_idx}  {name}  ... {tool_output_preview(matched_output)}",
                         body="\n".join(["Call", arguments, "", "Output", output_text]),
                         column="completion",
-                        collapsed=tool_idx > 1,
+                        collapsed=collapsed or tool_idx > 1,
                         classes="history-section tool-call-section nested-section",
                     )
                 )
+
+            for output_idx, output_message in enumerate(tool_outputs):
+                if output_idx in used_output_indexes:
+                    continue
+                output_text = (
+                    stringify_message(output_message)
+                    if isinstance(output_message, dict)
+                    else str(output_message)
+                )
+                nested_sections.append(
+                    HistorySectionData(
+                        title=(
+                            f"tool output {len(nested_sections) + 1}  "
+                            f"{tool_output_preview(output_message)}"
+                        ),
+                        body=output_text,
+                        column="completion",
+                        collapsed=True,
+                        classes="history-section tool-section nested-section",
+                    )
+                )
+
             sections.append(
                 HistorySectionData(
                     title=title,
                     body=body,
                     column="completion",
-                    collapsed=True,
+                    collapsed=collapsed,
                     classes="history-section assistant-section",
                     nested_sections=tuple(nested_sections),
                     body_first=False if nested_sections else True,
@@ -1062,16 +1117,32 @@ class RolloutViewer(Container):
             ),
         )
 
+    def _section_matches_highlight(self, section: HistorySectionData) -> bool:
+        if not (self._highlight_regex and self._highlight_column == section.column):
+            return False
+        if self._highlight_regex.search(section.title) or self._highlight_regex.search(
+            section.body
+        ):
+            return True
+        return any(self._section_matches_highlight(child) for child in section.nested_sections)
+
+    def _make_body_widget(self, body: str, column: str) -> Widget:
+        if self._render_markdown_math and not (
+            self._highlight_regex and self._highlight_column == column
+        ):
+            return MathMarkdown(body, classes="section-body")
+        text = Text(body)
+        if self._highlight_regex and self._highlight_column == column:
+            stylize_matches(text, self._highlight_regex, "reverse")
+        return Static(text, classes="section-body", markup=False)
+
     def _make_section(self, section: HistorySectionData) -> Collapsible:
         collapsed = section.collapsed
         if self._section_matches_highlight(section):
             collapsed = False
         body_children: list[Widget] = []
         if section.body or not section.nested_sections:
-            text = Text(section.body)
-            if self._highlight_regex and self._highlight_column == section.column:
-                stylize_matches(text, self._highlight_regex, "reverse")
-            body_children.append(Static(text, classes="section-body", markup=False))
+            body_children.append(self._make_body_widget(section.body, section.column))
         nested_children = [self._make_section(child) for child in section.nested_sections]
         children = (
             [*body_children, *nested_children]
@@ -1085,14 +1156,42 @@ class RolloutViewer(Container):
             classes=section.classes,
         )
 
-    def _section_matches_highlight(self, section: HistorySectionData) -> bool:
-        if not (self._highlight_regex and self._highlight_column == section.column):
-            return False
-        if self._highlight_regex.search(section.title) or self._highlight_regex.search(
-            section.body
-        ):
-            return True
-        return any(self._section_matches_highlight(child) for child in section.nested_sections)
+    def _collect_section_bodies(self, sections: list[HistorySectionData]) -> list[tuple[str, str]]:
+        result: list[tuple[str, str]] = []
+        for section in sections:
+            parent = (
+                [(section.body, section.column)]
+                if section.body or not section.nested_sections
+                else []
+            )
+            nested = [
+                (nested_section.body, nested_section.column)
+                for nested_section in section.nested_sections
+                if nested_section.body or not nested_section.nested_sections
+            ]
+            if section.body_first:
+                result.extend(parent)
+                result.extend(nested)
+            else:
+                result.extend(nested)
+                result.extend(parent)
+        return result
+
+    def _swap_section_bodies(self) -> None:
+        if not (self.records and self.is_mounted):
+            return
+        record = self.records[self.current_record_idx]
+        body_entries = self._collect_section_bodies(self._history_section_data(record))
+        container = self.query_one("#viewer-completion-scroll", VerticalScroll)
+        body_widgets = list(container.query(".section-body"))
+        for idx, body_widget in enumerate(body_widgets):
+            parent = body_widget.parent
+            if not isinstance(parent, Widget) or idx >= len(body_entries):
+                continue
+            body, column = body_entries[idx]
+            replacement = self._make_body_widget(body, column)
+            parent.mount(replacement, after=body_widget)
+            body_widget.remove()
 
     def _build_history_summary_text(self, record: dict[str, Any]) -> Text:
         completion = record.get("completion")
@@ -1118,7 +1217,7 @@ class RolloutViewer(Container):
         return Text.assemble(
             (self._record_progress_label(), "bold"),
             ("  reward ", "dim"),
-            (str(reward), "bold"),
+            (format_reward_value(reward), reward_style(reward)),
         )
 
     def _build_search_lines(
@@ -1129,12 +1228,23 @@ class RolloutViewer(Container):
         completion_lines: list[tuple[int, int, str]] = []
         for idx, section in enumerate(sections):
             target = prompt_lines if section.column == "prompt" else completion_lines
-            for line in section.body.splitlines():
-                target.append((idx, -1, line))
-            for nested_idx, nested in enumerate(section.nested_sections):
-                nested_target = prompt_lines if nested.column == "prompt" else completion_lines
-                for line in nested.body.splitlines():
-                    nested_target.append((idx, nested_idx, line))
+
+            def append_body(lines: list[tuple[int, int, str]], body: str) -> None:
+                for line in body.splitlines():
+                    lines.append((idx, -1, line))
+
+            def append_nested() -> None:
+                for nested_idx, nested in enumerate(section.nested_sections):
+                    nested_target = prompt_lines if nested.column == "prompt" else completion_lines
+                    for line in nested.body.splitlines():
+                        nested_target.append((idx, nested_idx, line))
+
+            if section.body_first:
+                append_body(target, section.body)
+                append_nested()
+            else:
+                append_nested()
+                append_body(target, section.body)
         return prompt_lines, completion_lines
 
     def _handle_search_result(self, result: SearchResult | None) -> None:
@@ -1167,12 +1277,6 @@ class RolloutViewer(Container):
             if result is not None:
                 container = self.query_one("#viewer-completion-scroll", VerticalScroll)
                 self._expand_and_scroll_to_match(container)
-
-    def _swap_section_bodies(self) -> None:
-        if not (self.records and self.is_mounted):
-            return
-        record = self.records[self.current_record_idx]
-        self._rebuild_completion_sections(record)
 
     def _expand_and_scroll_to_match(self, container: VerticalScroll) -> None:
         sections = [child for child in container.children if isinstance(child, Collapsible)]
@@ -1211,35 +1315,104 @@ class RolloutViewer(Container):
     ) -> str:
         heading = f"{'#' * (depth + 2)} {section.title}"
         parts = [heading]
-        if section.body:
-            parts.append(indent_block(section.body, "  "))
-        parts.extend(
+        body = [indent_block(section.body, "  ")] if section.body else []
+        nested = [
             self._render_history_section_copy_text(child, depth=depth + 1)
             for child in section.nested_sections
-        )
+        ]
+        if section.body_first:
+            parts.extend(body)
+            parts.extend(nested)
+        else:
+            parts.extend(nested)
+            parts.extend(body)
         return "\n\n".join(part for part in parts if part)
 
     def _render_history_copy_text(self, sections: list[HistorySectionData]) -> str:
         return "\n\n".join(self._render_history_section_copy_text(section) for section in sections)
 
+    def _detail_copy_sections(self, record: dict[str, Any]) -> list[tuple[str, str, str]]:
+        sections = [
+            ("viewer-details-task", "Task", text_to_plain(build_task_text(record))),
+            ("viewer-details-score", "Score", text_to_plain(build_score_text(record))),
+            ("viewer-details-usage", "Usage", text_to_plain(build_usage_text(record))),
+            (
+                "viewer-details-info",
+                "Info",
+                text_to_plain(build_info_text(record, self.metadata)),
+            ),
+        ]
+        return [section for section in sections if section[2]]
+
+    def _render_detail_copy_text(self, sections: list[tuple[str, str, str]]) -> str:
+        return "\n\n".join(f"{label}\n{body}" for _, label, body in sections if body)
+
+    def _append_history_copy_items(
+        self,
+        items: list[RolloutCopyItem],
+        sections: list[HistorySectionData],
+        *,
+        depth: int = 0,
+        prefix: str = "history",
+    ) -> None:
+        for idx, section in enumerate(sections, start=1):
+            key = f"{prefix}:{idx}"
+            indent = "  " * depth
+            items.append(
+                RolloutCopyItem(
+                    key=key,
+                    label=f"History: {indent}{section.title}",
+                    body=self._render_history_section_copy_text(section),
+                )
+            )
+            self._append_history_copy_items(
+                items,
+                list(section.nested_sections),
+                depth=depth + 1,
+                prefix=key,
+            )
+
+    def _build_rollout_snapshot_text(
+        self,
+        record: dict[str, Any],
+        history_sections: list[HistorySectionData],
+        detail_sections: list[tuple[str, str, str]],
+    ) -> str:
+        history_summary = text_to_plain(self._build_history_summary_text(record))
+        history_text = self._render_history_copy_text(history_sections)
+        history_parts = ["Completion History"]
+        if history_summary:
+            history_parts.append(history_summary)
+        if history_text:
+            history_parts.append(history_text)
+
+        detail_text = self._render_detail_copy_text(detail_sections)
+        blocks = [
+            f"Current Rollout\n{build_rollout_prompt(self.current_record_idx, record).plain}",
+            "\n\n".join(history_parts),
+        ]
+        if detail_text:
+            blocks.append(f"Details\n\n{detail_text}")
+        return "\n\n".join(block for block in blocks if block)
+
     def _build_rollout_copy_items(self, record: dict[str, Any]) -> list[RolloutCopyItem]:
         history_sections = self._history_section_data(record)
-        raw_text = text_to_plain(format_prompt_or_completion(record))
+        detail_sections = self._detail_copy_sections(record)
+        raw_text = pretty_json_or_str(record)
         history_text = self._render_history_copy_text(history_sections)
-        snapshot_parts = [
-            f"Current Rollout\n{build_rollout_prompt(self.current_record_idx, record).plain}",
-            f"Completion History\n\n{history_text}" if history_text else "",
-            f"Raw\n\n{raw_text}" if raw_text else "",
-        ]
         items = [
             RolloutCopyItem(
                 key="snapshot",
                 label="Full rollout snapshot",
-                body="\n\n".join(part for part in snapshot_parts if part).strip(),
+                body=self._build_rollout_snapshot_text(
+                    record,
+                    history_sections,
+                    detail_sections,
+                ),
             ),
             RolloutCopyItem(
                 key="rollout",
-                label="Rollout row",
+                label="Rollout card",
                 body=build_rollout_prompt(self.current_record_idx, record).plain,
             ),
         ]
@@ -1251,6 +1424,24 @@ class RolloutViewer(Container):
                     body=history_text,
                 )
             )
+        detail_text = self._render_detail_copy_text(detail_sections)
+        if detail_text:
+            items.append(
+                RolloutCopyItem(
+                    key="details",
+                    label="Details panel",
+                    body=detail_text,
+                )
+            )
+        for detail_id, label, body in detail_sections:
+            items.append(
+                RolloutCopyItem(
+                    key=f"details:{detail_id}",
+                    label=f"Details: {label}",
+                    body=body,
+                )
+            )
+        self._append_history_copy_items(items, history_sections)
         if raw_text:
             items.append(RolloutCopyItem(key="raw", label="Raw JSON", body=raw_text))
         return items
@@ -1427,6 +1618,7 @@ class LocalEvalRunScreen(Screen[None]):
             "expand_all",
             "collapse_all",
             "show_logs",
+            "toggle_markdown_math",
         }:
             return False
         if self._view_mode == "rollouts" and action == "show_rollouts":
@@ -1498,11 +1690,39 @@ class LocalEvalRunScreen(Screen[None]):
     def action_history_end(self) -> None:
         self._center_scroll_target().scroll_end(animate=False)
 
+    def _should_skip_focus(self, widget: Widget) -> bool:
+        if widget.id == "viewer-completion-scroll":
+            return True
+        if isinstance(widget, ContentTabs):
+            return True
+        node: DOMNode | None = widget.parent
+        while node is not None:
+            if isinstance(node, Widget) and not node.display:
+                return True
+            node = node.parent
+        return False
+
     def action_focus_next_pane(self) -> None:
+        starting = self.focused
         self.focus_next()
+        first_candidate = self.focused
+        while self.focused is not None and self.focused is not starting:
+            if not self._should_skip_focus(self.focused):
+                break
+            self.focus_next()
+            if self.focused is first_candidate:
+                break
 
     def action_focus_prev_pane(self) -> None:
+        starting = self.focused
         self.focus_previous()
+        first_candidate = self.focused
+        while self.focused is not None and self.focused is not starting:
+            if not self._should_skip_focus(self.focused):
+                break
+            self.focus_previous()
+            if self.focused is first_candidate:
+                break
 
     def action_search(self) -> None:
         if self._view_mode == "logs":
@@ -1515,6 +1735,10 @@ class LocalEvalRunScreen(Screen[None]):
             self._copy_logs()
             return
         self._rollout_viewer().action_copy()
+
+    def action_toggle_markdown_math(self) -> None:
+        if self._view_mode == "rollouts":
+            self._rollout_viewer().action_toggle_markdown_math()
 
     def _rollout_viewer(self) -> RolloutViewer:
         return self.query_one("#local-rollout-viewer", RolloutViewer)
@@ -1663,6 +1887,38 @@ class LocalEvalRunScreen(Screen[None]):
                 return
             self._log_highlight_timer = self.set_timer(3.0, self._clear_log_highlight)
         self._populate_logs_view()
+        if result is not None and self._log_highlight_regex is not None:
+            self._scroll_to_first_log_match()
+
+    def _scroll_to_first_log_match(self) -> None:
+        if not self._log_highlight_regex or not self._log_files:
+            return
+        lines, _ = self._get_active_log_lines()
+        line_count = len(lines)
+        start = max(0, line_count - LazyLogFile.MAX_DISPLAY_LINES)
+        first_match_display_idx: int | None = None
+        for idx in range(start, line_count):
+            if self._log_highlight_regex.search(lines[idx]):
+                first_match_display_idx = idx - start
+                break
+        if first_match_display_idx is None:
+            return
+
+        offset_lines = 2 if start > 0 else 0
+        target_line = first_match_display_idx + offset_lines
+        container = self.query_one("#logs-scroll", LogScrollPane)
+
+        def do_scroll() -> None:
+            content_height = container.virtual_size.height
+            visible_height = container.size.height
+            total_lines = (line_count - start) + offset_lines
+            if total_lines <= 0 or content_height <= visible_height:
+                return
+            fraction = target_line / total_lines
+            target_y = int(fraction * content_height)
+            container.scroll_to(y=max(0, target_y - visible_height // 2), animate=False)
+
+        self.call_after_refresh(do_scroll)
 
     def _clear_log_highlight(self) -> None:
         self._log_highlight_regex = None

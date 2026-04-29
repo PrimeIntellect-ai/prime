@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from collections import defaultdict
 from typing import Any
@@ -97,9 +98,12 @@ def stringify_message(message: Any) -> str:
 
 
 def parse_tool_calls(tool_calls: Any) -> list[Any]:
-    if not isinstance(tool_calls, list):
+    parsed = parse_jsonish_string(tool_calls)
+    if isinstance(parsed, dict):
+        return [parsed]
+    if not isinstance(parsed, list):
         return []
-    return [parse_jsonish_string(tool_call) for tool_call in tool_calls]
+    return [parse_jsonish_string(tool_call) for tool_call in parsed]
 
 
 def tool_call_parts(tool_call: Any) -> tuple[str, str, str | None]:
@@ -708,7 +712,45 @@ def parse_jsonish_string(value: Any) -> Any:
     try:
         return json.loads(stripped)
     except json.JSONDecodeError:
-        return value
+        try:
+            return ast.literal_eval(stripped)
+        except (SyntaxError, ValueError):
+            return value
+
+
+def normalize_message_sequence(value: Any) -> Any:
+    parsed = parse_jsonish_string(value)
+    if isinstance(parsed, dict):
+        return [normalize_message(parsed)] if parsed.get("role") else parsed
+    if not isinstance(parsed, list):
+        return parsed
+    return [
+        normalize_message(message) if isinstance(message, dict) else message for message in parsed
+    ]
+
+
+def normalize_message(message: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(message)
+    tool_calls = normalized.get("tool_calls")
+    parsed_tool_calls = parse_jsonish_string(tool_calls)
+    if isinstance(parsed_tool_calls, dict):
+        normalized["tool_calls"] = [parsed_tool_calls]
+    elif isinstance(parsed_tool_calls, list):
+        normalized["tool_calls"] = [
+            parse_jsonish_string(tool_call) for tool_call in parsed_tool_calls
+        ]
+    return normalized
+
+
+def normalize_rollout_record(record: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(record)
+    for key in ("prompt", "completion", "trajectory"):
+        if key in normalized:
+            normalized[key] = normalize_message_sequence(normalized[key])
+    for key in ("info", "metrics", "timing", "token_usage"):
+        if key in normalized:
+            normalized[key] = parse_jsonish_string(normalized[key])
+    return normalized
 
 
 def pretty_json_or_str(value: Any) -> str:
@@ -723,6 +765,146 @@ def compact_json_or_str(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
     except (TypeError, ValueError):
         return str(value)
+
+
+def format_run_datetime(metadata: dict[str, Any]) -> str:
+    return f"{metadata.get('date', '')} {metadata.get('time', '')}".strip()
+
+
+def format_setting_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return format_compact_metric(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        if all(
+            isinstance(item, (str, int, float, bool)) and not isinstance(item, dict)
+            for item in value
+        ):
+            return ", ".join(format_setting_value(item) for item in value)
+    return compact_json_or_str(value)
+
+
+def tool_name(tool: Any) -> str:
+    if not isinstance(tool, dict):
+        return str(getattr(tool, "name", "") or "")
+    function = tool.get("function")
+    if isinstance(function, dict):
+        name = function.get("name")
+        if isinstance(name, str):
+            return name
+    name = tool.get("name")
+    return name if isinstance(name, str) else ""
+
+
+def run_setting_rows(metadata: dict[str, Any]) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+
+    ordered_settings: list[tuple[str, Any]] = []
+    if metadata.get("base_url") not in (None, ""):
+        ordered_settings.append(("endpoint", metadata["base_url"]))
+    if metadata.get("num_examples") not in (None, ""):
+        ordered_settings.append(("examples", metadata["num_examples"]))
+    if metadata.get("rollouts_per_example") not in (None, ""):
+        ordered_settings.append(("rollouts/example", metadata["rollouts_per_example"]))
+    if metadata.get("pass_threshold") not in (None, ""):
+        ordered_settings.append(("pass threshold", metadata["pass_threshold"]))
+
+    sampling_args = metadata.get("sampling_args")
+    if isinstance(sampling_args, dict):
+        for key in sorted(sampling_args):
+            value = sampling_args[key]
+            if value not in (None, ""):
+                ordered_settings.append((f"sampling.{key}", value))
+
+    env_args = metadata.get("env_args")
+    if isinstance(env_args, dict):
+        for key in sorted(env_args):
+            value = env_args[key]
+            if value not in (None, ""):
+                ordered_settings.append((f"env.{key}", value))
+
+    state_columns = metadata.get("state_columns")
+    if isinstance(state_columns, list) and state_columns:
+        ordered_settings.append(("state columns", state_columns))
+
+    tools = metadata.get("tools")
+    if isinstance(tools, list):
+        tool_names = sorted(name for name in (tool_name(tool) for tool in tools) if name)
+        if tool_names:
+            ordered_settings.append(("tools", tool_names))
+
+    for label, value in ordered_settings:
+        rows.append((label, format_setting_value(value)))
+
+    return rows
+
+
+def build_settings_table(
+    rows: list[tuple[str, str]],
+    heading: str,
+    *,
+    value_header: str = "Value",
+) -> Group | Text:
+    if not rows:
+        return Text()
+
+    title = Text()
+    title.append(heading, style="bold dim")
+
+    table = Table(
+        box=box.SIMPLE_HEAD,
+        expand=True,
+        show_edge=False,
+        pad_edge=False,
+        padding=(0, 1),
+        collapse_padding=True,
+        row_styles=["none", "dim"],
+    )
+    table.add_column("Setting", style="dim", width=20, no_wrap=True)
+    table.add_column(value_header, ratio=1)
+
+    for setting, value in rows:
+        table.add_row(setting, value)
+
+    return Group(title, table)
+
+
+def run_setting_variation_rows(
+    metadatas: list[dict[str, Any]],
+    *,
+    max_rows: int = 8,
+) -> tuple[list[tuple[str, str]], int]:
+    if not metadatas:
+        return [], 0
+
+    setting_maps = [dict(run_setting_rows(metadata)) for metadata in metadatas]
+
+    ordered_keys: list[str] = []
+    for setting_map in setting_maps:
+        for key in setting_map:
+            if key not in ordered_keys:
+                ordered_keys.append(key)
+
+    rows: list[tuple[str, str]] = []
+    for key in ordered_keys:
+        counts: dict[str, int] = defaultdict(int)
+        for setting_map in setting_maps:
+            counts[setting_map.get(key, "(unset)")] += 1
+        if len(counts) <= 1:
+            continue
+        parts = [
+            f"{value} ({count} run{'s' if count != 1 else ''})"
+            for value, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        ]
+        rows.append((key, ", ".join(parts)))
+
+    hidden_rows = max(0, len(rows) - max_rows)
+    return rows[:max_rows], hidden_rows
 
 
 def truncate_preview(text: str, limit: int = 72) -> str:

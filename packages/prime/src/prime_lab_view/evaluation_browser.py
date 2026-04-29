@@ -13,9 +13,14 @@ from .eval_records import RunOverviewStats
 from .eval_render import (
     build_metric_summary_table,
     build_reward_distribution_table,
+    build_settings_table,
     format_reward_value,
+    format_run_datetime,
+    int_like_sort_key,
     numeric_reward,
     reward_style,
+    run_setting_rows,
+    run_setting_variation_rows,
 )
 from .models import LabItem
 from .widgets import EvaluationNodeData
@@ -174,19 +179,31 @@ def evaluation_run_selection_details(
     summary.append("\n")
     summary.append(f"{evaluation_env_id(item)}   {evaluation_model(item)}", style="dim")
 
+    is_local_eval = item.raw.get("type") == "local_eval"
     summary_parts: list[tuple[str, str, str | None]] = []
-    if item.status and numeric_reward(item.status) is None:
+    if not is_local_eval and item.status and numeric_reward(item.status) is None:
         summary_parts.append(("status", item.status, item.status_style))
     if reward is not None:
         summary_parts.append(("avg reward", f"{reward:.3f}", reward_style(reward)))
-    for label, value in (
-        ("samples", metadata_value(item, "Samples")),
-        ("examples", metadata_value(item, "Examples")),
-        ("rollouts", metadata_value(item, "Rollouts")),
-        ("updated", metadata_value(item, "Updated")),
-    ):
-        if value and value != "-":
-            summary_parts.append((label, value, None))
+
+    metadata = evaluation_item_metadata(item)
+    if is_local_eval:
+        created = format_run_datetime(metadata)
+        if created:
+            summary_parts.insert(0, ("created", created, None))
+        if stats is not None and stats.rewards:
+            summary_parts.append(("rollouts", str(len(stats.rewards)), None))
+        elif metadata.get("num_examples") not in (None, ""):
+            summary_parts.append(("examples", str(metadata.get("num_examples")), None))
+    else:
+        for label, value in (
+            ("samples", metadata_value(item, "Samples")),
+            ("examples", metadata_value(item, "Examples")),
+            ("rollouts", metadata_value(item, "Rollouts")),
+            ("updated", metadata_value(item, "Updated")),
+        ):
+            if value and value != "-":
+                summary_parts.append((label, value, None))
     if summary_parts:
         summary.append("\n\n")
         for idx, (label, value, style) in enumerate(summary_parts):
@@ -196,11 +213,13 @@ def evaluation_run_selection_details(
             summary.append(value, style=style or "")
 
     items: list[Any] = [summary]
-    settings = evaluation_run_settings_table(item)
-    if settings.row_count:
-        items.extend([Text(""), settings])
+    if is_local_eval:
+        setting_rows = run_setting_rows(metadata)
+        if setting_rows:
+            items.extend([Text(""), build_settings_table(setting_rows, "Run settings")])
 
-    if item.raw.get("type") == "local_eval":
+        pass_rate_text = evaluation_pass_rates_text(metadata)
+
         if stats is None:
             items.extend(
                 [
@@ -216,7 +235,13 @@ def evaluation_run_selection_details(
                 items.extend([Text(""), reward_summary])
             if getattr(metric_summary, "plain", None) != "":
                 items.extend([Text(""), metric_summary])
+        if pass_rate_text.plain:
+            items.extend([Text(""), pass_rate_text])
         return Group(*items)
+
+    settings = evaluation_run_settings_table(item)
+    if settings.row_count:
+        items.extend([Text(""), settings])
 
     detail_chunks = platform_detail_chunks(item.raw) if platform_detail_chunks is not None else []
     if detail_chunks:
@@ -253,6 +278,38 @@ def first_text_value(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def evaluation_item_metadata(item: LabItem) -> dict[str, Any]:
+    metadata = item.raw.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def evaluation_pass_rates_text(metadata: dict[str, Any]) -> Text:
+    pass_rates: list[tuple[str, float]] = []
+    for key, prefix in (("pass_at_k", "pass@"), ("pass_all_k", "pass-all@")):
+        values = metadata.get(key)
+        if isinstance(values, dict):
+            for bucket, value in sorted(
+                values.items(),
+                key=lambda item: int_like_sort_key(item[0]),
+            ):
+                numeric = numeric_reward(value)
+                if numeric is not None:
+                    pass_rates.append((f"{prefix}{bucket}", numeric))
+
+    text = Text()
+    if not pass_rates:
+        return text
+    text.append("Pass rates\n", style="bold dim")
+    for idx, (label, value) in enumerate(pass_rates[:6]):
+        if idx and idx % 3 == 0:
+            text.append("\n")
+        elif idx:
+            text.append("   ")
+        text.append(f"{label} ", style="bold")
+        text.append(f"{value:.3f}", style=reward_style(value))
+    return text
 
 
 def evaluation_sort_time(item: LabItem) -> str:
@@ -334,7 +391,35 @@ def evaluation_model_selection_details(
                 recent.append("  reward ", style="dim")
                 recent.append(f"{reward:.3f}", style=reward_style(reward))
             recent.append("\n")
-        items.extend([Text(""), recent, Text(""), Text("Enter opens highlighted run", style="dim")])
+        items.extend([Text(""), recent])
+
+        local_metadatas = [
+            metadata
+            for run in runs
+            for metadata in [evaluation_item_metadata(run)]
+            if run.raw.get("type") == "local_eval" and metadata
+        ]
+        variation_rows, hidden_variations = run_setting_variation_rows(local_metadatas)
+        if variation_rows:
+            items.extend(
+                [
+                    Text(""),
+                    build_settings_table(
+                        variation_rows,
+                        "Setting variations",
+                        value_header="Across runs",
+                    ),
+                ]
+            )
+            if hidden_variations:
+                items.extend(
+                    [
+                        Text(""),
+                        Text(f"{hidden_variations} more varied settings not shown", style="dim"),
+                    ]
+                )
+
+        items.extend([Text(""), Text("Enter opens highlighted run", style="dim")])
     return Group(*items)
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,7 +25,13 @@ from prime_lab_view.data import LabDataSource, LabLoadOptions, discover_local_ev
 from prime_lab_view.eval_records import LazyRunResults, LocalEvalRun
 from prime_lab_view.eval_render import compute_run_overview_stats, history_groups
 from prime_lab_view.eval_screen import LocalEvalRunScreen, RolloutViewer
+from prime_lab_view.evaluation_browser import (
+    evaluation_index,
+    evaluation_model_selection_details,
+    evaluation_run_selection_details,
+)
 from prime_lab_view.filters import FilterChoice, filter_choices
+from prime_lab_view.models import LabItem
 from rich.console import Console
 from textual.widgets import Label
 
@@ -369,6 +376,62 @@ def test_training_data_tab_uses_rollout_viewer() -> None:
     assert any(isinstance(widget, RolloutViewer) for widget in widgets)
 
 
+def test_training_data_tab_normalizes_serialized_rollout_samples() -> None:
+    completion = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": json.dumps(
+                [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "search", "arguments": '{"query":"prime"}'},
+                    }
+                ]
+            ),
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "found it"},
+        {"role": "assistant", "content": "done"},
+    ]
+    item = LabItem(
+        key="training:run-1",
+        section="training",
+        title="run-1",
+        subtitle="",
+        status="COMPLETED",
+        status_style="green",
+        raw={
+            "id": "run-1",
+            "progress": {"steps_with_samples": [90]},
+            "rollout_samples_loaded": True,
+            "rollout_samples_step": 90,
+            "rollout_samples": {
+                "samples": [
+                    {
+                        "reward": 1.0,
+                        "prompt": json.dumps([{"role": "user", "content": "question"}]),
+                        "completion": json.dumps(completion),
+                    }
+                ],
+                "total": 1,
+                "page": 1,
+                "limit": 50,
+            },
+        },
+    )
+
+    widgets = _training_run_widgets(item, include_logs=False, active_tab="data")
+    viewer = next(widget for widget in widgets if isinstance(widget, RolloutViewer))
+    record = viewer.records[0]
+    sections = viewer._history_section_data(record)
+
+    assert isinstance(record["completion"], list)
+    assert isinstance(record["completion"][0]["tool_calls"], list)
+    assert sections[1].title.startswith("1. assistant")
+    assert "Call" in sections[1].nested_sections[0].body
+    assert "Output" in sections[1].nested_sections[0].body
+
+
 def test_lab_view_renders_platform_histogram_data() -> None:
     raw = {
         "avg_score": 0.5,
@@ -559,6 +622,72 @@ def test_local_eval_lazy_records_and_overview_stats(tmp_path: Path) -> None:
         "accuracy": 0.5,
         "num_turns": 3.0,
     }
+
+
+def test_local_eval_selection_details_match_verifiers_sidebar_logic(tmp_path: Path) -> None:
+    run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
+    run_dir.mkdir(parents=True)
+    metadata = {
+        "avg_reward": 0.75,
+        "date": "2026-04-26",
+        "time": "03:15:00",
+        "num_examples": 1,
+        "rollouts_per_example": 2,
+        "sampling_args": {"temperature": 0.7, "max_tokens": 128},
+        "pass_at_k": {"1": 0.5},
+        "pass_all_k": {"2": 1.0},
+    }
+    (run_dir / "metadata.json").write_text('{"avg_reward": 0.75}', encoding="utf-8")
+    (run_dir / "results.jsonl").write_text(
+        '{"reward": 0.5, "metrics": {"accuracy": 0.0}}\n'
+        '{"reward": 1.0, "metrics": {"accuracy": 1.0}}\n',
+        encoding="utf-8",
+    )
+    item = _local_eval_item("eval:run-a", "run-a", run_dir, metadata)
+    stats = compute_run_overview_stats(LocalEvalRun.from_item(item))
+
+    details = _render_renderable(evaluation_run_selection_details(item, stats))
+
+    assert "Run settings" in details
+    assert "sampling.temperature" in details
+    assert "Pass rates" in details
+    assert "pass@1" in details
+    assert "pass-all@2" in details
+    assert "Rollout rewards" in details
+
+
+def test_local_eval_model_details_include_setting_variations(tmp_path: Path) -> None:
+    run_a = _local_eval_item(
+        "eval:run-a",
+        "run-a",
+        tmp_path / "run-a",
+        {
+            "avg_reward": 0.5,
+            "num_examples": 1,
+            "rollouts_per_example": 1,
+            "sampling_args": {"temperature": 0.2},
+        },
+    )
+    run_b = _local_eval_item(
+        "eval:run-b",
+        "run-b",
+        tmp_path / "run-b",
+        {
+            "avg_reward": 0.8,
+            "num_examples": 1,
+            "rollouts_per_example": 2,
+            "sampling_args": {"temperature": 0.8},
+        },
+    )
+    index = evaluation_index([run_a, run_b])
+
+    details = _render_renderable(evaluation_model_selection_details("gsm8k", "openai/gpt-4", index))
+
+    assert "Setting variations" in details
+    assert "rollouts/example" in details
+    assert "sampling.temperature" in details
+    assert "0.2 (1 run)" in details
+    assert "0.8 (1 run)" in details
 
 
 def test_local_eval_history_groups_pair_tool_calls_with_outputs() -> None:
@@ -763,6 +892,39 @@ async def test_prime_lab_view_evaluations_by_env_groups_runs(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_prime_lab_view_by_env_enter_opens_highlighted_local_eval(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        '{"avg_reward": 0.5, "num_examples": 1, "rollouts_per_example": 1}',
+        encoding="utf-8",
+    )
+    (run_dir / "results.jsonl").write_text(
+        '{"reward": 0.5, "prompt": [{"role": "user", "content": "2+2?"}], '
+        '"completion": [{"role": "assistant", "content": "4"}]}\n',
+        encoding="utf-8",
+    )
+    source = make_source()
+    snapshot = source.load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._active_section_key = "evaluations"
+        app.set_evaluation_view("env")
+        await pilot.pause()
+
+        tree = app.query_one("#evaluation-tree", EvaluationTree)
+        tree.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, LocalEvalRunScreen)
+
+
+@pytest.mark.asyncio
 async def test_prime_lab_view_click_opens_local_eval_run_screen(tmp_path: Path) -> None:
     run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
     run_dir.mkdir(parents=True)
@@ -860,3 +1022,41 @@ def _render_details(item: Any) -> str:
     console = Console(record=True, width=120)
     console.print(_item_details(item))
     return console.export_text()
+
+
+def _render_renderable(renderable: Any) -> str:
+    console = Console(record=True, width=120)
+    console.print(renderable)
+    return console.export_text()
+
+
+def _local_eval_item(
+    key: str,
+    run_id: str,
+    run_dir: Path,
+    metadata: dict[str, Any],
+    *,
+    env_id: str = "gsm8k",
+    model: str = "openai/gpt-4",
+) -> LabItem:
+    return LabItem(
+        key=key,
+        section="evaluations",
+        title=run_id,
+        subtitle=f"{model} · {env_id}",
+        status="",
+        status_style="dim",
+        metadata=(
+            ("Environment", env_id),
+            ("Model", model),
+            ("Avg reward", str(metadata.get("avg_reward", "-"))),
+        ),
+        raw={
+            "type": "local_eval",
+            "env_id": env_id,
+            "model": model,
+            "run_id": run_id,
+            "path": str(run_dir),
+            "metadata": metadata,
+        },
+    )

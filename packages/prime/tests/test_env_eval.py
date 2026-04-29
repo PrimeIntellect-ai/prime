@@ -9,6 +9,11 @@ import pytest
 # Use a small/fast model for testing
 TEST_MODEL = "deepseek/deepseek-chat"
 
+pytestmark = pytest.mark.skipif(
+    os.environ.get("PRIME_RUN_LIVE_EVAL_TESTS") != "1" or not os.environ.get("PRIME_API_KEY"),
+    reason="Set PRIME_RUN_LIVE_EVAL_TESTS=1 and PRIME_API_KEY to run live eval tests.",
+)
+
 
 @pytest.fixture(scope="module")
 def install_math_env():

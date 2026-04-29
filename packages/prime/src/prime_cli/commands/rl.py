@@ -1,4 +1,4 @@
-"""RL (Reinforcement Learning) training commands."""
+"""Hosted Training commands."""
 
 import json
 import os
@@ -170,7 +170,7 @@ def clean_logs(text: str) -> list[str]:
 
 
 def generate_rl_config_template(environment: str | None = None) -> str:
-    """Generate a TOML config template for RL training."""
+    """Generate a TOML config template for Hosted Training."""
     env_value = environment or "primeintellect/reverse-text"
 
     return f'''\
@@ -705,25 +705,58 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
 class DefaultGroup(DefaultCommandGroup):
     """Makes 'run' the default command when a config file is passed."""
 
+    def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
+        super().__init__(*args, default_cmd_name=default_cmd_name, **kwargs)
+        self._show_default_command_params = False
+
     def format_usage(self, ctx, formatter):
         formatter.write_usage(
             ctx.command_path,
             "[OPTIONS] CONFIG_PATH [ARGS]... | COMMAND [ARGS]...",
         )
 
+    def get_params(self, ctx):
+        params = super().get_params(ctx)
+        if not self._show_default_command_params:
+            return params
+
+        default_command = self.commands.get(self.default_cmd_name)
+        if default_command is None:
+            return params
+
+        seen = {p.name for p in default_command.params}
+        return [*default_command.params, *(p for p in params if p.name not in seen)]
+
+    def format_help(self, ctx, formatter):
+        self._show_default_command_params = True
+        try:
+            return super().format_help(ctx, formatter)
+        finally:
+            self._show_default_command_params = False
+
+    def invoke(self, ctx):
+        if ctx.info_name == "rl":
+            typer.echo(
+                "[DEPRECATED] The 'rl' command is deprecated. Use 'prime train' instead.",
+                err=True,
+            )
+        return super().invoke(ctx)
+
 
 app = PlainTyper(
     cls=DefaultGroup,
-    help="Manage hosted RL training runs.",
+    help=(
+        "Launch and manage Hosted Training runs. Pass a config path directly to start a new run."
+    ),
     no_args_is_help=True,
 )
 
 
-@app.command("run", rich_help_panel="Commands", epilog=RL_RUN_JSON_HELP)
+@app.command("run", rich_help_panel="Commands", hidden=True, epilog=RL_RUN_JSON_HELP)
 def create_run(
     config_path: str = typer.Argument(
         ...,
-        help="Path to TOML config file (e.g., rl.toml)",
+        help="Path to a TOML config file to launch as a Hosted Training run.",
     ),
     env: Optional[List[str]] = typer.Option(
         None,
@@ -747,11 +780,11 @@ def create_run(
         help="Skip action status check and run even if environment action failed.",
     ),
 ) -> None:
-    """Start an RL training run from a config file.
+    """Launch a Hosted Training run from a config file.
 
     Example:
 
-        prime rl run rl.toml
+        prime train config.toml
     """
     validate_output_format(output, console)
 
@@ -791,7 +824,7 @@ def create_run(
         console.print("  - CLI flag: --env-file secrets.env")
         console.print("  - CLI flag: -e WANDB_API_KEY=your-key")
         console.print(
-            "  - Environment variable: export WANDB_API_KEY=... && prime rl ... -e WANDB_API_KEY"
+            "  - Environment variable: export WANDB_API_KEY=... && prime train ... -e WANDB_API_KEY"
         )
         raise typer.Exit(1)
 
@@ -938,7 +971,7 @@ def create_run(
 
                 console.print(
                     "[yellow]This usually means the environment doesn't compile or run, "
-                    "or is using an unsupported version of verifiers, so the training run "
+                    "or is using an unsupported version of verifiers, so the Hosted Training run "
                     "will fail.[/yellow]"
                 )
                 console.print("[dim]To proceed anyway, use --skip-action-check[/dim]")
@@ -946,7 +979,7 @@ def create_run(
 
             console.print()
 
-        console.print("[dim]Creating RL training run...[/dim]\n")
+        console.print("[dim]Creating Hosted Training run...[/dim]\n")
 
         # Create the run
         run = rl_client.create_run(
@@ -1009,7 +1042,7 @@ def create_run(
 
         if run.status != "QUEUED":
             console.print("\n[dim]View logs with:[/dim]")
-            console.print(f"  prime rl logs {run.id} -f")
+            console.print(f"  prime train logs {run.id} -f")
 
     except ValidationError as e:
         console.print("[red]Configuration Error:[/red]")
@@ -1033,7 +1066,7 @@ def create_run(
 def list_models(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List available models for RL training."""
+    """List available models for Hosted Training."""
     validate_output_format(output, console)
 
     try:
@@ -1048,12 +1081,12 @@ def list_models(
             return
 
         if not models:
-            console.print("[yellow]No models available for RL training.[/yellow]")
+            console.print("[yellow]No models available for Hosted Training.[/yellow]")
             console.print("[dim]This could mean no healthy RL clusters are running.[/dim]")
             return
 
         table = Table(
-            title="Prime RL — Models",
+            title="Hosted Training - Models",
             caption="[dim]Prices per 1M tokens[/dim]",
         )
         table.add_column("Model", style="cyan")
@@ -1180,7 +1213,7 @@ RL_CONFIGS_JSON_HELP = json_output_help(
 def list_configs(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List available configuration options for RL training."""
+    """List available configuration options for Hosted Training."""
     validate_output_format(output, console)
 
     schema = RLConfig.model_json_schema()
@@ -1203,7 +1236,7 @@ def list_configs(
         )
         return
 
-    table = Table(title="Prime RL — Config Options")
+    table = Table(title="Hosted Training - Config Options")
     table.add_column("Section", style="magenta")
     table.add_column("Config", style="cyan")
     table.add_column("Type", style="green")
@@ -1222,12 +1255,12 @@ def list_configs(
     console.print(table)
     console.print(
         "\n[dim]Use these in your TOML config file. "
-        "See 'prime rl init' to generate a template.[/dim]"
+        "See 'prime train init' to generate a template.[/dim]"
     )
 
 
 def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> None:
-    """Implementation for listing RL training runs."""
+    """Implementation for listing Hosted Training runs."""
     validate_output_format(output, console)
 
     if num < 1 or page < 1:
@@ -1265,10 +1298,10 @@ def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> No
             if page > 1:
                 console.print("[yellow]No more results.[/yellow]")
             else:
-                console.print("[yellow]No RL training runs found.[/yellow]")
+                console.print("[yellow]No Hosted Training runs found.[/yellow]")
             return
 
-        table = Table(title="RL Training Runs")
+        table = Table(title="Hosted Training Runs")
         table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("Status", style="bold")
         table.add_column("Model", style="magenta")
@@ -1324,9 +1357,9 @@ def get_run(
 
     Example:
 
-        prime rl get <run_id>
+        prime train get <run_id>
 
-        prime rl get <run_id> -o json
+        prime train get <run_id> -o json
     """
     validate_output_format(output, console)
 
@@ -1438,7 +1471,7 @@ def restart_run(
 
     Example:
 
-        prime rl restart <run_id>
+        prime train restart <run_id>
     """
     try:
         if not force:
@@ -1576,7 +1609,7 @@ def get_logs(
         help=(
             "Env-server name. Implies --component=env-server. "
             "Use 'name/N' to disambiguate when multiple env-servers share a name. "
-            "List with 'prime rl components <run_id>'."
+            "List with 'prime train components <run_id>'."
         ),
     ),
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
@@ -1590,14 +1623,14 @@ def get_logs(
     (e.g. ``ModuleNotFoundError``) and the orchestrator has stalled at
     "Starting orchestrator step 0".
 
-    List available pods first with ``prime rl components <run_id>``.
+    List available pods first with ``prime train components <run_id>``.
 
     Examples:
 
-        prime rl logs <run_id>
-        prime rl logs <run_id> -f
-        prime rl logs <run_id> --env reverse-text
-        prime rl logs <run_id> --env reverse-text/1 -f
+        prime train logs <run_id>
+        prime train logs <run_id> -f
+        prime train logs <run_id> --env reverse-text
+        prime train logs <run_id> --env reverse-text/1 -f
     """
     if component is None:
         component = "env-server" if env is not None else "orchestrator"
@@ -1614,7 +1647,7 @@ def get_logs(
     if component == "env-server" and env is None:
         raise typer.BadParameter(
             "--env is required when reading env-server logs. "
-            "Run 'prime rl components <run_id>' to list available env-servers.",
+            "Run 'prime train components <run_id>' to list available env-servers.",
             param_hint="--env",
         )
 
@@ -1663,13 +1696,13 @@ def list_components(
     """List pods (orchestrator + env-servers) for a run.
 
     Use the env name shown here with
-    ``prime rl logs <run_id> -c env-server --env <name>``. When multiple
+    ``prime train logs <run_id> -c env-server --env <name>``. When multiple
     env-servers share a name, the qualified form ``name/N`` is shown — pass
     that exact string to ``--env``.
 
     Example:
 
-        prime rl components <run_id>
+        prime train components <run_id>
     """
     try:
         api_client = APIClient()
@@ -1703,7 +1736,7 @@ def list_components(
     if env_servers:
         console.print(
             "\n[dim]View env-server logs with:[/dim] "
-            "[bold]prime rl logs <run_id> -c env-server --env <env>[/bold]"
+            "[bold]prime train logs <run_id> -c env-server --env <env>[/bold]"
         )
 
 
@@ -1715,13 +1748,13 @@ def init_config(
     ),
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing file"),
 ) -> None:
-    """Generate a template config file for a training run.
+    """Generate a template config file for a Hosted Training run.
 
     Example:
 
-        prime rl init              # Creates rl.toml
+        prime train init           # Creates rl.toml
 
-        prime rl init my-config.toml
+        prime train init my-config.toml
     """
     path = Path(output_path)
 
@@ -1745,7 +1778,7 @@ def init_config(
     path.write_text(template)
 
     console.print(f"[green]✓[/green] Created {output_path}")
-    console.print(f"\n[dim]Run with:[/dim] prime rl run {output_path}")
+    console.print(f"\n[dim]Run with:[/dim] prime train {output_path}")
 
 
 @app.command("metrics", rich_help_panel="Monitoring", epilog=RL_METRICS_JSON_HELP)
@@ -1755,15 +1788,15 @@ def get_metrics(
     max_step: Optional[int] = typer.Option(None, "--max-step", help="Maximum step (inclusive)"),
     limit: Optional[int] = typer.Option(None, "--limit", "-n", help="Maximum number of records"),
 ) -> None:
-    """Get training metrics for a run.
+    """Get Hosted Training metrics for a run.
 
     Example:
 
-        prime rl metrics <run_id>
+        prime train metrics <run_id>
 
-        prime rl metrics <run_id> --min-step 10 --max-step 50
+        prime train metrics <run_id> --min-step 10 --max-step 50
 
-        prime rl metrics <run_id> | jq '.metrics[0]'
+        prime train metrics <run_id> | jq '.metrics[0]'
     """
     try:
         api_client = APIClient()
@@ -1794,9 +1827,9 @@ def get_rollouts(
 
     Example:
 
-        prime rl rollouts <run_id> --step 10
+        prime train rollouts <run_id> --step 10
 
-        prime rl rollouts <run_id> -s 50 --num 100 | jq '.samples[0]'
+        prime train rollouts <run_id> -s 50 --num 100 | jq '.samples[0]'
     """
     try:
         api_client = APIClient()
@@ -1824,9 +1857,9 @@ def get_progress(
 
     Example:
 
-        prime rl progress <run_id>
+        prime train progress <run_id>
 
-        prime rl progress <run_id> | jq '.latest_step'
+        prime train progress <run_id> | jq '.latest_step'
     """
     try:
         api_client = APIClient()
@@ -1855,9 +1888,9 @@ def get_distributions(
 
     Example:
 
-        prime rl distributions <run_id>
+        prime train distributions <run_id>
 
-        prime rl distributions <run_id> --type rewards --step 50
+        prime train distributions <run_id> --type rewards --step 50
     """
     try:
         api_client = APIClient()
@@ -1888,9 +1921,9 @@ def list_checkpoints(
 
     Example:
 
-        prime rl checkpoints <run_id>
+        prime train checkpoints <run_id>
 
-        prime rl checkpoints <run_id> --status READY
+        prime train checkpoints <run_id> --status READY
     """
     validate_output_format(output, console)
 

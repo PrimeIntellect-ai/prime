@@ -64,7 +64,7 @@ def test_models_table_renders_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_models_json_includes_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("prime_cli.core.APIClient.get", _mock_get_factory([]))
 
-    result = CliRunner().invoke(app, ["rl", "models", "--output", "json"])
+    result = CliRunner().invoke(app, ["train", "models", "--output", "json"])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)

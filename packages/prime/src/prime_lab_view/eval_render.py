@@ -12,6 +12,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .eval_records import LocalEvalRun, MetricSummary, RunOverviewStats, parse_log_header
+from .palette import STATUS_ERROR, STATUS_INFO, STATUS_SUCCESS, STATUS_WARNING
 
 
 def format_numeric(value: float | int | str) -> str:
@@ -618,7 +619,7 @@ def build_metric_summary_table(metric_summaries: list[MetricSummary]) -> Table |
         collapse_padding=True,
         row_styles=["none", "dim"],
     )
-    table.add_column("Metric", style="bold cyan", ratio=1, min_width=24, no_wrap=True)
+    table.add_column("Metric", style=f"bold {STATUS_INFO}", ratio=1, min_width=24, no_wrap=True)
     table.add_column("Average", justify="right", no_wrap=True)
     table.add_column("Min", justify="right", no_wrap=True)
     table.add_column("Max", justify="right", no_wrap=True)
@@ -649,15 +650,15 @@ def append_styled_log_line(log_text: Text, line: str) -> None:
         return
     timestamp, source, level, message = parsed
     level_style = {
-        "DEBUG": "dim blue",
-        "INFO": "bold green",
-        "WARNING": "bold yellow",
-        "ERROR": "bold red",
-        "CRITICAL": "bold red reverse",
+        "DEBUG": f"dim {STATUS_INFO}",
+        "INFO": STATUS_SUCCESS,
+        "WARNING": STATUS_WARNING,
+        "ERROR": STATUS_ERROR,
+        "CRITICAL": f"{STATUS_ERROR} reverse",
     }.get(level, "dim")
     log_text.append(timestamp, style="bold dim")
     log_text.append(" - ", style="dim")
-    log_text.append(source, style="dim cyan")
+    log_text.append(source, style=f"dim {STATUS_INFO}")
     log_text.append(" - ", style="dim")
     log_text.append(level, style=level_style)
     log_text.append(message, style="dim")
@@ -734,10 +735,10 @@ def truncate_preview(text: str, limit: int = 72) -> str:
 def reward_style(value: Any) -> str:
     if isinstance(value, (int, float)):
         if value >= 0.9:
-            return "bold green"
+            return STATUS_SUCCESS
         if value >= 0.5:
-            return "bold yellow"
-        return "bold red"
+            return STATUS_WARNING
+        return STATUS_ERROR
     return "bold"
 
 
@@ -849,14 +850,14 @@ def error_preview(error: Any) -> str:
 
 def reward_bucket_counts(values: list[float]) -> list[tuple[str, int, str]]:
     bucket_counts = [
-        ("<0", 0, "bold red"),
-        ("=0", 0, "bold red"),
-        ("0-<0.25", 0, "red"),
-        ("0.25-<0.5", 0, "yellow"),
-        ("0.5-<0.75", 0, "yellow"),
-        ("0.75-<1", 0, "green"),
-        ("=1", 0, "bold green"),
-        (">1", 0, "bold green"),
+        ("<0", 0, STATUS_ERROR),
+        ("=0", 0, STATUS_ERROR),
+        ("0-<0.25", 0, STATUS_ERROR),
+        ("0.25-<0.5", 0, STATUS_WARNING),
+        ("0.5-<0.75", 0, STATUS_WARNING),
+        ("0.75-<1", 0, STATUS_SUCCESS),
+        ("=1", 0, STATUS_SUCCESS),
+        (">1", 0, STATUS_SUCCESS),
     ]
 
     for reward in values:

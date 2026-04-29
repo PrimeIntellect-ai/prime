@@ -15,312 +15,56 @@ from rich.console import Group
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
-from textual import events, on, work
+from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.screen import ModalScreen, Screen
-from textual.theme import Theme
+from textual.screen import Screen
 from textual.widget import Widget
-from textual.widgets import Footer, Input, Label, OptionList, Static, Tab, Tabs, Tree
+from textual.widgets import Footer, Label, OptionList, Static, Tab, Tabs, Tree
 from textual.widgets._option_list import Option
 from textual_hires_canvas import Canvas, TextAlign
 from textual_plot import HiResMode, PlotWidget
 from textual_plot.axis_formatter import CategoricalAxisFormatter
 
 from .data import LabLoadOptions
-from .eval_records import LocalEvalRun
+from .eval_records import LocalEvalRun, RunOverviewStats
+from .eval_render import compute_run_overview_stats
 from .eval_screen import LocalEvalRunScreen, RolloutViewer
+from .evaluation_browser import (
+    EVALUATION_VIEWS,
+    evaluation_env_tree_label,
+    evaluation_group_selection_details,
+    evaluation_index,
+    evaluation_model_tree_label,
+    evaluation_run_selection_details,
+    evaluation_run_tree_label,
+    local_eval_stats_key,
+    sorted_evaluation_runs,
+)
+from .filters import FilterChoice, FilterScreen
 from .models import LabItem, LabSection, LabSnapshot
-
-
-class SearchScreen(ModalScreen[str | None]):
-    """Small modal for filtering the active section."""
-
-    BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
-    ]
-
-    CSS = """
-    SearchScreen {
-        align: center middle;
-    }
-
-    #search-dialog {
-        width: 72;
-        height: auto;
-        border: round $primary;
-        padding: 1 2;
-        background: $surface;
-    }
-    """
-
-    def compose(self) -> ComposeResult:
-        with Container(id="search-dialog"):
-            yield Label("Filter")
-            yield Input(placeholder="environment, model, run, status", id="query")
-
-    def on_mount(self) -> None:
-        self.query_one("#query", Input).focus()
-
-    @on(Input.Submitted, "#query")
-    def _submit(self, event: Input.Submitted) -> None:
-        self.dismiss(event.value.strip() or None)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-class LabOptionList(OptionList):
-    """Option list where mouse clicks highlight rows without opening them."""
-
-    BINDINGS = [
-        Binding("space", "back", "Back", key_display="Space"),
-    ]
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._mouse_selected_option_id: str | None = None
-        self._mouse_selected_was_armed = False
-
-    async def _on_click(self, event: events.Click) -> None:
-        clicked_option = event.style.meta.get("option")
-        if not isinstance(clicked_option, int):
-            return
-        if self._options[clicked_option].disabled:
-            event.stop()
-            return
-        self.focus()
-        option_id = str(self._options[clicked_option].id)
-        is_training = isinstance(self.app, PrimeLabView) and self.app.is_training_item_key(
-            option_id
-        )
-        was_armed = isinstance(self.app, PrimeLabView) and self.app.is_run_expand_ready(option_id)
-        self._mouse_selected_option_id = option_id
-        self._mouse_selected_was_armed = was_armed
-        self.highlighted = clicked_option
-        if is_training and not was_armed:
-            if isinstance(self.app, PrimeLabView):
-                self.app.arm_training_run_from_mouse(option_id)
-            event.prevent_default()
-            event.stop()
-            return
-        self.action_select()
-        event.prevent_default()
-        event.stop()
-
-    def consume_mouse_selection(self) -> tuple[str | None, bool]:
-        option_id = self._mouse_selected_option_id
-        was_armed = self._mouse_selected_was_armed
-        self._mouse_selected_option_id = None
-        self._mouse_selected_was_armed = False
-        return option_id, was_armed
-
-    def action_back(self) -> None:
-        if isinstance(self.app, PrimeLabView):
-            self.app.action_back_from_list()
-
-
-class HomeGroupToggle(Static, can_focus=True):
-    """Focusable segmented control for the Home item groups."""
-
-    BINDINGS = [
-        Binding("up", "previous_group", "Prev tab", key_display="Up"),
-        Binding("down", "next_group", "Next tab", key_display="Down"),
-        Binding("enter", "focus_rows", "Select", key_display="Enter"),
-        Binding("space", "back", "Back", key_display="Space"),
-    ]
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._segments: list[tuple[str, int, int]] = []
-
-    async def _on_click(self, event: events.Click) -> None:
-        for group, start, end in self._segments:
-            if start <= event.x < end and isinstance(self.app, PrimeLabView):
-                self.focus()
-                self.app.set_home_group(group)
-                self.app.focus_home_rows()
-                event.stop()
-                return
-
-    def action_previous_group(self) -> None:
-        if isinstance(self.app, PrimeLabView):
-            self.app.action_previous_home_group()
-
-    def action_next_group(self) -> None:
-        if isinstance(self.app, PrimeLabView):
-            self.app.action_next_home_group()
-
-    def action_focus_rows(self) -> None:
-        if isinstance(self.app, PrimeLabView):
-            self.app.focus_home_rows()
-
-    def action_back(self) -> None:
-        if isinstance(self.app, PrimeLabView):
-            self.app.focus_nav_pane()
-
-    def update_groups(
-        self, groups: list[tuple[str, str, list[LabItem]]], active_group: str
-    ) -> None:
-        text = Text()
-        self._segments = []
-        cursor = 0
-        for index, (key, label, items) in enumerate(groups):
-            if index:
-                text.append("  ")
-                cursor += 2
-            segment = f" {label} {len(items)} "
-            self._segments.append((key, cursor, cursor + len(segment)))
-            style = "bold white on #8b5cf6" if key == active_group else "dim"
-            text.append(segment, style=style)
-            cursor += len(segment)
-        self.update(text)
-
-
-class LabInspector(Static, can_focus=True):
-    """Focusable inspector pane so left/right can move across all panes."""
-
-
-class LoadingMessage(Static):
-    """Small loading row with a terminal-friendly spinner."""
-
-    _FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-
-    def __init__(self, message: str, *, classes: str | None = None) -> None:
-        super().__init__("", markup=False, classes=classes)
-        self._message = message
-        self._frame_index = 0
-
-    def on_mount(self) -> None:
-        self.set_interval(0.12, self._tick)
-        self._tick()
-
-    def _tick(self) -> None:
-        frame = self._FRAMES[self._frame_index % len(self._FRAMES)]
-        self._frame_index += 1
-        text = Text()
-        text.append(frame, style="#8b5cf6")
-        text.append(f" {self._message}", style="dim")
-        self.update(text)
-        self.refresh()
-
-
-class LoadingChart(LoadingMessage):
-    """Chart-shaped loading placeholder."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message, classes="chart-loading")
-
-
-class ChartPickerScreen(ModalScreen[int | None]):
-    """Metric picker for the run overview chart."""
-
-    BINDINGS = [
-        Binding("escape", "cancel", "Cancel", key_display="Esc"),
-        Binding("/", "focus_filter", "Filter", key_display="/"),
-    ]
-
-    CSS = """
-    ChartPickerScreen {
-        align: center middle;
-    }
-
-    #chart-dialog {
-        width: 88;
-        height: 28;
-        border: round $primary;
-        padding: 1 2;
-        background: $surface;
-    }
-
-    #chart-list {
-        height: 1fr;
-    }
-
-    #chart-filter {
-        display: none;
-        height: 3;
-        margin-bottom: 1;
-    }
-
-    #chart-actions {
-        height: 1;
-        color: $text-muted;
-    }
-    """
-
-    def __init__(self, charts: list["ChartSpec"], selected_index: int) -> None:
-        super().__init__()
-        self._charts = charts
-        self._selected_index = selected_index
-        self._filter = ""
-
-    def compose(self) -> ComposeResult:
-        with Container(id="chart-dialog"):
-            yield Label("Metrics")
-            yield Input(placeholder="Filter metrics", id="chart-filter")
-            option_list = OptionList(id="chart-list")
-            for idx in self._visible_chart_indexes():
-                option_list.add_option(Option(self._charts[idx].title, id=str(idx)))
-            yield option_list
-            yield Static("/  Filter    Esc  Cancel", id="chart-actions", markup=False)
-
-    def on_mount(self) -> None:
-        self._sync_filtered_options()
-        option_list = self.query_one("#chart-list", OptionList)
-        option_list.focus()
-
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action == "focus_filter" and isinstance(self.focused, Input):
-            return False
-        return True
-
-    def action_focus_filter(self) -> None:
-        filter_input = self.query_one("#chart-filter", Input)
-        filter_input.display = True
-        filter_input.focus()
-
-    @on(OptionList.OptionSelected, "#chart-list")
-    def _select(self, event: OptionList.OptionSelected) -> None:
-        if event.option.id is None:
-            self.dismiss(None)
-            return
-        self.dismiss(int(str(event.option.id)))
-
-    @on(Input.Changed, "#chart-filter")
-    def _filter_changed(self, event: Input.Changed) -> None:
-        self._filter = event.value.strip().lower()
-        self._sync_filtered_options()
-
-    @on(Input.Submitted, "#chart-filter")
-    def _filter_submitted(self, _event: Input.Submitted) -> None:
-        self.query_one("#chart-list", OptionList).focus()
-
-    def _sync_filtered_options(self) -> None:
-        option_list = self.query_one("#chart-list", OptionList)
-        visible = self._visible_chart_indexes()
-        option_list.clear_options()
-        if not visible:
-            option_list.add_option(Option("No matching metrics", disabled=True))
-            option_list.highlighted = 0
-            return
-        for idx in visible:
-            option_list.add_option(Option(self._charts[idx].title, id=str(idx)))
-        option_list.highlighted = (
-            visible.index(self._selected_index) if self._selected_index in visible else 0
-        )
-
-    def _visible_chart_indexes(self) -> list[int]:
-        if not self._filter:
-            return list(range(len(self._charts)))
-        return [
-            idx for idx, chart in enumerate(self._charts) if self._filter in chart.title.lower()
-        ]
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
+from .palette import (
+    GRID,
+    LAB_THEME,
+    NEUTRAL,
+    PRIMARY,
+    STATUS_ERROR,
+    STATUS_INFO,
+    STATUS_SUCCESS,
+    STATUS_WARNING,
+)
+from .widgets import (
+    EvaluationNodeData,
+    EvaluationTree,
+    EvaluationViewToggle,
+    HomeGroupToggle,
+    LabInspector,
+    LabOptionList,
+    LoadingChart,
+    LoadingMessage,
+)
 
 
 @dataclass(frozen=True)
@@ -537,16 +281,16 @@ class TrainingRunScreen(Screen[None]):
     }
 
     PlotWidget.chart-plot > .plot--axis {
-        color: #c4b5fd;
+        color: $primary;
     }
 
     PlotWidget.chart-plot > .plot--tick {
-        color: #93c5fd;
+        color: $warning;
         text-style: bold;
     }
 
     PlotWidget.chart-plot > .plot--label {
-        color: #c4b5fd;
+        color: $primary;
         text-style: bold italic;
     }
     """
@@ -730,9 +474,10 @@ class TrainingRunScreen(Screen[None]):
         if not charts:
             return
 
-        def select_chart(index: int | None) -> None:
-            if index is None:
+        def select_chart(value: str | None) -> None:
+            if value is None:
                 return
+            index = int(value)
             self._active_tab = "overview"
             if self._chart_mode == "metrics":
                 self._metric_index = index
@@ -740,7 +485,24 @@ class TrainingRunScreen(Screen[None]):
                 self._distribution_index = index
             self._render_chart_change(was_overview=True)
 
-        self.app.push_screen(ChartPickerScreen(charts, self._active_chart_index()), select_chart)
+        self.app.push_screen(
+            FilterScreen(
+                [
+                    FilterChoice(
+                        key=str(index),
+                        label=chart.title,
+                        search_text=chart.title.lower(),
+                        value=str(index),
+                    )
+                    for index, chart in enumerate(charts)
+                ],
+                title="Metrics" if self._chart_mode == "metrics" else "Reward Distribution",
+                placeholder="Filter charts",
+                width=88,
+                height=28,
+            ),
+            select_chart,
+        )
 
     def action_show_metric_charts(self) -> None:
         if self._detail is None or not _metric_chart_count(self._visible_chart_raw()):
@@ -780,7 +542,7 @@ class TrainingRunScreen(Screen[None]):
                 title=self._base_item.title,
                 subtitle=str(exc),
                 status="error",
-                status_style="red",
+                status_style=STATUS_ERROR,
             )
         load_seconds = time.perf_counter() - started_at
         self.app.call_from_thread(self._set_detail, detail, load_seconds)
@@ -1108,27 +870,12 @@ class PrimeLabView(App[None]):
     """Lab read-only terminal viewer."""
 
     ENABLE_COMMAND_PALETTE = False
-
-    PRIME_THEME = Theme(
-        name="prime-lab",
-        primary="#8b5cf6",
-        secondary="#f59e0b",
-        accent="#ef4444",
-        warning="#f59e0b",
-        error="#ef4444",
-        success="#22c55e",
-        background="#030303",
-        surface="#09090b",
-        panel="#111014",
-        foreground="#f4f4f5",
-        dark=True,
-    )
+    PRIME_THEME = LAB_THEME
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
         Binding("enter", "load_detail", "Open", key_display="Enter"),
-        Binding("l", "load_logs", "Logs"),
         Binding("g", "load_more_rows", "More rows"),
         Binding("/", "search", "Filter"),
         Binding("left", "previous_pane", "Prev pane", key_display="Left"),
@@ -1204,6 +951,18 @@ class PrimeLabView(App[None]):
         color: $foreground;
     }
 
+    #evaluation-toggle {
+        display: none;
+        height: 1;
+        color: $foreground;
+    }
+
+    #evaluation-tree {
+        display: none;
+        background: $surface;
+        height: 1fr;
+    }
+
     OptionList > .option-list--option-highlighted {
         background: $primary 20%;
     }
@@ -1240,6 +999,11 @@ class PrimeLabView(App[None]):
         self._prefetching_detail_key: str | None = None
         self._expand_ready_run_key: str | None = None
         self._home_group = "workspaces"
+        self._evaluation_view = "runs"
+        self._evaluation_tree_index: dict[str, dict[str, list[LabItem]]] = {}
+        self._evaluation_click_selected_node: object | None = None
+        self._local_eval_stats_cache: dict[str, RunOverviewStats] = {}
+        self._loading_local_eval_stats: set[str] = set()
 
     def compose(self) -> ComposeResult:
         yield Static("Loading Lab ...", id="topbar", markup=False)
@@ -1250,7 +1014,9 @@ class PrimeLabView(App[None]):
                 yield Label("Loading", id="section-title", classes="pane-title")
                 yield Static("", id="section-subtitle", classes="pane-subtitle", markup=False)
                 yield HomeGroupToggle("", id="home-toggle", markup=False)
+                yield EvaluationViewToggle("", id="evaluation-toggle", markup=False)
                 yield LabOptionList(id="item-list")
+                yield EvaluationTree("Evaluations", id="evaluation-tree")
             with Vertical(id="inspector-pane", classes="pane"):
                 yield Label("Inspector", id="inspector-title", classes="pane-title")
                 yield LabInspector("", id="inspector", markup=False)
@@ -1260,14 +1026,20 @@ class PrimeLabView(App[None]):
         self.register_theme(self.PRIME_THEME)
         self.theme = "prime-lab"
         self.query_one("#section-tree", Tree).show_root = False
+        evaluation_tree = self.query_one("#evaluation-tree", EvaluationTree)
+        evaluation_tree.show_root = False
+        evaluation_tree.auto_expand = False
+        evaluation_tree.guide_depth = 2
         self._show_initial_snapshot()
         self._reload()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action in {"search", "load_more_rows"} and isinstance(
-            self.screen, TrainingRunScreen | ChartPickerScreen | LocalEvalRunScreen
+            self.screen, TrainingRunScreen | FilterScreen | LocalEvalRunScreen
         ):
             return False
+        if action == "load_detail":
+            return self._main_open_action_available()
         if action == "clear_filter":
             return bool(self._filter)
         if action == "load_more_rows":
@@ -1297,23 +1069,31 @@ class PrimeLabView(App[None]):
         if isinstance(focused, Tree):
             self._focus_main_pane(prefer_rows=False)
             return
-        if isinstance(focused, LabOptionList | HomeGroupToggle):
+        if isinstance(focused, LabOptionList | HomeGroupToggle | EvaluationViewToggle):
             self._focus_inspector_pane()
             return
         self._focus_main_pane(prefer_rows=False)
 
     def action_back_from_list(self) -> None:
-        if self._active_section_key != "workspace":
-            self.focus_nav_pane()
-            return
-        toggle = self.query_one("#home-toggle", HomeGroupToggle)
-        if toggle.display:
-            toggle.focus()
+        if self._active_section_key == "workspace":
+            toggle = self.query_one("#home-toggle", HomeGroupToggle)
+            if toggle.display:
+                toggle.focus()
+                return
+        if self._active_section_key == "evaluations":
+            toggle = self.query_one("#evaluation-toggle", EvaluationViewToggle)
+            if toggle.display:
+                toggle.focus()
+                return
+        self.focus_nav_pane()
 
     def focus_nav_pane(self) -> None:
         self.query_one("#section-tree", Tree).focus()
 
     def focus_home_rows(self) -> None:
+        self._focus_main_pane(prefer_rows=True)
+
+    def focus_evaluation_rows(self) -> None:
         self._focus_main_pane(prefer_rows=True)
 
     def action_previous_home_group(self) -> None:
@@ -1345,12 +1125,56 @@ class PrimeLabView(App[None]):
         self._home_group = group
         self._render_active_section()
 
+    def set_segmented_toggle(self, toggle_id: str, key: str) -> None:
+        if toggle_id == "home-toggle":
+            self.set_home_group(key)
+            self.focus_home_rows()
+        elif toggle_id == "evaluation-toggle":
+            self.set_evaluation_view(key)
+            self.focus_evaluation_rows()
+
+    def action_previous_evaluation_view(self) -> None:
+        self._switch_evaluation_view(-1)
+
+    def action_next_evaluation_view(self) -> None:
+        self._switch_evaluation_view(1)
+
+    def _switch_evaluation_view(self, direction: int) -> None:
+        keys = [key for key, _ in EVALUATION_VIEWS]
+        try:
+            index = keys.index(self._evaluation_view)
+        except ValueError:
+            index = 0
+        self._evaluation_view = keys[(index + direction) % len(keys)]
+        self._evaluation_click_selected_node = None
+        self._render_active_section()
+
+    def set_evaluation_view(self, view: str) -> None:
+        if view not in {key for key, _ in EVALUATION_VIEWS}:
+            return
+        if view == self._evaluation_view:
+            return
+        self._evaluation_view = view
+        self._evaluation_click_selected_node = None
+        self._render_active_section()
+
     def _focus_main_pane(self, *, prefer_rows: bool) -> None:
         if self._active_section_key == "workspace" and not prefer_rows:
             toggle = self.query_one("#home-toggle", HomeGroupToggle)
             if toggle.display:
                 toggle.focus()
                 return
+        if self._active_section_key == "evaluations":
+            if not prefer_rows:
+                toggle = self.query_one("#evaluation-toggle", EvaluationViewToggle)
+                if toggle.display:
+                    toggle.focus()
+                    return
+            if self._evaluation_view == "env":
+                tree = self.query_one("#evaluation-tree", EvaluationTree)
+                if tree.display:
+                    tree.focus()
+                    return
         self.query_one("#item-list", OptionList).focus()
 
     def _focus_inspector_pane(self) -> None:
@@ -1374,9 +1198,19 @@ class PrimeLabView(App[None]):
                 self._filter = value.lower()
                 self._render_active_section()
 
-        self.push_screen(SearchScreen(), apply_filter)
+        self.push_screen(
+            FilterScreen(
+                self._filter_choices_for_active_section(),
+                title="Filter",
+                placeholder="environment, model, run, status",
+                initial=self._filter,
+            ),
+            apply_filter,
+        )
 
     def action_load_detail(self) -> None:
+        if self._handle_evaluation_tree_enter():
+            return
         self._load_selected_detail(include_logs=False)
 
     def action_load_logs(self) -> None:
@@ -1457,7 +1291,7 @@ class PrimeLabView(App[None]):
                 title=item.title,
                 subtitle=str(exc),
                 status="error",
-                status_style="red",
+                status_style=STATUS_ERROR,
                 metadata=item.metadata,
                 raw=item.raw,
             )
@@ -1534,10 +1368,19 @@ class PrimeLabView(App[None]):
         self.query_one("#section-subtitle", Static).update(section.description)
 
         if section.key == "workspace":
+            self.query_one("#evaluation-toggle", Static).display = False
+            self.query_one("#evaluation-tree", EvaluationTree).display = False
             self._render_workspace_home(section, selected_key)
             return
 
         self.query_one("#home-toggle", Static).display = False
+
+        if section.key == "evaluations":
+            self._render_evaluations_section(section, selected_key)
+            return
+
+        self.query_one("#evaluation-toggle", Static).display = False
+        self.query_one("#evaluation-tree", EvaluationTree).display = False
         option_list = self.query_one("#item-list", OptionList)
         option_list.display = True
         option_list.clear_options()
@@ -1564,6 +1407,100 @@ class PrimeLabView(App[None]):
             option_list.add_option(Option(_item_label(item), id=item.key))
 
         self.call_after_refresh(lambda: self._highlight_item(option_list, selected_key))
+
+    def _render_evaluations_section(self, section: LabSection, selected_key: str | None) -> None:
+        toggle = self.query_one("#evaluation-toggle", EvaluationViewToggle)
+        toggle.display = True
+        toggle.update_views(EVALUATION_VIEWS, self._evaluation_view)
+
+        self._items_by_key = {}
+        self._visible_items = []
+        for item in section.items:
+            item = self._detail_cache.get(item.key, item)
+            if not self._filter or self._matches_filter(item):
+                self._visible_items.append(item)
+                self._items_by_key[item.key] = item
+        self._evaluation_tree_index = evaluation_index(self._visible_items)
+
+        option_list = self.query_one("#item-list", OptionList)
+        evaluation_tree = self.query_one("#evaluation-tree", EvaluationTree)
+        if self._evaluation_view == "env":
+            option_list.display = False
+            option_list.clear_options()
+            evaluation_tree.display = True
+            self._populate_evaluation_tree(evaluation_tree, selected_key)
+            return
+
+        evaluation_tree.display = False
+        evaluation_tree.clear()
+        option_list.display = True
+        option_list.clear_options()
+
+        if not self._visible_items:
+            empty = LabItem(
+                key="evaluations:empty",
+                section="evaluations",
+                title="No rows",
+                subtitle="Clear the filter or refresh the view.",
+                status="empty",
+                status_style="dim",
+            )
+            self._visible_items = [empty]
+            self._items_by_key[empty.key] = empty
+
+        for item in self._visible_items:
+            self._items_by_key[item.key] = item
+            option_list.add_option(Option(_item_label(item), id=item.key))
+
+        self.call_after_refresh(lambda: self._highlight_item(option_list, selected_key))
+
+    def _populate_evaluation_tree(self, tree: EvaluationTree, selected_key: str | None) -> None:
+        tree.clear()
+        root = tree.root
+        root.expand()
+        first_run_node = None
+        selected_node = None
+        if not self._evaluation_tree_index:
+            root.add("No evaluation runs", allow_expand=False)
+            self.query_one("#inspector-title", Label).update("Selection Details")
+            self.query_one("#inspector", Static).update(Text("No evaluation runs", style="dim"))
+            return
+
+        for env_index, env_id in enumerate(sorted(self._evaluation_tree_index)):
+            models = self._evaluation_tree_index[env_id]
+            total_runs = sum(len(runs) for runs in models.values())
+            env_node = root.add(
+                evaluation_env_tree_label(env_id, models, total_runs),
+                data=EvaluationNodeData(kind="env", env_id=env_id),
+                expand=env_index == 0,
+            )
+            for model_index, model in enumerate(sorted(models)):
+                runs = sorted_evaluation_runs(models[model])
+                model_node = env_node.add(
+                    evaluation_model_tree_label(model, runs),
+                    data=EvaluationNodeData(kind="model", env_id=env_id, model=model),
+                    expand=env_index == 0 and model_index == 0,
+                )
+                for item in runs:
+                    self._items_by_key[item.key] = item
+                    run_node = model_node.add(
+                        evaluation_run_tree_label(item),
+                        data=EvaluationNodeData(
+                            kind="run",
+                            env_id=env_id,
+                            model=model,
+                            item_key=item.key,
+                        ),
+                        allow_expand=False,
+                    )
+                    if first_run_node is None:
+                        first_run_node = run_node
+                    if selected_key == item.key:
+                        selected_node = run_node
+
+        target_node = selected_node or first_run_node
+        if target_node is not None:
+            self.call_after_refresh(lambda: tree.move_cursor(target_node))
 
     def _render_workspace_home(self, section: LabSection, selected_key: str | None) -> None:
         toggle = self.query_one("#home-toggle", HomeGroupToggle)
@@ -1634,16 +1571,26 @@ class PrimeLabView(App[None]):
         self._selected_item = item
         if item.section != "training" or self._expand_ready_run_key != item.key:
             self._expand_ready_run_key = None
-        self.query_one("#inspector-title", Label).update(item.title)
-        self.query_one("#inspector", Static).update(_item_details(item))
+        if item.section == "evaluations":
+            self.query_one("#inspector-title", Label).update("Selection Details")
+            self.query_one("#inspector", Static).update(self._evaluation_run_details(item))
+        else:
+            self.query_one("#inspector-title", Label).update(item.title)
+            self.query_one("#inspector", Static).update(_item_details(item))
         self._prefetch_training_detail(item)
 
     def is_training_item_key(self, key: str) -> bool:
         item = self._items_by_key.get(key)
         return item is not None and item.section == "training"
 
+    def is_guarded_option_key(self, key: str) -> bool:
+        return self.is_training_item_key(key)
+
     def is_run_expand_ready(self, key: str) -> bool:
         return self._expand_ready_run_key == key
+
+    def is_option_expand_ready(self, key: str) -> bool:
+        return self.is_run_expand_ready(key)
 
     def arm_training_run_from_mouse(self, key: str) -> None:
         item = self._items_by_key.get(key)
@@ -1651,6 +1598,45 @@ class PrimeLabView(App[None]):
             return
         self._show_item(item)
         self._expand_ready_run_key = item.key
+
+    def arm_option_from_mouse(self, key: str) -> None:
+        self.arm_training_run_from_mouse(key)
+
+    def _evaluation_run_details(self, item: LabItem) -> Group:
+        stats: RunOverviewStats | None = None
+        if item.raw.get("type") == "local_eval":
+            cache_key = local_eval_stats_key(item)
+            stats = self._local_eval_stats_cache.get(cache_key)
+            if stats is None and cache_key not in self._loading_local_eval_stats:
+                self._loading_local_eval_stats.add(cache_key)
+                self._load_local_eval_stats_worker(item)
+        return evaluation_run_selection_details(
+            item,
+            stats,
+            platform_detail_chunks=_evaluation_detail_chunks,
+        )
+
+    @work(thread=True, exclusive=False, group="local-eval-stats")
+    def _load_local_eval_stats_worker(self, item: LabItem) -> None:
+        cache_key = local_eval_stats_key(item)
+        stats = compute_run_overview_stats(LocalEvalRun.from_item(item))
+        self.call_from_thread(self._finish_local_eval_stats, item.key, cache_key, stats)
+
+    def _finish_local_eval_stats(
+        self, item_key: str, cache_key: str, stats: RunOverviewStats
+    ) -> None:
+        self._loading_local_eval_stats.discard(cache_key)
+        self._local_eval_stats_cache[cache_key] = stats
+        if self._selected_item is not None and self._selected_item.key == item_key:
+            item = self._detail_cache.get(item_key, self._selected_item)
+            self.query_one("#inspector-title", Label).update("Selection Details")
+            self.query_one("#inspector", Static).update(
+                evaluation_run_selection_details(
+                    item,
+                    stats,
+                    platform_detail_chunks=_evaluation_detail_chunks,
+                )
+            )
 
     def _prefetch_training_detail(self, item: LabItem) -> None:
         if (
@@ -1696,6 +1682,8 @@ class PrimeLabView(App[None]):
                 self._detail_cache.get(item.key), item
             )
             item = self._detail_cache[item.key]
+        elif item.section in {"environments", "evaluations"}:
+            self._detail_cache[item.key] = item
         self._items_by_key[item.key] = item
         self._visible_items = [
             item if visible.key == item.key else visible for visible in self._visible_items
@@ -1731,6 +1719,26 @@ class PrimeLabView(App[None]):
             self._active_section_key = key
             self._render_active_section()
 
+    @on(Tree.NodeHighlighted, "#evaluation-tree")
+    def _evaluation_tree_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        self._show_evaluation_tree_selection(getattr(event.node, "data", None))
+
+    @on(Tree.NodeSelected, "#evaluation-tree")
+    def _evaluation_tree_selected(self, event: Tree.NodeSelected) -> None:
+        payload = getattr(event.node, "data", None)
+        if not isinstance(payload, EvaluationNodeData):
+            return
+        self._show_evaluation_tree_selection(payload)
+        if payload.kind == "run":
+            if self._evaluation_click_selected_node is event.node:
+                self._open_evaluation_tree_run(payload)
+            else:
+                self._evaluation_click_selected_node = event.node
+            return
+        self._evaluation_click_selected_node = None
+        if event.node.allow_expand:
+            event.node.toggle()
+
     @on(OptionList.OptionHighlighted, "#item-list")
     def _item_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         item = self._items_by_key.get(str(event.option.id))
@@ -1753,6 +1761,67 @@ class PrimeLabView(App[None]):
                     self._prefetch_training_detail(item)
                     return
             self._load_selected_detail(include_logs=False)
+
+    def _show_evaluation_tree_selection(self, payload: Any) -> None:
+        if not isinstance(payload, EvaluationNodeData):
+            return
+        self.query_one("#inspector-title", Label).update("Selection Details")
+        if payload.kind == "run":
+            item = self._items_by_key.get(payload.item_key)
+            if item is None:
+                return
+            self._selected_item = item
+            self.query_one("#inspector", Static).update(self._evaluation_run_details(item))
+            return
+        self._selected_item = None
+        self._expand_ready_run_key = None
+        self.query_one("#inspector", Static).update(
+            evaluation_group_selection_details(payload, self._evaluation_tree_index)
+        )
+
+    def _open_evaluation_tree_run(self, payload: EvaluationNodeData) -> None:
+        item = self._items_by_key.get(payload.item_key)
+        if item is None:
+            return
+        self._show_item(item)
+        self._load_selected_detail(include_logs=False)
+
+    def _handle_evaluation_tree_enter(self) -> bool:
+        if self._active_section_key != "evaluations" or self._evaluation_view != "env":
+            return False
+        if not isinstance(self.focused, EvaluationTree):
+            return False
+        tree = self.query_one("#evaluation-tree", EvaluationTree)
+        node = tree.cursor_node
+        if node is None:
+            return False
+        payload = getattr(node, "data", None)
+        if not isinstance(payload, EvaluationNodeData):
+            return False
+        if payload.kind == "run":
+            self._open_evaluation_tree_run(payload)
+            return True
+        if node.allow_expand:
+            node.toggle()
+            return True
+        return False
+
+    def _main_open_action_available(self) -> bool:
+        if self._active_section_key == "evaluations" and self._evaluation_view == "env":
+            return isinstance(self.focused, EvaluationTree)
+        return self._selected_item is not None and not self._selected_item.raw.get("loading")
+
+    def _filter_choices_for_active_section(self) -> list[FilterChoice]:
+        if self._snapshot is None:
+            return []
+        section = self._snapshot.section(self._active_section_key)
+        if section is None:
+            return []
+        if section.key == "workspace":
+            items = self._workspace_items()
+        else:
+            items = [self._detail_cache.get(item.key, item) for item in section.items]
+        return [_filter_choice_for_item(item) for item in items]
 
 
 def run_lab_view(
@@ -1802,6 +1871,26 @@ def _ladder_limits(max_limit: int, *, start: int = 5) -> tuple[int, ...]:
         current *= 2
     limits.append(max_limit)
     return tuple(limits)
+
+
+def _filter_choice_for_item(item: LabItem) -> FilterChoice:
+    return FilterChoice(
+        key=item.key,
+        label=_item_label(item),
+        search_text=_item_search_text(item),
+        value=item.title,
+    )
+
+
+def _item_search_text(item: LabItem) -> str:
+    return " ".join(
+        [
+            item.title,
+            item.subtitle,
+            item.status,
+            *(value for _, value in item.metadata),
+        ]
+    ).lower()
 
 
 def _item_label(item: LabItem) -> Text:
@@ -2746,7 +2835,7 @@ def _training_data_page(raw: dict[str, Any], progress: dict[str, Any]) -> list[W
 
     error = rollout_samples.get("error")
     if error:
-        text.append(f"\n\nFailed to load rollout samples: {error}", style="red")
+        text.append(f"\n\nFailed to load rollout samples: {error}", style=STATUS_ERROR)
         return [Static(text)]
 
     records = [sample for sample in samples if isinstance(sample, dict)]
@@ -2951,7 +3040,7 @@ def _progress_block(summary: dict[str, int | float | bool]) -> Text:
     text = Text()
     text.append(f"{percent:5.1f}% ", style="bold")
     text.append("[")
-    text.append("#" * filled, style="#8b5cf6")
+    text.append("#" * filled, style=PRIMARY)
     text.append("." * (width - filled), style="dim")
     text.append("]")
     text.append(
@@ -3043,26 +3132,26 @@ def _draw_plot(plot: PlotWidget, chart: ChartSpec) -> None:
         plot.plot(
             list(chart.x),
             list(chart.y),
-            line_style="#3f3f46",
+            line_style=GRID,
             hires_mode=HiResMode.BRAILLE,
         )
         plot.plot(
             list(chart.x),
             list(smooth_y or chart.y),
-            line_style="#8b5cf6 bold",
+            line_style=f"{PRIMARY} bold",
             hires_mode=HiResMode.BRAILLE,
         )
         plot.scatter(
             list(chart.x),
             list(chart.y),
             marker="•",
-            marker_style="#d4d4d8",
+            marker_style=NEUTRAL,
         )
     else:
         plot.bar(
             list(chart.x),
             list(chart.y),
-            bar_style="#8b5cf6",
+            bar_style=PRIMARY,
             hires_mode=HiResMode.HALFBLOCK,
         )
 
@@ -3217,7 +3306,7 @@ def _line_chart(label: str, points: list[tuple[int, float]]) -> Text:
     latest = points[-1][1]
     text = Text()
     text.append(f"{label}\n", style="bold dim")
-    text.append("".join(chars), style="#8b5cf6")
+    text.append("".join(chars), style=PRIMARY)
     text.append(f"  latest {latest:.4g}  step {start_step}->{end_step}", style="dim")
     return text
 
@@ -3242,7 +3331,7 @@ def _distribution_chart(distribution: dict[str, Any], *, title: str) -> Table | 
     table.add_column("Chart")
     for label, count in bins:
         width = max(1, int(round((count / max_count) * 36))) if count > 0 else 0
-        table.add_row(label, _format_number(count), Text("#" * width, style="#8b5cf6"))
+        table.add_row(label, _format_number(count), Text("#" * width, style=PRIMARY))
     return table
 
 
@@ -3623,14 +3712,14 @@ def _compact_fields(value: dict[str, Any]) -> str:
 def _log_level_style(level: str) -> str:
     normalized = level.upper()
     if normalized in {"ERROR", "ERR", "CRITICAL", "FATAL"}:
-        return "red bold"
+        return STATUS_ERROR
     if normalized in {"WARNING", "WARN"}:
-        return "yellow"
+        return STATUS_WARNING
     if normalized in {"INFO", "NOTICE"}:
-        return "green"
+        return STATUS_SUCCESS
     if normalized in {"DEBUG", "TRACE"}:
         return "dim"
-    return "cyan"
+    return STATUS_INFO
 
 
 def _tail_text(value: str, *, max_chars: int) -> str:

@@ -18,6 +18,13 @@ from prime_cli.utils.time_utils import format_time_ago
 from prime_evals import EvalsClient
 
 from .models import LabItem, LabSection, LabSnapshot
+from .palette import (
+    PRIMARY,
+    STATUS_ERROR,
+    STATUS_INFO,
+    STATUS_SUCCESS,
+    STATUS_WARNING,
+)
 
 
 @dataclass(frozen=True)
@@ -179,7 +186,7 @@ class LabDataSource:
             description="Local Lab environments, configs, and auth profiles.",
             items=tuple(items),
             status=f"{current_profile} * {workspace.name}",
-            status_style="green" if authenticated else "yellow",
+            status_style=STATUS_SUCCESS if authenticated else STATUS_WARNING,
         )
 
     def _environment_section(
@@ -252,7 +259,7 @@ class LabDataSource:
             description="Local and platform environments.",
             items=tuple(items),
             status=f"{len(items)} shown",
-            status_style="cyan",
+            status_style=STATUS_INFO,
         )
 
     def _evaluation_section(
@@ -273,7 +280,7 @@ class LabDataSource:
                 description="Local and platform evaluation runs.",
                 items=tuple([*local_items, *auth_section.items]),
                 status=f"{len(local_items)} local",
-                status_style="cyan" if local_items else "yellow",
+                status_style=STATUS_INFO if local_items else STATUS_WARNING,
             )
 
         try:
@@ -293,7 +300,7 @@ class LabDataSource:
                 description="Local and platform evaluation runs.",
                 items=items,
                 status=f"{len(items)} shown",
-                status_style="cyan",
+                status_style=STATUS_INFO,
             )
         except Exception as exc:
             warnings.append(f"Evaluations unavailable: {exc}")
@@ -310,7 +317,7 @@ class LabDataSource:
                     description="Local and platform evaluation runs.",
                     items=tuple([*local_items, *error.items]),
                     status=f"{len(local_items)} local",
-                    status_style="yellow",
+                    status_style=STATUS_WARNING,
                 )
             return _error_section(
                 "evaluations",
@@ -345,7 +352,7 @@ class LabDataSource:
                 description="Training runs for the active account or team.",
                 items=items,
                 status=f"{len(items)} shown",
-                status_style="cyan",
+                status_style=STATUS_INFO,
             )
         except Exception as exc:
             warnings.append(f"Training runs unavailable: {exc}")
@@ -364,7 +371,7 @@ class LabDataSource:
             description="Eval outputs discovered in this workspace.",
             items=items,
             status=f"{len(items)} found",
-            status_style="cyan" if items else "dim",
+            status_style=STATUS_INFO if items else "dim",
         )
 
     def _load_rl_detail(
@@ -576,7 +583,7 @@ def _platform_loading_section(
                 description=description,
                 items=tuple([*local_items, *auth_section.items]),
                 status=f"{len(local_items)} local",
-                status_style="cyan",
+                status_style=STATUS_INFO,
             )
         return auth_section
 
@@ -592,13 +599,13 @@ def _platform_loading_section(
                 title=f"Loading {title}",
                 subtitle="Fetching platform data...",
                 status="loading",
-                status_style="#8b5cf6",
+                status_style=PRIMARY,
                 metadata=(("Source", "platform"),),
                 raw={"loading": True},
             ),
         ),
         status="loading",
-        status_style="#8b5cf6",
+        status_style=PRIMARY,
     )
 
 
@@ -779,7 +786,7 @@ def _local_eval_item(run: dict[str, Any], idx: int, *, section: str = "local-eva
         title=run_id,
         subtitle=f"{run.get('env_id', '-')} · {run.get('model', '-')}",
         status=reward_text,
-        status_style="green" if reward_is_numeric and float(reward) > 0 else "dim",
+        status_style=STATUS_SUCCESS if reward_is_numeric and float(reward) > 0 else "dim",
         metadata=(
             ("Environment", str(run.get("env_id") or "-")),
             ("Model", str(run.get("model") or "-")),
@@ -874,7 +881,7 @@ def _workspace_context_item(
         title=workspace.name,
         subtitle=str(workspace),
         status="active" if active else "cached",
-        status_style="green" if active else "cyan",
+        status_style=STATUS_SUCCESS if active else STATUS_INFO,
         metadata=tuple(metadata),
         raw={
             "type": "workspace_context",
@@ -998,7 +1005,7 @@ def _workspace_profile_items(profiles: list[str], current_profile: str) -> list[
                 title=profile,
                 subtitle="Prime CLI auth profile",
                 status="current" if current else "profile",
-                status_style="green" if current else "cyan",
+                status_style=STATUS_SUCCESS if current else STATUS_INFO,
                 metadata=(
                     ("Kind", "Auth profile"),
                     ("Current", "yes" if current else "no"),
@@ -1035,7 +1042,7 @@ def _workspace_environment_items(
                 title=path.name,
                 subtitle=rel_path,
                 status="environment",
-                status_style="cyan",
+                status_style=STATUS_INFO,
                 metadata=(
                     ("Kind", "Local environment"),
                     ("Path", rel_path),
@@ -1087,7 +1094,7 @@ def _workspace_config_item(path: Path, workspace: Path, config_kind: str) -> Lab
         title=title,
         subtitle=subtitle,
         status=config_kind,
-        status_style="yellow" if config_kind == "rl" else "cyan",
+        status_style=STATUS_WARNING if config_kind == "rl" else STATUS_INFO,
         metadata=(
             ("Kind", _workspace_config_kind_label(config_kind)),
             ("Path", rel_path),
@@ -1220,7 +1227,7 @@ def _auth_required_section(key: str, title: str, description: str) -> LabSection
         title="Sign in required",
         subtitle="Run prime login to view authenticated platform data.",
         status="auth",
-        status_style="yellow",
+        status_style=STATUS_WARNING,
     )
     return LabSection(
         key=key,
@@ -1228,7 +1235,7 @@ def _auth_required_section(key: str, title: str, description: str) -> LabSection
         description=description,
         items=(item,),
         status="auth required",
-        status_style="yellow",
+        status_style=STATUS_WARNING,
     )
 
 
@@ -1239,7 +1246,7 @@ def _error_section(key: str, title: str, description: str, exc: Exception) -> La
         title="Unavailable",
         subtitle=str(exc),
         status="error",
-        status_style="red",
+        status_style=STATUS_ERROR,
     )
     return LabSection(
         key=key,
@@ -1247,7 +1254,7 @@ def _error_section(key: str, title: str, description: str, exc: Exception) -> La
         description=description,
         items=(item,),
         status="error",
-        status_style="red",
+        status_style=STATUS_ERROR,
     )
 
 
@@ -1298,9 +1305,9 @@ def _read_json_file(path: Path) -> dict[str, Any]:
 def _status_style(status: str) -> str:
     normalized = status.upper()
     if normalized in {"COMPLETED", "SUCCESS", "READY", "PUBLIC"}:
-        return "green"
+        return STATUS_SUCCESS
     if normalized in {"RUNNING", "PENDING", "STARTING", "PRIVATE"}:
-        return "yellow"
+        return STATUS_WARNING
     if normalized in {"FAILED", "ERROR", "CANCELLED"}:
-        return "red"
+        return STATUS_ERROR
     return "dim"

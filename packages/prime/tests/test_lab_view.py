@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from prime_lab_view.app import (
+    EvaluationTree,
     LabOptionList,
     PrimeLabView,
     TrainingRunScreen,
@@ -23,7 +24,9 @@ from prime_lab_view.data import LabDataSource, LabLoadOptions, discover_local_ev
 from prime_lab_view.eval_records import LazyRunResults, LocalEvalRun
 from prime_lab_view.eval_render import compute_run_overview_stats, history_groups
 from prime_lab_view.eval_screen import LocalEvalRunScreen, RolloutViewer
+from prime_lab_view.filters import FilterChoice, filter_choices
 from rich.console import Console
+from textual.widgets import Label
 
 
 class FakeConfig:
@@ -593,6 +596,16 @@ def test_lab_view_log_tail_doubles_after_default() -> None:
     assert _next_log_tail_lines(2000) == 4000
 
 
+def test_lab_view_filter_choices_preserve_prefilled_results() -> None:
+    choices = [
+        FilterChoice("a", "gsm8k run", "gsm8k openai completed", "gsm8k"),
+        FilterChoice("b", "wiki run", "wiki qwen running", "wiki"),
+    ]
+
+    assert [choice.key for choice in filter_choices(choices, "")] == ["a", "b"]
+    assert [choice.key for choice in filter_choices(choices, "qwen")] == ["b"]
+
+
 @pytest.mark.asyncio
 async def test_prime_lab_view_mounts(tmp_path: Path) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
@@ -720,6 +733,33 @@ async def test_prime_lab_view_opens_local_eval_run_screen(tmp_path: Path) -> Non
         await pilot.pause()
 
         assert isinstance(app.screen, LocalEvalRunScreen)
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_view_evaluations_by_env_groups_runs(tmp_path: Path) -> None:
+    run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        '{"avg_reward": 0.5, "num_examples": 1, "rollouts_per_example": 1}',
+        encoding="utf-8",
+    )
+    (run_dir / "results.jsonl").write_text('{"reward": 0.5}\n', encoding="utf-8")
+    source = make_source()
+    snapshot = source.load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._active_section_key = "evaluations"
+        app.set_evaluation_view("env")
+        await pilot.pause()
+
+        tree = app.query_one("#evaluation-tree", EvaluationTree)
+        assert tree.display
+        assert not app.query_one("#item-list", LabOptionList).display
+        assert "gsm8k" in app._evaluation_tree_index
+        assert "openai/gpt-4.1-mini" in app._evaluation_tree_index["gsm8k"]
+        assert str(app.query_one("#inspector-title", Label).render()) == "Selection Details"
 
 
 @pytest.mark.asyncio

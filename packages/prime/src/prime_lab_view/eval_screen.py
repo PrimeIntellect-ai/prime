@@ -65,6 +65,7 @@ from .eval_render import (
     tool_group_preview,
     tool_output_preview,
 )
+from .palette import STATUS_ERROR
 
 
 class EvalPanel(Container):
@@ -274,7 +275,7 @@ class EvalSearchScreen(ModalScreen[SearchResult | None]):
         try:
             compiled = re.compile(pattern, re.IGNORECASE)
         except re.error as exc:
-            error_label.update(Text(f"Invalid regex: {exc}", style="red"))
+            error_label.update(Text(f"Invalid regex: {exc}", style=STATUS_ERROR))
             self._active_column = None
             return
 
@@ -827,8 +828,8 @@ class RolloutViewer(Container):
         error = record.get("error")
         if error is not None:
             completion_text.append("\n\n")
-            completion_text.append("error: ", style="bold red")
-            completion_text.append(str(error), style="red")
+            completion_text.append("error: ", style=STATUS_ERROR)
+            completion_text.append(str(error), style=STATUS_ERROR)
         self._prompt_text = prompt_text.plain
         self._completion_text = completion_text.plain
 
@@ -1477,8 +1478,8 @@ class LocalEvalRunScreen(Screen[None]):
         error = record.get("error")
         if error is not None:
             completion_text.append("\n\n")
-            completion_text.append("error: ", style="bold red")
-            completion_text.append(str(error), style="red")
+            completion_text.append("error: ", style=STATUS_ERROR)
+            completion_text.append(str(error), style=STATUS_ERROR)
         self._prompt_text = prompt_text.plain
         self._completion_text = completion_text.plain
 

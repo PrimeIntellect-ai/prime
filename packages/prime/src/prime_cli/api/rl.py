@@ -13,6 +13,13 @@ class RLModel(BaseModel):
 
     name: str = Field(..., description="Model name")
     at_capacity: bool = Field(False, alias="atCapacity")
+    training_price_per_mtok: Optional[float] = Field(None, alias="trainingPricePerMtok")
+    inference_input_price_per_mtok: Optional[float] = Field(
+        None, alias="inferenceInputPricePerMtok"
+    )
+    inference_output_price_per_mtok: Optional[float] = Field(
+        None, alias="inferenceOutputPricePerMtok"
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 

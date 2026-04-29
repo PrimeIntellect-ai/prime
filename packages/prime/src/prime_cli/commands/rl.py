@@ -29,7 +29,7 @@ from ..utils import (
 )
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.env_vars import EnvParseError, collect_env_vars
-from ..utils.formatters import format_file_size, strip_ansi
+from ..utils.formatters import format_file_size, format_price_per_mtok, strip_ansi
 
 console = get_console()
 
@@ -39,7 +39,8 @@ RL_RUN_JSON_HELP = json_output_help(
 )
 
 RL_MODELS_JSON_HELP = json_output_help(
-    ".models[] = {name, at_capacity}",
+    ".models[] = {name, at_capacity, training_price_per_mtok, "
+    "inference_input_price_per_mtok, inference_output_price_per_mtok}",
 )
 
 RL_LIST_JSON_HELP = json_output_help(
@@ -1054,13 +1055,22 @@ def list_models(
         table = Table(title="Prime RL — Models")
         table.add_column("Model", style="cyan")
         table.add_column("Status")
+        table.add_column("Training $/M tok", style="green", justify="right")
+        table.add_column("Inference In $/M tok", style="green", justify="right")
+        table.add_column("Inference Out $/M tok", style="green", justify="right")
 
         for model in models:
             if model.at_capacity:
                 status = "[red]At Capacity[/red]"
             else:
                 status = "[green]Available[/green]"
-            table.add_row(model.name, status)
+            table.add_row(
+                model.name,
+                status,
+                format_price_per_mtok(model.training_price_per_mtok) or "-",
+                format_price_per_mtok(model.inference_input_price_per_mtok) or "-",
+                format_price_per_mtok(model.inference_output_price_per_mtok) or "-",
+            )
 
         console.print(table)
 

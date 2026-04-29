@@ -15,6 +15,7 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
+from ..utils.formatters import format_price_per_mtok
 
 app = PlainTyper(
     help="Run and manage Prime Inference\n\n"
@@ -37,17 +38,6 @@ def _fmt_created(val: str) -> str:
         return _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return val or ""
-
-
-def _fmt_price(x) -> str:
-    """Format USD per 1M tokens (mtok) for display."""
-    if x is None:
-        return ""
-    try:
-        f = float(x)
-        return f"${f:.6f}".rstrip("0").rstrip(".")
-    except Exception:
-        return str(x)
 
 
 @app.command("models", epilog=MODELS_JSON_HELP)
@@ -94,8 +84,8 @@ def list_models(
             table.add_row(
                 mid,
                 created,
-                _fmt_price(pin),
-                _fmt_price(pout),
+                format_price_per_mtok(pin),
+                format_price_per_mtok(pout),
             )
 
         console.print(table)

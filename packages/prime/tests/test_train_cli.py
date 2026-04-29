@@ -36,7 +36,7 @@ def test_rl_alias_still_works_with_deprecation_warning(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     assert (
-        "DeprecationWarning: The command 'rl' is deprecated. Use `prime train` instead."
+        "[DEPRECATED] The 'rl' command is deprecated. Use 'prime train' instead."
     ) in result.output
     assert "Run with: prime train" in result.output
     assert output_path.exists()
@@ -47,9 +47,9 @@ def test_rl_alias_warning_uses_stderr_for_json_output() -> None:
 
     assert result.exit_code == 0, result.output
     assert (
-        "DeprecationWarning: The command 'rl' is deprecated. Use `prime train` instead."
+        "[DEPRECATED] The 'rl' command is deprecated. Use 'prime train' instead."
     ) in result.stderr
-    assert "DeprecationWarning" not in result.stdout
+    assert "[DEPRECATED]" not in result.stdout
     data = json.loads(result.stdout)
     assert "configs" in data
 

@@ -736,7 +736,7 @@ class DefaultGroup(DefaultCommandGroup):
     def invoke(self, ctx):
         if ctx.info_name == "rl":
             typer.echo(
-                "DeprecationWarning: The command 'rl' is deprecated. Use `prime train` instead.",
+                "[DEPRECATED] The 'rl' command is deprecated. Use 'prime train' instead.",
                 err=True,
             )
         return super().invoke(ctx)

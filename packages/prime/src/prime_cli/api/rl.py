@@ -510,8 +510,13 @@ class RLClient:
                 params["step"] = step
 
             response = self.client.get(f"/rft/runs/{run_id}/distributions", params=params)
+            chart_data = response.get("chartData") or response.get("chart_data")
+            bins = response.get("bins")
+            if bins is None and isinstance(chart_data, dict):
+                bins = chart_data.get("histogramData")
             return {
-                "bins": response.get("bins", []),
+                **response,
+                "bins": bins or [],
                 "step": response.get("step"),
             }
         except Exception as e:

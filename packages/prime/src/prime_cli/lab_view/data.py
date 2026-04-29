@@ -1,0 +1,1276 @@
+"""Data loading for the Lab TUI."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import toml
+from prime_evals import EvalsClient
+
+from prime_cli.api.rl import RLClient
+from prime_cli.client import APIClient, APIError
+from prime_cli.core import Config
+from prime_cli.utils.time_utils import format_time_ago
+
+from .models import LabItem, LabSection, LabSnapshot
+
+
+@dataclass(frozen=True)
+class LabLoadOptions:
+    """Options for a single Lab TUI data refresh."""
+
+    limit: int = 30
+    workspace: Path = Path.cwd()
+    env_dir: str = "./environments"
+    outputs_dir: str = "./outputs"
+
+
+class LabDataSource:
+    """Read-only Lab data source."""
+
+    def __init__(
+        self,
+        *,
+        api_client_factory: Callable[..., Any] = APIClient,
+        evals_client_factory: Callable[[Any], Any] = EvalsClient,
+        rl_client_factory: Callable[[Any], Any] = RLClient,
+        config_factory: Callable[[], Any] = Config,
+    ) -> None:
+        self._api_client_factory = api_client_factory
+        self._evals_client_factory = evals_client_factory
+        self._rl_client_factory = rl_client_factory
+        self._config_factory = config_factory
+
+    def load(self, options: LabLoadOptions) -> LabSnapshot:
+        warnings: list[str] = []
+        config = self._config_factory()
+        authenticated = bool(config.api_key)
+        team = config.team_name or config.team_id
+
+        sections = [
+            self._workspace_section(options, config, authenticated, team),
+            self._environment_section(options, authenticated, warnings),
+            self._rl_section(options, config, authenticated, warnings),
+            self._evaluation_section(options, config, authenticated, warnings),
+        ]
+
+        return LabSnapshot(
+            workspace=options.workspace.resolve(),
+            base_url=config.base_url,
+            frontend_url=config.frontend_url,
+            authenticated=authenticated,
+            team=team,
+            sections=tuple(sections),
+            warnings=tuple(warnings),
+        )
+
+    def load_initial(self, options: LabLoadOptions) -> LabSnapshot:
+        """Load local Lab context while platform requests are still in flight."""
+        config = self._config_factory()
+        authenticated = bool(config.api_key)
+        team = config.team_name or config.team_id
+
+        sections = [
+            self._workspace_section(options, config, authenticated, team),
+            _platform_loading_section(
+                "environments",
+                "Environments",
+                "Local and platform environments.",
+                authenticated=True,
+                local_items=tuple(
+                    _workspace_environment_items(
+                        options.workspace.resolve(),
+                        options.env_dir,
+                        options.limit,
+                        section="environments",
+                    )
+                ),
+            ),
+            _platform_loading_section(
+                "training",
+                "Training",
+                "Training runs for the active account or team.",
+                authenticated=authenticated,
+            ),
+            _platform_loading_section(
+                "evaluations",
+                "Evaluations",
+                "Local and platform evaluation runs.",
+                authenticated=authenticated,
+                local_items=tuple(_local_eval_items(options, section="evaluations")),
+            ),
+        ]
+
+        return LabSnapshot(
+            workspace=options.workspace.resolve(),
+            base_url=config.base_url,
+            frontend_url=config.frontend_url,
+            authenticated=authenticated,
+            team=team,
+            sections=tuple(sections),
+        )
+
+    def load_item_detail(
+        self,
+        item: LabItem,
+        *,
+        include_logs: bool = False,
+        log_tail_lines: int = 50,
+        metrics_limit: int = 10,
+        metrics_min_step: int | None = None,
+    ) -> LabItem:
+        """Load expanded read-only data for a selected item."""
+        if item.section == "training":
+            return self._load_rl_detail(
+                item,
+                include_logs=include_logs,
+                log_tail_lines=log_tail_lines,
+                metrics_limit=metrics_limit,
+                metrics_min_step=metrics_min_step,
+            )
+        if item.section == "evaluations" and item.title != "Sign in required":
+            if item.raw.get("type") == "local_eval":
+                return item
+            return self._load_evaluation_detail(item)
+        if item.section == "environments":
+            if item.raw.get("type") == "local_environment":
+                return item
+            return self._load_environment_detail(item)
+        return item
+
+    def _workspace_section(
+        self,
+        options: LabLoadOptions,
+        config: Config,
+        authenticated: bool,
+        team: str | None,
+    ) -> LabSection:
+        auth_status = "authenticated" if authenticated else "public"
+        workspace = options.workspace.resolve()
+        profiles = _config_profiles(config)
+        current_profile = _config_current_profile(config)
+        items = [
+            *_workspace_context_items(
+                workspace,
+                config,
+                auth_status=auth_status,
+                team=team,
+                profiles=profiles,
+                current_profile=current_profile,
+                limit=options.limit,
+            ),
+            *_workspace_profile_items(profiles, current_profile),
+            *_workspace_environment_items(
+                workspace,
+                options.env_dir,
+                options.limit,
+                section="workspace",
+            ),
+            *_workspace_config_items(workspace, options.limit),
+        ]
+        return LabSection(
+            key="workspace",
+            title="Home",
+            description="Local Lab environments, configs, and auth profiles.",
+            items=tuple(items),
+            status=f"{current_profile} * {workspace.name}",
+            status_style="green" if authenticated else "yellow",
+        )
+
+    def _environment_section(
+        self, options: LabLoadOptions, authenticated: bool, warnings: list[str]
+    ) -> LabSection:
+        seen: set[str] = set()
+        items: list[LabItem] = _workspace_environment_items(
+            options.workspace.resolve(),
+            options.env_dir,
+            options.limit,
+            section="environments",
+        )
+        for item in items:
+            seen.add(item.title)
+
+        if authenticated:
+            try:
+                client = self._api_client_factory()
+                mine_params: dict[str, Any] = {
+                    "include_teams": True,
+                    "limit": options.limit,
+                    "offset": 0,
+                    "sort_by": "updated_at",
+                    "sort_order": "desc",
+                    "mine_only": True,
+                }
+                response = client.get("/environmentshub/", params=mine_params)
+                environments = response.get("data", response.get("environments", []))
+                if not isinstance(environments, list):
+                    raise APIError("environment list response did not contain a list")
+                for idx, env in enumerate(environments):
+                    item = _environment_item(env, idx, section="environments", scope="mine")
+                    seen.add(item.title)
+                    items.append(item)
+            except Exception as exc:
+                warnings.append(f"Authenticated environments unavailable: {exc}")
+
+        try:
+            public_client = self._api_client_factory(require_auth=False)
+            public_params: dict[str, Any] = {
+                "include_teams": True,
+                "limit": options.limit,
+                "offset": 0,
+                "sort_by": "stars",
+                "sort_order": "desc",
+                "visibility": "PUBLIC",
+            }
+            response = public_client.get("/environmentshub/", params=public_params)
+            environments = response.get("data", response.get("environments", []))
+            if not isinstance(environments, list):
+                raise APIError("public environment response did not contain a list")
+            for idx, env in enumerate(environments):
+                item = _environment_item(env, idx, section="environments", scope="public")
+                if item.title in seen:
+                    continue
+                items.append(item)
+        except Exception as exc:
+            warnings.append(f"Public environments unavailable: {exc}")
+            if not items:
+                return _error_section(
+                    "environments",
+                    "Environments",
+                    "Environments Hub entries.",
+                    exc,
+                )
+
+        return LabSection(
+            key="environments",
+            title="Environments",
+            description="Local and platform environments.",
+            items=tuple(items),
+            status=f"{len(items)} shown",
+            status_style="cyan",
+        )
+
+    def _evaluation_section(
+        self,
+        options: LabLoadOptions,
+        config: Config,
+        authenticated: bool,
+        warnings: list[str],
+    ) -> LabSection:
+        local_items = _local_eval_items(options, section="evaluations")
+        if not authenticated:
+            auth_section = _auth_required_section(
+                "evaluations", "Evaluations", "Local and platform evaluation runs."
+            )
+            return LabSection(
+                key="evaluations",
+                title="Evaluations",
+                description="Local and platform evaluation runs.",
+                items=tuple([*local_items, *auth_section.items]),
+                status=f"{len(local_items)} local",
+                status_style="cyan" if local_items else "yellow",
+            )
+
+        try:
+            api_client = self._api_client_factory()
+            client = self._evals_client_factory(api_client)
+            response = client.list_evaluations(skip=0, limit=options.limit, team_id=config.team_id)
+            evaluations = response.get("evaluations", [])
+            if not isinstance(evaluations, list):
+                raise APIError("evaluation list response did not contain a list")
+            platform_items = tuple(
+                _evaluation_item(eval_data, idx) for idx, eval_data in enumerate(evaluations)
+            )
+            items = tuple([*platform_items, *local_items])
+            return LabSection(
+                key="evaluations",
+                title="Evaluations",
+                description="Local and platform evaluation runs.",
+                items=items,
+                status=f"{len(items)} shown",
+                status_style="cyan",
+            )
+        except Exception as exc:
+            warnings.append(f"Evaluations unavailable: {exc}")
+            if local_items:
+                error = _error_section(
+                    "evaluations",
+                    "Evaluations",
+                    "Local and platform evaluation runs.",
+                    exc,
+                )
+                return LabSection(
+                    key="evaluations",
+                    title="Evaluations",
+                    description="Local and platform evaluation runs.",
+                    items=tuple([*local_items, *error.items]),
+                    status=f"{len(local_items)} local",
+                    status_style="yellow",
+                )
+            return _error_section(
+                "evaluations",
+                "Evaluations",
+                "Local and platform evaluation runs.",
+                exc,
+            )
+
+    def _rl_section(
+        self,
+        options: LabLoadOptions,
+        config: Config,
+        authenticated: bool,
+        warnings: list[str],
+    ) -> LabSection:
+        if not authenticated:
+            return _auth_required_section(
+                "training",
+                "Training",
+                "Hosted training runs for the active account or team.",
+            )
+
+        try:
+            api_client = self._api_client_factory()
+            client = self._rl_client_factory(api_client)
+            runs = client.list_runs(team_id=config.team_id)
+            runs = sorted(runs, key=lambda run: run.created_at, reverse=True)[: options.limit]
+            items = tuple(_rl_run_item(run, idx) for idx, run in enumerate(runs))
+            return LabSection(
+                key="training",
+                title="Training",
+                description="Training runs for the active account or team.",
+                items=items,
+                status=f"{len(items)} shown",
+                status_style="cyan",
+            )
+        except Exception as exc:
+            warnings.append(f"Training runs unavailable: {exc}")
+            return _error_section(
+                "training",
+                "Training",
+                "Training runs for the active account or team.",
+                exc,
+            )
+
+    def _local_eval_section(self, options: LabLoadOptions) -> LabSection:
+        items = tuple(_local_eval_items(options, section="local-evals"))
+        return LabSection(
+            key="local-evals",
+            title="Local Evals",
+            description="Eval outputs discovered in this workspace.",
+            items=items,
+            status=f"{len(items)} found",
+            status_style="cyan" if items else "dim",
+        )
+
+    def _load_rl_detail(
+        self,
+        item: LabItem,
+        *,
+        include_logs: bool,
+        log_tail_lines: int,
+        metrics_limit: int,
+        metrics_min_step: int | None,
+    ) -> LabItem:
+        run_id = item.title
+        api_client = self._api_client_factory()
+        client = self._rl_client_factory(api_client)
+
+        run = client.get_run(run_id)
+        run_data = run.model_dump(mode="json") if hasattr(run, "model_dump") else dict(run)
+
+        progress: dict[str, Any] = {}
+        metrics: list[dict[str, Any]] = []
+        metrics_loaded = False
+        environment_statuses: list[dict[str, Any]] = []
+        reward_distribution: dict[str, Any] = {}
+        reward_distribution_loaded = False
+        logs = ""
+        logs_loaded = False
+
+        try:
+            progress = client.get_progress(run_id)
+        except Exception as exc:
+            progress = {"error": str(exc)}
+
+        try:
+            metrics = client.get_metrics(
+                run_id,
+                min_step=metrics_min_step,
+                limit=metrics_limit,
+            )
+            metrics_loaded = True
+        except Exception as exc:
+            metrics = [{"error": str(exc)}]
+
+        try:
+            reward_distribution = client.get_distributions(run_id, distribution_type="rewards")
+            reward_distribution_loaded = True
+        except Exception as exc:
+            reward_distribution = {"error": str(exc)}
+
+        if include_logs:
+            try:
+                logs = client.get_logs(run_id, tail_lines=log_tail_lines)
+                logs_loaded = True
+            except Exception as exc:
+                logs = f"Failed to load logs: {exc}"
+                logs_loaded = True
+
+        for env in run_data.get("environments") or []:
+            slug = _environment_slug(env)
+            if slug is None:
+                continue
+            owner, name = slug.split("/", 1)
+            try:
+                environment_statuses.append(client.get_environment_status(owner, name))
+            except Exception as exc:
+                environment_statuses.append({"environment": slug, "error": str(exc)})
+
+        raw = {
+            **run_data,
+            "progress": progress,
+            "recent_metrics": metrics,
+            "metrics_loaded": metrics_loaded,
+            "metrics_limit": metrics_limit,
+            "metrics_page_limit": metrics_limit,
+            "metrics_page_count": len(metrics),
+            "metrics_min_step": metrics_min_step,
+            "environment_statuses": environment_statuses,
+            "reward_distribution": reward_distribution,
+            "reward_distribution_loaded": reward_distribution_loaded,
+        }
+        if include_logs:
+            raw["logs_tail"] = logs
+            raw["logs_loaded"] = logs_loaded
+            raw["log_tail_lines"] = log_tail_lines
+
+        detail_item = _rl_run_item(run, 0)
+        metadata = list(detail_item.metadata)
+        latest_step = progress.get("latest_step")
+        steps_with_samples = progress.get("steps_with_samples")
+        if latest_step is not None:
+            metadata.append(("Latest step", str(latest_step)))
+        if isinstance(steps_with_samples, list):
+            metadata.append(("Sample steps", str(len(steps_with_samples))))
+        if include_logs:
+            metadata.append(("Logs", f"{len(logs.splitlines())} tail lines"))
+
+        return LabItem(
+            key=item.key,
+            section=item.section,
+            title=detail_item.title,
+            subtitle=detail_item.subtitle,
+            status=detail_item.status,
+            status_style=detail_item.status_style,
+            metadata=tuple(metadata),
+            raw=raw,
+        )
+
+    def _load_evaluation_detail(self, item: LabItem) -> LabItem:
+        eval_id = item.title
+        api_client = self._api_client_factory()
+        client = self._evals_client_factory(api_client)
+        detail = client.get_evaluation(eval_id)
+        samples: dict[str, Any] = {}
+        try:
+            samples = client.get_samples(eval_id, page=1, limit=20)
+        except Exception as exc:
+            samples = {"error": str(exc)}
+
+        raw = {**detail, "samples_preview": samples}
+        detail_item = _evaluation_item(raw, 0)
+        metadata = list(detail_item.metadata)
+        total = samples.get("total") if isinstance(samples, dict) else None
+        if total is not None:
+            metadata.append(("Preview samples", str(total)))
+        return LabItem(
+            key=item.key,
+            section=item.section,
+            title=detail_item.title,
+            subtitle=detail_item.subtitle,
+            status=detail_item.status,
+            status_style=detail_item.status_style,
+            metadata=tuple(metadata),
+            raw=raw,
+        )
+
+    def _load_environment_detail(self, item: LabItem) -> LabItem:
+        if "/" not in item.title:
+            return item
+        owner, name = item.title.split("/", 1)
+        client = self._api_client_factory(require_auth=False)
+        details = client.get(f"/environmentshub/{owner}/{name}/@latest")
+        status: dict[str, Any] = {}
+        try:
+            status_response = client.get(f"/environmentshub/{owner}/{name}/status")
+            status = status_response.get("data", status_response)
+        except Exception as exc:
+            status = {"error": str(exc)}
+
+        data = details.get("data", details)
+        if not isinstance(data, dict):
+            data = {"value": data}
+        raw = {**data, "status": status}
+        metadata = list(item.metadata)
+        if version := raw.get("semantic_version"):
+            metadata.append(("Semantic version", str(version)))
+        if content_hash := raw.get("content_hash"):
+            metadata.append(("Content hash", str(content_hash)[:12]))
+        if raw.get("wheel_url") or raw.get("simple_index_url"):
+            metadata.append(("Install", f"prime env install {item.title}"))
+
+        return LabItem(
+            key=item.key,
+            section=item.section,
+            title=item.title,
+            subtitle=item.subtitle,
+            status=item.status,
+            status_style=item.status_style,
+            metadata=tuple(metadata),
+            raw=raw,
+        )
+
+
+def load_lab_snapshot(options: LabLoadOptions) -> LabSnapshot:
+    return LabDataSource().load(options)
+
+
+def _platform_loading_section(
+    key: str,
+    title: str,
+    description: str,
+    *,
+    authenticated: bool,
+    local_items: tuple[LabItem, ...] = (),
+) -> LabSection:
+    if not authenticated and key in {"training", "evaluations"}:
+        auth_section = _auth_required_section(key, title, description)
+        if local_items:
+            return LabSection(
+                key=key,
+                title=title,
+                description=description,
+                items=tuple([*local_items, *auth_section.items]),
+                status=f"{len(local_items)} local",
+                status_style="cyan",
+            )
+        return auth_section
+
+    return LabSection(
+        key=key,
+        title=title,
+        description=description,
+        items=(
+            *local_items,
+            LabItem(
+                key=f"{key}:loading",
+                section=key,
+                title=f"Loading {title}",
+                subtitle="Fetching platform data...",
+                status="loading",
+                status_style="#8b5cf6",
+                metadata=(("Source", "platform"),),
+                raw={"loading": True},
+            ),
+        ),
+        status="loading",
+        status_style="#8b5cf6",
+    )
+
+
+def discover_local_eval_runs(
+    workspace: Path,
+    *,
+    env_dir: str = "./environments",
+    outputs_dir: str = "./outputs",
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    roots: list[Path] = []
+    env_root = (workspace / env_dir).resolve()
+    if env_root.is_dir():
+        for env_path in sorted(env_root.iterdir(), key=lambda path: path.name):
+            candidate = env_path / "outputs" / "evals"
+            if candidate.is_dir():
+                roots.append(candidate)
+
+    global_root = (workspace / outputs_dir / "evals").resolve()
+    if global_root.is_dir():
+        roots.append(global_root)
+
+    runs: list[dict[str, Any]] = []
+    for root in roots:
+        for env_model_dir in sorted(root.iterdir(), key=lambda path: path.name):
+            if not env_model_dir.is_dir() or "--" not in env_model_dir.name:
+                continue
+            env_id, model_part = env_model_dir.name.split("--", 1)
+            model = model_part.replace("--", "/")
+            run_dirs = sorted(
+                env_model_dir.iterdir(),
+                key=lambda path: path.name,
+                reverse=True,
+            )
+            for run_dir in run_dirs:
+                metadata_path = run_dir / "metadata.json"
+                results_path = run_dir / "results.jsonl"
+                if (
+                    not run_dir.is_dir()
+                    or not metadata_path.is_file()
+                    or not results_path.is_file()
+                ):
+                    continue
+                metadata = _read_json_file(metadata_path)
+                runs.append(
+                    {
+                        "env_id": env_id,
+                        "model": model,
+                        "run_id": run_dir.name,
+                        "path": str(run_dir),
+                        "metadata": metadata,
+                    }
+                )
+                if len(runs) >= limit:
+                    return runs
+    return runs
+
+
+def _local_eval_items(options: LabLoadOptions, *, section: str) -> list[LabItem]:
+    return [
+        _local_eval_item(run, idx, section=section)
+        for idx, run in enumerate(
+            discover_local_eval_runs(
+                options.workspace,
+                env_dir=options.env_dir,
+                outputs_dir=options.outputs_dir,
+                limit=options.limit,
+            )
+        )
+    ]
+
+
+def _environment_item(env: dict[str, Any], idx: int, *, section: str, scope: str) -> LabItem:
+    owner = env.get("owner") or {}
+    owner_name = owner.get("name") or owner.get("slug") or env.get("owner_name") or "-"
+    name = env.get("name") or env.get("slug") or "-"
+    env_id = f"{owner_name}/{name}" if owner_name != "-" else str(name)
+    description = str(env.get("description") or "")
+    updated = _format_optional_time(env.get("updated_at"))
+    version = env.get("latest_version") or "-"
+    stars = str(env.get("stars", 0))
+    visibility = str(env.get("visibility") or "-")
+    status = str(env.get("latest_ci_status") or visibility)
+
+    return LabItem(
+        key=f"environment:{env.get('id', idx)}",
+        section=section,
+        title=env_id,
+        subtitle=description,
+        status=status,
+        status_style=_status_style(status),
+        metadata=(
+            ("Scope", scope),
+            ("Version", str(version)),
+            ("Stars", stars),
+            ("Visibility", visibility),
+            ("Updated", updated),
+        ),
+        raw=env,
+    )
+
+
+def _evaluation_item(eval_data: dict[str, Any], idx: int) -> LabItem:
+    eval_id = str(eval_data.get("evaluation_id") or eval_data.get("id") or idx)
+    env_names = eval_data.get("environment_names") or eval_data.get("environmentNames") or []
+    env_name = _first_text(env_names) or _first_text(eval_data.get("environment_ids")) or "-"
+    model = str(eval_data.get("model_name") or eval_data.get("modelName") or "-")
+    status = str(eval_data.get("status") or "UNKNOWN")
+    raw_metadata = eval_data.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+    eval_type = "hosted" if eval_data.get("is_hosted") else "local"
+
+    return LabItem(
+        key=f"evaluation:{eval_id}",
+        section="evaluations",
+        title=eval_id,
+        subtitle=f"{env_name} · {model}",
+        status=status,
+        status_style=_status_style(status),
+        metadata=(
+            ("Environment", str(env_name)),
+            ("Model", model),
+            ("Type", eval_type),
+            ("Examples", str(metadata.get("num_examples", "-"))),
+            ("Rollouts", str(metadata.get("rollouts_per_example", "-"))),
+            ("Samples", str(eval_data.get("total_samples", eval_data.get("totalSamples", "-")))),
+            ("Updated", _format_optional_time(eval_data.get("updated_at"))),
+        ),
+        raw=eval_data,
+    )
+
+
+def _rl_run_item(run: Any, idx: int) -> LabItem:
+    data = run.model_dump(mode="json") if hasattr(run, "model_dump") else dict(run)
+    run_id = str(data.get("id") or idx)
+    status = str(data.get("status") or "UNKNOWN")
+    model = str(data.get("base_model") or data.get("baseModel") or "-")
+    envs = data.get("environments") or []
+    env_names = (
+        ", ".join(_environment_name(env) for env in envs[:3]) if isinstance(envs, list) else "-"
+    )
+    if isinstance(envs, list) and len(envs) > 3:
+        env_names += f", +{len(envs) - 3}"
+    if not env_names:
+        env_names = "-"
+
+    return LabItem(
+        key=f"rl-run:{run_id}",
+        section="training",
+        title=run_id,
+        subtitle=f"{model} · {env_names}",
+        status=status,
+        status_style=_status_style(status),
+        metadata=(
+            ("Name", str(data.get("name") or "-")),
+            ("Model", model),
+            ("Environments", env_names),
+            ("Max steps", str(data.get("max_steps") or data.get("maxSteps") or "-")),
+            ("Batch", str(data.get("batch_size") or data.get("batchSize") or "-")),
+            ("Created", _format_optional_time(data.get("created_at") or data.get("createdAt"))),
+            ("Updated", _format_optional_time(data.get("updated_at") or data.get("updatedAt"))),
+        ),
+        raw=data,
+    )
+
+
+def _local_eval_item(run: dict[str, Any], idx: int, *, section: str = "local-evals") -> LabItem:
+    raw_metadata = run.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+    reward = metadata.get("avg_reward")
+    reward_is_numeric = isinstance(reward, int | float)
+    reward_text = f"{reward:.4g}" if reward_is_numeric else "-"
+    run_id = str(run.get("run_id") or idx)
+
+    return LabItem(
+        key=f"local-eval:{run_id}:{idx}",
+        section=section,
+        title=run_id,
+        subtitle=f"{run.get('env_id', '-')} · {run.get('model', '-')}",
+        status=reward_text,
+        status_style="green" if reward_is_numeric and float(reward) > 0 else "dim",
+        metadata=(
+            ("Environment", str(run.get("env_id") or "-")),
+            ("Model", str(run.get("model") or "-")),
+            ("Avg reward", reward_text),
+            ("Examples", str(metadata.get("num_examples", "-"))),
+            ("Rollouts", str(metadata.get("rollouts_per_example", "-"))),
+            ("Path", str(run.get("path") or "-")),
+        ),
+        raw={**run, "type": "local_eval"},
+    )
+
+
+def _workspace_context_items(
+    workspace: Path,
+    config: Config,
+    *,
+    auth_status: str,
+    team: str | None,
+    profiles: list[str],
+    current_profile: str,
+    limit: int,
+) -> list[LabItem]:
+    active_metadata = _read_lab_workspace_metadata(workspace) or {}
+    items = [
+        _workspace_context_item(
+            workspace,
+            config,
+            auth_status=auth_status,
+            team=team,
+            profiles=profiles,
+            current_profile=current_profile,
+            active=True,
+            lab_metadata=active_metadata,
+        )
+    ]
+    for cached_workspace, lab_metadata in _discover_cached_lab_workspaces(
+        workspace, max(0, limit - 1)
+    ):
+        items.append(
+            _workspace_context_item(
+                cached_workspace,
+                config,
+                auth_status=auth_status,
+                team=team,
+                profiles=(),
+                current_profile=current_profile,
+                active=False,
+                lab_metadata=lab_metadata,
+            )
+        )
+    return items
+
+
+def _workspace_context_item(
+    workspace: Path,
+    config: Config,
+    *,
+    auth_status: str,
+    team: str | None,
+    profiles: list[str] | tuple[str, ...],
+    current_profile: str,
+    active: bool,
+    lab_metadata: dict[str, Any],
+) -> LabItem:
+    choices = lab_metadata.get("choices")
+    primary_agent = (
+        choices.get("primary_agent")
+        if isinstance(choices, dict) and choices.get("primary_agent")
+        else None
+    )
+    setup_source = lab_metadata.get("setup_source")
+    metadata = [
+        ("Path", str(workspace)),
+    ]
+    if setup_source is not None:
+        metadata.append(("Setup", str(setup_source)))
+    if primary_agent is not None:
+        metadata.append(("Primary agent", str(primary_agent)))
+    if active:
+        metadata.extend(
+            [
+                ("Auth", auth_status),
+                ("Profile", current_profile),
+                ("Team", team or "-"),
+                ("API", config.base_url),
+                ("App", config.frontend_url),
+            ]
+        )
+    return LabItem(
+        key=f"workspace:context:{_workspace_cache_key(workspace)}",
+        section="workspace",
+        title=workspace.name,
+        subtitle=str(workspace),
+        status="active" if active else "cached",
+        status_style="green" if active else "cyan",
+        metadata=tuple(metadata),
+        raw={
+            "type": "workspace_context",
+            "workspace": str(workspace),
+            "active": active,
+            "auth": auth_status,
+            "profile": current_profile,
+            "profiles": list(profiles),
+            "team": team,
+            "api": config.base_url,
+            "app": config.frontend_url,
+            "setup_source": setup_source,
+            "choices": choices if isinstance(choices, dict) else {},
+        },
+    )
+
+
+def _discover_cached_lab_workspaces(
+    active_workspace: Path, limit: int
+) -> list[tuple[Path, dict[str, Any]]]:
+    if limit <= 0:
+        return []
+    active_workspace = active_workspace.resolve()
+    found: list[tuple[Path, dict[str, Any]]] = []
+    seen = {active_workspace}
+    for root in _lab_workspace_search_roots(active_workspace):
+        for marker_workspace in _iter_lab_workspace_markers(root):
+            workspace = marker_workspace.resolve()
+            if workspace in seen:
+                continue
+            metadata = _read_lab_workspace_metadata(workspace)
+            if metadata is None:
+                continue
+            seen.add(workspace)
+            found.append((workspace, metadata))
+            if len(found) >= limit:
+                return found
+    return found
+
+
+def _lab_workspace_search_roots(active_workspace: Path) -> list[Path]:
+    candidates = [active_workspace.parent]
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            root = candidate.resolve()
+        except OSError:
+            continue
+        if not root.is_dir() or root in seen:
+            continue
+        roots.append(root)
+        seen.add(root)
+    return roots
+
+
+def _iter_lab_workspace_markers(root: Path) -> list[Path]:
+    workspaces: list[Path] = []
+    skip_dirs = {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "outputs",
+    }
+    max_depth = 3
+    for current, dirs, _files in os.walk(root):
+        current_path = Path(current)
+        try:
+            depth = len(current_path.relative_to(root).parts)
+        except ValueError:
+            depth = 0
+        if (current_path / ".prime" / "lab.json").is_file() or (
+            current_path / ".prime" / "lab_setup.json"
+        ).is_file():
+            workspaces.append(current_path)
+        if depth >= max_depth:
+            dirs[:] = []
+            continue
+        dirs[:] = [
+            directory
+            for directory in dirs
+            if directory not in skip_dirs and not directory.startswith(".")
+        ]
+    return sorted(workspaces, key=lambda path: path.name.lower())
+
+
+def _read_lab_workspace_metadata(workspace: Path) -> dict[str, Any] | None:
+    metadata: dict[str, Any] = {}
+    for filename in ("lab_setup.json", "lab.json"):
+        path = workspace / ".prime" / filename
+        if not path.is_file():
+            continue
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(loaded, dict):
+            metadata.update(loaded)
+    return metadata or None
+
+
+def _workspace_cache_key(workspace: Path) -> str:
+    return hashlib.sha1(str(workspace).encode("utf-8")).hexdigest()[:12]
+
+
+def _workspace_profile_items(profiles: list[str], current_profile: str) -> list[LabItem]:
+    items: list[LabItem] = []
+    for profile in profiles:
+        current = profile == current_profile
+        command = f"prime config use {profile}"
+        items.append(
+            LabItem(
+                key=f"workspace:profile:{profile}",
+                section="workspace",
+                title=profile,
+                subtitle="Prime CLI auth profile",
+                status="current" if current else "profile",
+                status_style="green" if current else "cyan",
+                metadata=(
+                    ("Kind", "Auth profile"),
+                    ("Current", "yes" if current else "no"),
+                    ("Command", command),
+                ),
+                raw={
+                    "type": "auth_profile",
+                    "profile": profile,
+                    "current": current,
+                    "command": command,
+                },
+            )
+        )
+    return items
+
+
+def _workspace_environment_items(
+    workspace: Path, env_dir: str, limit: int, *, section: str
+) -> list[LabItem]:
+    env_root = _workspace_path(workspace, env_dir)
+    if not env_root.is_dir():
+        return []
+
+    items: list[LabItem] = []
+    for path in sorted(child for child in env_root.iterdir() if child.is_dir()):
+        if path.name.startswith("."):
+            continue
+        rel_path = _relative_path(path, workspace)
+        command = f"prime env build {path.name} --path {_relative_path(env_root, workspace)}"
+        items.append(
+            LabItem(
+                key=f"workspace:local-env:{rel_path}",
+                section=section,
+                title=path.name,
+                subtitle=rel_path,
+                status="environment",
+                status_style="cyan",
+                metadata=(
+                    ("Kind", "Local environment"),
+                    ("Path", rel_path),
+                    ("Build", command),
+                ),
+                raw={
+                    "type": "local_environment",
+                    "name": path.name,
+                    "path": str(path),
+                    "relative_path": rel_path,
+                    "command": command,
+                    "files": _interesting_child_files(path),
+                },
+            )
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _workspace_config_items(workspace: Path, limit: int) -> list[LabItem]:
+    configs_root = workspace / "configs"
+    if not configs_root.is_dir():
+        return []
+
+    items: list[LabItem] = []
+    for config_kind in ("rl", "eval", "gepa"):
+        kind_root = configs_root / config_kind
+        if not kind_root.is_dir():
+            continue
+        for path in sorted(kind_root.rglob("*.toml")):
+            if not path.is_file():
+                continue
+            items.append(_workspace_config_item(path, workspace, config_kind))
+            if len(items) >= limit:
+                return items
+    return items
+
+
+def _workspace_config_item(path: Path, workspace: Path, config_kind: str) -> LabItem:
+    rel_path = _relative_path(path, workspace)
+    parsed, toml_text = _read_toml_preview(path)
+    command = _workspace_config_command(config_kind, rel_path)
+    title = path.stem
+    subtitle = _workspace_config_subtitle(config_kind, parsed) or rel_path
+    return LabItem(
+        key=f"workspace:config:{config_kind}:{rel_path}",
+        section="workspace",
+        title=title,
+        subtitle=subtitle,
+        status=config_kind,
+        status_style="yellow" if config_kind == "rl" else "cyan",
+        metadata=(
+            ("Kind", _workspace_config_kind_label(config_kind)),
+            ("Path", rel_path),
+            ("Run", command),
+        ),
+        raw={
+            "type": "config_file",
+            "config_kind": config_kind,
+            "path": str(path),
+            "relative_path": rel_path,
+            "command": command,
+            "toml": toml_text,
+            "parsed": parsed,
+        },
+    )
+
+
+def _config_profiles(config: Config) -> list[str]:
+    list_environments = getattr(config, "list_environments", None)
+    if not callable(list_environments):
+        return [_config_current_profile(config)]
+    try:
+        profiles = [str(profile) for profile in list_environments()]
+    except Exception:
+        return [_config_current_profile(config)]
+    return profiles or [_config_current_profile(config)]
+
+
+def _config_current_profile(config: Config) -> str:
+    return str(getattr(config, "current_environment", None) or "production")
+
+
+def _workspace_path(workspace: Path, value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = workspace / path
+    return path.resolve()
+
+
+def _relative_path(path: Path, root: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(root.resolve()))
+    except ValueError:
+        return str(path)
+
+
+def _interesting_child_files(path: Path) -> list[str]:
+    names = []
+    for child in sorted(path.iterdir()):
+        if child.name.startswith("."):
+            continue
+        if child.is_file() and child.suffix in {".py", ".toml", ".md", ".json"}:
+            names.append(child.name)
+    return names[:12]
+
+
+def _read_toml_preview(path: Path) -> tuple[dict[str, Any], str]:
+    try:
+        toml_text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}, ""
+    try:
+        parsed = toml.loads(toml_text)
+    except toml.TomlDecodeError:
+        parsed = {}
+    return parsed if isinstance(parsed, dict) else {}, toml_text
+
+
+def _workspace_config_command(config_kind: str, rel_path: str) -> str:
+    if config_kind == "rl":
+        return f"prime rl run {rel_path}"
+    if config_kind == "eval":
+        return f"prime eval run {rel_path} --hosted"
+    return f"prime gepa run {rel_path}"
+
+
+def _workspace_config_kind_label(config_kind: str) -> str:
+    if config_kind == "rl":
+        return "Training config"
+    if config_kind == "eval":
+        return "Evaluation config"
+    return "GEPA config"
+
+
+def _workspace_config_subtitle(config_kind: str, parsed: dict[str, Any]) -> str:
+    if config_kind == "rl":
+        model = parsed.get("model") or parsed.get("base_model") or parsed.get("baseModel")
+        environments = parsed.get("environments")
+        env_name = "-"
+        if isinstance(environments, list) and environments:
+            first_env = environments[0]
+            if isinstance(first_env, dict):
+                env_name = str(first_env.get("id") or first_env.get("slug") or "-")
+        parts = [str(value) for value in (model, env_name) if value and value != "-"]
+        return " · ".join(parts)
+    if config_kind == "eval":
+        evals = parsed.get("eval")
+        if isinstance(evals, list) and evals:
+            first_eval = evals[0]
+            if isinstance(first_eval, dict):
+                env = first_eval.get("env_id") or first_eval.get("environment")
+                model = first_eval.get("model") or parsed.get("model")
+                parts = [str(value) for value in (env, model) if value]
+                if len(evals) > 1:
+                    parts.append(f"{len(evals)} evals")
+                return " · ".join(parts)
+        env = parsed.get("env_id") or parsed.get("environment")
+        model = parsed.get("model")
+        return " · ".join(str(value) for value in (env, model) if value)
+    env = parsed.get("env_id") or parsed.get("environment") or parsed.get("task")
+    return str(env or "")
+
+
+def _auth_required_section(key: str, title: str, description: str) -> LabSection:
+    item = LabItem(
+        key=f"{key}:auth-required",
+        section=key,
+        title="Sign in required",
+        subtitle="Run prime login to view authenticated platform data.",
+        status="auth",
+        status_style="yellow",
+    )
+    return LabSection(
+        key=key,
+        title=title,
+        description=description,
+        items=(item,),
+        status="auth required",
+        status_style="yellow",
+    )
+
+
+def _error_section(key: str, title: str, description: str, exc: Exception) -> LabSection:
+    item = LabItem(
+        key=f"{key}:error",
+        section=key,
+        title="Unavailable",
+        subtitle=str(exc),
+        status="error",
+        status_style="red",
+    )
+    return LabSection(
+        key=key,
+        title=title,
+        description=description,
+        items=(item,),
+        status="error",
+        status_style="red",
+    )
+
+
+def _environment_name(env: Any) -> str:
+    if not isinstance(env, dict):
+        return str(env)
+    return str(env.get("slug") or env.get("name") or env.get("id") or "?")
+
+
+def _environment_slug(env: Any) -> str | None:
+    if not isinstance(env, dict):
+        return None
+    slug = env.get("slug") or env.get("id")
+    if isinstance(slug, str) and "/" in slug:
+        return slug
+    owner = env.get("owner")
+    name = env.get("name")
+    if isinstance(owner, str) and isinstance(name, str) and owner and name:
+        return f"{owner}/{name}"
+    return None
+
+
+def _first_text(value: Any) -> str | None:
+    if isinstance(value, list) and value:
+        return str(value[0])
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _format_optional_time(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        return format_time_ago(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _status_style(status: str) -> str:
+    normalized = status.upper()
+    if normalized in {"COMPLETED", "SUCCESS", "READY", "PUBLIC"}:
+        return "green"
+    if normalized in {"RUNNING", "PENDING", "STARTING", "PRIVATE"}:
+        return "yellow"
+    if normalized in {"FAILED", "ERROR", "CANCELLED"}:
+        return "red"
+    return "dim"

@@ -1052,12 +1052,15 @@ def list_models(
             console.print("[dim]This could mean no healthy RL clusters are running.[/dim]")
             return
 
-        table = Table(title="Prime RL — Models")
+        table = Table(
+            title="Prime RL — Models",
+            caption="[dim]Prices per 1M tokens[/dim]",
+        )
         table.add_column("Model", style="cyan")
         table.add_column("Status")
-        table.add_column("Training $/M tok", style="green", justify="right")
-        table.add_column("Inference In $/M tok", style="green", justify="right")
-        table.add_column("Inference Out $/M tok", style="green", justify="right")
+        table.add_column("Input", style="green", justify="right")
+        table.add_column("Output", style="green", justify="right")
+        table.add_column("Train", style="green", justify="right")
 
         for model in models:
             if model.at_capacity:
@@ -1067,9 +1070,9 @@ def list_models(
             table.add_row(
                 model.name,
                 status,
-                format_price_per_mtok(model.training_price_per_mtok) or "-",
                 format_price_per_mtok(model.inference_input_price_per_mtok) or "-",
                 format_price_per_mtok(model.inference_output_price_per_mtok) or "-",
+                format_price_per_mtok(model.training_price_per_mtok) or "-",
             )
 
         console.print(table)

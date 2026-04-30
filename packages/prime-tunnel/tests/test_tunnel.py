@@ -225,6 +225,29 @@ async def test_client_create_tunnel_sends_labels(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_client_list_tunnels_uses_plural_labels_param(monkeypatch):
+    client = TunnelClient(api_key="test-key")
+    captured = {}
+
+    async def fake_request(method, url, json=None, params=None):
+        captured["method"] = method
+        captured["params"] = params
+        return MagicMock(status_code=200)
+
+    async def fake_handle_response(response, operation):
+        return {"tunnels": []}
+
+    monkeypatch.setattr(client, "_idempotent_request_with_retry", fake_request)
+    monkeypatch.setattr(client, "_handle_response", fake_handle_response)
+
+    tunnels = await client.list_tunnels(labels=["dev"])
+
+    assert tunnels == []
+    assert captured["params"]["labels"] == ["dev"]
+    assert "label" not in captured["params"]
+
+
+@pytest.mark.asyncio
 async def test_client_bulk_delete_by_labels(monkeypatch):
     client = TunnelClient(api_key="test-key")
     captured = {}

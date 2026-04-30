@@ -360,7 +360,7 @@ class TunnelClient:
         if team_id:
             params["teamId"] = team_id
         if labels:
-            params["label"] = labels
+            params["labels"] = labels
         if status:
             params["status"] = status
 

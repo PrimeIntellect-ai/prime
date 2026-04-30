@@ -178,13 +178,13 @@ def list_tunnels(
         console.print(f"[red]Error:[/red] {e}", style="bold")
         raise typer.Exit(1)
 
-    if not tunnels:
-        console.print("[dim]No active tunnels[/dim]")
-        return
-
     tunnels_data = [_format_tunnel_for_output(tunnel) for tunnel in tunnels]
     if output == "json":
         output_data_as_json({"tunnels": tunnels_data, "page": page, "per_page": num}, console)
+        return
+
+    if not tunnels:
+        console.print("[dim]No active tunnels[/dim]")
         return
 
     table = Table(title="Active Tunnels")

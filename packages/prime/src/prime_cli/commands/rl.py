@@ -1133,7 +1133,7 @@ def list_models(
         console.print(table)
         if promo_labels:
             joined = ", ".join(rich_escape(label) for label in promo_labels)
-            console.print(f"[bold yellow]{joined}[/bold yellow]")
+            console.print(f"[bold yellow]{joined}[/bold yellow]", justify="center")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

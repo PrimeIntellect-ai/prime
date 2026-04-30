@@ -236,6 +236,46 @@ def test_models_promo_label_deduplicated_across_models(
     assert plain.count("shared promo") == 1
 
 
+def test_models_table_renders_promo_with_list_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-swap backend: legacy fields hold effective price, list_* hold list price."""
+    payload = {
+        "models": [
+            {
+                "name": "qwen/qwen3-8b",
+                "atCapacity": False,
+                "trainingPricePerMtok": 0.0,
+                "inferenceInputPricePerMtok": 0.0,
+                "inferenceOutputPricePerMtok": 0.0,
+                "listTrainingPricePerMtok": 0.5,
+                "listInferenceInputPricePerMtok": 1.0,
+                "listInferenceOutputPricePerMtok": 3.0,
+                "effectiveTrainingPricePerMtok": 0.0,
+                "effectiveInferenceInputPricePerMtok": 0.0,
+                "effectiveInferenceOutputPricePerMtok": 0.0,
+                "promoLabel": "Free RFT week",
+            },
+        ]
+    }
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return payload
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "→" in plain
+    assert "FREE" in plain
+    assert "$0.5" in plain
+    assert "$1" in plain
+    assert "$3" in plain
+    assert plain.count("Free RFT week") == 1
+
+
 def test_models_json_includes_effective_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return _promo_payload()

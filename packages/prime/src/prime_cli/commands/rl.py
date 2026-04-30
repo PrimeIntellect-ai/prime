@@ -1108,24 +1108,33 @@ def list_models(
                 status = "[red]At Capacity[/red]"
             else:
                 status = "[green]Available[/green]"
+            # Post-swap backends populate list_* with the un-discounted price
+            # and the legacy *_price_per_mtok with the effective (charged) price.
+            # Pre-swap backends omit list_* and keep legacy=list, effective=charged.
+            if model.list_training_price_per_mtok is not None:
+                list_train = model.list_training_price_per_mtok
+                eff_train = model.training_price_per_mtok
+            else:
+                list_train = model.training_price_per_mtok
+                eff_train = model.effective_training_price_per_mtok
+            if model.list_inference_input_price_per_mtok is not None:
+                list_input = model.list_inference_input_price_per_mtok
+                eff_input = model.inference_input_price_per_mtok
+            else:
+                list_input = model.inference_input_price_per_mtok
+                eff_input = model.effective_inference_input_price_per_mtok
+            if model.list_inference_output_price_per_mtok is not None:
+                list_output = model.list_inference_output_price_per_mtok
+                eff_output = model.inference_output_price_per_mtok
+            else:
+                list_output = model.inference_output_price_per_mtok
+                eff_output = model.effective_inference_output_price_per_mtok
             table.add_row(
                 model.name,
                 status,
-                format_promo_price(
-                    model.inference_input_price_per_mtok,
-                    model.effective_inference_input_price_per_mtok,
-                )
-                or "-",
-                format_promo_price(
-                    model.inference_output_price_per_mtok,
-                    model.effective_inference_output_price_per_mtok,
-                )
-                or "-",
-                format_promo_price(
-                    model.training_price_per_mtok,
-                    model.effective_training_price_per_mtok,
-                )
-                or "-",
+                format_promo_price(list_input, eff_input) or "-",
+                format_promo_price(list_output, eff_output) or "-",
+                format_promo_price(list_train, eff_train) or "-",
             )
             if model.promo_label and model.promo_label not in promo_labels:
                 promo_labels.append(model.promo_label)

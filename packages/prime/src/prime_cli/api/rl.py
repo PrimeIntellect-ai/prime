@@ -20,6 +20,13 @@ class RLModel(BaseModel):
     inference_output_price_per_mtok: Optional[float] = Field(
         None, alias="inferenceOutputPricePerMtok"
     )
+    list_training_price_per_mtok: Optional[float] = Field(None, alias="listTrainingPricePerMtok")
+    list_inference_input_price_per_mtok: Optional[float] = Field(
+        None, alias="listInferenceInputPricePerMtok"
+    )
+    list_inference_output_price_per_mtok: Optional[float] = Field(
+        None, alias="listInferenceOutputPricePerMtok"
+    )
     effective_training_price_per_mtok: Optional[float] = Field(
         None, alias="effectiveTrainingPricePerMtok"
     )

@@ -20,6 +20,13 @@ class RLModel(BaseModel):
     inference_output_price_per_mtok: Optional[float] = Field(
         None, alias="inferenceOutputPricePerMtok"
     )
+    list_training_price_per_mtok: Optional[float] = Field(None, alias="listTrainingPricePerMtok")
+    list_inference_input_price_per_mtok: Optional[float] = Field(
+        None, alias="listInferenceInputPricePerMtok"
+    )
+    list_inference_output_price_per_mtok: Optional[float] = Field(
+        None, alias="listInferenceOutputPricePerMtok"
+    )
     effective_training_price_per_mtok: Optional[float] = Field(
         None, alias="effectiveTrainingPricePerMtok"
     )
@@ -32,6 +39,24 @@ class RLModel(BaseModel):
     promo_label: Optional[str] = Field(None, alias="promoLabel")
 
     model_config = ConfigDict(populate_by_name=True)
+
+    def resolve_prices(self, category: str) -> tuple[Optional[float], Optional[float]]:
+        """Return ``(list_price, effective_price)`` for ``category``.
+
+        Categories: ``training``, ``inference_input``, ``inference_output``.
+
+        Post-swap backends populate ``list_*`` with the un-discounted price and
+        the legacy ``*_price_per_mtok`` with the effective (charged) price.
+        Pre-swap backends omit ``list_*`` and keep ``legacy = list``,
+        ``effective = charged``.
+        """
+        list_attr = f"list_{category}_price_per_mtok"
+        legacy_attr = f"{category}_price_per_mtok"
+        effective_attr = f"effective_{category}_price_per_mtok"
+        list_value = getattr(self, list_attr)
+        if list_value is not None:
+            return list_value, getattr(self, legacy_attr)
+        return getattr(self, legacy_attr), getattr(self, effective_attr)
 
 
 class RLRun(BaseModel):

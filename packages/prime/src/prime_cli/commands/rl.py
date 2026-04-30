@@ -34,6 +34,7 @@ from ..utils.formatters import (
     format_promo_price,
     strip_ansi,
 )
+from ..utils.prompt import confirm_or_skip
 
 console = get_console()
 
@@ -786,6 +787,7 @@ def create_run(
         "--skip-action-check",
         help="Skip action status check and run even if environment action failed.",
     ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
@@ -839,6 +841,25 @@ def create_run(
         api_client = APIClient()
         rl_client = RLClient(api_client)
         app_config = Config()
+
+        # Kick off pricing fetch in the background so it overlaps with summary
+        # rendering and the action-status checks below. Daemon thread so a slow
+        # /rft/models can't outlive the command (ThreadPoolExecutor workers are
+        # joined at interpreter exit, which would defeat the timeout cap below).
+        import threading
+
+        pricing_state: Dict[str, Any] = {"models": None, "error": None}
+        pricing_done = threading.Event()
+
+        def _fetch_pricing() -> None:
+            try:
+                pricing_state["models"] = rl_client.list_models(team_id=app_config.team_id)
+            except Exception as exc:
+                pricing_state["error"] = exc
+            finally:
+                pricing_done.set()
+
+        threading.Thread(target=_fetch_pricing, daemon=True).start()
 
         # Show configuration in organized sections
         console.print("[white]Configuration:[/white]\n")
@@ -936,6 +957,38 @@ def create_run(
             console.print("\n[cyan]Secrets[/cyan]")
             console.print(f"  Keys: {', '.join(secrets.keys())}")
 
+        # Pricing (best-effort — skipped silently if /rft/models is unreachable,
+        # times out, or doesn't include the chosen model. 8s cap so a slow
+        # endpoint can't gate the confirmation prompt.)
+        if pricing_done.wait(timeout=8) and pricing_state["error"] is None:
+            available = pricing_state["models"] or []
+        else:
+            available = []
+        priced = next((m for m in available if m.name == cfg.model), None)
+        if priced is not None:
+            list_train, eff_train = priced.resolve_prices("training")
+            list_input, eff_input = priced.resolve_prices("inference_input")
+            list_output, eff_output = priced.resolve_prices("inference_output")
+            console.print(
+                "\n[cyan]Pricing[/cyan] [dim](per 1M tokens, charged on actual usage)[/dim]"
+            )
+
+            def _format(list_p: Any, eff_p: Any) -> str:
+                charged = eff_p if eff_p is not None else list_p
+                if charged is None:
+                    return "-"
+                if float(charged) == 0:
+                    if list_p is not None and float(list_p) > float(charged):
+                        return format_promo_price(list_p, eff_p) or "[bold green]Free[/bold green]"
+                    return "[bold green]Free[/bold green]"
+                return format_promo_price(list_p, eff_p) or "-"
+
+            console.print(f"  Training:         {_format(list_train, eff_train)}")
+            console.print(f"  Inference Input:  {_format(list_input, eff_input)}")
+            console.print(f"  Inference Output: {_format(list_output, eff_output)}")
+            if priced.promo_label:
+                console.print(f"  [bold yellow]{rich_escape(priced.promo_label)}[/bold yellow]")
+
         console.print()
 
         # Check action status for hub environments
@@ -985,6 +1038,10 @@ def create_run(
                 raise typer.Exit(1)
 
             console.print()
+
+        if not confirm_or_skip("Launch this Hosted Training run?", yes, default=True):
+            console.print("\nRun cancelled")
+            return
 
         console.print("[dim]Creating Hosted Training run...[/dim]\n")
 
@@ -1094,7 +1151,6 @@ def list_models(
 
         table = Table(
             title="Hosted Training - Models",
-            caption="[dim]Prices per 1M tokens[/dim]",
         )
         table.add_column("Model", style="cyan")
         table.add_column("Status")
@@ -1108,32 +1164,25 @@ def list_models(
                 status = "[red]At Capacity[/red]"
             else:
                 status = "[green]Available[/green]"
+            list_train, eff_train = model.resolve_prices("training")
+            list_input, eff_input = model.resolve_prices("inference_input")
+            list_output, eff_output = model.resolve_prices("inference_output")
             table.add_row(
                 model.name,
                 status,
-                format_promo_price(
-                    model.inference_input_price_per_mtok,
-                    model.effective_inference_input_price_per_mtok,
-                )
-                or "-",
-                format_promo_price(
-                    model.inference_output_price_per_mtok,
-                    model.effective_inference_output_price_per_mtok,
-                )
-                or "-",
-                format_promo_price(
-                    model.training_price_per_mtok,
-                    model.effective_training_price_per_mtok,
-                )
-                or "-",
+                format_promo_price(list_input, eff_input) or "-",
+                format_promo_price(list_output, eff_output) or "-",
+                format_promo_price(list_train, eff_train) or "-",
             )
             if model.promo_label and model.promo_label not in promo_labels:
                 promo_labels.append(model.promo_label)
 
-        console.print(table)
+        caption_lines = ["[dim]Prices per 1M tokens[/dim]"]
         if promo_labels:
             joined = ", ".join(rich_escape(label) for label in promo_labels)
-            console.print(f"[bold yellow]{joined}[/bold yellow]")
+            caption_lines.append(f"[bold yellow]{joined}[/bold yellow]")
+        table.caption = "\n".join(caption_lines)
+        console.print(table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

@@ -62,11 +62,10 @@ def _run_usage_json(usage: RunUsage) -> dict:
 
 
 def _build_run_usage_table(usage: RunUsage) -> Table:
-    # Rich parses table titles as markup, so values from the API (run_name,
-    # status) must be escaped before interpolation — otherwise a stray
-    # "[bold]" or similar in those strings would be interpreted as markup.
-    name = rich_escape(usage.run_name or usage.run_id)
-    title = f"Run Usage — {name}"
+    # Title stays short (run id + status) so long run names don't wrap and
+    # mangle the table header. The descriptive name + base model live in
+    # the caption below the table.
+    title = f"Run Usage — {rich_escape(usage.run_id)}"
     if usage.status:
         title += f"  [{rich_escape(usage.status)}]"
 
@@ -75,34 +74,37 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
         [
             ("Bucket", "cyan"),
             ("Tokens", "white"),
-            ("Input tokens", "white"),
-            ("Output tokens", "white"),
             ("Cost", "green"),
             ("Price / Mtok", "magenta"),
         ],
         show_lines=False,
     )
 
+    caption_parts: list[str] = []
+    if usage.run_name and usage.run_name != usage.run_id:
+        caption_parts.append(rich_escape(usage.run_name))
+    if usage.base_model:
+        caption_parts.append(f"model: {rich_escape(usage.base_model)}")
+    if caption_parts:
+        table.caption = "[dim]" + "  •  ".join(caption_parts) + "[/dim]"
+
     table.add_row(
         "Training",
         _format_tokens(usage.training.tokens),
-        "-",
-        "-",
         _format_usd(usage.training.cost_usd),
         format_price_per_mtok(usage.pricing.training_per_mtok) or "-",
     )
+    # Inference cost is a single combined number (input + output charges)
+    # — render it on the output row and leave the input row's Cost blank
+    # so the column doesn't double-count.
     table.add_row(
         "Inference (input)",
-        "-",
         _format_tokens(usage.inference.input_tokens),
-        "-",
         "",
         format_price_per_mtok(usage.pricing.inference_input_per_mtok) or "-",
     )
     table.add_row(
         "Inference (output)",
-        "-",
-        "-",
         _format_tokens(usage.inference.output_tokens),
         _format_usd(usage.inference.cost_usd),
         format_price_per_mtok(usage.pricing.inference_output_per_mtok) or "-",
@@ -110,8 +112,6 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
     table.add_row(
         "[bold]Total[/bold]",
         f"[bold]{_format_tokens(usage.total_tokens)}[/bold]",
-        "",
-        "",
         f"[bold]{_format_usd(usage.total_cost_usd)}[/bold]",
         "",
     )

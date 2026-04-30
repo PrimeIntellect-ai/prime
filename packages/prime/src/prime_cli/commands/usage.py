@@ -49,6 +49,17 @@ def _format_tokens(value: int) -> str:
     return str(value)
 
 
+def _derived_cost(tokens: int, price_per_mtok: float | None) -> float | None:
+    """Compute cost in USD from tokens × snapshotted rate.
+
+    Returns None when the rate is missing so the caller can render `-`
+    (genuinely unknown) instead of `$0.00` (zero rate, which is a real value).
+    """
+    if price_per_mtok is None:
+        return None
+    return float(tokens) * price_per_mtok / 1_000_000
+
+
 def _format_usd(value: float) -> str:
     if value == 0:
         return "$0.00"
@@ -88,25 +99,30 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
     if caption_parts:
         table.caption = "[dim]" + "  •  ".join(caption_parts) + "[/dim]"
 
+    # Per-row inference cost is derived from tokens × the *same* snapshotted
+    # rate that produced RFTUsage.cost on the backend, so the two derived
+    # halves sum to the combined inference cost in the response (modulo a
+    # cent of rounding). The Total row keeps using the backend's exact sum
+    # so what we show as "Total" is what was actually billed.
+    in_cost = _derived_cost(usage.inference.input_tokens, usage.pricing.inference_input_per_mtok)
+    out_cost = _derived_cost(usage.inference.output_tokens, usage.pricing.inference_output_per_mtok)
+
     table.add_row(
         "Training",
         _format_tokens(usage.training.tokens),
         _format_usd(usage.training.cost_usd),
         format_price_per_mtok(usage.pricing.training_per_mtok) or "-",
     )
-    # Inference cost is a single combined number (input + output charges)
-    # — render it on the output row and leave the input row's Cost blank
-    # so the column doesn't double-count.
     table.add_row(
         "Inference (input)",
         _format_tokens(usage.inference.input_tokens),
-        "",
+        _format_usd(in_cost) if in_cost is not None else "-",
         format_price_per_mtok(usage.pricing.inference_input_per_mtok) or "-",
     )
     table.add_row(
         "Inference (output)",
         _format_tokens(usage.inference.output_tokens),
-        _format_usd(usage.inference.cost_usd),
+        _format_usd(out_cost) if out_cost is not None else "-",
         format_price_per_mtok(usage.pricing.inference_output_per_mtok) or "-",
     )
     table.add_row(

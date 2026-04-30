@@ -16,6 +16,12 @@ def _api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _run_usage_payload() -> Dict[str, Any]:
+    # Cost numbers are self-consistent with the rates × tokens math the CLI
+    # does for the per-row inference breakdown:
+    #   training:           5M × $2.5/Mtok = $12.50
+    #   inference (input):  1M × $0.5/Mtok = $0.50
+    #   inference (output): 3M × $1.5/Mtok = $4.50
+    #   inference combined: $5.00; total: $17.50
     return {
         "run_id": "rft_abc",
         "run_name": "my-run",
@@ -31,10 +37,10 @@ def _run_usage_payload() -> Dict[str, Any]:
             "tokens": 4_000_000,
             "input_tokens": 1_000_000,
             "output_tokens": 3_000_000,
-            "cost_usd": 7.0,
+            "cost_usd": 5.0,
         },
         "total_tokens": 9_000_000,
-        "total_cost_usd": 19.5,
+        "total_cost_usd": 17.5,
         "pricing": {
             "training_per_mtok": 2.5,
             "inference_input_per_mtok": 0.5,
@@ -74,8 +80,10 @@ def test_train_usage_table_renders_tokens_and_cost(monkeypatch: pytest.MonkeyPat
     assert "1.00M" in plain
     assert "3.00M" in plain
     assert "$12.50" in plain
-    assert "$7.00" in plain
-    assert "$19.50" in plain
+    # Per-row inference costs derived from rates × tokens:
+    assert "$0.50" in plain  # 1M × $0.5
+    assert "$4.50" in plain  # 3M × $1.5
+    assert "$17.50" in plain  # total
     assert "$2.5" in plain or "$2.50" in plain
     assert calls == [{"endpoint": "/billing/runs/rft_abc/usage", "params": None}]
 
@@ -92,7 +100,7 @@ def test_train_usage_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
     data = json.loads(result.output)
     assert data["run_id"] == "rft_abc"
     assert data["total_tokens"] == 9_000_000
-    assert data["total_cost_usd"] == 19.5
+    assert data["total_cost_usd"] == 17.5
     assert data["pricing"]["training_per_mtok"] == 2.5
 
 

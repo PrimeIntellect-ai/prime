@@ -842,6 +842,14 @@ def create_run(
         rl_client = RLClient(api_client)
         app_config = Config()
 
+        # Kick off pricing fetch in the background so it overlaps with summary
+        # rendering and the action-status checks below.
+        from concurrent.futures import ThreadPoolExecutor
+
+        _pricing_executor = ThreadPoolExecutor(max_workers=1)
+        pricing_future = _pricing_executor.submit(rl_client.list_models, team_id=app_config.team_id)
+        _pricing_executor.shutdown(wait=False)
+
         # Show configuration in organized sections
         console.print("[white]Configuration:[/white]\n")
 
@@ -941,8 +949,8 @@ def create_run(
         # Pricing (best-effort — skipped silently if /rft/models is unreachable
         # or doesn't include the chosen model)
         try:
-            available = rl_client.list_models(team_id=app_config.team_id)
-        except APIError:
+            available = pricing_future.result()
+        except Exception:
             available = []
         priced = next((m for m in available if m.name == cfg.model), None)
         if priced is not None:

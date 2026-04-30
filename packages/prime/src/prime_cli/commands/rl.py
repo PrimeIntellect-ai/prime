@@ -946,10 +946,11 @@ def create_run(
             console.print("\n[cyan]Secrets[/cyan]")
             console.print(f"  Keys: {', '.join(secrets.keys())}")
 
-        # Pricing (best-effort — skipped silently if /rft/models is unreachable
-        # or doesn't include the chosen model)
+        # Pricing (best-effort — skipped silently if /rft/models is unreachable,
+        # times out, or doesn't include the chosen model. 8s cap so a slow
+        # endpoint can't gate the confirmation prompt.)
         try:
-            available = pricing_future.result()
+            available = pricing_future.result(timeout=8)
         except Exception:
             available = []
         priced = next((m for m in available if m.name == cfg.model), None)

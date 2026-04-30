@@ -955,24 +955,9 @@ def create_run(
             available = []
         priced = next((m for m in available if m.name == cfg.model), None)
         if priced is not None:
-            if priced.list_training_price_per_mtok is not None:
-                list_train = priced.list_training_price_per_mtok
-                eff_train = priced.training_price_per_mtok
-            else:
-                list_train = priced.training_price_per_mtok
-                eff_train = priced.effective_training_price_per_mtok
-            if priced.list_inference_input_price_per_mtok is not None:
-                list_input = priced.list_inference_input_price_per_mtok
-                eff_input = priced.inference_input_price_per_mtok
-            else:
-                list_input = priced.inference_input_price_per_mtok
-                eff_input = priced.effective_inference_input_price_per_mtok
-            if priced.list_inference_output_price_per_mtok is not None:
-                list_output = priced.list_inference_output_price_per_mtok
-                eff_output = priced.inference_output_price_per_mtok
-            else:
-                list_output = priced.inference_output_price_per_mtok
-                eff_output = priced.effective_inference_output_price_per_mtok
+            list_train, eff_train = priced.resolve_prices("training")
+            list_input, eff_input = priced.resolve_prices("inference_input")
+            list_output, eff_output = priced.resolve_prices("inference_output")
             console.print(
                 "\n[cyan]Pricing[/cyan] [dim](per 1M tokens, charged on actual usage)[/dim]"
             )
@@ -1168,27 +1153,9 @@ def list_models(
                 status = "[red]At Capacity[/red]"
             else:
                 status = "[green]Available[/green]"
-            # Post-swap backends populate list_* with the un-discounted price
-            # and the legacy *_price_per_mtok with the effective (charged) price.
-            # Pre-swap backends omit list_* and keep legacy=list, effective=charged.
-            if model.list_training_price_per_mtok is not None:
-                list_train = model.list_training_price_per_mtok
-                eff_train = model.training_price_per_mtok
-            else:
-                list_train = model.training_price_per_mtok
-                eff_train = model.effective_training_price_per_mtok
-            if model.list_inference_input_price_per_mtok is not None:
-                list_input = model.list_inference_input_price_per_mtok
-                eff_input = model.inference_input_price_per_mtok
-            else:
-                list_input = model.inference_input_price_per_mtok
-                eff_input = model.effective_inference_input_price_per_mtok
-            if model.list_inference_output_price_per_mtok is not None:
-                list_output = model.list_inference_output_price_per_mtok
-                eff_output = model.inference_output_price_per_mtok
-            else:
-                list_output = model.inference_output_price_per_mtok
-                eff_output = model.effective_inference_output_price_per_mtok
+            list_train, eff_train = model.resolve_prices("training")
+            list_input, eff_input = model.resolve_prices("inference_input")
+            list_output, eff_output = model.resolve_prices("inference_output")
             table.add_row(
                 model.name,
                 status,

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from prime_tunnel import Config, Tunnel, TunnelClient
-from prime_tunnel.exceptions import TunnelTimeoutError
+from prime_tunnel.exceptions import TunnelError, TunnelTimeoutError
 from prime_tunnel.models import TunnelInfo
 
 
@@ -245,3 +245,37 @@ async def test_client_bulk_delete_by_labels(monkeypatch):
     assert captured["json"]["labels"] == ["dev"]
     assert captured["json"]["team_id"] == "team-1"
     assert result["succeeded"] == ["t-test123"]
+
+
+@pytest.mark.asyncio
+async def test_client_bulk_delete_uses_configured_team_id(monkeypatch):
+    client = TunnelClient(api_key="test-key")
+    captured = {}
+    client.config.config["team_id"] = "team-from-config"
+
+    async def fake_request(method, url, json=None, params=None):
+        captured["method"] = method
+        captured["json"] = json
+        return MagicMock(status_code=200)
+
+    async def fake_handle_response(response, operation):
+        return {"succeeded": ["t-test123"], "failed": [], "message": "ok"}
+
+    monkeypatch.setattr(client, "_idempotent_request_with_retry", fake_request)
+    monkeypatch.setattr(client, "_handle_response", fake_handle_response)
+
+    result = await client.bulk_delete_tunnels(all_users=True)
+
+    assert captured["json"]["team_id"] == "team-from-config"
+    assert captured["json"]["all_users"] is True
+    assert result["succeeded"] == ["t-test123"]
+
+
+@pytest.mark.asyncio
+async def test_client_bulk_delete_all_users_requires_team_id(monkeypatch):
+    client = TunnelClient(api_key="test-key")
+    client.config.config.pop("team_id", None)
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
+
+    with pytest.raises(TunnelError, match="all_users requires a team ID"):
+        await client.bulk_delete_tunnels(labels=["dev"], all_users=True)

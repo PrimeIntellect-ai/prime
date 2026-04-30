@@ -27,7 +27,7 @@ console = get_console()
 
 
 def _format_tunnel_for_output(tunnel) -> dict:
-    created_at = tunnel.created_at or tunnel.expires_at
+    created_at = tunnel.created_at
     return {
         "tunnel_id": tunnel.tunnel_id,
         "name": tunnel.name,
@@ -38,8 +38,8 @@ def _format_tunnel_for_output(tunnel) -> dict:
         "local_port": tunnel.local_port,
         "user_id": tunnel.user_id,
         "team_id": tunnel.team_id,
-        "created_at": iso_timestamp(created_at),
-        "created": human_age(created_at),
+        "created_at": iso_timestamp(created_at) if created_at else None,
+        "created": human_age(created_at) if created_at else None,
         "expires_at": iso_timestamp(tunnel.expires_at),
     }
 
@@ -198,13 +198,14 @@ def list_tunnels(
 
     for tunnel_data in tunnels_data:
         status_display = tunnel_data["status"]
-        if status_display == "CONNECTED":
+        normalized_status = str(status_display).upper()
+        if normalized_status == "CONNECTED":
             status_display = "[green]connected[/green]"
-        elif status_display == "PENDING":
+        elif normalized_status == "PENDING":
             status_display = "[yellow]pending[/yellow]"
-        elif status_display == "DISCONNECTED":
+        elif normalized_status == "DISCONNECTED":
             status_display = "[red]disconnected[/red]"
-        elif status_display == "EXPIRED":
+        elif normalized_status == "EXPIRED":
             status_display = "[dim]expired[/dim]"
 
         table.add_row(
@@ -214,7 +215,7 @@ def list_tunnels(
             tunnel_data["url"],
             status_display,
             ", ".join(tunnel_data["labels"]) if tunnel_data["labels"] else "-",
-            tunnel_data["created"],
+            tunnel_data["created"] or "-",
         )
 
     console.print(table)
@@ -289,10 +290,6 @@ def stop_tunnel(
 
     if not all and not tunnel_ids and not labels:
         console.print("[red]Error:[/red] Must specify tunnel IDs, --all, or --label")
-        raise typer.Exit(1)
-
-    if all and not only_mine and not team_id:
-        console.print("[red]Error:[/red] --all-users requires --team-id")
         raise typer.Exit(1)
 
     parsed_ids: List[str] = []

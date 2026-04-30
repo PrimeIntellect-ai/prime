@@ -3,10 +3,33 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from prime_cli.commands.tunnel import _format_tunnel_for_output
 from prime_cli.main import app
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+def test_format_tunnel_does_not_derive_created_from_expiration() -> None:
+    tunnel_data = _format_tunnel_for_output(
+        SimpleNamespace(
+            tunnel_id="t-test123",
+            name="api",
+            url="https://t-test123.example.com",
+            hostname="t-test123.example.com",
+            status="CONNECTED",
+            labels=["dev"],
+            local_port=8765,
+            user_id="user-1",
+            team_id=None,
+            created_at=None,
+            expires_at=datetime.now(timezone.utc),
+        )
+    )
+
+    assert tunnel_data["created_at"] is None
+    assert tunnel_data["created"] is None
+    assert tunnel_data["expires_at"] is not None
 
 
 def test_tunnel_list_passes_label_filters(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,10 +115,24 @@ def test_tunnel_stop_all_uses_scoped_bulk_delete(monkeypatch: pytest.MonkeyPatch
     assert captured["all_users"] is False
 
 
-def test_tunnel_stop_all_users_requires_team_id(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tunnel_stop_all_users_defers_team_resolution_to_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    captured: dict[str, Any] = {}
+
+    class FakeTunnelClient:
+        async def bulk_delete_tunnels(self, **kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {"succeeded": ["t-test123"], "failed": [], "message": "ok"}
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("prime_cli.commands.tunnel.TunnelClient", FakeTunnelClient)
 
     result = runner.invoke(app, ["tunnel", "stop", "--all", "--all-users", "--yes"])
 
-    assert result.exit_code == 1
-    assert "--all-users requires --team-id" in result.output
+    assert result.exit_code == 0, result.output
+    assert captured["team_id"] is None
+    assert captured["all_users"] is True

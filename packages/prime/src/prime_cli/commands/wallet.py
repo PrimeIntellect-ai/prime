@@ -40,25 +40,25 @@ def _format_resource(entry: BillingEntry) -> str:
     return entry.resource_type
 
 
-def _build_balance_table(wallet: Wallet, team_label: str) -> object:
-    # Title stays short ("Wallet" + scope label) so long cuids never wrap
-    # across multiple lines. The wallet_id is internal-only and not
-    # user-meaningful, so it lives in the caption for support/debug.
-    title = f"Wallet — {team_label}"
-    table = build_table(
-        title,
-        [("Field", "cyan"), ("Value", "white")],
-        show_lines=False,
+def _print_header(wallet: Wallet, team_label: str) -> None:
+    """Render the balance summary as plain left-aligned lines.
+
+    Avoids stacking two centered tables of different widths, which makes
+    the title + first column visibly jump as the eye moves down. Plain
+    text keeps everything anchored to the left margin.
+    """
+    console.print(f"[bold]Wallet[/bold]  [dim]({team_label})[/dim]")
+    console.print(
+        f"  Balance:  [bold green]{format_usd(wallet.balance_usd)}[/bold green] "
+        f"[dim]{wallet.currency}[/dim]"
     )
-    table.add_row("Balance", f"[bold green]{format_usd(wallet.balance_usd)}[/bold green]")
-    table.add_row("Currency", wallet.currency)
-    table.add_row("Total billing rows", str(wallet.total_billings))
-    table.caption = f"[dim]wallet id: {rich_escape(wallet.wallet_id)}[/dim]"
-    return table
+    console.print(f"  Billings: [bold]{wallet.total_billings}[/bold] total")
+    console.print(f"  [dim]wallet id: {rich_escape(wallet.wallet_id)}[/dim]")
+    console.print()
 
 
 def _build_billings_table(wallet: Wallet) -> object:
-    title = f"Recent billings ({len(wallet.recent_billings)} of {wallet.total_billings})"
+    title = f"Recent billings — last {len(wallet.recent_billings)} of {wallet.total_billings}"
     table = build_table(
         title,
         [
@@ -119,8 +119,8 @@ def wallet_command(
     if config.team_id:
         team_label = f"team {rich_escape(config.team_name or config.team_id)}"
     else:
-        team_label = "Personal"
-    console.print(_build_balance_table(wallet, team_label))
+        team_label = "personal"
+    _print_header(wallet, team_label)
     if wallet.recent_billings:
         console.print(_build_billings_table(wallet))
     else:

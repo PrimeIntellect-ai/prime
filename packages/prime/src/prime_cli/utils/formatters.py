@@ -56,6 +56,30 @@ def format_price_per_mtok(value: Any) -> str:
         return str(value)
 
 
+def format_promo_price(original: Any, effective: Any) -> str:
+    """Format a price cell with optional promo strikethrough.
+
+    Returns rich-markup text that the table renderer auto-parses. When
+    no discount applies, falls back to ``format_price_per_mtok``.
+    """
+    if effective is None:
+        return format_price_per_mtok(original)
+
+    try:
+        original_f = float(original) if original is not None else None
+        effective_f = float(effective)
+    except (TypeError, ValueError):
+        return format_price_per_mtok(original)
+
+    if original_f is None or original_f <= 0 or effective_f >= original_f:
+        return format_price_per_mtok(original)
+
+    struck = format_price_per_mtok(original_f)
+    if effective_f == 0:
+        return f"[strike dim]{struck}[/strike dim] [bold green]FREE[/bold green]"
+    return f"[strike dim]{struck}[/strike dim] {format_price_per_mtok(effective_f)}"
+
+
 def format_resources(cpu_cores: float, memory_gb: float, gpu_count: int = 0) -> str:
     """Format resource specifications as compact string."""
     resources = f"{cpu_cores:g}CPU/{memory_gb:g}GB"

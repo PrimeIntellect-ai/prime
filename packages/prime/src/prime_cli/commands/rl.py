@@ -29,7 +29,11 @@ from ..utils import (
 )
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.env_vars import EnvParseError, collect_env_vars
-from ..utils.formatters import format_file_size, format_price_per_mtok, strip_ansi
+from ..utils.formatters import (
+    format_file_size,
+    format_promo_price,
+    strip_ansi,
+)
 
 console = get_console()
 
@@ -40,7 +44,10 @@ RL_RUN_JSON_HELP = json_output_help(
 
 RL_MODELS_JSON_HELP = json_output_help(
     ".models[] = {name, at_capacity, training_price_per_mtok, "
-    "inference_input_price_per_mtok, inference_output_price_per_mtok}",
+    "inference_input_price_per_mtok, inference_output_price_per_mtok, "
+    "effective_training_price_per_mtok?, "
+    "effective_inference_input_price_per_mtok?, "
+    "effective_inference_output_price_per_mtok?, promo_label?}",
 )
 
 RL_LIST_JSON_HELP = json_output_help(
@@ -1095,6 +1102,7 @@ def list_models(
         table.add_column("Output", style="green", justify="right")
         table.add_column("Train", style="green", justify="right")
 
+        promo_labels: List[str] = []
         for model in models:
             if model.at_capacity:
                 status = "[red]At Capacity[/red]"
@@ -1103,12 +1111,28 @@ def list_models(
             table.add_row(
                 model.name,
                 status,
-                format_price_per_mtok(model.inference_input_price_per_mtok) or "-",
-                format_price_per_mtok(model.inference_output_price_per_mtok) or "-",
-                format_price_per_mtok(model.training_price_per_mtok) or "-",
+                format_promo_price(
+                    model.inference_input_price_per_mtok,
+                    model.effective_inference_input_price_per_mtok,
+                )
+                or "-",
+                format_promo_price(
+                    model.inference_output_price_per_mtok,
+                    model.effective_inference_output_price_per_mtok,
+                )
+                or "-",
+                format_promo_price(
+                    model.training_price_per_mtok,
+                    model.effective_training_price_per_mtok,
+                )
+                or "-",
             )
+            if model.promo_label and model.promo_label not in promo_labels:
+                promo_labels.append(model.promo_label)
 
         console.print(table)
+        for label in promo_labels:
+            console.print(f"[bold yellow]{rich_escape(label)}[/bold yellow]")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

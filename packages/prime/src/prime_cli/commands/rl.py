@@ -1094,7 +1094,6 @@ def list_models(
 
         table = Table(
             title="Hosted Training - Models",
-            caption="[dim]Prices per 1M tokens[/dim]",
         )
         table.add_column("Model", style="cyan")
         table.add_column("Status")
@@ -1139,10 +1138,12 @@ def list_models(
             if model.promo_label and model.promo_label not in promo_labels:
                 promo_labels.append(model.promo_label)
 
-        console.print(table)
+        caption_lines = ["[dim]Prices per 1M tokens[/dim]"]
         if promo_labels:
             joined = ", ".join(rich_escape(label) for label in promo_labels)
-            console.print(f"[bold yellow]{joined}[/bold yellow]", justify="center")
+            caption_lines.append(f"[bold yellow]{joined}[/bold yellow]")
+        table.caption = "\n".join(caption_lines)
+        console.print(table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

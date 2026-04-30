@@ -938,6 +938,44 @@ def create_run(
             console.print("\n[cyan]Secrets[/cyan]")
             console.print(f"  Keys: {', '.join(secrets.keys())}")
 
+        # Pricing (best-effort — skipped silently if /rft/models is unreachable
+        # or doesn't include the chosen model)
+        try:
+            available = rl_client.list_models(team_id=app_config.team_id)
+        except APIError:
+            available = []
+        priced = next((m for m in available if m.name == cfg.model), None)
+        if priced is not None:
+            if priced.list_training_price_per_mtok is not None:
+                list_train = priced.list_training_price_per_mtok
+                eff_train = priced.training_price_per_mtok
+            else:
+                list_train = priced.training_price_per_mtok
+                eff_train = priced.effective_training_price_per_mtok
+            if priced.list_inference_input_price_per_mtok is not None:
+                list_input = priced.list_inference_input_price_per_mtok
+                eff_input = priced.inference_input_price_per_mtok
+            else:
+                list_input = priced.inference_input_price_per_mtok
+                eff_input = priced.effective_inference_input_price_per_mtok
+            if priced.list_inference_output_price_per_mtok is not None:
+                list_output = priced.list_inference_output_price_per_mtok
+                eff_output = priced.inference_output_price_per_mtok
+            else:
+                list_output = priced.inference_output_price_per_mtok
+                eff_output = priced.effective_inference_output_price_per_mtok
+            console.print(
+                "\n[cyan]Pricing[/cyan] [dim](per 1M tokens, charged on actual usage)[/dim]"
+            )
+            train_str = format_promo_price(list_train, eff_train) or "-"
+            input_str = format_promo_price(list_input, eff_input) or "-"
+            output_str = format_promo_price(list_output, eff_output) or "-"
+            console.print(f"  Training:         {train_str}")
+            console.print(f"  Inference Input:  {input_str}")
+            console.print(f"  Inference Output: {output_str}")
+            if priced.promo_label:
+                console.print(f"  [bold yellow]{rich_escape(priced.promo_label)}[/bold yellow]")
+
         console.print()
 
         # Check action status for hub environments

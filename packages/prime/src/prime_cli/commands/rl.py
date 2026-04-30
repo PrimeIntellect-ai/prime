@@ -843,12 +843,23 @@ def create_run(
         app_config = Config()
 
         # Kick off pricing fetch in the background so it overlaps with summary
-        # rendering and the action-status checks below.
-        from concurrent.futures import ThreadPoolExecutor
+        # rendering and the action-status checks below. Daemon thread so a slow
+        # /rft/models can't outlive the command (ThreadPoolExecutor workers are
+        # joined at interpreter exit, which would defeat the timeout cap below).
+        import threading
 
-        _pricing_executor = ThreadPoolExecutor(max_workers=1)
-        pricing_future = _pricing_executor.submit(rl_client.list_models, team_id=app_config.team_id)
-        _pricing_executor.shutdown(wait=False)
+        pricing_state: Dict[str, Any] = {"models": None, "error": None}
+        pricing_done = threading.Event()
+
+        def _fetch_pricing() -> None:
+            try:
+                pricing_state["models"] = rl_client.list_models(team_id=app_config.team_id)
+            except Exception as exc:
+                pricing_state["error"] = exc
+            finally:
+                pricing_done.set()
+
+        threading.Thread(target=_fetch_pricing, daemon=True).start()
 
         # Show configuration in organized sections
         console.print("[white]Configuration:[/white]\n")
@@ -949,9 +960,9 @@ def create_run(
         # Pricing (best-effort — skipped silently if /rft/models is unreachable,
         # times out, or doesn't include the chosen model. 8s cap so a slow
         # endpoint can't gate the confirmation prompt.)
-        try:
-            available = pricing_future.result(timeout=8)
-        except Exception:
+        if pricing_done.wait(timeout=8) and pricing_state["error"] is None:
+            available = pricing_state["models"] or []
+        else:
             available = []
         priced = next((m for m in available if m.name == cfg.model), None)
         if priced is not None:

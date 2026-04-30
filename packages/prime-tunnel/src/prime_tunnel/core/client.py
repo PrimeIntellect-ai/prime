@@ -299,8 +299,6 @@ class TunnelClient:
         """Bulk delete multiple tunnels."""
         self._check_auth_required()
 
-        if team_id is None:
-            team_id = self.config.team_id
         if all_users and not team_id:
             raise TunnelError("all_users requires a team ID")
 

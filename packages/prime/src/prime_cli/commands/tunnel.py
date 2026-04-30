@@ -349,6 +349,9 @@ def stop_tunnel(
         not_found: List[dict] = []
         failed: List[dict] = []
         try:
+            scoped_team_id = team_id
+            if (all or labels) and scoped_team_id is None:
+                scoped_team_id = client.config.team_id
             scoped_user_id = client.config.user_id if only_mine else None
             if (all or labels) and only_mine and not scoped_user_id:
                 raise ValueError(
@@ -358,13 +361,13 @@ def stop_tunnel(
             if labels:
                 result = await client.bulk_delete_tunnels(
                     labels=labels,
-                    team_id=team_id,
+                    team_id=scoped_team_id,
                     user_id=scoped_user_id,
                     all_users=not only_mine,
                 )
             elif all:
                 result = await client.bulk_delete_tunnels(
-                    team_id=team_id,
+                    team_id=scoped_team_id,
                     user_id=scoped_user_id,
                     all_users=not only_mine,
                 )

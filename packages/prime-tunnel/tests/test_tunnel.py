@@ -272,7 +272,7 @@ async def test_client_bulk_delete_by_labels(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_client_bulk_delete_uses_configured_team_id(monkeypatch):
+async def test_client_bulk_delete_ids_does_not_default_configured_team(monkeypatch):
     client = TunnelClient(api_key="test-key")
     captured = {}
     client.config.config["team_id"] = "team-from-config"
@@ -288,11 +288,11 @@ async def test_client_bulk_delete_uses_configured_team_id(monkeypatch):
     monkeypatch.setattr(client, "_idempotent_request_with_retry", fake_request)
     monkeypatch.setattr(client, "_handle_response", fake_handle_response)
 
-    result = await client.bulk_delete_tunnels(all_users=True)
+    result = await client.bulk_delete_tunnels(tunnel_ids=["t-personal"])
 
-    assert captured["json"]["teamId"] == "team-from-config"
+    assert "teamId" not in captured["json"]
     assert "team_id" not in captured["json"]
-    assert captured["json"]["all_users"] is True
+    assert captured["json"]["tunnel_ids"] == ["t-personal"]
     assert result["succeeded"] == ["t-test123"]
 
 

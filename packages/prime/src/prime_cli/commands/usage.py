@@ -1,0 +1,292 @@
+"""`prime usage` — token usage and price for RFT runs and the wider account.
+
+Mirrors the platform billing/analytics view (excluding sandbox) so an agent can
+poll a run's running cost without scraping the dashboard.
+"""
+
+import time
+from typing import Any, Dict, Optional
+
+import typer
+from rich.live import Live
+from rich.table import Table
+
+from prime_cli.api.billing import (
+    AreaUsage,
+    BillingClient,
+    RunUsage,
+    UsageSummary,
+)
+from prime_cli.core import APIClient, APIError
+from prime_cli.utils import (
+    PlainTyper,
+    build_table,
+    get_console,
+    is_plain_mode,
+    json_output_help,
+    output_data_as_json,
+    validate_output_format,
+)
+from prime_cli.utils.formatters import format_price_per_mtok
+
+app = PlainTyper(help="View token usage and price (excludes sandbox)", no_args_is_help=True)
+console = get_console()
+
+
+VALID_PERIODS = ("7_days", "this_month", "last_month", "6_months")
+
+RUN_USAGE_JSON_HELP = json_output_help(
+    ". = {run_id, run_name?, base_model?, status?, total_tokens, "
+    "total_cost_usd, record_count, "
+    "training: {tokens, input_tokens, output_tokens, cost_usd}, "
+    "inference: {tokens, input_tokens, output_tokens, cost_usd}, "
+    "pricing: {training_per_mtok?, inference_input_per_mtok?, "
+    "inference_output_per_mtok?}}"
+)
+
+USAGE_SUMMARY_JSON_HELP = json_output_help(
+    ". = {period, start_date, end_date, wallet_id, team_id?, total_cost_usd, "
+    "areas: [{area, total_cost_usd, training_tokens, inference_tokens, "
+    "inference_requests}]}"
+)
+
+
+def _format_tokens(value: int) -> str:
+    """Render token counts compactly: 1234 → '1.23K', 1_500_000 → '1.50M'."""
+    if value <= 0:
+        return "0"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.2f}K"
+    return str(value)
+
+
+def _format_usd(value: float) -> str:
+    if value == 0:
+        return "$0.00"
+    if abs(value) < 0.01:
+        return f"${value:.4f}"
+    return f"${value:.2f}"
+
+
+def _run_usage_json(usage: RunUsage) -> Dict[str, Any]:
+    """Convert RunUsage into a stable JSON shape for the CLI surface."""
+    return usage.model_dump()
+
+
+def _summary_json(summary: UsageSummary) -> Dict[str, Any]:
+    return summary.model_dump()
+
+
+def _build_run_usage_table(usage: RunUsage) -> Table:
+    title = f"Run Usage — {usage.run_name or usage.run_id}"
+    if usage.status:
+        title += f"  [{usage.status}]"
+
+    table = build_table(
+        title,
+        [
+            ("Bucket", "cyan"),
+            ("Tokens", "white"),
+            ("Input tokens", "white"),
+            ("Output tokens", "white"),
+            ("Cost", "green"),
+            ("Price / Mtok", "magenta"),
+        ],
+        show_lines=False,
+    )
+
+    table.add_row(
+        "Training",
+        _format_tokens(usage.training.tokens),
+        "-",
+        "-",
+        _format_usd(usage.training.cost_usd),
+        format_price_per_mtok(usage.pricing.training_per_mtok) or "-",
+    )
+    table.add_row(
+        "Inference (input)",
+        "-",
+        _format_tokens(usage.inference.input_tokens),
+        "-",
+        "",
+        format_price_per_mtok(usage.pricing.inference_input_per_mtok) or "-",
+    )
+    table.add_row(
+        "Inference (output)",
+        "-",
+        "-",
+        _format_tokens(usage.inference.output_tokens),
+        _format_usd(usage.inference.cost_usd),
+        format_price_per_mtok(usage.pricing.inference_output_per_mtok) or "-",
+    )
+    table.add_row(
+        "[bold]Total[/bold]",
+        f"[bold]{_format_tokens(usage.total_tokens)}[/bold]",
+        "",
+        "",
+        f"[bold]{_format_usd(usage.total_cost_usd)}[/bold]",
+        "",
+    )
+    return table
+
+
+def _build_summary_table(summary: UsageSummary) -> Table:
+    title = f"Usage Summary — {summary.period} ({summary.start_date} → {summary.end_date})"
+    table = build_table(
+        title,
+        [
+            ("Area", "cyan"),
+            ("Tokens / Requests", "white"),
+            ("Cost", "green"),
+        ],
+        show_lines=False,
+    )
+
+    for area in summary.areas:
+        table.add_row(
+            area.area.title(),
+            _format_area_metric(area),
+            _format_usd(area.total_cost_usd),
+        )
+
+    table.add_row(
+        "[bold]Total[/bold]",
+        "",
+        f"[bold]{_format_usd(summary.total_cost_usd)}[/bold]",
+    )
+    return table
+
+
+def _format_area_metric(area: AreaUsage) -> str:
+    if area.area == "training":
+        train = _format_tokens(area.training_tokens)
+        infer = _format_tokens(area.inference_tokens)
+        return f"train {train} / inf {infer}"
+    if area.area == "inference":
+        return f"{area.inference_requests} req"
+    return "-"
+
+
+@app.command("run", epilog=RUN_USAGE_JSON_HELP)
+def run_usage(
+    run_id: str = typer.Argument(..., help="RFT run ID (e.g. rft_..."),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    watch: bool = typer.Option(
+        False, "--watch", "-w", help="Poll continuously and update in place"
+    ),
+    interval: int = typer.Option(
+        30,
+        "--interval",
+        "-n",
+        min=2,
+        help="Seconds between polls when --watch is set",
+    ),
+) -> None:
+    """Show token usage and price for a single RFT run."""
+    validate_output_format(output, console)
+
+    billing = BillingClient(APIClient())
+
+    try:
+        usage = billing.get_run_usage(run_id)
+    except APIError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if not watch:
+        if output == "json":
+            output_data_as_json(_run_usage_json(usage), console)
+            return
+        console.print(_build_run_usage_table(usage))
+        return
+
+    if output == "json":
+        # JSON watch mode emits one JSON object per tick — agent-friendly.
+        _watch_json(billing.get_run_usage, run_id, interval, _run_usage_json)
+        return
+
+    if is_plain_mode():
+        # Plain mode: print one snapshot per tick instead of a Live re-render
+        # so output stays append-only and grep-able.
+        _watch_plain(billing.get_run_usage, run_id, interval, _build_run_usage_table)
+        return
+
+    _watch_live(billing.get_run_usage, run_id, interval, _build_run_usage_table)
+
+
+@app.command("summary", epilog=USAGE_SUMMARY_JSON_HELP)
+def summary(
+    period: str = typer.Option(
+        "this_month",
+        "--period",
+        "-p",
+        help=f"Time window. One of: {', '.join(VALID_PERIODS)}",
+    ),
+    team: Optional[str] = typer.Option(
+        None, "--team", "-t", help="Team ID (defaults to personal wallet)"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Show aggregated tokens + cost per billing area (sandbox excluded)."""
+    validate_output_format(output, console)
+
+    if period not in VALID_PERIODS:
+        console.print(
+            f"[red]Error: invalid --period '{period}'. "
+            f"Expected one of: {', '.join(VALID_PERIODS)}[/red]"
+        )
+        raise typer.Exit(1)
+
+    billing = BillingClient(APIClient())
+
+    try:
+        result = billing.get_usage_summary(period=period, team_id=team)
+    except APIError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if output == "json":
+        output_data_as_json(_summary_json(result), console)
+        return
+
+    console.print(_build_summary_table(result))
+
+
+def _watch_live(fetch, run_id, interval, render):
+    try:
+        with Live(render(fetch(run_id)), console=console, refresh_per_second=4) as live:
+            while True:
+                time.sleep(interval)
+                live.update(render(fetch(run_id)))
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped.[/dim]")
+    except APIError as exc:
+        console.print(f"[red]Error during watch: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+def _watch_plain(fetch, run_id, interval, render):
+    try:
+        while True:
+            console.print(render(fetch(run_id)))
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        console.print("\nStopped.")
+    except APIError as exc:
+        console.print(f"[red]Error during watch: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+def _watch_json(fetch, run_id, interval, to_json):
+    try:
+        while True:
+            output_data_as_json(to_json(fetch(run_id)), console)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        # Don't print to stdout — would corrupt the JSON stream.
+        return
+    except APIError as exc:
+        console.print(f"[red]Error during watch: {exc}[/red]")
+        raise typer.Exit(1) from exc

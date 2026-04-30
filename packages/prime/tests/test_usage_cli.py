@@ -1,4 +1,4 @@
-"""Tests for `prime train usage` and `prime usage` (account-wide summary)."""
+"""Tests for `prime train usage` (per-run token + price view)."""
 
 import json
 from typing import Any, Dict, List, Optional
@@ -44,54 +44,6 @@ def _run_usage_payload() -> Dict[str, Any]:
     }
 
 
-def _summary_payload() -> Dict[str, Any]:
-    return {
-        "period": "this_month",
-        "start_date": "2026-04-01",
-        "end_date": "2026-04-30",
-        "wallet_id": "w-1",
-        "team_id": None,
-        "total_cost_usd": 612.5,
-        "areas": [
-            {
-                "area": "training",
-                "total_cost_usd": 600.0,
-                "training_tokens": 20_000_000,
-                "inference_tokens": 4_000_000,
-                "inference_requests": 0,
-            },
-            {
-                "area": "inference",
-                "total_cost_usd": 8.0,
-                "training_tokens": 0,
-                "inference_tokens": 0,
-                "inference_requests": 20,
-            },
-            {
-                "area": "compute",
-                "total_cost_usd": 2.5,
-                "training_tokens": 0,
-                "inference_tokens": 0,
-                "inference_requests": 0,
-            },
-            {
-                "area": "disks",
-                "total_cost_usd": 1.5,
-                "training_tokens": 0,
-                "inference_tokens": 0,
-                "inference_requests": 0,
-            },
-            {
-                "area": "images",
-                "total_cost_usd": 0.5,
-                "training_tokens": 0,
-                "inference_tokens": 0,
-                "inference_requests": 0,
-            },
-        ],
-    }
-
-
 def _make_get_mock(routes: Dict[str, Dict[str, Any]], calls: List[Dict[str, Any]]):
     def mock_get(
         self: Any, endpoint: str, params: Optional[Dict[str, Any]] = None
@@ -102,11 +54,6 @@ def _make_get_mock(routes: Dict[str, Dict[str, Any]], calls: List[Dict[str, Any]
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
     return mock_get
-
-
-# -----------------------------------------------------------------------------
-# `prime train usage <run_id>`
-# -----------------------------------------------------------------------------
 
 
 def test_train_usage_table_renders_tokens_and_cost(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,83 +140,3 @@ def test_train_usage_propagates_typed_api_errors(monkeypatch: pytest.MonkeyPatch
     # The original message should appear, not "Failed to get run usage: …".
     assert "token expired" in result.output
     assert "Failed to get run usage" not in result.output
-
-
-# -----------------------------------------------------------------------------
-# `prime usage` (account-wide summary)
-# -----------------------------------------------------------------------------
-
-
-def test_usage_summary_renders_all_areas_excludes_sandbox(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: List[Dict[str, Any]] = []
-    monkeypatch.setattr(
-        "prime_cli.core.APIClient.get",
-        _make_get_mock({"/billing/usage": _summary_payload()}, calls),
-    )
-
-    result = CliRunner().invoke(app, ["usage"], env={"COLUMNS": "200"})
-
-    assert result.exit_code == 0, result.output
-    plain = strip_ansi(result.output)
-    assert "Training" in plain
-    assert "Inference" in plain
-    assert "Compute" in plain
-    assert "Disks" in plain
-    assert "Images" in plain
-    assert "Sandbox" not in plain
-    assert "$600.00" in plain
-    assert "$612.50" in plain
-    assert "20 req" in plain
-    assert calls == [{"endpoint": "/billing/usage", "params": {"period": "this_month"}}]
-
-
-def test_usage_passes_team_and_period_query_params(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: List[Dict[str, Any]] = []
-    monkeypatch.setattr(
-        "prime_cli.core.APIClient.get",
-        _make_get_mock({"/billing/usage": _summary_payload()}, calls),
-    )
-
-    result = CliRunner().invoke(
-        app,
-        [
-            "usage",
-            "--period",
-            "7_days",
-            "--team",
-            "team-1",
-            "--output",
-            "json",
-        ],
-    )
-
-    assert result.exit_code == 0, result.output
-    data = json.loads(result.output)
-    assert data["period"] == "this_month"  # echoed from payload
-    assert calls == [
-        {
-            "endpoint": "/billing/usage",
-            "params": {"period": "7_days", "teamId": "team-1"},
-        }
-    ]
-
-
-def test_usage_rejects_invalid_period(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail_get(*args: Any, **kwargs: Any) -> Dict[str, Any]:
-        raise AssertionError("Should not call API on invalid period")
-
-    monkeypatch.setattr("prime_cli.core.APIClient.get", fail_get)
-
-    result = CliRunner().invoke(app, ["usage", "--period", "forever"])
-
-    assert result.exit_code == 1, result.output
-    assert "invalid --period" in result.output
-
-
-def test_usage_appears_in_root_help() -> None:
-    result = CliRunner().invoke(app, ["--help"])
-
-    assert result.exit_code == 0, result.output
-    assert "usage" in result.output

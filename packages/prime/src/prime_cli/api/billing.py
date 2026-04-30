@@ -1,6 +1,6 @@
-"""Billing API client — token usage and cost for RFT runs and overall account areas."""
+"""Billing API client — token usage and cost for an RFT run."""
 
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,24 +37,6 @@ class RunUsage(BaseModel):
     record_count: int = 0
 
 
-class AreaUsage(BaseModel):
-    area: str
-    total_cost_usd: float = 0.0
-    training_tokens: int = 0
-    inference_tokens: int = 0
-    inference_requests: int = 0
-
-
-class UsageSummary(BaseModel):
-    period: str
-    start_date: str
-    end_date: str
-    wallet_id: str
-    team_id: Optional[str] = None
-    total_cost_usd: float = 0.0
-    areas: List[AreaUsage]
-
-
 class BillingClient:
     """Thin client for `/api/v1/billing/*` endpoints."""
 
@@ -73,23 +55,6 @@ class BillingClient:
         except Exception as exc:  # noqa: BLE001
             raise APIError(_format_error("Failed to get run usage", exc)) from exc
         return RunUsage.model_validate(response)
-
-    def get_usage_summary(
-        self,
-        period: str = "this_month",
-        team_id: Optional[str] = None,
-    ) -> UsageSummary:
-        """Fetch aggregated tokens + cost per billing area for a period."""
-        params: Dict[str, Any] = {"period": period}
-        if team_id:
-            params["teamId"] = team_id
-        try:
-            response = self.client.get("/billing/usage", params=params)
-        except APIError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise APIError(_format_error("Failed to get usage summary", exc)) from exc
-        return UsageSummary.model_validate(response)
 
 
 def _format_error(prefix: str, exc: Exception) -> str:

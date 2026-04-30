@@ -79,7 +79,7 @@ def format_promo_price(original: Any, effective: Any) -> str:
         new_str = "[bold green]FREE[/bold green]"
     else:
         new_str = f"[bold green]{format_price_per_mtok(effective_f)}[/bold green]"
-    return f"[dim]{original_str}[/dim] → {new_str}"
+    return f"[strike dim]{original_str}[/strike dim] → {new_str}"
 
 
 def format_resources(cpu_cores: float, memory_gb: float, gpu_count: int = 0) -> str:

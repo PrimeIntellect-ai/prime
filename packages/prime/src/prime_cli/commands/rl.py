@@ -1092,19 +1092,9 @@ def list_models(
             console.print("[dim]This could mean no healthy RL clusters are running.[/dim]")
             return
 
-        promo_labels: List[str] = []
-        for model in models:
-            if model.promo_label and model.promo_label not in promo_labels:
-                promo_labels.append(model.promo_label)
-
-        caption = "[dim]Prices per 1M tokens[/dim]"
-        if promo_labels:
-            joined = ", ".join(rich_escape(label) for label in promo_labels)
-            caption += f" [dim]• Active discount: {joined}[/dim]"
-
         table = Table(
             title="Hosted Training - Models",
-            caption=caption,
+            caption="[dim]Prices per 1M tokens[/dim]",
         )
         table.add_column("Model", style="cyan")
         table.add_column("Status")
@@ -1112,6 +1102,7 @@ def list_models(
         table.add_column("Output", style="green", justify="right")
         table.add_column("Train", style="green", justify="right")
 
+        promo_labels: List[str] = []
         for model in models:
             if model.at_capacity:
                 status = "[red]At Capacity[/red]"
@@ -1136,8 +1127,13 @@ def list_models(
                 )
                 or "-",
             )
+            if model.promo_label and model.promo_label not in promo_labels:
+                promo_labels.append(model.promo_label)
 
         console.print(table)
+        if promo_labels:
+            joined = ", ".join(rich_escape(label) for label in promo_labels)
+            console.print(f"[bold yellow]{joined}[/bold yellow]")
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

@@ -101,7 +101,7 @@ class TunnelClient:
         method: str,
         url: str,
         json: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, str]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
         """Make async HTTP request with retry on transient connection errors.
 
@@ -122,7 +122,7 @@ class TunnelClient:
         method: str,
         url: str,
         json: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, str]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
         """Make async HTTP request with retry on transient errors including timeouts.
 
@@ -166,6 +166,7 @@ class TunnelClient:
         local_port: int,
         name: Optional[str] = None,
         team_id: Optional[str] = None,
+        labels: Optional[list[str]] = None,
     ) -> TunnelInfo:
         """
         Register a new tunnel with the backend.
@@ -174,6 +175,7 @@ class TunnelClient:
             local_port: Local port the tunnel will forward to
             name: Optional friendly name for the tunnel
             team_id: Optional team ID for team tunnels
+            labels: Optional labels for organizing tunnels
 
         Returns:
             TunnelInfo with connection details
@@ -193,6 +195,8 @@ class TunnelClient:
             payload["name"] = name
         if team_id:
             payload["teamId"] = team_id
+        if labels:
+            payload["labels"] = labels
 
         try:
             response = await self._request_with_retry("POST", url, json=payload)
@@ -243,9 +247,16 @@ class TunnelClient:
             frp_token="",  # Token not returned on status check
             server_host="",
             server_port=7000,
+            name=data.get("name"),
+            local_port=data.get("local_port"),
+            labels=data.get("labels", []),
             expires_at=data["expires_at"],
             user_id=data.get("user_id"),
+            team_id=data.get("team_id"),
             status=data.get("status"),
+            created_at=data.get("created_at"),
+            connected_at=data.get("connected_at"),
+            terminated_at=data.get("terminated_at"),
         )
 
     async def delete_tunnel(self, tunnel_id: str) -> bool:
@@ -277,12 +288,27 @@ class TunnelClient:
         await self._handle_response(response, "delete tunnel")
         return True
 
-    async def bulk_delete_tunnels(self, tunnel_ids: list[str]) -> dict:
+    async def bulk_delete_tunnels(
+        self,
+        tunnel_ids: Optional[list[str]] = None,
+        labels: Optional[list[str]] = None,
+        team_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        all_users: bool = False,
+    ) -> dict:
         """Bulk delete multiple tunnels."""
         self._check_auth_required()
 
         url = f"{self.base_url}/api/v1/tunnel"
-        payload = {"tunnel_ids": tunnel_ids}
+        payload: Dict[str, Any] = {"all_users": all_users}
+        if tunnel_ids:
+            payload["tunnel_ids"] = tunnel_ids
+        if labels:
+            payload["labels"] = labels
+        if team_id:
+            payload["team_id"] = team_id
+        if user_id:
+            payload["user_id"] = user_id
 
         try:
             response = await self._idempotent_request_with_retry("DELETE", url, json=payload)
@@ -295,7 +321,16 @@ class TunnelClient:
 
         return await self._handle_response(response, "bulk delete tunnels")
 
-    async def list_tunnels(self, team_id: Optional[str] = None) -> list[TunnelInfo]:
+    async def list_tunnels(
+        self,
+        team_id: Optional[str] = None,
+        labels: Optional[list[str]] = None,
+        status: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 50,
+        sort_by: str = "createdAt",
+        sort_order: str = "desc",
+    ) -> list[TunnelInfo]:
         """
         List all tunnels for the current user.
 
@@ -311,7 +346,18 @@ class TunnelClient:
             team_id = self.config.team_id
 
         url = f"{self.base_url}/api/v1/tunnel"
-        params = {"teamId": team_id} if team_id else None
+        params: Dict[str, Any] = {
+            "page": page,
+            "perPage": per_page,
+            "sortBy": sort_by,
+            "sortOrder": sort_order,
+        }
+        if team_id:
+            params["teamId"] = team_id
+        if labels:
+            params["label"] = labels
+        if status:
+            params["status"] = status
 
         try:
             response = await self._idempotent_request_with_retry("GET", url, params=params)
@@ -333,9 +379,16 @@ class TunnelClient:
                     frp_token="",
                     server_host="",
                     server_port=7000,
+                    name=t.get("name"),
+                    local_port=t.get("local_port"),
+                    labels=t.get("labels", []),
                     expires_at=t["expires_at"],
                     user_id=t.get("user_id"),
+                    team_id=t.get("team_id"),
                     status=t.get("status"),
+                    created_at=t.get("created_at"),
+                    connected_at=t.get("connected_at"),
+                    terminated_at=t.get("terminated_at"),
                 )
             )
         return tunnels

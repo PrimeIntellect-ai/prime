@@ -100,6 +100,8 @@ def test_tunnel_stop_by_label_uses_bulk_delete(monkeypatch: pytest.MonkeyPatch) 
     captured: dict[str, Any] = {}
 
     class FakeTunnelClient:
+        config = SimpleNamespace(user_id="user-1")
+
         async def bulk_delete_tunnels(self, **kwargs: Any) -> dict[str, Any]:
             captured.update(kwargs)
             return {"succeeded": ["t-test123"], "failed": [], "message": "ok"}
@@ -113,6 +115,7 @@ def test_tunnel_stop_by_label_uses_bulk_delete(monkeypatch: pytest.MonkeyPatch) 
 
     assert result.exit_code == 0, result.output
     assert captured["labels"] == ["dev"]
+    assert captured["user_id"] == "user-1"
     assert captured["all_users"] is False
 
 
@@ -121,6 +124,8 @@ def test_tunnel_stop_all_uses_scoped_bulk_delete(monkeypatch: pytest.MonkeyPatch
     captured: dict[str, Any] = {}
 
     class FakeTunnelClient:
+        config = SimpleNamespace(user_id="user-1")
+
         async def list_tunnels(self, **kwargs: Any) -> list[Any]:
             raise AssertionError("stop --all should not list tunnels before deletion")
 
@@ -137,6 +142,7 @@ def test_tunnel_stop_all_uses_scoped_bulk_delete(monkeypatch: pytest.MonkeyPatch
 
     assert result.exit_code == 0, result.output
     assert captured["team_id"] is None
+    assert captured["user_id"] == "user-1"
     assert captured["all_users"] is False
 
 
@@ -147,6 +153,8 @@ def test_tunnel_stop_all_users_defers_team_resolution_to_client(
     captured: dict[str, Any] = {}
 
     class FakeTunnelClient:
+        config = SimpleNamespace(user_id=None)
+
         async def bulk_delete_tunnels(self, **kwargs: Any) -> dict[str, Any]:
             captured.update(kwargs)
             return {"succeeded": ["t-test123"], "failed": [], "message": "ok"}
@@ -161,3 +169,25 @@ def test_tunnel_stop_all_users_defers_team_resolution_to_client(
     assert result.exit_code == 0, result.output
     assert captured["team_id"] is None
     assert captured["all_users"] is True
+
+
+def test_tunnel_stop_all_requires_current_user_for_only_mine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+    class FakeTunnelClient:
+        config = SimpleNamespace(user_id=None)
+
+        async def bulk_delete_tunnels(self, **kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("bulk delete should not be called without user_id")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("prime_cli.commands.tunnel.TunnelClient", FakeTunnelClient)
+
+    result = runner.invoke(app, ["tunnel", "stop", "--all", "--yes"])
+
+    assert result.exit_code == 1
+    assert "Cannot resolve current user ID" in result.output

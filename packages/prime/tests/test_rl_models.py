@@ -109,7 +109,7 @@ def _promo_payload() -> Dict[str, Any]:
     }
 
 
-def test_models_table_shows_strikethrough_when_promo_active(
+def test_models_table_renders_promo_arrow_and_caption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -121,13 +121,14 @@ def test_models_table_shows_strikethrough_when_promo_active(
 
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
-    # FREE chip is rendered for 100% off categories.
+    # Discounted cells render as "original → effective".
+    assert "→" in plain
     assert "FREE" in plain
-    # Original prices remain visible (struck through in styled output).
     assert "$0.5" in plain
     assert "$1" in plain
     assert "$3" in plain
-    assert "Free RFT week" in plain
+    # Promo label is folded into the caption, not a free-floating line.
+    assert "Active discount: Free RFT week" in plain
 
 
 def test_models_table_no_promo_when_effective_equals_original(

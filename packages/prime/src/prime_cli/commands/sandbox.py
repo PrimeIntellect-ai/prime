@@ -89,6 +89,7 @@ def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
         "image": sandbox.docker_image,
         "status": sandbox.status,
         "resources": format_resources(sandbox.cpu_cores, sandbox.memory_gb, sandbox.gpu_count),
+        "region": getattr(sandbox, "region", None),
         "labels": ", ".join(sandbox.labels) if sandbox.labels else "-",  # For table output
         "labels_list": sandbox.labels,  # For JSON output
         "created_at": iso_timestamp(sandbox.created_at),  # For JSON output
@@ -118,6 +119,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "created_at": iso_timestamp(sandbox.created_at),
         "user_id": sandbox.user_id,
         "team_id": sandbox.team_id,
+        "region": getattr(sandbox, "region", None),
         "registry_credentials_id": getattr(sandbox, "registry_credentials_id", None),
     }
 
@@ -212,6 +214,7 @@ def list_sandboxes_cmd(
                     "image": sandbox_data["image"],
                     "status": sandbox_data["status"],
                     "resources": sandbox_data["resources"],
+                    "region": sandbox_data["region"],
                     "labels": sandbox_data["labels_list"],
                     "created_at": sandbox_data["created_at"],
                 }
@@ -329,6 +332,8 @@ def get(
 
             table.add_row("User ID", sandbox_data["user_id"] or "N/A")
             table.add_row("Team ID", sandbox_data["team_id"] or "Personal")
+            if sandbox_data.get("region"):
+                table.add_row("Region", sandbox_data["region"])
             if sandbox_data.get("registry_credentials_id"):
                 table.add_row(
                     "Registry Credentials",
@@ -400,6 +405,11 @@ def create(
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
+    ),
+    region: Optional[str] = typer.Option(
+        None,
+        "--region",
+        help="Sandbox cluster region (for example: us, eu-west). Uses backend default if omitted.",
     ),
     registry_credentials_id: Optional[str] = typer.Option(
         None,
@@ -508,6 +518,7 @@ def create(
             secrets=secrets_vars if secrets_vars else None,
             labels=labels if labels else [],
             team_id=team_id,
+            region=region,
             registry_credentials_id=registry_credentials_id,
         )
 
@@ -524,6 +535,7 @@ def create(
         console.print(f"Network Access: {network_status}")
         console.print(f"Timeout: {timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
+        console.print(f"Region: {region or 'Backend default'}")
         if registry_credentials_id:
             console.print(f"Registry Credentials: {registry_credentials_id}")
         if labels:

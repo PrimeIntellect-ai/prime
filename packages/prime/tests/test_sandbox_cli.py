@@ -116,6 +116,37 @@ def test_sandbox_create_accepts_docker_image_for_gpu(monkeypatch: pytest.MonkeyP
     assert captured["request"].vm is True
 
 
+def test_sandbox_create_accepts_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-eu-west")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.11-slim",
+            "--region",
+            "eu-west",
+            "--yes",
+        ],
+    )
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, f"Failed: {result.output}"
+    assert "Successfully created sandbox sbx-eu-west" in output
+    assert "Region: eu-west" in output
+    assert captured["request"].region == "eu-west"
+
+
 def test_sandbox_create_requires_gpu_type(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")

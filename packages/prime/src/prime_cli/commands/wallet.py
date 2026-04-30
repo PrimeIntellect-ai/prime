@@ -19,6 +19,7 @@ from prime_cli.utils import (
     output_data_as_json,
     validate_output_format,
 )
+from prime_cli.utils.formatters import format_usd
 
 console = get_console()
 
@@ -28,14 +29,6 @@ WALLET_JSON_HELP = json_output_help(
     "recent_billings: [{id, created_at, updated_at, last_billed_at?, "
     "amount_usd, currency, resource_type, resource_id?}]}"
 )
-
-
-def _format_usd(value: float) -> str:
-    if value == 0:
-        return "$0.00"
-    if abs(value) < 0.01:
-        return f"${value:.4f}"
-    return f"${value:.2f}"
 
 
 def _format_when(entry: BillingEntry) -> str:
@@ -58,7 +51,7 @@ def _build_balance_table(wallet: Wallet) -> object:
         [("Field", "cyan"), ("Value", "white")],
         show_lines=False,
     )
-    table.add_row("Balance", f"[bold green]{_format_usd(wallet.balance_usd)}[/bold green]")
+    table.add_row("Balance", f"[bold green]{format_usd(wallet.balance_usd)}[/bold green]")
     table.add_row("Currency", wallet.currency)
     table.add_row("Total billing rows", str(wallet.total_billings))
     return table
@@ -79,7 +72,7 @@ def _build_billings_table(wallet: Wallet) -> object:
         table.add_row(
             _format_when(entry),
             _format_resource(entry),
-            _format_usd(entry.amount_usd),
+            format_usd(entry.amount_usd),
         )
     return table
 

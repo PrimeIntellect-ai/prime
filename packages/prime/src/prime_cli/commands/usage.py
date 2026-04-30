@@ -23,7 +23,7 @@ from prime_cli.utils import (
     output_data_as_json,
     validate_output_format,
 )
-from prime_cli.utils.formatters import format_price_per_mtok
+from prime_cli.utils.formatters import format_price_per_mtok, format_usd
 
 console = get_console()
 
@@ -58,14 +58,6 @@ def _derived_cost(tokens: int, price_per_mtok: float | None) -> float | None:
     if price_per_mtok is None:
         return None
     return float(tokens) * price_per_mtok / 1_000_000
-
-
-def _format_usd(value: float) -> str:
-    if value == 0:
-        return "$0.00"
-    if abs(value) < 0.01:
-        return f"${value:.4f}"
-    return f"${value:.2f}"
 
 
 def _run_usage_json(usage: RunUsage) -> dict:
@@ -110,25 +102,25 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
     table.add_row(
         "Training",
         _format_tokens(usage.training.tokens),
-        _format_usd(usage.training.cost_usd),
+        format_usd(usage.training.cost_usd),
         format_price_per_mtok(usage.pricing.training_per_mtok) or "-",
     )
     table.add_row(
         "Inference (input)",
         _format_tokens(usage.inference.input_tokens),
-        _format_usd(in_cost) if in_cost is not None else "-",
+        format_usd(in_cost) if in_cost is not None else "-",
         format_price_per_mtok(usage.pricing.inference_input_per_mtok) or "-",
     )
     table.add_row(
         "Inference (output)",
         _format_tokens(usage.inference.output_tokens),
-        _format_usd(out_cost) if out_cost is not None else "-",
+        format_usd(out_cost) if out_cost is not None else "-",
         format_price_per_mtok(usage.pricing.inference_output_per_mtok) or "-",
     )
     table.add_row(
         "[bold]Total[/bold]",
         f"[bold]{_format_tokens(usage.total_tokens)}[/bold]",
-        f"[bold]{_format_usd(usage.total_cost_usd)}[/bold]",
+        f"[bold]{format_usd(usage.total_cost_usd)}[/bold]",
         "",
     )
     return table

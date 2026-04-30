@@ -13,6 +13,11 @@ from typer.testing import CliRunner
 def _api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    # Default to no team so tests don't depend on the developer's local
+    # `~/.prime/config.json`. Tests that exercise the team path override
+    # `Config.team_id` explicitly.
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
+    monkeypatch.setattr("prime_cli.core.Config.team_id", None)
 
 
 def _wallet_payload() -> Dict[str, Any]:
@@ -126,21 +131,34 @@ def test_wallet_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
     assert data["recent_billings"][0]["resource_type"] == "training"
 
 
-def test_wallet_passes_limit_and_team(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_wallet_passes_limit_and_uses_configured_team(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """team_id comes from Config (set by `prime switch`), never a CLI flag."""
     calls: List[Dict[str, Any]] = []
     monkeypatch.setattr(
         "prime_cli.core.APIClient.get",
         _make_get_mock({"/wallet": _wallet_payload()}, calls),
     )
+    monkeypatch.setattr("prime_cli.core.Config.team_id", "team-cfg")
 
-    result = CliRunner().invoke(
-        app, ["wallet", "--limit", "5", "--team", "team-1", "--output", "json"]
-    )
+    result = CliRunner().invoke(app, ["wallet", "--limit", "5", "--output", "json"])
 
     assert result.exit_code == 0, result.output
     assert calls == [
-        {"endpoint": "/wallet", "params": {"limit": 5, "offset": 0, "teamId": "team-1"}}
+        {
+            "endpoint": "/wallet",
+            "params": {"limit": 5, "offset": 0, "teamId": "team-cfg"},
+        }
     ]
+
+
+def test_wallet_does_not_accept_team_flag() -> None:
+    """`--team` is intentionally not supported — must follow the configured team."""
+    result = CliRunner().invoke(app, ["wallet", "--team", "team-1"])
+
+    assert result.exit_code != 0
+    assert "No such option: --team" in result.output or "no such option" in result.output.lower()
 
 
 def test_wallet_handles_empty_billings(monkeypatch: pytest.MonkeyPatch) -> None:

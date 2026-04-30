@@ -5,13 +5,11 @@ audit of the billing flow: "balance dropped by exactly $X after run R logged
 the charge in the Billing table".
 """
 
-from typing import Optional
-
 import typer
 from rich.markup import escape as rich_escape
 
 from prime_cli.api.wallet import BillingEntry, Wallet, WalletClient
-from prime_cli.core import APIClient, APIError
+from prime_cli.core import APIClient, APIError, Config
 from prime_cli.utils import (
     build_table,
     get_console,
@@ -42,10 +40,11 @@ def _format_resource(entry: BillingEntry) -> str:
     return entry.resource_type
 
 
-def _build_balance_table(wallet: Wallet) -> object:
-    title = f"Wallet — {rich_escape(wallet.wallet_id)}" + (
-        f" (team {rich_escape(wallet.team_id)})" if wallet.team_id else ""
-    )
+def _build_balance_table(wallet: Wallet, team_label: str) -> object:
+    # Title stays short ("Wallet" + scope label) so long cuids never wrap
+    # across multiple lines. The wallet_id is internal-only and not
+    # user-meaningful, so it lives in the caption for support/debug.
+    title = f"Wallet — {team_label}"
     table = build_table(
         title,
         [("Field", "cyan"), ("Value", "white")],
@@ -54,6 +53,7 @@ def _build_balance_table(wallet: Wallet) -> object:
     table.add_row("Balance", f"[bold green]{format_usd(wallet.balance_usd)}[/bold green]")
     table.add_row("Currency", wallet.currency)
     table.add_row("Total billing rows", str(wallet.total_billings))
+    table.caption = f"[dim]wallet id: {rich_escape(wallet.wallet_id)}[/dim]"
     return table
 
 
@@ -86,31 +86,28 @@ def wallet_command(
         max=100,
         help="Number of recent billing rows to fetch (max 100)",
     ),
-    team: Optional[str] = typer.Option(
-        None, "--team", "-t", help="Team ID (defaults to personal wallet)"
-    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Show wallet balance and most recent billing rows.
 
-    Lets an agent audit billing end-to-end: pair this with
-    ``prime train usage <run_id>`` to confirm the wallet debit matches the
-    run's reported cost.
+    Follows the team configured via ``prime switch`` / ``prime config``
+    (personal wallet when no team is selected). Lets an agent audit billing
+    end-to-end: pair this with ``prime train usage <run_id>`` to confirm
+    the wallet debit matches the run's reported cost.
 
     Example:
 
         prime wallet
 
         prime wallet --limit 50 --output json
-
-        prime wallet --team team_abc
     """
     validate_output_format(output, console)
 
+    config = Config()
     client = WalletClient(APIClient())
 
     try:
-        wallet = client.get(limit=limit, team_id=team)
+        wallet = client.get(limit=limit, team_id=config.team_id)
     except APIError as exc:
         console.print(f"[red]Error: {exc}[/red]")
         raise typer.Exit(1) from exc
@@ -119,7 +116,11 @@ def wallet_command(
         output_data_as_json(wallet.model_dump(), console)
         return
 
-    console.print(_build_balance_table(wallet))
+    if config.team_id:
+        team_label = f"team {rich_escape(config.team_name or config.team_id)}"
+    else:
+        team_label = "Personal"
+    console.print(_build_balance_table(wallet, team_label))
     if wallet.recent_billings:
         console.print(_build_billings_table(wallet))
     else:

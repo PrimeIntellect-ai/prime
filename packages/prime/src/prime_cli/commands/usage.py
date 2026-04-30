@@ -189,19 +189,20 @@ def run_usage(
 
     billing = BillingClient(APIClient())
 
-    try:
-        usage = billing.get_run_usage(run_id)
-    except APIError as exc:
-        console.print(f"[red]Error: {exc}[/red]")
-        raise typer.Exit(1) from exc
-
     if not watch:
+        try:
+            usage = billing.get_run_usage(run_id)
+        except APIError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+            raise typer.Exit(1) from exc
+
         if output == "json":
             output_data_as_json(_run_usage_json(usage), console)
             return
         console.print(_build_run_usage_table(usage))
         return
 
+    # Watch mode: the watcher does the first fetch itself — no eager call.
     if output == "json":
         # JSON watch mode emits one JSON object per tick — agent-friendly.
         _watch_json(billing.get_run_usage, run_id, interval, _run_usage_json)
@@ -280,13 +281,16 @@ def _watch_plain(fetch, run_id, interval, render):
 
 
 def _watch_json(fetch, run_id, interval, to_json):
+    # JSON watch streams one object per tick to stdout — keep stdout strictly
+    # JSON so agents can parse it with `jq -c` or similar. All diagnostics
+    # (errors, interrupts) go to stderr to avoid corrupting the stream.
+    err_console = get_console(stderr=True)
     try:
         while True:
             output_data_as_json(to_json(fetch(run_id)), console)
             time.sleep(interval)
     except KeyboardInterrupt:
-        # Don't print to stdout — would corrupt the JSON stream.
         return
     except APIError as exc:
-        console.print(f"[red]Error during watch: {exc}[/red]")
+        err_console.print(f"[red]Error during watch: {exc}[/red]")
         raise typer.Exit(1) from exc

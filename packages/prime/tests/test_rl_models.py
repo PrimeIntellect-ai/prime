@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 import pytest
 from prime_cli.main import app
+from prime_cli.utils.formatters import strip_ansi
 from typer.testing import CliRunner
 
 
@@ -88,3 +89,164 @@ def test_models_handles_backend_without_pricing_fields(
 
     assert result.exit_code == 0, result.output
     assert "qwen/qwen3-8b" in result.output
+
+
+def _promo_payload() -> Dict[str, Any]:
+    return {
+        "models": [
+            {
+                "name": "qwen/qwen3-8b",
+                "atCapacity": False,
+                "trainingPricePerMtok": 0.5,
+                "inferenceInputPricePerMtok": 1.0,
+                "inferenceOutputPricePerMtok": 3.0,
+                "effectiveTrainingPricePerMtok": 0.0,
+                "effectiveInferenceInputPricePerMtok": 0.0,
+                "effectiveInferenceOutputPricePerMtok": 0.0,
+                "promoLabel": "Free RFT week",
+            },
+        ]
+    }
+
+
+def test_models_table_renders_promo_arrow_and_caption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return _promo_payload()
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    # Discounted cells render as "original → effective".
+    assert "→" in plain
+    assert "FREE" in plain
+    assert "$0.5" in plain
+    assert "$1" in plain
+    assert "$3" in plain
+    # Promo label rendered once below the table.
+    assert plain.count("Free RFT week") == 1
+
+
+def test_models_table_no_promo_when_effective_equals_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "models": [
+            {
+                "name": "qwen/qwen3-8b",
+                "atCapacity": False,
+                "trainingPricePerMtok": 0.5,
+                "inferenceInputPricePerMtok": 1.0,
+                "inferenceOutputPricePerMtok": 3.0,
+                "effectiveTrainingPricePerMtok": 0.5,
+                "effectiveInferenceInputPricePerMtok": 1.0,
+                "effectiveInferenceOutputPricePerMtok": 3.0,
+                "promoLabel": None,
+            }
+        ]
+    }
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return payload
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "FREE" not in plain
+    assert "$0.5" in plain
+
+
+def test_models_zero_original_with_promo_does_not_render_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "models": [
+            {
+                "name": "qwen/qwen3-8b",
+                "atCapacity": False,
+                "trainingPricePerMtok": 0.0,
+                "inferenceInputPricePerMtok": 0.0,
+                "inferenceOutputPricePerMtok": 0.0,
+                "effectiveTrainingPricePerMtok": 0.0,
+                "effectiveInferenceInputPricePerMtok": 0.0,
+                "effectiveInferenceOutputPricePerMtok": 0.0,
+                "promoLabel": None,
+            }
+        ]
+    }
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return payload
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "FREE" not in plain
+
+
+def test_models_promo_label_deduplicated_across_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "models": [
+            {
+                "name": "model-a",
+                "atCapacity": False,
+                "trainingPricePerMtok": 0.5,
+                "inferenceInputPricePerMtok": 1.0,
+                "inferenceOutputPricePerMtok": 3.0,
+                "effectiveTrainingPricePerMtok": 0.0,
+                "effectiveInferenceInputPricePerMtok": 0.0,
+                "effectiveInferenceOutputPricePerMtok": 0.0,
+                "promoLabel": "shared promo",
+            },
+            {
+                "name": "model-b",
+                "atCapacity": False,
+                "trainingPricePerMtok": 0.2,
+                "inferenceInputPricePerMtok": 0.4,
+                "inferenceOutputPricePerMtok": 0.6,
+                "effectiveTrainingPricePerMtok": 0.0,
+                "effectiveInferenceInputPricePerMtok": 0.0,
+                "effectiveInferenceOutputPricePerMtok": 0.0,
+                "promoLabel": "shared promo",
+            },
+        ]
+    }
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return payload
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert plain.count("shared promo") == 1
+
+
+def test_models_json_includes_effective_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return _promo_payload()
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "models", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["models"][0]["effective_training_price_per_mtok"] == 0.0
+    assert data["models"][0]["effective_inference_input_price_per_mtok"] == 0.0
+    assert data["models"][0]["effective_inference_output_price_per_mtok"] == 0.0
+    assert data["models"][0]["promo_label"] == "Free RFT week"

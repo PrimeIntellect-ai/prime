@@ -20,6 +20,16 @@ class RLModel(BaseModel):
     inference_output_price_per_mtok: Optional[float] = Field(
         None, alias="inferenceOutputPricePerMtok"
     )
+    effective_training_price_per_mtok: Optional[float] = Field(
+        None, alias="effectiveTrainingPricePerMtok"
+    )
+    effective_inference_input_price_per_mtok: Optional[float] = Field(
+        None, alias="effectiveInferenceInputPricePerMtok"
+    )
+    effective_inference_output_price_per_mtok: Optional[float] = Field(
+        None, alias="effectiveInferenceOutputPricePerMtok"
+    )
+    promo_label: Optional[str] = Field(None, alias="promoLabel")
 
     model_config = ConfigDict(populate_by_name=True)
 

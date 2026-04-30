@@ -967,12 +967,20 @@ def create_run(
             console.print(
                 "\n[cyan]Pricing[/cyan] [dim](per 1M tokens, charged on actual usage)[/dim]"
             )
-            train_str = format_promo_price(list_train, eff_train) or "-"
-            input_str = format_promo_price(list_input, eff_input) or "-"
-            output_str = format_promo_price(list_output, eff_output) or "-"
-            console.print(f"  Training:         {train_str}")
-            console.print(f"  Inference Input:  {input_str}")
-            console.print(f"  Inference Output: {output_str}")
+
+            def _format(list_p: Any, eff_p: Any) -> str:
+                charged = eff_p if eff_p is not None else list_p
+                if charged is None:
+                    return "-"
+                if float(charged) == 0:
+                    if list_p is not None and float(list_p) > float(charged):
+                        return format_promo_price(list_p, eff_p) or "[bold green]Free[/bold green]"
+                    return "[bold green]Free[/bold green]"
+                return format_promo_price(list_p, eff_p) or "-"
+
+            console.print(f"  Training:         {_format(list_train, eff_train)}")
+            console.print(f"  Inference Input:  {_format(list_input, eff_input)}")
+            console.print(f"  Inference Output: {_format(list_output, eff_output)}")
             if priced.promo_label:
                 console.print(f"  [bold yellow]{rich_escape(priced.promo_label)}[/bold yellow]")
 

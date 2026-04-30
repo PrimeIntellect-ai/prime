@@ -266,7 +266,8 @@ async def test_client_bulk_delete_by_labels(monkeypatch):
     result = await client.bulk_delete_tunnels(labels=["dev"], team_id="team-1")
 
     assert captured["json"]["labels"] == ["dev"]
-    assert captured["json"]["team_id"] == "team-1"
+    assert captured["json"]["teamId"] == "team-1"
+    assert "team_id" not in captured["json"]
     assert result["succeeded"] == ["t-test123"]
 
 
@@ -289,7 +290,8 @@ async def test_client_bulk_delete_uses_configured_team_id(monkeypatch):
 
     result = await client.bulk_delete_tunnels(all_users=True)
 
-    assert captured["json"]["team_id"] == "team-from-config"
+    assert captured["json"]["teamId"] == "team-from-config"
+    assert "team_id" not in captured["json"]
     assert captured["json"]["all_users"] is True
     assert result["succeeded"] == ["t-test123"]
 

@@ -311,9 +311,9 @@ class TunnelClient:
         if labels:
             payload["labels"] = labels
         if team_id:
-            payload["team_id"] = team_id
+            payload["teamId"] = team_id
         if user_id:
-            payload["user_id"] = user_id
+            payload["userId"] = user_id
 
         try:
             response = await self._idempotent_request_with_retry("DELETE", url, json=payload)

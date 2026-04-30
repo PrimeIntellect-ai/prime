@@ -35,6 +35,7 @@ from ..utils.formatters import (
     strip_ansi,
 )
 from ..utils.prompt import confirm_or_skip
+from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
 console = get_console()
 
@@ -2044,3 +2045,9 @@ def list_checkpoints(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+# `prime train usage` — token usage and price for one run; lives next to the
+# other run-scoped monitoring commands. Implemented in commands/usage.py and
+# also re-exposed as the top-level `prime usage` summary command.
+app.command("usage", rich_help_panel="Monitoring", epilog=RUN_USAGE_JSON_HELP)(run_usage_command)

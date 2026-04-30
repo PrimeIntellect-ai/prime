@@ -1,7 +1,13 @@
-"""`prime usage` — token usage and price for RFT runs and the wider account.
+"""Token usage and price commands.
 
-Mirrors the platform billing/analytics view (excluding sandbox) so an agent can
-poll a run's running cost without scraping the dashboard.
+Two entry points are exported:
+
+- ``run_usage_command`` — registered as ``prime train usage`` in
+  ``commands/rl.py`` (sits next to ``train logs``, ``train metrics``, etc.).
+- ``summary_command`` — registered as the top-level ``prime usage`` so the
+  account-wide billing roll-up has its own ergonomic command (no subgroup).
+
+Both mirror the platform billing/analytics view, with sandbox excluded.
 """
 
 import time
@@ -19,7 +25,6 @@ from prime_cli.api.billing import (
 )
 from prime_cli.core import APIClient, APIError
 from prime_cli.utils import (
-    PlainTyper,
     build_table,
     get_console,
     is_plain_mode,
@@ -29,7 +34,6 @@ from prime_cli.utils import (
 )
 from prime_cli.utils.formatters import format_price_per_mtok
 
-app = PlainTyper(help="View token usage and price (excludes sandbox)", no_args_is_help=True)
 console = get_console()
 
 
@@ -71,7 +75,6 @@ def _format_usd(value: float) -> str:
 
 
 def _run_usage_json(usage: RunUsage) -> Dict[str, Any]:
-    """Convert RunUsage into a stable JSON shape for the CLI surface."""
     return usage.model_dump()
 
 
@@ -169,8 +172,7 @@ def _format_area_metric(area: AreaUsage) -> str:
     return "-"
 
 
-@app.command("run", epilog=RUN_USAGE_JSON_HELP)
-def run_usage(
+def run_usage_command(
     run_id: str = typer.Argument(..., help="RFT run ID (e.g. rft_..."),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
     watch: bool = typer.Option(
@@ -184,7 +186,16 @@ def run_usage(
         help="Seconds between polls when --watch is set",
     ),
 ) -> None:
-    """Show token usage and price for a single RFT run."""
+    """Show token usage and price for a single training run.
+
+    Example:
+
+        prime train usage <run_id>
+
+        prime train usage <run_id> --watch --interval 15
+
+        prime train usage <run_id> --output json
+    """
     validate_output_format(output, console)
 
     billing = BillingClient(APIClient())
@@ -204,21 +215,17 @@ def run_usage(
 
     # Watch mode: the watcher does the first fetch itself — no eager call.
     if output == "json":
-        # JSON watch mode emits one JSON object per tick — agent-friendly.
         _watch_json(billing.get_run_usage, run_id, interval, _run_usage_json)
         return
 
     if is_plain_mode():
-        # Plain mode: print one snapshot per tick instead of a Live re-render
-        # so output stays append-only and grep-able.
         _watch_plain(billing.get_run_usage, run_id, interval, _build_run_usage_table)
         return
 
     _watch_live(billing.get_run_usage, run_id, interval, _build_run_usage_table)
 
 
-@app.command("summary", epilog=USAGE_SUMMARY_JSON_HELP)
-def summary(
+def summary_command(
     period: str = typer.Option(
         "this_month",
         "--period",
@@ -230,7 +237,17 @@ def summary(
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Show aggregated tokens + cost per billing area (sandbox excluded)."""
+    """Account-wide billing summary (sandbox excluded).
+
+    Mirrors the dashboard analytics view — total tokens + cost per area
+    (training, inference, compute, disks, images) for the chosen period.
+
+    Example:
+
+        prime usage
+
+        prime usage --period 7_days --output json
+    """
     validate_output_format(output, console)
 
     if period not in VALID_PERIODS:

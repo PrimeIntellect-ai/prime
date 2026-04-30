@@ -1,4 +1,4 @@
-"""Tests for `prime usage` — RFT run usage and aggregated billing summary."""
+"""Tests for `prime train usage` and `prime usage` (account-wide summary)."""
 
 import json
 from typing import Any, Dict, List, Optional
@@ -104,42 +104,42 @@ def _make_get_mock(routes: Dict[str, Dict[str, Any]], calls: List[Dict[str, Any]
     return mock_get
 
 
-def test_run_usage_table_renders_tokens_and_cost(monkeypatch: pytest.MonkeyPatch) -> None:
+# -----------------------------------------------------------------------------
+# `prime train usage <run_id>`
+# -----------------------------------------------------------------------------
+
+
+def test_train_usage_table_renders_tokens_and_cost(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: List[Dict[str, Any]] = []
     monkeypatch.setattr(
         "prime_cli.core.APIClient.get",
         _make_get_mock({"/billing/runs/rft_abc/usage": _run_usage_payload()}, calls),
     )
 
-    result = CliRunner().invoke(app, ["usage", "run", "rft_abc"], env={"COLUMNS": "200"})
+    result = CliRunner().invoke(app, ["train", "usage", "rft_abc"], env={"COLUMNS": "200"})
 
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
-    # Table header
     assert "Run Usage" in plain
     assert "my-run" in plain
     assert "RUNNING" in plain
-    # Token formatting (5M, 1M, 3M)
     assert "5.00M" in plain
     assert "1.00M" in plain
     assert "3.00M" in plain
-    # Costs
     assert "$12.50" in plain
     assert "$7.00" in plain
     assert "$19.50" in plain
-    # Pricing per Mtok
     assert "$2.5" in plain or "$2.50" in plain
-    # Single GET to the right endpoint
     assert calls == [{"endpoint": "/billing/runs/rft_abc/usage", "params": None}]
 
 
-def test_run_usage_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_train_usage_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "prime_cli.core.APIClient.get",
         _make_get_mock({"/billing/runs/rft_abc/usage": _run_usage_payload()}, []),
     )
 
-    result = CliRunner().invoke(app, ["usage", "run", "rft_abc", "--output", "json"])
+    result = CliRunner().invoke(app, ["train", "usage", "rft_abc", "--output", "json"])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -149,7 +149,19 @@ def test_run_usage_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
     assert data["pricing"]["training_per_mtok"] == 2.5
 
 
-def test_summary_table_renders_all_areas_excludes_sandbox(
+def test_train_usage_appears_in_train_help() -> None:
+    result = CliRunner().invoke(app, ["train", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "usage" in result.output
+
+
+# -----------------------------------------------------------------------------
+# `prime usage` (account-wide summary)
+# -----------------------------------------------------------------------------
+
+
+def test_usage_summary_renders_all_areas_excludes_sandbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: List[Dict[str, Any]] = []
@@ -158,7 +170,7 @@ def test_summary_table_renders_all_areas_excludes_sandbox(
         _make_get_mock({"/billing/usage": _summary_payload()}, calls),
     )
 
-    result = CliRunner().invoke(app, ["usage", "summary"], env={"COLUMNS": "200"})
+    result = CliRunner().invoke(app, ["usage"], env={"COLUMNS": "200"})
 
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
@@ -171,13 +183,10 @@ def test_summary_table_renders_all_areas_excludes_sandbox(
     assert "$600.00" in plain
     assert "$612.50" in plain
     assert "20 req" in plain
-    # Default period sent as query param
     assert calls == [{"endpoint": "/billing/usage", "params": {"period": "this_month"}}]
 
 
-def test_summary_passes_team_and_period_query_params(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_usage_passes_team_and_period_query_params(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: List[Dict[str, Any]] = []
     monkeypatch.setattr(
         "prime_cli.core.APIClient.get",
@@ -188,7 +197,6 @@ def test_summary_passes_team_and_period_query_params(
         app,
         [
             "usage",
-            "summary",
             "--period",
             "7_days",
             "--team",
@@ -209,23 +217,20 @@ def test_summary_passes_team_and_period_query_params(
     ]
 
 
-def test_summary_rejects_invalid_period(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No HTTP call expected — should fail before that.
+def test_usage_rejects_invalid_period(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail_get(*args: Any, **kwargs: Any) -> Dict[str, Any]:
         raise AssertionError("Should not call API on invalid period")
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", fail_get)
 
-    result = CliRunner().invoke(app, ["usage", "summary", "--period", "forever"])
+    result = CliRunner().invoke(app, ["usage", "--period", "forever"])
 
     assert result.exit_code == 1, result.output
     assert "invalid --period" in result.output
 
 
-def test_usage_help_lists_subcommands(monkeypatch: pytest.MonkeyPatch) -> None:
-    result = CliRunner().invoke(app, ["usage", "--help"])
+def test_usage_appears_in_root_help() -> None:
+    result = CliRunner().invoke(app, ["--help"])
 
     assert result.exit_code == 0, result.output
-    assert "run" in result.output
-    assert "summary" in result.output
-    assert "View token usage and price" in result.output
+    assert "usage" in result.output

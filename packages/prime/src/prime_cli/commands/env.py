@@ -3038,7 +3038,12 @@ def _install_single_environment(env_slug: str, tool: str = "uv", prerelease: boo
         return False
 
     cmd_parts = _build_install_command(
-        name, target_version, simple_index_url, wheel_url, tool, url_dependencies=url_dependencies,
+        name,
+        target_version,
+        simple_index_url,
+        wheel_url,
+        tool,
+        url_dependencies=url_dependencies,
         prerelease=prerelease,
     )
     if not cmd_parts:

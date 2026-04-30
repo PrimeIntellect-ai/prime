@@ -27,7 +27,8 @@ from .commands.switch import app as switch_app
 from .commands.teams import app as teams_app
 from .commands.tunnel import app as tunnel_app
 from .commands.upgrade import app as upgrade_app
-from .commands.usage import app as usage_app
+from .commands.usage import USAGE_SUMMARY_JSON_HELP
+from .commands.usage import summary_command as usage_summary_command
 from .commands.whoami import app as whoami_app
 from .core import Config
 from .utils import PlainTyper, get_console
@@ -55,7 +56,9 @@ app.add_typer(
     rich_help_panel="Lab",
 )
 app.add_typer(deployments_app, name="deployments", rich_help_panel="Lab")
-app.add_typer(usage_app, name="usage", rich_help_panel="Lab")
+app.command("usage", rich_help_panel="Account", epilog=USAGE_SUMMARY_JSON_HELP)(
+    usage_summary_command
+)
 
 # Compute commands
 app.add_typer(availability_app, name="availability", rich_help_panel="Compute")

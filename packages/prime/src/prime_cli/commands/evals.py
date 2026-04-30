@@ -1,6 +1,5 @@
 import argparse
 import json
-import re
 import time
 from functools import wraps
 from pathlib import Path
@@ -23,7 +22,11 @@ from ..utils import (
 )
 from ..utils.display import get_eval_viewer_url
 from ..utils.env_metadata import find_environment_metadata
-from ..utils.eval_push import load_results_jsonl
+from ..utils.eval_push import (
+    extract_verifiers_metrics,
+    load_results_jsonl,
+    normalize_verifiers_result_samples,
+)
 from ..utils.hosted_eval import (
     EvalStatus,
     HostedEvalConfig,
@@ -903,26 +906,13 @@ def _load_eval_directory(directory: Path) -> dict:
 
     results = load_results_jsonl(directory / "results.jsonl")
 
-    for sample in results:
-        if "id" in sample and "example_id" not in sample:
-            sample["example_id"] = sample["id"]
-
-    avg_pattern = re.compile(r"^avg_(.+)$")
-    metrics = {}
-    metadata_copy = {}
-    for key, value in metadata.items():
-        if match := avg_pattern.match(key):
-            metrics[match.group(1)] = value
-        else:
-            metadata_copy[key] = value
-
     return {
         "eval_name": f"{env_field}-{metadata['model']}",
         "model_name": metadata["model"],
         "env": env_field,
-        "metrics": metrics,
-        "metadata": metadata_copy,
-        "results": results,
+        "metrics": extract_verifiers_metrics(metadata),
+        "metadata": {"framework": "verifiers", **metadata},
+        "results": normalize_verifiers_result_samples(results),
     }
 
 
@@ -1031,6 +1021,7 @@ def _push_single_eval(
                 evaluation_id=eval_id,
                 name=eval_name,
                 model_name=eval_data.get("model_name"),
+                dataset=eval_data.get("env"),
                 framework=eval_data.get("metadata", {}).get("framework", "verifiers"),
                 task_type=eval_data.get("metadata", {}).get("task_type"),
                 metadata=eval_data.get("metadata"),
@@ -1049,6 +1040,7 @@ def _push_single_eval(
             environments=environments,
             run_id=run_id,
             model_name=eval_data.get("model_name"),
+            dataset=eval_data.get("env"),
             framework=eval_data.get("metadata", {}).get("framework", "verifiers"),
             task_type=eval_data.get("metadata", {}).get("task_type"),
             metadata=eval_data.get("metadata"),

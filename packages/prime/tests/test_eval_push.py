@@ -210,6 +210,7 @@ class TestPushSingleEval:
 
         assert eval_id == "eval-123"
         assert captured["is_public"] is False
+        assert captured["dataset"] == "gsm8k"
 
     def test_create_evaluation_passes_public_flag(self, tmp_path, monkeypatch):
         metadata = {"env": "gsm8k", "model": "gpt-4"}
@@ -385,7 +386,8 @@ class TestLoadEvalDirectory:
         assert data["eval_name"] == "gsm8k-gpt-4"
         assert data["model_name"] == "gpt-4"
         assert data["env"] == "gsm8k"
-        assert data["metrics"] == {"reward": 0.85, "accuracy": 0.9}
+        assert data["metrics"] == {"avg_reward": 0.85, "avg_accuracy": 0.9}
+        assert data["metadata"]["avg_reward"] == 0.85
         assert data["metadata"]["num_examples"] == 100
         assert len(data["results"]) == 2
         assert data["results"][0]["example_id"] == 0
@@ -477,7 +479,7 @@ class TestLoadEvalDirectory:
         data = _load_eval_directory(tmp_path)
 
         assert data["results"][0]["example_id"] == 42
-        assert data["results"][0]["id"] == 42  # Original field preserved
+        assert "id" not in data["results"][0]
 
     def test_extracts_avg_metrics(self, tmp_path):
         """Extracts avg_* fields into metrics dict"""
@@ -495,11 +497,11 @@ class TestLoadEvalDirectory:
         data = _load_eval_directory(tmp_path)
 
         assert data["metrics"] == {
-            "reward": 0.75,
-            "correctness": 0.8,
-            "format_reward": 0.95,
+            "avg_reward": 0.75,
+            "avg_correctness": 0.8,
+            "avg_format_reward": 0.95,
         }
-        assert "avg_reward" not in data["metadata"]
+        assert data["metadata"]["avg_reward"] == 0.75
         assert data["metadata"]["other_field"] == "value"
 
     def test_invalid_metadata_json_raises(self, tmp_path):

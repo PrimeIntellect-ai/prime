@@ -51,6 +51,22 @@ def load_results_jsonl(path: Path) -> list[dict]:
     return results
 
 
+def extract_verifiers_metrics(metadata: dict) -> dict:
+    return {k: v for k, v in metadata.items() if k.startswith("avg_")}
+
+
+def normalize_verifiers_result_sample(sample: dict) -> dict:
+    return {
+        "example_id": sample.get("id", 0),
+        "reward": sample.get("reward", 0.0),
+        **{k: v for k, v in sample.items() if k not in {"id", "reward"}},
+    }
+
+
+def normalize_verifiers_result_samples(samples: list[dict]) -> list[dict]:
+    return [normalize_verifiers_result_sample(sample) for sample in samples]
+
+
 def push_eval_results_to_hub(
     env_name: str,
     model: str,
@@ -175,18 +191,11 @@ def push_eval_results_to_hub(
             environments = [{"slug": resolved_env_slug}]
     else:
         raise ValueError("No valid environment identifier found")
-    metrics = {k: v for k, v in metadata.items() if k.startswith("avg_")}
+    metrics = extract_verifiers_metrics(metadata)
 
     eval_metadata = {"framework": "verifiers", "job_id": job_id, **metadata}
 
-    converted_results = [
-        {
-            "example_id": sample.get("id", 0),
-            "reward": sample.get("reward", 0.0),
-            **{k: v for k, v in sample.items() if k not in {"id", "reward"}},
-        }
-        for sample in results_samples
-    ]
+    converted_results = normalize_verifiers_result_samples(results_samples)
 
     eval_name = f"{env_name}--{model}--{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 

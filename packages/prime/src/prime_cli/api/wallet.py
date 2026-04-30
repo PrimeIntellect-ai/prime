@@ -31,7 +31,7 @@ class Wallet(BaseModel):
 
 
 class WalletClient:
-    """Thin client for `/api/v1/wallet`."""
+    """Thin client for `/api/v1/billing/wallet`."""
 
     def __init__(self, client: APIClient) -> None:
         self.client = client
@@ -46,7 +46,7 @@ class WalletClient:
         if team_id:
             params["teamId"] = team_id
         try:
-            response = self.client.get("/wallet", params=params)
+            response = self.client.get("/billing/wallet", params=params)
         except APIError:
             # Let typed APIError subclasses (UnauthorizedError, etc.) propagate
             # — wrapping them strips the type and the caller's ability to

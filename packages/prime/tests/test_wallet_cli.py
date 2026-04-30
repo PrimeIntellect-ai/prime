@@ -89,7 +89,7 @@ def test_wallet_renders_balance_and_billings_table(monkeypatch: pytest.MonkeyPat
     calls: List[Dict[str, Any]] = []
     monkeypatch.setattr(
         "prime_cli.core.APIClient.get",
-        _make_get_mock({"/wallet": _wallet_payload()}, calls),
+        _make_get_mock({"/billing/wallet": _wallet_payload()}, calls),
     )
 
     result = CliRunner().invoke(app, ["wallet"], env={"COLUMNS": "200"})
@@ -111,13 +111,13 @@ def test_wallet_renders_balance_and_billings_table(monkeypatch: pytest.MonkeyPat
     assert "$1.25" in plain
     assert "$0.05" in plain or "$0.0500" in plain
     # Default query params
-    assert calls == [{"endpoint": "/wallet", "params": {"limit": 20, "offset": 0}}]
+    assert calls == [{"endpoint": "/billing/wallet", "params": {"limit": 20, "offset": 0}}]
 
 
 def test_wallet_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "prime_cli.core.APIClient.get",
-        _make_get_mock({"/wallet": _wallet_payload()}, []),
+        _make_get_mock({"/billing/wallet": _wallet_payload()}, []),
     )
 
     result = CliRunner().invoke(app, ["wallet", "--output", "json"])
@@ -138,7 +138,7 @@ def test_wallet_passes_limit_and_uses_configured_team(
     calls: List[Dict[str, Any]] = []
     monkeypatch.setattr(
         "prime_cli.core.APIClient.get",
-        _make_get_mock({"/wallet": _wallet_payload()}, calls),
+        _make_get_mock({"/billing/wallet": _wallet_payload()}, calls),
     )
     monkeypatch.setattr("prime_cli.core.Config.team_id", "team-cfg")
 
@@ -147,7 +147,7 @@ def test_wallet_passes_limit_and_uses_configured_team(
     assert result.exit_code == 0, result.output
     assert calls == [
         {
-            "endpoint": "/wallet",
+            "endpoint": "/billing/wallet",
             "params": {"limit": 5, "offset": 0, "teamId": "team-cfg"},
         }
     ]
@@ -164,7 +164,7 @@ def test_wallet_does_not_accept_team_flag() -> None:
 def test_wallet_handles_empty_billings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "prime_cli.core.APIClient.get",
-        _make_get_mock({"/wallet": _empty_wallet_payload()}, []),
+        _make_get_mock({"/billing/wallet": _empty_wallet_payload()}, []),
     )
 
     result = CliRunner().invoke(app, ["wallet"], env={"COLUMNS": "200"})

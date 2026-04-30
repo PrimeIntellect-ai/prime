@@ -55,12 +55,97 @@ def extract_verifiers_metrics(metadata: dict) -> dict:
     return {k: v for k, v in metadata.items() if k.startswith("avg_")}
 
 
+_SAMPLE_FIELD_ALIASES = {
+    "exampleId": "example_id",
+    "rolloutNumber": "rollout_number",
+    "numSteps": "num_steps",
+    "totalTime": "total_time",
+    "latencyMs": "latency_ms",
+}
+
+_STANDARD_SAMPLE_FIELDS = {
+    "evaluation_id",
+    "sample_id",
+    "example_id",
+    "reward",
+    "task",
+    "prompt",
+    "completion",
+    "answer",
+    "score",
+    "correct",
+    "num_steps",
+    "total_time",
+    "latency_ms",
+    "rollout_number",
+}
+
+_RESERVED_RESULT_KEYS = {
+    "id",
+    "info",
+    "metadata",
+    *_STANDARD_SAMPLE_FIELDS,
+    *_SAMPLE_FIELD_ALIASES,
+}
+
+
+def _numeric_or_none(value: object) -> float | int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    return None
+
+
+def _timing_total_time(timing: object) -> float | None:
+    if not isinstance(timing, dict):
+        return None
+
+    timing_dict = {str(key): value for key, value in timing.items()}
+
+    total_ms = _numeric_or_none(timing_dict.get("total_ms"))
+    if total_ms is None:
+        total_ms = _numeric_or_none(timing_dict.get("totalMs"))
+    if total_ms is not None:
+        return float(total_ms) / 1000.0
+
+    total = _numeric_or_none(timing_dict.get("total"))
+    return float(total) if total is not None else None
+
+
 def normalize_verifiers_result_sample(sample: dict) -> dict:
-    return {
-        "example_id": sample.get("id", 0),
+    normalized = {
+        "example_id": sample.get("example_id", sample.get("exampleId", sample.get("id", 0))),
         "reward": sample.get("reward", 0.0),
-        **{k: v for k, v in sample.items() if k not in {"id", "reward"}},
     }
+
+    for key in _STANDARD_SAMPLE_FIELDS - {"example_id", "reward"}:
+        if key in sample:
+            normalized[key] = sample[key]
+
+    for source_key, target_key in _SAMPLE_FIELD_ALIASES.items():
+        if source_key in sample and target_key not in normalized:
+            normalized[target_key] = sample[source_key]
+
+    timing_total_time = _timing_total_time(sample.get("timing"))
+    if timing_total_time is not None:
+        normalized.setdefault("total_time", timing_total_time)
+        normalized.setdefault("latency_ms", int(round(timing_total_time * 1000)))
+
+    info = {}
+    for key in ("metadata", "info"):
+        value = sample.get(key)
+        if isinstance(value, dict):
+            info.update(value)
+
+    for key, value in sample.items():
+        if key not in _RESERVED_RESULT_KEYS:
+            info.setdefault(key, value)
+
+    if info:
+        normalized["info"] = info
+
+    return normalized
 
 
 def normalize_verifiers_result_samples(samples: list[dict]) -> list[dict]:

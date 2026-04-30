@@ -481,6 +481,41 @@ class TestLoadEvalDirectory:
         assert data["results"][0]["example_id"] == 42
         assert "id" not in data["results"][0]
 
+    def test_preserves_rollout_viewer_state_in_info(self, tmp_path):
+        """Preserves vf-eval state fields in info for the rollout viewer."""
+        metadata = {"env": "test", "model": "test-model"}
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+
+        result = {
+            "id": 42,
+            "reward": 1.0,
+            "timing": {"total_ms": 1500, "generation_ms": 1200},
+            "token_usage": {"input_tokens": 10, "output_tokens": 20},
+            "trajectory": [{"reward": 1.0}],
+            "metrics": {"answer_reward": 1.0},
+            "is_completed": True,
+            "stop_condition": "done",
+            "turn": 2,
+            "metadata": {"source": "vf-eval"},
+        }
+        (tmp_path / "results.jsonl").write_text(json.dumps(result))
+
+        data = _load_eval_directory(tmp_path)
+        sample = data["results"][0]
+
+        assert sample["example_id"] == 42
+        assert sample["total_time"] == 1.5
+        assert sample["latency_ms"] == 1500
+        assert "timing" not in sample
+        assert sample["info"]["timing"] == {"total_ms": 1500, "generation_ms": 1200}
+        assert sample["info"]["token_usage"] == {"input_tokens": 10, "output_tokens": 20}
+        assert sample["info"]["trajectory"] == [{"reward": 1.0}]
+        assert sample["info"]["metrics"] == {"answer_reward": 1.0}
+        assert sample["info"]["is_completed"] is True
+        assert sample["info"]["stop_condition"] == "done"
+        assert sample["info"]["turn"] == 2
+        assert sample["info"]["source"] == "vf-eval"
+
     def test_extracts_avg_metrics(self, tmp_path):
         """Extracts avg_* fields into metrics dict"""
         metadata = {

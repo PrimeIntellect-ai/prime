@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 
 import typer
 from rich.live import Live
+from rich.markup import escape as rich_escape
 from rich.table import Table
 
 from prime_cli.api.billing import (
@@ -83,9 +84,13 @@ def _summary_json(summary: UsageSummary) -> Dict[str, Any]:
 
 
 def _build_run_usage_table(usage: RunUsage) -> Table:
-    title = f"Run Usage — {usage.run_name or usage.run_id}"
+    # Rich parses table titles as markup, so values from the API (run_name,
+    # status) must be escaped before interpolation — otherwise a stray
+    # "[bold]" or similar in those strings would be interpreted as markup.
+    name = rich_escape(usage.run_name or usage.run_id)
+    title = f"Run Usage — {name}"
     if usage.status:
-        title += f"  [{usage.status}]"
+        title += f"  [{rich_escape(usage.status)}]"
 
     table = build_table(
         title,
@@ -136,7 +141,11 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
 
 
 def _build_summary_table(summary: UsageSummary) -> Table:
-    title = f"Usage Summary — {summary.period} ({summary.start_date} → {summary.end_date})"
+    # Escape API-supplied strings to keep them out of Rich's markup parser.
+    period = rich_escape(summary.period)
+    start = rich_escape(summary.start_date)
+    end = rich_escape(summary.end_date)
+    title = f"Usage Summary — {period} ({start} → {end})"
     table = build_table(
         title,
         [

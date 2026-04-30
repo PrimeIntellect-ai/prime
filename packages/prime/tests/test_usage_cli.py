@@ -156,6 +156,45 @@ def test_train_usage_appears_in_train_help() -> None:
     assert "usage" in result.output
 
 
+def test_train_usage_escapes_rich_markup_in_run_name_and_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """API-supplied run_name/status must not be parsed as Rich markup."""
+    payload = _run_usage_payload()
+    payload["run_name"] = "evil[bold red]name[/bold red]"
+    payload["status"] = "RUN[blink]"
+
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _make_get_mock({"/billing/runs/rft_abc/usage": payload}, []),
+    )
+
+    result = CliRunner().invoke(app, ["train", "usage", "rft_abc"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    # Bracketed text is rendered literally, not consumed as markup.
+    assert "evil[bold red]name[/bold red]" in plain
+    assert "RUN[blink]" in plain
+
+
+def test_train_usage_propagates_typed_api_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Subclassed APIErrors must propagate intact, not be re-wrapped."""
+    from prime_cli.core import UnauthorizedError
+
+    def raise_unauthorized(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        raise UnauthorizedError("token expired")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", raise_unauthorized)
+
+    result = CliRunner().invoke(app, ["train", "usage", "rft_abc"])
+
+    assert result.exit_code == 1
+    # The original message should appear, not "Failed to get run usage: …".
+    assert "token expired" in result.output
+    assert "Failed to get run usage" not in result.output
+
+
 # -----------------------------------------------------------------------------
 # `prime usage` (account-wide summary)
 # -----------------------------------------------------------------------------

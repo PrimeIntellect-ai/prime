@@ -65,9 +65,14 @@ class BillingClient:
         """Fetch token + cost totals for a single RFT run."""
         try:
             response = self.client.get(f"/billing/runs/{run_id}/usage")
-            return RunUsage.model_validate(response)
+        except APIError:
+            # Let typed APIError subclasses (UnauthorizedError, etc.) propagate
+            # — wrapping them strips the type and the caller's ability to
+            # branch on auth/payment failures.
+            raise
         except Exception as exc:  # noqa: BLE001
             raise APIError(_format_error("Failed to get run usage", exc)) from exc
+        return RunUsage.model_validate(response)
 
     def get_usage_summary(
         self,
@@ -80,9 +85,11 @@ class BillingClient:
             params["teamId"] = team_id
         try:
             response = self.client.get("/billing/usage", params=params)
-            return UsageSummary.model_validate(response)
+        except APIError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise APIError(_format_error("Failed to get usage summary", exc)) from exc
+        return UsageSummary.model_validate(response)
 
 
 def _format_error(prefix: str, exc: Exception) -> str:

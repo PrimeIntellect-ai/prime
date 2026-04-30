@@ -34,6 +34,7 @@ from ..utils.formatters import (
     format_promo_price,
     strip_ansi,
 )
+from ..utils.prompt import confirm_or_skip
 
 console = get_console()
 
@@ -786,6 +787,7 @@ def create_run(
         "--skip-action-check",
         help="Skip action status check and run even if environment action failed.",
     ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
@@ -985,6 +987,10 @@ def create_run(
                 raise typer.Exit(1)
 
             console.print()
+
+        if not confirm_or_skip("Launch this Hosted Training run?", yes, default=True):
+            console.print("\nRun cancelled")
+            return
 
         console.print("[dim]Creating Hosted Training run...[/dim]\n")
 

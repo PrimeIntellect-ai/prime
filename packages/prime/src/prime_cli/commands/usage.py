@@ -90,13 +90,16 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
         show_lines=False,
     )
 
-    caption_parts: list[str] = []
+    # Each piece of metadata goes on its own caption line. Joining with a
+    # separator lets Rich wrap mid-label (e.g. "model:" at the end of one
+    # line, the value alone on the next) when the model name is long.
+    caption_lines: list[str] = []
     if usage.run_name and usage.run_name != usage.run_id:
-        caption_parts.append(rich_escape(usage.run_name))
+        caption_lines.append(rich_escape(usage.run_name))
     if usage.base_model:
-        caption_parts.append(f"model: {rich_escape(usage.base_model)}")
-    if caption_parts:
-        table.caption = "[dim]" + "  •  ".join(caption_parts) + "[/dim]"
+        caption_lines.append(f"model: {rich_escape(usage.base_model)}")
+    if caption_lines:
+        table.caption = "[dim]" + "\n".join(caption_lines) + "[/dim]"
 
     # Per-row inference cost is derived from tokens × the *same* snapshotted
     # rate that produced RFTUsage.cost on the backend, so the two derived

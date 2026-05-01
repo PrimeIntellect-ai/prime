@@ -165,10 +165,14 @@ def run_usage_command(
     billing = BillingClient(APIClient())
 
     if not watch:
+        # In JSON mode, errors must go to stderr so stdout stays strictly
+        # JSON for agents piping through `jq`. Watch-mode JSON already does
+        # this — keep one-shot consistent.
+        err_console = get_console(stderr=True) if output == "json" else console
         try:
             usage = billing.get_run_usage(run_id)
         except APIError as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            err_console.print(f"[red]Error: {exc}[/red]")
             raise typer.Exit(1) from exc
 
         if output == "json":

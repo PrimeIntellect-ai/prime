@@ -106,10 +106,13 @@ def wallet_command(
     config = Config()
     client = WalletClient(APIClient())
 
+    # In JSON mode, errors must go to stderr so stdout stays strictly JSON
+    # for agents piping through `jq`.
+    err_console = get_console(stderr=True) if output == "json" else console
     try:
         wallet = client.get(limit=limit, team_id=config.team_id)
     except APIError as exc:
-        console.print(f"[red]Error: {exc}[/red]")
+        err_console.print(f"[red]Error: {exc}[/red]")
         raise typer.Exit(1) from exc
 
     if output == "json":

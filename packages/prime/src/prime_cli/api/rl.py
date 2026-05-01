@@ -68,6 +68,10 @@ class RLRun(BaseModel):
     team_id: Optional[str] = Field(None, alias="teamId")
     cluster_id: Optional[str] = Field(None, alias="rftClusterId")
     status: str = Field(..., description="Run status")
+    # Discriminator: SHARED_RFT_HOSTED (LoRA) | DEDICATED_FULL_FT (own
+    # helm release on a PrimeCluster) | EXTERNAL (CLI-side prime-rl).
+    # Optional for backward-compat with older API versions.
+    kind: Optional[str] = Field(None, description="Run kind discriminator")
 
     # Training configuration
     rollouts_per_example: int = Field(..., alias="rolloutsPerExample")

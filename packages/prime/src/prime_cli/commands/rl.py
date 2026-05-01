@@ -700,6 +700,130 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
         console.print("[yellow]Warning:[/yellow] `trajectory_strategy` is deprecated and ignored.")
 
 
+def _peek_toml(config_path: str) -> Dict[str, Any]:
+    """Parse the TOML once for the dispatch decision. Returns {} on missing
+    or malformed file — the strict load_config call below produces the
+    user-facing error in that case so we don't double-report here."""
+    p = Path(config_path)
+    if not p.exists():
+        return {}
+    try:
+        data = toml.load(p)
+    except toml.TomlDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _is_full_finetune(cfg: Dict[str, Any]) -> bool:
+    """A config is full-FT iff it carries one of:
+
+    - top-level `type = "full_finetune"` (mirrors prime-rl's discriminator)
+    - top-level `[hosted]` table (forward-compatible: any hosted-only knobs
+      live in there — currently just `prime_cluster_id`)
+    - a `[deployment]` table with `num_train_gpus` / `num_infer_gpus`
+      (matches the prime-rl `qwen30b_math/rl.toml` shape exactly)
+    """
+    if cfg.get("type") == "full_finetune":
+        return True
+    if isinstance(cfg.get("hosted"), dict):
+        return True
+    deploy = cfg.get("deployment")
+    if isinstance(deploy, dict) and ("num_train_gpus" in deploy or "num_infer_gpus" in deploy):
+        return True
+    return False
+
+
+def _dispatch_full_finetune_run(
+    *,
+    raw_cfg: Dict[str, Any],
+    config_path: str,
+    env: Optional[List[str]],
+    env_file: Optional[List[str]],
+    output: str,
+    yes: bool,
+) -> None:
+    """Hand off to /api/v1/training/runs (full-FT prime-rl on a registered
+    PrimeCluster). Reuses the shared env-file plumbing for WANDB / HF
+    secrets so the user experience matches the LoRA path."""
+    from ..api.training import HostedTrainingClient, build_payload_from_toml
+
+    hosted_cfg = raw_cfg.get("hosted") if isinstance(raw_cfg.get("hosted"), dict) else {}
+    prime_cluster_id = hosted_cfg.get("prime_cluster_id") or raw_cfg.get("prime_cluster_id")
+    if not prime_cluster_id:
+        console.print(
+            "[red]Error:[/red] full_finetune configs must set "
+            "`prime_cluster_id` (top-level or under [hosted]). "
+            "List with `prime registry list`."
+        )
+        raise typer.Exit(1)
+
+    name = hosted_cfg.get("name") or raw_cfg.get("name")
+
+    # Resolve env files relative to the config dir, same convention as the
+    # LoRA path. We don't validate WANDB presence here — the chart wires
+    # WANDB_API_KEY via secretKeyRef only if `[wandb]` is configured AND
+    # the user passed --wandb-api-key, mirroring the platform's existing
+    # admin-dialog UX.
+    config_dir = Path(config_path).parent
+    cfg_env_files: List[str] = []
+    for key in ("env_files", "env_file"):
+        val = raw_cfg.get(key)
+        if isinstance(val, list):
+            cfg_env_files.extend(str(config_dir / p) for p in val)
+        elif isinstance(val, str):
+            cfg_env_files.append(str(config_dir / val))
+    all_env_files = cfg_env_files + (env_file or [])
+
+    def _warn(msg: str) -> None:
+        console.print(f"[yellow]Warning:[/yellow] {msg}")
+
+    try:
+        secrets = collect_env_vars(
+            env_args=env,
+            env_files=all_env_files if all_env_files else None,
+            on_warning=_warn,
+        )
+    except EnvParseError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    secrets = secrets or {}
+
+    payload = build_payload_from_toml(
+        raw_cfg,
+        prime_cluster_id=prime_cluster_id,
+        name=name,
+        wandb_api_key=secrets.get("WANDB_API_KEY"),
+        hf_token=secrets.get("HF_TOKEN"),
+    )
+
+    if output == "json":
+        # Honor the existing --output json contract: print the payload that
+        # would be sent and skip confirmation. Useful for scripting.
+        output_data_as_json({"would_dispatch": payload}, console)
+        return
+
+    if not yes and not typer.confirm(f"Dispatch full_finetune run on cluster {prime_cluster_id}?"):
+        raise typer.Exit(0)
+
+    api_client = APIClient()
+    client = HostedTrainingClient(api_client)
+    try:
+        result = client.create_run(payload)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    console.print(
+        f"[green]Dispatched[/green] hosted run [bold]{result.run_id}[/bold] "
+        f"(job [dim]{result.job_id}[/dim])"
+    )
+    console.print(
+        "[yellow]Save this token now — it is shown once and powers the "
+        "orchestrator's metric uploads:[/yellow]"
+    )
+    console.print(f"  PRIME_API_KEY={result.token_value}")
+
+
 def load_config(path: str) -> RLConfig:
     """Load config from TOML file."""
     p = Path(path)
@@ -873,6 +997,23 @@ def create_run(
         prime train config.toml
     """
     validate_output_format(output, console)
+
+    # Peek at the raw TOML BEFORE the strict-schema RLConfig parse so a
+    # full-FT config (`type = "full_finetune"` or a `[hosted]` table) can
+    # bypass the LoRA-shared validators and dispatch on the hosted full-FT
+    # endpoint instead. Backwards-compatible: configs without these markers
+    # take the LoRA path exactly as before.
+    raw_cfg = _peek_toml(config_path)
+    if _is_full_finetune(raw_cfg):
+        _dispatch_full_finetune_run(
+            raw_cfg=raw_cfg,
+            config_path=config_path,
+            env=env,
+            env_file=env_file,
+            output=output,
+            yes=yes,
+        )
+        return
 
     console.print(f"[dim]Loading config from {config_path}[/dim]\n")
     cfg = load_config(config_path)
@@ -1679,19 +1820,35 @@ def delete_run(
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
 ) -> None:
     """Delete a run."""
+    if not force:
+        confirm = typer.confirm(f"Are you sure you want to permanently delete run {run_id}?")
+        if not confirm:
+            console.print("Cancelled.")
+            raise typer.Exit(0)
+
+    api_client = APIClient()
+    rl_client = RLClient(api_client)
+
+    # Look up the run kind first so we can route to the right endpoint.
+    # The shared LoRA path is /rft/runs/{id}; hosted full-FT lives on
+    # /training/runs/{id}. Falling back blindly between them would surface
+    # confusing "not found" errors when a non-admin tries to delete a
+    # hosted run, so do the discriminator check up-front.
+    kind: Optional[str] = None
     try:
-        if not force:
-            confirm = typer.confirm(f"Are you sure you want to permanently delete run {run_id}?")
-            if not confirm:
-                console.print("Cancelled.")
-                raise typer.Exit(0)
+        run = rl_client.get_run(run_id)
+        kind = getattr(run, "kind", None) or run.model_dump(by_alias=False).get("kind")
+    except APIError:
+        kind = None
 
-        api_client = APIClient()
-        rl_client = RLClient(api_client)
+    try:
+        if kind == "DEDICATED_FULL_FT":
+            from ..api.training import HostedTrainingClient
 
-        rl_client.delete_run(run_id)
+            HostedTrainingClient(api_client).delete_run(run_id)
+        else:
+            rl_client.delete_run(run_id)
         console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
-
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

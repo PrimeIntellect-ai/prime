@@ -810,15 +810,14 @@ def _dispatch_full_finetune_run(
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
+    # Don't print result.token_value: the platform wires it into the
+    # per-run k8s Secret automatically (orchestrator's PRIME_API_KEY env
+    # via secretKeyRef). Surfacing it on stdout makes it easy to leak into
+    # shared shell history/CI logs without buying anything for the user.
     console.print(
         f"[green]Dispatched[/green] hosted run [bold]{result.run_id}[/bold] "
         f"(job [dim]{result.job_id}[/dim])"
     )
-    console.print(
-        "[yellow]Save this token now — it is shown once and powers the "
-        "orchestrator's metric uploads:[/yellow]"
-    )
-    console.print(f"  PRIME_API_KEY={result.token_value}")
 
 
 def load_config(path: str) -> RLConfig:

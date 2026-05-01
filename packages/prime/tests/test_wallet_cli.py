@@ -153,6 +153,49 @@ def test_wallet_passes_limit_and_uses_configured_team(
     ]
 
 
+def test_wallet_header_falls_back_to_team_id_when_env_overrides_team(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When PRIME_TEAM_ID env-overrides team_id, config.team_name is for a
+    different team and would mislead the audit header — the table must show
+    the env-sourced id, not the stale name from ~/.prime/config.json.
+    """
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _make_get_mock({"/billing/wallet": _wallet_payload()}, []),
+    )
+    monkeypatch.setattr("prime_cli.core.Config.team_id", "team-from-env")
+    monkeypatch.setattr("prime_cli.core.Config.team_name", "stale-name-from-file")
+    monkeypatch.setattr("prime_cli.core.Config.team_id_from_env", True)
+
+    result = CliRunner().invoke(app, ["wallet"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "team-from-env" in plain
+    assert "stale-name-from-file" not in plain
+
+
+def test_wallet_header_uses_team_name_when_not_env_sourced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the team comes from the config file (not env), team_name is
+    trustworthy and should be displayed for readability."""
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _make_get_mock({"/billing/wallet": _wallet_payload()}, []),
+    )
+    monkeypatch.setattr("prime_cli.core.Config.team_id", "team-from-file")
+    monkeypatch.setattr("prime_cli.core.Config.team_name", "Acme Inc")
+    monkeypatch.setattr("prime_cli.core.Config.team_id_from_env", False)
+
+    result = CliRunner().invoke(app, ["wallet"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "Acme Inc" in plain
+
+
 def test_wallet_does_not_accept_team_flag() -> None:
     """`--team` is intentionally not supported — must follow the configured team."""
     result = CliRunner().invoke(app, ["wallet", "--team", "team-1"])

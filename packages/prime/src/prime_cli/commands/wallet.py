@@ -119,7 +119,11 @@ def wallet_command(
         return
 
     if config.team_id:
-        team_label = f"team {rich_escape(config.team_name or config.team_id)}"
+        # When PRIME_TEAM_ID env var overrides the configured team, the file's
+        # team_name is for a different team — fall back to the id so the
+        # header doesn't lie about which wallet we're showing.
+        display_name = None if config.team_id_from_env else config.team_name
+        team_label = f"team {rich_escape(display_name or config.team_id)}"
     else:
         team_label = "personal"
     _print_header(wallet, team_label)

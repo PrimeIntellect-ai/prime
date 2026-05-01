@@ -39,10 +39,15 @@ RUN_USAGE_JSON_HELP = json_output_help(
 
 
 def _format_tokens(value: int) -> str:
-    """Render token counts compactly: 1234 → '1.23K', 1_500_000 → '1.50M'."""
+    """Render token counts compactly: 1234 → '1.23K', 1_500_000 → '1.50M'.
+
+    Promotes to M whenever rounding to 2dp would produce ≥ 1.00M, so values
+    just below the boundary (e.g. 999_995) render as ``1.00M`` instead of
+    the misleading ``1000.00K``.
+    """
     if value <= 0:
         return "0"
-    if value >= 1_000_000:
+    if round(value / 1_000_000, 2) >= 1.00:
         return f"{value / 1_000_000:.2f}M"
     if value >= 1_000:
         return f"{value / 1_000:.2f}K"

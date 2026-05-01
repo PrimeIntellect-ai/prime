@@ -150,6 +150,21 @@ def test_train_usage_propagates_typed_api_errors(monkeypatch: pytest.MonkeyPatch
     assert "Failed to get run usage" not in result.output
 
 
+def test_format_tokens_promotes_to_M_at_rounding_boundary() -> None:
+    """A value that would round to '1000.00K' must render as '1.00M' instead."""
+    from prime_cli.commands.usage import _format_tokens
+
+    # 999_995 rounds to 1.0M at 2dp; without the fix it would print "1000.00K"
+    assert _format_tokens(999_995) == "1.00M"
+    # Comfortably within the K range
+    assert _format_tokens(900_000) == "900.00K"
+    assert _format_tokens(1234) == "1.23K"
+    # Comfortably within the M range
+    assert _format_tokens(1_000_000) == "1.00M"
+    assert _format_tokens(1_500_000) == "1.50M"
+    assert _format_tokens(0) == "0"
+
+
 def test_train_usage_wraps_response_shape_drift_as_api_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -113,7 +113,9 @@ def wallet_command(
         raise typer.Exit(1) from exc
 
     if output == "json":
-        output_data_as_json(wallet.model_dump(), console)
+        # mode="json" emits ISO-8601 datetime strings rather than the
+        # space-separated repr that default=str produces.
+        output_data_as_json(wallet.model_dump(mode="json"), console)
         return
 
     if config.team_id:

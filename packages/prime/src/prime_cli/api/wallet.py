@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from prime_cli.core import APIClient, APIError
 
@@ -54,7 +54,14 @@ class WalletClient:
             raise
         except Exception as exc:  # noqa: BLE001
             raise APIError(_format_error("Failed to get wallet", exc)) from exc
-        return Wallet.model_validate(response)
+
+        try:
+            return Wallet.model_validate(response)
+        except ValidationError as exc:
+            # Wrap shape drift as APIError so the caller's existing
+            # except-APIError branch surfaces it as a clean CLI error
+            # instead of an unhandled traceback.
+            raise APIError(f"Unexpected /billing/wallet response: {exc}") from exc
 
 
 def _format_error(prefix: str, exc: Exception) -> str:

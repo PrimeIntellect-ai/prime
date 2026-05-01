@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from prime_cli.core import APIClient, APIError
 
@@ -54,7 +54,14 @@ class BillingClient:
             raise
         except Exception as exc:  # noqa: BLE001
             raise APIError(_format_error("Failed to get run usage", exc)) from exc
-        return RunUsage.model_validate(response)
+
+        try:
+            return RunUsage.model_validate(response)
+        except ValidationError as exc:
+            # Wrap shape drift as APIError so the caller's existing
+            # except-APIError branch surfaces it as a clean CLI error
+            # instead of an unhandled traceback.
+            raise APIError(f"Unexpected /billing/runs/{run_id}/usage response: {exc}") from exc
 
 
 def _format_error(prefix: str, exc: Exception) -> str:

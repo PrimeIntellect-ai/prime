@@ -148,3 +148,21 @@ def test_train_usage_propagates_typed_api_errors(monkeypatch: pytest.MonkeyPatch
     # The original message should appear, not "Failed to get run usage: …".
     assert "token expired" in result.output
     assert "Failed to get run usage" not in result.output
+
+
+def test_train_usage_wraps_response_shape_drift_as_api_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the backend response is missing required fields, the CLI should
+    surface a clean error rather than an unhandled Pydantic traceback.
+    """
+    bad_payload = {"run_id": "rft_abc"}  # missing training/inference/pricing
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _make_get_mock({"/billing/runs/rft_abc/usage": bad_payload}, []),
+    )
+
+    result = CliRunner().invoke(app, ["train", "usage", "rft_abc"])
+
+    assert result.exit_code == 1
+    assert "Unexpected" in result.output

@@ -182,6 +182,42 @@ def test_wallet_appears_in_root_help() -> None:
     assert "wallet" in result.output
 
 
+def test_wallet_json_emits_iso_datetimes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`mode='json'` should produce ISO-8601 datetime strings (e.g. 2026-04-30T22:00:00),
+    not the space-separated fallback `default=str` produces.
+    """
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _make_get_mock({"/billing/wallet": _wallet_payload()}, []),
+    )
+
+    result = CliRunner().invoke(app, ["wallet", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    for entry in data["recent_billings"]:
+        assert "T" in entry["created_at"], f"expected ISO timestamp, got {entry['created_at']!r}"
+        assert "T" in entry["updated_at"]
+
+
+def test_wallet_wraps_response_shape_drift_as_api_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the backend response is missing required fields, the CLI should
+    surface a clean error rather than an unhandled Pydantic traceback.
+    """
+    bad_payload = {"wallet_id": "w-1"}  # missing balance/currency/etc.
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _make_get_mock({"/billing/wallet": bad_payload}, []),
+    )
+
+    result = CliRunner().invoke(app, ["wallet"])
+
+    assert result.exit_code == 1
+    assert "Unexpected" in result.output
+
+
 def test_wallet_propagates_typed_api_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     """Subclassed APIErrors must propagate intact (e.g. 401 → UnauthorizedError)."""
     from prime_cli.core import UnauthorizedError

@@ -61,7 +61,9 @@ def _derived_cost(tokens: int, price_per_mtok: float | None) -> float | None:
 
 
 def _run_usage_json(usage: RunUsage) -> dict:
-    return usage.model_dump()
+    # mode="json" emits canonical JSON (ISO-8601 datetimes etc.) instead of
+    # Python-native types that fall back to repr() at serialization time.
+    return usage.model_dump(mode="json")
 
 
 def _build_run_usage_table(usage: RunUsage) -> Table:

@@ -24,3 +24,4 @@ venv/
 ENV/
 test_env/
 .DS_Store
+.claude/worktrees/

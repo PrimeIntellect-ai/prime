@@ -45,6 +45,20 @@ def format_price(value: float) -> str:
     return f"${value:.2f}"
 
 
+def format_usd(value: float) -> str:
+    """Format a USD amount with sub-cent precision when the value is tiny.
+
+    Used by `prime train usage` and `prime wallet` for table cells. Zero
+    renders as `$0.00` (a real value, not "missing"); values below a cent
+    render with extra decimals so they don't collapse to `$0.00`.
+    """
+    if value == 0:
+        return "$0.00"
+    if abs(value) < 0.01:
+        return f"${value:.4f}"
+    return f"${value:.2f}"
+
+
 def format_price_per_mtok(value: Any) -> str:
     """Format USD per 1M tokens for display, trimming trailing zeros."""
     if value is None:

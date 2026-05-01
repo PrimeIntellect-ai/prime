@@ -748,14 +748,10 @@ def _dispatch_full_finetune_run(
     from ..api.training import HostedTrainingClient, build_payload_from_toml
 
     hosted_cfg = raw_cfg.get("hosted") if isinstance(raw_cfg.get("hosted"), dict) else {}
+    # Optional: when omitted the backend auto-picks the first uncordoned
+    # PrimeCluster. The common case today is one cluster per env, so this
+    # makes the demo path zero-config.
     prime_cluster_id = hosted_cfg.get("prime_cluster_id") or raw_cfg.get("prime_cluster_id")
-    if not prime_cluster_id:
-        console.print(
-            "[red]Error:[/red] full_finetune configs must set "
-            "`prime_cluster_id` (top-level or under [hosted]). "
-            "List with `prime registry list`."
-        )
-        raise typer.Exit(1)
 
     name = hosted_cfg.get("name") or raw_cfg.get("name")
 
@@ -802,7 +798,8 @@ def _dispatch_full_finetune_run(
         output_data_as_json({"would_dispatch": payload}, console)
         return
 
-    if not yes and not typer.confirm(f"Dispatch full_finetune run on cluster {prime_cluster_id}?"):
+    target = prime_cluster_id or "auto-picked PrimeCluster"
+    if not yes and not typer.confirm(f"Dispatch full_finetune run on {target}?"):
         raise typer.Exit(0)
 
     api_client = APIClient()

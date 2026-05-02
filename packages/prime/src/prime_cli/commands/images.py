@@ -599,15 +599,21 @@ def list_images(
 
         response = client.request("GET", "/images", params=params)
         images: list[ImageRow] = response.get("data", [])
-        total_count: int = int(response.get("totalCount", len(images)))
-
-        if not images:
-            console.print("[yellow]No images or builds found.[/yellow]")
-            console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
-            return
+        total_count: int = int(response.get("totalCount", offset + len(images)))
 
         if output == "json":
             console.print(json.dumps(response, indent=2))
+            return
+
+        if not images:
+            if total_count == 0:
+                console.print("[yellow]No images or builds found.[/yellow]")
+                console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
+            else:
+                console.print(
+                    f"[yellow]No images at offset {offset}. Total: {total_count} image(s).[/yellow]"
+                )
+                console.print("Try [bold]--offset 0[/bold] to start from the beginning.")
             return
 
         # Table output

@@ -1783,6 +1783,7 @@ dependencies = [
     { name = "textual" },
     { name = "textual-plot" },
     { name = "toml" },
+    { name = "tomli" },
     { name = "typer" },
     { name = "verifiers" },
 ]
@@ -1811,6 +1812,7 @@ requires-dist = [
     { name = "textual", specifier = ">=6.1.0" },
     { name = "textual-plot", specifier = ">=0.10.1" },
     { name = "toml", specifier = ">=0.10.0" },
+    { name = "tomli", specifier = ">=2.0.0" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.0a6" },
     { name = "typer", specifier = ">=0.9.0" },
     { name = "types-toml", marker = "extra == 'dev'", specifier = ">=0.10.0" },

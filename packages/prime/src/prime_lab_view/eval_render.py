@@ -13,7 +13,16 @@ from rich.table import Table
 from rich.text import Text
 
 from .eval_records import LocalEvalRun, MetricSummary, RunOverviewStats, parse_log_header
-from .palette import STATUS_ERROR, STATUS_INFO, STATUS_SUCCESS, STATUS_WARNING
+from .palette import (
+    STATUS_ERROR,
+    STATUS_INFO,
+    STATUS_ROLLOUT_SUCCESS,
+    STATUS_ROLLOUT_WARNING,
+    STATUS_SUCCESS,
+    STATUS_WARNING,
+)
+
+IGNORED_ENV_SETTING_KEYS = {"version", "version_id", "versionId", "visibility"}
 
 
 def format_numeric(value: float | int | str) -> str:
@@ -88,7 +97,7 @@ def stringify_message(message: Any) -> str:
     if not isinstance(message, dict):
         return stringify_message_content(message)
 
-    content = stringify_message_content(message.get("content", "")).strip()
+    content = stringify_message_content(message.get("content", ""))
     reasoning = stringify_message_reasoning(message)
     if reasoning and content:
         return f"Reasoning\n{reasoning}\n\n{content}"
@@ -270,7 +279,7 @@ def build_rollout_prompt(idx: int, record: dict[str, Any] | None = None) -> Text
     reward = record.get("reward")
     label.append("  ")
     label.append("reward ", style="dim")
-    label.append(format_reward_value(reward), style=reward_style(reward))
+    label.append(format_reward_value(reward), style=reward_style(reward, subdued=True))
     label.append("\n")
     label.append(truncate_preview(record_preview(record), 38), style="dim")
     return label
@@ -321,11 +330,17 @@ def build_score_text(record: dict[str, Any]) -> Text:
     return out
 
 
-def build_task_text(record: dict[str, Any]) -> Text:
+def build_task_text(record: dict[str, Any], metadata: dict[str, Any] | None = None) -> Text:
     out = Text()
     append_context_section(out, "Environment", record.get("env_id"))
     append_context_section(out, "Answer", record.get("answer"))
     append_context_section(out, "Stop condition", record.get("stop_condition"))
+    error = record.get("error")
+    if error not in (None, ""):
+        append_context_section(out, "Error", error)
+    info = record.get("info")
+    if info not in (None, {}, ""):
+        append_context_section(out, "Info", format_info_for_details(info))
     return out
 
 
@@ -356,15 +371,8 @@ def build_usage_text(record: dict[str, Any]) -> Text:
     return out
 
 
-def build_info_text(record: dict[str, Any], metadata: dict[str, Any]) -> Text:
+def build_state_text(record: dict[str, Any], metadata: dict[str, Any]) -> Text:
     out = Text()
-    error = record.get("error")
-    if error not in (None, ""):
-        append_context_section(out, "Error", error)
-
-    info = record.get("info")
-    if info not in (None, {}, ""):
-        append_context_section(out, "Info", format_info_for_details(info))
 
     state_columns = metadata.get("state_columns")
     if isinstance(state_columns, list):
@@ -376,6 +384,10 @@ def build_info_text(record: dict[str, Any], metadata: dict[str, Any]) -> Text:
                 continue
             append_context_section(out, column, format_info_for_details(value))
     return out
+
+
+def build_info_text(record: dict[str, Any], metadata: dict[str, Any]) -> Text:
+    return build_state_text(record, metadata)
 
 
 def build_run_summary_text(
@@ -824,6 +836,8 @@ def run_setting_rows(metadata: dict[str, Any]) -> list[tuple[str, str]]:
     env_args = metadata.get("env_args")
     if isinstance(env_args, dict):
         for key in sorted(env_args):
+            if key in IGNORED_ENV_SETTING_KEYS:
+                continue
             value = env_args[key]
             if value not in (None, ""):
                 ordered_settings.append((f"env.{key}", value))
@@ -914,12 +928,14 @@ def truncate_preview(text: str, limit: int = 72) -> str:
     return collapsed[: limit - 1].rstrip() + "..."
 
 
-def reward_style(value: Any) -> str:
+def reward_style(value: Any, *, subdued: bool = False) -> str:
+    success_style = STATUS_ROLLOUT_SUCCESS if subdued else STATUS_SUCCESS
+    warning_style = STATUS_ROLLOUT_WARNING if subdued else STATUS_WARNING
     if isinstance(value, (int, float)):
         if value >= 0.9:
-            return STATUS_SUCCESS
+            return success_style
         if value >= 0.5:
-            return STATUS_WARNING
+            return warning_style
         return STATUS_ERROR
     return "bold"
 

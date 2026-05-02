@@ -7,11 +7,13 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
+from rich.markup import escape
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
+from textual.css.query import NoMatches
 from textual.dom import DOMNode
 from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
@@ -44,7 +46,6 @@ from .eval_records import (
 )
 from .eval_render import (
     append_styled_log_line,
-    build_info_text,
     build_metric_summary_table,
     build_reward_distribution_table,
     build_reward_text,
@@ -52,6 +53,7 @@ from .eval_render import (
     build_run_metric_text,
     build_run_summary_text,
     build_score_text,
+    build_state_text,
     build_task_text,
     build_usage_text,
     compute_run_overview_stats,
@@ -71,7 +73,7 @@ from .eval_render import (
     tool_group_preview,
     tool_output_preview,
 )
-from .palette import STATUS_ERROR
+from .palette import ROLLOUT_SUCCESS, ROLLOUT_WARNING, STATUS_ERROR, TOOL_CALL
 
 
 class EvalPanel(Container):
@@ -521,7 +523,8 @@ class RolloutViewer(Container):
         Binding("c", "copy", "Copy"),
     ]
 
-    DEFAULT_CSS = """
+    DEFAULT_CSS = (
+        """
     RolloutViewer {
         layout: horizontal;
         height: 1fr;
@@ -599,41 +602,41 @@ class RolloutViewer(Container):
     }
 
     RolloutViewer .assistant-section {
-        background: $success 6%;
-        border: round $success;
+        background: $rollout-success 2%;
+        border: round $rollout-success 80%;
     }
 
     RolloutViewer .assistant-section > CollapsibleTitle {
-        color: $success;
+        color: $rollout-success;
     }
 
     RolloutViewer .assistant-section > CollapsibleTitle:hover {
-        background: $success 12%;
+        background: $rollout-success 7%;
     }
 
     RolloutViewer .assistant-section > CollapsibleTitle:focus {
-        background: $success 24%;
+        background: $rollout-success 11%;
     }
 
     RolloutViewer .tool-section {
-        background: $warning 6%;
-        border: round $warning;
+        background: $rollout-warning 2%;
+        border: round $rollout-warning 80%;
     }
 
     RolloutViewer .tool-section > CollapsibleTitle {
-        color: $warning;
+        color: $rollout-warning;
     }
 
     RolloutViewer .tool-section > CollapsibleTitle:hover {
-        background: $warning 12%;
+        background: $rollout-warning 7%;
     }
 
     RolloutViewer .tool-section > CollapsibleTitle:focus {
-        background: $warning 24%;
+        background: $rollout-warning 11%;
     }
 
     RolloutViewer .prompt-section {
-        background: $secondary 4%;
+        background: $secondary 3%;
         border: round $secondary;
     }
 
@@ -642,11 +645,11 @@ class RolloutViewer(Container):
     }
 
     RolloutViewer .prompt-section > CollapsibleTitle:hover {
-        background: $secondary 12%;
+        background: $secondary 8%;
     }
 
     RolloutViewer .prompt-section > CollapsibleTitle:focus {
-        background: $secondary 24%;
+        background: $secondary 14%;
     }
 
     RolloutViewer .prompt-section .section-body {
@@ -654,24 +657,24 @@ class RolloutViewer(Container):
     }
 
     RolloutViewer .tool-call-section {
-        background: $accent 8%;
-        border: round $accent;
+        background: $tool-call 4%;
+        border: round $tool-call 85%;
     }
 
     RolloutViewer .tool-call-section > CollapsibleTitle {
-        color: $accent;
+        color: $tool-call;
     }
 
     RolloutViewer .tool-call-section > CollapsibleTitle:hover {
-        background: $accent 12%;
+        background: $tool-call 8%;
     }
 
     RolloutViewer .tool-call-section > CollapsibleTitle:focus {
-        background: $accent 24%;
+        background: $tool-call 14%;
     }
 
     RolloutViewer .reasoning-section {
-        background: $primary 6%;
+        background: $primary 3%;
         border: round $primary;
     }
 
@@ -680,27 +683,35 @@ class RolloutViewer(Container):
     }
 
     RolloutViewer .reasoning-section > CollapsibleTitle:hover {
-        background: $primary 12%;
+        background: $primary 8%;
     }
 
     RolloutViewer .reasoning-section > CollapsibleTitle:focus {
-        background: $primary 24%;
+        background: $primary 14%;
     }
 
     RolloutViewer .assistant-section .nested-section > CollapsibleTitle:hover {
-        background: $success 12%;
+        background: $rollout-success 9%;
     }
 
     RolloutViewer .assistant-section .nested-section > CollapsibleTitle:focus {
-        background: $success 24%;
+        background: $rollout-success 16%;
     }
 
     RolloutViewer .tool-section .nested-section > CollapsibleTitle:hover {
-        background: $warning 12%;
+        background: $rollout-warning 9%;
     }
 
     RolloutViewer .tool-section .nested-section > CollapsibleTitle:focus {
-        background: $warning 24%;
+        background: $rollout-warning 16%;
+    }
+
+    RolloutViewer .assistant-section .tool-call-section > CollapsibleTitle:hover {
+        background: $tool-call 8%;
+    }
+
+    RolloutViewer .assistant-section .tool-call-section > CollapsibleTitle:focus {
+        background: $tool-call 14%;
     }
 
     RolloutViewer .prompt-section .nested-section > CollapsibleTitle:hover {
@@ -719,7 +730,10 @@ class RolloutViewer(Container):
         padding: 0 1 0 1;
         color: $text;
     }
-    """
+    """.replace("$rollout-success", ROLLOUT_SUCCESS)
+        .replace("$rollout-warning", ROLLOUT_WARNING)
+        .replace("$tool-call", TOOL_CALL)
+    )
 
     def __init__(
         self,
@@ -784,9 +798,9 @@ class RolloutViewer(Container):
                         Static("", id="viewer-usage-content", markup=False),
                         classes="details-scroll",
                     )
-                with TabPane("Info", id="viewer-details-info"):
+                with TabPane("State", id="viewer-details-state"):
                     yield TabbedScrollPane(
-                        Static("", id="viewer-info-content", markup=False),
+                        Static("", id="viewer-state-content", markup=False),
                         classes="details-scroll",
                     )
 
@@ -796,7 +810,7 @@ class RolloutViewer(Container):
         self._populate_rollout_list()
         if self._on_record_changed is not None:
             self._on_record_changed(self.current_record_idx, self.records[self.current_record_idx])
-        self.update_display()
+        self.call_after_refresh(self.update_display)
         self.call_after_refresh(self._focus_primary_content)
 
     def action_prev_record(self) -> None:
@@ -808,7 +822,9 @@ class RolloutViewer(Container):
     def action_expand_all(self) -> None:
         if not self.records:
             return
-        container = self.query_one("#viewer-completion-scroll", VerticalScroll)
+        container = self._completion_scroll()
+        if container is None:
+            return
         for section in container.query(Collapsible):
             section.collapsed = False
         self._focus_primary_content()
@@ -816,30 +832,28 @@ class RolloutViewer(Container):
     def action_collapse_all(self) -> None:
         if not self.records:
             return
-        container = self.query_one("#viewer-completion-scroll", VerticalScroll)
+        container = self._completion_scroll()
+        if container is None:
+            return
         for section in container.query(Collapsible):
             section.collapsed = True
         self._focus_primary_content(prefer_expanded=False)
 
     def action_history_page_up(self) -> None:
-        if self.records:
-            self.query_one("#viewer-completion-scroll", VerticalScroll).scroll_page_up(
-                animate=False
-            )
+        if self.records and (container := self._completion_scroll()) is not None:
+            container.scroll_page_up(animate=False)
 
     def action_history_page_down(self) -> None:
-        if self.records:
-            self.query_one("#viewer-completion-scroll", VerticalScroll).scroll_page_down(
-                animate=False
-            )
+        if self.records and (container := self._completion_scroll()) is not None:
+            container.scroll_page_down(animate=False)
 
     def action_history_home(self) -> None:
-        if self.records:
-            self.query_one("#viewer-completion-scroll", VerticalScroll).scroll_home(animate=False)
+        if self.records and (container := self._completion_scroll()) is not None:
+            container.scroll_home(animate=False)
 
     def action_history_end(self) -> None:
-        if self.records:
-            self.query_one("#viewer-completion-scroll", VerticalScroll).scroll_end(animate=False)
+        if self.records and (container := self._completion_scroll()) is not None:
+            container.scroll_end(animate=False)
 
     def action_toggle_markdown_math(self) -> None:
         self._render_markdown_math = not self._render_markdown_math
@@ -871,7 +885,9 @@ class RolloutViewer(Container):
         return f"{self.current_record_idx + 1}/{len(self.records)}"
 
     def _populate_rollout_list(self) -> None:
-        rollout_list = self.query_one("#viewer-rollout-list", OptionList)
+        rollout_list = self._rollout_list()
+        if rollout_list is None:
+            return
         rollout_list.clear_options()
         for idx, record in enumerate(self.records):
             rollout_list.add_option(Option(build_rollout_prompt(idx, record), id=str(idx)))
@@ -882,7 +898,9 @@ class RolloutViewer(Container):
         if not self.records:
             return
         new_index = (self.current_record_idx + delta) % len(self.records)
-        rollout_list = self.query_one("#viewer-rollout-list", OptionList)
+        rollout_list = self._rollout_list()
+        if rollout_list is None:
+            return
         rollout_list.highlighted = new_index
         rollout_list.scroll_to_highlight()
         self._set_current_record(new_index)
@@ -895,7 +913,8 @@ class RolloutViewer(Container):
         if self._on_record_changed is not None:
             self._on_record_changed(index, self.records[index])
         self.update_display(focus_history=focus_history)
-        self.query_one("#viewer-completion-scroll", VerticalScroll).scroll_y = 0
+        if container := self._completion_scroll():
+            container.scroll_y = 0
         for scroll in self.query(".details-scroll"):
             if isinstance(scroll, VerticalScroll):
                 scroll.scroll_y = 0
@@ -916,19 +935,35 @@ class RolloutViewer(Container):
             return
         record = self.records[self.current_record_idx]
         self._set_record_text_state(record)
-        self.query_one("#viewer-history-summary", Static).update(
-            self._build_history_summary_text(record)
+        self._update_static(
+            "#viewer-history-summary",
+            self._build_history_summary_text(record),
         )
-        self.query_one("#viewer-task-content", Static).update(build_task_text(record))
-        self.query_one("#viewer-score-content", Static).update(build_score_text(record))
-        self.query_one("#viewer-usage-content", Static).update(build_usage_text(record))
-        self.query_one("#viewer-info-content", Static).update(
-            build_info_text(record, self.metadata)
+        self._update_static("#viewer-task-content", build_task_text(record, self.metadata))
+        self._update_static("#viewer-score-content", build_score_text(record))
+        self._update_static("#viewer-usage-content", build_usage_text(record))
+        self._update_static(
+            "#viewer-state-content",
+            build_state_text(record, self.metadata),
         )
-        self.query_one("#viewer-rollout-summary", Label).update(
-            self._build_rollout_summary_text(record)
-        )
+        self._update_label("#viewer-rollout-summary", self._build_rollout_summary_text(record))
         self._rebuild_completion_sections(record, focus_history)
+
+    @on(TabbedContent.TabActivated, "#viewer-details-tabs")
+    def _details_tab_activated(self, _event: TabbedContent.TabActivated) -> None:
+        self.call_after_refresh(self.update_display)
+
+    def _update_static(self, selector: str, renderable: object) -> None:
+        try:
+            self.query_one(selector, Static).update(renderable)
+        except NoMatches:
+            return
+
+    def _update_label(self, selector: str, renderable: object) -> None:
+        try:
+            self.query_one(selector, Label).update(renderable)
+        except NoMatches:
+            return
 
     @on(OptionList.OptionHighlighted, "#viewer-rollout-list")
     def on_rollout_highlighted(self, event: OptionList.OptionHighlighted) -> None:
@@ -952,22 +987,16 @@ class RolloutViewer(Container):
     ) -> None:
         if not self.is_mounted:
             return
-        container = self.query_one("#viewer-completion-scroll", VerticalScroll)
+        container = self._completion_scroll()
+        if container is None:
+            return
         container.remove_children()
         container.mount(*self._completion_sections(record))
         if focus_history:
             self.call_after_refresh(self._focus_primary_content)
 
     def _history_section_data(self, record: dict[str, Any]) -> list[HistorySectionData]:
-        sections = [
-            HistorySectionData(
-                title="Initial Prompt",
-                body=self._prompt_text,
-                column="prompt",
-                collapsed=True,
-                classes="history-section prompt-section",
-            )
-        ]
+        sections = [self._initial_prompt_section_data(record)]
         completion = record.get("completion")
         if not isinstance(completion, list) or not completion:
             sections.append(
@@ -993,7 +1022,7 @@ class RolloutViewer(Container):
                 sections.append(
                     HistorySectionData(
                         title=title,
-                        body=stringify_message_content(message.get("content", "")).strip(),
+                        body=stringify_message_content(message.get("content", "")),
                         column="completion",
                         collapsed=True,
                         classes=(
@@ -1017,7 +1046,7 @@ class RolloutViewer(Container):
             title = f"{idx}. assistant"
             if preview:
                 title += f"  {preview}"
-            body = stringify_message_content(message.get("content", "")).strip()
+            body = stringify_message_content(message.get("content", ""))
             collapsed = True
             if self._highlight_regex and self._highlight_column == "completion":
                 collapsed = not (body and self._highlight_regex.search(body))
@@ -1103,6 +1132,57 @@ class RolloutViewer(Container):
             )
         return sections
 
+    def _initial_prompt_section_data(self, record: dict[str, Any]) -> HistorySectionData:
+        prompt = record.get("prompt")
+        if not isinstance(prompt, list) or not prompt:
+            return HistorySectionData(
+                title="Initial Prompt",
+                body=self._prompt_text,
+                column="prompt",
+                collapsed=True,
+                classes="history-section prompt-section",
+            )
+
+        nested_sections: list[HistorySectionData] = []
+        for idx, message in enumerate(prompt, start=1):
+            if not isinstance(message, dict):
+                nested_sections.append(
+                    HistorySectionData(
+                        title=f"{idx}. prompt",
+                        body=str(message),
+                        column="prompt",
+                        collapsed=False,
+                        classes="history-section prompt-section nested-section",
+                    )
+                )
+                continue
+            role = str(message.get("role") or "message")
+            preview = format_message_preview(message)
+            title = f"{idx}. {role}"
+            if preview:
+                title += f"  {preview}"
+            nested_sections.append(
+                HistorySectionData(
+                    title=title,
+                    body=stringify_message_content(message.get("content", "")),
+                    column="prompt",
+                    collapsed=False,
+                    classes="history-section prompt-section nested-section",
+                    nested_sections=self._reasoning_section_data(message),
+                    body_first=True,
+                )
+            )
+
+        return HistorySectionData(
+            title="Initial Prompt",
+            body="",
+            column="prompt",
+            collapsed=True,
+            classes="history-section prompt-section",
+            nested_sections=tuple(nested_sections),
+            body_first=False,
+        )
+
     def _reasoning_section_data(self, message: dict[str, Any]) -> tuple[HistorySectionData, ...]:
         reasoning = stringify_message_reasoning(message)
         if not reasoning:
@@ -1151,7 +1231,7 @@ class RolloutViewer(Container):
         )
         return Collapsible(
             *children,
-            title=section.title,
+            title=escape(section.title),
             collapsed=collapsed,
             classes=section.classes,
         )
@@ -1182,7 +1262,9 @@ class RolloutViewer(Container):
             return
         record = self.records[self.current_record_idx]
         body_entries = self._collect_section_bodies(self._history_section_data(record))
-        container = self.query_one("#viewer-completion-scroll", VerticalScroll)
+        container = self._completion_scroll()
+        if container is None:
+            return
         body_widgets = list(container.query(".section-body"))
         for idx, body_widget in enumerate(body_widgets):
             parent = body_widget.parent
@@ -1217,7 +1299,7 @@ class RolloutViewer(Container):
         return Text.assemble(
             (self._record_progress_label(), "bold"),
             ("  reward ", "dim"),
-            (format_reward_value(reward), reward_style(reward)),
+            (format_reward_value(reward), reward_style(reward, subdued=True)),
         )
 
     def _build_search_lines(
@@ -1275,7 +1357,9 @@ class RolloutViewer(Container):
         if repaint and self.is_mounted and (had_highlight or result is not None):
             self._swap_section_bodies()
             if result is not None:
-                container = self.query_one("#viewer-completion-scroll", VerticalScroll)
+                container = self._completion_scroll()
+                if container is None:
+                    return
                 self._expand_and_scroll_to_match(container)
 
     def _expand_and_scroll_to_match(self, container: VerticalScroll) -> None:
@@ -1298,10 +1382,15 @@ class RolloutViewer(Container):
         self.call_after_refresh(lambda target=scroll_target: target.scroll_visible(animate=False))
 
     def _focus_primary_content(self, *, prefer_expanded: bool = True) -> None:
-        container = self.query_one("#viewer-completion-scroll", VerticalScroll)
+        container = self._completion_scroll()
+        if container is None:
+            if rollout_list := self._rollout_list():
+                rollout_list.focus()
+            return
         sections = [child for child in container.children if isinstance(child, Collapsible)]
         if not sections:
-            self.query_one("#viewer-rollout-list", OptionList).focus()
+            if rollout_list := self._rollout_list():
+                rollout_list.focus()
             return
         target = sections[0]
         if prefer_expanded:
@@ -1309,6 +1398,18 @@ class RolloutViewer(Container):
         title_widget = next(iter(target.children), None)
         if title_widget is not None and getattr(title_widget, "can_focus", False):
             title_widget.focus()
+
+    def _rollout_list(self) -> OptionList | None:
+        try:
+            return self.query_one("#viewer-rollout-list", OptionList)
+        except NoMatches:
+            return None
+
+    def _completion_scroll(self) -> VerticalScroll | None:
+        try:
+            return self.query_one("#viewer-completion-scroll", VerticalScroll)
+        except NoMatches:
+            return None
 
     def _render_history_section_copy_text(
         self, section: HistorySectionData, *, depth: int = 0
@@ -1333,13 +1434,17 @@ class RolloutViewer(Container):
 
     def _detail_copy_sections(self, record: dict[str, Any]) -> list[tuple[str, str, str]]:
         sections = [
-            ("viewer-details-task", "Task", text_to_plain(build_task_text(record))),
+            (
+                "viewer-details-task",
+                "Task",
+                text_to_plain(build_task_text(record, self.metadata)),
+            ),
             ("viewer-details-score", "Score", text_to_plain(build_score_text(record))),
             ("viewer-details-usage", "Usage", text_to_plain(build_usage_text(record))),
             (
-                "viewer-details-info",
-                "Info",
-                text_to_plain(build_info_text(record, self.metadata)),
+                "viewer-details-state",
+                "State",
+                text_to_plain(build_state_text(record, self.metadata)),
             ),
         ]
         return [section for section in sections if section[2]]
@@ -1679,16 +1784,20 @@ class LocalEvalRunScreen(Screen[None]):
             self._rollout_viewer().action_collapse_all()
 
     def action_history_page_up(self) -> None:
-        self._center_scroll_target().scroll_page_up(animate=False)
+        if target := self._center_scroll_target():
+            target.scroll_page_up(animate=False)
 
     def action_history_page_down(self) -> None:
-        self._center_scroll_target().scroll_page_down(animate=False)
+        if target := self._center_scroll_target():
+            target.scroll_page_down(animate=False)
 
     def action_history_home(self) -> None:
-        self._center_scroll_target().scroll_home(animate=False)
+        if target := self._center_scroll_target():
+            target.scroll_home(animate=False)
 
     def action_history_end(self) -> None:
-        self._center_scroll_target().scroll_end(animate=False)
+        if target := self._center_scroll_target():
+            target.scroll_end(animate=False)
 
     def _should_skip_focus(self, widget: Widget) -> bool:
         if widget.id == "viewer-completion-scroll":
@@ -1784,10 +1893,10 @@ class LocalEvalRunScreen(Screen[None]):
             build_reward_text(record, heading="Current Reward", multiline=False, limit=3)
         )
 
-    def _center_scroll_target(self) -> VerticalScroll:
+    def _center_scroll_target(self) -> VerticalScroll | None:
         if self._view_mode == "logs":
             return self.query_one("#logs-scroll", LogScrollPane)
-        return self.query_one("#viewer-completion-scroll", VerticalScroll)
+        return self._rollout_viewer()._completion_scroll()
 
     def _update_responsive_layout(self, width: int) -> None:
         _ = width

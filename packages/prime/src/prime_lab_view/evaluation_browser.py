@@ -63,6 +63,33 @@ def evaluation_env_id(item: LabItem) -> str:
     return "Unknown environment"
 
 
+def evaluation_env_label(item: LabItem) -> Text:
+    label = Text(evaluation_env_id(item))
+    version = evaluation_env_version(item)
+    if version:
+        label.append("  ")
+        label.append(f"({version})", style="dim")
+    return label
+
+
+def evaluation_env_version(item: LabItem) -> str:
+    raw = item.raw
+    metadata = evaluation_item_metadata(item)
+    for value in (
+        raw.get("environment_version"),
+        raw.get("environmentVersion"),
+        raw.get("version"),
+        metadata.get("version"),
+        metadata.get("environment_version"),
+        metadata.get("environmentVersion"),
+        _env_arg_value(metadata, "version"),
+    ):
+        text = first_text_value(value)
+        if text and text != "-":
+            return text
+    return ""
+
+
 def evaluation_model(item: LabItem) -> str:
     raw = item.raw
     for value in (
@@ -177,7 +204,11 @@ def evaluation_run_selection_details(
     summary.append("Run\n", style="bold dim")
     summary.append(evaluation_run_id(item), style="bold")
     summary.append("\n")
-    summary.append(f"{evaluation_env_id(item)}   {evaluation_model(item)}", style="dim")
+    env_model = Text()
+    env_model.append_text(evaluation_env_label(item))
+    env_model.append("   ")
+    env_model.append(evaluation_model(item), style="dim")
+    summary.append_text(env_model)
 
     is_local_eval = item.raw.get("type") == "local_eval"
     summary_parts: list[tuple[str, str, str | None]] = []
@@ -191,10 +222,12 @@ def evaluation_run_selection_details(
         created = format_run_datetime(metadata)
         if created:
             summary_parts.insert(0, ("created", created, None))
-        if stats is not None and stats.rewards:
-            summary_parts.append(("rollouts", str(len(stats.rewards)), None))
-        elif metadata.get("num_examples") not in (None, ""):
+        if metadata.get("num_examples") not in (None, ""):
             summary_parts.append(("examples", str(metadata.get("num_examples")), None))
+        if metadata.get("rollouts_per_example") not in (None, ""):
+            summary_parts.append(("rollouts/ex", str(metadata.get("rollouts_per_example")), None))
+        if stats is not None and stats.rewards:
+            summary_parts.append(("records", str(len(stats.rewards)), None))
     else:
         for label, value in (
             ("samples", metadata_value(item, "Samples")),
@@ -283,6 +316,13 @@ def first_text_value(value: Any) -> str | None:
 def evaluation_item_metadata(item: LabItem) -> dict[str, Any]:
     metadata = item.raw.get("metadata")
     return metadata if isinstance(metadata, dict) else {}
+
+
+def _env_arg_value(metadata: dict[str, Any], key: str) -> Any:
+    env_args = metadata.get("env_args")
+    if not isinstance(env_args, dict):
+        return None
+    return env_args.get(key)
 
 
 def evaluation_pass_rates_text(metadata: dict[str, Any]) -> Text:

@@ -17,9 +17,21 @@ from prime_cli.core import Config
 from prime_cli.utils.time_utils import format_time_ago
 from prime_evals import EvalsClient
 
+from .cache import (
+    lab_account_cache_key,
+    lab_row_cache_key,
+    load_cached_lab_item_detail,
+    load_cached_lab_sections,
+    recent_workspaces,
+    record_recent_workspace,
+    write_cached_lab_item_detail,
+    write_cached_lab_sections,
+)
+from .environment_records import local_environment_items, merged_environment_items
 from .models import LabItem, LabSection, LabSnapshot
 from .palette import (
     PRIMARY,
+    STATUS_DIM,
     STATUS_ERROR,
     STATUS_INFO,
     STATUS_SUCCESS,
@@ -59,14 +71,19 @@ class LabDataSource:
         authenticated = bool(config.api_key)
         team = config.team_name or config.team_id
 
+        cache_key = _row_cache_key(options, config, team)
+        detail_cache_key = _account_cache_key(config, team)
+        cached_sections = load_cached_lab_sections(cache_key, limit=options.limit)
+
         sections = [
             self._workspace_section(options, config, authenticated, team),
             self._environment_section(options, authenticated, warnings),
             self._rl_section(options, config, authenticated, warnings),
             self._evaluation_section(options, config, authenticated, warnings),
         ]
+        sections = _hydrate_platform_sections(detail_cache_key, sections, cached_sections)
 
-        return LabSnapshot(
+        snapshot = LabSnapshot(
             workspace=options.workspace.resolve(),
             base_url=config.base_url,
             frontend_url=config.frontend_url,
@@ -75,43 +92,57 @@ class LabDataSource:
             sections=tuple(sections),
             warnings=tuple(warnings),
         )
+        write_cached_lab_sections(
+            cache_key,
+            snapshot.sections,
+        )
+        return snapshot
 
     def load_initial(self, options: LabLoadOptions) -> LabSnapshot:
         """Load local Lab context while platform requests are still in flight."""
         config = self._config_factory()
         authenticated = bool(config.api_key)
         team = config.team_name or config.team_id
+        cache_key = _row_cache_key(options, config, team)
+        detail_cache_key = _account_cache_key(config, team)
+        cached_sections = load_cached_lab_sections(cache_key, limit=options.limit)
+        local_environment_items = tuple(
+            _workspace_environment_items(
+                options.workspace.resolve(),
+                options.env_dir,
+                options.limit,
+                section="environments",
+            )
+        )
+        local_eval_items = tuple(_local_eval_items(options, section="evaluations"))
 
         sections = [
             self._workspace_section(options, config, authenticated, team),
-            _platform_loading_section(
+            _cached_or_loading_section(
                 "environments",
                 "Environments",
                 "Local and platform environments.",
                 authenticated=True,
-                local_items=tuple(
-                    _workspace_environment_items(
-                        options.workspace.resolve(),
-                        options.env_dir,
-                        options.limit,
-                        section="environments",
-                    )
-                ),
+                local_items=local_environment_items,
+                cached_section=cached_sections.get("environments"),
             ),
-            _platform_loading_section(
+            _cached_or_loading_section(
                 "training",
                 "Training",
                 "Training runs for the active account or team.",
                 authenticated=authenticated,
+                cached_section=cached_sections.get("training"),
             ),
-            _platform_loading_section(
+            _cached_or_loading_section(
                 "evaluations",
                 "Evaluations",
                 "Local and platform evaluation runs.",
                 authenticated=authenticated,
-                local_items=tuple(_local_eval_items(options, section="evaluations")),
+                local_items=local_eval_items,
+                cached_section=cached_sections.get("evaluations"),
             ),
         ]
+        sections = _hydrate_platform_sections(detail_cache_key, sections, cached_sections)
 
         return LabSnapshot(
             workspace=options.workspace.resolve(),
@@ -133,22 +164,39 @@ class LabDataSource:
     ) -> LabItem:
         """Load expanded read-only data for a selected item."""
         if item.section == "training":
-            return self._load_rl_detail(
+            result = self._load_rl_detail(
                 item,
                 include_logs=include_logs,
                 log_tail_lines=log_tail_lines,
                 metrics_limit=metrics_limit,
                 metrics_min_step=metrics_min_step,
             )
-        if item.section == "evaluations" and item.title != "Sign in required":
+        elif item.section == "evaluations" and item.title != "Sign in required":
             if item.raw.get("type") == "local_eval":
-                return item
-            return self._load_evaluation_detail(item)
-        if item.section == "environments":
-            if item.raw.get("type") == "local_environment":
-                return item
-            return self._load_environment_detail(item)
-        return item
+                result = item
+            else:
+                result = self._load_evaluation_detail(item)
+        elif item.section == "environments":
+            result = self._load_environment_detail(item)
+        else:
+            result = item
+
+        self._write_cached_item_detail(result)
+        return result
+
+    def _write_cached_item_detail(self, item: LabItem) -> None:
+        if item.section not in {"training", "environments", "evaluations"}:
+            return
+        config = self._config_factory()
+        team = config.team_name or config.team_id
+        write_cached_lab_item_detail(
+            lab_account_cache_key(
+                base_url=str(config.base_url),
+                profile=_config_current_profile(config),
+                team=team,
+            ),
+            item,
+        )
 
     def _workspace_section(
         self,
@@ -192,15 +240,7 @@ class LabDataSource:
     def _environment_section(
         self, options: LabLoadOptions, authenticated: bool, warnings: list[str]
     ) -> LabSection:
-        seen: set[str] = set()
-        items: list[LabItem] = _workspace_environment_items(
-            options.workspace.resolve(),
-            options.env_dir,
-            options.limit,
-            section="environments",
-        )
-        for item in items:
-            seen.add(item.title)
+        platform_entries: list[tuple[dict[str, Any], str]] = []
 
         if authenticated:
             try:
@@ -217,10 +257,7 @@ class LabDataSource:
                 environments = response.get("data", response.get("environments", []))
                 if not isinstance(environments, list):
                     raise APIError("environment list response did not contain a list")
-                for idx, env in enumerate(environments):
-                    item = _environment_item(env, idx, section="environments", scope="mine")
-                    seen.add(item.title)
-                    items.append(item)
+                platform_entries.extend((env, "mine") for env in environments)
             except Exception as exc:
                 warnings.append(f"Authenticated environments unavailable: {exc}")
 
@@ -238,14 +275,10 @@ class LabDataSource:
             environments = response.get("data", response.get("environments", []))
             if not isinstance(environments, list):
                 raise APIError("public environment response did not contain a list")
-            for idx, env in enumerate(environments):
-                item = _environment_item(env, idx, section="environments", scope="public")
-                if item.title in seen:
-                    continue
-                items.append(item)
+            platform_entries.extend((env, "public") for env in environments)
         except Exception as exc:
             warnings.append(f"Public environments unavailable: {exc}")
-            if not items:
+            if not platform_entries:
                 return _error_section(
                     "environments",
                     "Environments",
@@ -253,6 +286,13 @@ class LabDataSource:
                     exc,
                 )
 
+        items = merged_environment_items(
+            options.workspace.resolve(),
+            options.env_dir,
+            options.limit,
+            platform_entries,
+            section="environments",
+        )
         return LabSection(
             key="environments",
             title="Environments",
@@ -526,24 +566,76 @@ class LabDataSource:
         )
 
     def _load_environment_detail(self, item: LabItem) -> LabItem:
-        if "/" not in item.title:
+        raw = dict(item.raw)
+        slug = str(raw.get("slug") or item.title)
+        if "/" not in slug:
             return item
-        owner, name = item.title.split("/", 1)
+        owner, name = slug.split("/", 1)
+        selected_version = str(raw.get("selected_version") or "latest")
         client = self._api_client_factory(require_auth=False)
-        details = client.get(f"/environmentshub/{owner}/{name}/@latest")
+        try:
+            details = client.get(f"/environmentshub/{owner}/{name}/@{selected_version}")
+        except Exception:
+            return item
         status: dict[str, Any] = {}
         try:
             status_response = client.get(f"/environmentshub/{owner}/{name}/status")
             status = status_response.get("data", status_response)
         except Exception as exc:
             status = {"error": str(exc)}
+        versions: list[dict[str, Any]] = []
+        try:
+            versions_response = client.get(f"/environmentshub/{owner}/{name}/versions")
+            versions_data = versions_response.get("data", versions_response)
+            if isinstance(versions_data, dict):
+                raw_versions = versions_data.get("versions", [])
+            else:
+                raw_versions = versions_data
+            if isinstance(raw_versions, list):
+                versions = [version for version in raw_versions if isinstance(version, dict)]
+        except Exception:
+            versions = []
+        actions: list[dict[str, Any]] = []
+        try:
+            auth_client = self._api_client_factory()
+            actions_response = auth_client.get(
+                f"/environmentshub/{owner}/{name}/actions",
+                params={"limit": 20, "offset": 0},
+            )
+            actions_data = actions_response.get("data", actions_response)
+            if isinstance(actions_data, dict):
+                raw_actions = (
+                    actions_data.get("actions")
+                    or actions_data.get("jobs")
+                    or actions_data.get("items")
+                    or []
+                )
+            else:
+                raw_actions = actions_data
+            if isinstance(raw_actions, list):
+                actions = [action for action in raw_actions if isinstance(action, dict)]
+        except Exception:
+            actions = []
 
         data = details.get("data", details)
         if not isinstance(data, dict):
             data = {"value": data}
-        raw = {**data, "status": status}
+        platform = raw.get("platform")
+        if not isinstance(platform, dict):
+            platform = {}
+        platform = {**platform, **data}
+        raw = {
+            **raw,
+            **data,
+            "platform": platform,
+            "platform_detail": data,
+            "selected_version": selected_version,
+            "versions": versions,
+            "actions": actions,
+            "status": status,
+        }
         metadata = list(item.metadata)
-        if version := raw.get("semantic_version"):
+        if version := raw.get("semantic_version") or raw.get("semanticVersion"):
             metadata.append(("Semantic version", str(version)))
         if content_hash := raw.get("content_hash"):
             metadata.append(("Content hash", str(content_hash)[:12]))
@@ -566,13 +658,125 @@ def load_lab_snapshot(options: LabLoadOptions) -> LabSnapshot:
     return LabDataSource().load(options)
 
 
-def _platform_loading_section(
+def _row_cache_key(options: LabLoadOptions, config: Config, team: str | None) -> str:
+    return lab_row_cache_key(
+        workspace=options.workspace.resolve(),
+        base_url=str(config.base_url),
+        profile=_config_current_profile(config),
+        team=team,
+    )
+
+
+def _account_cache_key(config: Config, team: str | None) -> str:
+    return lab_account_cache_key(
+        base_url=str(config.base_url),
+        profile=_config_current_profile(config),
+        team=team,
+    )
+
+
+def _hydrate_platform_sections(
+    detail_cache_key: str,
+    sections: list[LabSection],
+    cached_sections: dict[str, LabSection],
+) -> list[LabSection]:
+    hydrated: list[LabSection] = []
+    for section in sections:
+        if section.key not in {"environments", "training", "evaluations"}:
+            hydrated.append(section)
+            continue
+        cached = cached_sections.get(section.key)
+        items = section.items
+        if cached is not None and (
+            _section_has_only_placeholder(section) or len(cached.items) > len(section.items)
+        ):
+            items = _merge_initial_items(section.key, section.items, cached.items)
+        items = tuple(_hydrate_item_detail(detail_cache_key, item) for item in items)
+        if items == section.items:
+            hydrated.append(section)
+            continue
+        hydrated.append(
+            LabSection(
+                key=section.key,
+                title=section.title,
+                description=section.description,
+                items=items,
+                status=f"{len(items)} shown",
+                status_style=STATUS_INFO if items else section.status_style,
+            )
+        )
+    return hydrated
+
+
+def _hydrate_item_detail(detail_cache_key: str, item: LabItem) -> LabItem:
+    cached = load_cached_lab_item_detail(detail_cache_key, item.key)
+    if cached is None:
+        return item
+    if item.section == "environments":
+        return _merge_environment_cached_detail(item, cached)
+    return cached
+
+
+def _merge_environment_cached_detail(item: LabItem, cached: LabItem) -> LabItem:
+    raw = {**cached.raw, **item.raw}
+    item_platform = item.raw.get("platform")
+    cached_platform = cached.raw.get("platform")
+    if isinstance(item_platform, dict) or isinstance(cached_platform, dict):
+        raw["platform"] = {
+            **(cached_platform if isinstance(cached_platform, dict) else {}),
+            **(item_platform if isinstance(item_platform, dict) else {}),
+        }
+    for key in (
+        "platform_detail",
+        "versions",
+        "actions",
+        "status",
+        "selected_version",
+        "source_error",
+    ):
+        if key in cached.raw and key not in raw:
+            raw[key] = cached.raw[key]
+    metadata = list(item.metadata)
+    existing = {label for label, _ in metadata}
+    for label, value in cached.metadata:
+        if label not in existing:
+            metadata.append((label, value))
+            existing.add(label)
+    return LabItem(
+        key=item.key,
+        section=item.section,
+        title=item.title,
+        subtitle=item.subtitle,
+        status=item.status,
+        status_style=item.status_style,
+        metadata=tuple(metadata),
+        raw=raw,
+    )
+
+
+def _section_has_only_placeholder(section: LabSection) -> bool:
+    if not section.items:
+        return True
+    return all(_is_placeholder_item(item) for item in section.items)
+
+
+def _is_placeholder_item(item: LabItem) -> bool:
+    return (
+        item.raw.get("loading") is True
+        or item.key.endswith(":error")
+        or item.key.endswith(":auth-required")
+        or item.title in {"Unavailable", "Sign in required"}
+    )
+
+
+def _cached_or_loading_section(
     key: str,
     title: str,
     description: str,
     *,
     authenticated: bool,
     local_items: tuple[LabItem, ...] = (),
+    cached_section: LabSection | None = None,
 ) -> LabSection:
     if not authenticated and key in {"training", "evaluations"}:
         auth_section = _auth_required_section(key, title, description)
@@ -586,6 +790,17 @@ def _platform_loading_section(
                 status_style=STATUS_INFO,
             )
         return auth_section
+
+    if cached_section is not None and cached_section.items:
+        items = _merge_initial_items(key, local_items, cached_section.items)
+        return LabSection(
+            key=key,
+            title=title,
+            description=description,
+            items=items,
+            status=f"{len(items)} cached",
+            status_style=STATUS_DIM,
+        )
 
     return LabSection(
         key=key,
@@ -607,6 +822,44 @@ def _platform_loading_section(
         status="loading",
         status_style=PRIMARY,
     )
+
+
+def _merge_initial_items(
+    section_key: str,
+    local_items: tuple[LabItem, ...],
+    cached_items: tuple[LabItem, ...],
+) -> tuple[LabItem, ...]:
+    if not local_items:
+        return cached_items
+    items = list(local_items)
+    seen = {_initial_item_identity(item) for item in items}
+    for item in cached_items:
+        if item.section != section_key:
+            item = LabItem(
+                key=item.key,
+                section=section_key,
+                title=item.title,
+                subtitle=item.subtitle,
+                status=item.status,
+                status_style=item.status_style,
+                metadata=item.metadata,
+                raw=item.raw,
+            )
+        identity = _initial_item_identity(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        items.append(item)
+    return tuple(items)
+
+
+def _initial_item_identity(item: LabItem) -> str:
+    raw_type = item.raw.get("type")
+    if item.section == "environments":
+        return f"environment:{item.raw.get('slug') or item.title}"
+    if item.section == "evaluations" and raw_type == "local_eval":
+        return f"local-eval:{item.raw.get('path') or item.title}"
+    return item.key or item.title
 
 
 def discover_local_eval_runs(
@@ -809,7 +1062,8 @@ def _workspace_context_items(
     current_profile: str,
     limit: int,
 ) -> list[LabItem]:
-    active_metadata = _read_lab_workspace_metadata(workspace) or {}
+    active_workspace_metadata = _read_lab_workspace_metadata(workspace)
+    active_metadata = active_workspace_metadata or {}
     items = [
         _workspace_context_item(
             workspace,
@@ -822,12 +1076,19 @@ def _workspace_context_items(
             lab_metadata=active_metadata,
         )
     ]
-    for cached_workspace, lab_metadata in _discover_cached_lab_workspaces(
-        workspace, max(0, limit - 1)
+    if active_workspace_metadata is None:
+        items.append(_workspace_setup_item(workspace))
+    items.append(_workspace_doctor_item(workspace))
+    if active_workspace_metadata is not None:
+        items.append(_workspace_agent_item(workspace, active_metadata))
+        items.append(_workspace_agent_sync_item(workspace, active_metadata))
+    items.append(_workspace_add_item(workspace))
+    for inactive_workspace, lab_metadata in _discover_inactive_lab_workspaces(
+        workspace, max(0, max(limit, 100) - len(items))
     ):
         items.append(
             _workspace_context_item(
-                cached_workspace,
+                inactive_workspace,
                 config,
                 auth_status=auth_status,
                 team=team,
@@ -838,6 +1099,103 @@ def _workspace_context_items(
             )
         )
     return items
+
+
+def _workspace_add_item(workspace: Path) -> LabItem:
+    return LabItem(
+        key=f"workspace:add:{_workspace_cache_key(workspace)}",
+        section="workspace",
+        title="Add workspace",
+        subtitle="Remember another local workspace path.",
+        status="action",
+        status_style=STATUS_INFO,
+        metadata=(
+            ("Kind", "Workspace action"),
+            ("Current", str(workspace)),
+        ),
+        raw={
+            "type": "add_workspace",
+            "workspace": str(workspace),
+        },
+    )
+
+
+def _workspace_doctor_item(workspace: Path) -> LabItem:
+    command = "prime lab doctor"
+    return LabItem(
+        key=f"workspace:doctor:{_workspace_cache_key(workspace)}",
+        section="workspace",
+        title="Check workspace",
+        subtitle="Run deterministic Lab checks for setup, configs, outputs, and agent assets.",
+        status="doctor",
+        status_style=STATUS_INFO,
+        metadata=(
+            ("Kind", "Workspace check"),
+            ("Workspace", str(workspace)),
+            ("Run", command),
+        ),
+        raw={
+            "type": "doctor_action",
+            "workspace": str(workspace),
+            "command": command,
+        },
+    )
+
+
+def _workspace_agent_item(workspace: Path, lab_metadata: dict[str, Any]) -> LabItem:
+    agent = _workspace_primary_agent(lab_metadata)
+    subtitle = f"{agent} · {workspace}" if agent else f"not configured · {workspace}"
+    return LabItem(
+        key=f"workspace:agent:{_workspace_cache_key(workspace)}",
+        section="workspace",
+        title="Coding agent",
+        subtitle=subtitle,
+        status="agent" if agent else "not configured",
+        status_style=PRIMARY if agent else "dim",
+        metadata=(
+            ("Agent", str(agent or "not configured")),
+            ("Workspace", str(workspace)),
+        ),
+        raw={
+            "type": "agent_chat",
+            "workspace": str(workspace),
+            "agent": str(agent),
+        },
+    )
+
+
+def _workspace_agent_sync_item(workspace: Path, lab_metadata: dict[str, Any]) -> LabItem:
+    agent = _workspace_primary_agent(lab_metadata) or "codex"
+    command = f"prime lab sync --agent {agent}"
+    return LabItem(
+        key=f"workspace:agent-sync:{_workspace_cache_key(workspace)}",
+        section="workspace",
+        title="Sync Lab assets",
+        subtitle=f"{agent} · refresh templates, skills, docs, and local guidance",
+        status="sync",
+        status_style=STATUS_INFO,
+        metadata=(
+            ("Kind", "Lab asset sync"),
+            ("Agent", agent),
+            ("Workspace", str(workspace)),
+            ("Run", command),
+        ),
+        raw={
+            "type": "agent_sync",
+            "workspace": str(workspace),
+            "agent": agent,
+            "command": command,
+        },
+    )
+
+
+def _workspace_primary_agent(lab_metadata: dict[str, Any]) -> str:
+    choices = lab_metadata.get("choices")
+    return str(
+        choices.get("primary_agent")
+        if isinstance(choices, dict) and choices.get("primary_agent")
+        else ""
+    )
 
 
 def _workspace_context_item(
@@ -880,7 +1238,7 @@ def _workspace_context_item(
         section="workspace",
         title=workspace.name,
         subtitle=str(workspace),
-        status="active" if active else "cached",
+        status="active" if active else "inactive",
         status_style=STATUS_SUCCESS if active else STATUS_INFO,
         metadata=tuple(metadata),
         raw={
@@ -899,14 +1257,43 @@ def _workspace_context_item(
     )
 
 
-def _discover_cached_lab_workspaces(
+def _workspace_setup_item(workspace: Path) -> LabItem:
+    command = "prime lab setup"
+    return LabItem(
+        key=f"workspace:setup:{_workspace_cache_key(workspace)}",
+        section="workspace",
+        title="Set up Lab workspace",
+        subtitle=str(workspace),
+        status="setup",
+        status_style=STATUS_WARNING,
+        metadata=(
+            ("Kind", "Setup action"),
+            ("Path", str(workspace)),
+            ("Run", command),
+        ),
+        raw={
+            "type": "setup_action",
+            "workspace": str(workspace),
+            "command": command,
+        },
+    )
+
+
+def _discover_inactive_lab_workspaces(
     active_workspace: Path, limit: int
 ) -> list[tuple[Path, dict[str, Any]]]:
-    if limit <= 0:
-        return []
     active_workspace = active_workspace.resolve()
     found: list[tuple[Path, dict[str, Any]]] = []
     seen = {active_workspace}
+    for workspace in recent_workspaces():
+        if workspace in seen:
+            continue
+        metadata = _read_lab_workspace_metadata(workspace)
+        seen.add(workspace)
+        found.append((workspace, metadata or {}))
+    if limit <= 0:
+        return found
+    sibling_count = 0
     for root in _lab_workspace_search_roots(active_workspace):
         for marker_workspace in _iter_lab_workspace_markers(root):
             workspace = marker_workspace.resolve()
@@ -917,7 +1304,9 @@ def _discover_cached_lab_workspaces(
                 continue
             seen.add(workspace)
             found.append((workspace, metadata))
-            if len(found) >= limit:
+            record_recent_workspace(workspace)
+            sibling_count += 1
+            if sibling_count >= limit:
                 return found
     return found
 
@@ -1025,42 +1414,7 @@ def _workspace_profile_items(profiles: list[str], current_profile: str) -> list[
 def _workspace_environment_items(
     workspace: Path, env_dir: str, limit: int, *, section: str
 ) -> list[LabItem]:
-    env_root = _workspace_path(workspace, env_dir)
-    if not env_root.is_dir():
-        return []
-
-    items: list[LabItem] = []
-    for path in sorted(child for child in env_root.iterdir() if child.is_dir()):
-        if path.name.startswith("."):
-            continue
-        rel_path = _relative_path(path, workspace)
-        command = f"prime env build {path.name} --path {_relative_path(env_root, workspace)}"
-        items.append(
-            LabItem(
-                key=f"workspace:local-env:{rel_path}",
-                section=section,
-                title=path.name,
-                subtitle=rel_path,
-                status="environment",
-                status_style=STATUS_INFO,
-                metadata=(
-                    ("Kind", "Local environment"),
-                    ("Path", rel_path),
-                    ("Build", command),
-                ),
-                raw={
-                    "type": "local_environment",
-                    "name": path.name,
-                    "path": str(path),
-                    "relative_path": rel_path,
-                    "command": command,
-                    "files": _interesting_child_files(path),
-                },
-            )
-        )
-        if len(items) >= limit:
-            break
-    return items
+    return local_environment_items(workspace, env_dir, limit, section=section)
 
 
 def _workspace_config_items(workspace: Path, limit: int) -> list[LabItem]:
@@ -1103,6 +1457,7 @@ def _workspace_config_item(path: Path, workspace: Path, config_kind: str) -> Lab
         raw={
             "type": "config_file",
             "config_kind": config_kind,
+            "workspace": str(workspace.resolve()),
             "path": str(path),
             "relative_path": rel_path,
             "command": command,

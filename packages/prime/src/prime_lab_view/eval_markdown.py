@@ -142,6 +142,7 @@ def render_block_math(latex: str) -> str:
 
 def make_math_parser() -> MarkdownIt:
     parser = MarkdownIt("gfm-like")
+    parser.disable(["html_block", "html_inline"])
     parser.use(dollarmath_plugin, allow_space=False, allow_digits=False)
     parser.use(amsmath_plugin)
     return parser

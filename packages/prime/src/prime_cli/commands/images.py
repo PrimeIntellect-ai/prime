@@ -564,10 +564,8 @@ def list_images(
     all_images: bool = typer.Option(
         False, "--all", "-a", help="[Deprecated] Show all accessible images (personal + team)"
     ),
-    limit: int = typer.Option(
-        100, "--limit", "-l", min=1, max=250, help="Maximum images to return (max 250)"
-    ),
-    offset: int = typer.Option(0, "--offset", min=0, help="Number of images to skip"),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
+    num: int = typer.Option(50, "--num", "-n", help="Items per page (max 250)"),
 ):
     """
     List all images you've pushed to Prime Intellect registry.
@@ -577,11 +575,18 @@ def list_images(
     \b
     Examples:
         prime images list
-        prime images list --limit 50
-        prime images list --limit 50 --offset 50
+        prime images list --num 100
+        prime images list --page 2
         prime images list --output json
     """
     validate_output_format(output, console)
+
+    if num < 1 or page < 1:
+        console.print("[red]Error:[/red] --num and --page must be at least 1")
+        raise typer.Exit(1)
+    if num > 250:
+        console.print("[red]Error:[/red] --num cannot exceed 250")
+        raise typer.Exit(1)
 
     if all_images and output != "json":
         console.print(
@@ -592,8 +597,12 @@ def list_images(
     try:
         client = APIClient()
 
+        # Backend speaks offset/limit; --page/--num is the user-facing convention
+        # (matches `prime sandbox list`). Translate here.
+        offset = (page - 1) * num
+
         # Build query params
-        params: dict[str, str] = {"limit": str(limit), "offset": str(offset)}
+        params: dict[str, str] = {"limit": str(num), "offset": str(offset)}
         if config.team_id:
             params["teamId"] = config.team_id
 
@@ -611,9 +620,9 @@ def list_images(
                 console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
             else:
                 console.print(
-                    f"[yellow]No images at offset {offset}. Total: {total_count} image(s).[/yellow]"
+                    f"[yellow]No images on page {page}. Total: {total_count} image(s).[/yellow]"
                 )
-                console.print("Try [bold]--offset 0[/bold] to start from the beginning.")
+                console.print("Try [bold]--page 1[/bold] to start from the beginning.")
             return
 
         # Table output
@@ -691,20 +700,18 @@ def list_images(
         console.print()
         console.print(table)
         console.print()
-        shown = len(images)
-        if total_count > shown or offset > 0:
+        shown_groups = len(grouped)
+        has_next = offset + shown_groups < total_count
+        if has_next or page > 1:
             start = offset + 1
-            end = offset + shown
-            footer = (
-                f"[dim]Showing {start}-{end} of {total_count} image(s) "
-                f"({len(grouped)} group(s))[/dim]"
+            end = offset + shown_groups
+            console.print(
+                f"[dim]Page {page} • showing {start}-{end} of {total_count} image(s)[/dim]"
             )
-            console.print(footer)
-            if total_count > offset + shown:
-                next_offset = offset + limit
-                console.print(f"[dim]Use --offset {next_offset} to see more.[/dim]")
+            if has_next:
+                console.print(f"[dim]Use --page {page + 1} to see more.[/dim]")
         else:
-            console.print(f"[dim]Total: {len(grouped)} image(s)[/dim]")
+            console.print(f"[dim]Total: {shown_groups} image(s)[/dim]")
         console.print()
 
     except UnauthorizedError:

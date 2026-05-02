@@ -564,6 +564,10 @@ def list_images(
     all_images: bool = typer.Option(
         False, "--all", "-a", help="[Deprecated] Show all accessible images (personal + team)"
     ),
+    limit: int = typer.Option(
+        100, "--limit", "-l", min=0, max=250, help="Maximum images to return (max 250)"
+    ),
+    offset: int = typer.Option(0, "--offset", min=0, help="Number of images to skip"),
 ):
     """
     List all images you've pushed to Prime Intellect registry.
@@ -573,6 +577,8 @@ def list_images(
     \b
     Examples:
         prime images list
+        prime images list --limit 50
+        prime images list --limit 50 --offset 50
         prime images list --output json
     """
     validate_output_format(output, console)
@@ -587,12 +593,13 @@ def list_images(
         client = APIClient()
 
         # Build query params
-        params: dict[str, str] = {}
+        params: dict[str, str] = {"limit": str(limit), "offset": str(offset)}
         if config.team_id:
             params["teamId"] = config.team_id
 
-        response = client.request("GET", "/images", params=params if params else None)
+        response = client.request("GET", "/images", params=params)
         images: list[ImageRow] = response.get("data", [])
+        total_count: int = int(response.get("totalCount", len(images)))
 
         if not images:
             console.print("[yellow]No images or builds found.[/yellow]")
@@ -678,7 +685,20 @@ def list_images(
         console.print()
         console.print(table)
         console.print()
-        console.print(f"[dim]Total: {len(grouped)} image(s)[/dim]")
+        shown = len(images)
+        if total_count > shown or offset > 0:
+            start = offset + 1
+            end = offset + shown
+            footer = (
+                f"[dim]Showing {start}-{end} of {total_count} image(s) "
+                f"({len(grouped)} group(s))[/dim]"
+            )
+            console.print(footer)
+            if total_count > offset + shown:
+                next_offset = offset + limit
+                console.print(f"[dim]Use --offset {next_offset} to see more.[/dim]")
+        else:
+            console.print(f"[dim]Total: {len(grouped)} image(s)[/dim]")
         console.print()
 
     except UnauthorizedError:

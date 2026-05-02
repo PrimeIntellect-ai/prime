@@ -565,7 +565,7 @@ def list_images(
         False, "--all", "-a", help="[Deprecated] Show all accessible images (personal + team)"
     ),
     limit: int = typer.Option(
-        100, "--limit", "-l", min=0, max=250, help="Maximum images to return (max 250)"
+        100, "--limit", "-l", min=1, max=250, help="Maximum images to return (max 250)"
     ),
     offset: int = typer.Option(0, "--offset", min=0, help="Number of images to skip"),
 ):

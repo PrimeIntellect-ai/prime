@@ -608,6 +608,7 @@ def list_images(
 
         response = client.request("GET", "/images", params=params)
         images: list[ImageRow] = response.get("data", [])
+        has_total_count: bool = "totalCount" in response
         total_count: int = int(response.get("totalCount", offset + len(images)))
 
         if output == "json":
@@ -615,14 +616,20 @@ def list_images(
             return
 
         if not images:
-            if total_count == 0:
+            if has_total_count and total_count == 0:
                 console.print("[yellow]No images or builds found.[/yellow]")
                 console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
-            else:
+            elif has_total_count:
                 console.print(
                     f"[yellow]No images on page {page}. Total: {total_count} image(s).[/yellow]"
                 )
                 console.print("Try [bold]--page 1[/bold] to start from the beginning.")
+            elif page > 1:
+                console.print(f"[yellow]No images on page {page}.[/yellow]")
+                console.print("Try [bold]--page 1[/bold] to start from the beginning.")
+            else:
+                console.print("[yellow]No images or builds found.[/yellow]")
+                console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
             return
 
         # Table output
@@ -701,15 +708,23 @@ def list_images(
         console.print(table)
         console.print()
         shown_groups = len(grouped)
-        has_next = offset + shown_groups < total_count
+        if has_total_count:
+            has_next = offset + shown_groups < total_count
+        else:
+            has_next = shown_groups >= num
         if has_next or page > 1:
             start = offset + 1
             end = offset + shown_groups
-            console.print(
-                f"[dim]Page {page} • showing {start}-{end} of {total_count} image(s)[/dim]"
-            )
+            if has_total_count:
+                console.print(
+                    f"[dim]Page {page} • showing {start}-{end} of {total_count} image(s)[/dim]"
+                )
+            else:
+                console.print(f"[dim]Page {page} • showing {start}-{end}[/dim]")
             if has_next:
                 console.print(f"[dim]Use --page {page + 1} to see more.[/dim]")
+        elif has_total_count:
+            console.print(f"[dim]Total: {total_count} image(s)[/dim]")
         else:
             console.print(f"[dim]Total: {shown_groups} image(s)[/dim]")
         console.print()

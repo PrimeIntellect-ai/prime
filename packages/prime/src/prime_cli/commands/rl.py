@@ -718,14 +718,10 @@ def _is_full_finetune(cfg: Dict[str, Any]) -> bool:
     """A config is full-FT iff it carries one of:
 
     - top-level `type = "full_finetune"` (mirrors prime-rl's discriminator)
-    - top-level `[hosted]` table (forward-compatible: any hosted-only knobs
-      live in there — currently just `prime_cluster_id`)
     - a `[deployment]` table with `num_train_gpus` / `num_infer_gpus`
       (matches the prime-rl `qwen30b_math/rl.toml` shape exactly)
     """
     if cfg.get("type") == "full_finetune":
-        return True
-    if isinstance(cfg.get("hosted"), dict):
         return True
     deploy = cfg.get("deployment")
     if isinstance(deploy, dict) and ("num_train_gpus" in deploy or "num_infer_gpus" in deploy):
@@ -744,25 +740,27 @@ def _dispatch_full_finetune_run(
 ) -> None:
     """Hand off to /api/v1/training/runs (full-FT prime-rl on a registered
     PrimeCluster). Reuses the shared env-file plumbing for WANDB / HF
-    secrets so the user experience matches the LoRA path."""
+    secrets so the user experience matches the LoRA path.
+
+    Backend always auto-picks the first uncordoned PrimeCluster — the
+    CLI never threads a cluster id, so a config that targets the wrong
+    cluster can't be a footgun."""
     from ..api.training import HostedTrainingClient, build_payload_from_toml
 
-    hosted_cfg = raw_cfg.get("hosted") if isinstance(raw_cfg.get("hosted"), dict) else {}
-    # Optional: when omitted the backend auto-picks the first uncordoned
-    # PrimeCluster. The common case today is one cluster per env, so this
-    # makes the demo path zero-config.
-    prime_cluster_id = hosted_cfg.get("prime_cluster_id") or raw_cfg.get("prime_cluster_id")
-
-    name = hosted_cfg.get("name") or raw_cfg.get("name")
+    name = raw_cfg.get("name")
 
     # Resolve env files relative to the config dir, same convention as the
     # LoRA path. We don't validate WANDB presence here — the chart wires
     # WANDB_API_KEY via secretKeyRef only if `[wandb]` is configured AND
     # the user passed --wandb-api-key, mirroring the platform's existing
     # admin-dialog UX.
+    #
+    # `env_file` (deprecated, singular) is loaded first so `env_files`
+    # (canonical, plural) overrides it on key collision. Mirrors the
+    # LoRA path at line 947 ("env_files takes precedence").
     config_dir = Path(config_path).parent
     cfg_env_files: List[str] = []
-    for key in ("env_files", "env_file"):
+    for key in ("env_file", "env_files"):
         val = raw_cfg.get(key)
         if isinstance(val, list):
             cfg_env_files.extend(str(config_dir / p) for p in val)
@@ -786,21 +784,18 @@ def _dispatch_full_finetune_run(
 
     payload = build_payload_from_toml(
         raw_cfg,
-        prime_cluster_id=prime_cluster_id,
         name=name,
         wandb_api_key=secrets.get("WANDB_API_KEY"),
         hf_token=secrets.get("HF_TOKEN"),
     )
 
-    if output == "json":
-        # Honor the existing --output json contract: print the payload that
-        # would be sent and skip confirmation. Useful for scripting.
-        output_data_as_json({"would_dispatch": payload}, console)
-        return
-
-    target = prime_cluster_id or "auto-picked PrimeCluster"
-    if not yes and not typer.confirm(f"Dispatch full_finetune run on {target}?"):
-        raise typer.Exit(0)
+    # `--output json` is a formatting switch: still dispatch the run,
+    # then print the result as JSON. Same contract as the LoRA path
+    # ("create then format"), which automation relies on to parse back
+    # run_id from the response.
+    if output != "json" and not yes:
+        if not typer.confirm("Dispatch full_finetune run on auto-picked PrimeCluster?"):
+            raise typer.Exit(0)
 
     api_client = APIClient()
     client = HostedTrainingClient(api_client)
@@ -809,6 +804,16 @@ def _dispatch_full_finetune_run(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+    if output == "json":
+        # Don't expose token_value in JSON output either — the chart
+        # binds it via secretKeyRef and printing it leaks credentials
+        # into automation logs.
+        output_data_as_json(
+            {"run": {"runId": result.run_id, "jobId": result.job_id}},
+            console,
+        )
+        return
 
     # Don't print result.token_value: the platform wires it into the
     # per-run k8s Secret automatically (orchestrator's PRIME_API_KEY env
@@ -995,10 +1000,11 @@ def create_run(
     validate_output_format(output, console)
 
     # Peek at the raw TOML BEFORE the strict-schema RLConfig parse so a
-    # full-FT config (`type = "full_finetune"` or a `[hosted]` table) can
-    # bypass the LoRA-shared validators and dispatch on the hosted full-FT
-    # endpoint instead. Backwards-compatible: configs without these markers
-    # take the LoRA path exactly as before.
+    # full-FT config (`type = "full_finetune"` or a `[deployment]` block
+    # with num_train_gpus/num_infer_gpus) can bypass the LoRA-shared
+    # validators and dispatch on the hosted full-FT endpoint instead.
+    # Backwards-compatible: configs without these markers take the LoRA
+    # path exactly as before.
     raw_cfg = _peek_toml(config_path)
     if _is_full_finetune(raw_cfg):
         _dispatch_full_finetune_run(

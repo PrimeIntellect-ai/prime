@@ -57,7 +57,6 @@ class HostedTrainingClient:
 def build_payload_from_toml(
     cfg: Dict[str, Any],
     *,
-    prime_cluster_id: Optional[str] = None,
     name: Optional[str] = None,
     wandb_api_key: Optional[str] = None,
     hf_token: Optional[str] = None,
@@ -69,12 +68,12 @@ def build_payload_from_toml(
     rl.toml`. Unknown fields are ignored — only the explicit whitelist
     below is forwarded; the chart owns the rest.
 
-    When `prime_cluster_id` is None the backend auto-picks the first
-    uncordoned PrimeCluster — matches the common single-cluster setup.
+    Cluster targeting is backend-side: the platform auto-picks the
+    first uncordoned PrimeCluster. The CLI deliberately doesn't expose
+    a cluster knob — keeps the wire payload narrow and removes a
+    footgun (mistargeting a config to the wrong cluster).
     """
     payload: Dict[str, Any] = {}
-    if prime_cluster_id:
-        payload["primeClusterId"] = prime_cluster_id
     if name:
         payload["name"] = name
 

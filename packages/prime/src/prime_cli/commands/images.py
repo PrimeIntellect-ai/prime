@@ -597,8 +597,6 @@ def list_images(
     try:
         client = APIClient()
 
-        # Backend speaks offset/limit; --page/--num is the user-facing convention
-        # (matches `prime sandbox list`). Translate here.
         offset = (page - 1) * num
 
         # Build query params

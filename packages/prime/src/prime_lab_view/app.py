@@ -18,6 +18,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Button, Footer, Label, OptionList, Static, Tree
 from textual.widgets._option_list import Option
 
+from .agent_adapters import agent_adapter
 from .agent_runtime import AgentChatMessage, AgentConnectionState, AgentRuntime
 from .agent_screen import AgentChatScreen
 from .config_screen import ConfigLaunchScreen, ConfigRunScreen
@@ -70,9 +71,10 @@ from .palette import (
     BUTTON_CSS,
     LAB_THEME,
     STATUS_ERROR,
+    STATUS_WARNING,
 )
 from .quickstart import (
-    build_environment_item,
+    coding_agent_item,
     evaluation_config_item,
     training_config_item,
 )
@@ -119,6 +121,7 @@ class PrimeLabView(App[None]):
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
         Binding("w", "show_welcome", "Welcome"),
+        Binding("c", "open_agent_chat", "Agent"),
         Binding("enter", "load_detail", "Open", key_display="Enter"),
         Binding("g", "load_more_rows", "More rows"),
         Binding("/", "search", "Filter"),
@@ -398,6 +401,13 @@ class PrimeLabView(App[None]):
             self.call_after_refresh(self._open_launch_screen)
             return
         self._open_launch_screen()
+
+    def action_open_agent_chat(self) -> None:
+        if self._launch_screen_active():
+            if self._launch_screen is not None:
+                self._launch_screen.dismiss("agent")
+            return
+        self._open_agent_or_setup()
 
     def action_clear_filter(self) -> None:
         if not self._filter:
@@ -977,8 +987,8 @@ class PrimeLabView(App[None]):
         return self._launch_screen is not None
 
     def _open_launch_target(self, target: str) -> None:
-        if target == "build":
-            self._open_quickstart_agent_flow()
+        if target in {"agent", "chat", "build"}:
+            self._open_agent_or_setup()
             return
         if target == "evaluate":
             self._open_quickstart_config("eval")
@@ -995,14 +1005,21 @@ class PrimeLabView(App[None]):
         self._filter = ""
         self._render_active_section()
 
-    def _open_quickstart_agent_flow(self) -> None:
+    def _open_agent_or_setup(self) -> None:
+        if self._snapshot is not None and configured_workspace_agent(self._snapshot):
+            self._open_agent_chat()
+            return
+        item = self._setup_item_for_current_workspace()
+        self.push_screen(SetupScreen(item, on_complete=self._refresh_after_workspace_memory_change))
+
+    def _open_agent_chat(self) -> None:
         workspace = self._snapshot.workspace if self._snapshot is not None else Path.cwd()
         agent = (
             configured_workspace_agent(self._snapshot)
             if self._snapshot is not None
             else self._agent_state.agent
         )
-        item = build_environment_item(workspace, agent=agent or self._agent_state.agent or "codex")
+        item = coding_agent_item(workspace, agent=agent or self._agent_state.agent or "codex")
         self.push_screen(
             AgentChatScreen(
                 item,
@@ -1049,8 +1066,45 @@ class PrimeLabView(App[None]):
                 team=team,
                 agent_label=agent_status_label(self._agent_state),
                 loading=loading,
+                agent_action_label=self._launch_agent_action_label(snapshot),
                 counts=counts,
             )
+        )
+
+    def _launch_agent_action_label(self, snapshot: LabSnapshot | None) -> str:
+        if snapshot is None:
+            return "Configure Agent"
+        agent = configured_workspace_agent(snapshot)
+        if not agent:
+            return "Configure Agent"
+        return f"Build with {agent_adapter(agent).label}"
+
+    def _setup_item_for_current_workspace(self) -> LabItem:
+        workspace = self._snapshot.workspace if self._snapshot is not None else Path.cwd()
+        if self._snapshot is not None:
+            section = self._snapshot.section("workspace")
+            if section is not None:
+                for item in section.items:
+                    if item.raw.get("type") == "setup_action":
+                        return item
+        command = "prime lab setup"
+        return LabItem(
+            key=f"workspace:setup:{workspace}",
+            section="workspace",
+            title="Set up Lab workspace",
+            subtitle=str(workspace),
+            status="setup",
+            status_style=STATUS_WARNING,
+            metadata=(
+                ("Kind", "Setup action"),
+                ("Path", str(workspace)),
+                ("Run", command),
+            ),
+            raw={
+                "type": "setup_action",
+                "workspace": str(workspace),
+                "command": command,
+            },
         )
 
     def _render_home_actions(self, items: list[LabItem]) -> None:

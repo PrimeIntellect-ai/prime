@@ -20,6 +20,7 @@ class LaunchScreen(Screen[str | None]):
 
     BINDINGS = [
         Binding("enter", "enter_lab", "Enter Lab", key_display="Enter"),
+        Binding("c", "agent", "Agent"),
         Binding("r", "refresh_lab", "Refresh"),
         Binding("q", "quit", "Quit"),
     ]
@@ -83,21 +84,21 @@ class LaunchScreen(Screen[str | None]):
         with Vertical(id="launch-actions"):
             with Horizontal(classes="launch-action-row"):
                 yield _launch_button(
-                    "Build Environment",
-                    id="launch-build",
+                    "Explore Environments",
+                    id="launch-explore",
                 )
                 yield _launch_button(
-                    "Run Evaluation",
-                    id="launch-evaluate",
+                    "Train Models",
+                    id="launch-train",
                 )
             with Horizontal(classes="launch-action-row"):
                 yield _launch_button(
-                    "Launch Training",
-                    id="launch-train",
+                    "Run Evaluations",
+                    id="launch-evaluate",
                 )
                 yield _launch_button(
-                    "Explore Environments",
-                    id="launch-explore",
+                    self._state.agent_action_label,
+                    id="launch-agent",
                 )
             yield Static(_launch_hotkeys(), id="launch-hotkeys")
 
@@ -108,6 +109,7 @@ class LaunchScreen(Screen[str | None]):
         self._state = state
         try:
             self.query_one("#home-launch", HomeLaunchPanel).update_state(state)
+            self.query_one("#launch-agent", Button).label = state.agent_action_label
         except NoMatches:
             return
 
@@ -118,6 +120,9 @@ class LaunchScreen(Screen[str | None]):
         action_refresh = getattr(self.app, "action_refresh", None)
         if callable(action_refresh):
             action_refresh()
+
+    def action_agent(self) -> None:
+        self.dismiss("agent")
 
     def action_quit(self) -> None:
         self.app.exit()
@@ -132,6 +137,9 @@ def _launch_hotkeys() -> Text:
     return Text.assemble(
         ("Enter", f"bold {PRIMARY}"),
         (" Lab", "dim"),
+        ("   ", "dim"),
+        ("c", f"bold {PRIMARY}"),
+        (" agent", "dim"),
         ("   ", "dim"),
         ("r", f"bold {PRIMARY}"),
         (" refresh", "dim"),

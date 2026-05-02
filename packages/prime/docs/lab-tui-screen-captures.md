@@ -519,42 +519,27 @@ Generated terminal text-image captures for the core Lab TUI surfaces. These are 
 ## Agent Chat
 
 ```text
- L A B  Coding agent                                                                                                PRIME Intellect
- Chat with configured agent
+ L A B  Agent                                                                                                       PRIME Intellect
+ claude · ~/dev/verifiers
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-╭──────────────────────────────────────────╮ ╭────────────────────────────────────────────────────────────────────────────────────╮
-│ Agent                                    │ │ Chat session                                                                       │
-│ Claude Code  claude                      │ │ Connected. Send a prompt to start the session.                                     │
-│                                          │ │                                                                                    │
-│ Workspace                                │ │                                                                                    │
-│ /private/tmp/prime-lab-tui-captures/veri │ │                                                                                    │
-│ fiers                                    │ │                                                                                    │
-│                                          │ │                                                                                    │
-│ Connection                               │ │                                                                                    │
-│ Claude Code connected  one-shot          │ │                                                                                    │
-│ One-shot exec ready                      │ │                                                                                    │
-│                                          │ │                                                                                    │
-│ ▊▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▎ │ │                                                                                    │
-│ ▊  Claude Code                      ▼  ▎ │ │                                                                                    │
-│ ▊▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▎ │ │                                                                                    │
-│                                          │ │                                                                                    │
-│ ▊▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▎ │ │                                                                                    │
-│ ▊  Ask the coding agent...             ▎ │ │                                                                                    │
-│ ▊▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▎ │ │                                                                                    │
-│                                          │ │                                                                                    │
-│                   Send                   │ │                                                                                    │
-│                                          │ │                                                                                    │
-│                                          │ │                                                                                    │
-│                                          │ │                                                                                    │
-│                                          │ │                                                                                    │
-│                                          │ │                                                                                    │
-│                                          │ │                                                                                    │
-│                                          │ │                                                                                    │
-│                                          │ │                                                                                    │
-│                                          │ │                                                                                    │
-╰──────────────────────────────────────────╯ ╰────────────────────────────────────────────────────────────────────────────────────╯
+                       ···◆·····················          ╎       ╎       ╎      ·······◆····
+                    ···•        ······•··········     ╎   ┃  ·    ╎   ···•·······
+                ···•············                 ·····•···╎       ╎      ╎        ╎
 
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                       What should we build in verifiers?
+                       Claude Code  Claude Code connected  ·  ~/dev/verifiers  ·  one-shot
+
+                       Chat session
+                       Connected. Enter sends. Type / for commands.
+
+
+
+
+                       ▌
+                       ▌  Ask Agent...  / commands
+                       ▌                                                       Claude Code  ·  Enter send  ·  / commands
+
+ auth check · research · ~/dev/verifiers  |  agent Claude Code connected
  Tab Next  Shift+Tab Previous  b Back  q Quit
 ```

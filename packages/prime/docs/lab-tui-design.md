@@ -38,10 +38,10 @@ Lab always opens on a sparse launch surface, then enters Home as the workspace c
 
 - Launch paint is intentionally sparse: Prime Intellect branding, Lab title, compact status, one animated visual, and quickstart actions.
 - Launch quickstart actions are product flows, not navigation labels:
-  - Build Environment opens an agent-assisted environment creation flow with prompt templates and custom prompt entry.
-  - Run Evaluation opens a native hosted-evaluation config editor seeded from a recommended template.
-  - Launch Training opens a native training config editor seeded from a recommended template.
   - Explore Environments opens the merged local/platform environment browser.
+  - Train Models opens a native training config editor seeded from a recommended template.
+  - Run Evaluations opens a native hosted-evaluation config editor seeded from a recommended template.
+  - Build with Agent opens the configured coding-agent command surface; if no agent is configured, it opens the embedded setup flow.
 - Dense workspace rows stay hidden while platform state is loading unless the user is filtering or interacting.
 - Active workspace and remembered inactive workspaces are loaded from global Lab state.
 - Add, forget, and switch workspace actions are native TUI screens.
@@ -151,8 +151,9 @@ Current direction:
 
 - No permanent sidebar.
 - A centered chat stage owns the page.
-- A subtle animated backdrop strip gives the surface identity without competing with content.
-- Prompt templates appear as inline action chips above the composer.
+- A subtle animated backdrop strip stretches with the stage width, giving the surface identity without competing with content.
+- The composer is an Enter-to-send command bar; visible controls stay minimal.
+- Slash commands expose secondary actions such as agent switching and prompt starters without permanent chrome.
 - Agent, workspace, transport, and connection state sit in ambient header/status text, not a separate control panel.
 - Turns render like a refined terminal log: clear user/agent/system demarcation, preserved whitespace, markup-safe content, and enough structure for inline widgets.
 
@@ -313,6 +314,7 @@ Tested runtime contracts:
 
 - One-shot exec agents receive a prompt and append prompt/completion messages without terminal takeover.
 - Codex app-server stdio initializes, starts a thread, streams assistant deltas, and completes a turn.
+- Codex app-server threads receive the Lab dynamic widget tool contract and can request `lab.render_widget` payloads for native choice/config/action widgets.
 - Hermes ACP stdio initializes, creates a session, streams session updates, and completes a prompt.
 - OpenCode ACP HTTP endpoint startup is detected and falls back to one-shot prompt execution until a native HTTP client is added.
 - Pi RPC startup creates a workspace-scoped session directory and falls back to one-shot prompt execution until a native RPC client is added.
@@ -666,12 +668,12 @@ These are the active cleanup targets noticed while implementing the current slic
 
 - Launch action routing lived as string ids in `LaunchScreen` plus a dict in `PrimeLabView`; quickstart flow objects now live in `quickstart.py`, but the next cleanup is a typed `LabAction` registry shared by launch buttons, Home actions, footer labels, and agent widget requests.
 - Config templates exist in environment actions, setup templates, and quickstart flows. They should be centralized behind canonical config factories with named templates and nice-TOML printers.
-- Agent chat is still layout-first. It should become transcript/card-first, with controls as ambient top/bottom chrome and prompt templates represented as reusable action cards.
+- Agent chat now uses a centered transcript plus command bar, but inline widgets are still textual summaries. The next cleanup is a typed transcript/card renderer that can mount real widget cards in response to `lab.render_widget`.
 - Selector hydration is snapshot-oriented. A per-section data service would be easier to cache, time, test, and refresh independently.
 - Some screens still reach into private-ish helpers across modules. Public domain helpers should live in `training_config`, `quickstart`, `source_browser`, `readme`, and future `actions` modules.
 - Text-image screen captures are manually curated in docs. The renderer should become a deterministic test utility that can print any page/widget from typed state without launching the full app.
 - Footer/action labels are better than before but still split between Textual bindings, screen-specific buttons, and generated action items. A single action descriptor should drive label, binding, click target, enabled state, and documentation.
-- Home and Agent surfaces still have different product languages. The final V1 should make creative research flows visually closer to the launch surface, while technical selectors keep dense browsing affordances.
+- Home and Agent surfaces are converging on launch-screen visual language, while technical selectors keep dense browsing affordances.
 
 ## Test Coverage
 

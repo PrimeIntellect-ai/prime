@@ -20,12 +20,12 @@ class PromptTemplate:
     prompt: str
 
 
-def build_environment_item(workspace: Path, *, agent: str) -> LabItem:
-    """Create the agent-chat item for building a new local environment."""
+def coding_agent_item(workspace: Path, *, agent: str) -> LabItem:
+    """Create the general coding-agent chat item for the active workspace."""
 
     templates = (
         PromptTemplate(
-            "New task",
+            "Build env",
             "\n".join(
                 [
                     "Help me build a new verifiers environment in this Lab workspace.",
@@ -33,40 +33,37 @@ def build_environment_item(workspace: Path, *, agent: str) -> LabItem:
                     "Task idea:",
                     "- ",
                     "",
-                    "Please inspect the existing environments and propose the smallest scaffold.",
+                    "Inspect the existing environments first. If there are multiple plausible",
+                    "implementation paths, ask me to choose before editing files.",
                 ]
             ),
         ),
         PromptTemplate(
-            "From benchmark",
-            "\n".join(
-                [
-                    "Create a new verifiers environment from an existing benchmark or dataset.",
-                    "",
-                    "Benchmark or dataset:",
-                    "- ",
-                    "",
-                    "Use the local workspace conventions and include a README.",
-                    "Also add a quick eval config.",
-                ]
+            "Plan project",
+            (
+                "Help me plan the next research iteration in this Lab workspace. Inspect the local "
+                "environments, configs, and recent runs first, then propose the smallest useful "
+                "next step."
             ),
         ),
         PromptTemplate(
-            "Review scaffold",
-            "\n".join(
-                [
-                    "Review the active Lab workspace and suggest a clean environment scaffold.",
-                    "Focus on source layout, pyproject metadata, README content,",
-                    "and evaluation hooks.",
-                ]
+            "Edit config",
+            (
+                "Help me modify a Lab config in this workspace. If there are multiple plausible "
+                "configs, show me the choices before making changes."
             ),
+        ),
+        PromptTemplate(
+            "Fix issue",
+            "Help me debug the current Lab workspace. Check setup, configs, generated outputs, and "
+            "recent errors before proposing a fix.",
         ),
     )
     return LabItem(
-        key=f"quickstart:agent:build-environment:{workspace}",
+        key=f"quickstart:agent:chat:{workspace}",
         section="workspace",
-        title="Build Environment",
-        subtitle="Use the configured coding agent to create or refine a local environment.",
+        title="Agent",
+        subtitle="Chat with the configured coding agent in this workspace.",
         status=agent or "agent",
         status_style=PRIMARY,
         metadata=(

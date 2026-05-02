@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .agent_adapters import AgentAdapter, AgentServerSpec, agent_adapter
+from .agent_widgets import (
+    handle_lab_widget_tool_call,
+    lab_dynamic_tools,
+    lab_widget_developer_instructions,
+)
 
 AgentStatus = Literal["none", "starting", "connected", "error", "stopped"]
 AgentRole = Literal["user", "assistant", "system"]
@@ -419,6 +424,8 @@ class AgentRuntime:
                 "thread/start",
                 {
                     "cwd": str(workspace),
+                    "developerInstructions": lab_widget_developer_instructions(),
+                    "dynamicTools": lab_dynamic_tools(),
                     "sessionStartSource": "startup",
                 },
                 timeout=30,
@@ -524,6 +531,12 @@ class AgentRuntime:
             if request_id is not None:
                 self._respond(request_id, None)
             return
+        if method == "item/tool/call":
+            status, content, response = handle_lab_widget_tool_call(params)
+            self._record_dynamic_tool_call(status, content)
+            if request_id is not None:
+                self._respond(request_id, response)
+            return
         if method == "session/request_permission":
             if request_id is not None:
                 self._respond(request_id, {"outcome": {"outcome": "cancelled"}})
@@ -599,6 +612,11 @@ class AgentRuntime:
                     last.content or "(completed without response text)",
                 )
             self._active_turn_id = ""
+            self._emit_messages_locked()
+
+    def _record_dynamic_tool_call(self, status: str, content: str) -> None:
+        with self._lock:
+            self._messages.append(AgentChatMessage("system", content, status))
             self._emit_messages_locked()
 
     def _record_codex_turn(self, result: dict[str, Any]) -> None:

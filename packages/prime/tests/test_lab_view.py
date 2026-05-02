@@ -27,8 +27,8 @@ from prime_cli.lab_setup import (
     run_lab_sync_service,
 )
 from prime_lab_view.agent_adapters import agent_adapter, agent_select_options
-from prime_lab_view.agent_runtime import AgentRuntime
-from prime_lab_view.agent_screen import AgentChatScreen
+from prime_lab_view.agent_runtime import AgentChatMessage, AgentConnectionState, AgentRuntime
+from prime_lab_view.agent_screen import AgentChatScreen, _chat_transcript
 from prime_lab_view.app import (
     EvaluationTree,
     LabOptionList,
@@ -92,7 +92,7 @@ from prime_lab_view.training_screen import TrainingRunScreen, _next_log_tail_lin
 from prime_lab_view.widgets import HomeLaunchPanel
 from rich.console import Console
 from textual.containers import Vertical, VerticalScroll
-from textual.widgets import Button, Label, OptionList, Tab
+from textual.widgets import Button, Input, Label, OptionList, Static, Tab
 from typer.testing import CliRunner
 
 
@@ -1726,6 +1726,109 @@ def test_agent_runtime_supports_codex_app_stdio_chat(tmp_path: Path) -> None:
     runtime.stop()
 
 
+def test_agent_runtime_exposes_codex_lab_widget_tools(tmp_path: Path) -> None:
+    messages: tuple[Any, ...] = ()
+    thread_start_params: dict[str, Any] = {}
+    tool_responses: list[dict[str, Any]] = []
+    process_holder: list[_FakeJsonRpcProcess] = []
+    tool_response_seen = threading.Event()
+
+    def handler(process: _FakeJsonRpcProcess, message: dict[str, Any]) -> None:
+        request_id = message.get("id")
+        method = message.get("method")
+        if method == "initialize":
+            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
+        elif method == "thread/start":
+            params = message.get("params")
+            if isinstance(params, dict):
+                thread_start_params.update(params)
+            process.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {"thread": {"id": "thread-1"}},
+                }
+            )
+        elif method is None and request_id == 77:
+            result = message.get("result")
+            if isinstance(result, dict):
+                tool_responses.append(result)
+            tool_response_seen.set()
+        else:
+            process.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"message": f"unexpected {method}"},
+                }
+            )
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> _FakeJsonRpcProcess:
+        process = _FakeJsonRpcProcess(handler)
+        process.command = command
+        process_holder.append(process)
+        return process
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime.start(tmp_path, "codex")
+
+    assert _wait_for(lambda: runtime.state.status == "connected")
+    assert "lab.render_widget" in str(thread_start_params.get("developerInstructions"))
+    dynamic_tools = thread_start_params.get("dynamicTools")
+    assert isinstance(dynamic_tools, list)
+    assert dynamic_tools[0]["namespace"] == "lab"
+    assert dynamic_tools[0]["name"] == "render_widget"
+
+    process_holder[0].emit(
+        {
+            "jsonrpc": "2.0",
+            "id": 77,
+            "method": "item/tool/call",
+            "params": {
+                "namespace": "lab",
+                "tool": "render_widget",
+                "callId": "widget-1",
+                "arguments": {
+                    "kind": "choice_picker",
+                    "title": "Pick a config",
+                    "candidates": [{"id": "a"}, {"id": "b"}],
+                },
+            },
+        }
+    )
+
+    assert tool_response_seen.wait(timeout=2)
+    assert tool_responses[-1]["success"] is True
+    assert _wait_for(lambda: messages and messages[-1].status == "widget")
+    latest_message = _last_message(messages)
+    assert "Pick a config" in latest_message.content
+    runtime.stop()
+
+
+def test_agent_chat_transcript_renders_assistant_markdown() -> None:
+    transcript = _chat_transcript(
+        (
+            AgentChatMessage("user", "show me code"),
+            AgentChatMessage(
+                "assistant",
+                "Here is a helper:\n\n```python\nprint('hello')\n```\n\n- done",
+            ),
+        ),
+        AgentConnectionState(status="connected", label="Codex"),
+    )
+
+    rendered = _render_renderable(transcript)
+
+    assert "Assistant" in rendered
+    assert "print" in rendered
+    assert "hello" in rendered
+    assert "```" not in rendered
+
+
 def test_agent_runtime_supports_hermes_acp_stdio_chat(tmp_path: Path) -> None:
     messages: tuple[Any, ...] = ()
 
@@ -1908,7 +2011,7 @@ async def test_prime_lab_view_mounts(tmp_path: Path) -> None:
 async def test_prime_lab_view_home_launch_panel_uses_home_state(tmp_path: Path) -> None:
     (tmp_path / ".prime").mkdir()
     (tmp_path / ".prime" / "lab.json").write_text(
-        '{"choices": {"primary_agent": "codex"}}',
+        '{"choices": {"primary_agent": "claude"}}',
         encoding="utf-8",
     )
     snapshot = make_source().load_initial(LabLoadOptions(limit=10, workspace=tmp_path))
@@ -1939,6 +2042,7 @@ async def test_prime_lab_view_home_launch_panel_shows_for_loaded_workspace(
         assert screen.query_one("#home-launch", HomeLaunchPanel).display is True
         assert screen.query_one("#launch-actions").display is True
         assert screen.query_one("#launch-hotkeys").display is True
+        assert "agent" in str(screen.query_one("#launch-hotkeys").render())
         assert app.check_action("search", ()) is False
         assert app.check_action("load_more_rows", ()) is False
 
@@ -2060,16 +2164,67 @@ async def test_prime_lab_view_launch_grid_opens_quickstart_flows(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_prime_lab_view_launch_grid_build_opens_agent_templates(tmp_path: Path) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "claude"}}',
+        encoding="utf-8",
+    )
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
 
     async with app.run_test(size=(140, 44)) as pilot:
         await pilot.pause()
-        await pilot.click("#launch-build")
+        button = app.screen.query_one("#launch-agent", Button)
+        assert "Build with Claude Code" in str(button.label)
+
+        await pilot.click("#launch-agent")
         await pilot.pause()
 
         assert isinstance(app.screen, AgentChatScreen)
-        assert app.screen.query("#agent-template-0")
+        assert not app.screen.query("#agent-send")
+        assert not app.screen.query("#agent-select")
+        app.screen.query_one("#agent-prompt", Input).value = "/template"
+        await pilot.pause()
+        menu = _render_renderable(app.screen.query_one("#agent-command-menu", Static).content)
+        assert "/template 1" in menu
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_view_launch_grid_agent_configures_when_missing(tmp_path: Path) -> None:
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        button = app.screen.query_one("#launch-agent", Button)
+        assert "Configure Agent" in str(button.label)
+
+        await pilot.click("#launch-agent")
+        await pilot.pause()
+
+        assert isinstance(app.screen, SetupScreen)
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_view_chat_hotkey_opens_agent_chat(tmp_path: Path) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "claude"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+
+        assert isinstance(app.screen, AgentChatScreen)
+        header = _render_renderable(app.screen.query_one("#agent-header", Static).content)
+        assert "Agent" in header
+        assert "claude" in header
+        assert str(tmp_path) not in header
 
 
 @pytest.mark.asyncio
@@ -2392,7 +2547,7 @@ async def test_prime_lab_view_opens_add_workspace_screen(tmp_path: Path) -> None
 async def test_prime_lab_view_opens_agent_sync_screen(tmp_path: Path) -> None:
     (tmp_path / ".prime").mkdir()
     (tmp_path / ".prime" / "lab.json").write_text(
-        '{"choices": {"primary_agent": "codex"}}',
+        '{"choices": {"primary_agent": "claude"}}',
         encoding="utf-8",
     )
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))

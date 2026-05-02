@@ -39,6 +39,7 @@ class LaunchBackdrop:
 
         self._paint_braille_noise(chars, styles, priority)
         self._paint_scan_bars(chars, styles, priority)
+        self._paint_edge_anchor(chars, styles, priority)
         self._paint_contours(chars, styles, priority)
         self._paint_metric_traces(chars, styles, priority)
         self._paint_horizon(chars, styles, priority)
@@ -89,6 +90,25 @@ class LaunchBackdrop:
                 char = "┃" if (index + y) % 4 == 0 else "╎"
                 style = LAUNCH_SCAN if (index + y + self.frame) % 9 == 0 else LAUNCH_SCAN_DIM
                 _set_cell(chars, styles, priority, x, y, char, style, 2)
+
+    def _paint_edge_anchor(
+        self,
+        chars: list[list[str]],
+        styles: list[list[str]],
+        priority: list[list[int]],
+    ) -> None:
+        rows = len(chars)
+        width = len(chars[0])
+        if width < 82 or rows < 8:
+            return
+        x = width - 4
+        top = max(1, int(rows * 0.18))
+        bottom = min(rows - 2, int(rows * 0.76))
+        for y in range(top, bottom):
+            if (y + self.frame) % 7 == 0:
+                continue
+            style = LAUNCH_SCAN if (y + self.frame) % 11 == 0 else LAUNCH_SCAN_DIM
+            _set_cell(chars, styles, priority, x, y, "┃", style, 2)
 
     def _paint_contours(
         self,

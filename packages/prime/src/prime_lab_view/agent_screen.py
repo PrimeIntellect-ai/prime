@@ -5,16 +5,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from rich.console import Group
+from rich.console import Group, RenderableType
+from rich.markdown import Markdown
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Input, Select, Static
+from textual.widgets import Footer, Input, Static
 
-from .agent_adapters import agent_adapter, agent_select_options
+from .agent_adapters import agent_adapter
 from .agent_runtime import AgentChatMessage, AgentConnectionState
 from .launch_backdrop import LaunchBackdrop
 from .models import LabItem
@@ -61,9 +62,9 @@ class AgentChatScreen(Screen[None]):
     }
 
     #agent-stage {
-        width: 82%;
+        width: 86%;
         min-width: 72;
-        max-width: 150;
+        max-width: 176;
         height: 1fr;
         background: $background;
         padding: 1 0;
@@ -84,51 +85,50 @@ class AgentChatScreen(Screen[None]):
 
     #agent-composer {
         height: auto;
-        background: $surface;
-        padding: 1;
+        background: $background;
+        padding: 0 1 1 1;
         margin-top: 1;
     }
 
-    #agent-template-row {
-        height: 3;
+    #agent-input-shell {
+        height: auto;
+        background: $panel;
+        border-left: solid $primary;
+        padding: 1 1 0 1;
+    }
+
+    #agent-command-menu {
+        display: none;
+        height: auto;
+        color: $text-muted;
         margin-bottom: 1;
     }
 
-    #agent-control-row {
-        height: 3;
+    #agent-command-menu.visible {
+        display: block;
     }
 
     #agent-prompt {
         height: 3;
         width: 1fr;
+        background: $panel;
+        border: none;
     }
 
-    #agent-select {
-        height: 3;
-        width: 28;
-        margin-right: 1;
+    #agent-prompt:focus {
+        border: none;
     }
 
-    .agent-action-button {
-        width: 1fr;
-    }
-
-    .agent-template-button {
-        width: 1fr;
-        height: 3;
-        margin-right: 1;
-    }
-
-    #agent-send {
-        width: 12;
-        margin-left: 1;
+    #agent-composer-meta {
+        height: 1;
+        content-align: right middle;
+        color: $text-muted;
     }
 
     #agent-statusbar {
         height: 1;
         padding: 0 1;
-        background: $surface;
-        border-top: solid $primary;
+        background: $background;
     }
     """
     )
@@ -159,7 +159,7 @@ class AgentChatScreen(Screen[None]):
         self._last_status_key = ""
 
     def compose(self) -> ComposeResult:
-        yield Static(_agent_header(self._item), id="agent-header", markup=False)
+        yield Static(_agent_header(self._workspace, self._agent), id="agent-header", markup=False)
         with Vertical(id="agent-body"):
             with Vertical(id="agent-stage"):
                 yield Static(
@@ -169,6 +169,7 @@ class AgentChatScreen(Screen[None]):
                         self._agent,
                         self._state_provider(),
                         frame=self._frame,
+                        width=108,
                     ),
                     id="agent-atmosphere",
                     markup=False,
@@ -182,61 +183,39 @@ class AgentChatScreen(Screen[None]):
                     id="agent-chat",
                 )
                 with Vertical(id="agent-composer"):
-                    if self._template_prompts_by_id:
-                        with Horizontal(id="agent-template-row"):
-                            for template_id, template in self._template_prompts_by_id.items():
-                                yield Button(
-                                    template["label"],
-                                    id=template_id,
-                                    classes="agent-template-button -style-default",
-                                )
-                    with Horizontal(id="agent-control-row"):
-                        yield Select(
-                            agent_select_options(self._agent),
-                            value=self._agent,
-                            allow_blank=False,
-                            id="agent-select",
+                    with Vertical(id="agent-input-shell"):
+                        yield Static(
+                            _agent_command_menu(self._template_prompts_by_id),
+                            id="agent-command-menu",
+                            markup=False,
                         )
-                        yield Input(placeholder="Ask the coding agent...", id="agent-prompt")
-                        yield Button(
-                            "Send",
-                            id="agent-send",
-                            classes="agent-action-button",
-                            variant="primary",
+                        yield Input(
+                            placeholder="Ask Agent...  / commands",
+                            id="agent-prompt",
                         )
+                        yield Static(_agent_composer_meta(self._agent), id="agent-composer-meta")
         yield Static(self._status_text_provider(), id="agent-statusbar", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
         self.set_interval(0.25, self._refresh_runtime_view)
         self._refresh_runtime_view()
+        self.call_after_refresh(lambda: self.query_one("#agent-prompt", Input).focus())
 
     def action_back(self) -> None:
         self.app.pop_screen()
 
-    @on(Button.Pressed, "#agent-send")
-    def _send_pressed(self, _event: Button.Pressed) -> None:
-        self._send_current_prompt()
-
-    @on(Button.Pressed, ".agent-template-button")
-    def _template_pressed(self, event: Button.Pressed) -> None:
-        template = self._template_prompts_by_id.get(event.button.id or "")
-        if template is None:
-            return
-        self.query_one("#agent-prompt", Input).value = template["prompt"]
-        self.query_one("#agent-prompt", Input).focus()
+    @on(Input.Changed, "#agent-prompt")
+    def _prompt_changed(self, event: Input.Changed) -> None:
+        self._update_command_menu(event.value)
 
     @on(Input.Submitted, "#agent-prompt")
     def _prompt_submitted(self, _event: Input.Submitted) -> None:
-        self._send_current_prompt()
-
-    @on(Select.Changed, "#agent-select")
-    def _agent_selected(self, event: Select.Changed) -> None:
-        if not isinstance(event.value, str):
+        value = self.query_one("#agent-prompt", Input).value
+        if value.lstrip().startswith("/"):
+            self._handle_agent_command(value)
             return
-        self._agent = event.value
-        self._select_agent(self._workspace, self._agent)
-        self._refresh_runtime_view()
+        self._send_current_prompt()
 
     def _send_current_prompt(self) -> None:
         state = self._state_provider()
@@ -248,6 +227,47 @@ class AgentChatScreen(Screen[None]):
         self.query_one("#agent-prompt", Input).value = ""
         self._send_prompt(prompt)
         self._refresh_runtime_view()
+
+    def _handle_agent_command(self, value: str) -> None:
+        command, _, arg = value.strip().partition(" ")
+        command = command.lower()
+        arg = arg.strip()
+        if command in {"/agent", "/agents"}:
+            if not arg:
+                self._update_command_menu("/agent")
+                return
+            adapter = agent_adapter(arg)
+            self._agent = adapter.name
+            self._select_agent(self._workspace, self._agent)
+            self.query_one("#agent-header", Static).update(
+                _agent_header(self._workspace, self._agent)
+            )
+            self.query_one("#agent-composer-meta", Static).update(_agent_composer_meta(self._agent))
+            self.query_one("#agent-prompt", Input).value = ""
+            self._update_command_menu("")
+            self._refresh_runtime_view()
+            return
+        if command in {"/template", "/templates"}:
+            if arg.isdigit():
+                template = self._template_prompts_by_id.get(f"agent-template-{int(arg) - 1}")
+                if template is not None:
+                    self.query_one("#agent-prompt", Input).value = template["prompt"]
+                    self._update_command_menu("")
+                    return
+            self._update_command_menu("/template")
+            return
+        if command in {"/help", "/"}:
+            self._update_command_menu("/")
+            return
+        self._update_command_menu(value)
+
+    def _update_command_menu(self, value: str) -> None:
+        menu = self.query_one("#agent-command-menu", Static)
+        stripped = value.lstrip()
+        visible = stripped.startswith("/")
+        menu.set_class(visible, "visible")
+        if visible:
+            menu.update(_agent_command_menu(self._template_prompts_by_id, query=stripped))
 
     def _refresh_runtime_view(self) -> None:
         self._frame += 1
@@ -263,6 +283,7 @@ class AgentChatScreen(Screen[None]):
                     self._agent,
                     state,
                     frame=self._frame,
+                    width=self._atmosphere_width(),
                 )
             )
         chat_key = (messages, state.status, state.label, state.agent, state.message)
@@ -271,18 +292,25 @@ class AgentChatScreen(Screen[None]):
             self.query_one("#agent-chat-body", Static).update(_chat_transcript(messages, state))
         ready = _chat_transport_ready(state)
         self.query_one("#agent-prompt", Input).disabled = not ready
-        self.query_one("#agent-send", Button).disabled = not ready
         status_text = self._status_text_provider()
         status_key = status_text.plain
         if status_key != self._last_status_key:
             self._last_status_key = status_key
             self.query_one("#agent-statusbar", Static).update(status_text)
 
+    def _atmosphere_width(self) -> int:
+        width = self.query_one("#agent-stage").size.width or self.size.width
+        return max(72, min(176, width or 108))
 
-def _agent_header(item: LabItem) -> Group:
+
+def _agent_header(workspace: Path, agent: str) -> Group:
+    adapter = agent_adapter(agent)
     title = Text()
-    title.append(item.title, style="bold")
-    title.append(f"\n{item.subtitle}", style="dim")
+    title.append("Agent", style="bold")
+    title.append("\n")
+    title.append(adapter.name, style="dim")
+    title.append(" · ", style="dim")
+    title.append(compact_path(workspace), style="dim")
     return Group(lab_header(title))
 
 
@@ -293,9 +321,11 @@ def _agent_atmosphere(
     state: AgentConnectionState,
     *,
     frame: int,
+    width: int,
 ) -> Group:
     adapter = agent_adapter(agent)
-    backdrop = LaunchBackdrop(frame=frame).render_text(108, 5)
+    backdrop_width = max(72, min(176, width))
+    backdrop = LaunchBackdrop(frame=frame).render_text(backdrop_width, 5)
     heading = Text()
     heading.append(_agent_prompt_heading(item, workspace), style="bold white")
     heading.append("\n")
@@ -313,38 +343,50 @@ def _agent_atmosphere(
 def _agent_prompt_heading(item: LabItem, workspace: Path) -> str:
     if item.raw.get("prompt_templates"):
         return f"What should we build in {workspace.name or 'this workspace'}?"
-    return f"Ask {item.title or 'the coding agent'}"
+    return "Agent"
 
 
 def _chat_transcript(
     messages: tuple[AgentChatMessage, ...],
     state: AgentConnectionState,
-) -> Text:
+) -> RenderableType:
     text = Text()
     if not messages:
         text.append("Chat session\n", style="bold")
         if state.status == "none":
             text.append("No coding agent configured for this workspace.", style="dim")
         elif state.status == "connected":
-            text.append("Connected. Send a prompt to start the session.", style="dim")
+            text.append("Connected. Enter sends. Type / for commands.", style="dim")
         else:
             text.append(_connection_label(state), style=_connection_style(state.status))
         return text
 
+    renderables: list[RenderableType] = []
     for idx, message in enumerate(messages):
         if idx:
-            text.append("\n\n")
+            renderables.append(Text(""))
         role_style = {
             "user": "bold",
             "assistant": STATUS_SUCCESS,
             "system": STATUS_WARNING if message.status != "error" else STATUS_ERROR,
         }.get(message.role, "bold")
-        text.append(message.role.capitalize(), style=role_style)
+        header = Text()
+        header.append(message.role.capitalize(), style=role_style)
         if message.status:
-            text.append(f"  {message.status}", style="dim")
-        text.append("\n")
-        text.append(message.content)
-    return text
+            header.append(f"  {message.status}", style="dim")
+        renderables.append(header)
+        renderables.append(_message_body(message))
+    return Group(*renderables)
+
+
+def _message_body(message: AgentChatMessage) -> RenderableType:
+    if message.role == "assistant":
+        return Markdown(
+            message.content or " ",
+            code_theme="nord-darker",
+            hyperlinks=True,
+        )
+    return Text(message.content)
 
 
 def _connection_label(state: AgentConnectionState) -> str:
@@ -359,6 +401,55 @@ def _connection_label(state: AgentConnectionState) -> str:
 
 def _chat_transport_ready(state: AgentConnectionState) -> bool:
     return state.status == "connected"
+
+
+def _agent_composer_meta(agent: str) -> Text:
+    adapter = agent_adapter(agent)
+    return Text.assemble(
+        (adapter.label, PRIMARY),
+        ("  ·  Enter send", "dim"),
+        ("  ·  / commands", "dim"),
+    )
+
+
+def _agent_command_menu(
+    templates: dict[str, dict[str, str]],
+    *,
+    query: str = "/",
+) -> Text:
+    text = Text()
+    rows = [
+        ("/agent codex", "Switch to Codex"),
+        ("/agent claude", "Switch to Claude Code one-shot"),
+        ("/agent opencode", "Switch to OpenCode"),
+        ("/agent pi", "Switch to Pi Coding Agent"),
+        ("/agent hermes", "Switch to Hermes Agent"),
+        ("/help", "Show chat commands"),
+    ]
+    if templates:
+        rows.append(("/template N", "Load a prompt starter"))
+    query = query.strip().lower()
+    if query.startswith("/template") and templates:
+        rows = [
+            (
+                f"/template {index + 1}",
+                template["label"],
+            )
+            for index, template in enumerate(templates.values())
+        ]
+    elif query and query not in {"/", "/help"}:
+        prefix = query.split(maxsplit=1)[0]
+        rows = [row for row in rows if row[0].startswith(prefix) or prefix in row[0]]
+        if not rows:
+            rows = [("/help", "Show chat commands")]
+
+    for index, (command, detail) in enumerate(rows):
+        if index:
+            text.append("\n")
+        style = "bold white on #2a2538" if index == 0 else "white"
+        text.append(command.ljust(18), style=style)
+        text.append(detail, style="dim")
+    return text
 
 
 def _prompt_templates(item: LabItem) -> dict[str, dict[str, str]]:

@@ -304,6 +304,7 @@ class HomeLaunchState:
     team: str
     agent_label: str
     loading: bool
+    agent_action_label: str = "Configure Agent"
     counts: tuple[tuple[str, int], ...] = ()
 
 
@@ -337,7 +338,7 @@ class HomeLaunchPanel(Static):
         text = Text()
         width = max(48, self.size.width or 96)
         height = max(18, self.size.height or 28)
-        content_width = min(156, max(64, width - 8))
+        content_width = min(190, max(64, width - 4))
         left_margin = max(1, (width - content_width) // 2)
         lines = self._launch_lines(content_width)
         top_pad = max(0, (height - len(lines)) // 2)

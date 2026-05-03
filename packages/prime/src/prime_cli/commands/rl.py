@@ -19,7 +19,7 @@ from rich.table import Table
 from prime_cli.core import Config
 
 from ..api.rl import EnvServerInfo, RLClient, RLRun
-from ..client import APIClient, APIError, ValidationError
+from ..client import APIClient, APIError, NotFoundError, ValidationError
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
@@ -1847,11 +1847,16 @@ def delete_run(
         hosted_client.delete_run(run_id)
         console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
         return
+    except NotFoundError:
+        # Backend's kind gate told us this isn't a DEDICATED_FULL_FT run
+        # — fall through to the LoRA path. Typed exception (rather than
+        # substring-matching the message) so the fallback can't be
+        # tripped by an unrelated error body that happens to contain
+        # "HTTP 404".
+        pass
     except APIError as e:
-        if "HTTP 404" not in str(e):
-            console.print(f"[red]Error:[/red] {e}")
-            raise typer.Exit(1)
-        # Fall through: not a DEDICATED_FULL_FT run, try LoRA path.
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
     try:
         rl_client.delete_run(run_id)

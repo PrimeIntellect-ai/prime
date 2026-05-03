@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from prime_cli.core import APIClient, APIError
+from prime_cli.core import APIClient
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -32,26 +32,25 @@ class HostedTrainingClient:
     def create_run(self, payload: Dict[str, Any]) -> HostedTrainingRunResponse:
         """POST /v1/training/runs. Backend mints a per-run API token and
         kicks off the helm install asynchronously; returns immediately with
-        identifiers."""
-        try:
-            response = self.client.post("/training/runs", json=payload)
-            return HostedTrainingRunResponse.model_validate(response)
-        except Exception as e:
-            if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to create hosted training run: {e.response.text}")
-            raise APIError(f"Failed to create hosted training run: {str(e)}")
+        identifiers.
+
+        Lets typed APIError subclasses (NotFoundError, UnauthorizedError,
+        …) propagate so callers can branch by exception class instead of
+        string-matching the message.
+        """
+        response = self.client.post("/training/runs", json=payload)
+        return HostedTrainingRunResponse.model_validate(response)
 
     def delete_run(self, run_id: str) -> Dict[str, Any]:
         """DELETE /v1/training/runs/{run_id}. Idempotent: helm uninstall +
         namespace delete + RFTRun soft-delete. Returns the wire payload
-        (typically {runId, deleted})."""
-        try:
-            response = self.client.request("DELETE", f"/training/runs/{run_id}")
-            return response if isinstance(response, dict) else {"runId": run_id}
-        except Exception as e:
-            if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to delete hosted training run: {e.response.text}")
-            raise APIError(f"Failed to delete hosted training run: {str(e)}")
+        (typically {runId, deleted}). Re-raises typed APIError subclasses
+        (NotFoundError on 404, etc.) so callers can branch by exception
+        class — `prime train delete` uses NotFoundError as the 'not a
+        hosted run, try LoRA' fallback signal.
+        """
+        response = self.client.request("DELETE", f"/training/runs/{run_id}")
+        return response if isinstance(response, dict) else {"runId": run_id}
 
 
 def build_payload_from_toml(

@@ -113,40 +113,17 @@ def _build_messages(message: str, system: Optional[str]) -> List[Dict[str, str]]
 
 
 def _print_stream(chunks: Iterable[Dict[str, Any]]) -> None:
-    in_reasoning = False
-    saw_content = False
-    finish_reason: Optional[str] = None
     for chunk in chunks:
         choices = chunk.get("choices") or []
         if not choices:
             continue
-        choice = choices[0]
-        finish_reason = choice.get("finish_reason") or finish_reason
-        delta = choice.get("delta") or {}
-        reasoning = delta.get("reasoning_content")
-        if reasoning:
-            if not in_reasoning:
-                sys.stdout.write("<thinking>")
-                in_reasoning = True
-            sys.stdout.write(reasoning)
-            sys.stdout.flush()
-            continue
+        delta = choices[0].get("delta") or {}
         piece = delta.get("content")
         if piece:
-            if in_reasoning:
-                sys.stdout.write("</thinking>\n")
-                in_reasoning = False
-            saw_content = True
             sys.stdout.write(piece)
             sys.stdout.flush()
-    if in_reasoning:
-        sys.stdout.write("</thinking>\n")
     sys.stdout.write("\n")
     sys.stdout.flush()
-    if not saw_content and finish_reason == "length":
-        console.print(
-            "[yellow]hit max_tokens before final answer — try --max-tokens 2000+[/yellow]"
-        )
 
 
 @app.command("chat", epilog=CHAT_JSON_HELP)
@@ -222,21 +199,11 @@ def chat(
         if not choices:
             console.print("[yellow]No choices returned.[/yellow]")
             return
-        msg = choices[0].get("message") or {}
-        content = msg.get("content") or ""
-        reasoning = msg.get("reasoning_content") or ""
-        finish_reason = choices[0].get("finish_reason")
-        if reasoning:
-            console.print(f"[dim]<thinking>\n{reasoning}\n</thinking>[/dim]")
-        if content:
-            sys.stdout.write(content)
-            if not content.endswith("\n"):
-                sys.stdout.write("\n")
-            sys.stdout.flush()
-        elif finish_reason == "length":
-            console.print(
-                "[yellow]hit max_tokens before final answer — try --max-tokens 2000+[/yellow]"
-            )
+        content = (choices[0].get("message") or {}).get("content") or ""
+        sys.stdout.write(content)
+        if not content.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
 
     except typer.Exit:
         raise

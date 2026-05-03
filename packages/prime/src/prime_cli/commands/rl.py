@@ -1829,27 +1829,32 @@ def delete_run(
             raise typer.Exit(0)
 
     api_client = APIClient()
+
+    # Try the hosted full-FT delete endpoint first. The backend's kind
+    # gate 404s for non-DEDICATED_FULL_FT runs, so a 404 here means
+    # "not a hosted run" and we fall back to the LoRA-shared path.
+    # This avoids the prior approach of pre-fetching via rl_client.get_run
+    # for the discriminator — which fails for DEDICATED_FULL_FT runs
+    # whose row doesn't carry the LoRA-required RLRun fields
+    # (rollouts_per_example, seq_len, max_steps, batch_size, base_model).
+    # Pydantic ValidationError on those would mask the actual run kind
+    # and silently route to the wrong endpoint.
+    from ..api.training import HostedTrainingClient
+
     rl_client = RLClient(api_client)
-
-    # Look up the run kind first so we can route to the right endpoint.
-    # The shared LoRA path is /rft/runs/{id}; hosted full-FT lives on
-    # /training/runs/{id}. Falling back blindly between them would surface
-    # confusing "not found" errors when a non-admin tries to delete a
-    # hosted run, so do the discriminator check up-front.
-    kind: Optional[str] = None
+    hosted_client = HostedTrainingClient(api_client)
     try:
-        run = rl_client.get_run(run_id)
-        kind = getattr(run, "kind", None) or run.model_dump(by_alias=False).get("kind")
-    except APIError:
-        kind = None
+        hosted_client.delete_run(run_id)
+        console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
+        return
+    except APIError as e:
+        if "HTTP 404" not in str(e):
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(1)
+        # Fall through: not a DEDICATED_FULL_FT run, try LoRA path.
 
     try:
-        if kind == "DEDICATED_FULL_FT":
-            from ..api.training import HostedTrainingClient
-
-            HostedTrainingClient(api_client).delete_run(run_id)
-        else:
-            rl_client.delete_run(run_id)
+        rl_client.delete_run(run_id)
         console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

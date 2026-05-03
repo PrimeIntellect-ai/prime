@@ -58,64 +58,31 @@ def build_payload_from_toml(
     cfg: Dict[str, Any],
     *,
     name: Optional[str] = None,
+    image_tag: Optional[str] = None,
     wandb_api_key: Optional[str] = None,
     hf_token: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Map a prime-rl-style TOML dict onto the /v1/training/runs payload.
+    """Build the /v1/training/runs payload from a prime-rl-style TOML dict.
 
-    Mirrors the shape used in `prime-rl/examples/*/rl.toml` so the same
-    file can be passed to both `uv run rl @ rl.toml` and `prime train
-    rl.toml`. Unknown fields are ignored — only the explicit whitelist
-    below is forwarded; the chart owns the rest.
+    Ships the *whole* TOML as `config` so the backend can split it
+    per-component (trainer / orchestrator / inference) and bake each
+    into the corresponding pod's startup command. Anything outside the
+    handful of platform-authoritative overlays (chart-side scrape ports,
+    monitor URL, secret name) flows through unchanged — same e2e
+    behaviour as `uv run rl @ rl.toml`.
 
-    Cluster targeting is backend-side: the platform auto-picks the
-    first uncordoned PrimeCluster. The CLI deliberately doesn't expose
-    a cluster knob — keeps the wire payload narrow and removes a
-    footgun (mistargeting a config to the wrong cluster).
+    What stays out of `config`:
+      - secrets (wandb / hf): materialised into a per-run k8s Secret,
+      - run name: lives on the platform's RFTRun row, not the TOML,
+      - image_tag: chart-level (which prime-rl image to pull).
+
+    Cluster targeting is backend-side (auto-pick first uncordoned).
     """
-    payload: Dict[str, Any] = {}
+    payload: Dict[str, Any] = {"config": cfg}
     if name:
         payload["name"] = name
-
-    def _dig(d: Any, *path: str) -> Any:
-        cur = d
-        for key in path:
-            if not isinstance(cur, dict) or key not in cur:
-                return None
-            cur = cur[key]
-        return cur
-
-    mapping = {
-        "model": ("model", "name"),
-        "trainerGpus": ("deployment", "num_train_gpus"),
-        "inferenceGpus": ("deployment", "num_infer_gpus"),
-        "imageTag": ("image", "tag"),
-        "seqLen": ("seq_len",),
-        "maxSteps": ("max_steps",),
-        "learningRate": ("trainer", "optim", "lr"),
-        "batchSize": ("orchestrator", "batch_size"),
-        "rolloutsPerExample": ("orchestrator", "rollouts_per_example"),
-        "maxCompletionTokens": (
-            "orchestrator",
-            "train",
-            "sampling",
-            "max_completion_tokens",
-        ),
-        "wandbEntity": ("wandb", "entity"),
-        "wandbProject": ("wandb", "project"),
-        "wandbRunName": ("wandb", "name"),
-    }
-    for api_key, path in mapping.items():
-        v = _dig(cfg, *path)
-        if v is not None:
-            payload[api_key] = v
-
-    train_envs = _dig(cfg, "orchestrator", "train", "env")
-    if isinstance(train_envs, list) and train_envs:
-        env_id = train_envs[0].get("id") if isinstance(train_envs[0], dict) else None
-        if env_id:
-            payload["envId"] = env_id
-
+    if image_tag:
+        payload["imageTag"] = image_tag
     if wandb_api_key:
         payload["wandbApiKey"] = wandb_api_key
     if hf_token:

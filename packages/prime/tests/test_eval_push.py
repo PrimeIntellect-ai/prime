@@ -211,6 +211,35 @@ class TestPushSingleEval:
         assert eval_id == "eval-123"
         assert captured["is_public"] is False
         assert captured["dataset"] == "gsm8k"
+        assert captured["environments"] is None
+
+    def test_create_evaluation_links_only_owner_slug_environment(self, tmp_path, monkeypatch):
+        metadata = {"env": "gsm8k", "model": "gpt-4"}
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+        (tmp_path / "results.jsonl").write_text("")
+
+        captured = {}
+
+        class DummyEvalsClient:
+            def __init__(self, _api_client):
+                pass
+
+            def create_evaluation(self, **kwargs):
+                captured.update(kwargs)
+                return {"evaluation_id": "eval-123"}
+
+            def finalize_evaluation(self, evaluation_id, metrics=None):
+                captured["finalized_evaluation_id"] = evaluation_id
+                captured["finalized_metrics"] = metrics
+
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
+
+        eval_id = _push_single_eval(str(tmp_path), "owner/gsm8k", None, None)
+
+        assert eval_id == "eval-123"
+        assert captured["dataset"] == "owner/gsm8k"
+        assert captured["environments"] == [{"slug": "owner/gsm8k"}]
 
     def test_create_evaluation_passes_public_flag(self, tmp_path, monkeypatch):
         metadata = {"env": "gsm8k", "model": "gpt-4"}

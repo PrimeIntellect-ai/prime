@@ -77,19 +77,19 @@ class EvalsClient:
 
     def _resolve_environment_id(self, env_name: str) -> str:
         """
-        Resolve environment ID by name (get-or-create behavior).
+        Lookup environment ID by name without creating an environment.
         Only used when no owner slug is provided.
 
         Raises:
             EvalsAPIError: If the environment does not exist (404)
         """
         try:
-            resolve_data: Dict[str, Any] = {"name": env_name}
+            lookup_data: Dict[str, Any] = {"name": env_name}
 
             if self.client.config.team_id:
-                resolve_data["team_id"] = self.client.config.team_id
+                lookup_data["team_id"] = self.client.config.team_id
 
-            response = self.client.post("/environmentshub/resolve", json=resolve_data)
+            response = self.client.post("/environmentshub/lookup", json=lookup_data)
             return response["data"]["id"]
 
         except APIError as e:
@@ -124,7 +124,7 @@ class EvalsClient:
                     owner_slug, name = slug.split("/", 1)
                     resolved_env["id"] = self._lookup_environment_by_slug(owner_slug, name)
                 elif "name" in resolved_env:
-                    # Just a name, resolve to database ID (get-or-create)
+                    # Just a name, lookup to database ID without creating an environment
                     resolved_env["id"] = self._resolve_environment_id(resolved_env.pop("name"))
                 elif "id" in resolved_env:
                     # "id" key exists - validate it exists in the hub via lookup
@@ -155,32 +155,27 @@ class EvalsClient:
         metrics: Optional[Dict[str, Any]] = None,
         is_public: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Create a new evaluation
+        """Create a new evaluation.
 
-        Either run_id or environments must be provided.
-        Environments should be a list of dicts with 'id' and optional 'version_id'.
+        Environment associations are optional. When provided, environments should be a list of
+        dicts with 'id' and optional 'version_id'.
 
         Example: [{"id": "simpleqa", "version_id": "v1"}]
 
         Raises:
-            InvalidEvaluationError: If neither run_id nor environments is provided
+            InvalidEvaluationError: If environment identifiers are provided but none resolve
+                and no run_id is provided
         """
-        if not run_id and not environments:
-            raise InvalidEvaluationError(
-                "Either 'run_id' or 'environments' must be provided. "
-                "For environment evals, provide environments=[{'id': 'env-id', 'version_id': 'v1'}]"
-            )
-
         resolved_environments = None
         if environments:
             resolved_environments = self._resolve_environments(environments)
 
-            # Validate that we have at least one resolved environment if run_id is not provided
             # This check happens AFTER resolution to catch cases where all environments were invalid
             if not resolved_environments and not run_id:
                 raise InvalidEvaluationError(
                     "All provided environments lack valid identifiers (slug, name, or id). "
-                    "Either provide valid environment identifiers or provide a 'run_id'. "
+                    "Either provide valid environment identifiers, provide a 'run_id', "
+                    "or omit 'environments'. "
                 )
 
         payload = {
@@ -421,19 +416,19 @@ class AsyncEvalsClient:
 
     async def _resolve_environment_id(self, env_name: str) -> str:
         """
-        Resolve environment ID by name (get-or-create behavior).
+        Lookup environment ID by name without creating an environment.
         Only used when no owner slug is provided.
 
         Raises:
             EvalsAPIError: If the environment does not exist (404)
         """
         try:
-            resolve_data: Dict[str, Any] = {"name": env_name}
+            lookup_data: Dict[str, Any] = {"name": env_name}
 
             if self.client.config.team_id:
-                resolve_data["team_id"] = self.client.config.team_id
+                lookup_data["team_id"] = self.client.config.team_id
 
-            response = await self.client.post("/environmentshub/resolve", json=resolve_data)
+            response = await self.client.post("/environmentshub/lookup", json=lookup_data)
             return response["data"]["id"]
 
         except APIError as e:
@@ -467,7 +462,7 @@ class AsyncEvalsClient:
                     owner_slug, name = slug.split("/", 1)
                     resolved_env["id"] = await self._lookup_environment_by_slug(owner_slug, name)
                 elif "name" in resolved_env:
-                    # Just a name, resolve to database ID (get-or-create)
+                    # Just a name, lookup to database ID without creating an environment
                     resolved_env["id"] = await self._resolve_environment_id(
                         resolved_env.pop("name")
                     )
@@ -505,32 +500,27 @@ class AsyncEvalsClient:
         metrics: Optional[Dict[str, Any]] = None,
         is_public: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Create a new evaluation
+        """Create a new evaluation.
 
-        Either run_id or environments must be provided.
-        Environments should be a list of dicts with 'id' and optional 'version_id'.
+        Environment associations are optional. When provided, environments should be a list of
+        dicts with 'id' and optional 'version_id'.
 
         Example: [{"id": "simpleqa", "version_id": "v1"}]
 
         Raises:
-            InvalidEvaluationError: If neither run_id nor environments is provided
+            InvalidEvaluationError: If environment identifiers are provided but none resolve
+                and no run_id is provided
         """
-        if not run_id and not environments:
-            raise InvalidEvaluationError(
-                "Either 'run_id' or 'environments' must be provided. "
-                "For environment evals, provide environments=[{'id': 'env-id', 'version_id': 'v1'}]"
-            )
-
         resolved_environments = None
         if environments:
             resolved_environments = await self._resolve_environments(environments)
 
-            # Validate that we have at least one resolved environment if run_id is not provided
             # This check happens AFTER resolution to catch cases where all environments were invalid
             if not resolved_environments and not run_id:
                 raise InvalidEvaluationError(
                     "All provided environments lack valid identifiers (slug, name, or id). "
-                    "Either provide valid environment identifiers or provide a 'run_id'. "
+                    "Either provide valid environment identifiers, provide a 'run_id', "
+                    "or omit 'environments'. "
                 )
 
         payload = {

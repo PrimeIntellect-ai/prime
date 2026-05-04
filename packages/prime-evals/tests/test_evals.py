@@ -41,6 +41,67 @@ def test_create_evaluation_request_with_metadata():
     assert request.metadata == metadata
 
 
+class _FakeConfig:
+    team_id = "team-123"
+
+
+class _FakeAPIClient:
+    def __init__(self):
+        self.config = _FakeConfig()
+        self.calls = []
+
+    def post(self, path, json):
+        self.calls.append(("post", path, json))
+        if path == "/environmentshub/lookup":
+            return {"data": {"id": "env-123"}}
+        raise AssertionError(f"unexpected POST {path}")
+
+    def request(self, method, path, json):
+        self.calls.append(("request", method, path, json))
+        return {"evaluation_id": "eval-123"}
+
+
+def test_create_evaluation_allows_dataset_only_without_environment_resolution():
+    """Dataset-only evaluations should not resolve or create environments."""
+    api_client = _FakeAPIClient()
+    client = EvalsClient(api_client)
+
+    response = client.create_evaluation(
+        name="test-evaluation",
+        model_name="gpt-4o-mini",
+        dataset="gsm8k",
+    )
+
+    assert response == {"evaluation_id": "eval-123"}
+    assert [call for call in api_client.calls if call[0] == "post"] == []
+    request_payload = next(call[3] for call in api_client.calls if call[0] == "request")
+    assert request_payload["dataset"] == "gsm8k"
+    assert "environments" not in request_payload
+
+
+def test_create_evaluation_name_lookup_does_not_resolve_or_create_environment():
+    """Name environment refs must use lookup-only semantics, not get-or-create resolve."""
+    api_client = _FakeAPIClient()
+    client = EvalsClient(api_client)
+
+    response = client.create_evaluation(
+        name="test-evaluation",
+        environments=[{"name": "gsm8k"}],
+        model_name="gpt-4o-mini",
+        dataset="gsm8k",
+    )
+
+    assert response == {"evaluation_id": "eval-123"}
+    assert (
+        "post",
+        "/environmentshub/lookup",
+        {"name": "gsm8k", "team_id": "team-123"},
+    ) in api_client.calls
+    assert not any(call[1] == "/environmentshub/resolve" for call in api_client.calls)
+    request_payload = next(call[3] for call in api_client.calls if call[0] == "request")
+    assert request_payload["environments"] == [{"id": "env-123"}]
+
+
 def test_evaluation_status_enum():
     """Test EvaluationStatus enum values"""
     assert EvaluationStatus.PENDING == "PENDING"

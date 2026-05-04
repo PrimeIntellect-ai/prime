@@ -977,6 +977,18 @@ def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, An
     return get_eval_viewer_url(evaluation_id)
 
 
+def _eval_push_environments(env_ref: Optional[str]) -> Optional[list[dict[str, str]]]:
+    """Return lookup-only environment refs for eval push.
+
+    Bare environment names are dataset labels only: resolving them through the evals SDK uses
+    environmenthub get-or-create semantics in older clients, which can create partial environment
+    records during `prime eval push`.
+    """
+    if not env_ref or "/" not in env_ref:
+        return None
+    return [{"slug": env_ref}]
+
+
 def _push_single_eval(
     config_path: str,
     env_slug: Optional[str],
@@ -990,20 +1002,12 @@ def _push_single_eval(
     eval_name = name or eval_data["eval_name"]
     console.print(f"[blue]✓ Loaded eval data:[/blue] {path}")
 
-    detected_env = eval_data.get("env_id") or eval_data.get("env")
-    if not env_slug and detected_env and not run_id and not eval_id:
-        env_slug = detected_env
-
+    detected_env = eval_data.get("env")
+    dataset = env_slug or detected_env
+    environment_ref = env_slug or detected_env
     environments = None
-    if env_slug and not run_id and not eval_id:
-        # Determine if env_slug is a slug (owner/name) or a name
-        # Use appropriate key so _resolve_environments can properly resolve it
-        if "/" in env_slug:
-            # It's a slug (owner/name format)
-            environments = [{"slug": env_slug}]
-        else:
-            # It's a name (will be resolved by _resolve_environments)
-            environments = [{"name": env_slug}]
+    if not run_id and not eval_id:
+        environments = _eval_push_environments(environment_ref)
 
     console.print()
 
@@ -1021,7 +1025,7 @@ def _push_single_eval(
                 evaluation_id=eval_id,
                 name=eval_name,
                 model_name=eval_data.get("model_name"),
-                dataset=eval_data.get("env"),
+                dataset=dataset,
                 framework=eval_data.get("metadata", {}).get("framework", "verifiers"),
                 task_type=eval_data.get("metadata", {}).get("task_type"),
                 metadata=eval_data.get("metadata"),
@@ -1040,7 +1044,7 @@ def _push_single_eval(
             environments=environments,
             run_id=run_id,
             model_name=eval_data.get("model_name"),
-            dataset=eval_data.get("env"),
+            dataset=dataset,
             framework=eval_data.get("metadata", {}).get("framework", "verifiers"),
             task_type=eval_data.get("metadata", {}).get("task_type"),
             metadata=eval_data.get("metadata"),

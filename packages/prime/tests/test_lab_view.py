@@ -70,6 +70,7 @@ from prime_lab_app.agent_sessions import (
     workspace_session_key,
     write_agent_session,
 )
+from prime_lab_app.agent_widget_actions import build_agent_widget_config
 from prime_lab_app.agent_widget_model import build_agent_widget_model
 from prime_lab_app.agent_widgets import lab_widget_diagnostic_prompt
 from prime_lab_app.app import (
@@ -4106,6 +4107,37 @@ def test_prime_lab_app_chat_widget_completes_partial_eval_config(tmp_path: Path)
     assert values["rollouts_per_example"] == "3"
     assert values["max_tokens"] == "1024"
     assert values["max_concurrent"] == "auto"
+
+
+def test_prime_lab_app_chat_widget_uses_default_environment_for_rl_config(
+    tmp_path: Path,
+) -> None:
+    message = AgentChatMessage(
+        "system",
+        "Action ready",
+        "widget",
+        {
+            "kind": "run_launcher",
+            "title": "Train: wordle",
+            "payload": {
+                "kind": "run_launcher",
+                "config_kind": "rl",
+                "defaults": {
+                    "model": "openai/gpt-oss-20b",
+                    "environment": "primeintellect/wordle",
+                },
+            },
+        },
+    )
+
+    model = build_agent_widget_model(message, tmp_path)
+    values = model.config_context["values"] if model.config_context is not None else {}
+    build = build_agent_widget_config(model, {})
+
+    assert model.title == "Train wordle"
+    assert values["envs"] == "primeintellect/wordle"
+    assert values["model"] == "openai/gpt-oss-20b"
+    assert build.parsed["env"] == [{"id": "primeintellect/wordle"}]
 
 
 @pytest.mark.asyncio

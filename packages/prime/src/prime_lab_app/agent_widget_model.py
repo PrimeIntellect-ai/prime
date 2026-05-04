@@ -684,25 +684,33 @@ def _widget_environment_from_payload(
     config_path: Path,
     workspace: Path,
 ) -> str:
+    config_kind = str(payload.get("config_kind") or "eval")
     config = payload.get("config")
     if isinstance(config, dict):
         envs = initial_config_field_values(
             config,
-            str(payload.get("config_kind") or "eval"),
+            config_kind,
             fallback_name="",
         )
         if envs.get("envs"):
             return _resolve_widget_environment(
                 workspace,
-                envs["envs"].split(",", 1)[0].split("@", 1)[0].strip(),
+                _widget_environment_token(envs["envs"]),
             )
-    for key in ("env_id", "environment", "environment_id", "env"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return _resolve_widget_environment(workspace, value.strip())
+        if env_value := _widget_environment_from_mapping(config):
+            return _resolve_widget_environment(workspace, _widget_environment_token(env_value))
+    defaults = payload.get("defaults")
+    if isinstance(defaults, dict):
+        envs = initial_config_field_values(defaults, config_kind, fallback_name="")
+        if envs.get("envs"):
+            return _resolve_widget_environment(workspace, _widget_environment_token(envs["envs"]))
+        if env_value := _widget_environment_from_mapping(defaults):
+            return _resolve_widget_environment(workspace, _widget_environment_token(env_value))
+    if env_value := _widget_environment_from_mapping(payload):
+        return _resolve_widget_environment(workspace, _widget_environment_token(env_value))
     command_env = _environment_from_command(payload.get("command"))
     if command_env:
-        return _resolve_widget_environment(workspace, command_env)
+        return _resolve_widget_environment(workspace, _widget_environment_token(command_env))
     title = str(payload.get("title") or "")
     if ":" in title:
         candidate = title.split(":", 1)[1].strip()
@@ -711,6 +719,35 @@ def _widget_environment_from_payload(
     if config_path.stem and config_path.stem != "agent-config":
         return _resolve_widget_environment(workspace, config_path.stem)
     return _resolve_widget_environment(workspace, "")
+
+
+def _widget_environment_from_mapping(value: dict[str, Any]) -> str:
+    for key in ("env_id", "environment", "environment_id", "env", "envs", "environments"):
+        env_value = _widget_environment_value(value.get(key))
+        if env_value:
+            return env_value
+    return ""
+
+
+def _widget_environment_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("env_id", "id", "environment", "environment_id", "name", "slug"):
+            env_value = value.get(key)
+            if isinstance(env_value, str) and env_value.strip():
+                return env_value.strip()
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            env_value = _widget_environment_value(item)
+            if env_value:
+                return env_value
+    return ""
+
+
+def _widget_environment_token(value: str) -> str:
+    return value.split(",", 1)[0].split("@", 1)[0].strip()
 
 
 def _environment_from_command(command: Any) -> str:
@@ -911,7 +948,10 @@ def _widget_command_text(payload: dict[str, Any], workspace: Path) -> str:
 def _widget_config_path(payload: dict[str, Any], workspace: Path) -> Path:
     raw_path = str(payload.get("config_path") or "").strip()
     if not raw_path:
-        raw_path = ".prime/lab/configs/eval/agent-config.toml"
+        config_kind = str(payload.get("config_kind") or "eval")
+        if config_kind not in {"eval", "rl", "gepa"}:
+            config_kind = "eval"
+        raw_path = f".prime/lab/configs/{config_kind}/agent-config.toml"
     path = Path(raw_path).expanduser()
     if not path.is_absolute():
         path = workspace / path

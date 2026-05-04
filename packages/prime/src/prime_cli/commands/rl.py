@@ -184,7 +184,6 @@ def generate_rl_config_template(environment: str | None = None) -> str:
 
     return f'''\
 model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
-loss = "rl"
 max_steps = 100
 
 # env_files = ["secrets.env"] # optional file(s) for secrets
@@ -197,6 +196,9 @@ rollouts_per_example = 8
 # oversampling_factor = 1.0
 # max_async_level = 4
 
+# Optional: warm-start from an existing checkpoint
+# checkpoint_id = "..."
+
 # Optional: SFT hard distillation
 # loss = "sft"
 # [teacher]
@@ -206,9 +208,6 @@ rollouts_per_example = 8
 # [teacher.sampling]
 # max_tokens = 2048
 # reasoning_effort = "medium"
-
-# Optional: warm-start from an existing checkpoint
-# checkpoint_id = "..."
 
 [sampling]
 max_tokens = 2048

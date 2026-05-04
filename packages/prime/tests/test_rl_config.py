@@ -96,9 +96,7 @@ def test_load_config_rejects_legacy_sft_distill_config(tmp_path: Path) -> None:
         ),
     ],
 )
-def test_load_config_rejects_legacy_sft_distill_fields(
-    tmp_path: Path, config_body: str
-) -> None:
+def test_load_config_rejects_legacy_sft_distill_fields(tmp_path: Path, config_body: str) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text('model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\n' + config_body)
 
@@ -111,6 +109,35 @@ def test_generate_rl_config_template_uses_broad_buffer_threshold_examples() -> N
 
     assert "# easy_threshold = 1.0" in template
     assert "# hard_threshold = 0.0" in template
+
+
+def test_generate_rl_config_template_keeps_checkpoint_id_top_level_with_sft(
+    tmp_path: Path,
+) -> None:
+    template = generate_rl_config_template()
+    config_text = template
+    replacements = {
+        '# checkpoint_id = "..."': 'checkpoint_id = "ckpt_test"',
+        '# loss = "sft"': 'loss = "sft"',
+        "# [teacher]": "[teacher]",
+        '# model = "openai/gpt-oss-120b"': 'model = "openai/gpt-oss-120b"',
+        "# save = false": "save = false",
+        "# [teacher.sampling]": "[teacher.sampling]",
+        "# max_tokens = 2048": "max_tokens = 2048",
+        '# reasoning_effort = "medium"': 'reasoning_effort = "medium"',
+    }
+    for old, new in replacements.items():
+        config_text = config_text.replace(old, new, 1)
+
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(config_text)
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.checkpoint_id == "ckpt_test"
+    assert cfg.loss == "sft"
+    assert cfg.teacher is not None
+    assert cfg.teacher.sampling.max_tokens == 2048
 
 
 def test_flatten_config_schema_expands_optional_nested_models() -> None:
@@ -230,9 +257,7 @@ def test_load_config_rejects_sft_without_teacher(tmp_path: Path) -> None:
 def test_load_config_rejects_teacher_for_rl(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text(
-        'model = "openai/gpt-oss-20b"\n'
-        "[teacher]\n"
-        'model = "openai/gpt-oss-120b"\n'
+        'model = "openai/gpt-oss-20b"\n[teacher]\nmodel = "openai/gpt-oss-120b"\n'
     )
 
     with pytest.raises(typer.Exit):

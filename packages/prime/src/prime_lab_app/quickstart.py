@@ -10,6 +10,7 @@ import toml
 
 from .models import LabItem
 from .palette import PRIMARY
+from .toml_format import format_toml_blocks
 
 
 @dataclass(frozen=True)
@@ -85,7 +86,7 @@ def evaluation_config_item(workspace: Path) -> LabItem:
     """Create a starter hosted-evaluation config item."""
 
     path = workspace / ".prime" / "lab" / "configs" / "eval" / "new-evaluation.toml"
-    toml_text = _space_toml_blocks(
+    toml_text = format_toml_blocks(
         toml.dumps(
             {
                 "model": "",
@@ -115,7 +116,7 @@ def training_config_item(workspace: Path) -> LabItem:
     """Create a starter training config item."""
 
     path = workspace / ".prime" / "lab" / "configs" / "rl" / "new-training.toml"
-    toml_text = _space_toml_blocks(
+    toml_text = format_toml_blocks(
         toml.dumps(
             {
                 "model": "",
@@ -177,13 +178,3 @@ def _safe_toml_loads(value: str) -> dict[str, Any]:
     except toml.TomlDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
-
-
-def _space_toml_blocks(value: str) -> str:
-    lines = value.splitlines()
-    spaced: list[str] = []
-    for line in lines:
-        if line.startswith("[[") and spaced and spaced[-1] != "":
-            spaced.append("")
-        spaced.append(line)
-    return "\n".join(spaced) + ("\n" if spaced else "")

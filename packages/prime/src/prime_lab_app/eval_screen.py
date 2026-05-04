@@ -74,6 +74,7 @@ from .eval_render import (
     tool_output_preview,
 )
 from .palette import ROLLOUT_SUCCESS, ROLLOUT_WARNING, STATUS_ERROR, TOOL_CALL
+from .widgets import ClearableInput
 
 
 class EvalPanel(Container):
@@ -175,7 +176,7 @@ class EvalSearchScreen(ModalScreen[SearchResult | None]):
     def compose(self) -> ComposeResult:
         with Container():
             yield Label(Text("Search", style="bold"))
-            yield Input(placeholder="regex, case-insensitive", id="search-input")
+            yield ClearableInput(placeholder="regex, case-insensitive", id="search-input")
             yield Label("", id="search-error", classes="subtitle")
             with Horizontal(classes="modal-columns"):
                 with EvalPanel(classes="modal-panel"):
@@ -190,7 +191,7 @@ class EvalSearchScreen(ModalScreen[SearchResult | None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#search-input", Input).focus()
+        self.query_one("#search-input", ClearableInput).focus()
         self._update_results("")
 
     def on_key(self, event: events.Key) -> None:
@@ -238,7 +239,7 @@ class EvalSearchScreen(ModalScreen[SearchResult | None]):
         selection = self._current_selection()
         if selection is None:
             return
-        pattern = self.query_one("#search-input", Input).value
+        pattern = self.query_one("#search-input", ClearableInput).value
         self.dismiss(
             SearchResult(
                 column=selection.column,
@@ -370,7 +371,6 @@ class RolloutCopyScreen(ModalScreen[None]):
 
     BINDINGS = [
         Binding("escape", "close", "Back", key_display="Esc"),
-        Binding("b,backspace", "close", show=False),
         Binding("c", "copy", "Copy"),
     ]
 
@@ -516,11 +516,11 @@ class RolloutViewer(Container):
         Binding("pagedown", "history_page_down", show=False),
         Binding("home", "history_home", show=False),
         Binding("end", "history_end", show=False),
-        Binding("e", "expand_all", "Expand all"),
-        Binding("x", "collapse_all", "Collapse all"),
+        Binding("e", "expand_all", "Expand all", show=False),
+        Binding("x", "collapse_all", "Collapse all", show=False),
         Binding("/", "search", "Search"),
-        Binding("m", "toggle_markdown_math", "Toggle markdown"),
-        Binding("c", "copy", "Copy"),
+        Binding("m", "toggle_markdown_math", "Toggle markdown", show=False),
+        Binding("c", "copy", "Copy", show=False),
     ]
 
     DEFAULT_CSS = (
@@ -1558,8 +1558,7 @@ class LocalEvalRunScreen(Screen[None]):
     COMPACT_LAYOUT_WIDTH = 150
 
     BINDINGS = [
-        Binding("b,backspace", "back", "Back"),
-        Binding("q", "quit", "Quit"),
+        Binding("escape", "back", "Back", key_display="Esc"),
         Binding("p", "prev_record", "Prev rollout"),
         Binding("n", "next_record", "Next rollout"),
         Binding("l", "show_logs", "Logs"),
@@ -1568,12 +1567,12 @@ class LocalEvalRunScreen(Screen[None]):
         Binding("pagedown", "history_page_down", show=False),
         Binding("home", "history_home", show=False),
         Binding("end", "history_end", show=False),
-        Binding("tab", "focus_next_pane", "Next pane"),
+        Binding("tab", "focus_next_pane", "Next pane", show=False),
         Binding("shift+tab", "focus_prev_pane", show=False),
-        Binding("e", "expand_all", "Expand all"),
-        Binding("x", "collapse_all", "Collapse all"),
+        Binding("e", "expand_all", "Expand all", show=False),
+        Binding("x", "collapse_all", "Collapse all", show=False),
         Binding("/", "search", "Search"),
-        Binding("c", "copy", "Copy"),
+        Binding("c", "copy", "Copy", show=False),
     ]
 
     CSS = """

@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import re
-import shlex
-import subprocess
-import threading
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,14 +20,13 @@ from textual.css.query import NoMatches
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Input, Label, Static
 
+from .launch_runner import ConfigLaunchRunner
 from .models import LabItem
 from .palette import BUTTON_CSS, CODE_THEME, PRIMARY, STATUS_ERROR, STATUS_SUCCESS, STATUS_WARNING
 from .shell import lab_header
+from .toml_format import format_toml_blocks
 from .training_config import normalize_rl_config
-
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{5,}")
-_LOG_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 12.0)
+from .widgets import ClearableInput
 
 
 @dataclass(frozen=True)
@@ -47,10 +42,31 @@ class ConfigBuildResult:
     errors: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
-class LogFollowCommand:
-    argv: tuple[str, ...]
-    display: str
+def build_config_from_fields(
+    config: dict[str, Any],
+    config_kind: str,
+    field_value: Any,
+) -> ConfigBuildResult:
+    """Build a normalized Lab config from form field values."""
+
+    return _form_config(config, config_kind, field_value)
+
+
+def initial_config_field_values(
+    config: dict[str, Any],
+    config_kind: str,
+    *,
+    fallback_name: str,
+) -> dict[str, str]:
+    """Return the standard editable field values for a Lab config."""
+
+    return _initial_field_values(config, config_kind, fallback_name=fallback_name)
+
+
+def launch_command_for_config(config_kind: str, rel_path: str) -> str:
+    """Return the Lab CLI command for launching a generated config."""
+
+    return _launch_command(config_kind, rel_path)
 
 
 FIELD_INITIAL_KEYS = {
@@ -69,10 +85,9 @@ class ConfigRunScreen(Screen[None]):
     """Native TUI editor for a local Lab config."""
 
     BINDINGS = [
-        Binding("b,backspace", "back", "Back"),
-        Binding("q", "quit", "Quit"),
-        Binding("tab", "focus_next", "Next", key_display="Tab"),
-        Binding("shift+tab", "focus_previous", "Previous", key_display="Shift+Tab"),
+        Binding("escape", "back", "Back", key_display="Esc"),
+        Binding("tab", "focus_next", "Next", key_display="Tab", show=False),
+        Binding("shift+tab", "focus_previous", "Previous", key_display="Shift+Tab", show=False),
     ]
 
     CSS = (
@@ -237,7 +252,7 @@ class ConfigRunScreen(Screen[None]):
 
     def _field_value(self, field_id: str) -> str:
         try:
-            return self.query_one(f"#{field_id}", Input).value.strip()
+            return self.query_one(f"#{field_id}", ClearableInput).value.strip()
         except NoMatches:
             return self._initial_fields.get(FIELD_INITIAL_KEYS.get(field_id, ""), "").strip()
 
@@ -251,8 +266,7 @@ class ConfigLaunchScreen(Screen[None]):
     """Native launch/follow screen for config-backed Lab commands."""
 
     BINDINGS = [
-        Binding("b,backspace", "back", "Back"),
-        Binding("q", "quit", "Quit"),
+        Binding("escape", "back", "Back", key_display="Esc"),
         Binding("s", "stop", "Stop"),
     ]
 
@@ -314,9 +328,7 @@ class ConfigLaunchScreen(Screen[None]):
         self._subtitle = subtitle
         self._follow_training_logs = follow_training_logs
         self._output = ""
-        self._process: subprocess.Popen[str] | None = None
-        self._process_lock = threading.Lock()
-        self._stop_requested = threading.Event()
+        self._runner: ConfigLaunchRunner | None = None
         self._running = False
 
     def compose(self) -> ComposeResult:
@@ -340,6 +352,22 @@ class ConfigLaunchScreen(Screen[None]):
 
     def on_mount(self) -> None:
         self._running = True
+        self._runner = ConfigLaunchRunner(
+            command=self._command,
+            workspace=self._workspace,
+            follow_training_logs=self._follow_training_logs,
+            append_output=lambda text: self.app.call_from_thread(self._append_output, text),
+            update_status=lambda text, style: self.app.call_from_thread(
+                self._update_status,
+                text,
+                style,
+            ),
+            finish=lambda kind, returncode: self.app.call_from_thread(
+                self._finish_runner,
+                kind,
+                returncode,
+            ),
+        )
         self._run_launch_worker()
 
     def action_back(self) -> None:
@@ -350,102 +378,26 @@ class ConfigLaunchScreen(Screen[None]):
 
     @work(thread=True, exclusive=True)
     def _run_launch_worker(self) -> None:
-        command = shlex.split(self._command)
-        try:
-            returncode, logs_command = self._stream_process(
-                command,
-                detect_training_logs=self._follow_training_logs,
-            )
-        except OSError as exc:
-            self.app.call_from_thread(self._append_output, f"Launch failed: {exc}\n")
-            self.app.call_from_thread(self._finish_launch, 1)
-            return
-        if self._stop_requested.is_set():
-            self.app.call_from_thread(self._finish_stopped)
-            return
-        if returncode == 0 and logs_command is not None and not self._stop_requested.is_set():
-            self._follow_logs_with_backoff(logs_command)
-            return
-        self.app.call_from_thread(self._finish_launch, returncode)
-
-    def _follow_logs_with_backoff(self, logs_command: LogFollowCommand) -> None:
-        self.app.call_from_thread(self._start_log_follow, logs_command)
-        retry_count = 0
-        while not self._stop_requested.is_set():
-            try:
-                returncode, _unused = self._stream_process(list(logs_command.argv))
-            except OSError as exc:
-                self.app.call_from_thread(self._append_output, f"Log follow failed: {exc}\n")
-                self.app.call_from_thread(self._finish_launch, 1)
-                return
-            if self._stop_requested.is_set():
-                self.app.call_from_thread(self._finish_stopped)
-                return
-            if returncode == 0:
-                self.app.call_from_thread(self._finish_log_follow)
-                return
-            delay = _log_retry_delay(retry_count)
-            retry_count += 1
-            self.app.call_from_thread(
-                self._append_output,
-                f"\nLogs are not ready yet; retrying in {delay:g}s.\n",
-            )
-            self._stop_requested.wait(delay)
-        self.app.call_from_thread(self._finish_stopped)
-
-    def _stream_process(
-        self,
-        command: list[str],
-        *,
-        detect_training_logs: bool = False,
-    ) -> tuple[int, LogFollowCommand | None]:
-        process = subprocess.Popen(
-            command,
-            cwd=self._workspace,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        with self._process_lock:
-            self._process = process
-        logs_command: LogFollowCommand | None = None
-        try:
-            if process.stdout is not None:
-                for line in process.stdout:
-                    if detect_training_logs and logs_command is None:
-                        logs_command = _extract_training_log_follow_command(line)
-                        if logs_command is not None:
-                            self.app.call_from_thread(
-                                self._mark_log_follow_detected,
-                                logs_command,
-                            )
-                    self.app.call_from_thread(self._append_output, line)
-            return process.wait(), logs_command
-        finally:
-            with self._process_lock:
-                if self._process is process:
-                    self._process = None
+        if self._runner is not None:
+            self._runner.run()
 
     def _append_output(self, text: str) -> None:
         self._output = (self._output + text)[-100_000:]
         self.query_one("#launch-log", Static).update(Text(self._output))
 
-    def _mark_log_follow_detected(self, logs_command: LogFollowCommand) -> None:
-        self.query_one("#launch-status", Label).update(
-            Text(f"Run created. Preparing live logs: {logs_command.display}", style=PRIMARY)
-        )
+    def _update_status(self, text: str, style: str) -> None:
+        self.query_one("#launch-status", Label).update(Text(text, style=style))
 
-    def _start_log_follow(self, logs_command: LogFollowCommand) -> None:
-        self._append_output(f"\nFollowing run logs with: {logs_command.display}\n\n")
-        self.query_one("#launch-status", Label).update(
-            Text("Following live training logs", style=STATUS_SUCCESS)
-        )
+    def _finish_runner(self, kind: str, returncode: int | None) -> None:
+        if kind == "stopped":
+            self._finish_stopped()
+        elif kind == "logs":
+            self._finish_log_follow()
+        else:
+            self._finish_launch(int(returncode or 0))
 
     def _finish_launch(self, returncode: int) -> None:
         self._running = False
-        with self._process_lock:
-            self._process = None
         status = (
             Text("Launch command completed", style=STATUS_SUCCESS)
             if returncode == 0
@@ -469,8 +421,6 @@ class ConfigLaunchScreen(Screen[None]):
 
     def _finish_stopped(self) -> None:
         self._running = False
-        with self._process_lock:
-            self._process = None
         self.query_one("#launch-status", Label).update(Text("Stopped", style=STATUS_WARNING))
         try:
             self.query_one("#launch-stop", Button).disabled = True
@@ -478,14 +428,10 @@ class ConfigLaunchScreen(Screen[None]):
             pass
 
     def _stop_process(self) -> None:
-        self._stop_requested.set()
-        with self._process_lock:
-            process = self._process
-        if process is None or process.poll() is not None:
+        if self._runner is None:
             self._finish_stopped()
             return
-        process.terminate()
-        self._append_output("\nStopped command.\n")
+        self._runner.stop()
 
     @on(Button.Pressed, "#launch-stop")
     def _stop_pressed(self, _event: Button.Pressed) -> None:
@@ -515,7 +461,7 @@ def _field_widgets(values: dict[str, str]) -> list[Any]:
         disabled = bool(rest[1]) if len(rest) > 1 else False
         widgets.append(Static(label, classes="field-label", markup=False))
         widgets.append(
-            Input(
+            ClearableInput(
                 str(value),
                 id=field_id,
                 type=input_type,
@@ -543,7 +489,7 @@ def _form_config(config: dict[str, Any], config_kind: str, field_value: Any) -> 
         _set_environment_field(updated, config_kind, env_text)
 
     filtered = _filter_empty_values(updated)
-    toml_text = _space_toml_blocks(toml.dumps(filtered)).rstrip()
+    toml_text = format_toml_blocks(toml.dumps(filtered)).rstrip()
     validation = _validate_toml(toml_text)
     if validation.error is not None:
         errors.append(validation.error)
@@ -928,56 +874,6 @@ def _launch_command(config_kind: str, rel_path: str) -> str:
     if config_kind == "eval":
         return f"prime eval run {rel_path} --hosted"
     return f"prime gepa run {rel_path}"
-
-
-def _extract_training_log_follow_command(text: str) -> LogFollowCommand | None:
-    cleaned = _ANSI_ESCAPE_RE.sub("", text).replace("`", " ")
-    try:
-        tokens = shlex.split(cleaned)
-    except ValueError:
-        tokens = cleaned.split()
-    for index in range(len(tokens)):
-        command_head = tokens[index : index + 3]
-        if command_head == ["prime", "rl", "logs"]:
-            run_id = _first_run_id(tokens[index + 3 : index + 8])
-            if run_id:
-                return _training_log_follow_command(run_id)
-        if tokens[index : index + 2] == ["prime", "logs"]:
-            run_id = _first_run_id(tokens[index + 2 : index + 7])
-            if run_id:
-                return _training_log_follow_command(run_id)
-    return None
-
-
-def _first_run_id(tokens: list[str]) -> str:
-    for token in tokens:
-        stripped = token.strip().strip(".,;:)")
-        if stripped.startswith("-"):
-            continue
-        if _RUN_ID_RE.fullmatch(stripped):
-            return stripped
-    return ""
-
-
-def _training_log_follow_command(run_id: str) -> LogFollowCommand:
-    argv = ("prime", "rl", "logs", run_id, "-f")
-    return LogFollowCommand(argv, " ".join(argv))
-
-
-def _log_retry_delay(retry_count: int) -> float:
-    if retry_count < len(_LOG_RETRY_DELAYS):
-        return _LOG_RETRY_DELAYS[retry_count]
-    return _LOG_RETRY_DELAYS[-1]
-
-
-def _space_toml_blocks(value: str) -> str:
-    lines = value.splitlines()
-    spaced: list[str] = []
-    for line in lines:
-        if line.startswith("[[") and spaced and spaced[-1] != "":
-            spaced.append("")
-        spaced.append(line)
-    return "\n".join(spaced) + ("\n" if spaced else "")
 
 
 def _filter_empty_values(value: Any) -> Any:

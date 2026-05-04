@@ -13,6 +13,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Label, OptionList, Static
 from textual.widgets._option_list import Option
 
+from .widgets import ClearableInput
+
 
 @dataclass(frozen=True)
 class FilterChoice:
@@ -78,7 +80,7 @@ class FilterScreen(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Container(id="filter-dialog"):
             yield Label(self._title)
-            yield Input(
+            yield ClearableInput(
                 value=self._query,
                 placeholder=self._placeholder,
                 id="filter-query",
@@ -91,7 +93,7 @@ class FilterScreen(ModalScreen[str | None]):
         dialog.styles.width = self._width
         dialog.styles.height = self._height
         self._sync_results()
-        query = self.query_one("#filter-query", Input)
+        query = self.query_one("#filter-query", ClearableInput)
         query.focus()
         query.cursor_position = len(query.value)
 

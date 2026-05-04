@@ -21,8 +21,6 @@ class LaunchScreen(Screen[str | None]):
     BINDINGS = [
         Binding("enter", "enter_lab", "Enter Lab", key_display="Enter"),
         Binding("c", "agent", "Agent"),
-        Binding("r", "refresh_lab", "Refresh"),
-        Binding("q", "quit", "Quit"),
     ]
 
     CSS = (
@@ -73,9 +71,9 @@ class LaunchScreen(Screen[str | None]):
         super().__init__()
         self._state = HomeLaunchState(
             workspace="-",
-            auth_label="auth ?",
+            auth_label="?",
             team="-",
-            agent_label="agent none",
+            agent_label="none",
             loading=True,
         )
 
@@ -116,16 +114,8 @@ class LaunchScreen(Screen[str | None]):
     def action_enter_lab(self) -> None:
         self.dismiss("home")
 
-    def action_refresh_lab(self) -> None:
-        action_refresh = getattr(self.app, "action_refresh", None)
-        if callable(action_refresh):
-            action_refresh()
-
     def action_agent(self) -> None:
         self.dismiss("agent")
-
-    def action_quit(self) -> None:
-        self.app.exit()
 
     @on(Button.Pressed, ".launch-action-button")
     def _launch_action_pressed(self, event: Button.Pressed) -> None:
@@ -140,12 +130,6 @@ def _launch_hotkeys() -> Text:
         ("   ", "dim"),
         ("c", f"bold {PRIMARY}"),
         (" agent", "dim"),
-        ("   ", "dim"),
-        ("r", f"bold {PRIMARY}"),
-        (" refresh", "dim"),
-        ("   ", "dim"),
-        ("q", f"bold {PRIMARY}"),
-        (" quit", "dim"),
     )
 
 

@@ -10,17 +10,25 @@ from typing import Any
 
 from rich.console import Group
 from rich.text import Text
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.widgets import Button, Footer, Label, OptionList, Static, Tree
 from textual.widgets._option_list import Option
 
 from .agent_adapters import agent_adapter
+from .agent_mcp_bridge import LabMcpIpcServer
 from .agent_runtime import AgentChatMessage, AgentConnectionState, AgentRuntime
 from .agent_screen import AgentChatScreen
+from .agent_sessions import (
+    AgentSessionRecord,
+    append_agent_session_action,
+    create_agent_session,
+    ensure_agent_session,
+    write_agent_session,
+)
 from .config_screen import ConfigLaunchScreen, ConfigRunScreen
 from .data import LabLoadOptions
 from .details import (
@@ -70,6 +78,7 @@ from .models import LabItem, LabSection, LabSnapshot
 from .palette import (
     BUTTON_CSS,
     LAB_THEME,
+    PRIMARY,
     STATUS_ERROR,
     STATUS_WARNING,
 )
@@ -84,7 +93,9 @@ from .shell import (
     agent_status_label,
     compact_path,
     configured_workspace_agent,
-    lab_header,
+    lab_logo_text,
+    lab_mark_text,
+    status_identity,
     statusbar_text,
     write_workspace_agent_choice,
 )
@@ -109,6 +120,39 @@ from .widgets import (
 )
 
 WorkspaceSwitcher = Callable[[Path], None]
+NAV_SECTION_KEYS = frozenset({"environments", "training", "evaluations"})
+
+
+class WorkspacePathLink(Static):
+    """Clickable active-workspace path in the global chrome."""
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        open_workspace_settings = getattr(self.app, "open_workspace_settings", None)
+        if callable(open_workspace_settings):
+            open_workspace_settings()
+
+
+class StatusBar(Static):
+    """Global status line with warning-tray affordance."""
+
+    def on_click(self, event: events.Click) -> None:
+        snapshot = getattr(self.app, "_snapshot", None)
+        if snapshot is not None and getattr(snapshot, "warnings", ()):
+            event.stop()
+            toggle_warning_viewer = getattr(self.app, "toggle_warning_viewer", None)
+            if callable(toggle_warning_viewer):
+                toggle_warning_viewer()
+            return
+        event.stop()
+        if event.x >= max(0, self.size.width - 32):
+            open_agent_chat = getattr(self.app, "action_open_agent_chat", None)
+            if callable(open_agent_chat):
+                open_agent_chat()
+            return
+        open_workspace_settings = getattr(self.app, "open_workspace_settings", None)
+        if callable(open_workspace_settings):
+            open_workspace_settings()
 
 
 class PrimeLabView(App[None]):
@@ -118,18 +162,17 @@ class PrimeLabView(App[None]):
     PRIME_THEME = LAB_THEME
 
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
-        Binding("r", "refresh", "Refresh"),
-        Binding("w", "show_welcome", "Welcome"),
+        Binding("ctrl+c", "quit", "Quit", show=False),
+        Binding("ctrl+w", "show_welcome", "Welcome", key_display="Ctrl+W"),
         Binding("c", "open_agent_chat", "Agent"),
         Binding("enter", "load_detail", "Open", key_display="Enter"),
-        Binding("g", "load_more_rows", "More rows"),
+        Binding("g", "load_more_rows", "More rows", show=False),
         Binding("/", "search", "Filter"),
         Binding("left", "previous_pane", "Prev pane", key_display="Left"),
         Binding("right", "next_pane", "Next pane", key_display="Right"),
-        Binding("escape", "clear_filter", "Clear filter", key_display="Esc"),
-        Binding("tab", "focus_next", "Next pane", key_display="Tab"),
-        Binding("shift+tab", "focus_previous", "Prev pane", key_display="Shift+Tab"),
+        Binding("escape", "clear_filter", "Clear filter", key_display="Esc", show=False),
+        Binding("tab", "focus_next", "Next pane", key_display="Tab", show=False),
+        Binding("shift+tab", "focus_previous", "Prev pane", key_display="Shift+Tab", show=False),
     ]
 
     CSS = (
@@ -145,6 +188,32 @@ class PrimeLabView(App[None]):
         height: 2;
         padding: 0 1;
         border-bottom: solid $primary;
+        background: $background;
+        layout: horizontal;
+    }
+
+    #topbar-title {
+        width: auto;
+        min-width: 14;
+        content-align: left middle;
+        background: $background;
+    }
+
+    #workspace-path {
+        width: 1fr;
+        content-align: center middle;
+        color: $text-muted;
+        background: $background;
+    }
+
+    #workspace-path:hover {
+        color: $foreground;
+        text-style: underline;
+    }
+
+    #topbar-logo {
+        width: auto;
+        content-align: right middle;
         background: $background;
     }
 
@@ -232,11 +301,27 @@ class PrimeLabView(App[None]):
         overflow-y: auto;
     }
 
+    #warning-viewer {
+        display: none;
+        max-height: 8;
+        background: $surface;
+        border-top: solid $primary;
+        padding: 0 1;
+    }
+
+    #warning-viewer-body {
+        background: $surface;
+    }
+
     #statusbar {
         height: 1;
         padding: 0 1;
         background: $surface;
         border-top: solid $primary;
+    }
+
+    #statusbar.-has-warnings:hover {
+        background: $panel;
     }
     """
     )
@@ -282,12 +367,22 @@ class PrimeLabView(App[None]):
             on_messages=lambda messages: self._dispatch_agent_callback(
                 self._set_agent_messages, messages
             ),
+            on_action=lambda action: self._dispatch_agent_callback(
+                self._record_agent_action, action
+            ),
         )
         self._agent_state = AgentConnectionState()
         self._agent_messages: tuple[AgentChatMessage, ...] = ()
+        self._agent_session: AgentSessionRecord | None = None
+        self._lab_mcp_ipc: LabMcpIpcServer | None = None
+        self._workspace_agent_overrides: dict[Path, str] = {}
+        self._warnings_visible = False
 
     def compose(self) -> ComposeResult:
-        yield Static("Loading Lab ...", id="topbar", markup=False)
+        with Horizontal(id="topbar"):
+            yield Static(_topbar_title("Loading"), id="topbar-title", markup=False)
+            yield WorkspacePathLink("~", id="workspace-path", markup=False)
+            yield Static(lab_logo_text(), id="topbar-logo", markup=False)
         with Horizontal(id="body"):
             with Vertical(id="nav-pane", classes="pane"):
                 yield Tree("Sections", id="section-tree")
@@ -302,7 +397,9 @@ class PrimeLabView(App[None]):
             with Vertical(id="inspector-pane", classes="pane"):
                 yield Label("Inspector", id="inspector-title", classes="pane-title")
                 yield LabInspector("", id="inspector", markup=False)
-        yield Static("", id="statusbar", markup=False)
+        with VerticalScroll(id="warning-viewer"):
+            yield Static("", id="warning-viewer-body", markup=False)
+        yield StatusBar("", id="statusbar", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -318,6 +415,9 @@ class PrimeLabView(App[None]):
         self._reload()
 
     def on_unmount(self) -> None:
+        if self._lab_mcp_ipc is not None:
+            self._lab_mcp_ipc.stop()
+            self._lab_mcp_ipc = None
         self._agent_runtime.stop()
 
     def _open_launch_screen(self) -> None:
@@ -335,12 +435,15 @@ class PrimeLabView(App[None]):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if self._launch_screen_active() and action in {
+            "refresh",
             "load_more_rows",
             "search",
             "previous_pane",
             "next_pane",
             "clear_filter",
         }:
+            return False
+        if action == "refresh":
             return False
         if isinstance(
             self.screen,
@@ -385,11 +488,6 @@ class PrimeLabView(App[None]):
         if action == "load_more_rows":
             return self._ladder_loader is not None and self._requested_section_limit > 0
         return True
-
-    def action_refresh(self) -> None:
-        self._loaded_section_limit = 0
-        self._show_initial_snapshot()
-        self._reload()
 
     def action_show_welcome(self) -> None:
         if self._launch_screen_active():
@@ -453,6 +551,12 @@ class PrimeLabView(App[None]):
         self.focus_nav_pane()
 
     def focus_nav_pane(self) -> None:
+        if self._active_section_key == "workspace" and self._snapshot is not None:
+            target = _first_nav_section_key(self._snapshot)
+            if target is not None:
+                self._active_section_key = target
+                self._filter = ""
+                self._render_active_section()
         self.query_one("#section-tree", Tree).focus()
 
     def focus_home_rows(self) -> None:
@@ -460,6 +564,13 @@ class PrimeLabView(App[None]):
 
     def focus_evaluation_rows(self) -> None:
         self._focus_main_pane(prefer_rows=True)
+
+    def open_workspace_settings(self) -> None:
+        self._dismiss_launch_screen()
+        self._active_section_key = "workspace"
+        self._filter = ""
+        self._render_active_section()
+        self._focus_main_pane(prefer_rows=False)
 
     def action_previous_home_group(self) -> None:
         self._dismiss_launch_screen()
@@ -605,7 +716,7 @@ class PrimeLabView(App[None]):
             text = Text()
             text.append("Loading Lab ...", style="bold")
             text.append(f"\nInitial workspace view unavailable: {exc}", style="dim")
-            self.query_one("#topbar", Static).update(text)
+            self.query_one("#topbar-title", Static).update(text)
 
     @work(thread=True, exclusive=True)
     def _reload(self) -> None:
@@ -695,7 +806,13 @@ class PrimeLabView(App[None]):
     def _render_topbar(self) -> None:
         if self._snapshot is None:
             return
-        self.query_one("#topbar", Static).update(lab_header())
+        section = self._snapshot.section(self._active_section_key)
+        title = section.title if section is not None else "Settings"
+        self.query_one("#topbar-title", Static).update(_topbar_title(title))
+        self.query_one("#workspace-path", WorkspacePathLink).update(
+            _workspace_path_text(self._snapshot.workspace)
+        )
+        self.query_one("#topbar-logo", Static).update(lab_logo_text())
 
     def _render_statusbar(self) -> None:
         try:
@@ -703,17 +820,46 @@ class PrimeLabView(App[None]):
         except NoMatches:
             return
         statusbar.update(self._statusbar_text())
+        statusbar.set_class(
+            bool(self._snapshot is not None and self._snapshot.warnings),
+            "-has-warnings",
+        )
+        self._render_warning_viewer()
 
     def _statusbar_text(self) -> Text:
         return statusbar_text(self._snapshot, self._agent_state)
 
+    def toggle_warning_viewer(self) -> None:
+        if self._snapshot is None or not self._snapshot.warnings:
+            self._warnings_visible = False
+        else:
+            self._warnings_visible = not self._warnings_visible
+        self._render_warning_viewer()
+
+    def _render_warning_viewer(self) -> None:
+        try:
+            viewer = self.query_one("#warning-viewer", VerticalScroll)
+            body = self.query_one("#warning-viewer-body", Static)
+        except NoMatches:
+            return
+        warnings = self._snapshot.warnings if self._snapshot is not None else ()
+        if not warnings:
+            self._warnings_visible = False
+        viewer.display = bool(self._warnings_visible and warnings)
+        if not viewer.display:
+            body.update("")
+            return
+        body.update(_warning_viewer_text(warnings))
+
     def _set_agent_state(self, state: AgentConnectionState) -> None:
         self._agent_state = state
+        self._persist_agent_session()
         self._render_statusbar()
         self._sync_launch_screen()
 
     def _set_agent_messages(self, messages: tuple[AgentChatMessage, ...]) -> None:
         self._agent_messages = messages
+        self._persist_agent_session()
 
     def _dispatch_agent_callback(self, callback: Callable[..., None], *args: Any) -> None:
         if getattr(self, "_thread_id", None) == threading.get_ident():
@@ -725,11 +871,122 @@ class PrimeLabView(App[None]):
             return
 
     def _sync_agent_runtime(self, snapshot: LabSnapshot) -> None:
-        agent = configured_workspace_agent(snapshot)
+        workspace = snapshot.workspace.expanduser().resolve()
+        self._sync_lab_mcp_ipc(workspace)
+        agent = self._agent_for_workspace_snapshot(snapshot)
         if not agent:
-            self._agent_runtime.start(snapshot.workspace, "")
+            self._agent_session = None
+            self._agent_messages = ()
+            self._agent_runtime.start(workspace, "")
             return
-        self._agent_runtime.start(snapshot.workspace, agent)
+        self._start_agent_runtime(workspace, agent)
+
+    def _sync_lab_mcp_ipc(self, workspace: Path) -> None:
+        current = self._lab_mcp_ipc
+        if current is not None and current.workspace == workspace:
+            return
+        if current is not None:
+            current.stop()
+        server = LabMcpIpcServer(workspace, self._agent_runtime.handle_external_lab_tool)
+        server.start()
+        self._lab_mcp_ipc = server
+
+    def _agent_for_workspace_snapshot(self, snapshot: LabSnapshot) -> str:
+        workspace = snapshot.workspace.expanduser().resolve()
+        return self._workspace_agent_overrides.get(workspace) or configured_workspace_agent(
+            snapshot
+        )
+
+    def _apply_workspace_agent_choice(self, workspace: Path, agent: str) -> None:
+        if self._snapshot is None:
+            return
+        workspace = workspace.expanduser().resolve()
+        if self._snapshot.workspace.expanduser().resolve() != workspace:
+            return
+
+        changed = False
+        sections: list[LabSection] = []
+        for section in self._snapshot.sections:
+            if section.key != "workspace":
+                sections.append(section)
+                continue
+            items: list[LabItem] = []
+            for item in section.items:
+                updated = _with_workspace_agent_choice(item, workspace, agent)
+                changed = changed or updated is not item
+                items.append(updated)
+            sections.append(
+                LabSection(
+                    key=section.key,
+                    title=section.title,
+                    description=section.description,
+                    items=tuple(items),
+                    status=section.status,
+                    status_style=section.status_style,
+                )
+            )
+
+        if not changed:
+            return
+        self._snapshot = LabSnapshot(
+            workspace=self._snapshot.workspace,
+            base_url=self._snapshot.base_url,
+            frontend_url=self._snapshot.frontend_url,
+            authenticated=self._snapshot.authenticated,
+            team=self._snapshot.team,
+            sections=tuple(sections),
+            warnings=self._snapshot.warnings,
+        )
+        for section in self._snapshot.sections:
+            for item in section.items:
+                self._items_by_key[item.key] = item
+                if item.key in self._detail_cache:
+                    self._detail_cache[item.key] = item
+                if self._selected_item is not None and self._selected_item.key == item.key:
+                    self._selected_item = item
+        self._render_statusbar()
+        self._render_tree()
+        self._render_active_section()
+        self._sync_launch_screen()
+
+    def _start_agent_runtime(self, workspace: Path, agent: str) -> None:
+        adapter = agent_adapter(agent)
+        workspace = workspace.expanduser().resolve()
+        if (
+            self._agent_state.workspace == workspace
+            and self._agent_state.agent == adapter.name
+            and self._agent_state.status in {"starting", "connected", "error"}
+            and self._agent_session is not None
+        ):
+            return
+        record = ensure_agent_session(workspace, adapter.name)
+        self._agent_session = record
+        self._agent_messages = record.messages
+        self._agent_runtime.start(
+            workspace,
+            adapter.name,
+            session_id=record.native_session_id,
+            initial_messages=record.messages,
+        )
+
+    def _persist_agent_session(self) -> None:
+        record = self._agent_session
+        if record is None or self._agent_state.status == "none":
+            return
+        snapshot = self._snapshot
+        self._agent_session = write_agent_session(
+            record,
+            self._agent_state,
+            self._agent_messages,
+            base_url=str(snapshot.base_url) if snapshot is not None else "",
+            team=snapshot.team if snapshot is not None else None,
+            authenticated=snapshot.authenticated if snapshot is not None else None,
+        )
+
+    def _record_agent_action(self, action: dict[str, Any]) -> None:
+        if self._agent_session is None:
+            return
+        append_agent_session_action(self._agent_session, action)
 
     def _render_tree(self) -> None:
         if self._snapshot is None:
@@ -739,10 +996,9 @@ class PrimeLabView(App[None]):
         root = tree.root
         root.expand()
         selected_node = None
-        for section in self._snapshot.sections:
+        for section in _nav_sections(self._snapshot):
             label = Text()
             label.append(section.title, style="bold")
-            label.append(f"  {section.status}", style=section.status_style)
             node = root.add(label, data=section.key, allow_expand=False)
             if section.key == self._active_section_key:
                 selected_node = node
@@ -755,6 +1011,7 @@ class PrimeLabView(App[None]):
         section = self._snapshot.section(self._active_section_key)
         if section is None:
             return
+        self._render_topbar()
         selected_key = (
             self._selected_item.key
             if self._selected_item is not None and self._selected_item.section == section.key
@@ -765,7 +1022,7 @@ class PrimeLabView(App[None]):
         if self._filter:
             title = f"{title} / {self._filter}"
         self.query_one("#section-title", Label).update(title)
-        self.query_one("#section-subtitle", Static).update(section.description)
+        self.query_one("#section-subtitle", Static).update(_section_subtitle(section))
 
         self.query_one("#home-toggle", Static).display = False
         self.query_one("#home-actions", Horizontal).display = False
@@ -798,7 +1055,7 @@ class PrimeLabView(App[None]):
                 key=f"{section.key}:empty",
                 section=section.key,
                 title="No rows",
-                subtitle="Clear the filter or refresh the view.",
+                subtitle="Clear the filter or wait for loading to finish.",
                 status="empty",
                 status_style="dim",
             )
@@ -843,7 +1100,7 @@ class PrimeLabView(App[None]):
                 key="evaluations:empty",
                 section="evaluations",
                 title="No rows",
-                subtitle="Clear the filter or refresh the view.",
+                subtitle="Clear the filter or wait for loading to finish.",
                 status="empty",
                 status_style="dim",
             )
@@ -965,7 +1222,7 @@ class PrimeLabView(App[None]):
                 key="workspace:empty",
                 section="workspace",
                 title="No rows",
-                subtitle="Switch category or refresh the view.",
+                subtitle="Switch category or wait for loading to finish.",
                 status="empty",
                 status_style="dim",
             )
@@ -1006,7 +1263,7 @@ class PrimeLabView(App[None]):
         self._render_active_section()
 
     def _open_agent_or_setup(self) -> None:
-        if self._snapshot is not None and configured_workspace_agent(self._snapshot):
+        if self._snapshot is not None and self._agent_for_workspace_snapshot(self._snapshot):
             self._open_agent_chat()
             return
         item = self._setup_item_for_current_workspace()
@@ -1015,11 +1272,14 @@ class PrimeLabView(App[None]):
     def _open_agent_chat(self) -> None:
         workspace = self._snapshot.workspace if self._snapshot is not None else Path.cwd()
         agent = (
-            configured_workspace_agent(self._snapshot)
+            self._agent_for_workspace_snapshot(self._snapshot)
             if self._snapshot is not None
             else self._agent_state.agent
         )
-        item = coding_agent_item(workspace, agent=agent or self._agent_state.agent or "codex")
+        item = _agent_chat_item_with_context(
+            coding_agent_item(workspace, agent=agent or self._agent_state.agent or "codex"),
+            self._snapshot,
+        )
         self.push_screen(
             AgentChatScreen(
                 item,
@@ -1027,6 +1287,8 @@ class PrimeLabView(App[None]):
                 messages_provider=lambda: self._agent_messages,
                 select_agent=self._select_workspace_agent,
                 send_prompt=self._send_agent_prompt,
+                start_new_session=self._start_new_agent_session,
+                record_action=self._record_agent_action,
                 status_text_provider=self._statusbar_text,
             )
         )
@@ -1050,8 +1312,8 @@ class PrimeLabView(App[None]):
             for item in section.items
         )
         workspace = compact_path(snapshot.workspace) if snapshot is not None else "~"
-        auth_label = "auth ok" if snapshot is not None and snapshot.authenticated else "auth x"
-        team = (snapshot.team or "personal") if snapshot is not None else "-"
+        auth_label = "✓" if snapshot is not None and snapshot.authenticated else "×"
+        identity = status_identity(snapshot) if snapshot is not None else "-"
         workspace_items: list[LabItem] = []
         if snapshot is not None:
             section = snapshot.section("workspace")
@@ -1063,7 +1325,7 @@ class PrimeLabView(App[None]):
             HomeLaunchState(
                 workspace=workspace,
                 auth_label=auth_label,
-                team=team,
+                team=identity,
                 agent_label=agent_status_label(self._agent_state),
                 loading=loading,
                 agent_action_label=self._launch_agent_action_label(snapshot),
@@ -1074,7 +1336,7 @@ class PrimeLabView(App[None]):
     def _launch_agent_action_label(self, snapshot: LabSnapshot | None) -> str:
         if snapshot is None:
             return "Configure Agent"
-        agent = configured_workspace_agent(snapshot)
+        agent = self._agent_for_workspace_snapshot(snapshot)
         if not agent:
             return "Configure Agent"
         return f"Build with {agent_adapter(agent).label}"
@@ -1266,6 +1528,7 @@ class PrimeLabView(App[None]):
             self.push_screen(ConfigRunScreen(item))
             return
         if item.raw.get("type") == "agent_chat":
+            item = _agent_chat_item_with_context(item, self._snapshot)
             self.push_screen(
                 AgentChatScreen(
                     item,
@@ -1273,6 +1536,8 @@ class PrimeLabView(App[None]):
                     messages_provider=lambda: self._agent_messages,
                     select_agent=self._select_workspace_agent,
                     send_prompt=self._send_agent_prompt,
+                    start_new_session=self._start_new_agent_session,
+                    record_action=self._record_agent_action,
                     status_text_provider=self._statusbar_text,
                 )
             )
@@ -1348,8 +1613,22 @@ class PrimeLabView(App[None]):
         self._refresh_after_workspace_memory_change()
 
     def _select_workspace_agent(self, workspace: Path, agent: str) -> None:
-        write_workspace_agent_choice(workspace, agent)
-        self._agent_runtime.start(workspace, agent)
+        adapter = agent_adapter(agent)
+        workspace = workspace.expanduser().resolve()
+        self._workspace_agent_overrides[workspace] = adapter.name
+        write_workspace_agent_choice(workspace, adapter.name)
+        self._apply_workspace_agent_choice(workspace, adapter.name)
+        self._start_agent_runtime(workspace, adapter.name)
+        self._render_statusbar()
+
+    def _start_new_agent_session(self, workspace: Path, agent: str) -> None:
+        adapter = agent_adapter(agent)
+        workspace = workspace.expanduser().resolve()
+        self._workspace_agent_overrides[workspace] = adapter.name
+        self._agent_session = create_agent_session(workspace, adapter.name)
+        self._agent_messages = ()
+        self._agent_runtime.stop()
+        self._agent_runtime.start(workspace, adapter.name, initial_messages=())
         self._render_statusbar()
 
     def _send_agent_prompt(self, prompt: str) -> None:
@@ -1528,6 +1807,207 @@ def _is_lab_child_screen(screen: object) -> bool:
         | FilterScreen
         | LocalEvalRunScreen,
     )
+
+
+def _topbar_title(title: str) -> Text:
+    text = Text()
+    text.append_text(lab_mark_text())
+    text.append("  ", style="dim")
+    text.append(title, style="bold")
+    return text
+
+
+def _workspace_path_text(workspace: Path) -> Text:
+    text = Text()
+    text.append(compact_path(workspace), style="dim")
+    return text
+
+
+def _warning_viewer_text(warnings: tuple[str, ...]) -> Text:
+    text = Text()
+    text.append("Warnings", style=f"bold {STATUS_WARNING}")
+    text.append("  ", style="dim")
+    text.append("Open workspace settings and run Doctor for deterministic fixes.", style="dim")
+    for index, warning in enumerate(warnings, start=1):
+        text.append("\n")
+        text.append(f"{index}. ", style=STATUS_WARNING)
+        text.append(warning)
+    return text
+
+
+def _nav_sections(snapshot: LabSnapshot) -> tuple[LabSection, ...]:
+    return tuple(section for section in snapshot.sections if section.key in NAV_SECTION_KEYS)
+
+
+def _first_nav_section_key(snapshot: LabSnapshot) -> str | None:
+    sections = _nav_sections(snapshot)
+    return sections[0].key if sections else None
+
+
+def _section_subtitle(section: LabSection) -> Text:
+    text = Text(section.description, style="dim")
+    if section.status:
+        text.append(" · ", style="dim")
+        text.append(section.status, style=section.status_style)
+    return text
+
+
+def _with_workspace_agent_choice(item: LabItem, workspace: Path, agent: str) -> LabItem:
+    raw_workspace = item.raw.get("workspace")
+    if raw_workspace is None:
+        return item
+    try:
+        item_workspace = Path(str(raw_workspace)).expanduser().resolve()
+    except OSError:
+        return item
+    if item_workspace != workspace:
+        return item
+
+    item_type = item.raw.get("type")
+    if item_type == "workspace_context" and item.raw.get("active") is True:
+        choices = item.raw.get("choices")
+        choices_dict = dict(choices) if isinstance(choices, dict) else {}
+        choices_dict["primary_agent"] = agent
+        agents = choices_dict.get("agents")
+        agent_names = [str(name) for name in agents] if isinstance(agents, list) else []
+        if agent not in agent_names:
+            agent_names.insert(0, agent)
+        choices_dict["agents"] = agent_names
+        return LabItem(
+            key=item.key,
+            section=item.section,
+            title=item.title,
+            subtitle=item.subtitle,
+            status=item.status,
+            status_style=item.status_style,
+            metadata=_replace_metadata(item.metadata, "Primary agent", agent),
+            raw={**item.raw, "choices": choices_dict},
+        )
+
+    if item_type == "agent_chat":
+        return LabItem(
+            key=item.key,
+            section=item.section,
+            title=item.title,
+            subtitle=f"{agent} · {workspace}",
+            status="agent",
+            status_style=PRIMARY,
+            metadata=_replace_metadata(
+                _replace_metadata(item.metadata, "Agent", agent),
+                "Workspace",
+                str(workspace),
+            ),
+            raw={**item.raw, "agent": agent, "workspace": str(workspace)},
+        )
+
+    if item_type == "agent_sync":
+        command = f"prime lab sync --agent {agent}"
+        return LabItem(
+            key=item.key,
+            section=item.section,
+            title=item.title,
+            subtitle=f"{agent} · refresh templates, skills, docs, and local guidance",
+            status=item.status,
+            status_style=item.status_style,
+            metadata=_replace_metadata(
+                _replace_metadata(
+                    _replace_metadata(item.metadata, "Agent", agent),
+                    "Workspace",
+                    str(workspace),
+                ),
+                "Run",
+                command,
+            ),
+            raw={**item.raw, "agent": agent, "workspace": str(workspace), "command": command},
+        )
+
+    return item
+
+
+def _agent_chat_item_with_context(item: LabItem, snapshot: LabSnapshot | None) -> LabItem:
+    raw = dict(item.raw)
+    workspace = Path(str(raw.get("workspace") or ".")).expanduser().resolve()
+    agent = str(raw.get("agent") or "")
+    raw.setdefault(
+        "prompt_templates",
+        coding_agent_item(workspace, agent=agent or "codex").raw.get("prompt_templates", ()),
+    )
+    raw["references"] = _agent_reference_rows(snapshot)
+    return LabItem(
+        key=item.key,
+        section=item.section,
+        title=item.title,
+        subtitle=item.subtitle,
+        status=item.status,
+        status_style=item.status_style,
+        metadata=item.metadata,
+        raw=raw,
+    )
+
+
+def _agent_reference_rows(snapshot: LabSnapshot | None) -> tuple[dict[str, str], ...]:
+    if snapshot is None:
+        return ()
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for section_key, kind, prefix in (
+        ("environments", "environment", "env"),
+        ("workspace", "config", "config"),
+        ("training", "run", "run"),
+        ("evaluations", "eval", "eval"),
+    ):
+        section = snapshot.section(section_key)
+        if section is None:
+            continue
+        for item in section.items:
+            row = _agent_reference_row(item, kind=kind, prefix=prefix)
+            if row is None or row["insert"] in seen:
+                continue
+            seen.add(row["insert"])
+            rows.append(row)
+            if len(rows) >= 80:
+                return tuple(rows)
+    return tuple(rows)
+
+
+def _agent_reference_row(item: LabItem, *, kind: str, prefix: str) -> dict[str, str] | None:
+    if item.raw.get("loading") is True:
+        return None
+    if kind == "config" and item.raw.get("type") != "config_file":
+        return None
+    if kind == "environment" and item.raw.get("type") != "environment":
+        return None
+    value = (
+        item.raw.get("slug") or item.raw.get("relative_path") or item.raw.get("id") or item.title
+    )
+    token = _agent_reference_token(str(value))
+    if not token:
+        return None
+    return {
+        "kind": kind,
+        "label": item.title,
+        "insert": f"@{prefix}:{token}",
+        "detail": item.subtitle or item.status or "-",
+    }
+
+
+def _agent_reference_token(value: str) -> str:
+    value = value.strip()
+    return "".join("-" if char.isspace() else char for char in value)
+
+
+def _replace_metadata(
+    metadata: tuple[tuple[str, str], ...],
+    label: str,
+    value: str,
+) -> tuple[tuple[str, str], ...]:
+    rows = list(metadata)
+    for index, (row_label, _row_value) in enumerate(rows):
+        if row_label == label:
+            rows[index] = (label, value)
+            return tuple(rows)
+    rows.append((label, value))
+    return tuple(rows)
 
 
 def run_lab_view(

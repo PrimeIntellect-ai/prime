@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,7 +18,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Input, Markdown, OptionList, Static, Tab, Tabs
+from textual.widgets import Button, Footer, Input, Markdown, OptionList, Static
 from textual.widgets._option_list import Option
 
 from .cache import CachedEnvironmentSource, cached_environment_source, ensure_environment_source
@@ -29,7 +30,8 @@ from .readme import readme_markdown as _readme_markdown
 from .rows import item_badges_text
 from .shell import lab_header
 from .source_browser import SourceEntry, format_size, readme_path, source_entries, source_preview
-from .widgets import LoadingChart
+from .toml_format import format_toml_blocks
+from .widgets import ClearableInput, LoadingChart
 
 DetailLoader = Callable[[LabItem, bool, int, int, int | None], LabItem]
 WorkspaceSwitcher = Callable[[Path], None]
@@ -48,10 +50,7 @@ class EnvironmentScreen(Screen[None]):
     """Hub-like terminal page for one Lab environment."""
 
     BINDINGS = [
-        Binding("b,backspace", "back", "Back"),
-        Binding("q", "quit", "Quit"),
-        Binding("left", "previous_tab", "Prev tab", key_display="Left"),
-        Binding("right", "next_tab", "Next tab", key_display="Right"),
+        Binding("escape", "back", "Back", key_display="Esc"),
         Binding("enter", "open_entry", "Open", key_display="Enter"),
         Binding("space", "parent_dir", "Parent", key_display="Space"),
     ]
@@ -71,21 +70,16 @@ class EnvironmentScreen(Screen[None]):
         background: $background;
     }
 
-    .page-tabs {
-        height: 3;
-        background: $background;
-    }
-
     .page-body {
         height: 1fr;
         padding: 0;
     }
 
     .source-list {
-        height: 2fr;
+        height: 1fr;
         min-height: 10;
         border: round $primary;
-        background: $surface;
+        background: $panel;
     }
 
     .source-column {
@@ -95,11 +89,10 @@ class EnvironmentScreen(Screen[None]):
     }
 
     .source-extras {
-        height: 1fr;
-        min-height: 8;
-        padding: 0 1;
-        border: round $primary;
-        background: $surface;
+        height: auto;
+        min-height: 0;
+        padding: 0;
+        background: $background;
         margin-top: 1;
     }
 
@@ -116,7 +109,7 @@ class EnvironmentScreen(Screen[None]):
     .source-preview {
         width: 1fr;
         border: round $primary;
-        background: $surface;
+        background: $panel;
         padding: 0 1;
     }
 
@@ -131,7 +124,7 @@ class EnvironmentScreen(Screen[None]):
     }
 
     .source-file-markdown {
-        background: $surface;
+        background: $panel;
     }
 
     .about-sidebar {
@@ -170,7 +163,6 @@ class EnvironmentScreen(Screen[None]):
         self._detail_loader = detail_loader
         self._frontend_url = frontend_url
         self._workspace = Path(workspace or ".").expanduser().resolve()
-        self._active_tab = "code"
         self._source: CachedEnvironmentSource | None = None
         self._root: Path | None = None
         self._selected_version = str(item.raw.get("selected_version") or "latest")
@@ -185,17 +177,10 @@ class EnvironmentScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Static(_environment_header(self._item), id="env-header", classes="page-header")
-        yield Tabs(
-            Tab("Code", id="code"),
-            Tab("Leaderboard", id="leaderboard"),
-            id="env-tabs",
-            classes="page-tabs",
-        )
         yield Horizontal(id="env-body", classes="page-body")
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#env-tabs", Tabs).active = self._active_tab
         self._source = cached_environment_source(
             {**self._item.raw, "selected_version": self._selected_version}
         )
@@ -210,21 +195,6 @@ class EnvironmentScreen(Screen[None]):
 
     def action_back(self) -> None:
         self.app.pop_screen()
-
-    def action_previous_tab(self) -> None:
-        self._switch_tab(-1)
-
-    def action_next_tab(self) -> None:
-        self._switch_tab(1)
-
-    def action_open_platform(self) -> None:
-        url = _environment_tab_url(
-            self._frontend_url,
-            str(self._item.raw.get("slug") or ""),
-            self._active_tab,
-        )
-        if url:
-            webbrowser.open(url)
 
     def action_next_version(self) -> None:
         versions = _environment_versions(self._item.raw)
@@ -246,14 +216,8 @@ class EnvironmentScreen(Screen[None]):
         self._render_loading()
         self._load_environment_worker()
 
-    def action_refresh_source(self) -> None:
-        self._source = None
-        self._root = None
-        self._render_loading()
-        self._load_environment_worker()
-
     def action_open_entry(self) -> None:
-        if self._active_tab != "code" or not self._selected_entry_id:
+        if not self._selected_entry_id:
             return
         entry = self._entry_by_id.get(self._selected_entry_id)
         if entry is None:
@@ -266,7 +230,7 @@ class EnvironmentScreen(Screen[None]):
         self._render_file(entry.path)
 
     def action_parent_dir(self) -> None:
-        if self._active_tab != "code" or self._root is None:
+        if self._root is None:
             return
         if not self._current_dir:
             return
@@ -321,21 +285,6 @@ class EnvironmentScreen(Screen[None]):
         self.query_one("#env-header", Static).update(_environment_header(item))
         self._render_tab()
 
-    def _switch_tab(self, direction: int) -> None:
-        tabs = ("code", "leaderboard")
-        try:
-            idx = tabs.index(self._active_tab)
-        except ValueError:
-            idx = 0
-        self._active_tab = tabs[(idx + direction) % len(tabs)]
-        self.query_one("#env-tabs", Tabs).active = self._active_tab
-        self._render_tab()
-
-    @on(Tabs.TabActivated, "#env-tabs")
-    def _tab_activated(self, event: Tabs.TabActivated) -> None:
-        self._active_tab = event.tab.id or "code"
-        self._render_tab()
-
     @on(OptionList.OptionHighlighted, ".env-files")
     def _file_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         option_id = str(event.option.id)
@@ -386,10 +335,7 @@ class EnvironmentScreen(Screen[None]):
         panel.mount(LoadingChart("Loading environment source ..."))
 
     def _render_tab(self) -> None:
-        if self._active_tab == "code":
-            self._render_code()
-            return
-        self._render_platform_page(self._active_tab)
+        self._render_code()
 
     def _render_code(self) -> None:
         body = self.query_one("#env-body", Horizontal)
@@ -404,7 +350,7 @@ class EnvironmentScreen(Screen[None]):
         source_column = Vertical(classes="source-column")
         body.mount(source_column)
         source_column.mount(files)
-        extras = VerticalScroll(classes="source-extras")
+        extras = Vertical(classes="source-extras")
         source_column.mount(extras)
         self._mount_extras(extras)
         body.mount(preview)
@@ -426,8 +372,7 @@ class EnvironmentScreen(Screen[None]):
         else:
             _set_source_preview_message(preview, "No files found")
 
-    def _mount_extras(self, container: VerticalScroll) -> None:
-        container.mount(Static("Actions", classes="pane-title", markup=False))
+    def _mount_extras(self, container: Vertical) -> None:
         self._action_by_id = {}
         actions = [
             EnvironmentAction(
@@ -440,9 +385,7 @@ class EnvironmentScreen(Screen[None]):
                 "Evaluate",
                 "Create an evaluation config for this environment.",
             ),
-            *_environment_platform_action_specs(
-                self._item, self._frontend_url, self._selected_version
-            ),
+            *_environment_platform_action_specs(self._item, self._frontend_url),
         ]
         for index, action in enumerate(actions):
             option_id = f"env-action-{index}"
@@ -456,7 +399,6 @@ class EnvironmentScreen(Screen[None]):
                     variant="primary" if action.key in {"train", "evaluate"} else "default",
                 )
             )
-        container.mount(Static(_environment_about(self._item), markup=False))
 
     def _render_file(self, path: Path) -> None:
         if self._preview_container is None:
@@ -473,64 +415,22 @@ class EnvironmentScreen(Screen[None]):
         except Exception as exc:
             _set_source_preview_message(self._preview_container, str(exc), style=STATUS_ERROR)
 
-    def _render_static_page(self, renderable: Any) -> None:
-        self._preview_container = None
-        self._preview_path = None
-        body = self.query_one("#env-body", Horizontal)
-        body.remove_children()
-        body.mount(Static(renderable, classes="empty-panel", markup=False))
-
-    def _render_platform_page(self, tab: str) -> None:
-        self._preview_container = None
-        self._preview_path = None
-        body = self.query_one("#env-body", Horizontal)
-        body.remove_children()
-        slug = str(self._item.raw.get("slug") or self._item.title)
-        url = _environment_tab_url(self._frontend_url, slug, tab)
-        panel = Vertical(classes="empty-panel")
-        body.mount(panel)
-        panel.mount(Static(_platform_placeholder(tab), markup=False))
-        if url:
-            button_id = f"platform-link-{tab}"
-            self._link_by_id[button_id] = url
-            panel.mount(
-                Button(
-                    "View on platform",
-                    id=button_id,
-                    classes="external-link-button",
-                    compact=True,
-                    variant="primary",
-                )
-            )
-
     def _run_environment_action(self, action: EnvironmentAction) -> None:
         slug = str(self._item.raw.get("slug") or self._item.title)
-        if action.key in {"view", "discussions", "actions"}:
+        if action.key == "platform":
             url = action.detail
             if url:
                 webbrowser.open(url)
             return
-        if action.key == "install":
+        if action.key == "sync":
             self.app.push_screen(
                 ConfigLaunchScreen(
-                    command=f"prime env install {slug}",
+                    command=action.detail,
                     workspace=self._workspace,
-                    title="Installing environment",
+                    title="Syncing environment",
                     subtitle=slug,
                 )
             )
-            return
-        if action.key == "refresh":
-            self.action_refresh_source()
-            return
-        if action.key.startswith("version:"):
-            self._selected_version = action.key.removeprefix("version:")
-            self._source = None
-            self._root = None
-            self._current_dir = ""
-            self._selected_entry_id = None
-            self._render_loading()
-            self._load_environment_worker()
             return
         if action.key in {"train", "evaluate"}:
             config_kind = "rl" if action.key == "train" else "eval"
@@ -549,8 +449,7 @@ class WorkspaceScreen(Screen[None]):
     """Source browser for a Lab workspace."""
 
     BINDINGS = [
-        Binding("b,backspace", "back", "Back"),
-        Binding("q", "quit", "Quit"),
+        Binding("escape", "back", "Back", key_display="Esc"),
         Binding("enter", "open_entry", "Open", key_display="Enter"),
         Binding("space", "parent_dir", "Parent", key_display="Space"),
         Binding("s", "switch_workspace", "Switch active"),
@@ -709,8 +608,7 @@ class AddWorkspaceScreen(Screen[None]):
     """Add a remembered local workspace path."""
 
     BINDINGS = [
-        Binding("b,backspace", "back", "Back"),
-        Binding("q", "quit", "Quit"),
+        Binding("escape", "back", "Back", key_display="Esc"),
         Binding("enter", "add_workspace", "Add", key_display="Enter"),
     ]
 
@@ -737,7 +635,7 @@ class AddWorkspaceScreen(Screen[None]):
         yield Static(_add_workspace_header(self._item), id="env-header", classes="page-header")
         with Vertical(classes="empty-panel"):
             yield Static("Path", classes="field-label", markup=False)
-            yield Input(
+            yield ClearableInput(
                 str(Path.home()),
                 placeholder="/path/to/workspace",
                 id="workspace-path",
@@ -747,13 +645,13 @@ class AddWorkspaceScreen(Screen[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#workspace-path", Input).focus()
+        self.query_one("#workspace-path", ClearableInput).focus()
 
     def action_back(self) -> None:
         self.app.pop_screen()
 
     def action_add_workspace(self) -> None:
-        path = Path(self.query_one("#workspace-path", Input).value).expanduser().resolve()
+        path = Path(self.query_one("#workspace-path", ClearableInput).value).expanduser().resolve()
         if not path.is_dir():
             self.notify("Workspace path does not exist", severity="warning")
             return
@@ -886,47 +784,26 @@ def _workspace_about(item: LabItem) -> Group:
 def _environment_platform_action_specs(
     item: LabItem,
     frontend_url: str,
-    selected_version: str,
 ) -> list[EnvironmentAction]:
     slug = str(item.raw.get("slug") or item.title)
     actions = [
-        EnvironmentAction("install", "Install", f"prime env install {slug}"),
+        EnvironmentAction("sync", "Sync", _environment_sync_command(item)),
         EnvironmentAction(
-            "view", "View on platform", environment_platform_url(frontend_url, slug) or ""
+            "platform", "Platform", environment_platform_url(frontend_url, slug) or ""
         ),
-        EnvironmentAction(
-            "discussions",
-            "Open discussions",
-            _environment_tab_url(frontend_url, slug, "discussions") or "",
-        ),
-        EnvironmentAction(
-            "actions",
-            "Open actions",
-            _environment_tab_url(frontend_url, slug, "actions") or "",
-        ),
-        EnvironmentAction("refresh", "Refresh source", "Reload metadata and cached source files."),
     ]
-    for version in _environment_versions(item.raw)[:12]:
-        ref = _version_ref(version)
-        if not ref or ref == selected_version:
-            continue
-        actions.append(
-            EnvironmentAction(
-                f"version:{ref}",
-                f"Use version {ref}",
-                _version_detail(version),
-            )
-        )
     return [action for action in actions if action.detail]
 
 
-def _environment_action_label(action: EnvironmentAction) -> Text:
-    label = Text()
-    label.append(action.label, style="bold")
-    if action.detail:
-        label.append("\n")
-        label.append(action.detail, style="dim")
-    return label
+def _environment_sync_command(item: LabItem) -> str:
+    raw = item.raw
+    slug = str(raw.get("slug") or item.title)
+    local = raw.get("local") if isinstance(raw.get("local"), dict) else None
+    if local is not None and local.get("path"):
+        return f"prime env push --path {shlex.quote(str(local['path']))}"
+    if "/" in slug:
+        return f"prime env pull {shlex.quote(slug)}"
+    return "prime env push"
 
 
 def _environment_config_item(item: LabItem, *, config_kind: str, workspace: Path) -> LabItem:
@@ -977,7 +854,7 @@ def _environment_config_toml(slug: str, *, config_kind: str, version: str = "") 
             "save_results": True,
             "eval": [eval_config],
         }
-        return _space_toml_blocks(toml.dumps(config)).rstrip()
+        return format_toml_blocks(toml.dumps(config)).rstrip()
 
     env: dict[str, Any] = {"id": slug}
     if version:
@@ -990,7 +867,7 @@ def _environment_config_toml(slug: str, *, config_kind: str, version: str = "") 
         "sampling": {"max_tokens": 512},
         "env": [env],
     }
-    return _space_toml_blocks(toml.dumps(config)).rstrip()
+    return format_toml_blocks(toml.dumps(config)).rstrip()
 
 
 def _safe_toml_loads(value: str) -> dict[str, Any]:
@@ -999,25 +876,6 @@ def _safe_toml_loads(value: str) -> dict[str, Any]:
     except toml.TomlDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
-
-
-def _space_toml_blocks(value: str) -> str:
-    lines = value.splitlines()
-    spaced: list[str] = []
-    for line in lines:
-        if line.startswith("[[") and spaced and spaced[-1] != "":
-            spaced.append("")
-        spaced.append(line)
-    return "\n".join(spaced) + ("\n" if spaced else "")
-
-
-def _platform_placeholder(tab: str) -> Group:
-    label = {"leaderboard": "Leaderboard", "platform": "Platform"}.get(tab, tab.title())
-    table = Table.grid(padding=(0, 2))
-    table.add_column(style="bold dim", no_wrap=True)
-    table.add_column()
-    table.add_row("Status", "Available on platform")
-    return Group(Text(label, style="bold"), table)
 
 
 def _missing_source(item: LabItem) -> Group:
@@ -1113,40 +971,6 @@ def _version_detail(version: dict[str, Any]) -> str:
     if sha := version.get("sha256"):
         parts.append(str(sha)[:12])
     return " · ".join(parts)
-
-
-def _actions_table(raw: dict[str, Any]) -> Table:
-    table = Table.grid(padding=(0, 2))
-    table.add_column(style="bold dim", no_wrap=True)
-    table.add_column()
-    actions = raw.get("actions")
-    if not isinstance(actions, list):
-        return table
-    for action in actions[:10]:
-        if not isinstance(action, dict):
-            continue
-        name = str(action.get("name") or action.get("action_name") or action.get("id") or "-")
-        status = str(action.get("status") or action.get("state") or "-")
-        version = str(
-            action.get("semanticVersion")
-            or action.get("semantic_version")
-            or action.get("version")
-            or ""
-        )
-        table.add_row(name, " · ".join(part for part in (status, version) if part and part != "-"))
-    return table
-
-
-def _environment_tab_url(frontend_url: str, slug: str, tab: str) -> str | None:
-    url = environment_platform_url(frontend_url, slug)
-    if not url:
-        return None
-    suffix = {
-        "leaderboard": "leaderboard",
-        "discussions": "discussions",
-        "actions": "actions",
-    }.get(tab)
-    return f"{url}/{suffix}" if suffix else url
 
 
 def _dependencies(platform: dict[str, Any]) -> str:

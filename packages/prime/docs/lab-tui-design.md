@@ -10,6 +10,26 @@
 
 Cross-repo platform/API and Verifiers cleanup dependencies are tracked in Linear as `WB-2`.
 
+## V1 Readiness Snapshot
+
+Current state: roughly 85% feature-built and 75% V1-ready. The core surfaces exist and the focused Lab test module is green, but V1 readiness still depends on reducing the remaining architecture seams and validating live native-agent tool calls across configured binaries.
+
+Implemented and green in the current slice:
+
+- `prime lab` launch surface, quickstart actions, workspace memory, setup/sync/doctor services, and `prime lab view` alias.
+- Merged local/platform environment records, source cache, source browser, README rendering, local/platform badges, and environment actions.
+- Training/evaluation selectors, durable row/detail cache hydration, config edit/run flows, launch command output, training log handoff, metrics/distribution toggles, and shared rollout viewer logic.
+- Global chat sessions, prompt history, slash/help/reference menus, native Lab tool contracts, MCP/ACP wiring, unsupported-agent triage, and inline eval/training launcher cards.
+- Dev-only text renderer under `packages/prime/dev/`; no generated screen artifacts are part of the runtime or test oracle.
+
+V1 blockers still worth treating as product-quality work, not optional polish:
+
+- Live native-agent validation must be run against Codex, Claude SDK, Claude Code, Cursor, OpenCode, Pi, and Hermes whenever their adapter/tool contracts change. Unit tests cover contracts; they do not prove the current user machine's auth/tool wiring is healthy.
+- Agent inline run-launcher cards now have a logical control model, shared action preparation, shared launch execution, and a Textual card skin. Choice/config/action/patch/rollout cards should follow the same split.
+- Config factories and nice-TOML printers should be centralized across quickstart flows, environment actions, config screens, and agent cards so every entry point renders the same recommended user-facing TOML.
+- Background hydration should move from snapshot refreshes to per-section services with freshness timestamps and timings.
+- Platform preview APIs for training/evaluation would remove local estimates and make launch validation deterministic.
+
 ## Product Principles
 
 - One golden path: every common workflow has one obvious command and one obvious TUI action.
@@ -19,22 +39,28 @@ Cross-repo platform/API and Verifiers cleanup dependencies are tracked in Linear
 - Source hash as identity: environment source identity is based on a deterministic content hash that excludes generated artifacts.
 - Canonical config inside, nice config outside: the runtime works with normalized config while users edit compact TOML that reflects the recommended writing style.
 - No dead panels: platform-only surfaces use real buttons or native data when available.
-- Reusable widgets: action bars, filters, source browsers, Markdown/code viewers, config editors, logs, rollout viewers, palette tokens, and footer descriptors are shared across screens.
+- Reusable components: action bars, filters, source browsers, Markdown/code viewers, config editors, logs, rollout viewers, palette tokens, and footer descriptors are shared across screens.
 
 ## Current Product Surface
 
 ### Shell And Navigation
 
 - The TUI launches by default from `prime lab`.
-- The global bottom status bar shows compact auth, team, workspace, and coding-agent connection state.
-- Primary sections are Home, Environments, Training, Evaluations, and Agent.
+- The global bottom status bar shows compact auth, team, warnings, and coding-agent connection state.
+- The active workspace path is a top-level clickable workspace affordance. It is the single global home for workspace location and opens workspace/profile/settings controls.
+- Primary destinations are Environments, Training, Evaluations, and Agent. Environments, Training, and Evaluations live in the section selector; Agent is a global shell surface. Settings is a control surface opened from the active workspace/status affordances, not a primary section.
+- Section selectors are destinations only. Counts, loading state, auth state, and team context live in page subtitles, top chrome, bottom status, or explicit detail panels.
+- Non-zero warnings are clickable in the bottom status bar and open a compact warning tray above the bar. The tray points users toward workspace settings and Doctor for deterministic checks and fixes.
+- The bottom status bar is a compact shell control: auth/team, workspace, warnings, and agent state are displayed once. Non-zero warnings open the warning tray; otherwise the left side opens workspace/profile controls and the right side opens Agent.
 - Footer actions come from screen bindings/action descriptors rather than handwritten footer text.
-- Mouse, arrow keys, Enter, and Space are the main navigation primitives.
+- Mouse, arrow keys, Enter, Esc, and Space are the main navigation primitives.
+- `Esc` backs out of child/full-screen views. `Enter` opens, submits, or confirms. `/` activates filters or slash commands. Arrow keys move selection or tabs. `Space` is reserved for local toggles/pickers and explicit control actions such as chart selection or source parent navigation.
+- `Ctrl+C` exits the app and is intentionally not advertised. Focused text inputs consume `Ctrl+C` to clear their value instead of closing Lab.
 - `prime lab view` preserves the explicit viewer alias.
 
-### Launch Surface And Home
+### Launch Surface And Workspace Controls
 
-Lab always opens on a sparse launch surface, then enters Home as the workspace control surface.
+Lab always opens on a sparse Welcome surface. Workspace/profile/setup controls are available from the shell and contextual buttons rather than acting like the app's homepage.
 
 - Launch paint is intentionally sparse: Prime Intellect branding, Lab title, compact status, one animated visual, and quickstart actions.
 - Launch quickstart actions are product flows, not navigation labels:
@@ -42,6 +68,7 @@ Lab always opens on a sparse launch surface, then enters Home as the workspace c
   - Train Models opens a native training config editor seeded from a recommended template.
   - Run Evaluations opens a native hosted-evaluation config editor seeded from a recommended template.
   - Build with Agent opens the configured coding-agent command surface; if no agent is configured, it opens the embedded setup flow.
+- Footers show only primary navigation and the most important page action. Secondary accelerators like more rows/logs, platform open, copy, expand/collapse, and tab focus remain callable where useful but stay hidden behind page controls, slash commands, buttons, or future help overlays.
 - Dense workspace rows stay hidden while platform state is loading unless the user is filtering or interacting.
 - Active workspace and remembered inactive workspaces are loaded from global Lab state.
 - Add, forget, and switch workspace actions are native TUI screens.
@@ -58,7 +85,7 @@ prime lab
   -> launch surface
   -> local workspace/cache status paints immediately
   -> platform sections hydrate in the background
-  -> Enter opens Home, or a quickstart action opens a flow directly
+  -> Enter opens workspace controls, or a quickstart action opens a flow directly
 ```
 
 The launch surface should stay visually calm even while data is still loading. It should never show selector-only controls such as Filter or More Rows, and quickstart buttons should feel like deliberate calls to action rather than a secondary nav menu.
@@ -88,7 +115,7 @@ Launch: Run Evaluation
   -> open Data viewer for rollouts
 ```
 
-The next improvement is a first-class template picker before the editor. The current implementation opens the editor with a recommended starter config.
+The current implementation opens the editor with a recommended starter config. A richer template picker belongs in the next product slice once the canonical config factory is centralized.
 
 ### Launch Training
 
@@ -110,9 +137,9 @@ Every training config display should expose a small Modify and Run action. Train
 Launch: Explore Environments
   -> merged local/platform environment selector
   -> open Hub-like environment page
-  -> browse README/source/actions
+  -> browse README/source
   -> create eval/training config from the environment
-  -> install, refresh source, or view platform
+  -> sync local/platform source or open platform
 ```
 
 The selector and detail sidebar should stay identical for local-only, platform-only, and merged local/platform records except for source/badge differences.
@@ -123,8 +150,8 @@ The selector and detail sidebar should stay identical for local-only, platform-o
 Agent
   -> full-screen chat surface
   -> user asks for a research action
-  -> agent can request a typed UI widget
-  -> user confirms/edits in native widget
+  -> agent can request a typed native control
+  -> user confirms/edits in that control
   -> deterministic command/API executes
   -> result links back to the relevant Lab page
 ```
@@ -136,12 +163,16 @@ Example:
   -> agent resolves "alphabet-sort run" or asks for clarification
   -> Lab renders a mini run/config selector
   -> user selects source config/run
-  -> Lab renders config edit widget with batch_size focused
+  -> Lab renders an inline config editor with batch_size focused
   -> user confirms launch
   -> Lab streams logs and attaches the new run to the current project
 ```
 
-Agent-composed widgets should be declarative data specs rendered by Lab, not arbitrary Textual objects emitted by the agent. The agent proposes intent, candidates, defaults, and validation notes; Lab owns the widgets, side effects, and confirmation gates.
+Agent-composed controls are declarative data specs rendered by Lab, not arbitrary Textual objects emitted by the agent. The agent proposes intent, candidates, defaults, and validation notes; Lab owns the controls, side effects, and confirmation gates.
+
+Inline run-launcher cards are the golden path for agent-mediated eval and training launches. They prefill environment/model/run knobs from existing workspace configs when available, fall back to local environment metadata or Environments Hub ids, render model choices from `configs/endpoints.toml` before Prime Inference defaults, always save eval results, and stream launch output/logs in the chat card itself.
+
+The transcript has a Lab-native ChatParts layer rather than relying on Textual message primitives. ChatParts are typed render intents such as text, Markdown, Lab references, and Lab-native actions. The same parts can be streamed into the TUI, printed in tests, serialized to session logs, and mounted as interactive control cards.
 
 ### Chat Experience
 
@@ -153,18 +184,20 @@ Current direction:
 - A centered chat stage owns the page.
 - A subtle animated backdrop strip stretches with the stage width, giving the surface identity without competing with content.
 - The composer is an Enter-to-send command bar; visible controls stay minimal.
+- The composer is one line by default, expands upward only after explicit newlines, and collapses large paste payloads to a colored `[N lines pasted]` placeholder while preserving the submitted text.
 - Slash commands expose secondary actions such as agent switching and prompt starters without permanent chrome.
+- `?` as the first composer character opens prompt starters. `@` opens Lab references such as environments, configs, runs, evals, and files. Empty-composer Up/Down cycles recent user prompts from the current workspace+agent session.
 - Agent, workspace, transport, and connection state sit in ambient header/status text, not a separate control panel.
-- Turns render like a refined terminal log: clear user/agent/system demarcation, preserved whitespace, markup-safe content, and enough structure for inline widgets.
+- Turns render like a refined terminal log: purple rails with grayscale user text, green rails for agent output, compact system/error rows, preserved whitespace, markup-safe content, and enough structure for inline controls.
 
 Design options considered:
 
 - Launch-like command surface: sparse hero prompt, large composer, recent/template actions below. Best for starting creative work.
 - Terminal transcript: dense scrollback with soft separators and low chrome. Best for long-running agent sessions.
-- Widget-first workbench: transcript plus inline config selectors, diff previews, launch cards, and result cards. Best for agent-directed Lab actions.
+- Control-first workbench: transcript plus inline config selectors, diff previews, launch cards, and result cards. Best for agent-directed Lab actions.
 - Ambient research canvas: backdrop field remains visible behind/around cards. Best for brand feel, but must stay dim and low-frequency to avoid distracting from text.
 
-Chosen V1 shape: a centered stage that starts as a launch-like command surface and evolves into a terminal transcript with inline widget cards. The backdrop should be a narrow dim strip, not a full-screen animation, once chat content exists.
+Chosen V1 shape: a centered stage that starts as a launch-like command surface and evolves into a terminal transcript with inline control cards. The backdrop should be a narrow dim strip, not a full-screen animation, once chat content exists.
 
 ### Projects
 
@@ -202,7 +235,7 @@ Rows and sidebars show coherent status:
 - `LOCAL` appears for workspace source.
 - `PUBLIC` or `PRIVATE` appears for platform visibility.
 - Local and platform records merge into one row when their identity matches.
-- The selector details view avoids duplicate local/platform/status/install sections.
+- The selector details view avoids duplicate local/platform/status/action sections.
 - Local source hashes are computed with the same generated-artifact ignore policy as environment publishing.
 
 Environment detail screens provide:
@@ -214,9 +247,8 @@ Environment detail screens provide:
 - Clickable buttons for Markdown and HTML `href` links.
 - Version selection.
 - Source cache under `~/.prime/lab/cache`.
-- Install, train, evaluate, refresh-source, and platform actions as buttons.
-- Leaderboard tab as a compact platform link surface unless native data is present.
-- Discussion and action links live in the code tab action panel until native discussion/action data deserves a full screen.
+- Train, Evaluate, Sync, and Platform actions render as stacked buttons. Sync is the only local/platform source mutation button: it pulls platform-only environments into the workspace and pushes local owned environments to the platform.
+- Platform discussion/action data should be surfaced through the single Platform button until native discussion/action data deserves a full screen.
 
 ### Training
 
@@ -278,7 +310,7 @@ The config editor is native TUI UI.
 - Preview shows validation, command, field diff, and nice TOML.
 - Launch opens a native follow screen with terminal-like output.
 - Training launches detect the emitted `prime rl logs <run-id> -f` hint and hand off to live run logs with retry/backoff while the run starts.
-- Environment install also uses the native follow screen.
+- Environment sync uses the native follow screen.
 
 Canonical config handling uses three representations:
 
@@ -290,34 +322,68 @@ Canonical config handling uses three representations:
 
 Lab owns a coding-agent runtime abstraction.
 
-Supported targets:
+Tool-backed Lab targets:
 
 - Codex
-- OpenCode
-- Pi Coding Agent
-- Hermes Agent
-- Claude Code as one-shot exec
-- Custom command fallback as one-shot exec
+- Claude via Claude Agent SDK
+- Claude Code via the Prime Lab MCP bridge
+- Cursor via the Prime Lab MCP bridge
+- OpenCode via ACP plus Prime Lab MCP tools
+- Pi Coding Agent via `pi-acp` plus Prime Lab MCP tools
+- Hermes Agent via ACP plus Prime Lab MCP tools
 
 Runtime behavior:
 
+- The Agent Capability Registry owns each agent's label, binary requirements, setup repair commands, runtime transport, native tool surface, doctor status, and generated config paths.
 - Server-mode agents start automatically when Lab launches and an agent is configured.
 - Connection state is visible in the global status bar.
-- Codex app-server stdio and Hermes ACP stdio are native streaming chat transports.
-- OpenCode ACP HTTP and Pi RPC currently start as server transports and use one-shot prompt execution as the chat fallback until native client contracts are wired.
-- Claude Code and custom commands run as one-shot prompt-to-completion execution.
+- Agent status is concise, such as `✓ Codex`; the status bar does not repeat `agent` or `connected`.
+- Agent Client Protocol is Lab's preferred chat/session/event protocol for agents that expose it. ACP owns session lifecycle, prompt turns, assistant deltas, tool-call progress, slash-command announcements, cancel/close, and resumable session metadata.
+- MCP remains Lab's native control/tool protocol. ACP sessions receive the Prime Lab MCP server through `session/new`, and MCP-backed headless agents receive generated native MCP config files.
+- Codex app-server stdio is a native streaming chat transport with dynamic Lab tools.
+- Claude uses `claude_agent_sdk.query`; the SDK is a Lab dependency so the configured Claude target is first-class.
+- Claude receives an SDK MCP server with native Lab tools.
+- Claude Code receives a generated `--mcp-config` pointing to `prime lab mcp --workspace ...`; that stdio MCP server forwards tool calls into the running Lab TUI over workspace-scoped local IPC.
+- Cursor receives a generated `.cursor/mcp.json` entry for `prime_lab` and runs headless with MCP and tool approvals enabled.
+- OpenCode starts `opencode acp --cwd <workspace>` and receives Prime Lab MCP tools in the ACP session.
+- Pi starts `pi-acp` and receives Prime Lab MCP tools in the ACP session. `prime lab setup` and `prime lab sync` install the Lab-owned `pi-acp` bridge when Pi is selected and the Pi CLI is already present.
+- Hermes starts `hermes acp --accept-hooks` in the selected workspace and receives Prime Lab MCP tools in the ACP session.
+- Custom commands are not Lab-supported until they provide a native tool contract.
 - Chat screens use the runtime abstraction instead of full terminal takeover.
 - Agent sync installs Prime-owned skills/docs guidance into configured agent locations.
-- The chat surface should move toward the launch-screen feel: more spacious, fewer sidebars, status/action chrome pushed to the edges, and interactive prompt/config/result cards inside the transcript.
+- The chat surface follows the launch-screen feel: spacious, no sidebar, status/action chrome at the edges, slash commands for secondary actions, and room for interactive prompt/config/result cards inside the transcript.
+- Agent failures stay attached to the selected agent and render explicit errors. Lab does not silently switch to a different agent after a failure.
+- Streaming assistant text is normalized at the adapter boundary before rendering. Full-message snapshots are deduplicated, token/delta streams append to one mutable assistant turn, and Markdown rendering happens from the current turn buffer rather than from independent partial blocks.
 
-Tested runtime contracts:
+### Agent Sessions And Research Threads
 
-- One-shot exec agents receive a prompt and append prompt/completion messages without terminal takeover.
+Agent chat persistence is global and workspace-scoped.
+
+- Lab sessions live under `~/.prime/lab/sessions/{workspace_hash}/{agent}/{session_id}/`.
+- `session.json` stores workspace, agent, transport, native session id, endpoint, auth/team context, and timestamps.
+- `transcript.jsonl` stores normalized user, assistant, and system messages.
+- `actions.jsonl` stores Lab-native actions such as configs created, evals launched, training runs launched, source syncs, and deterministic remediation.
+- `native/` stores pointers or symlinks to agent-native logs when available.
+- Opening the Agent screen loads the latest compatible session for the selected workspace and agent.
+- Switching agent starts or resumes that agent's own session; it never presents a model/agent switch as the same conversational identity.
+- Native resume ids are passed back to transports that support them, while Lab's session id remains the stable local folder identity.
+- `/clear` starts a fresh workspace+agent session and clears the visible transcript. Previous sessions remain durable and resumable through session history once that browser exists.
+- The launch-style art clears once a conversation starts so the transcript can own the vertical space.
+
+Research Projects are the future grouping layer above sessions. A project can tie together agent sessions, configs, environment source hashes, evals, training runs, notes, and team-shared research history. The current session/action metadata is shaped so projects can attach later without changing chat persistence.
+
+Runtime contract validation matrix:
+
+- Claude SDK chat runs through the Python SDK query stream, tracks session IDs, and renders streamed assistant text.
+- Claude SDK sessions receive an in-process SDK MCP server exposing native Lab tools.
+- Claude Code headless chat receives a generated Prime Lab MCP config, streams JSON output, and forwards native MCP calls into the running Lab app.
+- Cursor headless chat receives a generated workspace `.cursor/mcp.json` entry, streams JSON output, and forwards native MCP calls into the running Lab app.
+- OpenCode ACP initializes, creates or resumes a session with Prime Lab MCP servers, streams `session/update` assistant chunks, and renders ACP tool-call updates as compact transcript events.
+- Pi ACP initializes through `pi-acp`, creates or resumes a session with Prime Lab MCP servers, and streams `session/update` assistant chunks through the same ACP normalizer.
+- Hermes ACP initializes, creates or resumes a session with Prime Lab MCP servers, and streams `session/update` assistant chunks through the same ACP normalizer.
 - Codex app-server stdio initializes, starts a thread, streams assistant deltas, and completes a turn.
-- Codex app-server threads receive the Lab dynamic widget tool contract and can request `lab.render_widget` payloads for native choice/config/action widgets.
-- Hermes ACP stdio initializes, creates a session, streams session updates, and completes a prompt.
-- OpenCode ACP HTTP endpoint startup is detected and falls back to one-shot prompt execution until a native HTTP client is added.
-- Pi RPC startup creates a workspace-scoped session directory and falls back to one-shot prompt execution until a native RPC client is added.
+- Codex app-server threads receive the Lab dynamic tool contract and can request specific `lab.choose`, `lab.edit_config`, `lab.preview_action`, `lab.launch_run`, `lab.show_patch`, and `lab.inspect_rollouts` payloads.
+- Agents without a native Lab tool surface are triaged as `not yet supported`; Lab does not start a process, inject fallback protocols, or silently route to another agent.
 - A configured workspace agent auto-starts when the TUI launches and reports status in the global status bar.
 
 Agent use cases:
@@ -331,20 +397,47 @@ Agent use cases:
 - synchronize local agent skills with the active Lab workspace
 - retrieve platform and Prime CLI docs from local context
 
-## Agent-Composed Widget Contract
+## Agent-Composed Control Contract
 
 Agent-composed UI should use a small stable schema that Lab can render without trusting agent code.
 
-Initial widget types:
+Initial control types:
 
 - choice picker: list of typed candidates, single or multi-select
 - config editor: config kind, canonical config payload, highlighted fields, read-only fields
 - action preview: command/API call, side effects, validation output, confirm/cancel
 - file patch summary: files, hunks, risk notes, open file buttons
-- run launcher: source config/run, config diff, launch button, live logs link
+- run launcher: compact config fields, source config/run, launch button, inline command output and live logs
 - rollout insight: selected samples, failure categories, proposed next action
 
-The agent may request a widget by returning structured JSON or MCP/tool-call payload. Lab validates the payload, renders a native widget, and routes the result back to the agent/runtime. The Textual UI remains a skin over typed domain objects so the same widget specs can be printed in tests, rendered in the TUI, or serialized into project timelines.
+Evaluation and training flows use the same native control sequence: `edit_config`, then
+`preview_action`, then `launch_run`, with `config_kind = "eval"` or
+`config_kind = "rl"`. The UI should not grow separate eval-only and
+training-only interaction contracts.
+
+The agent may request an interactive control only through a native tool or MCP call. Lab validates the payload, renders a native control, and routes the result back to the agent/runtime. The Textual UI remains a skin over typed domain objects so the same specs can be printed in tests, rendered in the TUI, or serialized into project timelines.
+
+Recommended augmentation model:
+
+- Native tool contracts are required for an agent to be considered Lab-supported. Lab injects tools such as `choose`, `edit_config`, and `launch_run` with JSON schemas, descriptions, and developer instructions at session start. The tool schema itself is the main context: it tells the model what action exists, when to use it, and what payload shape Lab can render.
+- ACP-backed agents receive Lab tools as MCP servers at `session/new`. MCP-backed headless agents use the same bridge through native config files. In both cases, the running TUI owns a local workspace-scoped IPC socket, and `prime lab mcp` exposes stdio MCP tools that forward calls into that socket. This avoids pseudo-protocol parsing while keeping the UI process as the source of truth for control rendering and action logging.
+- Skills are the portable guidance layer. `prime lab setup` and `prime lab sync` install the Prime-managed Lab controls skill so Codex, Cursor, Claude, Claude Code, OpenCode, Pi, and Hermes share the same product guidance while their native tool APIs differ.
+- `AGENTS.md` remains workspace policy: repo conventions, canonical commands, upload policy, and Prime research norms. It should not be the only source of Lab control semantics because it can drift per repo and does not provide callable schemas.
+- Headless transports that do not expose custom tools are triaged as not yet supported for Lab-native chat actions. Lab should not ask agents to emit fenced JSON or other pseudo-tool protocols; the golden path is a native tool surface that Lab can validate and route.
+- Agent output parsing must stay at the adapter boundary. Reasoning/thinking events are not transcript content; assistant-message deltas append to one mutable turn; final snapshots should complete that turn rather than creating a second visible answer.
+
+Native control availability must be testable per agent:
+
+- native tool transports receive a startup handshake listing supported Lab control schemas
+- non-native transports show a precise not-yet-supported state and do not receive pseudo-protocol prompts
+- `prime lab setup` and `prime lab sync` install the Prime-managed Lab controls skill into `.prime/skills`, mirror it to `~/.prime/lab/skills`, link it into the configured agent's skill folder, install Lab-owned bridge packages such as `pi-acp` when needed, and write the agent's native Lab tool config
+- accepted native control requests and user-triggered inline launches write `actions.jsonl` events with control id, kind, title, source/config path, command, status, and return code when available
+- run-launcher requests mount compact inline config-and-launch cards in chat; the user sees the target once, tunes the visible values, and launches without leaving the transcript
+- run-launcher cards use the same config-building and launch-runner services as full config pages; compact chat cards are visual skins over the same logical action, not a duplicate launch path
+- choice/config/action/patch/rollout cards should follow the same logical-control/visual-skin split as the run launcher, with shared backend services rather than per-screen process logic
+- `/diagnose` asks the active agent to render a no-op choice picker and records both the diagnostic start and any structured control request in the session action log
+
+This keeps control interop strict: Codex, Claude, Claude Code, Cursor, OpenCode, Pi, and Hermes are supported because each has a native Lab tool surface. One-shot custom commands remain unsupported until they provide a native tool contract.
 
 ## Workspace, Auth, And Teams
 
@@ -367,10 +460,10 @@ State tracks remembered workspace paths, active workspace, inactive workspace pa
 
 Auth tokens stay in the existing Prime auth/config locations. Lab state stores references, not token copies.
 
-The status bar uses a compact shape:
+The status bar uses a compact shape with colored indicators:
 
 ```text
-auth ok | PI Applied Research | ~/dev/verifiers | agent: codex connected
+✓ PI Applied Research · ~/dev/verifiers | ✓ Codex
 ```
 
 ## Source Identity And Cache
@@ -406,7 +499,7 @@ Environment pointers:
 ~/.prime/lab/cache/environments/<owner>/<name>/<version_id>.json
 ```
 
-The current implementation already stores environment source trees globally under owner/name/version and writes manifests for downloaded archives. The V1 cache contract keeps those stable owner/name/version pointers, but the source tree itself should become hash-addressed so the hash is the source of truth and duplicate versions can share one blob.
+The implementation keeps stable owner/name/version pointers and stores the source tree itself under the content hash, so source identity is hash-addressed and duplicate versions can share one blob. Downloads write pointer manifests that resolve to `sources/<content_hash>/files`.
 
 Workspace pins:
 
@@ -447,7 +540,7 @@ V1 performance fixes:
 
 - Split background hydration into per-section workers so Training can finish without waiting for Environments or Evaluations.
 - Add cursor/page APIs where platform supports them; avoid repeated full list requests for each ladder step.
-- Cache per-section freshness timestamps and skip redundant background requests for fresh sections unless the user explicitly refreshes.
+- Cache per-section freshness timestamps and skip redundant background requests for fresh sections unless the cache is stale or the active context changes.
 - Record load timings in a lightweight debug event log so slow startup can be attributed to local scanning, cache reads, auth/team resolution, or platform endpoints.
 - Keep the launch surface resident while hydration continues, and only repaint status/counts when values actually change.
 
@@ -495,6 +588,17 @@ Each issue has severity, explanation, and deterministic remediation when availab
 
 Sync reports drift before changing user-owned agent files.
 
+Doctor is the source of truth for Lab workspace and agent-readiness health. The TUI should not grow separate one-off checks for AGENTS.md, skills, docs, config drift, or agent guidance. Instead:
+
+- launch performs a cheap cached doctor summary and surfaces non-zero WARN/FAIL counts in the warning tray
+- Settings exposes explicit Doctor and Sync buttons with the same result model as the CLI
+- chat startup can inject a compact readiness summary into the agent context, but user-facing remediation still routes through Doctor/Sync
+- synced assets record source URL/ref/hash metadata under `.prime/lab/manifest.json`
+- doctor compares local files, linked agent skill dirs, and manifest entries to flag missing or stale guidance
+- sync updates Prime-owned assets only; user-authored AGENTS.md sections need explicit confirmation before overwrite
+
+This keeps stale workspace guidance, outdated skills, missing docs, and agent setup issues on one golden path: Doctor diagnoses, Sync refreshes, Setup initializes.
+
 ## Git And Platform Sync
 
 Lab nudges users toward aligned local source, GitHub, and platform state.
@@ -510,12 +614,14 @@ Workspace and environment checks flag:
 
 Environment screens expose:
 
-- Install
 - Train
 - Evaluate
-- Refresh source
+- Sync
 - View platform version
-- Copy/source-friendly install command content
+
+`prime env pull` writes origin and fork-chain metadata in `.prime/.env-metadata.json`. A later push preserves the pulled origin while updating the active owner/name, so local forks retain their ancestry. This lets Lab explain whether Sync will pull from the platform, push to the active owner/team, or create a fork lineage.
+
+Interactive code viewing is a likely Agent-side companion to this model, but it should not become a full editor until the Git/GitHub/EnvHub contract is explicit. The intended model is: source hash identifies platform environment versions; Git branch/commit links workspace source to reviewable code; Lab can show code state in a togglable agent sidebar or inline card; projects tie source, configs, evals, training runs, and agent sessions into a research timeline.
 
 ## Verifiers Command Migration
 
@@ -523,7 +629,7 @@ Recommended ownership:
 
 | Verifiers command | Prime CLI target | Ownership |
 | --- | --- | --- |
-| `vf-setup` | `prime lab setup` | Prime CLI owns user-facing setup. Verifiers keeps compatibility shims. |
+| `vf-setup` | `prime lab setup` | Prime CLI owns user-facing setup. Verifiers keeps thin aliases until those commands are removed. |
 | `vf-init` | `prime env init` and Lab create-env flow | Prime CLI owns the scaffold path. Verifiers keeps library internals. |
 | `vf-tui` | `prime eval tui` and Lab Data tab | Shared rollout viewer logic lives in reusable Prime CLI modules. |
 | `vf-install` | `prime env install` | Prime CLI owns install UX. |
@@ -639,24 +745,29 @@ CLI entrypoints
   -> domain records and canonical configs
   -> data clients and caches
   -> Textual screens
-  -> reusable widgets
+  -> reusable components
 ```
 
 Key modules:
 
 - `prime_cli.lab_setup`: setup, sync, and doctor services callable from CLI and TUI.
-- `prime_lab_view.cache`: row/detail/source/workspace cache.
-- `prime_lab_view.environment_records`: local/platform environment merge layer.
-- `prime_lab_view.config_screen`: native config editor and launch follower.
-- `prime_lab_view.source_browser`: source tree and file rendering.
-- `prime_lab_view.eval_screen`: shared rollout/eval viewer widgets.
-- `prime_lab_view.agent_runtime`: server/exec adapter runtime.
-- `prime_lab_view.palette`: shared color tokens and CSS helpers.
+- `prime_lab_app.cache`: row/detail/source/workspace cache.
+- `prime_lab_app.environment_records`: local/platform environment merge layer.
+- `prime_lab_app.config_screen`: native config editor and launch follower.
+- `prime_lab_app.toml_format`: shared nice-TOML formatting for config screens, quickstarts, environment actions, and chat cards.
+- `prime_lab_app.source_browser`: source tree and file rendering.
+- `prime_lab_app.eval_screen`: shared rollout/eval viewer components.
+- `prime_lab_app.agent_capabilities`: supported-agent registry, machine requirements, setup commands, native surfaces, and doctor path expectations.
+- `prime_lab_app.agent_acp`: ACP session params, MCP server injection, session capability parsing, and session/update normalization.
+- `prime_lab_app.agent_runtime`: server/exec adapter runtime.
+- `prime_lab_app.agent_cards`: inline chat control cards and compact config/launch skins shared by eval and training agent flows.
+- `prime_lab_app.agent_mcp_bridge`: workspace-scoped IPC bridge and generated MCP config helpers.
+- `prime_lab_app.palette`: shared color tokens and CSS helpers.
 
-Widget rules:
+Component rules:
 
-- Widgets receive data and action descriptors, not hardcoded key labels.
-- Widgets use palette tokens, not literal CSS colors.
+- Components receive data and action descriptors, not hardcoded key labels.
+- Components use palette tokens, not literal CSS colors.
 - Arbitrary user/model text is sanitized before Rich rendering.
 - Markdown views parse links into clickable buttons when possible.
 - Platform links are buttons with human labels, not raw URL blobs.
@@ -666,16 +777,24 @@ Widget rules:
 
 These are the active cleanup targets noticed while implementing the current slice:
 
-- Launch action routing lived as string ids in `LaunchScreen` plus a dict in `PrimeLabView`; quickstart flow objects now live in `quickstart.py`, but the next cleanup is a typed `LabAction` registry shared by launch buttons, Home actions, footer labels, and agent widget requests.
-- Config templates exist in environment actions, setup templates, and quickstart flows. They should be centralized behind canonical config factories with named templates and nice-TOML printers.
-- Agent chat now uses a centered transcript plus command bar, but inline widgets are still textual summaries. The next cleanup is a typed transcript/card renderer that can mount real widget cards in response to `lab.render_widget`.
+- Launch action routing lived as string ids in `LaunchScreen` plus a dict in `PrimeLabView`; quickstart flow objects now live in `quickstart.py`, but the next cleanup is a typed `LabAction` registry shared by launch buttons, Settings actions, footer labels, and agent control requests.
+- Config templates exist in environment actions, setup templates, and quickstart flows. TOML presentation is now shared, but the next cleanup is centralizing the canonical config factories and named templates behind one service.
+- Agent chat mounts inline launcher cards through `agent_cards` using `agent_widget_model` for payload normalization and `agent_widget_actions` for config construction, generated TOML, launch command preparation, and action logging. Run-launcher and config-editor requests already share the compact embedded config skin; the next cleanup is applying the same logical-control/service/skin split to choice, preview, patch, and rollout insight cards.
+- Agent capability data is centralized and runtime startup consumes `AgentCapability` for unsupported triage. Remaining cleanup is moving native-surface preparation and dependency repair rules fully into the capability registry so runtime only starts declared transports.
 - Selector hydration is snapshot-oriented. A per-section data service would be easier to cache, time, test, and refresh independently.
-- Some screens still reach into private-ish helpers across modules. Public domain helpers should live in `training_config`, `quickstart`, `source_browser`, `readme`, and future `actions` modules.
-- Text-image screen captures are manually curated in docs. The renderer should become a deterministic test utility that can print any page/widget from typed state without launching the full app.
-- Footer/action labels are better than before but still split between Textual bindings, screen-specific buttons, and generated action items. A single action descriptor should drive label, binding, click target, enabled state, and documentation.
-- Home and Agent surfaces are converging on launch-screen visual language, while technical selectors keep dense browsing affordances.
+- Some screens still reach into private-ish helpers across modules. The agent control helpers and TOML formatting have public module surfaces now; remaining public domain helpers should live in `training_config`, `quickstart`, `source_browser`, `readme`, and future `actions` modules.
+- Visual checks should use the dev-only stdout renderer under `packages/prime/dev/`; screen images are not a test oracle and should not leave generated artifacts in the repo.
+- Footer/action labels are improving but still split between Textual bindings, screen-specific buttons, and generated action items. A single action descriptor should drive label, binding, click target, enabled state, and documentation.
+- Welcome and Agent surfaces are converging on launch-screen visual language, while technical selectors keep dense browsing affordances.
 
 ## Test Coverage
+
+Testing should stay surgical. Default suite coverage should protect contracts
+that would create real product regressions: cache monotonicity, workspace
+scoping, config generation, launch commands, agent tool routing, stream
+deduplication, and a small number of critical Textual navigation paths. Visual
+review is manual through the dev renderer; do not add screenshot-style tests for
+every layout tweak.
 
 Unit coverage includes:
 
@@ -688,12 +807,14 @@ Unit coverage includes:
 - config parse/render/diff/launch helpers
 - action/link extraction and markup escaping
 - agent adapter and runtime modes
+- agent session cache pathing, metadata, transcript writes, and per-agent separation
+- chat composer newline expansion, large paste placeholder, and preserved submit payload
 - durable row cache monotonicity across smaller refreshes
 
 Textual coverage includes:
 
 - `prime lab` default launch
-- launch Home visual state and quickstart actions
+- launch Welcome visual state and quickstart actions
 - setup empty state
 - inactive workspace selection
 - environment row selection/opening
@@ -705,8 +826,25 @@ Textual coverage includes:
 - rollout viewer prompt/message/state rendering
 - config edit/save/launch preview
 - agent connection status
+- agent slash command selection and per-agent session switching
 
-Screen snapshot coverage is recorded in `packages/prime/docs/lab-tui-screen-captures.md`. These text-image captures validate launch composition, selector pages, environment detail layout, training detail, evaluation detail, config launch/edit flows, setup/workspace screens, and agent chat surfaces at terminal resolution.
+Manual visual checks should use the dev-only renderer:
+
+```bash
+uv run --project packages/prime python packages/prime/dev/render_lab_screens.py --screen all > /tmp/lab-screens.txt
+```
+
+The renderer prints lightweight terminal sketches from deterministic state. It is for quick product review only, not app runtime behavior and not a load-bearing test fixture.
+
+Live native-agent validation should be run when changing adapter contracts:
+
+- Codex app-server dynamic tools call `choose` and emit a Lab control action.
+- Claude Agent SDK receives an in-process SDK MCP server, has Lab tools pre-allowed, calls `choose`, and emits a Lab control action.
+- Claude Code headless chat loads the generated MCP config, has Lab MCP tools explicitly allowed, calls `mcp__prime_lab__choose`, and reaches the running Lab IPC bridge.
+- Cursor headless chat loads the generated `.cursor/mcp.json`, runs with MCP approval enabled, calls `prime_lab-choose`, and reaches the running Lab IPC bridge.
+- OpenCode loads workspace `opencode.json`, calls `prime_lab_choose`, and reaches the running Lab IPC bridge.
+- Pi starts through `pi-acp`, receives Prime Lab MCP servers during ACP `session/new`, calls `choose`, and reaches the running Lab IPC bridge.
+- Hermes loads its generated MCP config, calls `choose`, and reaches the running Lab IPC bridge.
 
 CLI coverage includes:
 

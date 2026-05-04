@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import json
 import queue
+import sys
 import tarfile
 import threading
 import time
-from dataclasses import dataclass
+import types
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
 import toml
+from prime_cli.commands.env import _environment_fork_chain, _environment_ref
 from prime_cli.commands.lab import app as lab_cli_app
 from prime_cli.commands.rl import RLConfig as HostedRLConfig
+from prime_cli.lab_mcp import _serve_lab_mcp_stdio, lab_mcp_tool_definitions
 from prime_cli.lab_setup import (
     LabDoctorOptions,
     LabSetupOptions,
@@ -26,10 +30,49 @@ from prime_cli.lab_setup import (
     run_lab_setup_service,
     run_lab_sync_service,
 )
-from prime_lab_view.agent_adapters import agent_adapter, agent_select_options
-from prime_lab_view.agent_runtime import AgentChatMessage, AgentConnectionState, AgentRuntime
-from prime_lab_view.agent_screen import AgentChatScreen, _chat_transcript
-from prime_lab_view.app import (
+from prime_lab_app.agent_acp import (
+    acp_lab_mcp_servers,
+    acp_session_params,
+    acp_session_support,
+    acp_update_event,
+)
+from prime_lab_app.agent_adapters import (
+    agent_adapter,
+    agent_mcp_config_path,
+    agent_select_options,
+)
+from prime_lab_app.agent_capabilities import agent_capability, known_agent_names
+from prime_lab_app.agent_cards import AgentWidgetCard
+from prime_lab_app.agent_mcp_bridge import (
+    LabMcpIpcServer,
+    call_lab_mcp_tool,
+    write_hermes_mcp_config,
+    write_opencode_mcp_config,
+)
+from prime_lab_app.agent_runtime import (
+    AgentChatMessage,
+    AgentConnectionState,
+    AgentRuntime,
+    _dedupe_streamed_text,
+    _extract_stream_delta,
+    _merge_stream_text,
+)
+from prime_lab_app.agent_screen import (
+    AgentChatScreen,
+    AgentPrompt,
+    _chat_transcript,
+)
+from prime_lab_app.agent_sessions import (
+    append_agent_prompt_history,
+    create_agent_session,
+    latest_agent_session,
+    load_agent_prompt_history,
+    workspace_session_key,
+    write_agent_session,
+)
+from prime_lab_app.agent_widget_model import build_agent_widget_model
+from prime_lab_app.agent_widgets import lab_widget_diagnostic_prompt
+from prime_lab_app.app import (
     EvaluationTree,
     LabOptionList,
     PrimeLabView,
@@ -37,9 +80,10 @@ from prime_lab_view.app import (
     _ladder_limits,
     _parse_log_records,
 )
-from prime_lab_view.cache import (
+from prime_lab_app.cache import (
     cached_environment_source,
     ensure_environment_source,
+    environment_source_blob_cache_path,
     environment_source_cache_path,
     forget_recent_workspace,
     load_cached_lab_sections,
@@ -47,52 +91,53 @@ from prime_lab_view.cache import (
     record_recent_workspace,
     write_cached_lab_sections,
 )
-from prime_lab_view.config_screen import ConfigLaunchScreen, ConfigRunScreen
-from prime_lab_view.data import LabDataSource, LabLoadOptions, discover_local_eval_runs
-from prime_lab_view.environment_screen import (
+from prime_lab_app.chat_parts import ReferencePart, message_parts
+from prime_lab_app.config_screen import ConfigLaunchScreen, ConfigRunScreen
+from prime_lab_app.data import LabDataSource, LabLoadOptions, discover_local_eval_runs
+from prime_lab_app.environment_screen import (
     AddWorkspaceScreen,
     EnvironmentAction,
     EnvironmentScreen,
     WorkspaceScreen,
 )
-from prime_lab_view.eval_markdown import MathMarkdown, make_math_parser
-from prime_lab_view.eval_records import LazyRunResults, LocalEvalRun
-from prime_lab_view.eval_render import compute_run_overview_stats, history_groups
-from prime_lab_view.eval_screen import LocalEvalRunScreen, RolloutViewer
-from prime_lab_view.evaluation_browser import (
+from prime_lab_app.eval_markdown import MathMarkdown, make_math_parser
+from prime_lab_app.eval_records import LazyRunResults, LocalEvalRun
+from prime_lab_app.eval_render import compute_run_overview_stats, history_groups
+from prime_lab_app.eval_screen import LocalEvalRunScreen, RolloutViewer
+from prime_lab_app.evaluation_browser import (
     evaluation_index,
     evaluation_model_selection_details,
     evaluation_run_selection_details,
 )
-from prime_lab_view.filters import FilterChoice, filter_choices
-from prime_lab_view.launch_backdrop import LaunchBackdrop
-from prime_lab_view.launch_screen import LaunchScreen
-from prime_lab_view.models import LabItem, LabSection
-from prime_lab_view.palette import TOOL_CALL
-from prime_lab_view.readme import readme_links as _readme_links
-from prime_lab_view.readme import readme_markdown as _readme_markdown
-from prime_lab_view.rows import item_badges_text
-from prime_lab_view.setup_screens import AgentSyncScreen, DoctorScreen, SetupScreen
-from prime_lab_view.shell import lab_header
-from prime_lab_view.source_browser import source_entries, source_preview
-from prime_lab_view.training_charts import (
+from prime_lab_app.filters import FilterChoice, filter_choices
+from prime_lab_app.launch_backdrop import LaunchBackdrop
+from prime_lab_app.launch_screen import LaunchScreen
+from prime_lab_app.models import LabItem, LabSection
+from prime_lab_app.palette import TOOL_CALL
+from prime_lab_app.readme import readme_links as _readme_links
+from prime_lab_app.readme import readme_markdown as _readme_markdown
+from prime_lab_app.rows import item_badges_text
+from prime_lab_app.setup_screens import AgentSyncScreen, DoctorScreen, SetupScreen
+from prime_lab_app.shell import compact_path, configured_workspace_agent, lab_header
+from prime_lab_app.source_browser import source_entries, source_preview
+from prime_lab_app.training_charts import (
     chart_count as _chart_count,
 )
-from prime_lab_view.training_charts import (
+from prime_lab_app.training_charts import (
     histogram_charts_from_raw as _histogram_charts_from_raw,
 )
-from prime_lab_view.training_config import (
+from prime_lab_app.training_config import (
     training_config_toml as _training_config_toml,
 )
-from prime_lab_view.training_config import (
+from prime_lab_app.training_config import (
     training_platform_url as _training_platform_url,
 )
-from prime_lab_view.training_render import training_run_widgets as _training_run_widgets
-from prime_lab_view.training_screen import TrainingRunScreen, _next_log_tail_lines
-from prime_lab_view.widgets import HomeLaunchPanel
+from prime_lab_app.training_render import training_run_widgets as _training_run_widgets
+from prime_lab_app.training_screen import TrainingRunScreen, _next_log_tail_lines
+from prime_lab_app.widgets import ClearableInput, HomeLaunchPanel
 from rich.console import Console
 from textual.containers import Vertical, VerticalScroll
-from textual.widgets import Button, Input, Label, OptionList, Static, Tab
+from textual.widgets import Button, Label, OptionList, Select, Static, Tree
 from typer.testing import CliRunner
 
 
@@ -371,7 +416,7 @@ def test_lab_view_snapshot_prioritizes_training_and_auth_environments(tmp_path: 
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
 
     assert [section.title for section in snapshot.sections] == [
-        "Home",
+        "Settings",
         "Environments",
         "Training",
         "Evaluations",
@@ -449,6 +494,31 @@ def test_lab_view_environment_badges_keep_independent_styles() -> None:
 
     assert badges.plain == "  LOCAL PUBLIC"
     assert [str(span.style) for span in badges.spans] == ["bold #38bdf8", "bold #84cc16"]
+
+
+def test_environment_metadata_tracks_fork_chain() -> None:
+    origin = _environment_ref(
+        "primeintellect",
+        "alphabet-sort",
+        environment_id="env-original",
+        version="0.1.8",
+    )
+    upstream = _environment_ref(
+        "research",
+        "alphabet-sort",
+        environment_id="env-fork",
+        version="0.1.9",
+    )
+
+    chain = _environment_fork_chain(
+        {
+            "origin": origin,
+            "fork_chain": [origin],
+        },
+        upstream,
+    )
+
+    assert chain == [origin, upstream]
 
 
 def test_lab_view_local_environment_source_hash_ignores_generated_outputs(
@@ -543,7 +613,7 @@ def test_lab_environment_cache_downloads_source_and_writes_manifest(
         assert timeout == 60.0
         return FakeStream()
 
-    monkeypatch.setattr("prime_lab_view.cache.httpx.stream", fake_stream)
+    monkeypatch.setattr("prime_lab_app.cache.httpx.stream", fake_stream)
 
     cached = ensure_environment_source(
         {
@@ -556,10 +626,19 @@ def test_lab_environment_cache_downloads_source_and_writes_manifest(
     )
 
     assert cached is not None
-    assert cached.root == environment_source_cache_path("research", "cached-env", "0.2.0")
+    assert cached.root == environment_source_blob_cache_path(cached.manifest["content_hash"])
     assert (cached.root / "README.md").read_text(encoding="utf-8") == "# Cached Env\n"
     assert cached.manifest["slug"] == "research/cached-env"
     assert cached.manifest["version"] == "0.2.0"
+    pointer_manifest = (
+        environment_source_cache_path("research", "cached-env", "0.2.0")
+        / ".prime"
+        / "lab-cache.json"
+    )
+    assert (
+        json.loads(pointer_manifest.read_text(encoding="utf-8"))["content_hash"]
+        == (cached.manifest["content_hash"])
+    )
 
 
 def test_lab_environment_cache_finds_existing_source_without_package_url(
@@ -588,6 +667,50 @@ def test_lab_environment_cache_finds_existing_source_without_package_url(
     assert cached.root == root
 
 
+def test_lab_environment_cache_resolves_version_pointer_to_hash_blob(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    pointer = environment_source_cache_path("research", "cached-env", "0.2.0")
+    pointer_manifest = pointer / ".prime" / "lab-cache.json"
+    blob_root = tmp_path / ".prime" / "lab" / "cache" / "sources"
+    content_hash = "a" * 64
+    source_root = environment_source_blob_cache_path(content_hash)
+    source_manifest = blob_root / content_hash / "manifest.json"
+    source_root.mkdir(parents=True)
+    (source_root / "README.md").write_text("# Blob Env\n", encoding="utf-8")
+    pointer_manifest.parent.mkdir(parents=True)
+    pointer_manifest.write_text(
+        json.dumps(
+            {
+                "slug": "research/cached-env",
+                "version": "0.2.0",
+                "content_hash": content_hash,
+                "cached_at": "2026-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    source_manifest.write_text(
+        json.dumps(
+            {
+                "slug": "research/cached-env",
+                "version": "0.2.0",
+                "content_hash": content_hash,
+                "cached_at": "2026-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cached = cached_environment_source({"slug": "research/cached-env", "latest_version": "0.2.0"})
+
+    assert cached is not None
+    assert cached.root == source_root
+    assert (cached.root / "README.md").read_text(encoding="utf-8") == "# Blob Env\n"
+
+
 def test_lab_environment_cache_rejects_unsafe_archive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -608,7 +731,7 @@ def test_lab_environment_cache_rejects_unsafe_archive(
         def iter_bytes(self, chunk_size: int) -> list[bytes]:
             return [archive[:chunk_size], archive[chunk_size:]]
 
-    monkeypatch.setattr("prime_lab_view.cache.httpx.stream", lambda *_args, **_kwargs: FakeStream())
+    monkeypatch.setattr("prime_lab_app.cache.httpx.stream", lambda *_args, **_kwargs: FakeStream())
 
     with pytest.raises(ValueError, match="path with '..'"):
         ensure_environment_source(
@@ -648,7 +771,7 @@ def test_lab_view_initial_snapshot_shows_local_context_and_platform_loading(
     snapshot = make_source().load_initial(LabLoadOptions(limit=10, workspace=tmp_path))
 
     assert [section.title for section in snapshot.sections] == [
-        "Home",
+        "Settings",
         "Environments",
         "Training",
         "Evaluations",
@@ -992,7 +1115,7 @@ def test_lab_view_renders_environment_details_without_raw_json() -> None:
 
     assert "Status" in rendered
     assert "1.0.0" in rendered
-    assert "prime env install primeintellect/gsm8k" in rendered
+    assert "prime env install primeintellect/gsm8k" not in rendered
     assert "Raw" not in rendered
     assert "content_hash" not in rendered
 
@@ -1289,7 +1412,7 @@ def test_prime_lab_launches_viewer_by_default(monkeypatch: pytest.MonkeyPatch) -
     def fake_run_lab_view(**kwargs: Any) -> None:
         calls.append(kwargs)
 
-    monkeypatch.setattr("prime_lab_view.run_lab_view", fake_run_lab_view)
+    monkeypatch.setattr("prime_lab_app.run_lab_view", fake_run_lab_view)
 
     result = CliRunner().invoke(lab_cli_app, [])
 
@@ -1298,13 +1421,13 @@ def test_prime_lab_launches_viewer_by_default(monkeypatch: pytest.MonkeyPatch) -
     assert calls[0]["limit"] == 1000
 
 
-def test_prime_lab_view_alias_launches_viewer(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prime_lab_app_alias_launches_viewer(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 
     def fake_run_lab_view(**kwargs: Any) -> None:
         calls.append(kwargs)
 
-    monkeypatch.setattr("prime_lab_view.run_lab_view", fake_run_lab_view)
+    monkeypatch.setattr("prime_lab_app.run_lab_view", fake_run_lab_view)
 
     result = CliRunner().invoke(lab_cli_app, ["view", "--limit", "7"])
 
@@ -1382,6 +1505,33 @@ def test_prime_lab_doctor_service_checks_and_fixes_workspace(tmp_path: Path) -> 
     )
 
 
+def test_prime_lab_doctor_checks_all_configured_agent_surfaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("prime_lab_app.agent_capabilities.shutil.which", lambda _binary: "/bin/x")
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        json.dumps(
+            {
+                "choices": {
+                    "agents": ["codex", "claude"],
+                    "primary_agent": "codex",
+                    "use_multiple_agents": True,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
+    checks = {check.name: check for check in result.checks}
+
+    assert checks["Codex native tools"].status == "PASS"
+    assert checks["Claude native tools"].status == "PASS"
+    assert "Coding agent" not in checks
+
+
 def test_prime_lab_doctor_service_checks_configs_and_source_hygiene(tmp_path: Path) -> None:
     configs_dir = tmp_path / "configs" / "rl"
     configs_dir.mkdir(parents=True)
@@ -1439,6 +1589,7 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
     downloads: list[Path] = []
 
     def fake_download(_url: str, dest: Path, _emit: Any, *, force: bool = False) -> None:
@@ -1446,7 +1597,17 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"{dest.name}\n", encoding="utf-8")
 
+    commands: list[list[str]] = []
+
+    def fake_runner(command: Any, cwd: Path, emit: Any) -> int:
+        commands.append(list(command))
+        return 0
+
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
+    monkeypatch.setattr(
+        "prime_lab_app.agent_capabilities.shutil.which",
+        lambda command: "/bin/pi" if command == "pi" else None,
+    )
 
     assert parse_lab_sync_args(["--agent", "pi"]).agents == ("pi",)
     assert parse_lab_sync_args([]).agents == ()
@@ -1455,11 +1616,25 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
         LabSyncOptions(agents=("pi",)),
         workspace=tmp_path,
         emit=lambda _text: None,
+        runner=fake_runner,
     )
 
     assert result.exit_code == 0
     assert (tmp_path / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
+    assert (tmp_path / ".prime" / "skills" / "lab-widgets" / "SKILL.md").is_file()
+    assert (tmp_path / ".prime" / "lab" / "skills" / "lab-widgets" / "SKILL.md").is_file()
+    skill_text = (tmp_path / ".prime" / "skills" / "lab-widgets" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "native Lab controls" in skill_text
+    assert "not a shell" in skill_text
+    assert "Do not suggest CLI" in skill_text
+    assert "Do not name internal implementation surfaces" in skill_text
+    assert "native tools, not markdown conventions" in skill_text
+    assert "not yet supported" not in skill_text
     assert (tmp_path / ".pi" / "skills" / "create-environments").exists()
+    assert (tmp_path / ".pi" / "skills" / "lab-widgets").exists()
+    assert ["npm", "install", "-g", "pi-acp"] in commands
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
     assert (tmp_path / ".prime" / "lab" / "docs" / "index.md").is_file()
     assert (tmp_path / "AGENTS.md").is_file()
@@ -1470,6 +1645,7 @@ def test_prime_lab_sync_service_preserves_workspace_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / ".prime").mkdir()
     (tmp_path / ".prime" / "lab.json").write_text(
         '{"choices": {"agents": ["opencode"], "primary_agent": "opencode"}}',
@@ -1488,20 +1664,40 @@ def test_prime_lab_sync_service_preserves_workspace_agent(
     assert result.exit_code == 0
     assert metadata["choices"]["primary_agent"] == "opencode"
     assert (tmp_path / ".opencode" / "skills" / "create-environments").exists()
+    assert (tmp_path / ".opencode" / "skills" / "lab-widgets").exists()
+    opencode_config = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
+    assert opencode_config["mcp"]["prime_lab"]["command"] == [
+        sys.executable,
+        "-c",
+        "from prime_cli.main import run; run()",
+        "lab",
+        "mcp",
+        "--workspace",
+        str(tmp_path.resolve()),
+    ]
 
 
 def test_prime_lab_setup_service_supports_pi_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
     def fake_download(url: str, dest: Path, emit: Any, *, force: bool = False) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
 
+    commands: list[list[str]] = []
+
     def fake_runner(command: Any, cwd: Path, emit: Any) -> int:
+        commands.append(list(command))
         return 0
 
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
+    monkeypatch.setattr(
+        "prime_lab_app.agent_capabilities.shutil.which",
+        lambda command: "/bin/pi" if command == "pi" else None,
+    )
 
     assert parse_lab_setup_args(["--agent", "pi"]).agents == ("pi",)
 
@@ -1516,24 +1712,143 @@ def test_prime_lab_setup_service_supports_pi_agent(
     assert result.exit_code == 0
     assert metadata["choices"]["primary_agent"] == "pi"
     assert (tmp_path / ".pi" / "skills" / "create-environments").exists()
+    assert (tmp_path / ".pi" / "skills" / "lab-widgets").exists()
+    assert ["npm", "install", "-g", "pi-acp"] in commands
+
+
+def test_prime_lab_setup_service_supports_claude_code_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_download(url: str, dest: Path, emit: Any, *, force: bool = False) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
+
+    def fake_runner(command: Any, cwd: Path, emit: Any) -> int:
+        return 0
+
+    monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
+
+    assert parse_lab_setup_args(["--agent", "claude-code"]).agents == ("claude-code",)
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("claude-code",)),
+        workspace=tmp_path,
+        emit=lambda _text: None,
+        runner=fake_runner,
+    )
+
+    metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
+    assert result.exit_code == 0
+    assert metadata["choices"]["primary_agent"] == "claude-code"
+    assert (tmp_path / ".claude" / "skills" / "create-environments").exists()
+    assert (tmp_path / ".claude" / "skills" / "lab-widgets").exists()
+    assert agent_mcp_config_path(tmp_path, "claude-code").is_file()
+
+
+def test_prime_lab_setup_service_supports_hermes_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_download(url: str, dest: Path, emit: Any, *, force: bool = False) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
+
+    def fake_runner(command: Any, cwd: Path, emit: Any) -> int:
+        return 0
+
+    monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
+
+    assert parse_lab_setup_args(["--agent", "hermes-agent"]).agents == ("hermes-agent",)
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("hermes-agent",)),
+        workspace=tmp_path,
+        emit=lambda _text: None,
+        runner=fake_runner,
+    )
+
+    metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
+    assert result.exit_code == 0
+    assert metadata["choices"]["primary_agent"] == "hermes-agent"
+    assert (tmp_path / ".hermes" / "skills" / "create-environments").exists()
+    assert (tmp_path / ".hermes" / "skills" / "lab-widgets").exists()
+    assert (tmp_path / ".hermes" / "config.yaml").is_file()
 
 
 def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
     assert agent_adapter("codex").prompt_command("hello") == ["codex", "exec", "hello"]
     assert agent_adapter("claude").prompt_command("hello") == ["claude", "-p", "hello"]
-    assert agent_adapter("claude").server_spec(Path("/workspace")).transport == "one-shot"
-    assert agent_adapter("opencode").prompt_command("hello") == ["opencode", "run", "hello"]
-    assert agent_adapter("pi").prompt_command("hello") == ["pi", "-p", "hello"]
-    assert agent_adapter("hermes").prompt_command("hello") == ["hermes", "--oneshot", "hello"]
-    pi_server = agent_adapter("pi").server_spec(Path("/workspace"))
-    assert pi_server.command == (
-        "pi",
-        "--mode",
-        "rpc",
-        "--session-dir",
-        "/workspace/.prime/lab/agent-sessions/pi",
+    assert agent_adapter("claude").server_spec(Path("/workspace")).transport == "claude-agent-sdk"
+    assert agent_adapter("codex").lab_widget_contract == "codex-dynamic-tools"
+    assert agent_adapter("claude").lab_widget_contract == "claude-sdk-tools"
+    assert agent_adapter("claude-code").lab_widget_contract == "mcp-stdio-tools"
+    assert agent_adapter("cursor").lab_widget_contract == "mcp-stdio-tools"
+    assert agent_adapter("opencode").lab_widget_contract == "mcp-stdio-tools"
+    assert agent_adapter("pi").lab_widget_contract == "mcp-stdio-tools"
+    assert agent_adapter("hermes-agent").lab_widget_contract == "mcp-stdio-tools"
+    workspace = Path("/workspace")
+    allowed_lab_tools = ",".join(
+        (
+            "mcp__prime_lab__choose",
+            "mcp__prime_lab__edit_config",
+            "mcp__prime_lab__preview_action",
+            "mcp__prime_lab__launch_run",
+            "mcp__prime_lab__show_patch",
+            "mcp__prime_lab__inspect_rollouts",
+        )
     )
-    assert pi_server.transport == "stdio-jsonrpc"
+    assert agent_adapter("claude-code").stream_command("hello", workspace=workspace) == [
+        "claude",
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--allowedTools",
+        allowed_lab_tools,
+        "--mcp-config",
+        "/workspace/.prime/lab/agent-mcp/claude-code.json",
+        "--",
+        "hello",
+    ]
+    assert agent_adapter("claude-cli").name == "claude-code"
+    assert agent_adapter("cursor").stream_command("hello", "session-1") == [
+        "cursor-agent",
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--stream-partial-output",
+        "--trust",
+        "--approve-mcps",
+        "--force",
+        "--resume",
+        "session-1",
+        "hello",
+    ]
+    assert agent_adapter("opencode").prompt_command("hello") == ["opencode", "run", "hello"]
+    assert agent_adapter("opencode").server_spec(workspace).command == (
+        "opencode",
+        "acp",
+        "--cwd",
+        "/workspace",
+    )
+    assert agent_adapter("opencode").server_spec(workspace).transport == "acp-stdio"
+    assert agent_adapter("pi").prompt_command("hello") == ["pi", "--print", "hello"]
+    assert agent_adapter("hermes").prompt_command("hello") == ["hermes", "--oneshot", "hello"]
+    assert agent_adapter("hermes-agent").server_spec(workspace).command == (
+        "hermes",
+        "acp",
+        "--accept-hooks",
+    )
+    assert agent_adapter("hermes-agent").server_spec(workspace).transport == "acp-stdio"
+    pi_server = agent_adapter("pi").server_spec(Path("/workspace"))
+    assert pi_server.command == ("pi-acp",)
+    assert pi_server.transport == "acp-stdio"
     assert agent_adapter("hermes").name == "hermes-agent"
     assert agent_adapter("codex").server_spec(Path("/workspace")).command == (
         "codex",
@@ -1542,12 +1857,138 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
         "stdio://",
     )
     assert agent_adapter("codex").server_spec(Path("/workspace")).transport == "codex-app-stdio"
-    assert agent_adapter("hermes-agent").server_spec(Path("/workspace")).command == (
-        "hermes",
-        "acp",
-    )
-    assert agent_adapter("hermes-agent").server_spec(Path("/workspace")).transport == "acp-stdio"
     assert agent_adapter("my-agent").prompt_command("hello") == ["my-agent", "hello"]
+
+
+def test_lab_agent_capabilities_centralize_supported_agents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "prime_lab_app.agent_capabilities.shutil.which",
+        lambda command: "/bin/tool" if command in {"pi", "codex"} else None,
+    )
+
+    assert "pi" in known_agent_names()
+    pi = agent_capability("pi")
+    assert pi.label == "Pi Coding Agent"
+    assert pi.native_surface == "pi_acp"
+    assert [requirement.binary for requirement in pi.missing_requirements()] == ["pi-acp"]
+    assert pi.requirements[1].install_command == ("npm", "install", "-g", "pi-acp")
+    assert agent_capability("codex").native_surface == "codex_app_server"
+    assert agent_capability("custom-agent").status == "not_supported"
+    assert agent_capability("cursor").resolved_surface_paths(tmp_path) == (
+        tmp_path.resolve() / ".cursor" / "mcp.json",
+    )
+
+
+def test_agent_session_cache_scopes_by_workspace_and_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    codex_session = create_agent_session(workspace, "codex")
+    codex_session = write_agent_session(
+        codex_session,
+        AgentConnectionState(
+            agent="codex",
+            label="Codex",
+            status="connected",
+            transport="codex-app-stdio",
+            workspace=workspace,
+            session_id="thread-1",
+        ),
+        (
+            AgentChatMessage("user", "hello"),
+            AgentChatMessage(
+                "system",
+                "Widget requested",
+                "widget",
+                {"type": "widget_requested", "payload": {"title": "Pick env"}},
+            ),
+            AgentChatMessage("assistant", "hi"),
+        ),
+        base_url="https://api.test",
+        team="research",
+        authenticated=True,
+    )
+    claude_session = create_agent_session(workspace, "claude")
+
+    loaded_codex = latest_agent_session(workspace, "codex")
+    loaded_claude = latest_agent_session(workspace, "claude")
+    assert workspace_session_key(workspace)
+    assert loaded_codex == codex_session
+    assert loaded_claude == claude_session
+    assert loaded_codex is not None
+    assert loaded_codex.native_session_id == "thread-1"
+    assert loaded_codex.messages[-1].content == "hi"
+    assert loaded_codex.messages[1].metadata["payload"]["title"] == "Pick env"
+
+
+def test_agent_prompt_history_is_global_and_recent_unique(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    first_workspace = tmp_path / "first"
+    second_workspace = tmp_path / "second"
+    first_workspace.mkdir()
+    second_workspace.mkdir()
+
+    append_agent_prompt_history(first_workspace, "codex", "first prompt")
+    append_agent_prompt_history(second_workspace, "cursor", "second prompt")
+    append_agent_prompt_history(first_workspace, "codex", "first prompt")
+
+    assert load_agent_prompt_history(limit=10) == ("second prompt", "first prompt")
+
+
+def test_agent_acp_helpers_normalize_lab_mcp_and_updates(tmp_path: Path) -> None:
+    servers = acp_lab_mcp_servers(tmp_path)
+    assert servers[0]["name"] == "prime_lab"
+    assert servers[0]["args"][-2:] == ["--workspace", str(tmp_path.resolve())]
+
+    params = acp_session_params(tmp_path, session_id="session-1")
+    assert params["sessionId"] == "session-1"
+    assert params["mcpServers"][0]["name"] == "prime_lab"
+
+    support = acp_session_support(
+        {
+            "agentCapabilities": {
+                "sessionCapabilities": {"resume": {}, "close": {}},
+                "loadSession": True,
+            }
+        }
+    )
+    assert support.resume is True
+    assert support.load is True
+    assert support.close is True
+
+    delta = acp_update_event(
+        {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "hello"},
+        }
+    )
+    assert delta.kind == "assistant_delta"
+    assert delta.text == "hello"
+
+    tool = acp_update_event(
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tool-1",
+            "title": "Read config",
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": "ok"}}],
+        }
+    )
+    assert tool.kind == "tool_update"
+    assert tool.tool_call_id == "tool-1"
+    assert tool.title == "Read config"
+    assert tool.status == "completed"
+    assert tool.text == "ok"
 
 
 class _FakeJsonRpcProcess:
@@ -1621,26 +2062,648 @@ def _last_message(messages: tuple[Any, ...]) -> Any:
     return messages[-1]
 
 
-def test_agent_runtime_supports_one_shot_exec(tmp_path: Path) -> None:
-    class FakeProcess:
-        stdout = ["agent response\n"]
-
-        def wait(self) -> int:
-            return 0
-
-        def poll(self) -> None:
-            return None
-
-        def terminate(self) -> None:
-            return None
-
-    done = threading.Event()
-    commands: list[list[str]] = []
+@pytest.mark.parametrize(
+    "agent_name",
+    ("my-agent",),
+)
+def test_agent_runtime_triages_agents_without_lab_tool_surfaces(
+    tmp_path: Path,
+    agent_name: str,
+) -> None:
+    popen_called = False
     latest_messages: tuple[Any, ...] = ()
 
-    def fake_popen(command: list[str], **_kwargs: Any) -> FakeProcess:
+    def fake_popen(_command: list[str], **_kwargs: Any) -> Any:
+        nonlocal popen_called
+        popen_called = True
+        raise AssertionError("unsupported agents should not start a process")
+
+    def on_messages(messages: Any) -> None:
+        nonlocal latest_messages
+        latest_messages = messages
+
+    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime.start(tmp_path, agent_name)
+
+    assert runtime.state.status == "unsupported"
+    assert "not yet supported" in runtime.state.message
+    assert latest_messages
+    assert latest_messages[-1].status == "warning"
+    runtime.send_prompt("hello")
+    assert latest_messages[-1].status == "error"
+    assert "not yet supported" in latest_messages[-1].content
+    assert not popen_called
+
+
+def test_lab_mcp_ipc_roundtrip(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool, arguments))
+        return {"ok": True, "tool": tool, "arguments": arguments}
+
+    server = LabMcpIpcServer(tmp_path, handler)
+    server.start()
+    try:
+        result = call_lab_mcp_tool(tmp_path, "choose", {"title": "Pick one"})
+    finally:
+        server.stop()
+
+    assert result == {"ok": True, "tool": "choose", "arguments": {"title": "Pick one"}}
+    assert calls == [("choose", {"title": "Pick one"})]
+
+
+def test_lab_mcp_tool_definitions_include_widget_tools() -> None:
+    tools = lab_mcp_tool_definitions()
+    names = {tool["name"] for tool in tools}
+
+    assert {
+        "choose",
+        "edit_config",
+        "preview_action",
+        "launch_run",
+        "show_patch",
+        "inspect_rollouts",
+    }.issubset(names)
+    choose_tool = next(tool for tool in tools if tool["name"] == "choose")
+    assert choose_tool["inputSchema"]["type"] == "object"
+
+
+def test_lab_mcp_stdio_server_lists_and_forwards_tools(tmp_path: Path) -> None:
+    server = LabMcpIpcServer(
+        tmp_path,
+        lambda tool, arguments: {"ok": True, "tool": tool, "arguments": arguments},
+    )
+    server.start()
+    try:
+        request_stream = StringIO(
+            "\n".join(
+                json.dumps(payload)
+                for payload in (
+                    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {"name": "choose", "arguments": {"title": "Pick"}},
+                    },
+                )
+            )
+            + "\n"
+        )
+        response_stream = StringIO()
+        _serve_lab_mcp_stdio(tmp_path, request_stream, response_stream)
+    finally:
+        server.stop()
+
+    responses = [
+        json.loads(line) for line in response_stream.getvalue().splitlines() if line.strip()
+    ]
+    assert [response["id"] for response in responses] == [1, 2, 3]
+    assert responses[0]["result"]["serverInfo"]["name"] == "prime-lab"
+    assert any(tool["name"] == "choose" for tool in responses[1]["result"]["tools"])
+    tool_result = responses[2]["result"]["structuredContent"]
+    assert tool_result == {"ok": True, "tool": "choose", "arguments": {"title": "Pick"}}
+
+
+def test_agent_native_surface_writers_create_agent_specific_configs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    opencode_path = write_opencode_mcp_config(tmp_path)
+    hermes_path = write_hermes_mcp_config(tmp_path)
+
+    opencode_config = json.loads(opencode_path.read_text(encoding="utf-8"))
+    assert opencode_config["mcp"]["prime_lab"]["type"] == "local"
+    assert opencode_config["mcp"]["prime_lab"]["command"] == [
+        sys.executable,
+        "-c",
+        "from prime_cli.main import run; run()",
+        "lab",
+        "mcp",
+        "--workspace",
+        str(tmp_path.resolve()),
+    ]
+    assert opencode_config["mcp"]["prime_lab"]["enabled"] is True
+    assert opencode_config["mcp"]["prime_lab"]["timeout"] == 60000
+    hermes_config = hermes_path.read_text(encoding="utf-8")
+    assert "mcp_servers" in hermes_config
+    assert "prime_lab" in hermes_config
+    assert str(tmp_path.resolve()) in hermes_config
+
+
+def test_agent_runtime_handles_external_mcp_widget_calls(tmp_path: Path) -> None:
+    messages: tuple[Any, ...] = ()
+    actions: list[dict[str, Any]] = []
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    runtime = AgentRuntime(on_messages=on_messages, on_action=actions.append)
+    response = runtime.handle_external_lab_tool(
+        "choose",
+        {"prompt": "Pick env", "options": [{"id": "env", "label": "Env"}]},
+    )
+
+    assert '"ok": true' in response["contentItems"][0]["text"]
+    assert messages
+    assert messages[-1].status == "widget"
+    assert messages[-1].metadata["kind"] == "choice_picker"
+    assert messages[-1].metadata["payload"]["title"] == "Pick env"
+    assert actions[-1]["tool"] == "choose"
+    assert actions[-1]["source"] == "native_tool"
+
+
+def test_agent_runtime_widget_call_closes_active_assistant_turn(tmp_path: Path) -> None:
+    messages: tuple[Any, ...] = ()
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    runtime = AgentRuntime(on_messages=on_messages)
+    runtime._workspace = tmp_path
+    runtime._messages = [AgentChatMessage("assistant", "Preparing launch.", "streaming")]
+
+    response = runtime.handle_external_lab_tool(
+        "choose",
+        {
+            "title": "Pick a run",
+            "candidates": [{"id": "a", "label": "Run A"}],
+            "default_id": "a",
+        },
+    )
+
+    assert response["success"] is True
+    assert len(messages) == 2
+    assert messages[0] == AgentChatMessage("assistant", "Preparing launch.")
+    assert messages[1].status == "widget"
+    assert messages[1].metadata["kind"] == "choice_picker"
+
+
+def test_agent_runtime_supports_claude_code_with_lab_mcp_config(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    messages: tuple[Any, ...] = ()
+
+    class FakeCliProcess:
+        def __init__(self) -> None:
+            self.stdin = None
+            self.stderr = iter(())
+            self.stdout = iter(
+                [
+                    json.dumps(
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "ready"}],
+                            },
+                            "session_id": "claude-code-session",
+                        }
+                    )
+                    + "\n"
+                ]
+            )
+
+        def poll(self) -> int | None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> FakeCliProcess:
         commands.append(command)
-        return FakeProcess()
+        return FakeCliProcess()
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime.start(tmp_path, "claude-code")
+
+    assert runtime.state.status == "connected"
+    assert runtime.state.transport == "resumable-cli"
+    config_path = agent_mcp_config_path(tmp_path, "claude-code")
+    assert config_path.exists()
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["mcpServers"]["prime_lab"]["args"] == [
+        "-c",
+        "from prime_cli.main import run; run()",
+        "lab",
+        "mcp",
+        "--workspace",
+        str(tmp_path.resolve()),
+    ]
+
+    runtime.send_prompt("hello")
+
+    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
+    assert "--mcp-config" in commands[-1]
+    assert str(config_path) in commands[-1]
+    assert "Native Lab tools are available" in commands[-1][-1]
+    assert messages
+    assert messages[-1].content == "ready"
+
+
+def test_agent_runtime_supports_cursor_with_workspace_mcp_config(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    messages: tuple[Any, ...] = ()
+    existing_config = tmp_path / ".cursor" / "mcp.json"
+    existing_config.parent.mkdir(parents=True)
+    existing_config.write_text(
+        json.dumps({"mcpServers": {"existing": {"command": "echo", "args": ["ok"]}}}),
+        encoding="utf-8",
+    )
+
+    class FakeCursorProcess:
+        def __init__(self) -> None:
+            self.stdin = None
+            self.stderr = iter(())
+            self.stdout = iter(
+                [
+                    json.dumps(
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "cursor ready"}],
+                            },
+                            "session_id": "cursor-session",
+                            "timestamp_ms": 1,
+                        }
+                    )
+                    + "\n",
+                    json.dumps(
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "cursor ready"}],
+                            },
+                            "session_id": "cursor-session",
+                        }
+                    )
+                    + "\n",
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "subtype": "success",
+                            "result": "cursor ready",
+                            "session_id": "cursor-session",
+                        }
+                    )
+                    + "\n",
+                ]
+            )
+
+        def poll(self) -> int | None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> FakeCursorProcess:
+        commands.append(command)
+        return FakeCursorProcess()
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime.start(tmp_path, "cursor")
+
+    assert runtime.state.status == "connected"
+    cursor_config = json.loads(existing_config.read_text(encoding="utf-8"))
+    assert cursor_config["mcpServers"]["existing"]["command"] == "echo"
+    assert cursor_config["mcpServers"]["prime_lab"]["args"] == [
+        "-c",
+        "from prime_cli.main import run; run()",
+        "lab",
+        "mcp",
+        "--workspace",
+        str(tmp_path.resolve()),
+    ]
+
+    runtime.send_prompt("hello")
+
+    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
+    assert "--approve-mcps" in commands[-1]
+    assert "--force" in commands[-1]
+    assert "--workspace" in commands[-1]
+    assert str(tmp_path.resolve()) in commands[-1]
+    assert "Native Lab tools are available" in commands[-1][-1]
+    assert messages
+    assert messages[-1].content == "cursor ready"
+
+
+def test_agent_runtime_supports_opencode_with_workspace_mcp_config(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    messages: tuple[Any, ...] = ()
+    (tmp_path / "opencode.json").write_text(
+        json.dumps({"theme": "system", "mcp": {"existing": {"type": "local"}}}),
+        encoding="utf-8",
+    )
+    session_new_params: list[dict[str, Any]] = []
+    prompt_params: list[dict[str, Any]] = []
+
+    def handler(process: _FakeJsonRpcProcess, message: dict[str, Any]) -> None:
+        request_id = message["id"]
+        method = message["method"]
+        if method == "initialize":
+            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {"authMethods": []}})
+            return
+        if method == "session/new":
+            params = message["params"]
+            session_new_params.append(params)
+            process.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {"sessionId": "opencode-session"},
+                }
+            )
+            return
+        if method == "session/prompt":
+            prompt_params.append(message["params"])
+            process.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "opencode-session",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "opencode ready"},
+                        },
+                    },
+                }
+            )
+            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
+            return
+        process.emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> _FakeJsonRpcProcess:
+        commands.append(command)
+        return _FakeJsonRpcProcess(handler)
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime.start(tmp_path, "opencode")
+
+    assert _wait_for(lambda: runtime.state.status == "connected")
+    opencode_config = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
+    assert opencode_config["theme"] == "system"
+    assert opencode_config["mcp"]["prime_lab"]["type"] == "local"
+    assert commands[0] == ["opencode", "acp", "--cwd", str(tmp_path.resolve())]
+    assert session_new_params[0]["cwd"] == str(tmp_path.resolve())
+    assert session_new_params[0]["mcpServers"][0]["name"] == "prime_lab"
+
+    runtime.send_prompt("hello")
+
+    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
+    assert prompt_params
+    assert prompt_params[0]["sessionId"] == "opencode-session"
+    assert messages
+    assert messages[-1].content == "opencode ready"
+    runtime.stop()
+
+
+def test_agent_runtime_supports_pi_with_acp_mcp_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    commands: list[list[str]] = []
+    messages: tuple[Any, ...] = ()
+    session_new_params: list[dict[str, Any]] = []
+    prompt_params: list[dict[str, Any]] = []
+
+    def handler(process: _FakeJsonRpcProcess, message: dict[str, Any]) -> None:
+        request_id = message["id"]
+        method = message["method"]
+        if method == "initialize":
+            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {"authMethods": []}})
+            return
+        if method == "session/new":
+            session_new_params.append(message["params"])
+            process.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {"sessionId": "pi-session"},
+                }
+            )
+            return
+        if method == "session/prompt":
+            prompt_params.append(message["params"])
+            process.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "pi-session",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "pi ready"},
+                        },
+                    },
+                }
+            )
+            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
+            return
+        process.emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> _FakeJsonRpcProcess:
+        commands.append(command)
+        return _FakeJsonRpcProcess(handler)
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime.start(tmp_path, "pi")
+
+    assert _wait_for(lambda: runtime.state.status == "connected")
+    assert commands[0] == ["pi-acp"]
+    assert session_new_params[0]["cwd"] == str(tmp_path.resolve())
+    assert session_new_params[0]["mcpServers"][0]["name"] == "prime_lab"
+
+    runtime.send_prompt("hello")
+
+    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
+    assert prompt_params
+    assert prompt_params[0]["sessionId"] == "pi-session"
+    assert messages
+    assert messages[-1].content == "pi ready"
+    runtime.stop()
+
+
+def test_agent_runtime_supports_hermes_with_mcp_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    commands: list[list[str]] = []
+    messages: tuple[Any, ...] = ()
+    session_new_params: list[dict[str, Any]] = []
+
+    def handler(process: _FakeJsonRpcProcess, message: dict[str, Any]) -> None:
+        request_id = message["id"]
+        method = message["method"]
+        if method == "initialize":
+            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {"authMethods": []}})
+            return
+        if method == "session/new":
+            session_new_params.append(message["params"])
+            process.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {"sessionId": "hermes-session"},
+                }
+            )
+            return
+        if method == "session/prompt":
+            process.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "hermes-session",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "hermes ready"},
+                        },
+                    },
+                }
+            )
+            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
+            return
+        process.emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> _FakeJsonRpcProcess:
+        commands.append(command)
+        return _FakeJsonRpcProcess(handler)
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime.start(tmp_path, "hermes-agent")
+
+    assert _wait_for(lambda: runtime.state.status == "connected")
+    hermes_config = (tmp_path / "home" / ".hermes" / "config.yaml").read_text(encoding="utf-8")
+    assert "prime_lab" in hermes_config
+    assert str(tmp_path.resolve()) in hermes_config
+    assert commands[0] == ["hermes", "acp", "--accept-hooks"]
+    assert session_new_params[0]["mcpServers"][0]["name"] == "prime_lab"
+
+    runtime.send_prompt("hello")
+
+    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
+    assert messages
+    assert messages[-1].content == "hermes ready"
+    runtime.stop()
+
+
+def test_agent_runtime_supports_claude_agent_sdk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeOptions:
+        def __init__(
+            self,
+            cwd: str = "",
+            resume_session_id: str = "",
+            mcp_servers: dict[str, Any] | None = None,
+            allowed_tools: list[str] | None = None,
+            system_prompt: str = "",
+        ) -> None:
+            self.cwd = cwd
+            self.resume_session_id = resume_session_id
+            self.mcp_servers = mcp_servers or {}
+            self.allowed_tools = allowed_tools or []
+            self.system_prompt = system_prompt
+
+    async def fake_query(prompt: str, options: FakeOptions) -> Any:
+        assert prompt.endswith("\n\nhello")
+        assert "lab_edit_config" not in prompt
+        assert "Native Lab tools are available" in prompt
+        assert "not visible" not in prompt
+        assert "not yet supported" not in prompt
+        assert "not yet supported" not in options.system_prompt
+        assert options.cwd == str(tmp_path)
+        assert "prime_lab" in options.mcp_servers
+        assert "choose" in options.allowed_tools
+        assert "mcp__prime_lab__choose" in options.allowed_tools
+        assert "launch_run" in options.allowed_tools
+        assert "edit_config" in options.system_prompt
+        tools = options.mcp_servers["prime_lab"]["tools"]
+        choose_tool = next(tool for tool in tools if tool["name"] == "choose")
+        tool_result = await choose_tool["callback"](
+            {"prompt": "Pick env", "options": [{"id": "env", "label": "Env"}]}
+        )
+        assert '"ok": true' in tool_result["content"][0]["text"]
+        yield {"type": "system", "session_id": "sdk-session-1"}
+        yield {
+            "type": "assistant",
+            "message": {
+                "id": "sdk-message-1",
+                "content": [{"type": "text", "text": "hello"}],
+            },
+        }
+        yield {
+            "type": "assistant",
+            "message": {
+                "id": "sdk-message-1",
+                "content": [{"type": "text", "text": "hello world"}],
+            },
+        }
+
+    def fake_tool(name: str, description: str, input_schema: dict[str, Any]) -> Any:
+        assert name
+        assert description
+        assert input_schema.get("type") == "object"
+
+        def decorate(callback: Any) -> dict[str, Any]:
+            return {"name": name, "callback": callback}
+
+        return decorate
+
+    def fake_create_server(
+        name: str,
+        *,
+        version: str = "1.0.0",
+        tools: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        return {"name": name, "version": version, "tools": tools or []}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "claude_agent_sdk",
+        types.SimpleNamespace(
+            query=fake_query,
+            ClaudeAgentOptions=FakeOptions,
+            tool=fake_tool,
+            create_sdk_mcp_server=fake_create_server,
+        ),
+    )
+
+    done = threading.Event()
+    latest_messages: tuple[Any, ...] | None = None
+    actions: list[dict[str, Any]] = []
 
     def on_messages(messages: Any) -> None:
         nonlocal latest_messages
@@ -1648,18 +2711,24 @@ def test_agent_runtime_supports_one_shot_exec(tmp_path: Path) -> None:
         if messages and messages[-1].role == "assistant" and messages[-1].status != "streaming":
             done.set()
 
-    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime = AgentRuntime(on_messages=on_messages, on_action=actions.append)
     runtime.start(tmp_path, "claude")
 
     assert runtime.state.status == "connected"
-    assert runtime.state.transport == "one-shot"
+    assert runtime.state.transport == "claude-agent-sdk"
 
     runtime.send_prompt("hello")
 
     assert done.wait(timeout=2)
-    assert commands == [["claude", "-p", "hello"]]
-    assert latest_messages
-    assert latest_messages[-1].content == "agent response\n"
+    assert runtime.state.session_id == "sdk-session-1"
+    assert latest_messages is not None
+    assert len(latest_messages) > 0
+    assert latest_messages[-1].content == "hello world"
+    assert actions
+    assert actions[-1]["source"] == "native_tool"
+    assert actions[-1]["tool"] == "choose"
+    assert actions[-1]["title"] == "Pick env"
+    assert actions[-1]["payload"]["candidates"] == [{"id": "env", "label": "Env"}]
 
 
 def test_agent_runtime_supports_codex_app_stdio_chat(tmp_path: Path) -> None:
@@ -1728,6 +2797,7 @@ def test_agent_runtime_supports_codex_app_stdio_chat(tmp_path: Path) -> None:
 
 def test_agent_runtime_exposes_codex_lab_widget_tools(tmp_path: Path) -> None:
     messages: tuple[Any, ...] = ()
+    actions: list[dict[str, Any]] = []
     thread_start_params: dict[str, Any] = {}
     tool_responses: list[dict[str, Any]] = []
     process_holder: list[_FakeJsonRpcProcess] = []
@@ -1773,15 +2843,27 @@ def test_agent_runtime_exposes_codex_lab_widget_tools(tmp_path: Path) -> None:
         nonlocal messages
         messages = value
 
-    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime = AgentRuntime(
+        on_messages=on_messages,
+        on_action=actions.append,
+        popen_factory=fake_popen,
+    )
     runtime.start(tmp_path, "codex")
 
     assert _wait_for(lambda: runtime.state.status == "connected")
-    assert "lab.render_widget" in str(thread_start_params.get("developerInstructions"))
+    assert "edit_config" in str(thread_start_params.get("developerInstructions"))
     dynamic_tools = thread_start_params.get("dynamicTools")
     assert isinstance(dynamic_tools, list)
-    assert dynamic_tools[0]["namespace"] == "lab"
-    assert dynamic_tools[0]["name"] == "render_widget"
+    tool_names = {tool["name"] for tool in dynamic_tools if isinstance(tool, dict)}
+    assert {
+        "choose",
+        "edit_config",
+        "preview_action",
+        "launch_run",
+        "show_patch",
+        "inspect_rollouts",
+    }.issubset(tool_names)
+    assert all(tool["namespace"] == "lab" for tool in dynamic_tools if isinstance(tool, dict))
 
     process_holder[0].emit(
         {
@@ -1790,10 +2872,9 @@ def test_agent_runtime_exposes_codex_lab_widget_tools(tmp_path: Path) -> None:
             "method": "item/tool/call",
             "params": {
                 "namespace": "lab",
-                "tool": "render_widget",
+                "tool": "choose",
                 "callId": "widget-1",
                 "arguments": {
-                    "kind": "choice_picker",
                     "title": "Pick a config",
                     "candidates": [{"id": "a"}, {"id": "b"}],
                 },
@@ -1806,6 +2887,10 @@ def test_agent_runtime_exposes_codex_lab_widget_tools(tmp_path: Path) -> None:
     assert _wait_for(lambda: messages and messages[-1].status == "widget")
     latest_message = _last_message(messages)
     assert "Pick a config" in latest_message.content
+    assert actions[-1]["type"] == "widget_requested"
+    assert actions[-1]["tool"] == "choose"
+    assert actions[-1]["kind"] == "choice_picker"
+    assert actions[-1]["title"] == "Pick a config"
     runtime.stop()
 
 
@@ -1823,162 +2908,306 @@ def test_agent_chat_transcript_renders_assistant_markdown() -> None:
 
     rendered = _render_renderable(transcript)
 
-    assert "Assistant" in rendered
+    assert "Assistant" not in rendered
+    assert "User" not in rendered
+    assert "show me code" in rendered
     assert "print" in rendered
     assert "hello" in rendered
     assert "```" not in rendered
 
 
-def test_agent_runtime_supports_hermes_acp_stdio_chat(tmp_path: Path) -> None:
-    messages: tuple[Any, ...] = ()
-
-    def handler(process: _FakeJsonRpcProcess, message: dict[str, Any]) -> None:
-        request_id = message.get("id")
-        method = message.get("method")
-        if method == "initialize":
-            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {"authMethods": []}})
-        elif method == "session/new":
-            process.emit(
+def test_agent_chat_transcript_renders_lab_widget_card() -> None:
+    transcript = _chat_transcript(
+        (
+            AgentChatMessage(
+                "system",
+                "Widget requested",
+                "widget",
                 {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "result": {"sessionId": "session-1"},
-                }
-            )
-        elif method == "session/prompt":
-            process.emit(
-                {
-                    "jsonrpc": "2.0",
-                    "method": "session/update",
-                    "params": {
-                        "update": {
-                            "sessionUpdate": "agent_message_chunk",
-                            "content": {"type": "text", "text": "hermes response"},
-                        }
+                    "type": "widget_requested",
+                    "kind": "run_launcher",
+                    "title": "Eval: alphabet-sort",
+                    "payload": {
+                        "kind": "run_launcher",
+                        "title": "Eval: alphabet-sort",
+                        "config_kind": "eval",
+                        "config_path": "configs/eval/alphabet-sort.toml",
                     },
-                }
-            )
-            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
-        else:
-            process.emit(
-                {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": {"message": f"unexpected {method}"},
-                }
-            )
+                },
+            ),
+        ),
+        AgentConnectionState(status="connected", label="Cursor"),
+    )
 
-    def fake_popen(command: list[str], **_kwargs: Any) -> _FakeJsonRpcProcess:
-        process = _FakeJsonRpcProcess(handler)
-        process.command = command
-        return process
+    rendered = _render_renderable(transcript)
 
-    def on_messages(value: Any) -> None:
-        nonlocal messages
-        messages = value
-
-    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
-    runtime.start(tmp_path, "hermes")
-
-    assert _wait_for(lambda: runtime.state.status == "connected")
-    assert runtime.state.agent == "hermes-agent"
-    assert runtime.state.session_id == "session-1"
-
-    runtime.send_prompt("hello")
-
-    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
-    message = _last_message(messages)
-    assert message.role == "assistant"
-    assert message.content == "hermes response"
-    runtime.stop()
+    assert "Lab widget" not in rendered
+    assert "alphabet-sort" in rendered
+    assert "Eval: alphabet-sort" not in rendered
+    assert "Run launcher" not in rendered
+    assert "configs/eval/alphabet-sort.toml" in rendered
 
 
-def test_agent_runtime_records_opencode_http_endpoint(tmp_path: Path) -> None:
-    processes: list[_FakeJsonRpcProcess] = []
-    messages: tuple[Any, ...] = ()
+def test_agent_chat_parts_parse_lab_references() -> None:
+    parts = message_parts(
+        AgentChatMessage(
+            "user",
+            "Compare @env:primeintellect/gsm8k with @config:configs/eval/gsm8k.toml",
+        )
+    )
 
-    class FakeOneShotProcess:
-        stdout = ["opencode response\n"]
+    references = [part for part in parts if isinstance(part, ReferencePart)]
 
-        def wait(self) -> int:
-            return 0
-
-        def poll(self) -> None:
-            return None
-
-        def terminate(self) -> None:
-            return None
-
-    def fake_popen(command: list[str], **_kwargs: Any) -> Any:
-        if command[:2] == ["opencode", "run"]:
-            return FakeOneShotProcess()
-        process = _FakeJsonRpcProcess(lambda *_args: None, initial_stdout=("http://127.0.0.1:0",))
-        process.command = command
-        processes.append(process)
-        return process
-
-    def on_messages(value: Any) -> None:
-        nonlocal messages
-        messages = value
-
-    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
-    runtime.start(tmp_path, "opencode")
-
-    assert _wait_for(lambda: runtime.state.status == "connected")
-    assert runtime.state.transport == "acp-http"
-    assert runtime.state.endpoint == "http://127.0.0.1:0"
-    assert processes[0].command == ["opencode", "acp", "--hostname", "127.0.0.1", "--port", "0"]
-    runtime.send_prompt("hello")
-    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
-    assert _last_message(messages).content == "opencode response\n"
-    runtime.stop()
-
-
-def test_agent_runtime_starts_pi_rpc_with_session_dir(tmp_path: Path) -> None:
-    processes: list[_FakeJsonRpcProcess] = []
-    messages: tuple[Any, ...] = ()
-
-    class FakeOneShotProcess:
-        stdout = ["pi response\n"]
-
-        def wait(self) -> int:
-            return 0
-
-        def poll(self) -> None:
-            return None
-
-        def terminate(self) -> None:
-            return None
-
-    def fake_popen(command: list[str], **_kwargs: Any) -> Any:
-        if command[:2] == ["pi", "-p"]:
-            return FakeOneShotProcess()
-        process = _FakeJsonRpcProcess(lambda *_args: None)
-        process.command = command
-        processes.append(process)
-        return process
-
-    def on_messages(value: Any) -> None:
-        nonlocal messages
-        messages = value
-
-    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
-    runtime.start(tmp_path, "pi")
-
-    assert runtime.state.status == "connected"
-    assert runtime.state.transport == "stdio-jsonrpc"
-    assert processes[0].command == [
-        "pi",
-        "--mode",
-        "rpc",
-        "--session-dir",
-        str(tmp_path / ".prime" / "lab" / "agent-sessions" / "pi"),
+    assert [(part.ref_type, part.ref_id) for part in references] == [
+        ("environment", "primeintellect/gsm8k"),
+        ("config", "configs/eval/gsm8k.toml"),
     ]
-    assert (tmp_path / ".prime" / "lab" / "agent-sessions" / "pi").is_dir()
-    runtime.send_prompt("hello")
-    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
-    assert _last_message(messages).content == "pi response\n"
-    runtime.stop()
+
+
+def test_agent_stream_delta_deduplicates_idless_full_messages() -> None:
+    seen_messages: dict[str, str] = {}
+
+    first = _extract_stream_delta(
+        {"message": {"role": "assistant", "content": "Checking config parsing."}},
+        seen_messages,
+    )
+    duplicate = _extract_stream_delta(
+        {"message": {"role": "assistant", "content": "Checking config parsing."}},
+        seen_messages,
+    )
+    next_message = _extract_stream_delta(
+        {"message": {"role": "assistant", "content": "Writing config."}},
+        seen_messages,
+    )
+
+    assert first == "Checking config parsing."
+    assert duplicate == ""
+    assert next_message == "Writing config."
+
+
+def test_agent_stream_delta_handles_claude_code_partial_then_final() -> None:
+    seen_messages: dict[str, str] = {}
+
+    first = _extract_stream_delta(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "LAB_AGENT_"},
+            },
+            "session_id": "claude-session",
+        },
+        seen_messages,
+    )
+    second = _extract_stream_delta(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "SMOKE"},
+            },
+            "session_id": "claude-session",
+        },
+        seen_messages,
+    )
+    final = _extract_stream_delta(
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg-1",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "LAB_AGENT_SMOKE"}],
+            },
+            "session_id": "claude-session",
+        },
+        seen_messages,
+    )
+
+    assert first == "LAB_AGENT_"
+    assert second == "SMOKE"
+    assert final == ""
+
+
+def test_agent_stream_delta_handles_cursor_chunks_then_final_snapshot() -> None:
+    seen_messages: dict[str, str] = {}
+    chunks = [
+        {"text": "LAB_AGENT_S", "timestamp_ms": 1},
+        {"text": "MO", "timestamp_ms": 2},
+        {"text": "KE", "timestamp_ms": 3},
+        {"text": "_CURSOR", "timestamp_ms": 4},
+    ]
+
+    deltas = [
+        _extract_stream_delta(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": chunk["text"]}],
+                },
+                "timestamp_ms": chunk["timestamp_ms"],
+                "session_id": "cursor-session",
+            },
+            seen_messages,
+        )
+        for chunk in chunks
+    ]
+    final = _extract_stream_delta(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "LAB_AGENT_SMOKE_CURSOR"}],
+            },
+            "session_id": "cursor-session",
+        },
+        seen_messages,
+    )
+
+    assert "".join(deltas) == "LAB_AGENT_SMOKE_CURSOR"
+    assert final == ""
+
+
+def test_agent_stream_delta_ignores_cursor_thinking_events() -> None:
+    seen_messages: dict[str, str] = {}
+
+    thought = _extract_stream_delta(
+        {
+            "type": "thinking",
+            "subtype": "delta",
+            "text": "Planning the eval answer.",
+            "timestamp_ms": 1,
+        },
+        seen_messages,
+    )
+    assistant = _extract_stream_delta(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Here are eval options."}],
+            },
+            "timestamp_ms": 2,
+        },
+        seen_messages,
+    )
+
+    assert thought == ""
+    assert assistant == "Here are eval options."
+
+
+def test_agent_stream_delta_ignores_lab_widget_ack_payload() -> None:
+    text = _extract_stream_delta(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "ok": True,
+                                "tool": "choose",
+                                "kind": "choice_picker",
+                                "title": "Smoke test",
+                                "message": "displayed",
+                            }
+                        ),
+                    }
+                ],
+            },
+        },
+        {},
+    )
+
+    assert text == ""
+
+
+def test_agent_stream_delta_ignores_final_snapshot_after_streamed_chunks() -> None:
+    seen_messages: dict[str, str] = {}
+
+    status = _extract_stream_delta(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "Checking."}]},
+            "timestamp_ms": 1,
+        },
+        seen_messages,
+    )
+    answer = _extract_stream_delta(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "\n\nAnswer."}]},
+            "timestamp_ms": 2,
+        },
+        seen_messages,
+    )
+    final = _extract_stream_delta(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "Answer."}]},
+        },
+        seen_messages,
+    )
+
+    assert status == "Checking."
+    assert answer == "\n\nAnswer."
+    assert final == ""
+
+
+def test_agent_stream_merge_ignores_duplicate_cursor_snapshots() -> None:
+    content = _merge_stream_text("Checking config parsing.", "Checking config parsing.")
+    content = _merge_stream_text(content, "Checking config parsing.\nWriting config.")
+    content = _merge_stream_text(content, "\nWriting config.")
+
+    assert content == "Checking config parsing.\nWriting config."
+
+
+def test_agent_stream_merge_ignores_replayed_prior_blocks() -> None:
+    content = _merge_stream_text(
+        "Exploring eval setup.\n\nChecking environment defaults.",
+        "Exploring eval setup.",
+    )
+    content = _merge_stream_text(content, "\n\nChecking environment defaults.")
+
+    assert content == "Exploring eval setup.\n\nChecking environment defaults."
+
+
+def test_agent_stream_finalize_collapses_adjacent_duplicate_blocks() -> None:
+    content = "Exploring configs.\n\nExploring configs.\n\nWriting config."
+
+    assert _dedupe_streamed_text(content) == "Exploring configs.\n\nWriting config."
+
+
+def test_agent_runtime_collapses_duplicate_blocks_while_streaming() -> None:
+    messages: list[tuple[AgentChatMessage, ...]] = []
+    runtime = AgentRuntime(on_messages=messages.append)
+
+    runtime._append_streaming_assistant_text("Exploring configs.")
+    runtime._append_streaming_assistant_text("\n\nExploring configs.")
+    runtime._append_streaming_assistant_text("\n\nWriting config.")
+
+    assert messages[-1][-1] == AgentChatMessage(
+        "assistant",
+        "Exploring configs.\n\nWriting config.",
+        "streaming",
+    )
+
+
+def test_agent_runtime_strips_ansi_escape_codes_from_stream_events() -> None:
+    text = _extract_stream_delta(
+        {
+            "type": "assistant",
+            "message": {
+                "id": "message-1",
+                "content": [{"type": "text", "text": "\x1b[31mLAB\x1b[0m"}],
+            },
+        },
+        {},
+    )
+
+    assert text == "LAB"
 
 
 def test_lab_agent_select_options_keep_registered_agent_first() -> None:
@@ -1998,7 +3227,7 @@ def test_lab_brand_header_uses_lab_and_prime_marks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_mounts(tmp_path: Path) -> None:
+async def test_prime_lab_app_mounts(tmp_path: Path) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(lambda: snapshot)
 
@@ -2008,7 +3237,7 @@ async def test_prime_lab_view_mounts(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_home_launch_panel_uses_home_state(tmp_path: Path) -> None:
+async def test_prime_lab_app_home_launch_panel_uses_home_state(tmp_path: Path) -> None:
     (tmp_path / ".prime").mkdir()
     (tmp_path / ".prime" / "lab.json").write_text(
         '{"choices": {"primary_agent": "claude"}}',
@@ -2025,10 +3254,12 @@ async def test_prime_lab_view_home_launch_panel_uses_home_state(tmp_path: Path) 
 
         assert panel.display is True
         assert any(label == "workspaces" and count >= 1 for label, count in panel._state.counts)
+        launch_text = _render_renderable(panel.render())
+        assert "✓  ·" not in launch_text
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_home_launch_panel_shows_for_loaded_workspace(
+async def test_prime_lab_app_home_launch_panel_shows_for_loaded_workspace(
     tmp_path: Path,
 ) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
@@ -2042,13 +3273,16 @@ async def test_prime_lab_view_home_launch_panel_shows_for_loaded_workspace(
         assert screen.query_one("#home-launch", HomeLaunchPanel).display is True
         assert screen.query_one("#launch-actions").display is True
         assert screen.query_one("#launch-hotkeys").display is True
-        assert "agent" in str(screen.query_one("#launch-hotkeys").render())
+        hotkeys = str(screen.query_one("#launch-hotkeys").render())
+        assert "agent" in hotkeys
+        assert "refresh" not in hotkeys
+        assert app.check_action("refresh", ()) is False
         assert app.check_action("search", ()) is False
         assert app.check_action("load_more_rows", ()) is False
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_w_reopens_launch_screen(tmp_path: Path) -> None:
+async def test_prime_lab_app_ctrl_w_reopens_launch_screen(tmp_path: Path) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
 
@@ -2060,13 +3294,13 @@ async def test_prime_lab_view_w_reopens_launch_screen(tmp_path: Path) -> None:
         await pilot.pause()
         assert not isinstance(app.screen, LaunchScreen)
 
-        await pilot.press("w")
+        await pilot.press("ctrl+w")
         await pilot.pause()
         assert isinstance(app.screen, LaunchScreen)
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_auto_starts_configured_agent(tmp_path: Path) -> None:
+async def test_prime_lab_app_auto_starts_configured_agent(tmp_path: Path) -> None:
     (tmp_path / ".prime").mkdir()
     (tmp_path / ".prime" / "lab.json").write_text(
         '{"choices": {"primary_agent": "claude"}}',
@@ -2080,8 +3314,10 @@ async def test_prime_lab_view_auto_starts_configured_agent(tmp_path: Path) -> No
 
         assert app._agent_state.agent == "claude"
         assert app._agent_state.status == "connected"
-        assert app._agent_state.transport == "one-shot"
-        assert "Claude Code connected" in _render_renderable(app._statusbar_text())
+        assert app._agent_state.transport == "claude-agent-sdk"
+        status_text = _render_renderable(app._statusbar_text())
+        assert "✓ Claude" in status_text
+        assert "Claude connected" not in status_text
 
 
 @pytest.mark.asyncio
@@ -2111,6 +3347,8 @@ async def test_agent_chat_uses_centered_stage_without_sidebar(tmp_path: Path) ->
         assert not app.screen.query("#agent-controls")
         assert isinstance(app.screen.query_one("#agent-chat"), VerticalScroll)
         assert app.screen.query_one("#agent-atmosphere").display is True
+        prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
+        assert prompt.placeholder == "Ask Claude  •  /  ?  @"
 
 
 def test_launch_backdrop_renders_stable_terminal_field() -> None:
@@ -2124,7 +3362,7 @@ def test_launch_backdrop_renders_stable_terminal_field() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_home_launch_panel_dismisses_into_workspace(
+async def test_prime_lab_app_home_launch_panel_dismisses_into_workspace(
     tmp_path: Path,
 ) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
@@ -2137,7 +3375,17 @@ async def test_prime_lab_view_home_launch_panel_dismisses_into_workspace(
 
         assert not isinstance(app.screen, LaunchScreen)
         assert app._active_section_key == "workspace"
-        assert str(app.query_one("#section-title", Label).render()) == "Home"
+        assert str(app.query_one("#section-title", Label).render()) == "Settings"
+        workspace_path = _render_renderable(app.query_one("#workspace-path").render())
+        assert compact_path(tmp_path) in workspace_path
+        status_text = _render_renderable(app._statusbar_text())
+        assert "research" in status_text
+        assert compact_path(tmp_path) in status_text
+        section_tree = app.query_one("#section-tree", Tree)
+        section_labels = [
+            _render_renderable(node.label).strip() for node in section_tree.root.children
+        ]
+        assert section_labels == ["Environments", "Training", "Evaluations"]
         assert app.query_one("#item-list", OptionList).display is True
         assert app.query_one("#topbar").display is True
         assert app.query_one("#nav-pane").display is True
@@ -2149,7 +3397,35 @@ async def test_prime_lab_view_home_launch_panel_dismisses_into_workspace(
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_launch_grid_opens_quickstart_flows(tmp_path: Path) -> None:
+async def test_prime_lab_app_warning_status_opens_warning_viewer(tmp_path: Path) -> None:
+    base_snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    snapshot = replace(
+        base_snapshot,
+        warnings=("Training runs unavailable: retry later",),
+    )
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        warning_viewer = app.query_one("#warning-viewer")
+        assert warning_viewer.display is False
+        status_text = _render_renderable(app._statusbar_text())
+        assert "1 warning" in status_text
+        assert "1 warnings" not in status_text
+        await pilot.click("#statusbar")
+        await pilot.pause()
+
+        assert warning_viewer.display is True
+        rendered = _render_renderable(app.query_one("#warning-viewer-body", Static).render())
+        assert "Warnings" in rendered
+        assert "Training runs unavailable" in rendered
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_launch_grid_opens_quickstart_flows(tmp_path: Path) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
 
@@ -2163,7 +3439,7 @@ async def test_prime_lab_view_launch_grid_opens_quickstart_flows(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_launch_grid_build_opens_agent_templates(tmp_path: Path) -> None:
+async def test_prime_lab_app_launch_grid_build_opens_agent_templates(tmp_path: Path) -> None:
     (tmp_path / ".prime").mkdir()
     (tmp_path / ".prime" / "lab.json").write_text(
         '{"choices": {"primary_agent": "claude"}}',
@@ -2175,7 +3451,7 @@ async def test_prime_lab_view_launch_grid_build_opens_agent_templates(tmp_path: 
     async with app.run_test(size=(140, 44)) as pilot:
         await pilot.pause()
         button = app.screen.query_one("#launch-agent", Button)
-        assert "Build with Claude Code" in str(button.label)
+        assert "Build with Claude" in str(button.label)
 
         await pilot.click("#launch-agent")
         await pilot.pause()
@@ -2183,14 +3459,356 @@ async def test_prime_lab_view_launch_grid_build_opens_agent_templates(tmp_path: 
         assert isinstance(app.screen, AgentChatScreen)
         assert not app.screen.query("#agent-send")
         assert not app.screen.query("#agent-select")
-        app.screen.query_one("#agent-prompt", Input).value = "/template"
+        prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
+        prompt.load_text("?")
         await pilot.pause()
         menu = _render_renderable(app.screen.query_one("#agent-command-menu", Static).content)
-        assert "/template 1" in menu
+        assert "Build env" in menu
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert "Help me build a new verifiers environment" in prompt.text
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_launch_grid_agent_configures_when_missing(tmp_path: Path) -> None:
+async def test_prime_lab_app_agent_reference_menu_inserts_lab_reference(tmp_path: Path) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "claude"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.click("#launch-agent")
+        await pilot.pause()
+
+        prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
+        prompt.load_text("@")
+        await pilot.pause()
+
+        menu = _render_renderable(app.screen.query_one("#agent-command-menu", Static).content)
+        assert "@env:research/private-env" in menu
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert prompt.text == "@env:research/private-env "
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_agent_prompt_history_uses_empty_up_down(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "claude"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.click("#launch-agent")
+        await pilot.pause()
+
+        assert isinstance(app.screen, AgentChatScreen)
+        app._agent_messages = (
+            AgentChatMessage("user", "first prompt"),
+            AgentChatMessage("assistant", "first response"),
+            AgentChatMessage("user", "second prompt"),
+        )
+        app.screen._refresh_runtime_view()
+        prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
+        prompt.clear_prompt()
+        prompt.focus()
+        await pilot.pause()
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert prompt.text == "second prompt"
+
+        prompt.clear_prompt()
+        await pilot.press("up")
+        await pilot.press("up")
+        await pilot.pause()
+        assert prompt.text == "first prompt"
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert prompt.text == "second prompt"
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert prompt.text == ""
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_agent_prompt_history_uses_global_log_for_new_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "claude"}}',
+        encoding="utf-8",
+    )
+    append_agent_prompt_history(tmp_path, "cursor", "remembered prompt")
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.click("#launch-agent")
+        await pilot.pause()
+
+        assert isinstance(app.screen, AgentChatScreen)
+        app._agent_messages = ()
+        app.screen._refresh_runtime_view()
+        prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
+        prompt.clear_prompt()
+        prompt.focus()
+        await pilot.pause()
+
+        await pilot.press("up")
+        await pilot.pause()
+
+        assert prompt.text == "remembered prompt"
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_agent_slash_menu_uses_arrow_selection(tmp_path: Path) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "claude"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.click("#launch-agent")
+        await pilot.pause()
+
+        prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
+        prompt.load_text("/agent")
+        await pilot.pause()
+
+        await pilot.press("down")
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app._agent_state.agent == "claude-code"
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_agent_prompt_expands_and_preserves_large_paste(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "claude"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+    sent: list[str] = []
+    quit_calls = 0
+
+    def fake_quit() -> None:
+        nonlocal quit_calls
+        quit_calls += 1
+
+    app._send_agent_prompt = sent.append  # type: ignore[method-assign]
+    app.action_quit = fake_quit  # type: ignore[method-assign]
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.click("#launch-agent")
+        await pilot.pause()
+
+        prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
+        assert prompt.styles.height.value == 1
+
+        prompt.load_text("line one")
+        prompt.action_insert_newline()
+        await pilot.pause()
+        assert prompt.styles.height.value == 2
+
+        pasted = "\n".join(f"line {index}" for index in range(10))
+        prompt.apply_large_paste(pasted)
+        await pilot.pause()
+
+        assert prompt.text == "[10 lines pasted]"
+        assert prompt.submitted_text == pasted
+        assert prompt.has_class("large-paste")
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert sent == [pasted]
+        assert prompt.text == ""
+        assert prompt.styles.height.value == 1
+
+        prompt.load_text("clear me")
+        prompt.focus()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert isinstance(app.screen, AgentChatScreen)
+        assert prompt.text == ""
+        assert quit_calls == 0
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert quit_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_switching_agent_uses_separate_cached_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "claude"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.click("#launch-agent")
+        await pilot.pause()
+
+        claude_session = app._agent_session
+        assert claude_session is not None
+        assert claude_session.agent == "claude"
+
+        prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
+        prompt.load_text("/agent cursor")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        cursor_session = app._agent_session
+        assert cursor_session is not None
+        assert cursor_session.agent == "cursor"
+        assert cursor_session.path != claude_session.path
+        assert latest_agent_session(tmp_path, "claude") == claude_session
+        assert latest_agent_session(tmp_path, "cursor") == cursor_session
+        assert app._snapshot is not None
+        assert configured_workspace_agent(app._snapshot) == "cursor"
+        metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
+        assert metadata["choices"]["primary_agent"] == "cursor"
+
+        app._set_snapshot(snapshot)
+        await pilot.pause()
+
+        assert app._agent_state.agent == "cursor"
+        assert app._agent_state.status == "connected"
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_agent_clear_command_starts_fresh_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "claude"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.click("#launch-agent")
+        await pilot.pause()
+
+        assert isinstance(app.screen, AgentChatScreen)
+        old_session = app._agent_session
+        assert old_session is not None
+        app._agent_messages = (AgentChatMessage(role="user", content="old prompt"),)
+        app.screen._refresh_runtime_view()
+        await pilot.pause()
+
+        prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
+        prompt.load_text("/")
+        await pilot.pause()
+        menu = _render_renderable(app.screen.query_one("#agent-command-menu", Static).content)
+        assert "/clear" in menu
+        assert "/new" not in menu
+
+        prompt.load_text("/clear")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        new_session = app._agent_session
+        assert new_session is not None
+        assert new_session.path != old_session.path
+        assert app._agent_messages == ()
+        assert latest_agent_session(tmp_path, "claude") == new_session
+        assert app.screen.query_one("#agent-atmosphere").display is True
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_agent_diagnose_command_sends_native_tool_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "claude"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+    sent: list[str] = []
+    app._send_agent_prompt = sent.append  # type: ignore[method-assign]
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.click("#launch-agent")
+        await pilot.pause()
+
+        assert isinstance(app.screen, AgentChatScreen)
+        prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
+        prompt.load_text("/diagnose")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert sent == [lab_widget_diagnostic_prompt()]
+        assert prompt.text == ""
+        assert app._agent_session is not None
+        actions_path = app._agent_session.path / "actions.jsonl"
+        actions = [
+            json.loads(line)
+            for line in actions_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert actions[-1]["type"] == "agent_tool_diagnostic_started"
+        assert actions[-1]["agent"] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_launch_grid_agent_configures_when_missing(tmp_path: Path) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
 
@@ -2206,7 +3824,7 @@ async def test_prime_lab_view_launch_grid_agent_configures_when_missing(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_chat_hotkey_opens_agent_chat(tmp_path: Path) -> None:
+async def test_prime_lab_app_chat_hotkey_opens_agent_chat(tmp_path: Path) -> None:
     (tmp_path / ".prime").mkdir()
     (tmp_path / ".prime" / "lab.json").write_text(
         '{"choices": {"primary_agent": "claude"}}',
@@ -2223,12 +3841,558 @@ async def test_prime_lab_view_chat_hotkey_opens_agent_chat(tmp_path: Path) -> No
         assert isinstance(app.screen, AgentChatScreen)
         header = _render_renderable(app.screen.query_one("#agent-header", Static).content)
         assert "Agent" in header
-        assert "claude" in header
         assert str(tmp_path) not in header
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_launch_grid_training_and_explore(tmp_path: Path) -> None:
+async def test_prime_lab_app_chat_mounts_lab_widget_cards(tmp_path: Path) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "cursor"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+    widget_messages = (
+        AgentChatMessage(
+            "system",
+            "Widget requested",
+            "widget",
+            {
+                "type": "widget_requested",
+                "kind": "run_launcher",
+                "title": "Eval: alphabet-sort",
+                "payload": {
+                    "kind": "run_launcher",
+                    "title": "Eval: alphabet-sort",
+                    "config_kind": "eval",
+                    "config_path": "configs/eval/alphabet-sort.toml",
+                },
+            },
+        ),
+    )
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+
+        assert isinstance(app.screen, AgentChatScreen)
+        app._set_agent_messages(widget_messages)
+        app.screen._refresh_runtime_view()
+        await pilot.pause()
+
+        cards = list(app.screen.query(AgentWidgetCard))
+        assert cards
+        card_text = _render_renderable(cards[0].query(Static).first().content)
+        assert "Lab widget" not in card_text
+        assert "alphabet-sort" in card_text
+        assert "Eval:" not in card_text
+        assert "Evaluation" not in card_text
+        assert "Command" not in card_text
+        input_values = {
+            input_widget.name: input_widget.value for input_widget in cards[0].query(ClearableInput)
+        }
+        assert input_values["envs"] == "primeintellect/alphabet-sort"
+        assert input_values["num_examples"] == "50"
+        assert input_values["rollouts_per_example"] == "3"
+        assert "max_concurrent" in input_values
+        assert input_values["max_concurrent"] == "auto"
+        assert list(cards[0].query(Select))
+        button_labels = {str(button.label) for button in app.screen.query(Button)}
+        assert "Launch" in button_labels
+        assert "Stop" in button_labels
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_chat_choice_picker_records_selection(tmp_path: Path) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "cursor"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+    widget_messages = (
+        AgentChatMessage(
+            "system",
+            "Choice ready",
+            "widget",
+            {
+                "type": "widget_requested",
+                "widget_id": "choice-1",
+                "kind": "choice_picker",
+                "title": "Pick an environment",
+                "payload": {
+                    "kind": "choice_picker",
+                    "title": "Pick an environment",
+                    "candidates": [
+                        {"id": "reverse-text", "label": "reverse-text"},
+                        {"id": "wordle", "label": "wordle"},
+                    ],
+                    "default_id": "reverse-text",
+                },
+            },
+        ),
+    )
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+
+        assert isinstance(app.screen, AgentChatScreen)
+        app._set_agent_messages(widget_messages)
+        app.screen._refresh_runtime_view()
+        await pilot.pause()
+
+        card = app.screen.query_one(AgentWidgetCard)
+        labels = [str(button.label) for button in card.query(Button)]
+        assert labels == ["reverse-text", "wordle"]
+
+        card.query(Button).first().press()
+        await pilot.pause()
+
+        assert app._agent_session is not None
+        actions = [
+            json.loads(line)
+            for line in (app._agent_session.path / "actions.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        assert actions[-1]["type"] == "agent_widget_choice_selected"
+        assert actions[-1]["choice_id"] == "reverse-text"
+        status = _render_renderable(card.query_one(".agent-widget-status", Static).content)
+        assert "Selected reverse-text" in status
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_chat_config_editor_uses_inline_controls(tmp_path: Path) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "cursor"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+    widget_messages = (
+        AgentChatMessage(
+            "system",
+            "Config ready",
+            "widget",
+            {
+                "type": "widget_requested",
+                "kind": "config_editor",
+                "title": "Eval: alphabet-sort",
+                "payload": {
+                    "kind": "config_editor",
+                    "title": "Eval: alphabet-sort",
+                    "config_kind": "eval",
+                    "env_id": "alphabet-sort",
+                    "defaults": {"num_examples": 10, "rollouts_per_example": 2},
+                },
+            },
+        ),
+    )
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+
+        assert isinstance(app.screen, AgentChatScreen)
+        app._set_agent_messages(widget_messages)
+        app.screen._refresh_runtime_view()
+        await pilot.pause()
+
+        card = app.screen.query_one(AgentWidgetCard)
+        field_values = {
+            input_widget.name: input_widget.value for input_widget in card.query(ClearableInput)
+        }
+        button_labels = [str(button.label) for button in card.query(Button)]
+
+        assert field_values["num_examples"] == "10"
+        assert field_values["rollouts_per_example"] == "2"
+        assert button_labels == ["Launch", "Stop"]
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_chat_widget_launches_from_inline_config(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "cursor"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+    widget_messages = (
+        AgentChatMessage(
+            "system",
+            "Action ready",
+            "widget",
+            {
+                "type": "widget_requested",
+                "kind": "run_launcher",
+                "title": "Eval: reverse-text",
+                "payload": {
+                    "kind": "run_launcher",
+                    "title": "Eval: reverse-text",
+                    "config_kind": "eval",
+                    "env_id": "reverse-text",
+                    "defaults": {
+                        "model": "openai/gpt-4.1-mini",
+                        "num_examples": 25,
+                        "rollouts_per_example": 2,
+                        "max_tokens": 256,
+                    },
+                },
+            },
+        ),
+    )
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, AgentChatScreen)
+        app._set_agent_messages(widget_messages)
+        app.screen._refresh_runtime_view()
+        await pilot.pause()
+
+        card = app.screen.query_one(AgentWidgetCard)
+        fields = {input_widget.name: input_widget for input_widget in card.query(ClearableInput)}
+        fields["num_examples"].value = "7"
+        fields["rollouts_per_example"].value = "4"
+        launch_plan = card.current_launch_plan()
+        command = launch_plan.command
+        generated = tmp_path / ".prime" / "lab" / "configs" / "eval" / "reverse-text.toml"
+        parsed = toml.loads(generated.read_text(encoding="utf-8"))
+        assert command == (
+            "prime eval run .prime/lab/configs/eval/reverse-text.toml --hosted --follow"
+        )
+        assert parsed["model"] == "openai/gpt-4.1-mini"
+        assert parsed["num_examples"] == 7
+        assert parsed["rollouts_per_example"] == 4
+        assert parsed["eval"][0]["env_id"] == "primeintellect/reverse-text"
+        assert parsed["eval"][0]["sampling_args"]["max_tokens"] == 256
+
+
+def test_prime_lab_app_chat_widget_completes_partial_eval_config(tmp_path: Path) -> None:
+    message = AgentChatMessage(
+        "system",
+        "Action ready",
+        "widget",
+        {
+            "kind": "run_launcher",
+            "title": "Eval: reverse-text",
+            "payload": {
+                "kind": "run_launcher",
+                "config_kind": "eval",
+                "config": {"eval": [{"env_id": "reverse-text"}]},
+            },
+        },
+    )
+
+    model = build_agent_widget_model(message, tmp_path)
+    values = model.config_context["values"] if model.config_context is not None else {}
+
+    assert model.title == "Evaluate reverse-text"
+    assert values["envs"] == "reverse-text"
+    assert values["model"] == "openai/gpt-4.1-mini"
+    assert values["num_examples"] == "50"
+    assert values["rollouts_per_example"] == "3"
+    assert values["max_tokens"] == "1024"
+    assert values["max_concurrent"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_chat_preserves_widget_edits_when_transcript_appends(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "cursor"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+    widget_message = AgentChatMessage(
+        "system",
+        "Action ready",
+        "widget",
+        {
+            "type": "widget_requested",
+            "kind": "run_launcher",
+            "title": "Eval: reverse-text",
+            "payload": {
+                "kind": "run_launcher",
+                "title": "Eval: reverse-text",
+                "config_kind": "eval",
+                "env_id": "reverse-text",
+                "defaults": {"num_examples": 25},
+            },
+        },
+    )
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, AgentChatScreen)
+        app._set_agent_messages((widget_message,))
+        app.screen._refresh_runtime_view()
+        await pilot.pause()
+
+        card = app.screen.query_one(AgentWidgetCard)
+        fields = {input_widget.name: input_widget for input_widget in card.query(ClearableInput)}
+        fields["num_examples"].value = "9"
+        app._set_agent_messages((widget_message, AgentChatMessage("assistant", "Ready.")))
+        app.screen._refresh_runtime_view()
+        await pilot.pause()
+
+        card_after = app.screen.query_one(AgentWidgetCard)
+        fields_after = {
+            input_widget.name: input_widget for input_widget in card_after.query(ClearableInput)
+        }
+        assert card_after is card
+        assert fields_after["num_examples"].value == "9"
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_chat_widget_prefills_local_env_and_endpoint_model(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "cursor"}}',
+        encoding="utf-8",
+    )
+    env_dir = tmp_path / "environments" / "reverse_text"
+    env_dir.mkdir(parents=True)
+    (env_dir / "pyproject.toml").write_text(
+        '[project]\nname = "reverse-text"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "endpoints.toml").write_text(
+        "\n".join(
+            [
+                "[[endpoint]]",
+                'endpoint_id = "local-model"',
+                'model = "local/reverse-model"',
+                'url = "https://example.invalid/v1"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+    widget_messages = (
+        AgentChatMessage(
+            "system",
+            "Action ready",
+            "widget",
+            {
+                "type": "widget_requested",
+                "kind": "run_launcher",
+                "title": "Eval: reverse-text",
+                "payload": {
+                    "kind": "run_launcher",
+                    "title": "Eval: reverse-text",
+                    "config_kind": "eval",
+                    "env_id": "reverse-text",
+                },
+            },
+        ),
+    )
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, AgentChatScreen)
+        app._set_agent_messages(widget_messages)
+        app.screen._refresh_runtime_view()
+        await pilot.pause()
+
+        card = app.screen.query_one(AgentWidgetCard)
+        fields = {
+            input_widget.name: input_widget.value for input_widget in card.query(ClearableInput)
+        }
+        selects = {select.name: select.value for select in card.query(Select)}
+        assert "envs" not in fields
+        assert selects["envs"] == "reverse-text"
+        assert selects["model"] == "local/reverse-model"
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_chat_widget_prefills_existing_eval_config(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "cursor"}}',
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "configs" / "eval" / "reverse-text.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "\n".join(
+            [
+                'model = "existing/model"',
+                "num_examples = 12",
+                "rollouts_per_example = 5",
+                "max_concurrent = 3",
+                "save_results = true",
+                "",
+                "[[eval]]",
+                'env_id = "reverse-text"',
+                "",
+                "[eval.sampling_args]",
+                "max_tokens = 2048",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+    widget_messages = (
+        AgentChatMessage(
+            "system",
+            "Action ready",
+            "widget",
+            {
+                "type": "widget_requested",
+                "kind": "run_launcher",
+                "title": "Eval: reverse-text",
+                "payload": {
+                    "kind": "run_launcher",
+                    "title": "Eval: reverse-text",
+                    "config_kind": "eval",
+                    "env_id": "reverse-text",
+                },
+            },
+        ),
+    )
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, AgentChatScreen)
+        app._set_agent_messages(widget_messages)
+        app.screen._refresh_runtime_view()
+        await pilot.pause()
+
+        card = app.screen.query_one(AgentWidgetCard)
+        fields = {
+            input_widget.name: input_widget.value for input_widget in card.query(ClearableInput)
+        }
+        model_select = card.query_one(Select)
+        assert fields["envs"] == "reverse-text"
+        assert fields["num_examples"] == "12"
+        assert fields["rollouts_per_example"] == "5"
+        assert fields["max_tokens"] == "2048"
+        assert fields["max_concurrent"] == "3"
+        assert model_select.value == "existing/model"
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_chat_widget_launch_button_streams_inline_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "cursor"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+    widget_messages = (
+        AgentChatMessage(
+            "system",
+            "Action ready",
+            "widget",
+            {
+                "type": "widget_requested",
+                "kind": "run_launcher",
+                "title": "Eval: reverse-text",
+                "payload": {
+                    "kind": "run_launcher",
+                    "title": "Eval: reverse-text",
+                    "config_kind": "eval",
+                    "env_id": "reverse-text",
+                    "defaults": {"model": "openai/gpt-4.1-mini"},
+                },
+            },
+        ),
+    )
+    calls: list[str] = []
+
+    class FakeLaunchRunner:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            calls.append(str(kwargs["command"]))
+
+        def run(self) -> None:
+            self.kwargs["append_output"]("launching\n")
+            self.kwargs["append_output"]("done\n")
+            self.kwargs["finish"]("launch", 0)
+
+        def stop(self) -> None:
+            self.kwargs["finish"]("stopped", None)
+
+    monkeypatch.setattr("prime_lab_app.agent_cards.ConfigLaunchRunner", FakeLaunchRunner)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, AgentChatScreen)
+        app._set_agent_messages(widget_messages)
+        app.screen._refresh_runtime_view()
+        await pilot.pause()
+
+        card = app.screen.query_one(AgentWidgetCard)
+        launch_plan = card.current_launch_plan()
+        assert launch_plan.command == (
+            "prime eval run .prime/lab/configs/eval/reverse-text.toml --hosted --follow"
+        )
+        assert card._launch_running is False
+        card.query_one(".agent-widget-action-launch", Button).press()
+        await pilot.pause()
+        await pilot.pause()
+
+        log_text = _render_renderable(card.query_one(".agent-widget-log", Static).content)
+        status_text = _render_renderable(card.query_one(".agent-widget-status", Static).content)
+        assert calls == [
+            "prime eval run .prime/lab/configs/eval/reverse-text.toml --hosted --follow"
+        ]
+        assert "launching" in log_text
+        assert "done" in log_text
+        assert "Completed" in status_text
+        assert app._agent_session is not None
+        actions = [
+            json.loads(line)
+            for line in (app._agent_session.path / "actions.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        assert [action["status"] for action in actions[-2:]] == ["started", "completed"]
+        assert actions[-1]["type"] == "agent_inline_launch"
+        assert actions[-1]["config_kind"] == "eval"
+        assert actions[-1]["config_path"] == ".prime/lab/configs/eval/reverse-text.toml"
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_launch_grid_training_and_explore(tmp_path: Path) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
 
@@ -2251,7 +4415,7 @@ async def test_prime_lab_view_launch_grid_training_and_explore(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_ladder_loads_platform_sections(tmp_path: Path) -> None:
+async def test_prime_lab_app_ladder_loads_platform_sections(tmp_path: Path) -> None:
     source = make_source()
     loaded_limits: list[int] = []
 
@@ -2274,7 +4438,7 @@ async def test_prime_lab_view_ladder_loads_platform_sections(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_can_load_more_platform_rows(tmp_path: Path) -> None:
+async def test_prime_lab_app_can_load_more_platform_rows(tmp_path: Path) -> None:
     source = make_source()
     loaded_limits: list[int] = []
 
@@ -2299,7 +4463,7 @@ async def test_prime_lab_view_can_load_more_platform_rows(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_opens_training_run_screen(tmp_path: Path) -> None:
+async def test_prime_lab_app_opens_training_run_screen(tmp_path: Path) -> None:
     source = make_source()
     snapshot = source.load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(
@@ -2379,7 +4543,7 @@ def test_training_platform_url_uses_dashboard_route() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_opens_environment_screen(tmp_path: Path) -> None:
+async def test_prime_lab_app_opens_environment_screen(tmp_path: Path) -> None:
     source = make_source()
     snapshot = source.load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(
@@ -2407,11 +4571,11 @@ async def test_prime_lab_view_opens_environment_screen(tmp_path: Path) -> None:
 
         assert isinstance(app.screen, EnvironmentScreen)
         screen = app.screen
-        assert [tab.id for tab in screen.query(Tab)] == ["code", "leaderboard"]
+        assert not list(screen.query("#env-tabs"))
 
         screen._render_tab()
         await pilot.pause()
-        assert {"train", "evaluate", "install", "view", "discussions", "actions", "refresh"} <= {
+        assert {"train", "evaluate", "sync", "platform"} == {
             action.key for action in screen._action_by_id.values()
         }
 
@@ -2423,12 +4587,12 @@ async def test_prime_lab_view_opens_environment_screen(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_environment_install_action_uses_native_follow_screen(
+async def test_environment_sync_action_uses_native_follow_screen(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeProcess:
-        stdout = ["installing\n"]
+        stdout = ["syncing\n"]
 
         def wait(self) -> int:
             return 0
@@ -2445,7 +4609,7 @@ async def test_environment_install_action_uses_native_follow_screen(
         commands.append(command)
         return FakeProcess()
 
-    monkeypatch.setattr("prime_lab_view.config_screen.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("prime_lab_app.launch_runner.subprocess.Popen", fake_popen)
 
     source = make_source()
     snapshot = source.load(LabLoadOptions(limit=10, workspace=tmp_path))
@@ -2474,16 +4638,18 @@ async def test_environment_install_action_uses_native_follow_screen(
         screen = app.screen
         assert isinstance(screen, EnvironmentScreen)
 
-        screen._run_environment_action(EnvironmentAction("install", "Install", ""))
+        screen._run_environment_action(
+            EnvironmentAction("sync", "Sync", "prime env pull primeintellect/gsm8k")
+        )
         await pilot.pause()
         await pilot.pause()
 
         assert isinstance(app.screen, ConfigLaunchScreen)
-        assert commands and commands[0][:3] == ["prime", "env", "install"]
+        assert commands and commands[0][:3] == ["prime", "env", "pull"]
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_opens_setup_screen_for_uninitialized_workspace(
+async def test_prime_lab_app_opens_setup_screen_for_uninitialized_workspace(
     tmp_path: Path,
 ) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
@@ -2504,7 +4670,7 @@ async def test_prime_lab_view_opens_setup_screen_for_uninitialized_workspace(
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_opens_workspace_browser(tmp_path: Path) -> None:
+async def test_prime_lab_app_opens_workspace_browser(tmp_path: Path) -> None:
     (tmp_path / ".prime").mkdir()
     (tmp_path / ".prime" / "lab.json").write_text("{}", encoding="utf-8")
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
@@ -2525,7 +4691,7 @@ async def test_prime_lab_view_opens_workspace_browser(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_opens_add_workspace_screen(tmp_path: Path) -> None:
+async def test_prime_lab_app_opens_add_workspace_screen(tmp_path: Path) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(lambda: snapshot)
 
@@ -2544,7 +4710,7 @@ async def test_prime_lab_view_opens_add_workspace_screen(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_opens_agent_sync_screen(tmp_path: Path) -> None:
+async def test_prime_lab_app_opens_agent_sync_screen(tmp_path: Path) -> None:
     (tmp_path / ".prime").mkdir()
     (tmp_path / ".prime" / "lab.json").write_text(
         '{"choices": {"primary_agent": "claude"}}',
@@ -2568,7 +4734,7 @@ async def test_prime_lab_view_opens_agent_sync_screen(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_opens_doctor_screen(tmp_path: Path) -> None:
+async def test_prime_lab_app_opens_doctor_screen(tmp_path: Path) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(lambda: snapshot)
 
@@ -2589,7 +4755,7 @@ async def test_prime_lab_view_opens_doctor_screen(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_opens_config_run_screen(tmp_path: Path) -> None:
+async def test_prime_lab_app_opens_config_run_screen(tmp_path: Path) -> None:
     config_path = tmp_path / "configs" / "rl" / "train.toml"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
@@ -2635,7 +4801,7 @@ async def test_config_run_launch_uses_native_follow_screen(
         commands.append(command)
         return FakeProcess()
 
-    monkeypatch.setattr("prime_lab_view.config_screen.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("prime_lab_app.launch_runner.subprocess.Popen", fake_popen)
 
     config_path = tmp_path / "configs" / "rl" / "train.toml"
     config_path.parent.mkdir(parents=True)
@@ -2693,7 +4859,7 @@ async def test_config_launch_follows_training_logs_from_hint(
             return FakeProcess(["Watching logs for run abc123run...\n", "step 1 reward 0.5\n"])
         return FakeProcess(["Creating RL training run...\n", "  prime rl logs abc123run -f\n"])
 
-    monkeypatch.setattr("prime_lab_view.config_screen.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("prime_lab_app.launch_runner.subprocess.Popen", fake_popen)
 
     config_path = tmp_path / "configs" / "rl" / "train.toml"
     config_path.parent.mkdir(parents=True)
@@ -2762,8 +4928,8 @@ async def test_config_launch_retries_training_logs_until_ready(
             return FakeProcess(["logs ready\n"], 0)
         return FakeProcess(["  prime rl logs retryrun -f\n"])
 
-    monkeypatch.setattr("prime_lab_view.config_screen.subprocess.Popen", fake_popen)
-    monkeypatch.setattr("prime_lab_view.config_screen._LOG_RETRY_DELAYS", (0.01,))
+    monkeypatch.setattr("prime_lab_app.launch_runner.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("prime_lab_app.launch_runner._LOG_RETRY_DELAYS", (0.01,))
 
     config_path = tmp_path / "configs" / "rl" / "train.toml"
     config_path.parent.mkdir(parents=True)
@@ -2798,7 +4964,7 @@ async def test_config_launch_retries_training_logs_until_ready(
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_opens_local_eval_run_screen(tmp_path: Path) -> None:
+async def test_prime_lab_app_opens_local_eval_run_screen(tmp_path: Path) -> None:
     run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
     run_dir.mkdir(parents=True)
     (run_dir / "metadata.json").write_text(
@@ -2843,7 +5009,7 @@ async def test_prime_lab_view_opens_local_eval_run_screen(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_evaluations_by_env_groups_runs(tmp_path: Path) -> None:
+async def test_prime_lab_app_evaluations_by_env_groups_runs(tmp_path: Path) -> None:
     run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
     run_dir.mkdir(parents=True)
     (run_dir / "metadata.json").write_text(
@@ -2872,7 +5038,7 @@ async def test_prime_lab_view_evaluations_by_env_groups_runs(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_by_env_enter_opens_highlighted_local_eval(
+async def test_prime_lab_app_by_env_enter_opens_highlighted_local_eval(
     tmp_path: Path,
 ) -> None:
     run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
@@ -2907,7 +5073,7 @@ async def test_prime_lab_view_by_env_enter_opens_highlighted_local_eval(
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_click_opens_local_eval_run_screen(tmp_path: Path) -> None:
+async def test_prime_lab_app_click_opens_local_eval_run_screen(tmp_path: Path) -> None:
     run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
     run_dir.mkdir(parents=True)
     (run_dir / "metadata.json").write_text(
@@ -2954,7 +5120,7 @@ async def test_prime_lab_view_click_opens_local_eval_run_screen(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_view_mouse_click_requires_visible_training_sidebar(
+async def test_prime_lab_app_mouse_click_requires_visible_training_sidebar(
     tmp_path: Path,
 ) -> None:
     source = make_source()
@@ -3011,7 +5177,7 @@ def _render_details(item: Any) -> str:
 
 
 def _render_renderable(renderable: Any) -> str:
-    console = Console(record=True, width=120)
+    console = Console(record=True, width=120, file=StringIO())
     console.print(renderable)
     return console.export_text()
 

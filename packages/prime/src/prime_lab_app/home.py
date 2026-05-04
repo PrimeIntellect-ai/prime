@@ -1,4 +1,4 @@
-"""Home/workspace grouping and action helpers for the Lab TUI."""
+"""Settings/workspace grouping and action helpers for the Lab TUI."""
 
 from __future__ import annotations
 

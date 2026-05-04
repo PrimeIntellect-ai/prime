@@ -6,7 +6,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 from prime_cli.lab_setup import (
-    SUPPORTED_AGENTS,
     LabDoctorOptions,
     LabDoctorResult,
     LabSetupOptions,
@@ -27,6 +26,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Static
 
+from .agent_capabilities import agent_capability, known_agent_names
 from .environment_screen import EnvironmentScreen
 from .models import LabItem
 from .palette import STATUS_ERROR, STATUS_SUCCESS, STATUS_WARNING
@@ -39,8 +39,7 @@ class SetupScreen(Screen[None]):
     """Guided setup entry point for an uninitialized Lab workspace."""
 
     BINDINGS = [
-        Binding("b,backspace", "back", "Back"),
-        Binding("q", "quit", "Quit"),
+        Binding("escape", "back", "Back", key_display="Esc"),
         Binding("enter", "run_setup", "Run setup", key_display="Enter"),
     ]
 
@@ -75,6 +74,7 @@ class SetupScreen(Screen[None]):
         super().__init__()
         self._item = item
         self._on_complete = on_complete
+        self._agents = known_agent_names()
         self._agent_index = 0
         self._prime_rl = False
         self._running = False
@@ -139,10 +139,10 @@ class SetupScreen(Screen[None]):
             self.query_one("#setup-status", Static).update("Setup failed")
 
     def _selected_agent(self) -> str:
-        return SUPPORTED_AGENTS[self._agent_index % len(SUPPORTED_AGENTS)]
+        return self._agents[self._agent_index % len(self._agents)]
 
     def _agent_label(self) -> str:
-        return f"Agent: {self._selected_agent()}"
+        return f"Agent: {agent_capability(self._selected_agent()).label}"
 
     def _prime_rl_label(self) -> str:
         return f"Prime RL: {'on' if self._prime_rl else 'off'}"
@@ -159,7 +159,7 @@ class SetupScreen(Screen[None]):
     def _agent_pressed(self, _event: Button.Pressed) -> None:
         if self._running:
             return
-        self._agent_index = (self._agent_index + 1) % len(SUPPORTED_AGENTS)
+        self._agent_index = (self._agent_index + 1) % len(self._agents)
         self.query_one("#setup-agent", Button).label = self._agent_label()
 
     @on(Button.Pressed, "#setup-prime-rl")
@@ -174,8 +174,7 @@ class AgentSyncScreen(Screen[None]):
     """Refresh Lab templates, skills, docs, and local agent guidance."""
 
     BINDINGS = [
-        Binding("b,backspace", "back", "Back"),
-        Binding("q", "quit", "Quit"),
+        Binding("escape", "back", "Back", key_display="Esc"),
         Binding("enter", "run_sync", "Run sync", key_display="Enter"),
     ]
 
@@ -271,8 +270,7 @@ class DoctorScreen(Screen[None]):
     """Run deterministic Lab workspace checks."""
 
     BINDINGS = [
-        Binding("b,backspace", "back", "Back"),
-        Binding("q", "quit", "Quit"),
+        Binding("escape", "back", "Back", key_display="Esc"),
         Binding("enter", "run_check", "Run check", key_display="Enter"),
         Binding("f", "fix", "Apply fixes"),
     ]

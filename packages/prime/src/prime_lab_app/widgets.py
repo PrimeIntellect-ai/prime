@@ -10,7 +10,7 @@ from rich.text import Text
 from textual import events
 from textual.binding import Binding
 from textual.style import Style
-from textual.widgets import OptionList, Static, Tree
+from textual.widgets import Input, OptionList, Static, Tree
 from textual.widgets._tree import TreeNode
 
 from .launch_backdrop import LaunchBackdrop
@@ -29,7 +29,7 @@ class LabOptionList(OptionList):
     """Option list where mouse clicks can be guarded by the host app."""
 
     BINDINGS = [
-        Binding("space", "back", "Back", key_display="Space"),
+        Binding("escape", "back", "Back", key_display="Esc"),
     ]
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -69,6 +69,17 @@ class LabOptionList(OptionList):
 
     def action_back(self) -> None:
         _call_app(self.app, "action_back_from_list")
+
+
+class ClearableInput(Input):
+    """Input field where Ctrl+C clears text instead of closing Lab."""
+
+    BINDINGS = [
+        Binding("ctrl+c", "clear_field", show=False, priority=True),
+    ]
+
+    def action_clear_field(self) -> None:
+        self.value = ""
 
 
 @dataclass(frozen=True)
@@ -209,7 +220,7 @@ class SegmentedToggle(Static, can_focus=True):
         Binding("up", "previous_segment", "Prev", key_display="Up"),
         Binding("down", "next_segment", "Next", key_display="Down"),
         Binding("enter", "select_segment", "Select", key_display="Enter"),
-        Binding("space", "back", "Back", key_display="Space"),
+        Binding("escape", "back", "Back", key_display="Esc"),
     ]
 
     previous_action = ""
@@ -267,7 +278,7 @@ class SegmentedToggle(Static, can_focus=True):
 
 
 class HomeGroupToggle(SegmentedToggle):
-    """Segmented control for Home item groups."""
+    """Segmented control for Settings item groups."""
 
     previous_action = "action_previous_home_group"
     next_action = "action_next_home_group"
@@ -297,7 +308,7 @@ class EvaluationViewToggle(SegmentedToggle):
 
 @dataclass(frozen=True)
 class HomeLaunchState:
-    """Display state for the launch Home visual."""
+    """Display state for the Welcome launch visual."""
 
     workspace: str
     auth_label: str
@@ -309,16 +320,16 @@ class HomeLaunchState:
 
 
 class HomeLaunchPanel(Static):
-    """Animated launch panel for the Lab Home screen."""
+    """Animated launch panel for the Welcome screen."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__("", *args, markup=False, **kwargs)
         self._frame = 0
         self._state = HomeLaunchState(
             workspace="-",
-            auth_label="auth ?",
+            auth_label="?",
             team="-",
-            agent_label="agent none",
+            agent_label="none",
             loading=True,
         )
 
@@ -470,11 +481,16 @@ class HomeLaunchPanel(Static):
 
     def _context_line(self, state: HomeLaunchState, width: int) -> str:
         parts = [state.workspace]
-        if state.auth_label:
-            parts.append(state.auth_label)
-        if state.team and state.team != "-":
-            parts.append(state.team)
-        if state.agent_label and state.agent_label != "agent none":
+        identity = ""
+        if state.auth_label and state.team and state.team != "-":
+            identity = f"{state.auth_label} {state.team}"
+        elif state.auth_label:
+            identity = state.auth_label
+        elif state.team and state.team != "-":
+            identity = state.team
+        if identity:
+            parts.append(identity)
+        if state.agent_label and state.agent_label not in {"agent none", "none"}:
             parts.append(state.agent_label)
         return self._truncate("  ·  ".join(parts), width)
 

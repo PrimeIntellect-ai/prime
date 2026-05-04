@@ -49,9 +49,29 @@ LAB_SKILLS = (
     "train-with-environments",
     "brainstorm",
 )
-SUPPORTED_AGENTS = ("codex", "claude", "cursor", "opencode", "amp", "pi")
+LAB_WIDGETS_SKILL = "lab-widgets"
+PRIME_MANAGED_SKILLS = (*LAB_SKILLS, LAB_WIDGETS_SKILL)
+SUPPORTED_AGENTS = (
+    "codex",
+    "claude",
+    "claude-code",
+    "cursor",
+    "opencode",
+    "pi",
+    "hermes-agent",
+)
 AGENT_SKILLS_DIR_MAP = {
-    "amp": ".agents/skills",
+    "claude-code": ".claude/skills",
+    "hermes-agent": ".hermes/skills",
+    "pi": ".pi/skills",
+}
+GLOBAL_AGENT_SKILLS_DIR_MAP = {
+    "claude": ".claude/skills",
+    "claude-code": ".claude/skills",
+    "codex": ".codex/skills",
+    "cursor": ".cursor/skills",
+    "hermes-agent": ".hermes/skills",
+    "opencode": ".opencode/skills",
     "pi": ".pi/skills",
 }
 AGENT_SKILL_NAME_MAP: dict[str, dict[str, str]] = {}
@@ -67,6 +87,68 @@ LAB_GITIGNORE_PATTERNS = (
 ConfigSpec = tuple[str, str, str]
 Emit = Callable[[str], None]
 Runner = Callable[[Sequence[str], Path, Emit], int]
+
+LAB_WIDGETS_SKILL_MD = """---
+name: lab-widgets
+description: Use inside Prime Intellect Lab when choosing, editing, launching,
+  inspecting, syncing, or confirming Lab objects. Guides agents to expose native
+  Lab controls instead of manual CLI instructions.
+metadata:
+  short-description: Use native Lab controls for research actions
+---
+
+# Lab Controls
+
+You are assisting a user from inside the Prime Intellect Lab TUI. Your default
+path for actions is to use native Lab controls.
+
+The user is using the Lab app by default, not a shell. Do not suggest CLI
+commands or tell the user to run commands unless the user explicitly asks for
+CLI instructions.
+
+Use native Lab controls when the user asks to:
+
+- choose an environment, config, run, eval, model, workspace, or profile
+- create, clone, modify, validate, save, rerun, train, evaluate, sync, install, or push
+- inspect metrics, logs, rollout samples, source files, diffs, or generated config
+- confirm any side effect
+
+Do not stop at prose when the user should be able to click, edit, confirm, or
+inspect something in Lab.
+
+Do not narrate repository searches, file formats, docs, folders, resolver
+order, TOML shape, or other implementation details unless the user explicitly
+asks. Do not name internal implementation surfaces, tool plumbing, or rendering
+mechanics. Keep prose product-facing: what is ready, what needs a decision, or
+what changed.
+
+## Control Intents
+
+Prefer the smallest specific intent:
+
+- `choose`: ambiguous object/action selection
+- `edit_config`: eval, training, or GEPA config creation and edits
+- `preview_action`: validation plus confirm/cancel for side effects
+- `launch_run`: launch or rerun handoff with live logs
+- `show_patch`: source/config/doc file changes
+- `inspect_rollouts`: rollout, sample, metric, or failure diagnosis
+
+Evaluation and training runs should behave symmetrically. Use `edit_config`,
+then `preview_action`, then `launch_run` for both flows; set `config_kind` to
+`eval` for evaluations and `rl` for training.
+
+For every native control proposal, decide:
+
+- object kind and stable ids/paths
+- candidate list and default selection
+- editable fields and read-only fields
+- validation blockers or warnings
+- next confirmable action
+
+Lab controls are native tools, not markdown conventions. Keep any normal
+explanation short. Lab owns rendering, validation, confirmation, execution, and
+result logging after the native tool call.
+"""
 
 
 @dataclass(frozen=True)
@@ -249,7 +331,7 @@ def parse_lab_setup_args(args: list[str]) -> LabSetupOptions:
     parser.add_argument(
         "--no-interactive",
         action="store_true",
-        help="Accepted for compatibility; TUI and CLI setup resolve agents explicitly.",
+        help="Use setup defaults without prompts.",
     )
     namespace = parser.parse_args(args)
     return LabSetupOptions(
@@ -322,13 +404,15 @@ def run_lab_sync_service(
     *,
     workspace: Path,
     emit: Emit | None = None,
+    runner: Runner | None = None,
 ) -> LabSyncResult:
-    """Refresh Lab skills and local agent guidance without installing dependencies."""
+    """Refresh Lab skills, local agent guidance, and Lab-owned agent bridges."""
 
     workspace = workspace.expanduser().resolve()
     emit = emit or (lambda _text: None)
+    runner = runner or _run_command
     try:
-        _run_lab_sync_steps(options, workspace=workspace, emit=emit)
+        _run_lab_sync_steps(options, workspace=workspace, emit=emit, runner=runner)
     except Exception as exc:
         emit(f"Sync failed: {exc}\n")
         return LabSyncResult(exit_code=1, workspace=workspace)
@@ -365,6 +449,9 @@ def _run_lab_setup_steps(
     (workspace / "environments").mkdir(exist_ok=True)
     _sync_prime_skills(workspace, emit)
     _prepare_agent_skill_dirs(workspace, options.agents, emit)
+    _prepare_global_agent_skill_dirs(options.agents, emit)
+    _prepare_agent_runtime_dependencies(workspace, options.agents, emit, runner)
+    _prepare_agent_native_surfaces(workspace, options.agents, emit)
     _sync_lab_metadata(workspace, options.agents)
 
     if not options.skip_agents_md:
@@ -399,6 +486,7 @@ def _run_lab_sync_steps(
     *,
     workspace: Path,
     emit: Emit,
+    runner: Runner,
 ) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "configs").mkdir(exist_ok=True)
@@ -408,6 +496,9 @@ def _run_lab_sync_steps(
 
     _sync_prime_skills(workspace, emit)
     _prepare_agent_skill_dirs(workspace, agents, emit)
+    _prepare_global_agent_skill_dirs(agents, emit)
+    _prepare_agent_runtime_dependencies(workspace, agents, emit, runner)
+    _prepare_agent_native_surfaces(workspace, agents, emit)
     _sync_lab_metadata(workspace, agents)
     _sync_config_templates(workspace, emit)
 
@@ -455,6 +546,7 @@ def _write_lab_docs_index(workspace: Path) -> None:
                 "- `CLAUDE.md`",
                 "- `environments/AGENTS.md`",
                 "- `.prime/skills/*/SKILL.md`",
+                "- `~/.prime/lab/skills/lab-widgets/SKILL.md`",
                 "- `.prime/lab/templates/configs/**`",
                 "",
                 "## Prime docs",
@@ -479,7 +571,6 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
     metadata_path = workspace / ".prime" / "lab.json"
     metadata = _read_lab_metadata(workspace)
     agents = _workspace_agents_from_metadata(workspace)
-    primary_agent = agents[0] if agents else ""
 
     checks = [
         _path_check(
@@ -513,6 +604,12 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
             warning=True,
         ),
         _path_check(
+            "Lab action skill",
+            workspace / ".prime" / "skills" / LAB_WIDGETS_SKILL / "SKILL.md",
+            "Run prime lab sync.",
+            warning=True,
+        ),
+        _path_check(
             "Lab templates",
             workspace / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml",
             "Run prime lab sync.",
@@ -526,25 +623,34 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
         ),
     ]
 
-    if primary_agent:
-        agent_skill_dir = workspace / AGENT_SKILLS_DIR_MAP.get(
-            primary_agent, f".{primary_agent}/skills"
-        )
-        checks.append(
-            _path_check(
-                "Agent skills",
-                agent_skill_dir / "create-environments",
-                f"Run prime lab sync --agent {primary_agent}.",
-                warning=True,
+    if agents:
+        for agent in agents:
+            agent_skill_dir = workspace / AGENT_SKILLS_DIR_MAP.get(agent, f".{agent}/skills")
+            label = _agent_label(agent)
+            checks.append(
+                _path_check(
+                    f"{label} skills",
+                    agent_skill_dir / "create-environments",
+                    f"Run prime lab sync --agent {agent}.",
+                    warning=True,
+                )
             )
-        )
+            checks.append(
+                _path_check(
+                    f"{label} Lab actions",
+                    agent_skill_dir / LAB_WIDGETS_SKILL,
+                    f"Run prime lab sync --agent {agent}.",
+                    warning=True,
+                )
+            )
+            checks.append(_agent_native_surface_check(agent, workspace))
     else:
         checks.append(
             LabDoctorCheck(
                 name="Coding agent",
                 status="WARN",
                 message="No primary coding agent is configured.",
-                remediation="Run prime lab setup or configure an agent from Home.",
+                remediation="Run prime lab setup or configure an agent from Settings.",
             )
         )
 
@@ -861,13 +967,21 @@ def _sync_prime_skills(workspace: Path, emit: Emit) -> None:
         )
         dst = workspace / ".prime" / "skills" / skill_name / "SKILL.md"
         _download_file(src, dst, emit)
+    _write_prime_managed_skill(
+        workspace / ".prime" / "skills" / LAB_WIDGETS_SKILL / "SKILL.md",
+        LAB_WIDGETS_SKILL_MD,
+    )
+    _write_prime_managed_skill(
+        _global_prime_skills_dir() / LAB_WIDGETS_SKILL / "SKILL.md",
+        LAB_WIDGETS_SKILL_MD,
+    )
 
 
 def _prepare_agent_skill_dirs(workspace: Path, agents: tuple[str, ...], emit: Emit) -> None:
     for agent in agents:
         skills_dir = workspace / AGENT_SKILLS_DIR_MAP.get(agent, f".{agent}/skills")
         skills_dir.mkdir(parents=True, exist_ok=True)
-        for skill_name in LAB_SKILLS:
+        for skill_name in PRIME_MANAGED_SKILLS:
             source_dir = workspace / ".prime" / "skills" / skill_name
             if not source_dir.exists():
                 continue
@@ -875,6 +989,124 @@ def _prepare_agent_skill_dirs(workspace: Path, agents: tuple[str, ...], emit: Em
             target_dir = skills_dir / target_name
             _safe_link_or_copy_skill_dir(source_dir, target_dir)
         emit(f"Prepared {skills_dir.relative_to(workspace)}\n")
+
+
+def _prepare_global_agent_skill_dirs(agents: tuple[str, ...], emit: Emit) -> None:
+    source_dir = _global_prime_skills_dir() / LAB_WIDGETS_SKILL
+    if not source_dir.exists():
+        return
+    home = Path.home()
+    for agent in agents:
+        skills_dir_rel = GLOBAL_AGENT_SKILLS_DIR_MAP.get(agent)
+        if skills_dir_rel is None:
+            continue
+        skills_dir = home / skills_dir_rel
+        target_dir = skills_dir / LAB_WIDGETS_SKILL
+        _safe_link_or_copy_skill_dir(source_dir, target_dir)
+        emit(f"Prepared {target_dir}\n")
+
+
+def _prepare_agent_runtime_dependencies(
+    workspace: Path,
+    agents: tuple[str, ...],
+    emit: Emit,
+    runner: Runner,
+) -> None:
+    from prime_lab_app.agent_capabilities import agent_capability
+
+    for agent in agents:
+        capability = agent_capability(agent)
+        for requirement in capability.missing_requirements():
+            if not requirement.install_command:
+                emit(
+                    f"{capability.label} requires {requirement.binary}; install it and rerun sync\n"
+                )
+                continue
+            emit(f"Installing {requirement.description or requirement.binary}\n")
+            _check_command(requirement.install_command, workspace, emit, runner)
+
+
+def _prepare_agent_native_surfaces(workspace: Path, agents: tuple[str, ...], emit: Emit) -> None:
+    from prime_lab_app.agent_adapters import write_agent_native_surface
+
+    for agent in agents:
+        paths = write_agent_native_surface(workspace, agent)
+        for path in paths:
+            try:
+                display = str(path.relative_to(workspace))
+            except ValueError:
+                display = str(path)
+            emit(f"Prepared {display}\n")
+
+
+def _agent_native_surface_check(agent: str, workspace: Path) -> LabDoctorCheck:
+    from prime_lab_app.agent_capabilities import agent_capability
+
+    capability = agent_capability(agent)
+    name = f"{capability.label} native tools"
+    if capability.status == "not_supported":
+        return LabDoctorCheck(
+            name=name,
+            status="WARN",
+            message=f"{capability.label} is not yet supported.",
+            remediation=capability.unsupported_reason or "Choose a Lab-supported coding agent.",
+        )
+    missing = capability.missing_requirements()
+    if missing:
+        remediations = [
+            " ".join(requirement.install_command)
+            if requirement.install_command
+            else f"install {requirement.binary}"
+            for requirement in missing
+        ]
+        return LabDoctorCheck(
+            name=name,
+            status="WARN",
+            message="Missing " + ", ".join(requirement.binary for requirement in missing),
+            remediation="Run prime lab sync --agent "
+            f"{capability.name} or install: {', '.join(remediations)}.",
+        )
+    if capability.native_surface in {"codex_app_server", "claude_sdk", "pi_acp"}:
+        return LabDoctorCheck(
+            name=name,
+            status="PASS",
+            message=(
+                f"{capability.label} receives native Lab tools through {capability.native_surface}."
+            ),
+        )
+    expected_paths = capability.resolved_surface_paths(workspace)
+    missing_paths = [path for path in expected_paths if not path.exists()]
+    if not missing_paths:
+        return LabDoctorCheck(
+            name=name,
+            status="PASS",
+            message=", ".join(str(path) for path in expected_paths)
+            or f"{capability.label} receives Lab tools at session start.",
+        )
+    return LabDoctorCheck(
+        name=name,
+        status="WARN",
+        message="Missing " + ", ".join(str(path) for path in missing_paths),
+        remediation=f"Run prime lab sync --agent {capability.name}.",
+    )
+
+
+def _agent_label(agent: str) -> str:
+    from prime_lab_app.agent_capabilities import agent_capability
+
+    return agent_capability(agent).label
+
+
+def _global_prime_skills_dir() -> Path:
+    return Path.home() / ".prime" / "lab" / "skills"
+
+
+def _write_prime_managed_skill(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    current = path.read_text(encoding="utf-8") if path.is_file() else ""
+    if current == content:
+        return
+    path.write_text(content, encoding="utf-8")
 
 
 def _safe_link_or_copy_skill_dir(source: Path, target: Path) -> None:
@@ -976,13 +1208,16 @@ def _dedupe_config_destinations(configs: list[ConfigSpec]) -> list[ConfigSpec]:
 
 
 def _parse_agents(value: str | None) -> list[str]:
+    from prime_lab_app.agent_capabilities import agent_capability
+
     raw_agents = value.split(",") if value else ["codex"]
     agents: list[str] = []
     seen: set[str] = set()
     for raw_agent in raw_agents:
-        agent = raw_agent.strip().lower()
-        if not agent:
+        raw_name = raw_agent.strip().lower()
+        if not raw_name:
             continue
+        agent = agent_capability(raw_name).name
         if agent not in SUPPORTED_AGENTS:
             raise ValueError(
                 f"Unsupported coding agent '{raw_agent}'. Supported values: "

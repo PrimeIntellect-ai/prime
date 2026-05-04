@@ -48,27 +48,43 @@ def statusbar_text(
 ) -> Text:
     text = Text()
     if snapshot is None:
-        text.append("auth ?", style="dim")
-        text.append(" · ", style="dim")
-        text.append("team -", style="dim")
-        text.append(" · ", style="dim")
-        text.append("~", style="dim")
+        text.append("?", style="dim")
+        text.append(" -", style=NEUTRAL)
     else:
-        auth_label = "auth check" if snapshot.authenticated else "auth x"
-        text.append(auth_label, style=STATUS_SUCCESS if snapshot.authenticated else STATUS_ERROR)
-        text.append(" · ", style="dim")
-        text.append(snapshot.team or "personal", style=NEUTRAL)
+        indicator = "✓" if snapshot.authenticated else "×"
+        indicator_style = STATUS_SUCCESS if snapshot.authenticated else STATUS_ERROR
+        text.append(indicator, style=indicator_style)
+        text.append(f" {status_identity(snapshot)}", style=NEUTRAL)
         text.append(" · ", style="dim")
         text.append(compact_path(snapshot.workspace), style="dim")
         if snapshot.warnings:
             text.append(" · ", style="dim")
-            text.append(f"{len(snapshot.warnings)} warnings", style=STATUS_WARNING)
-    text.append("  |  ", style="dim")
-    text.append("agent ", style="dim")
-    text.append(agent_status_label(agent_state), style=agent_status_style(agent_state.status))
-    if agent_state.endpoint:
-        text.append(f" {agent_state.endpoint}", style="dim")
+            text.append(_count_label(len(snapshot.warnings), "warning"), style=STATUS_WARNING)
+
+    agent_text = agent_status_text(agent_state)
+    if agent_text.plain != "none":
+        text.append("  |  ", style="dim")
+        text.append_text(agent_text)
+        if agent_state.endpoint:
+            text.append(f" {agent_state.endpoint}", style="dim")
     return text
+
+
+def action_hint_text(*pairs: tuple[str, str]) -> Text:
+    """Render footer action hints as colored key labels plus muted action names."""
+    text = Text()
+    for index, (key, label) in enumerate(pairs):
+        if index:
+            text.append("  ·  ", style="dim")
+        text.append(key, style=f"bold {PRIMARY}")
+        if label:
+            text.append(f" {label}", style="dim")
+    return text
+
+
+def _count_label(count: int, singular: str) -> str:
+    suffix = "" if count == 1 else "s"
+    return f"{count} {singular}{suffix}"
 
 
 def agent_status_label(state: AgentConnectionState) -> str:
@@ -76,14 +92,36 @@ def agent_status_label(state: AgentConnectionState) -> str:
         return "none"
     label = state.label or state.agent or "agent"
     if state.status == "connected":
-        return f"{label} connected"
+        return f"✓ {label}"
     if state.status == "starting":
-        return f"{label} starting"
+        return f"… {label}"
+    if state.status == "unsupported":
+        return f"! {label}"
     if state.status == "stopped":
-        return f"{label} stopped"
+        return f"× {label}"
     if state.message:
-        return f"{label} {state.status}: {state.message}"
-    return f"{label} {state.status}"
+        return f"× {label}: {state.message}"
+    return f"× {label}"
+
+
+def agent_status_text(state: AgentConnectionState) -> Text:
+    """Render compact agent status as an indicator plus agent label."""
+    if state.status == "none":
+        return Text("none", style="dim")
+    label = state.label or state.agent or "agent"
+    text = Text()
+    if state.status == "connected":
+        text.append("✓", style=STATUS_SUCCESS)
+    elif state.status == "starting":
+        text.append("…", style=STATUS_WARNING)
+    elif state.status == "unsupported":
+        text.append("!", style=STATUS_WARNING)
+    else:
+        text.append("×", style=STATUS_ERROR if state.status == "error" else STATUS_WARNING)
+    text.append(f" {label}", style=NEUTRAL)
+    if state.status in {"error", "unsupported"} and state.message:
+        text.append(f": {state.message}", style="dim")
+    return text
 
 
 def agent_status_style(status: str) -> str:
@@ -91,9 +129,34 @@ def agent_status_style(status: str) -> str:
         return STATUS_SUCCESS
     if status == "error":
         return STATUS_ERROR
-    if status in {"starting", "stopped"}:
+    if status in {"starting", "stopped", "unsupported"}:
         return STATUS_WARNING
     return "dim"
+
+
+def status_identity(snapshot: LabSnapshot) -> str:
+    context = _active_workspace_context(snapshot)
+    team = context.get("team") or snapshot.team
+    profile = context.get("user_name") or context.get("username") or context.get("profile")
+    if team:
+        return str(team)
+    if profile:
+        return str(profile)
+    for key in ("user_id",):
+        value = context.get(key)
+        if value:
+            return str(value)
+    return "personal"
+
+
+def _active_workspace_context(snapshot: LabSnapshot) -> dict[str, object]:
+    section = snapshot.section("workspace")
+    if section is None:
+        return {}
+    for item in section.items:
+        if item.raw.get("type") == "workspace_context" and item.raw.get("active") is True:
+            return item.raw
+    return {}
 
 
 def compact_path(path: Path) -> str:

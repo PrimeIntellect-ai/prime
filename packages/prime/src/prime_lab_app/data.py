@@ -230,10 +230,10 @@ class LabDataSource:
         ]
         return LabSection(
             key="workspace",
-            title="Home",
-            description="Local Lab environments, configs, and auth profiles.",
+            title="Settings",
+            description="Workspaces, profiles, local assets, and setup.",
             items=tuple(items),
-            status=f"{current_profile} * {workspace.name}",
+            status="",
             status_style=STATUS_SUCCESS if authenticated else STATUS_WARNING,
         )
 
@@ -639,9 +639,6 @@ class LabDataSource:
             metadata.append(("Semantic version", str(version)))
         if content_hash := raw.get("content_hash"):
             metadata.append(("Content hash", str(content_hash)[:12]))
-        if raw.get("wheel_url") or raw.get("simple_index_url"):
-            metadata.append(("Install", f"prime env install {item.title}"))
-
         return LabItem(
             key=item.key,
             section=item.section,
@@ -1148,7 +1145,7 @@ def _workspace_agent_item(workspace: Path, lab_metadata: dict[str, Any]) -> LabI
     return LabItem(
         key=f"workspace:agent:{_workspace_cache_key(workspace)}",
         section="workspace",
-        title="Coding agent",
+        title="Agent",
         subtitle=subtitle,
         status="agent" if agent else "not configured",
         status_style=PRIMARY if agent else "dim",

@@ -9,6 +9,7 @@ import toml
 
 from .models import LabItem
 from .palette import PRIMARY
+from .toml_format import format_toml_blocks
 
 
 def training_config_toml(raw: dict[str, Any]) -> str:
@@ -50,7 +51,7 @@ def training_config_toml(raw: dict[str, Any]) -> str:
         config["buffer"] = raw["buffer_config"]
 
     filtered = _filter_empty_values(normalize_rl_config(config))
-    return _space_toml_blocks(toml.dumps(filtered)).rstrip() if filtered else ""
+    return format_toml_blocks(toml.dumps(filtered)).rstrip() if filtered else ""
 
 
 def normalize_rl_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -219,16 +220,6 @@ def _split_environment_token(token: str) -> tuple[str, str | None]:
         env_id, version = token.rsplit(":", 1)
         return env_id.strip(), version.strip() or None
     return token, None
-
-
-def _space_toml_blocks(value: str) -> str:
-    lines = value.splitlines()
-    spaced: list[str] = []
-    for line in lines:
-        if line.startswith("[[") and spaced and spaced[-1] != "":
-            spaced.append("")
-        spaced.append(line)
-    return "\n".join(spaced) + ("\n" if spaced else "")
 
 
 def _filter_empty_values(value: Any) -> Any:

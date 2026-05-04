@@ -19,6 +19,7 @@ dependencies = [
     "rich>=13.3.1",
     "textual>=6.1.0",
     "textual-plot>=0.10.1",
+    "claude-agent-sdk>=0.1.0",
     "cryptography>=41.0.0",
     "verifiers>=0.1.12.dev6",
     "build>=1.0.0",
@@ -74,7 +75,7 @@ allow-direct-references = true
 path = "src/prime_cli/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/prime_cli", "src/prime_lab_view"]
+packages = ["src/prime_cli", "src/prime_lab_app"]
 
 [tool.ruff]
 src = ["."]

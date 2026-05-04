@@ -175,7 +175,6 @@ def _environment_summary_table(item: LabItem) -> Table:
         ),
         ("Path", local.get("relative_path") or local.get("path") if local else None),
         ("Environment ID", local_metadata.get("environment_id")),
-        ("Install", _environment_install_command(raw)),
     ):
         text = _display_value(value)
         if text != "-":
@@ -198,11 +197,6 @@ def _environment_version(
         or local_project.get("version")
         or local_metadata.get("version")
     )
-
-
-def _environment_install_command(raw: dict[str, Any]) -> str:
-    slug = str(raw.get("slug") or raw.get("id") or "")
-    return f"prime env install {slug}" if slug else ""
 
 
 def _environment_local_files(raw: dict[str, Any]) -> Table:

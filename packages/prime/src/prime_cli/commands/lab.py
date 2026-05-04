@@ -100,12 +100,27 @@ def view(
     _launch_view(limit=limit, env_dir=env_dir, outputs_dir=outputs_dir)
 
 
+@app.command("mcp")
+def mcp(
+    workspace: Path = typer.Option(
+        Path.cwd(),
+        "--workspace",
+        help="Workspace whose running Lab TUI should receive MCP tool calls.",
+    ),
+) -> None:
+    """Run the Lab MCP server over stdio."""
+
+    from ..lab_mcp import run_lab_mcp_server
+
+    run_lab_mcp_server(workspace)
+
+
 def _launch_view(*, limit: int, env_dir: str, outputs_dir: str) -> None:
     if limit < 1:
         console.print("[red]Error:[/red] --limit must be at least 1")
         raise typer.Exit(1)
 
-    from prime_lab_view import run_lab_view
+    from prime_lab_app import run_lab_view
 
     run_lab_view(
         limit=limit,

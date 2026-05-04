@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import httpx
-from prime_cli.commands.env import _safe_tar_extract, is_valid_url
+from prime_cli.commands.env import _safe_tar_extract, compute_content_hash, is_valid_url
 
 from .models import LabItem, LabSection
 
@@ -204,7 +204,7 @@ def write_cached_lab_sections(cache_key: str, sections: Iterable[LabSection]) ->
 
 
 def record_recent_workspace(workspace: Path) -> None:
-    """Remember a workspace path for Home's inactive workspace list."""
+    """Remember a workspace path for Settings' inactive workspace list."""
 
     path = workspace_state_path()
     state = _read_json(path)
@@ -225,7 +225,7 @@ def record_recent_workspace(workspace: Path) -> None:
 
 
 def forget_recent_workspace(workspace: Path) -> None:
-    """Remove a workspace path from Home's inactive workspace list."""
+    """Remove a workspace path from Settings' inactive workspace list."""
 
     path = workspace_state_path()
     state = _read_json(path)
@@ -269,6 +269,16 @@ def environment_source_cache_path(owner: str, name: str, version: str) -> Path:
     for component in (owner, name, version):
         _validate_path_component(component)
     return lab_cache_root() / "environments" / owner / name / version
+
+
+def environment_source_blob_cache_path(content_hash: str) -> Path:
+    _validate_content_hash(content_hash)
+    return lab_cache_root() / "sources" / content_hash / "files"
+
+
+def environment_source_blob_manifest_path(content_hash: str) -> Path:
+    _validate_content_hash(content_hash)
+    return lab_cache_root() / "sources" / content_hash / "manifest.json"
 
 
 def cached_environment_source(raw: dict[str, Any]) -> CachedEnvironmentSource | None:
@@ -325,15 +335,22 @@ def ensure_environment_source(raw: dict[str, Any]) -> CachedEnvironmentSource | 
     manifest_path = cache_path / ".prime" / "lab-cache.json"
 
     _download_source_archive(package_url, cache_path)
+    content_hash = compute_content_hash(cache_path)
     manifest = {
+        "cache_version": 1,
         "slug": slug,
         "version": str(version),
+        "source_version": str(version),
+        "content_hash": content_hash,
         "cached_at": datetime.now(timezone.utc).isoformat(),
         "package_url": package_url,
     }
+    blob_root = _ensure_source_blob(cache_path, manifest)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    return CachedEnvironmentSource(cache_path, manifest_path, manifest)
+    blob_manifest_path = environment_source_blob_manifest_path(content_hash)
+    blob_manifest = _read_json(blob_manifest_path) or manifest
+    return CachedEnvironmentSource(blob_root, blob_manifest_path, blob_manifest)
 
 
 def _local_environment_source(raw: dict[str, Any]) -> CachedEnvironmentSource | None:
@@ -349,8 +366,29 @@ def _local_environment_source(raw: dict[str, Any]) -> CachedEnvironmentSource | 
 def _cached_environment_source_path(path: Path) -> CachedEnvironmentSource | None:
     manifest_path = path / ".prime" / "lab-cache.json"
     manifest = _read_json(manifest_path)
+    if not path.is_dir() or not manifest:
+        return None
+    content_hash = manifest.get("content_hash")
+    if isinstance(content_hash, str) and content_hash:
+        blob = _cached_environment_source_blob(content_hash)
+        if blob is not None:
+            return blob
+    if "version" in manifest and "source_version" not in manifest:
+        manifest = {**manifest, "source_version": manifest.get("version")}
     if path.is_dir() and manifest:
         return CachedEnvironmentSource(path, manifest_path, manifest)
+    return None
+
+
+def _cached_environment_source_blob(content_hash: str) -> CachedEnvironmentSource | None:
+    try:
+        root = environment_source_blob_cache_path(content_hash)
+        manifest_path = environment_source_blob_manifest_path(content_hash)
+    except ValueError:
+        return None
+    manifest = _read_json(manifest_path)
+    if root.is_dir() and manifest:
+        return CachedEnvironmentSource(root, manifest_path, manifest)
     return None
 
 
@@ -430,7 +468,6 @@ def _download_source_archive(url: str, dest: Path) -> None:
     if not is_valid_url(url):
         raise ValueError(f"Invalid package URL: {url}")
 
-    temp_extract_dir = Path(tempfile.mkdtemp(prefix="prime_lab_env_"))
     temp_file_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
@@ -450,9 +487,32 @@ def _download_source_archive(url: str, dest: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(extract_path), str(dest))
     finally:
-        shutil.rmtree(temp_extract_dir, ignore_errors=True)
         if temp_file_path and temp_file_path.exists():
             temp_file_path.unlink()
+
+
+def _ensure_source_blob(source_path: Path, manifest: dict[str, Any]) -> Path:
+    content_hash = str(manifest["content_hash"])
+    blob_root = environment_source_blob_cache_path(content_hash)
+    blob_manifest_path = environment_source_blob_manifest_path(content_hash)
+    if not blob_root.is_dir():
+        blob_root.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            source_path,
+            blob_root,
+            ignore=shutil.ignore_patterns(".prime"),
+        )
+    blob_manifest = {
+        **manifest,
+        "cache_version": 1,
+        "cached_at": manifest.get("cached_at") or datetime.now(timezone.utc).isoformat(),
+    }
+    blob_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    blob_manifest_path.write_text(
+        json.dumps(blob_manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return blob_root
 
 
 def _platform_detail(raw: dict[str, Any]) -> dict[str, Any]:
@@ -561,3 +621,8 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _validate_path_component(value: str) -> None:
     if not value or ".." in value or "/" in value or "\\" in value or "\x00" in value:
         raise ValueError(f"Unsafe cache path component: {value!r}")
+
+
+def _validate_content_hash(value: str) -> None:
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value.lower()):
+        raise ValueError(f"Unsafe source content hash: {value!r}")

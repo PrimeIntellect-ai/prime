@@ -102,19 +102,18 @@ class TrainingRunScreen(Screen[None]):
     """Full-page training run view."""
 
     BINDINGS = [
-        Binding("b,backspace", "back", "Back"),
-        Binding("q", "quit", "Quit"),
+        Binding("escape", "back", "Back", key_display="Esc"),
         Binding("l", "toggle_logs", "Logs"),
         Binding("left", "previous_tab", "Prev tab"),
         Binding("right", "next_tab", "Next tab"),
         Binding("up", "previous_metric", "Prev chart"),
         Binding("down", "next_metric", "Next chart"),
         Binding("space", "pick_chart", "Pick"),
-        Binding("m", "show_metric_charts", "Metrics"),
-        Binding("d", "show_distribution_charts", "Reward dist"),
-        Binding("g", "load_more_logs", "More logs"),
+        Binding("m", "show_metric_charts", "Metrics", show=False),
+        Binding("d", "show_distribution_charts", "Reward dist", show=False),
+        Binding("g", "load_more_logs", "More logs", show=False),
         Binding("e", "edit_config", "Edit config"),
-        Binding("o", "open_platform", "Open platform"),
+        Binding("o", "open_platform", "Open platform", show=False),
     ]
 
     CSS = (

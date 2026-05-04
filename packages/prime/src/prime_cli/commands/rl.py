@@ -199,6 +199,16 @@ rollouts_per_example = 8
 # Optional: warm-start from an existing checkpoint
 # checkpoint_id = "..."
 
+# Optional: SFT hard distillation
+# loss = "sft"
+# [teacher]
+# model = "openai/gpt-oss-120b"
+# save = false
+#
+# [teacher.sampling]
+# max_tokens = 2048
+# reasoning_effort = "medium"
+
 [sampling]
 max_tokens = 2048
 # temperature = 0.7
@@ -484,18 +494,6 @@ class AdaptersConfig(BaseModel):
         return result if result else None
 
 
-class InfrastructureConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    compute_size: str | None = None
-
-    def to_api_dict(self) -> Dict[str, Any] | None:
-        d: Dict[str, Any] = {}
-        if self.compute_size is not None:
-            d["compute_size"] = self.compute_size
-        return d if d else None
-
-
 class TailscaleConfig(BaseModel):
     """Optional per-run tailscale sidecar (enterprise-only feature).
 
@@ -570,11 +568,62 @@ class TailscaleConfig(BaseModel):
         }
 
 
+class InfrastructureConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    compute_size: str | None = None
+
+    def to_api_dict(self) -> Dict[str, Any] | None:
+        d: Dict[str, Any] = {}
+        if self.compute_size is not None:
+            d["compute_size"] = self.compute_size
+        return d if d else None
+
+
+class TeacherSamplingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_tokens: int | None = None
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+
+    def to_api_dict(self) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        if self.max_tokens is not None:
+            result["max_tokens"] = self.max_tokens
+        if self.reasoning_effort is not None:
+            result["reasoning_effort"] = self.reasoning_effort
+        return result
+
+
+class TeacherConfig(BaseModel):
+    """Teacher model for SFT distillation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str
+    save: bool = False
+    sampling: TeacherSamplingConfig = Field(default_factory=TeacherSamplingConfig)
+
+    @model_validator(mode="after")
+    def reject_teacher_save(self) -> "TeacherConfig":
+        if self.save:
+            raise ValueError("teacher.save=true is not supported")
+        return self
+
+    def to_api_dict(self) -> Dict[str, Any]:
+        return {
+            "model": self.model,
+            "save": self.save,
+            "sampling": self.sampling.to_api_dict(),
+        }
+
+
 class RLConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
     model: str
+    loss: Literal["rl", "sft"] = "rl"
     max_steps: int = 100
     batch_size: int = 128
     rollouts_per_example: int = 8
@@ -584,6 +633,7 @@ class RLConfig(BaseModel):
     max_async_level: int | None = None
     checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
     cluster_name: str | None = None  # Admin-only: target a specific cluster by name
+    teacher: TeacherConfig | None = None
     env: List[EnvConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
@@ -597,6 +647,22 @@ class RLConfig(BaseModel):
     run_config: Dict[str, Any] = Field(default_factory=dict)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_sft_rollout_default(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("loss", "rl") == "sft":
+            if "rollouts_per_example" not in data:
+                data = {**data, "rollouts_per_example": 1}
+        return data
+
+    @model_validator(mode="after")
+    def validate_loss_teacher(self) -> "RLConfig":
+        if self.loss == "sft" and self.teacher is None:
+            raise ValueError("loss='sft' requires a [teacher] config")
+        if self.loss == "rl" and self.teacher is not None:
+            raise ValueError("[teacher] can only be set when loss='sft'")
+        return self
 
 
 def _format_validation_errors(errors: list[Any]) -> list[str]:
@@ -874,6 +940,7 @@ def create_run(
 
         # Training
         console.print("\n[cyan]Training[/cyan]")
+        console.print(f"  Loss:                {cfg.loss}")
         console.print(f"  Max Steps:           {cfg.max_steps}")
         console.print(f"  Batch Size:          {cfg.batch_size}")
         console.print(f"  Rollouts per Example: {cfg.rollouts_per_example}")
@@ -885,8 +952,24 @@ def create_run(
             console.print(f"  Oversampling Factor: {cfg.oversampling_factor}")
         if cfg.max_async_level is not None:
             console.print(f"  Max Async Level:     {cfg.max_async_level}")
+
+        # Teacher
+        if cfg.teacher:
+            console.print("\n[cyan]Teacher[/cyan]")
+            console.print(f"  Model:            {cfg.teacher.model}")
+            console.print(f"  Save:             {cfg.teacher.save}")
+            teacher_sampling = cfg.teacher.sampling
+            if teacher_sampling.max_tokens is not None or teacher_sampling.reasoning_effort:
+                console.print("  Sampling:")
+                if teacher_sampling.max_tokens is not None:
+                    console.print(f"    Max Tokens:       {teacher_sampling.max_tokens}")
+                if teacher_sampling.reasoning_effort:
+                    console.print(f"    Reasoning Effort: {teacher_sampling.reasoning_effort}")
+
+        # Run config
         if cfg.run_config:
-            console.print(f"  Run Config:          {cfg.run_config}")
+            console.print("\n[cyan]Run Config[/cyan]")
+            console.print(f"  Values: {cfg.run_config}")
 
         # Sampling
         has_sampling = (
@@ -1084,6 +1167,8 @@ def create_run(
             enable_thinking=cfg.sampling.enable_thinking,
             reasoning_effort=cfg.sampling.reasoning_effort,
             run_config=cfg.run_config if cfg.run_config else None,
+            loss=cfg.loss,
+            teacher=cfg.teacher.to_api_dict() if cfg.teacher else None,
         )
 
         if output == "json":

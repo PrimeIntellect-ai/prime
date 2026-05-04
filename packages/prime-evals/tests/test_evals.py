@@ -56,6 +56,12 @@ class _FakeAPIClient:
             return {"data": {"id": "env-123"}}
         raise AssertionError(f"unexpected POST {path}")
 
+    def get(self, path):
+        self.calls.append(("get", path))
+        if path == "/environmentshub/owner/gsm8k/@latest":
+            return {"data": {"id": "env-slug-123"}}
+        raise AssertionError(f"unexpected GET {path}")
+
     def request(self, method, path, json):
         self.calls.append(("request", method, path, json))
         return {"evaluation_id": "eval-123"}
@@ -100,6 +106,25 @@ def test_create_evaluation_name_lookup_does_not_resolve_or_create_environment():
     assert not any(call[1] == "/environmentshub/resolve" for call in api_client.calls)
     request_payload = next(call[3] for call in api_client.calls if call[0] == "request")
     assert request_payload["environments"] == [{"id": "env-123"}]
+
+
+def test_create_evaluation_slug_lookup_uses_owner_detail_endpoint():
+    """Owner/name refs must support both user and team owners without creating envs."""
+    api_client = _FakeAPIClient()
+    client = EvalsClient(api_client)
+
+    response = client.create_evaluation(
+        name="test-evaluation",
+        environments=[{"slug": "owner/gsm8k"}],
+        model_name="gpt-4o-mini",
+        dataset="owner/gsm8k",
+    )
+
+    assert response == {"evaluation_id": "eval-123"}
+    assert ("get", "/environmentshub/owner/gsm8k/@latest") in api_client.calls
+    assert not any(call[1] == "/environmentshub/resolve" for call in api_client.calls)
+    request_payload = next(call[3] for call in api_client.calls if call[0] == "request")
+    assert request_payload["environments"] == [{"id": "env-slug-123"}]
 
 
 def test_evaluation_status_enum():

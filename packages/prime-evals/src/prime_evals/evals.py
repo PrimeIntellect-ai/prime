@@ -64,10 +64,7 @@ class EvalsClient:
             EvalsAPIError: If the environment does not exist (404)
         """
         try:
-            # Try team_slug first (lookup endpoint supports team_slug)
-            # If owner is not a team, backend will handle it appropriately
-            lookup_data: Dict[str, Any] = {"name": name, "team_slug": owner_slug}
-            response = self.client.post("/environmentshub/lookup", json=lookup_data)
+            response = self.client.get(f"/environmentshub/{owner_slug}/{name}/@latest")
             return response["data"]["id"]
         except APIError as e:
             raise EvalsAPIError(
@@ -403,10 +400,7 @@ class AsyncEvalsClient:
             EvalsAPIError: If the environment does not exist (404)
         """
         try:
-            # Try team_slug first (lookup endpoint supports team_slug)
-            # If owner is not a team, backend will handle it appropriately
-            lookup_data: Dict[str, Any] = {"name": name, "team_slug": owner_slug}
-            response = await self.client.post("/environmentshub/lookup", json=lookup_data)
+            response = await self.client.get(f"/environmentshub/{owner_slug}/{name}/@latest")
             return response["data"]["id"]
         except APIError as e:
             raise EvalsAPIError(

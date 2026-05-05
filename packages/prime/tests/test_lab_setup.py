@@ -223,20 +223,25 @@ def test_lab_doctor_reports_missing_selected_agent_guidance(
 
 
 def test_lab_doctor_fix_writes_standard_gitignore_patterns(tmp_path: Path) -> None:
-    (tmp_path / ".gitignore").write_text("# existing\ncustom.log\n", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text(
+        "# existing\ncustom.log\n.env.local\n/outputs-old/\n",
+        encoding="utf-8",
+    )
 
     result = run_lab_doctor_service(LabDoctorOptions(fix=True), workspace=tmp_path)
 
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    gitignore_lines = set(gitignore.splitlines())
     assert result.exit_code == 1
     assert "custom.log" in gitignore
-    assert ".env" in gitignore
-    assert "/outputs/" in gitignore
-    assert "/prime-rl/" in gitignore
-    assert "/environments/*/outputs/" in gitignore
-    assert "*.py[cod]" in gitignore
-    assert ".pytest_cache/" in gitignore
-    assert ".ruff_cache/" in gitignore
+    assert ".env.local" in gitignore_lines
+    assert ".env" in gitignore_lines
+    assert "/outputs/" in gitignore_lines
+    assert "/prime-rl/" in gitignore_lines
+    assert "/environments/*/outputs/" in gitignore_lines
+    assert "*.py[cod]" in gitignore_lines
+    assert ".pytest_cache/" in gitignore_lines
+    assert ".ruff_cache/" in gitignore_lines
 
 
 def test_lab_doctor_validates_environment_table_refs(tmp_path: Path) -> None:

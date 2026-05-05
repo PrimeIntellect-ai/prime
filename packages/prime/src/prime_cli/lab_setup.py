@@ -830,7 +830,7 @@ def _path_check(
 def _gitignore_check(workspace: Path) -> LabDoctorCheck:
     path = workspace / ".gitignore"
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    missing = [pattern for pattern in LAB_GITIGNORE_PATTERNS if pattern not in existing]
+    missing = _missing_gitignore_patterns(existing)
     if not missing:
         return LabDoctorCheck(
             name="Gitignore outputs",
@@ -1226,10 +1226,19 @@ def _parse_agents(value: str | None) -> list[str]:
 def _append_gitignore(workspace: Path) -> None:
     path = workspace / ".gitignore"
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    missing = [pattern for pattern in LAB_GITIGNORE_PATTERNS if pattern not in existing]
+    missing = _missing_gitignore_patterns(existing)
     if missing:
         section = "\n# Lab generated artifacts\n" + "\n".join(missing) + "\n"
         path.write_text(existing.rstrip() + section + "\n", encoding="utf-8")
+
+
+def _missing_gitignore_patterns(existing: str) -> list[str]:
+    existing_patterns = {
+        line.strip()
+        for line in existing.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    return [pattern for pattern in LAB_GITIGNORE_PATTERNS if pattern not in existing_patterns]
 
 
 def _global_prime_skills_dir() -> Path:

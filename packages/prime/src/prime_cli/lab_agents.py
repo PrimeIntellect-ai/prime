@@ -1,0 +1,362 @@
+"""Prime Lab coding-agent metadata and local setup surfaces."""
+
+from __future__ import annotations
+
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+from .lab_mcp_config import (
+    write_amp_mcp_config,
+    write_factory_mcp_config,
+    write_hermes_mcp_config,
+    write_lab_mcp_config,
+    write_opencode_mcp_config,
+)
+
+AgentCapabilityStatus = Literal["supported", "not_supported"]
+AgentNativeSurface = Literal[
+    "codex_app_server",
+    "claude_sdk",
+    "mcp_config",
+    "acp_mcp",
+    "pi_acp",
+    "none",
+]
+AgentTransport = Literal[
+    "codex-app-stdio",
+    "claude-agent-sdk",
+    "resumable-cli",
+    "acp-stdio",
+    "one-shot",
+]
+LabWidgetContract = Literal[
+    "codex-dynamic-tools",
+    "claude-sdk-tools",
+    "mcp-stdio-tools",
+    "not-supported",
+]
+
+
+@dataclass(frozen=True)
+class AgentInstallRequirement:
+    """One machine-level executable required for a Lab agent surface."""
+
+    binary: str
+    install_command: tuple[str, ...] = ()
+    description: str = ""
+
+    def installed(self) -> bool:
+        return shutil.which(self.binary) is not None
+
+
+@dataclass(frozen=True)
+class AgentAdapter:
+    """Command mapping for one user-facing coding agent."""
+
+    name: str
+    label: str
+    prompt_prefix: tuple[str, ...]
+    server_prefix: tuple[str, ...] = ()
+    server_transport: AgentTransport = "one-shot"
+    server_description: str = "Generic one-shot prompt execution."
+    stream_prefix: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    lab_widget_contract: LabWidgetContract = "not-supported"
+
+    def prompt_command(self, prompt: str) -> list[str]:
+        return [*self.prompt_prefix, prompt]
+
+
+@dataclass(frozen=True)
+class AgentCapability:
+    """Lab readiness and setup metadata for one coding agent."""
+
+    name: str
+    label: str
+    native_surface: AgentNativeSurface
+    requirements: tuple[AgentInstallRequirement, ...] = ()
+    expected_surface_paths: tuple[str, ...] = ()
+    user_skill_root: str = ""
+    status: AgentCapabilityStatus = "supported"
+    unsupported_reason: str = ""
+
+    @property
+    def adapter(self) -> AgentAdapter:
+        return agent_adapter(self.name)
+
+    def missing_requirements(self) -> tuple[AgentInstallRequirement, ...]:
+        return tuple(
+            requirement for requirement in self.requirements if not requirement.installed()
+        )
+
+    def resolved_surface_paths(self, workspace: Path) -> tuple[Path, ...]:
+        workspace = workspace.expanduser().resolve()
+        paths: list[Path] = []
+        for raw_path in self.expected_surface_paths:
+            if raw_path == "{claude_code_mcp}":
+                paths.append(agent_mcp_config_path(workspace, "claude-code"))
+            elif raw_path == "{cursor_mcp}":
+                paths.append(workspace / ".cursor" / "mcp.json")
+            elif raw_path == "{opencode_config}":
+                paths.append(workspace / "opencode.json")
+            elif raw_path == "{hermes_config}":
+                paths.append(Path.home() / ".hermes" / "config.yaml")
+            elif raw_path == "{factory_mcp}":
+                paths.append(workspace / ".factory" / "mcp.json")
+            elif raw_path == "{amp_settings}":
+                paths.append(workspace / ".amp" / "settings.json")
+            else:
+                path = Path(raw_path).expanduser()
+                paths.append(path if path.is_absolute() else workspace / path)
+        return tuple(paths)
+
+
+KNOWN_AGENT_ADAPTERS = {
+    "codex": AgentAdapter(
+        name="codex",
+        label="Codex",
+        prompt_prefix=("codex", "exec"),
+        server_prefix=("codex", "app-server", "--listen", "stdio://"),
+        server_transport="codex-app-stdio",
+        server_description="Codex app-server JSON-RPC transport.",
+        lab_widget_contract="codex-dynamic-tools",
+    ),
+    "claude": AgentAdapter(
+        name="claude",
+        label="Claude",
+        prompt_prefix=("claude", "-p"),
+        server_transport="claude-agent-sdk",
+        server_description="Claude Agent SDK session runtime.",
+        lab_widget_contract="claude-sdk-tools",
+    ),
+    "claude-code": AgentAdapter(
+        name="claude-code",
+        label="Claude Code",
+        prompt_prefix=("claude", "-p"),
+        stream_prefix=("claude", "-p", "--output-format", "stream-json"),
+        aliases=("claude-cli",),
+        lab_widget_contract="mcp-stdio-tools",
+    ),
+    "cursor": AgentAdapter(
+        name="cursor",
+        label="Cursor",
+        prompt_prefix=("cursor-agent", "-p"),
+        stream_prefix=("cursor-agent", "-p", "--output-format", "stream-json"),
+        lab_widget_contract="mcp-stdio-tools",
+    ),
+    "opencode": AgentAdapter(
+        name="opencode",
+        label="OpenCode",
+        prompt_prefix=("opencode", "run"),
+        server_prefix=("opencode", "acp"),
+        server_transport="acp-stdio",
+        server_description="OpenCode Agent Client Protocol stdio transport.",
+        stream_prefix=("opencode", "run", "--format", "json"),
+        lab_widget_contract="mcp-stdio-tools",
+    ),
+    "pi": AgentAdapter(
+        name="pi",
+        label="Pi Coding Agent",
+        prompt_prefix=("pi", "--print"),
+        server_prefix=("pi-acp",),
+        server_transport="acp-stdio",
+        server_description="Pi Agent Client Protocol stdio transport.",
+        stream_prefix=("pi", "--print", "--mode", "json"),
+        lab_widget_contract="mcp-stdio-tools",
+    ),
+    "hermes-agent": AgentAdapter(
+        name="hermes-agent",
+        label="Hermes Agent",
+        prompt_prefix=("hermes", "--oneshot"),
+        server_prefix=("hermes", "acp", "--accept-hooks"),
+        server_transport="acp-stdio",
+        server_description="Hermes Agent Client Protocol stdio transport.",
+        stream_prefix=("hermes", "chat", "--quiet", "--accept-hooks", "--source", "prime-lab"),
+        aliases=("hermes",),
+        lab_widget_contract="mcp-stdio-tools",
+    ),
+    "factory-droid": AgentAdapter(
+        name="factory-droid",
+        label="Factory Droid Agent",
+        prompt_prefix=("droid", "exec"),
+        stream_prefix=("droid", "exec", "--output-format", "stream-json"),
+        aliases=("droid", "factory"),
+        lab_widget_contract="mcp-stdio-tools",
+    ),
+    "amp": AgentAdapter(
+        name="amp",
+        label="Amp Code",
+        prompt_prefix=("amp", "--execute"),
+        stream_prefix=("amp", "--execute", "--stream-json"),
+        aliases=("amp-code",),
+        lab_widget_contract="mcp-stdio-tools",
+    ),
+}
+_AGENT_ALIASES = {
+    alias: adapter.name for adapter in KNOWN_AGENT_ADAPTERS.values() for alias in adapter.aliases
+}
+
+
+_CAPABILITIES: dict[str, AgentCapability] = {
+    "codex": AgentCapability(
+        name="codex",
+        label="Codex",
+        native_surface="codex_app_server",
+        requirements=(AgentInstallRequirement("codex", description="Codex CLI"),),
+        user_skill_root="~/.agents/skills",
+    ),
+    "claude": AgentCapability(
+        name="claude",
+        label="Claude",
+        native_surface="claude_sdk",
+        user_skill_root="~/.claude/skills",
+    ),
+    "claude-code": AgentCapability(
+        name="claude-code",
+        label="Claude Code",
+        native_surface="mcp_config",
+        requirements=(AgentInstallRequirement("claude", description="Claude Code CLI"),),
+        expected_surface_paths=("{claude_code_mcp}",),
+        user_skill_root="~/.claude/skills",
+    ),
+    "cursor": AgentCapability(
+        name="cursor",
+        label="Cursor",
+        native_surface="mcp_config",
+        requirements=(AgentInstallRequirement("cursor-agent", description="Cursor Agent CLI"),),
+        expected_surface_paths=("{cursor_mcp}",),
+        user_skill_root="~/.cursor/skills",
+    ),
+    "opencode": AgentCapability(
+        name="opencode",
+        label="OpenCode",
+        native_surface="acp_mcp",
+        requirements=(AgentInstallRequirement("opencode", description="OpenCode CLI"),),
+        expected_surface_paths=("{opencode_config}",),
+        user_skill_root="~/.opencode/skills",
+    ),
+    "pi": AgentCapability(
+        name="pi",
+        label="Pi Coding Agent",
+        native_surface="pi_acp",
+        user_skill_root="~/.pi/skills",
+        requirements=(
+            AgentInstallRequirement("pi", description="Pi Coding Agent CLI"),
+            AgentInstallRequirement(
+                "pi-acp",
+                install_command=("npm", "install", "-g", "pi-acp"),
+                description="Pi ACP bridge",
+            ),
+        ),
+    ),
+    "hermes-agent": AgentCapability(
+        name="hermes-agent",
+        label="Hermes Agent",
+        native_surface="acp_mcp",
+        requirements=(AgentInstallRequirement("hermes", description="Hermes Agent CLI"),),
+        expected_surface_paths=("{hermes_config}",),
+        user_skill_root="~/.hermes/skills",
+    ),
+    "factory-droid": AgentCapability(
+        name="factory-droid",
+        label="Factory Droid Agent",
+        native_surface="mcp_config",
+        requirements=(
+            AgentInstallRequirement(
+                "droid",
+                install_command=("npm", "install", "-g", "@factory/cli"),
+                description="Factory Droid Agent CLI",
+            ),
+        ),
+        expected_surface_paths=("{factory_mcp}",),
+        user_skill_root="~/.factory/skills",
+    ),
+    "amp": AgentCapability(
+        name="amp",
+        label="Amp Code",
+        native_surface="mcp_config",
+        requirements=(
+            AgentInstallRequirement(
+                "amp",
+                install_command=("npm", "install", "-g", "@sourcegraph/amp@latest"),
+                description="Amp Code CLI",
+            ),
+        ),
+        expected_surface_paths=("{amp_settings}",),
+        user_skill_root="~/.config/amp/skills",
+    ),
+}
+
+
+def known_agent_names() -> tuple[str, ...]:
+    """Return Lab-supported agent names in stable display order."""
+
+    return tuple(_CAPABILITIES)
+
+
+def agent_capability(name: str) -> AgentCapability:
+    """Return the declared Lab capability for a coding agent."""
+
+    normalized = _normalize_agent_name(name)
+    capability = _CAPABILITIES.get(normalized)
+    if capability is not None:
+        return capability
+    adapter = agent_adapter(normalized)
+    return AgentCapability(
+        name=adapter.name,
+        label=adapter.label,
+        native_surface="none",
+        status="not_supported",
+        unsupported_reason="This command does not expose a native Lab tool surface.",
+    )
+
+
+def agent_adapter(name: str) -> AgentAdapter:
+    """Return a known or generic command adapter."""
+
+    normalized = _normalize_agent_name(name)
+    adapter = KNOWN_AGENT_ADAPTERS.get(normalized)
+    if adapter is not None:
+        return adapter
+    return AgentAdapter(name=normalized, label=normalized, prompt_prefix=(normalized,))
+
+
+def agent_mcp_config_path(workspace: Path, agent: str) -> Path:
+    """Workspace-scoped MCP config file for an agent."""
+
+    return workspace / ".prime" / "lab" / "agent-mcp" / f"{agent}.json"
+
+
+def write_agent_native_surface(workspace: Path, agent: str) -> tuple[Path, ...]:
+    """Write the native Lab control surface for a supported coding agent."""
+
+    adapter = agent_adapter(agent)
+    if adapter.lab_widget_contract != "mcp-stdio-tools":
+        return ()
+    if adapter.name == "pi":
+        return ()
+    if adapter.name == "opencode":
+        return (write_opencode_mcp_config(workspace),)
+    if adapter.name == "hermes-agent":
+        return (write_hermes_mcp_config(workspace),)
+    if adapter.name == "factory-droid":
+        return (write_factory_mcp_config(workspace),)
+    if adapter.name == "amp":
+        return (write_amp_mcp_config(workspace),)
+    if adapter.name == "cursor":
+        return (write_lab_mcp_config(workspace, workspace / ".cursor" / "mcp.json"),)
+    return (write_lab_mcp_config(workspace, agent_mcp_config_path(workspace, adapter.name)),)
+
+
+def agent_user_skills_dir(agent: str) -> Path | None:
+    """Return the user-level skill root for a supported agent."""
+
+    root = agent_capability(agent).user_skill_root
+    return Path(root).expanduser() if root else None
+
+
+def _normalize_agent_name(name: str) -> str:
+    raw = name.strip().lower() or "codex"
+    return _AGENT_ALIASES.get(raw, raw)

@@ -123,7 +123,8 @@ from .widgets import (
 )
 
 WorkspaceSwitcher = Callable[[Path], None]
-NAV_SECTION_KEYS = frozenset({"environments", "training", "evaluations"})
+NAV_SECTION_ORDER = ("environments", "training", "evaluations", "workspace")
+NAV_SECTION_KEYS = frozenset(NAV_SECTION_ORDER)
 
 
 class WorkspacePathLink(Static):
@@ -564,12 +565,6 @@ class PrimeLabView(App[None]):
         self.focus_nav_pane()
 
     def focus_nav_pane(self) -> None:
-        if self._active_section_key == "workspace" and self._snapshot is not None:
-            target = _first_nav_section_key(self._snapshot)
-            if target is not None:
-                self._active_section_key = target
-                self._filter = ""
-                self._render_active_section()
         self.query_one("#section-tree", Tree).focus()
 
     def focus_home_rows(self) -> None:
@@ -1863,7 +1858,10 @@ def _warning_viewer_text(warnings: tuple[str, ...]) -> Text:
 
 
 def _nav_sections(snapshot: LabSnapshot) -> tuple[LabSection, ...]:
-    return tuple(section for section in snapshot.sections if section.key in NAV_SECTION_KEYS)
+    sections = {
+        section.key: section for section in snapshot.sections if section.key in NAV_SECTION_KEYS
+    }
+    return tuple(section for key in NAV_SECTION_ORDER if (section := sections.get(key)) is not None)
 
 
 def _first_nav_section_key(snapshot: LabSnapshot) -> str | None:

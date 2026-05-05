@@ -782,7 +782,7 @@ def _agent_native_surface_check(agent: str, workspace: Path) -> LabDoctorCheck:
             message="Missing " + ", ".join(requirement.binary for requirement in missing),
             remediation="Install selected agent dependency: " + ", ".join(remediations) + ".",
         )
-    if capability.native_surface in {"codex_app_server", "pi_acp"}:
+    if capability.native_surface == "codex_app_server":
         return LabDoctorCheck(
             name=name,
             status="PASS",

@@ -11,6 +11,7 @@ from .agent_adapters import (
     AgentAdapter,
     agent_adapter,
     agent_mcp_config_path,
+    pi_lab_extension_path,
 )
 
 AgentCapabilityStatus = Literal["supported", "needs_setup", "not_supported"]
@@ -18,7 +19,8 @@ AgentNativeSurface = Literal[
     "codex_app_server",
     "mcp_config",
     "acp_mcp",
-    "pi_acp",
+    "droid_mcp_config",
+    "pi_extension",
     "none",
 ]
 
@@ -69,11 +71,17 @@ class AgentCapability:
             if raw_path == "{cursor_mcp}":
                 paths.append(workspace / ".cursor" / "mcp.json")
                 continue
+            if raw_path == "{droid_mcp}":
+                paths.append(workspace / ".factory" / "mcp.json")
+                continue
             if raw_path == "{opencode_config}":
                 paths.append(workspace / "opencode.json")
                 continue
             if raw_path == "{hermes_config}":
                 paths.append(Path.home() / ".hermes" / "config.yaml")
+                continue
+            if raw_path == "{pi_extension}":
+                paths.append(pi_lab_extension_path(workspace))
                 continue
             path = Path(raw_path).expanduser()
             paths.append(path if path.is_absolute() else workspace / path)
@@ -117,7 +125,7 @@ _CAPABILITIES: dict[str, AgentCapability] = {
     "droid": AgentCapability(
         name="droid",
         label="Factory Droid Agent",
-        native_surface="none",
+        native_surface="droid_mcp_config",
         requirements=(
             AgentInstallRequirement(
                 "droid",
@@ -125,11 +133,7 @@ _CAPABILITIES: dict[str, AgentCapability] = {
                 description="Factory Droid Agent CLI",
             ),
         ),
-        status="not_supported",
-        unsupported_reason=(
-            "Factory Droid does not yet have a verified per-run Lab MCP/native tool "
-            "configuration path."
-        ),
+        expected_surface_paths=("{droid_mcp}",),
     ),
     "hermes": AgentCapability(
         name="hermes",
@@ -148,19 +152,9 @@ _CAPABILITIES: dict[str, AgentCapability] = {
     "pi": AgentCapability(
         name="pi",
         label="Pi Coding Agent",
-        native_surface="pi_acp",
-        requirements=(
-            AgentInstallRequirement("pi", description="Pi Coding Agent CLI"),
-            AgentInstallRequirement(
-                "pi-acp",
-                install_command=("npm", "install", "-g", "pi-acp"),
-                description="Pi ACP bridge",
-            ),
-        ),
-        status="not_supported",
-        unsupported_reason=(
-            "The current Pi ACP bridge initializes, but does not expose Lab MCP tools to the model."
-        ),
+        native_surface="pi_extension",
+        requirements=(AgentInstallRequirement("pi", description="Pi Coding Agent CLI"),),
+        expected_surface_paths=("{pi_extension}",),
     ),
 }
 _ALIASES = {

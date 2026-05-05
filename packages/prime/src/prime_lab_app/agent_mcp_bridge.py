@@ -125,6 +125,27 @@ def write_hermes_mcp_config(workspace: Path, path: Path | None = None) -> Path:
     return path
 
 
+def write_droid_mcp_config(workspace: Path, path: Path | None = None) -> Path:
+    """Write the workspace Droid MCP config that exposes Prime Lab tools."""
+
+    path = path or workspace / ".factory" / "mcp.json"
+    payload = _read_json_object(path)
+    servers = payload.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+    server = lab_mcp_server_config(workspace)
+    servers["prime_lab"] = {
+        "type": "stdio",
+        "command": server["command"],
+        "args": server["args"],
+        "disabled": False,
+    }
+    payload["mcpServers"] = servers
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 class LabMcpIpcServer:
     """Small JSON-lines Unix socket server owned by the running Lab TUI."""
 

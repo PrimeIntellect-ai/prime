@@ -24,8 +24,8 @@ Implemented and green in the current slice:
 
 Known post-V1 follow-up work:
 
-- Live native-agent validation must be rerun against Amp, Codex, Claude Code, Cursor, OpenCode, and Hermes whenever their adapter/tool contracts change. Unit tests cover contracts; they do not prove the current user machine's auth/tool wiring is healthy.
-- Factory Droid and Pi ACP are scaffolded and triaged, but are not V1 native-control agents because they do not currently expose a verified per-run Lab MCP/native tool path to the model.
+- Live native-agent validation must be rerun against Amp, Codex, Claude Code, Cursor, Factory Droid, OpenCode, Hermes, and Pi whenever their adapter/tool contracts change. Unit tests cover contracts; they do not prove the current user machine's auth/tool wiring is healthy.
+- Pi ACP remains a dead end for Lab controls because the current bridge does not forward MCP tools to the model. Lab supports Pi through a project-local Pi extension instead.
 - Agent inline run-launcher cards have a logical control model, shared action preparation, shared launch execution, and a Textual card skin. Choice/config/action/patch/rollout cards should continue moving toward the same split.
 - Config factories and nice-TOML printers should be centralized across quickstart flows, environment actions, config screens, and agent cards so every entry point renders the same recommended user-facing TOML.
 - Background hydration should move from snapshot refreshes to per-section services with freshness timestamps and timings.
@@ -49,7 +49,7 @@ Known post-V1 follow-up work:
 - The TUI launches by default from `prime lab`.
 - The global bottom status bar shows compact auth, team, warnings, and coding-agent connection state.
 - The active workspace path is a top-level clickable workspace affordance. It is the single global home for workspace location and opens workspace/profile/settings controls.
-- Primary destinations are Environments, Training, Evaluations, and Agent. Environments, Training, and Evaluations live in the section selector; Agent is a global shell surface. Settings is a control surface opened from the active workspace/status affordances, not a primary section.
+- Primary destinations are Environments, Training, Evaluations, and Settings. Agent is a global shell surface opened from the status bar or `c` binding.
 - Section selectors are destinations only. Counts, loading state, auth state, and team context live in page subtitles, top chrome, bottom status, or explicit detail panels.
 - Non-zero warnings are clickable in the bottom status bar and open a compact warning tray above the bar. The tray points users toward workspace settings and Doctor for deterministic checks and fixes.
 - The bottom status bar is a compact shell control: auth/team, workspace, warnings, and agent state are displayed once. Non-zero warnings open the warning tray; otherwise the left side opens workspace/profile controls and the right side opens Agent.
@@ -329,13 +329,10 @@ Tool-backed Lab targets:
 - Amp Code via `--mcp-config` and the Prime Lab MCP bridge
 - Claude via Claude Code and the Prime Lab MCP bridge
 - Cursor via the Prime Lab MCP bridge
+- Factory Droid Agent via project `.factory/mcp.json`
 - OpenCode via ACP plus Prime Lab MCP tools
 - Hermes Agent via ACP plus Prime Lab MCP tools
-
-Triaged non-V1 targets:
-
-- Factory Droid Agent; the CLI exposes MCP management and per-run settings, but Lab does not yet have a verified per-run MCP/native tool configuration path.
-- Pi Coding Agent via `pi-acp`; current bridge sessions initialize, but live validation shows Lab MCP tools are not exposed to the model, so Lab renders a precise unsupported state instead of pretending native actions work.
+- Pi Coding Agent via project `.pi/extensions/prime-lab/index.ts`
 
 Runtime behavior:
 
@@ -350,8 +347,8 @@ Runtime behavior:
 - Claude uses the Claude Code CLI path and receives a generated `--mcp-config` pointing to `prime lab mcp --workspace ...`; that stdio MCP server forwards tool calls into the running Lab TUI over workspace-scoped local IPC.
 - Cursor receives a generated `.cursor/mcp.json` entry for `prime_lab` and runs headless with MCP and tool approvals enabled.
 - OpenCode starts `opencode acp --cwd <workspace>` and receives Prime Lab MCP tools in the ACP session.
-- Factory Droid is rejected at runtime for Lab-native chat actions until Lab has a verified per-run MCP/native tool configuration path.
-- Pi is rejected at runtime for Lab-native chat actions until the ACP bridge exposes Lab MCP tools to the model.
+- Factory Droid receives a generated project `.factory/mcp.json` entry and runs headless from the selected workspace.
+- Pi receives a generated project `.pi/extensions/prime-lab/index.ts` extension that registers Lab tools directly with Pi.
 - Hermes starts `hermes acp --accept-hooks` in the selected workspace and receives Prime Lab MCP tools in the ACP session.
 - Custom commands are not Lab-supported until they provide a native tool contract.
 - Chat screens use the runtime abstraction instead of full terminal takeover.
@@ -385,8 +382,8 @@ Runtime contract validation matrix:
 - Claude Code headless chat receives a generated Prime Lab MCP config, streams JSON output, and forwards native MCP calls into the running Lab app.
 - Cursor headless chat receives a generated workspace `.cursor/mcp.json` entry, streams JSON output, and forwards native MCP calls into the running Lab app.
 - OpenCode ACP initializes, creates or resumes a session with Prime Lab MCP servers, streams `session/update` assistant chunks, and renders ACP tool-call updates as compact transcript events.
-- Factory Droid is currently marked unsupported for native actions because Lab does not have a verified per-run MCP/native tool configuration path.
-- Pi ACP initializes, but current live validation shows MCP tools are unavailable to the model; Lab marks Pi unsupported for native actions.
+- Factory Droid discovers the generated project `.factory/mcp.json` file and lists Prime Lab MCP tools; full model-turn validation also requires a Factory account with Droid entitlement.
+- Pi loads the generated project extension, registers Prime Lab tools with the model, streams JSON output, and forwards native tool calls into the running Lab app.
 - Hermes ACP initializes, creates or resumes a session with Prime Lab MCP servers, and streams `session/update` assistant chunks through the same ACP normalizer.
 - Codex app-server stdio initializes, starts a thread, streams assistant deltas, and completes a turn.
 - Codex app-server threads receive the Lab dynamic tool contract and can request specific `lab.choose`, `lab.edit_config`, `lab.preview_action`, `lab.launch_run`, `lab.show_patch`, and `lab.inspect_rollouts` payloads.
@@ -428,7 +425,7 @@ Recommended augmentation model:
 
 - Native tool contracts are required for an agent to be considered Lab-supported. Lab injects tools such as `choose`, `edit_config`, and `launch_run` with JSON schemas, descriptions, and developer instructions at session start. The tool schema itself is the main context: it tells the model what action exists, when to use it, and what payload shape Lab can render.
 - ACP-backed agents receive Lab tools as MCP servers at `session/new`. MCP-backed headless agents use the same bridge through native config files. In both cases, the running TUI owns a local workspace-scoped IPC socket, and `prime lab mcp` exposes stdio MCP tools that forward calls into that socket. This avoids pseudo-protocol parsing while keeping the UI process as the source of truth for control rendering and action logging.
-- Skills are the portable guidance layer. `prime lab setup` and `prime lab sync` install the Prime-managed Lab controls skill so Amp, Codex, Cursor, Claude, Claude Code, OpenCode, and Hermes share the same product guidance while their native tool APIs differ.
+- Skills are the portable guidance layer. `prime lab setup` and `prime lab sync` install the Prime-managed Lab controls skill so Amp, Codex, Cursor, Claude, Claude Code, Factory Droid, OpenCode, Hermes, and Pi share the same product guidance while their native tool APIs differ.
 - `AGENTS.md` remains workspace policy: repo conventions, canonical commands, upload policy, and Prime research norms. It should not be the only source of Lab control semantics because it can drift per repo and does not provide callable schemas.
 - Headless transports that do not expose custom tools are triaged as not yet supported for Lab-native chat actions. Lab should not ask agents to emit fenced JSON or other pseudo-tool protocols; the golden path is a native tool surface that Lab can validate and route.
 - Agent output parsing must stay at the adapter boundary. Reasoning/thinking events are not transcript content; assistant-message deltas append to one mutable turn; final snapshots should complete that turn rather than creating a second visible answer.
@@ -437,14 +434,14 @@ Native control availability must be testable per agent:
 
 - native tool transports receive a startup handshake listing supported Lab control schemas
 - non-native transports show a precise not-yet-supported state and do not receive pseudo-protocol prompts
-- `prime lab setup` and `prime lab sync` install the Prime-managed Lab controls skill into `.prime/skills`, mirror it to `~/.prime/lab/skills`, link it into the configured agent's skill folder, install Lab-owned bridge packages such as `pi-acp` when needed, and write the agent's native Lab tool config
+- `prime lab setup` and `prime lab sync` install the Prime-managed Lab controls skill into `.prime/skills`, mirror it to `~/.prime/lab/skills`, link it into the configured agent's skill folder, and write the agent's native Lab tool config
 - accepted native control requests and user-triggered inline launches write `actions.jsonl` events with control id, kind, title, source/config path, command, status, and return code when available
 - run-launcher requests mount compact inline config-and-launch cards in chat; the user sees the target once, tunes the visible values, and launches without leaving the transcript
 - run-launcher cards use the same config-building and launch-runner services as full config pages; compact chat cards are visual skins over the same logical action, not a duplicate launch path
 - choice/config/action/patch/rollout cards should follow the same logical-control/visual-skin split as the run launcher, with shared backend services rather than per-screen process logic
 - `/diagnose` asks the active agent to render a no-op choice picker and records both the diagnostic start and any structured control request in the session action log
 
-This keeps control interop strict: Amp, Codex, Claude, Claude Code, Cursor, OpenCode, and Hermes are supported because each has a native Lab tool surface. Factory Droid, Pi, and one-shot custom commands remain unsupported until they provide a native tool contract.
+This keeps control interop strict: Amp, Codex, Claude, Claude Code, Cursor, Factory Droid, OpenCode, Hermes, and Pi are supported because each has a native Lab tool surface. One-shot custom commands remain unsupported until they provide a native tool contract.
 
 ## Workspace, Auth, And Teams
 
@@ -851,8 +848,8 @@ Live native-agent validation should be run when changing adapter contracts:
 - Claude headless chat loads the generated MCP config, has Lab MCP tools explicitly allowed, calls `mcp__prime_lab__choose`, and reaches the running Lab IPC bridge.
 - Cursor headless chat loads the generated `.cursor/mcp.json`, runs with MCP approval enabled, calls `prime_lab-choose`, and reaches the running Lab IPC bridge.
 - OpenCode loads workspace `opencode.json`, calls `prime_lab_choose`, and reaches the running Lab IPC bridge.
-- Factory Droid remains unsupported until Lab has a verified per-run MCP/native tool configuration path.
-- Pi starts through `pi-acp` but currently reports no access to native Lab tools; validation should keep it unsupported until that changes.
+- Factory Droid loads workspace `.factory/mcp.json` and lists `mcp_prime_lab_*` tools; full live model-turn validation also requires a Factory account with Droid entitlement.
+- Pi loads workspace `.pi/extensions/prime-lab/index.ts`, lists the Prime Lab extension tools, and reaches the running Lab IPC bridge.
 - Hermes loads its generated MCP config, calls `choose`, and reaches the running Lab IPC bridge.
 
 CLI coverage includes:

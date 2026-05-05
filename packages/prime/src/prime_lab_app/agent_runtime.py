@@ -443,6 +443,7 @@ class AgentRuntime:
         seen_messages: dict[str, str] = {}
         emitted_text = False
         stderr_lines: list[str] = []
+        stdout_error_lines: list[str] = []
         if process.stderr is not None:
             threading.Thread(
                 target=_collect_stream_lines,
@@ -460,6 +461,10 @@ class AgentRuntime:
                 except json.JSONDecodeError:
                     self._append_streaming_assistant_text(raw_line)
                     continue
+                if _field(event, "type") == "error":
+                    error_message = _field(event, "message")
+                    if isinstance(error_message, str) and error_message:
+                        stdout_error_lines.append(error_message)
                 next_session_id = _extract_agent_session_id(event)
                 if next_session_id and next_session_id != session_id:
                     session_id = next_session_id
@@ -471,8 +476,10 @@ class AgentRuntime:
                     emitted_text = True
                     self._append_streaming_assistant_text(text)
         code = process.wait()
-        if code != 0 and stderr_lines:
-            self._append_streaming_assistant_text("\n".join(stderr_lines).strip())
+        if code != 0:
+            failure_lines = stderr_lines or stdout_error_lines
+            if failure_lines:
+                self._append_streaming_assistant_text("\n".join(failure_lines).strip())
         self._finish_streaming_process(code, failure_label=f"{adapter.label} request failed")
 
     def _initialize_acp_stdio(self) -> None:
@@ -979,7 +986,7 @@ def _collect_stream_lines(stream: Any, lines: list[str]) -> None:
 
 
 def _unsupported_agent_message(capability: AgentCapability) -> str:
-    supported = "Amp, Codex, Claude, Claude Code, Cursor, OpenCode, or Hermes"
+    supported = "Amp, Codex, Claude, Claude Code, Cursor, Factory Droid, OpenCode, Hermes, or Pi"
     reason = f" {capability.unsupported_reason}" if capability.unsupported_reason else ""
     return (
         f"{capability.label} is not yet supported for Lab-native chat actions.{reason} "

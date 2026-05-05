@@ -42,6 +42,7 @@ from prime_lab_app.agent_adapters import (
     agent_adapter,
     agent_mcp_config_path,
     agent_select_options,
+    pi_lab_extension_path,
 )
 from prime_lab_app.agent_capabilities import agent_capability, known_agent_names
 from prime_lab_app.agent_cards import AgentWidgetCard
@@ -49,6 +50,7 @@ from prime_lab_app.agent_mcp_bridge import (
     LabMcpIpcServer,
     call_lab_mcp_tool,
     write_amp_mcp_config,
+    write_droid_mcp_config,
     write_hermes_mcp_config,
     write_opencode_mcp_config,
 )
@@ -1884,7 +1886,7 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
     assert result.exit_code == 0
     assert (tmp_path / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
     assert (tmp_path / ".pi" / "skills" / "create-environments").exists()
-    assert any("npm install -g pi-acp" in line for line in emitted)
+    assert not any("pi-acp" in line for line in emitted)
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
     assert (tmp_path / ".prime" / "lab" / "docs" / "index.md").is_file()
     assert (tmp_path / "AGENTS.md").is_file()
@@ -1954,7 +1956,8 @@ def test_prime_lab_setup_service_supports_pi_agent(
     assert result.exit_code == 0
     assert metadata["choices"]["primary_agent"] == "pi"
     assert (tmp_path / ".pi" / "skills" / "create-environments").exists()
-    assert any("npm install -g pi-acp" in line for line in emitted)
+    assert pi_lab_extension_path(tmp_path).is_file()
+    assert not any("pi-acp" in line for line in emitted)
 
 
 def test_prime_lab_setup_service_supports_claude_code_agent(
@@ -2034,7 +2037,7 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
     assert agent_adapter("claude-code").lab_widget_contract == "mcp-stdio-tools"
     assert agent_adapter("cursor").lab_widget_contract == "mcp-stdio-tools"
     assert agent_adapter("opencode").lab_widget_contract == "mcp-stdio-tools"
-    assert agent_adapter("pi").lab_widget_contract == "not-supported"
+    assert agent_adapter("pi").lab_widget_contract == "pi-extension-tools"
     assert agent_adapter("hermes-agent").lab_widget_contract == "mcp-stdio-tools"
     workspace = Path("/workspace")
     allowed_lab_tools = ",".join(
@@ -2095,6 +2098,14 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
     )
     assert agent_adapter("opencode").server_spec(workspace).transport == "acp-stdio"
     assert agent_adapter("pi").prompt_command("hello") == ["pi", "--print", "hello"]
+    assert agent_adapter("pi").stream_command("hello", workspace=workspace) == [
+        "pi",
+        "--print",
+        "--mode",
+        "json",
+        "--no-session",
+        "hello",
+    ]
     assert agent_adapter("hermes").prompt_command("hello") == ["hermes", "--oneshot", "hello"]
     assert agent_adapter("hermes-agent").server_spec(workspace).command == (
         "hermes",
@@ -2103,11 +2114,20 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
     )
     assert agent_adapter("hermes-agent").server_spec(workspace).transport == "acp-stdio"
     assert agent_adapter("factory-droid").name == "droid"
-    assert agent_adapter("factory-droid").lab_widget_contract == "not-supported"
+    assert agent_adapter("factory-droid").lab_widget_contract == "mcp-stdio-tools"
+    assert agent_adapter("factory-droid").stream_command("hello", workspace=workspace) == [
+        "droid",
+        "exec",
+        "--output-format",
+        "stream-json",
+        "--cwd",
+        "/workspace",
+        "hello",
+    ]
     assert agent_adapter("amp-code").name == "amp"
     pi_server = agent_adapter("pi").server_spec(Path("/workspace"))
-    assert pi_server.command == ("pi-acp",)
-    assert pi_server.transport == "acp-stdio"
+    assert pi_server.command == ()
+    assert pi_server.transport == "resumable-cli"
     assert agent_adapter("hermes").name == "hermes"
     assert agent_adapter("codex").server_spec(Path("/workspace")).command == (
         "codex",
@@ -2140,19 +2160,19 @@ def test_lab_agent_capabilities_centralize_supported_agents(
     )
     pi = agent_capability("pi")
     assert pi.label == "Pi Coding Agent"
-    assert pi.native_surface == "pi_acp"
-    assert pi.status == "not_supported"
-    assert "does not expose Lab MCP tools" in pi.unsupported_reason
-    assert [requirement.binary for requirement in pi.missing_requirements()] == ["pi-acp"]
-    assert pi.requirements[1].install_command == ("npm", "install", "-g", "pi-acp")
+    assert pi.native_surface == "pi_extension"
+    assert pi.status == "supported"
+    assert pi.missing_requirements() == ()
+    assert pi.resolved_surface_paths(tmp_path) == (pi_lab_extension_path(tmp_path.resolve()),)
     assert agent_capability("amp").native_surface == "mcp_config"
     assert agent_capability("amp").resolved_surface_paths(tmp_path) == (
         tmp_path.resolve() / ".prime" / "lab" / "agent-mcp" / "amp.json",
     )
     droid = agent_capability("factory-droid")
     assert droid.name == "droid"
-    assert droid.status == "not_supported"
-    assert "verified per-run Lab MCP" in droid.unsupported_reason
+    assert droid.status == "supported"
+    assert droid.native_surface == "droid_mcp_config"
+    assert droid.resolved_surface_paths(tmp_path) == (tmp_path.resolve() / ".factory" / "mcp.json",)
     assert agent_capability("codex").native_surface == "codex_app_server"
     assert agent_capability("claude-code").name == "claude"
     assert agent_capability("claude").native_surface == "mcp_config"
@@ -2644,6 +2664,7 @@ def test_agent_native_surface_writers_create_agent_specific_configs(
     opencode_path = write_opencode_mcp_config(tmp_path)
     hermes_path = write_hermes_mcp_config(tmp_path)
     amp_path = write_amp_mcp_config(tmp_path)
+    droid_path = write_droid_mcp_config(tmp_path)
 
     opencode_config = json.loads(opencode_path.read_text(encoding="utf-8"))
     assert opencode_config["mcp"]["prime_lab"]["type"] == "local"
@@ -2673,6 +2694,16 @@ def test_agent_native_surface_writers_create_agent_specific_configs(
     ]
     assert "mcpServers" not in amp_config
     assert "amp.mcpServers" not in amp_config
+    droid_config = json.loads(droid_path.read_text(encoding="utf-8"))
+    assert droid_config["mcpServers"]["prime_lab"]["type"] == "stdio"
+    assert droid_config["mcpServers"]["prime_lab"]["args"] == [
+        "-c",
+        "from prime_cli.main import run; run()",
+        "lab",
+        "mcp",
+        "--workspace",
+        str(tmp_path.resolve()),
+    ]
 
 
 def test_agent_runtime_handles_external_mcp_widget_calls(tmp_path: Path) -> None:
@@ -2920,15 +2951,33 @@ def test_agent_runtime_supports_opencode_with_workspace_mcp_config(tmp_path: Pat
     runtime.stop()
 
 
-def test_agent_runtime_supports_pi_with_acp_mcp_tools(
+def test_agent_runtime_supports_pi_with_project_extension_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     messages: tuple[Any, ...] = ()
+    commands: list[list[str]] = []
 
-    def fake_popen(command: list[str], **_kwargs: Any) -> _FakeJsonRpcProcess:
-        raise AssertionError(f"unsupported Pi should not start: {command}")
+    class FakeCliProcess:
+        def __init__(self) -> None:
+            self.stdin = None
+            self.stderr = iter(())
+            self.stdout = iter(
+                [
+                    json.dumps({"type": "message_update", "delta": "pi ready"}) + "\n",
+                ]
+            )
+
+        def poll(self) -> int | None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> FakeCliProcess:
+        commands.append(command)
+        return FakeCliProcess()
 
     def on_messages(value: Any) -> None:
         nonlocal messages
@@ -2937,10 +2986,117 @@ def test_agent_runtime_supports_pi_with_acp_mcp_tools(
     runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
     runtime.start(tmp_path, "pi")
 
-    assert runtime.state.status == "unsupported"
-    assert "does not expose Lab MCP tools" in runtime.state.message
+    assert runtime.state.status == "connected"
+    assert runtime.state.transport == "resumable-cli"
+    extension_path = pi_lab_extension_path(tmp_path)
+    assert extension_path.is_file()
+    assert "registerTool" in extension_path.read_text(encoding="utf-8")
+
+    runtime.send_prompt("hello")
+
+    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
+    assert commands[-1][:4] == ["pi", "--print", "--mode", "json"]
+    assert "--no-session" in commands[-1]
+    assert "Native Lab tools are available" in commands[-1][-1]
     assert messages
-    assert messages[-1].status == "warning"
+    assert messages[-1].content == "pi ready"
+
+
+def test_agent_runtime_supports_droid_with_project_mcp_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    messages: tuple[Any, ...] = ()
+    commands: list[list[str]] = []
+
+    class FakeCliProcess:
+        def __init__(self) -> None:
+            self.stdin = None
+            self.stderr = iter(())
+            self.stdout = iter(
+                [
+                    json.dumps({"type": "message_update", "delta": "droid ready"}) + "\n",
+                ]
+            )
+
+        def poll(self) -> int | None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> FakeCliProcess:
+        commands.append(command)
+        return FakeCliProcess()
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime.start(tmp_path, "factory-droid")
+
+    assert runtime.state.status == "connected"
+    assert runtime.state.transport == "resumable-cli"
+    droid_config = json.loads((tmp_path / ".factory" / "mcp.json").read_text(encoding="utf-8"))
+    assert droid_config["mcpServers"]["prime_lab"]["type"] == "stdio"
+
+    runtime.send_prompt("hello")
+
+    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
+    assert commands[-1][:4] == ["droid", "exec", "--output-format", "stream-json"]
+    assert commands[-1][4:6] == ["--cwd", str(tmp_path.resolve())]
+    assert "Native Lab tools are available" in commands[-1][-1]
+    assert messages[-1].content == "droid ready"
+
+
+def test_agent_runtime_surfaces_resumable_cli_json_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    messages: tuple[Any, ...] = ()
+
+    class FakeCliProcess:
+        def __init__(self) -> None:
+            self.stdin = None
+            self.stderr = iter(())
+            self.stdout = iter(
+                [
+                    json.dumps(
+                        {
+                            "type": "error",
+                            "source": "agent_loop",
+                            "message": "402 Payment Required",
+                        }
+                    )
+                    + "\n",
+                    json.dumps({"type": "error", "source": "cli", "message": "Exec failed"}) + "\n",
+                ]
+            )
+
+        def poll(self) -> int | None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 1
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    def fake_popen(_command: list[str], **_kwargs: Any) -> FakeCliProcess:
+        return FakeCliProcess()
+
+    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime.start(tmp_path, "factory-droid")
+    runtime.send_prompt("hello")
+
+    assert _wait_for(lambda: messages and messages[-1].status == "error")
+    assert "Factory Droid Agent request failed with 1" in messages[-1].content
+    assert "402 Payment Required" in messages[-1].content
+    assert "Exec failed" in messages[-1].content
 
 
 def test_agent_runtime_supports_hermes_with_mcp_config(
@@ -3762,12 +3918,40 @@ async def test_prime_lab_app_home_launch_panel_dismisses_into_workspace(
         section_labels = [
             _render_renderable(node.label).strip() for node in section_tree.root.children
         ]
-        assert section_labels == ["Environments", "Training", "Evaluations"]
+        assert section_labels == ["Environments", "Training", "Evaluations", "Settings"]
         assert app.query_one("#item-list", OptionList).display is True
         assert app.query_one("#topbar").display is True
         assert app.query_one("#nav-pane").display is True
         assert app.query_one("#section-title").display is True
         assert app.query_one("#section-subtitle").display is True
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_settings_is_reachable_from_section_nav(tmp_path: Path) -> None:
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        app._active_section_key = "environments"
+        app._render_tree()
+        app._render_active_section()
+        await pilot.pause()
+
+        section_tree = app.query_one("#section-tree", Tree)
+        settings_node = next(
+            node
+            for node in section_tree.root.children
+            if _render_renderable(node.label).strip() == "Settings"
+        )
+        section_tree.move_cursor(settings_node)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app._active_section_key == "workspace"
+        assert str(app.query_one("#section-title", Label).render()) == "Settings"
         assert app.query_one("#inspector-pane").display is True
         assert app.query_one("#statusbar").display is True
         assert app.query("Footer").first().display is True

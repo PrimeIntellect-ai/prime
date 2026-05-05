@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from .agent_mcp_bridge import (
     write_amp_mcp_config,
+    write_droid_mcp_config,
     write_hermes_mcp_config,
     write_lab_mcp_config,
     write_opencode_mcp_config,
@@ -31,6 +33,7 @@ AgentTransport = Literal[
 LabWidgetContract = Literal[
     "codex-dynamic-tools",
     "mcp-stdio-tools",
+    "pi-extension-tools",
     "not-supported",
 ]
 
@@ -190,10 +193,11 @@ KNOWN_AGENT_ADAPTERS = {
         name="pi",
         label="Pi Coding Agent",
         prompt_prefix=("pi", "--print"),
-        server_prefix=("pi-acp",),
-        server_transport="acp-stdio",
-        server_description="Pi Agent Client Protocol stdio transport.",
-        stream_prefix=("pi", "--print", "--mode", "json"),
+        server_prefix=(),
+        server_transport="resumable-cli",
+        server_description="Pi headless CLI with project-local extension tools.",
+        stream_prefix=("pi", "--print", "--mode", "json", "--no-session"),
+        lab_widget_contract="pi-extension-tools",
     ),
     "hermes": AgentAdapter(
         name="hermes",
@@ -216,7 +220,9 @@ KNOWN_AGENT_ADAPTERS = {
         server_transport="resumable-cli",
         server_description="Factory Droid Agent headless CLI with resumable JSON sessions.",
         stream_prefix=("droid", "exec", "--output-format", "stream-json"),
+        workspace_flag="--cwd",
         aliases=("factory", "factory-droid"),
+        lab_widget_contract="mcp-stdio-tools",
     ),
     "amp": AgentAdapter(
         name="amp",
@@ -262,15 +268,129 @@ def write_agent_native_surface(workspace: Path, agent: str) -> tuple[Path, ...]:
     """Write the native Lab control surface for a supported coding agent."""
 
     adapter = agent_adapter(agent)
+    if adapter.lab_widget_contract == "pi-extension-tools":
+        return (_write_pi_lab_extension(workspace),)
     if adapter.lab_widget_contract == "mcp-stdio-tools":
         if adapter.name == "amp":
             return (write_amp_mcp_config(workspace),)
+        if adapter.name == "droid":
+            return (write_droid_mcp_config(workspace),)
         if adapter.name == "opencode":
             return (write_opencode_mcp_config(workspace),)
         if adapter.name == "hermes":
             return (write_hermes_mcp_config(workspace),)
         return (write_agent_mcp_config(workspace, adapter.name),)
     return ()
+
+
+def pi_lab_extension_path(workspace: Path) -> Path:
+    """Project-local Pi extension that exposes Prime Lab native controls."""
+
+    return workspace / ".pi" / "extensions" / "prime-lab" / "index.ts"
+
+
+def _write_pi_lab_extension(workspace: Path) -> Path:
+    path = pi_lab_extension_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_pi_lab_extension_source(), encoding="utf-8")
+    return path
+
+
+def _pi_lab_extension_source() -> str:
+    specs = [
+        {
+            "name": tool.name,
+            "label": f"Lab {tool.name.replace('_', ' ')}",
+            "description": tool.description,
+            "parameters": {
+                "type": "object",
+                "properties": tool.properties,
+                "required": list(tool.required),
+                "additionalProperties": True,
+            },
+        }
+        for tool in LAB_WIDGET_TOOLS
+    ]
+    specs_json = json.dumps(specs, indent=2, sort_keys=True)
+    return f"""import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import crypto from "node:crypto";
+import type {{ ExtensionAPI }} from "@mariozechner/pi-coding-agent";
+
+const TOOLS = {specs_json};
+
+function labSocketPath(cwd: string): string {{
+  const workspace = path.resolve(cwd);
+  const digest = crypto.createHash("sha256").update(workspace).digest("hex").slice(0, 24);
+  const root = process.env.PRIME_LAB_RUNTIME_DIR || "/tmp";
+  return path.join(root, `prime-lab-${{os.userInfo().uid}}`, digest, "lab.sock");
+}}
+
+function callLab(
+  workspace: string,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {{
+  const socketPath = labSocketPath(workspace);
+  return new Promise((resolve, reject) => {{
+    const client = net.createConnection(socketPath);
+    let data = "";
+    client.setTimeout(5000);
+    client.on("connect", () => {{
+      client.write(JSON.stringify({{
+        request_id: crypto.randomUUID(),
+        tool,
+        arguments: args || {{}},
+      }}) + "\\n");
+    }});
+    client.on("data", chunk => {{
+      data += chunk.toString("utf8");
+      if (data.includes("\\n")) {{
+        client.end();
+      }}
+    }});
+    client.on("timeout", () => {{
+      client.destroy(new Error("Prime Lab IPC timed out."));
+    }});
+    client.on("error", reject);
+    client.on("close", () => {{
+      if (!data.trim()) {{
+        reject(new Error("Prime Lab IPC returned no response."));
+        return;
+      }}
+      try {{
+        const response = JSON.parse(data.trim());
+        if (!response.ok) {{
+          reject(new Error(String(response.error || "Prime Lab tool call failed.")));
+          return;
+        }}
+        resolve(response.result);
+      }} catch (error) {{
+        reject(error);
+      }}
+    }});
+  }});
+}}
+
+export default function primeLabExtension(pi: ExtensionAPI) {{
+  for (const tool of TOOLS) {{
+    pi.registerTool({{
+      name: tool.name,
+      label: tool.label,
+      description: tool.description,
+      parameters: tool.parameters as any,
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {{
+        const result = await callLab(ctx.cwd, tool.name, params as Record<string, unknown>);
+        return {{
+          content: [{{ type: "text", text: JSON.stringify(result) }}],
+          details: result,
+        }};
+      }},
+    }});
+  }}
+}}
+"""
 
 
 def agent_adapter(name: str) -> AgentAdapter:

@@ -1109,12 +1109,14 @@ def _workspace_agents_from_metadata(workspace: Path) -> tuple[str, ...]:
         return ()
     agents = choices.get("agents")
     if isinstance(agents, list):
-        parsed = tuple(str(agent) for agent in agents if str(agent))
+        parsed = tuple(
+            agent.strip() for agent in agents if isinstance(agent, str) and agent.strip()
+        )
         if parsed:
             return parsed
     primary_agent = choices.get("primary_agent")
-    if primary_agent:
-        return (str(primary_agent),)
+    if isinstance(primary_agent, str) and primary_agent.strip():
+        return (primary_agent.strip(),)
     return ()
 
 

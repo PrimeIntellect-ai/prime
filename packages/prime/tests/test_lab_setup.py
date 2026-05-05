@@ -272,6 +272,16 @@ def test_lab_setup_installs_prime_rl_envs_with_split_editable_args(tmp_path: Pat
     ]
 
 
+def test_workspace_agents_from_metadata_ignores_non_string_values(tmp_path: Path) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        json.dumps({"choices": {"agents": [None, 0, "", " amp "], "primary_agent": 0}}),
+        encoding="utf-8",
+    )
+
+    assert lab_setup._workspace_agents_from_metadata(tmp_path) == ("amp",)
+
+
 def test_lab_sync_skips_user_owned_skill_conflicts(
     tmp_path: Path,
     monkeypatch: Any,

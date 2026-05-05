@@ -503,6 +503,8 @@ class AgentRuntime:
             session_support = acp_session_support(init)
             auth_errors: list[str] = []
             for method in init.get("authMethods") or []:
+                if self._agent == "opencode":
+                    continue
                 method_id = method.get("id") if isinstance(method, dict) else None
                 if method_id:
                     try:
@@ -510,16 +512,21 @@ class AgentRuntime:
                     except Exception as exc:
                         auth_errors.append(str(exc))
             current_session_id = self._state.session_id
+            mcp_servers = [] if self._agent == "opencode" else None
             if current_session_id and session_support.resume:
                 session = self._request(
                     "session/resume",
-                    acp_session_params(workspace, session_id=current_session_id),
+                    acp_session_params(
+                        workspace,
+                        session_id=current_session_id,
+                        mcp_servers=mcp_servers,
+                    ),
                     timeout=30,
                 )
             else:
                 session = self._request(
                     "session/new",
-                    acp_session_params(workspace),
+                    acp_session_params(workspace, mcp_servers=mcp_servers),
                     timeout=30,
                 )
         except Exception as exc:

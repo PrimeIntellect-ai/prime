@@ -2401,6 +2401,7 @@ def test_agent_acp_helpers_normalize_lab_mcp_and_updates(tmp_path: Path) -> None
     params = acp_session_params(tmp_path, session_id="session-1")
     assert params["sessionId"] == "session-1"
     assert params["mcpServers"][0]["name"] == "prime_lab"
+    assert acp_session_params(tmp_path, mcp_servers=[])["mcpServers"] == []
 
     support = acp_session_support(
         {
@@ -3113,6 +3114,7 @@ def test_agent_runtime_supports_opencode_with_workspace_mcp_config(tmp_path: Pat
     )
     session_new_params: list[dict[str, Any]] = []
     prompt_params: list[dict[str, Any]] = []
+    auth_calls: list[dict[str, Any]] = []
 
     def handler(process: _FakeJsonRpcProcess, message: dict[str, Any]) -> None:
         request_id = message["id"]
@@ -3134,6 +3136,7 @@ def test_agent_runtime_supports_opencode_with_workspace_mcp_config(tmp_path: Pat
             )
             return
         if method == "authenticate":
+            auth_calls.append(message["params"])
             process.emit(
                 {
                     "jsonrpc": "2.0",
@@ -3193,8 +3196,8 @@ def test_agent_runtime_supports_opencode_with_workspace_mcp_config(tmp_path: Pat
     assert opencode_config["mcp"]["prime_lab"]["type"] == "local"
     assert commands[0] == ["opencode", "acp", "--cwd", str(tmp_path.resolve())]
     assert session_new_params[0]["cwd"] == str(tmp_path.resolve())
-    assert session_new_params[0]["mcpServers"][0]["name"] == "prime_lab"
-    assert session_new_params[0]["mcpServers"][0]["env"] == {}
+    assert session_new_params[0]["mcpServers"] == []
+    assert auth_calls == []
 
     runtime.send_prompt("hello")
 

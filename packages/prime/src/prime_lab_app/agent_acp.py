@@ -51,12 +51,17 @@ def acp_lab_mcp_servers(workspace: Path) -> list[dict[str, Any]]:
     ]
 
 
-def acp_session_params(workspace: Path, *, session_id: str = "") -> dict[str, Any]:
+def acp_session_params(
+    workspace: Path,
+    *,
+    session_id: str = "",
+    mcp_servers: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Build common ACP session lifecycle params."""
 
     params: dict[str, Any] = {
         "cwd": str(workspace.expanduser().resolve()),
-        "mcpServers": acp_lab_mcp_servers(workspace),
+        "mcpServers": acp_lab_mcp_servers(workspace) if mcp_servers is None else mcp_servers,
     }
     if session_id:
         params["sessionId"] = session_id

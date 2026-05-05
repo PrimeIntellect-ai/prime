@@ -73,9 +73,6 @@ path = "src/prime_cli/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/prime_cli"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"src/prime_cli/lab_assets" = "prime_cli/lab_assets"
-
 [tool.ruff]
 src = ["."]
 line-length = 100 

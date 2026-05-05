@@ -10,9 +10,11 @@ import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from importlib import metadata, resources
+from importlib import metadata
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
 import toml
 from rich.console import Console
@@ -26,6 +28,8 @@ from .lab_agents import (
 )
 
 PRIME_RL_REPO = "primeintellect-ai/prime-rl"
+VERIFIERS_REPO = "primeintellect-ai/verifiers"
+VERIFIERS_REF = "main"
 PRIME_RL_REF = "main"
 PRIME_RL_INSTALL_SCRIPT_REF = "main"
 
@@ -38,8 +42,7 @@ LAB_SKILLS = (
     "train-with-environments",
     "brainstorm",
 )
-LAB_WIDGETS_SKILL = "lab-widgets"
-PRIME_MANAGED_SKILLS = (*LAB_SKILLS, LAB_WIDGETS_SKILL)
+PRIME_MANAGED_SKILLS = LAB_SKILLS
 SUPPORTED_AGENTS = known_agent_names()
 LAB_GITIGNORE_PATTERNS = (
     "./outputs",
@@ -49,20 +52,8 @@ LAB_GITIGNORE_PATTERNS = (
     "./environments/*/__pycache__",
     "*.pyc",
 )
-CONFIG_TEMPLATE_PATHS = (
-    "configs/endpoints.toml",
-    "configs/gepa/base.toml",
-    "configs/gepa/wordle.toml",
-    "configs/eval/minimal.toml",
-    "configs/eval/multi-env.toml",
-    "configs/rl/alphabet-sort.toml",
-    "configs/rl/gsm8k.toml",
-    "configs/rl/math-python.toml",
-    "configs/rl/reverse-text.toml",
-    "configs/rl/wiki-search.toml",
-    "configs/rl/wordle.toml",
-)
 PRIME_SKILLS_MANIFEST = ".prime-managed.json"
+ConfigSpec = tuple[str, str, str]
 
 Emit = Callable[[str], None]
 Runner = Callable[[Sequence[str], Path, Emit], int]
@@ -126,6 +117,56 @@ class LabDoctorResult:
     exit_code: int
     workspace: Path
     checks: tuple[LabDoctorCheck, ...]
+
+
+ENDPOINTS_SRC = (
+    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/refs/heads/{VERIFIERS_REF}"
+    "/configs/endpoints.toml"
+)
+AGENTS_MD_SRC = (
+    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/refs/heads/{VERIFIERS_REF}"
+    "/assets/lab/AGENTS.md"
+)
+CLAUDE_MD_SRC = (
+    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/refs/heads/{VERIFIERS_REF}"
+    "/assets/lab/CLAUDE.md"
+)
+ENVS_AGENTS_MD_SRC = (
+    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/refs/heads/{VERIFIERS_REF}"
+    "/assets/lab/environments/AGENTS.md"
+)
+PRIME_RL_CONFIGS: tuple[ConfigSpec, ...] = (
+    (
+        VERIFIERS_REPO,
+        "configs/local/prime-rl/wiki-search.toml",
+        "configs/prime-rl/wiki-search.toml",
+    ),
+)
+RL_CONFIGS: tuple[ConfigSpec, ...] = tuple(
+    (VERIFIERS_REPO, path, path)
+    for path in (
+        "configs/rl/alphabet-sort.toml",
+        "configs/rl/gsm8k.toml",
+        "configs/rl/math-python.toml",
+        "configs/rl/reverse-text.toml",
+        "configs/rl/wiki-search.toml",
+        "configs/rl/wordle.toml",
+    )
+)
+GEPA_CONFIGS: tuple[ConfigSpec, ...] = tuple(
+    (VERIFIERS_REPO, path, path)
+    for path in (
+        "configs/gepa/base.toml",
+        "configs/gepa/wordle.toml",
+    )
+)
+EVAL_CONFIGS: tuple[ConfigSpec, ...] = tuple(
+    (VERIFIERS_REPO, path, path)
+    for path in (
+        "configs/eval/minimal.toml",
+        "configs/eval/multi-env.toml",
+    )
+)
 
 
 def run_lab_setup(passthrough_args: list[str], *, console: Console | None = None) -> int:
@@ -337,10 +378,10 @@ def _run_lab_setup_steps(
     _sync_lab_metadata(workspace, options.agents)
 
     if not options.skip_agents_md:
-        _copy_asset("docs/AGENTS.md", workspace / "AGENTS.md", emit, force=True)
-        _copy_asset("docs/CLAUDE.md", workspace / "CLAUDE.md", emit, force=True)
-        _copy_asset(
-            "docs/environments/AGENTS.md",
+        _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", emit, force=True)
+        _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=True)
+        _download_file(
+            ENVS_AGENTS_MD_SRC,
             workspace / "environments" / "AGENTS.md",
             emit,
             force=True,
@@ -350,7 +391,7 @@ def _run_lab_setup_steps(
         _install_prime_rl(workspace, emit, runner)
         _install_environments_to_prime_rl(workspace, emit, runner)
 
-    _copy_setup_configs(workspace, emit)
+    _copy_setup_configs(workspace, emit, prime_rl=options.prime_rl)
     emit("Lab setup completed\n")
 
 
@@ -375,10 +416,10 @@ def _run_lab_sync_steps(
     _sync_config_templates(workspace, emit)
 
     if not options.skip_docs:
-        _copy_asset("docs/AGENTS.md", workspace / "AGENTS.md", emit, force=True)
-        _copy_asset("docs/CLAUDE.md", workspace / "CLAUDE.md", emit, force=True)
-        _copy_asset(
-            "docs/environments/AGENTS.md",
+        _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", emit, force=True)
+        _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=True)
+        _download_file(
+            ENVS_AGENTS_MD_SRC,
             workspace / "environments" / "AGENTS.md",
             emit,
             force=True,
@@ -396,13 +437,17 @@ def _sync_prime_skills(emit: Emit) -> None:
     }
     for skill_name in PRIME_MANAGED_SKILLS:
         skill_dir = _global_prime_skills_dir() / skill_name
-        content = _asset_text(f"skills/{skill_name}/SKILL.md")
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+        skill_path = skill_dir / "SKILL.md"
+        _download_file(
+            _repo_raw_url(VERIFIERS_REPO, VERIFIERS_REF, f"skills/{skill_name}/SKILL.md"),
+            skill_path,
+            emit,
+            force=True,
+        )
+        content = skill_path.read_text(encoding="utf-8")
         manifest["skills"][skill_name] = {
             "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         }
-        emit(f"Installed {skill_dir}\n")
     manifest_path = _global_prime_skills_dir() / PRIME_SKILLS_MANIFEST
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -410,15 +455,35 @@ def _sync_prime_skills(emit: Emit) -> None:
     )
 
 
-def _copy_setup_configs(workspace: Path, emit: Emit) -> None:
-    for asset_path in CONFIG_TEMPLATE_PATHS:
-        _copy_asset(asset_path, workspace / asset_path, emit)
+def _copy_setup_configs(workspace: Path, emit: Emit, *, prime_rl: bool) -> None:
+    _download_file(ENDPOINTS_SRC, workspace / "configs" / "endpoints.toml", emit)
+    configs: list[ConfigSpec] = []
+    if prime_rl:
+        configs.extend(PRIME_RL_CONFIGS)
+    configs.extend(GEPA_CONFIGS)
+    configs.extend(EVAL_CONFIGS)
+    if not prime_rl:
+        configs.extend(RL_CONFIGS)
+    _download_configs(workspace, _dedupe_config_destinations(configs), emit)
 
 
 def _sync_config_templates(workspace: Path, emit: Emit) -> None:
     template_root = workspace / ".prime" / "lab" / "templates"
-    for asset_path in CONFIG_TEMPLATE_PATHS:
-        _copy_asset(asset_path, template_root / asset_path, emit, force=True)
+    _download_file(
+        ENDPOINTS_SRC,
+        template_root / "configs" / "endpoints.toml",
+        emit,
+        force=True,
+    )
+    configs: list[ConfigSpec] = [*GEPA_CONFIGS, *EVAL_CONFIGS, *RL_CONFIGS]
+    for repo, source_path, dest_path in _dedupe_config_destinations(configs):
+        ref = PRIME_RL_REF if repo == PRIME_RL_REPO else VERIFIERS_REF
+        _download_file(
+            _repo_raw_url(repo, ref, source_path),
+            template_root / dest_path,
+            emit,
+            force=True,
+        )
 
 
 def _prepare_agent_skill_dirs(agents: tuple[str, ...], emit: Emit) -> None:
@@ -503,12 +568,6 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
             warning=True,
         ),
         _path_check(
-            "Lab action skill",
-            _global_prime_skills_dir() / LAB_WIDGETS_SKILL / "SKILL.md",
-            "Run prime lab sync.",
-            warning=True,
-        ),
-        _path_check(
             "Lab templates",
             workspace / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml",
             "Run prime lab sync.",
@@ -531,14 +590,6 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
                     _path_check(
                         f"{label} skills",
                         agent_skill_dir / "create-environments",
-                        f"Run prime lab sync --agent {agent}.",
-                        warning=True,
-                    )
-                )
-                checks.append(
-                    _path_check(
-                        f"{label} Lab actions",
-                        agent_skill_dir / LAB_WIDGETS_SKILL,
                         f"Run prime lab sync --agent {agent}.",
                         warning=True,
                     )
@@ -925,22 +976,39 @@ def _workspace_agents_from_metadata(workspace: Path) -> tuple[str, ...]:
     return ()
 
 
-def _copy_asset(asset_path: str, dest: Path, emit: Emit, *, force: bool = False) -> None:
+def _download_configs(workspace: Path, configs: list[ConfigSpec], emit: Emit) -> None:
+    for repo, source_path, dest_path in configs:
+        ref = PRIME_RL_REF if repo == PRIME_RL_REPO else VERIFIERS_REF
+        _download_file(_repo_raw_url(repo, ref, source_path), workspace / dest_path, emit)
+
+
+def _download_file(url: str, dest: Path, emit: Emit, *, force: bool = False) -> None:
     if dest.exists() and not force:
         emit(f"{dest.name} already exists\n")
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(_asset_text(asset_path), encoding="utf-8")
-    emit(f"Prepared {dest}\n")
+    try:
+        with urlopen(url, timeout=60) as response:
+            content = response.read()
+    except (HTTPError, URLError, TimeoutError) as exc:
+        raise RuntimeError(f"Failed to download {url}") from exc
+    dest.write_bytes(content)
+    emit(f"Downloaded {dest}\n")
 
 
-def _asset_text(asset_path: str) -> str:
-    raw_assets = resources.files("prime_cli.lab_assets").joinpath("assets.json").read_text()
-    payload = json.loads(raw_assets)
-    value = payload.get(asset_path)
-    if not isinstance(value, str):
-        raise KeyError(f"Unknown Lab setup asset: {asset_path}")
-    return value
+def _repo_raw_url(repo: str, ref: str, source_path: str) -> str:
+    return f"https://raw.githubusercontent.com/{repo}/refs/heads/{ref}/{source_path}"
+
+
+def _dedupe_config_destinations(configs: list[ConfigSpec]) -> list[ConfigSpec]:
+    deduped: list[ConfigSpec] = []
+    seen: set[str] = set()
+    for config in configs:
+        if config[2] in seen:
+            continue
+        seen.add(config[2])
+        deduped.append(config)
+    return deduped
 
 
 def _prime_package_version() -> str:

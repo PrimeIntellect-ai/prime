@@ -222,6 +222,23 @@ def test_lab_doctor_reports_missing_selected_agent_guidance(
     assert "npm install -g @sourcegraph/amp@latest" in checks["Amp Code native tools"].remediation
 
 
+def test_lab_doctor_fix_writes_standard_gitignore_patterns(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("# existing\ncustom.log\n", encoding="utf-8")
+
+    result = run_lab_doctor_service(LabDoctorOptions(fix=True), workspace=tmp_path)
+
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert result.exit_code == 1
+    assert "custom.log" in gitignore
+    assert ".env" in gitignore
+    assert "/outputs/" in gitignore
+    assert "/prime-rl/" in gitignore
+    assert "/environments/*/outputs/" in gitignore
+    assert "*.py[cod]" in gitignore
+    assert ".pytest_cache/" in gitignore
+    assert ".ruff_cache/" in gitignore
+
+
 def test_lab_doctor_validates_environment_table_refs(tmp_path: Path) -> None:
     (tmp_path / ".prime").mkdir()
     (tmp_path / ".prime" / "lab.json").write_text(

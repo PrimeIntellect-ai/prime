@@ -36,12 +36,17 @@ PRIME_RL_INSTALL_SCRIPT_REF = "main"
 
 SUPPORTED_AGENTS = known_agent_names()
 LAB_GITIGNORE_PATTERNS = (
-    "./outputs",
-    "./environments/*/outputs",
-    "./environments/*/dist",
-    "./environments/*/*.egg-info",
-    "./environments/*/__pycache__",
-    "*.pyc",
+    ".env",
+    "/outputs/",
+    "/prime-rl/",
+    "/environments/*/outputs/",
+    "/environments/*/dist/",
+    "/environments/*/*.egg-info/",
+    "/environments/*/__pycache__/",
+    "__pycache__/",
+    "*.py[cod]",
+    ".pytest_cache/",
+    ".ruff_cache/",
 )
 PRIME_SKILLS_MANIFEST = ".prime-managed.json"
 ConfigSpec = tuple[str, str, str]

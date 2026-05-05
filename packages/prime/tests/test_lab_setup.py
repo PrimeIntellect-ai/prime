@@ -93,6 +93,10 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     assert (home / ".pi" / "skills" / "create-environments").exists()
     assert not (tmp_path / ".pi" / "skills").exists()
     assert (tmp_path / "configs" / "rl" / "gsm8k.toml").is_file()
+    assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
+    assert (tmp_path / ".prime" / "lab" / "docs" / "index.md").is_file()
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert "/outputs/" in gitignore.splitlines()
     assert any("npm install -g pi-acp" in line for line in emitted)
 
 
@@ -201,6 +205,8 @@ def test_lab_sync_all_scaffolds_amp_and_factory_skills(
     assert (home / ".config" / "amp" / "skills" / "create-environments").exists()
     assert not (tmp_path / ".factory" / "skills").exists()
     assert not (tmp_path / ".amp" / "skills").exists()
+    assert (tmp_path / ".prime" / "lab" / "agent-mcp" / "amp.json").is_file()
+    assert not (tmp_path / ".prime" / "lab" / "agent-mcp" / "droid.json").exists()
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
 
 

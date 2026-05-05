@@ -62,15 +62,21 @@ class AgentCapability:
         for raw_path in self.expected_surface_paths:
             if raw_path == "{claude_mcp}":
                 paths.append(agent_mcp_config_path(workspace, "claude"))
-            elif raw_path == "{cursor_mcp}":
+                continue
+            if raw_path == "{amp_mcp}":
+                paths.append(agent_mcp_config_path(workspace, "amp"))
+                continue
+            if raw_path == "{cursor_mcp}":
                 paths.append(workspace / ".cursor" / "mcp.json")
-            elif raw_path == "{opencode_config}":
+                continue
+            if raw_path == "{opencode_config}":
                 paths.append(workspace / "opencode.json")
-            elif raw_path == "{hermes_config}":
+                continue
+            if raw_path == "{hermes_config}":
                 paths.append(Path.home() / ".hermes" / "config.yaml")
-            else:
-                path = Path(raw_path).expanduser()
-                paths.append(path if path.is_absolute() else workspace / path)
+                continue
+            path = Path(raw_path).expanduser()
+            paths.append(path if path.is_absolute() else workspace / path)
         return tuple(paths)
 
 
@@ -78,7 +84,7 @@ _CAPABILITIES: dict[str, AgentCapability] = {
     "amp": AgentCapability(
         name="amp",
         label="Amp Code",
-        native_surface="none",
+        native_surface="mcp_config",
         requirements=(
             AgentInstallRequirement(
                 "amp",
@@ -86,6 +92,7 @@ _CAPABILITIES: dict[str, AgentCapability] = {
                 description="Amp Code CLI",
             ),
         ),
+        expected_surface_paths=("{amp_mcp}",),
     ),
     "claude": AgentCapability(
         name="claude",
@@ -118,6 +125,11 @@ _CAPABILITIES: dict[str, AgentCapability] = {
                 description="Factory Droid Agent CLI",
             ),
         ),
+        status="not_supported",
+        unsupported_reason=(
+            "Factory Droid does not yet have a verified per-run Lab MCP/native tool "
+            "configuration path."
+        ),
     ),
     "hermes": AgentCapability(
         name="hermes",
@@ -145,6 +157,10 @@ _CAPABILITIES: dict[str, AgentCapability] = {
                 description="Pi ACP bridge",
             ),
         ),
+        status="not_supported",
+        unsupported_reason=(
+            "The current Pi ACP bridge initializes, but does not expose Lab MCP tools to the model."
+        ),
     ),
 }
 _ALIASES = {
@@ -168,7 +184,7 @@ AGENT_DISPLAY_ORDER = (
 
 
 def known_agent_names() -> tuple[str, ...]:
-    """Return Lab-supported agent names in stable display order."""
+    """Return known Lab agent names in stable display order."""
 
     return AGENT_DISPLAY_ORDER
 

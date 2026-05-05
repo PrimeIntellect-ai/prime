@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from .agent_mcp_bridge import (
+    write_amp_mcp_config,
     write_hermes_mcp_config,
     write_lab_mcp_config,
     write_opencode_mcp_config,
@@ -193,7 +194,6 @@ KNOWN_AGENT_ADAPTERS = {
         server_transport="acp-stdio",
         server_description="Pi Agent Client Protocol stdio transport.",
         stream_prefix=("pi", "--print", "--mode", "json"),
-        lab_widget_contract="mcp-stdio-tools",
     ),
     "hermes": AgentAdapter(
         name="hermes",
@@ -217,7 +217,6 @@ KNOWN_AGENT_ADAPTERS = {
         server_description="Factory Droid Agent headless CLI with resumable JSON sessions.",
         stream_prefix=("droid", "exec", "--output-format", "stream-json"),
         aliases=("factory", "factory-droid"),
-        lab_widget_contract="mcp-stdio-tools",
     ),
     "amp": AgentAdapter(
         name="amp",
@@ -226,7 +225,9 @@ KNOWN_AGENT_ADAPTERS = {
         server_prefix=(),
         server_transport="resumable-cli",
         server_description="Amp Code headless CLI with stream-json output.",
-        stream_prefix=("amp", "--execute", "--stream-json"),
+        stream_prefix=("amp", "--stream-json"),
+        mcp_config_flag="--mcp-config",
+        prompt_flag="--execute",
         aliases=("amp-code",),
         lab_widget_contract="mcp-stdio-tools",
     ),
@@ -262,8 +263,8 @@ def write_agent_native_surface(workspace: Path, agent: str) -> tuple[Path, ...]:
 
     adapter = agent_adapter(agent)
     if adapter.lab_widget_contract == "mcp-stdio-tools":
-        if adapter.name == "pi":
-            return ()
+        if adapter.name == "amp":
+            return (write_amp_mcp_config(workspace),)
         if adapter.name == "opencode":
             return (write_opencode_mcp_config(workspace),)
         if adapter.name == "hermes":

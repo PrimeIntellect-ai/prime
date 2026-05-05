@@ -884,7 +884,7 @@ def _merge_initial_items(
 ) -> tuple[LabItem, ...]:
     if not local_items:
         return cached_items
-    items = list(local_items)
+    items = [item for item in local_items if not _is_placeholder_item(item)]
     seen = {_initial_item_identity(item) for item in items}
     for item in cached_items:
         if item.section != section_key:

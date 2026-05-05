@@ -48,6 +48,7 @@ from prime_lab_app.agent_cards import AgentWidgetCard
 from prime_lab_app.agent_mcp_bridge import (
     LabMcpIpcServer,
     call_lab_mcp_tool,
+    write_amp_mcp_config,
     write_hermes_mcp_config,
     write_opencode_mcp_config,
 )
@@ -57,6 +58,7 @@ from prime_lab_app.agent_runtime import (
     AgentRuntime,
     _dedupe_streamed_text,
     _extract_stream_delta,
+    _is_lab_widget_tool_result_text,
     _merge_stream_text,
 )
 from prime_lab_app.agent_screen import (
@@ -976,6 +978,58 @@ def test_merge_snapshot_rows_preserves_newer_freshness(tmp_path: Path) -> None:
     assert training.row_data_origin == "mixed"
 
 
+def test_merge_snapshot_rows_drops_error_placeholders_when_cache_exists(
+    tmp_path: Path,
+) -> None:
+    previous = LabSnapshot(
+        workspace=tmp_path,
+        base_url="https://api.test",
+        frontend_url="https://app.test",
+        authenticated=True,
+        team="team",
+        sections=(
+            LabSection(
+                key="training",
+                title="Training",
+                description="Training runs.",
+                items=(LabItem(key="rl-run:1", section="training", title="run-1"),),
+                refreshed_at="2026-05-01T00:00:00+00:00",
+                row_data_origin="disk",
+            ),
+        ),
+    )
+    incoming = LabSnapshot(
+        workspace=tmp_path,
+        base_url="https://api.test",
+        frontend_url="https://app.test",
+        authenticated=True,
+        team="team",
+        sections=(
+            LabSection(
+                key="training",
+                title="Training",
+                description="Training runs.",
+                items=(
+                    LabItem(
+                        key="training:error",
+                        section="training",
+                        title="Unavailable",
+                        raw={"error": "boom"},
+                    ),
+                ),
+                refreshed_at="2026-05-02T00:00:00+00:00",
+                row_data_origin="live",
+            ),
+        ),
+    )
+
+    merged = merge_snapshot_rows(previous, incoming)
+    training = merged.section("training")
+
+    assert training is not None
+    assert [item.title for item in training.items] == ["run-1"]
+
+
 def test_lab_view_platform_cache_survives_refresh_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1002,6 +1056,9 @@ def test_lab_view_platform_cache_survives_refresh_errors(
     assert any(item.title == "run-1" for item in training.items)
     assert any(item.title == "research/private-env" for item in environments.items)
     assert any(item.title == "eval-1" for item in evaluations.items)
+    assert "Unavailable" not in [item.title for item in training.items]
+    assert "Unavailable" not in [item.title for item in environments.items]
+    assert "Unavailable" not in [item.title for item in evaluations.items]
 
 
 def test_lab_view_home_shows_inactive_sibling_workspaces(
@@ -1736,7 +1793,8 @@ def test_prime_lab_doctor_checks_all_configured_agent_surfaces(
     checks = {check.name: check for check in result.checks}
 
     assert checks["Codex native tools"].status == "PASS"
-    assert checks["Claude native tools"].status == "PASS"
+    assert checks["Claude native tools"].status == "WARN"
+    assert ".prime/lab/agent-mcp/claude.json" in checks["Claude native tools"].message
     assert "Coding agent" not in checks
 
 
@@ -1976,7 +2034,7 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
     assert agent_adapter("claude-code").lab_widget_contract == "mcp-stdio-tools"
     assert agent_adapter("cursor").lab_widget_contract == "mcp-stdio-tools"
     assert agent_adapter("opencode").lab_widget_contract == "mcp-stdio-tools"
-    assert agent_adapter("pi").lab_widget_contract == "mcp-stdio-tools"
+    assert agent_adapter("pi").lab_widget_contract == "not-supported"
     assert agent_adapter("hermes-agent").lab_widget_contract == "mcp-stdio-tools"
     workspace = Path("/workspace")
     allowed_lab_tools = ",".join(
@@ -2003,6 +2061,14 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
         "--mcp-config",
         "/workspace/.prime/lab/agent-mcp/claude.json",
         "--",
+        "hello",
+    ]
+    assert agent_adapter("amp-code").stream_command("hello", workspace=workspace) == [
+        "amp",
+        "--stream-json",
+        "--mcp-config",
+        "/workspace/.prime/lab/agent-mcp/amp.json",
+        "--execute",
         "hello",
     ]
     assert agent_adapter("claude-code").name == "claude"
@@ -2037,6 +2103,7 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
     )
     assert agent_adapter("hermes-agent").server_spec(workspace).transport == "acp-stdio"
     assert agent_adapter("factory-droid").name == "droid"
+    assert agent_adapter("factory-droid").lab_widget_contract == "not-supported"
     assert agent_adapter("amp-code").name == "amp"
     pi_server = agent_adapter("pi").server_spec(Path("/workspace"))
     assert pi_server.command == ("pi-acp",)
@@ -2074,12 +2141,21 @@ def test_lab_agent_capabilities_centralize_supported_agents(
     pi = agent_capability("pi")
     assert pi.label == "Pi Coding Agent"
     assert pi.native_surface == "pi_acp"
+    assert pi.status == "not_supported"
+    assert "does not expose Lab MCP tools" in pi.unsupported_reason
     assert [requirement.binary for requirement in pi.missing_requirements()] == ["pi-acp"]
     assert pi.requirements[1].install_command == ("npm", "install", "-g", "pi-acp")
+    assert agent_capability("amp").native_surface == "mcp_config"
+    assert agent_capability("amp").resolved_surface_paths(tmp_path) == (
+        tmp_path.resolve() / ".prime" / "lab" / "agent-mcp" / "amp.json",
+    )
+    droid = agent_capability("factory-droid")
+    assert droid.name == "droid"
+    assert droid.status == "not_supported"
+    assert "verified per-run Lab MCP" in droid.unsupported_reason
     assert agent_capability("codex").native_surface == "codex_app_server"
     assert agent_capability("claude-code").name == "claude"
     assert agent_capability("claude").native_surface == "mcp_config"
-    assert agent_capability("factory-droid").name == "droid"
     assert agent_capability("custom-agent").status == "not_supported"
     assert agent_capability("cursor").resolved_surface_paths(tmp_path) == (
         tmp_path.resolve() / ".cursor" / "mcp.json",
@@ -2193,6 +2269,58 @@ def test_agent_acp_helpers_normalize_lab_mcp_and_updates(tmp_path: Path) -> None
     assert tool.title == "Read config"
     assert tool.status == "completed"
     assert tool.text == "ok"
+
+
+def test_agent_runtime_filters_wrapped_lab_widget_tool_results() -> None:
+    ack = {
+        "success": True,
+        "contentItems": [
+            {
+                "type": "inputText",
+                "text": json.dumps(
+                    {
+                        "ok": True,
+                        "tool": "choose",
+                        "kind": "choice_picker",
+                        "title": "Lab tool diagnostic",
+                    }
+                ),
+            }
+        ],
+    }
+    wrapped = json.dumps({"result": json.dumps(ack)})
+
+    assert _is_lab_widget_tool_result_text(wrapped) is True
+
+
+def test_agent_runtime_suppresses_empty_lab_tool_update_after_widget() -> None:
+    messages: tuple[Any, ...] = ()
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    runtime = AgentRuntime(on_messages=on_messages)
+    runtime._messages = [
+        AgentChatMessage(
+            "system",
+            "Lab tool diagnostic",
+            "widget",
+            {"tool": "choose", "kind": "choice_picker"},
+        )
+    ]
+
+    runtime._record_acp_tool_event("prime_lab_choose", "completed", "")
+
+    assert len(messages) == 0
+    assert runtime.messages() == (
+        AgentChatMessage(
+            "system",
+            "Lab tool diagnostic",
+            "widget",
+            {"tool": "choose", "kind": "choice_picker"},
+        ),
+    )
 
 
 class _FakeJsonRpcProcess:
@@ -2515,6 +2643,7 @@ def test_agent_native_surface_writers_create_agent_specific_configs(
 
     opencode_path = write_opencode_mcp_config(tmp_path)
     hermes_path = write_hermes_mcp_config(tmp_path)
+    amp_path = write_amp_mcp_config(tmp_path)
 
     opencode_config = json.loads(opencode_path.read_text(encoding="utf-8"))
     assert opencode_config["mcp"]["prime_lab"]["type"] == "local"
@@ -2533,6 +2662,17 @@ def test_agent_native_surface_writers_create_agent_specific_configs(
     assert "mcp_servers" in hermes_config
     assert "prime_lab" in hermes_config
     assert str(tmp_path.resolve()) in hermes_config
+    amp_config = json.loads(amp_path.read_text(encoding="utf-8"))
+    assert amp_config["prime_lab"]["args"] == [
+        "-c",
+        "from prime_cli.main import run; run()",
+        "lab",
+        "mcp",
+        "--workspace",
+        str(tmp_path.resolve()),
+    ]
+    assert "mcpServers" not in amp_config
+    assert "amp.mcpServers" not in amp_config
 
 
 def test_agent_runtime_handles_external_mcp_widget_calls(tmp_path: Path) -> None:
@@ -2691,7 +2831,33 @@ def test_agent_runtime_supports_opencode_with_workspace_mcp_config(tmp_path: Pat
         request_id = message["id"]
         method = message["method"]
         if method == "initialize":
-            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {"authMethods": []}})
+            process.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "authMethods": [
+                            {
+                                "id": "opencode-login",
+                                "name": "Login with opencode",
+                            }
+                        ]
+                    },
+                }
+            )
+            return
+        if method == "authenticate":
+            process.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32603,
+                        "message": "Internal error",
+                        "data": {"details": "Authentication not implemented"},
+                    },
+                }
+            )
             return
         if method == "session/new":
             params = message["params"]
@@ -2747,12 +2913,37 @@ def test_agent_runtime_supports_opencode_with_workspace_mcp_config(tmp_path: Pat
     assert _wait_for(lambda: messages and messages[-1].status != "streaming")
     assert prompt_params
     assert prompt_params[0]["sessionId"] == "opencode-session"
+    assert "Native Lab tools are available" in prompt_params[0]["prompt"][0]["text"]
+    assert "do not stop at environment search prose" in prompt_params[0]["prompt"][0]["text"]
     assert messages
     assert messages[-1].content == "opencode ready"
     runtime.stop()
 
 
 def test_agent_runtime_supports_pi_with_acp_mcp_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    messages: tuple[Any, ...] = ()
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> _FakeJsonRpcProcess:
+        raise AssertionError(f"unsupported Pi should not start: {command}")
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime.start(tmp_path, "pi")
+
+    assert runtime.state.status == "unsupported"
+    assert "does not expose Lab MCP tools" in runtime.state.message
+    assert messages
+    assert messages[-1].status == "warning"
+
+
+def test_agent_runtime_supports_hermes_with_mcp_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2774,81 +2965,12 @@ def test_agent_runtime_supports_pi_with_acp_mcp_tools(
                 {
                     "jsonrpc": "2.0",
                     "id": request_id,
-                    "result": {"sessionId": "pi-session"},
-                }
-            )
-            return
-        if method == "session/prompt":
-            prompt_params.append(message["params"])
-            process.emit(
-                {
-                    "jsonrpc": "2.0",
-                    "method": "session/update",
-                    "params": {
-                        "sessionId": "pi-session",
-                        "update": {
-                            "sessionUpdate": "agent_message_chunk",
-                            "content": {"type": "text", "text": "pi ready"},
-                        },
-                    },
-                }
-            )
-            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
-            return
-        process.emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
-
-    def fake_popen(command: list[str], **_kwargs: Any) -> _FakeJsonRpcProcess:
-        commands.append(command)
-        return _FakeJsonRpcProcess(handler)
-
-    def on_messages(value: Any) -> None:
-        nonlocal messages
-        messages = value
-
-    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
-    runtime.start(tmp_path, "pi")
-
-    assert _wait_for(lambda: runtime.state.status == "connected")
-    assert commands[0] == ["pi-acp"]
-    assert session_new_params[0]["cwd"] == str(tmp_path.resolve())
-    assert session_new_params[0]["mcpServers"][0]["name"] == "prime_lab"
-
-    runtime.send_prompt("hello")
-
-    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
-    assert prompt_params
-    assert prompt_params[0]["sessionId"] == "pi-session"
-    assert messages
-    assert messages[-1].content == "pi ready"
-    runtime.stop()
-
-
-def test_agent_runtime_supports_hermes_with_mcp_config(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    commands: list[list[str]] = []
-    messages: tuple[Any, ...] = ()
-    session_new_params: list[dict[str, Any]] = []
-
-    def handler(process: _FakeJsonRpcProcess, message: dict[str, Any]) -> None:
-        request_id = message["id"]
-        method = message["method"]
-        if method == "initialize":
-            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {"authMethods": []}})
-            return
-        if method == "session/new":
-            session_new_params.append(message["params"])
-            process.emit(
-                {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
                     "result": {"sessionId": "hermes-session"},
                 }
             )
             return
         if method == "session/prompt":
+            prompt_params.append(message["params"])
             process.emit(
                 {
                     "jsonrpc": "2.0",
@@ -2887,6 +3009,8 @@ def test_agent_runtime_supports_hermes_with_mcp_config(
     runtime.send_prompt("hello")
 
     assert _wait_for(lambda: messages and messages[-1].status != "streaming")
+    assert prompt_params
+    assert "Native Lab tools are available" in prompt_params[0]["prompt"][0]["text"]
     assert messages
     assert messages[-1].content == "hermes ready"
     runtime.stop()
@@ -3079,6 +3203,7 @@ def test_agent_runtime_exposes_codex_lab_widget_tools(tmp_path: Path) -> None:
 
     assert _wait_for(lambda: runtime.state.status == "connected")
     assert "edit_config" in str(thread_start_params.get("developerInstructions"))
+    assert "do not stop after searching" in str(thread_start_params.get("developerInstructions"))
     dynamic_tools = thread_start_params.get("dynamicTools")
     assert isinstance(dynamic_tools, list)
     tool_names = {tool["name"] for tool in dynamic_tools if isinstance(tool, dict)}

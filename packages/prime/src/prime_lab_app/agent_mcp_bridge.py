@@ -71,6 +71,19 @@ def write_lab_mcp_config(workspace: Path, path: Path) -> Path:
     return path
 
 
+def write_amp_mcp_config(workspace: Path, path: Path | None = None) -> Path:
+    """Write the Amp config fragment that exposes Prime Lab MCP tools."""
+
+    path = path or workspace / ".prime" / "lab" / "agent-mcp" / "amp.json"
+    payload = _read_json_object(path)
+    payload["prime_lab"] = lab_mcp_server_config(workspace)
+    payload.pop("mcpServers", None)
+    payload.pop("amp.mcpServers", None)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def write_opencode_mcp_config(workspace: Path, path: Path | None = None) -> Path:
     """Write the workspace OpenCode config that exposes Prime Lab MCP tools."""
 

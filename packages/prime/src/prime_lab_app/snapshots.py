@@ -63,10 +63,14 @@ def _merge_section_rows(
     previous_items: tuple[LabItem, ...],
     incoming_items: tuple[LabItem, ...],
 ) -> tuple[LabItem, ...]:
+    if any(_is_placeholder_lab_item(item) for item in incoming_items):
+        incoming_items = tuple(
+            item for item in incoming_items if not _is_placeholder_lab_item(item)
+        )
+        if not incoming_items:
+            return previous_items
     if not previous_items or len(incoming_items) >= len(previous_items):
         return incoming_items
-    if incoming_items and all(_is_placeholder_lab_item(item) for item in incoming_items):
-        return previous_items
     incoming_keys = {item.key for item in incoming_items}
     preserved = [item for item in previous_items if item.key not in incoming_keys]
     if not preserved:

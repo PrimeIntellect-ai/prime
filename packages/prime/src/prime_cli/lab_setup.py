@@ -375,6 +375,7 @@ def _run_lab_setup_steps(
 
     (workspace / "configs").mkdir(exist_ok=True)
     (workspace / "environments").mkdir(exist_ok=True)
+    _append_gitignore(workspace)
     managed_skill_names = _sync_prime_skills(emit)
     _prepare_agent_skill_dirs(options.agents, managed_skill_names, emit)
     _report_missing_agent_requirements(options.agents, emit)
@@ -396,6 +397,8 @@ def _run_lab_setup_steps(
         _install_environments_to_prime_rl(workspace, emit, runner)
 
     _copy_setup_configs(workspace, emit, prime_rl=options.prime_rl)
+    _sync_config_templates(workspace, emit)
+    _write_lab_docs_index(workspace)
     emit("Lab setup completed\n")
 
 

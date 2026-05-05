@@ -354,6 +354,9 @@ class AgentRuntime:
                 )
                 self._record_codex_turn(result)
             else:
+                prompt_text = (
+                    _agent_prompt_with_lab_context(prompt) if transport == "acp-stdio" else prompt
+                )
                 if transport == "resumable-cli":
                     threading.Thread(
                         target=self._run_resumable_cli_prompt,
@@ -367,7 +370,7 @@ class AgentRuntime:
                     {
                         "sessionId": session_id,
                         "messageId": str(uuid.uuid4()),
-                        "prompt": [{"type": "text", "text": prompt}],
+                        "prompt": [{"type": "text", "text": prompt_text}],
                     },
                     timeout=3600,
                 )
@@ -491,10 +494,14 @@ class AgentRuntime:
                 timeout=12,
             )
             session_support = acp_session_support(init)
+            auth_errors: list[str] = []
             for method in init.get("authMethods") or []:
                 method_id = method.get("id") if isinstance(method, dict) else None
                 if method_id:
-                    self._request("authenticate", {"methodId": method_id}, timeout=12)
+                    try:
+                        self._request("authenticate", {"methodId": method_id}, timeout=12)
+                    except Exception as exc:
+                        auth_errors.append(str(exc))
             current_session_id = self._state.session_id
             if current_session_id and session_support.resume:
                 session = self._request(
@@ -509,6 +516,9 @@ class AgentRuntime:
                     timeout=30,
                 )
         except Exception as exc:
+            message = str(exc)
+            if "auth_errors" in locals() and auth_errors:
+                message = f"{message}; auth: {'; '.join(auth_errors)}"
             self._set_state(
                 AgentConnectionState(
                     agent=self._agent,
@@ -516,7 +526,7 @@ class AgentRuntime:
                     status="error",
                     transport=self._spec.transport if self._spec else "",
                     workspace=workspace,
-                    message=str(exc),
+                    message=message,
                 )
             )
             return
@@ -694,9 +704,18 @@ class AgentRuntime:
         text = text.strip()
         if not title and not text:
             return
+        if text and _is_lab_widget_tool_result_text(text):
+            return
         label = title or "Tool"
         content = label if not text else f"{label}\n{text}"
         with self._lock:
+            if (
+                not text
+                and _is_lab_widget_tool_event_title(label)
+                and self._messages
+                and self._messages[-1].status == "widget"
+            ):
+                return
             if (
                 self._messages
                 and self._messages[-1].role == "system"
@@ -960,7 +979,7 @@ def _collect_stream_lines(stream: Any, lines: list[str]) -> None:
 
 
 def _unsupported_agent_message(capability: AgentCapability) -> str:
-    supported = "Codex, Claude, Claude Code, Cursor, OpenCode, Pi, or Hermes"
+    supported = "Amp, Codex, Claude, Claude Code, Cursor, OpenCode, or Hermes"
     reason = f" {capability.unsupported_reason}" if capability.unsupported_reason else ""
     return (
         f"{capability.label} is not yet supported for Lab-native chat actions.{reason} "
@@ -1152,9 +1171,40 @@ def _is_lab_widget_tool_result_text(text: str) -> bool:
         payload = json.loads(text)
     except json.JSONDecodeError:
         return False
-    if not isinstance(payload, dict):
+    return _contains_lab_widget_tool_result(payload)
+
+
+def _contains_lab_widget_tool_result(value: Any) -> bool:
+    if not isinstance(value, dict):
         return False
-    return payload.get("ok") is True and isinstance(payload.get("tool"), str)
+    if value.get("ok") is True and isinstance(value.get("tool"), str):
+        return True
+    result = value.get("result")
+    if isinstance(result, str):
+        try:
+            if _contains_lab_widget_tool_result(json.loads(result)):
+                return True
+        except json.JSONDecodeError:
+            pass
+    content_items = value.get("contentItems")
+    if isinstance(content_items, list):
+        for item in content_items:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if not isinstance(text, str):
+                continue
+            try:
+                if _contains_lab_widget_tool_result(json.loads(text)):
+                    return True
+            except json.JSONDecodeError:
+                continue
+    return False
+
+
+def _is_lab_widget_tool_event_title(value: str) -> bool:
+    normalized = value.strip().lower().replace("-", "_")
+    return normalized.startswith(("prime_lab_", "mcp_prime_lab_"))
 
 
 def _merge_stream_text(existing: str, delta: str) -> str:
@@ -1239,8 +1289,15 @@ def _agent_prompt_with_lab_context(prompt: str) -> str:
         "the user explicitly asks for CLI instructions. Native Lab tools are available "
         "for this session; use them directly for confirmable Lab actions. Do not narrate "
         "repository searches, file formats, docs, folders, resolver order, TOML shape, or other "
-        "implementation details unless the user explicitly asks. Do not name internal "
-        "implementation surfaces, tool plumbing, or rendering mechanics.\n"
+        "implementation details unless the user explicitly asks. Do not say that you are "
+        "checking, reading, searching, or inspecting workspace files or configs; use a native "
+        "Lab control or state the user-facing decision needed. Avoid implementation-facing "
+        "words in visible chat such as workflow, skill, template, resolver, workspace file, "
+        "or config shape. Do not name internal "
+        "implementation surfaces, tool plumbing, or rendering mechanics. For eval creation, "
+        "resolve the environment and then open a native eval config editor; do not stop at "
+        "environment search prose. For training creation, open a native training launcher once "
+        "the required fields are known, or ask the user to choose the missing field.\n"
         "</prime_lab_context>\n\n"
         f"{prompt}"
     )

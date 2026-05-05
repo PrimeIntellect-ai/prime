@@ -35,6 +35,18 @@ def validate_agent_surfaces(
     results: list[AgentValidationResult] = []
     for agent in agents or known_agent_names():
         capability = agent_capability(agent)
+        if capability.status == "not_supported":
+            results.append(
+                AgentValidationResult(
+                    agent=capability.name,
+                    label=capability.label,
+                    ok=False,
+                    message=capability.unsupported_reason
+                    or "This agent does not expose native Lab tools.",
+                    checked_paths=capability.resolved_surface_paths(workspace),
+                )
+            )
+            continue
         missing = capability.missing_requirements()
         if missing:
             results.append(

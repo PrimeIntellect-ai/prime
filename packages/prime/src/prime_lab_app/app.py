@@ -577,6 +577,7 @@ class PrimeLabView(App[None]):
         self._dismiss_launch_screen()
         self._active_section_key = "workspace"
         self._filter = ""
+        self._render_tree()
         self._render_active_section()
         self._focus_main_pane(prefer_rows=False)
 
@@ -757,7 +758,7 @@ class PrimeLabView(App[None]):
         snapshot = merge_snapshot_rows(self._snapshot, snapshot)
         self._snapshot = snapshot
         if snapshot.section(self._active_section_key) is None and snapshot.sections:
-            self._active_section_key = snapshot.sections[0].key
+            self._active_section_key = _first_nav_section_key(snapshot) or snapshot.sections[0].key
         self._render_topbar()
         self._render_statusbar()
         self._render_tree()
@@ -870,13 +871,11 @@ class PrimeLabView(App[None]):
         self._persist_agent_session()
 
     def _dispatch_agent_callback(self, callback: Callable[..., None], *args: Any) -> None:
-        if getattr(self, "_thread_id", None) == threading.get_ident():
+        thread_id = getattr(self, "_thread_id", None)
+        if thread_id is None or thread_id == threading.get_ident():
             callback(*args)
             return
-        try:
-            self.call_from_thread(callback, *args)
-        except RuntimeError:
-            return
+        self.call_later(callback, *args)
 
     def _sync_agent_runtime(self, snapshot: LabSnapshot) -> None:
         workspace = snapshot.workspace.expanduser().resolve()

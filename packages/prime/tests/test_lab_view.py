@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import builtins
 import json
+import os
 import queue
 import sys
 import tarfile
 import threading
 import time
+import types
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any
 
+import prime_lab_app.agent_widget_model as agent_widget_model
 import pytest
 import toml
 from prime_cli.api.rl import RLClient
@@ -48,7 +52,9 @@ from prime_lab_app.agent_capabilities import agent_capability, known_agent_names
 from prime_lab_app.agent_cards import AgentWidgetCard
 from prime_lab_app.agent_mcp_bridge import (
     LabMcpIpcServer,
+    _dump_simple_yaml,
     call_lab_mcp_tool,
+    lab_mcp_runtime_dir,
     write_amp_mcp_config,
     write_droid_mcp_config,
     write_hermes_mcp_config,
@@ -162,8 +168,17 @@ from prime_lab_app.training_config import (
 from prime_lab_app.training_config import (
     training_platform_url as _training_platform_url,
 )
-from prime_lab_app.training_render import training_run_widgets as _training_run_widgets
-from prime_lab_app.training_screen import TrainingRunScreen, _next_log_tail_lines
+from prime_lab_app.training_render import (
+    training_progress_summary,
+)
+from prime_lab_app.training_render import (
+    training_run_widgets as _training_run_widgets,
+)
+from prime_lab_app.training_screen import (
+    TrainingRunScreen,
+    _merge_training_detail,
+    _next_log_tail_lines,
+)
 from prime_lab_app.widgets import ClearableInput, HomeLaunchPanel
 from rich.console import Console
 from textual.containers import Vertical, VerticalScroll
@@ -467,6 +482,46 @@ def test_lab_view_snapshot_prioritizes_training_and_auth_environments(tmp_path: 
     assert environments.items[0].raw["badges"][0]["label"] == "PRIVATE"
     assert environments.items[1].metadata[0] == ("Source", "platform")
     assert environments.items[1].raw["badges"][0]["label"] == "PUBLIC"
+
+
+def test_lab_view_caps_combined_evaluation_rows(tmp_path: Path) -> None:
+    for idx in range(4):
+        run_dir = tmp_path / "outputs" / "evals" / f"env-{idx}--model" / f"run-{idx}"
+        run_dir.mkdir(parents=True)
+        (run_dir / "metadata.json").write_text(
+            '{"avg_reward": 0.5, "num_examples": 1}',
+            encoding="utf-8",
+        )
+        (run_dir / "results.jsonl").write_text('{"reward": 0.5}\n', encoding="utf-8")
+
+    class ManyEvalsClient(FakeEvalsClient):
+        def list_evaluations(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "evaluations": [
+                    {
+                        "evaluation_id": f"eval-{idx}",
+                        "environment_names": [f"env-{idx}"],
+                        "model_name": "model",
+                        "status": "COMPLETED",
+                        "is_hosted": True,
+                    }
+                    for idx in range(6)
+                ]
+            }
+
+    source = LabDataSource(
+        api_client_factory=FakeAPIClient,
+        evals_client_factory=ManyEvalsClient,
+        rl_client_factory=FakeRLClient,
+        config_factory=FakeConfig,
+    )
+
+    snapshot = source.load(LabLoadOptions(limit=3, workspace=tmp_path))
+    evaluations = snapshot.section("evaluations")
+
+    assert evaluations is not None
+    assert len(evaluations.items) == 3
+    assert evaluations.status == "3 shown"
 
 
 def test_lab_view_merges_local_and_platform_environments(tmp_path: Path) -> None:
@@ -1195,6 +1250,50 @@ def test_training_data_tab_uses_rollout_viewer() -> None:
     assert any(isinstance(widget, RolloutViewer) for widget in widgets)
 
 
+def test_training_progress_counts_step_zero_as_completed() -> None:
+    summary = training_progress_summary(
+        {"max_steps": 10, "status": "RUNNING"},
+        {"latest_step": 0},
+        [],
+    )
+
+    assert summary["current_step"] == 0
+    assert summary["steps_completed"] == 1
+    assert summary["progress_percent"] == 10.0
+
+
+def test_training_log_reload_preserves_accumulated_metric_pages() -> None:
+    previous = LabItem(
+        key="training:run-1",
+        section="training",
+        title="run-1",
+        subtitle="",
+        status="RUNNING",
+        status_style="green",
+        raw={
+            "recent_metrics": [{"step": 0, "loss": 2.0}, {"step": 1, "loss": 1.5}],
+            "metrics_loaded": True,
+            "metrics_min_step": 1,
+        },
+    )
+    incoming = replace(
+        previous,
+        raw={
+            "recent_metrics": [{"step": 0, "loss": 1.9}],
+            "metrics_loaded": True,
+            "metrics_min_step": None,
+            "logs_tail": "latest log",
+            "logs_loaded": True,
+        },
+    )
+
+    merged = _merge_training_detail(previous, incoming)
+
+    assert [metric["step"] for metric in merged.raw["recent_metrics"]] == [0, 1]
+    assert merged.raw["recent_metrics"][0]["loss"] == 1.9
+    assert merged.raw["logs_tail"] == "latest log"
+
+
 def test_training_chart_failure_marks_plot_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail_draw(_plot: Any, _chart: ChartSpec) -> None:
         raise RuntimeError("plot failed")
@@ -1556,6 +1655,54 @@ def test_local_eval_lazy_records_and_overview_stats(tmp_path: Path) -> None:
         "accuracy": 0.5,
         "num_turns": 3.0,
     }
+
+
+def test_local_eval_run_screen_keeps_rollouts_lazy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        '{"avg_reward": 0.75, "num_examples": 2, "rollouts_per_example": 1}',
+        encoding="utf-8",
+    )
+    (run_dir / "results.jsonl").write_text(
+        '{"reward": 0.5}\n{"reward": 1.0}\n',
+        encoding="utf-8",
+    )
+    run = LocalEvalRun(env_id="gsm8k", model="openai/gpt-4", run_id="run-a", path=run_dir)
+
+    def fail_len(_records: LazyRunResults) -> int:
+        raise AssertionError("Local eval screen should not count every rollout at startup")
+
+    monkeypatch.setattr(LazyRunResults, "__len__", fail_len)
+    screen = LocalEvalRunScreen(run)
+    try:
+        assert screen._record_count == 2
+        assert screen._rollout_records[0]["reward"] == 0.5
+    finally:
+        screen.records.close()
+
+
+def test_local_eval_run_screen_counts_rollouts_without_metadata_hint(tmp_path: Path) -> None:
+    run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text('{"avg_reward": 0.75}', encoding="utf-8")
+    (run_dir / "results.jsonl").write_text(
+        '{"reward": 0.5}\n{"reward": 1.0}\n',
+        encoding="utf-8",
+    )
+    run = LocalEvalRun(env_id="gsm8k", model="openai/gpt-4", run_id="run-a", path=run_dir)
+
+    screen = LocalEvalRunScreen(run)
+    try:
+        assert screen._record_count is None
+        assert len(screen._rollout_records) == 2
+        assert screen._rollout_records.loaded(1) is None
+        assert screen._rollout_records[1]["reward"] == 1.0
+    finally:
+        screen.records.close()
 
 
 def test_local_eval_selection_details_match_verifiers_sidebar_logic(tmp_path: Path) -> None:
@@ -2249,6 +2396,7 @@ def test_agent_acp_helpers_normalize_lab_mcp_and_updates(tmp_path: Path) -> None
     servers = acp_lab_mcp_servers(tmp_path)
     assert servers[0]["name"] == "prime_lab"
     assert servers[0]["args"][-2:] == ["--workspace", str(tmp_path.resolve())]
+    assert servers[0]["env"] == {}
 
     params = acp_session_params(tmp_path, session_id="session-1")
     assert params["sessionId"] == "session-1"
@@ -2289,6 +2437,21 @@ def test_agent_acp_helpers_normalize_lab_mcp_and_updates(tmp_path: Path) -> None
     assert tool.title == "Read config"
     assert tool.status == "completed"
     assert tool.text == "ok"
+
+
+def test_lab_mcp_runtime_dir_without_getuid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRIME_LAB_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("USERNAME", "windows-user")
+    monkeypatch.delattr(os, "getuid", raising=False)
+
+    runtime_dir = lab_mcp_runtime_dir(tmp_path / "workspace")
+
+    assert runtime_dir.parent.name.startswith("prime-lab-")
+    assert runtime_dir.parent.parent == tmp_path
+    assert len(runtime_dir.name) == 24
 
 
 def test_agent_runtime_filters_wrapped_lab_widget_tool_results() -> None:
@@ -2505,7 +2668,31 @@ def test_lab_mcp_tool_definitions_include_widget_tools() -> None:
     assert "title" not in train_schema["properties"]
     edit_tool = next(tool for tool in tools if tool["name"] == "edit_config")
     assert edit_tool["inputSchema"]["additionalProperties"] is False
-    assert edit_tool["inputSchema"]["properties"]["config_kind"]["enum"] == ["eval", "gepa"]
+    assert edit_tool["inputSchema"]["properties"]["config_kind"]["enum"] == ["eval", "rl", "gepa"]
+    launch_tool = next(tool for tool in tools if tool["name"] == "launch_run")
+    assert launch_tool["inputSchema"]["properties"]["config_kind"]["enum"] == [
+        "eval",
+        "rl",
+        "gepa",
+    ]
+
+
+def test_lab_config_tools_accept_training_configs() -> None:
+    action = lab_widget_action_from_tool_call(
+        {
+            "namespace": "lab",
+            "tool": "edit_config",
+            "callId": "edit-rl",
+            "arguments": {
+                "title": "Edit training config",
+                "config_kind": "rl",
+                "config": {"model": "openai/gpt-oss-20b", "env": [{"id": "wordle"}]},
+            },
+        }
+    )
+
+    assert action["kind"] == "config_editor"
+    assert action["payload"]["config_kind"] == "rl"
 
 
 def test_lab_train_model_tool_uses_explicit_training_fields(
@@ -2655,6 +2842,38 @@ def test_lab_mcp_stdio_server_lists_and_forwards_tools(tmp_path: Path) -> None:
     assert tool_result == {"ok": True, "tool": "choose", "arguments": {"title": "Pick"}}
 
 
+def test_lab_mcp_stdio_marks_failed_tool_result_as_error(tmp_path: Path) -> None:
+    server = LabMcpIpcServer(
+        tmp_path,
+        lambda tool, _arguments: {"success": False, "tool": tool, "error": "invalid choice"},
+    )
+    server.start()
+    try:
+        request_stream = StringIO(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "choose", "arguments": {"title": ""}},
+                }
+            )
+            + "\n"
+        )
+        response_stream = StringIO()
+        _serve_lab_mcp_stdio(tmp_path, request_stream, response_stream)
+    finally:
+        server.stop()
+
+    response = json.loads(response_stream.getvalue())
+    assert response["result"]["isError"] is True
+    assert response["result"]["structuredContent"] == {
+        "success": False,
+        "tool": "choose",
+        "error": "invalid choice",
+    }
+
+
 def test_agent_native_surface_writers_create_agent_specific_configs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2704,6 +2923,43 @@ def test_agent_native_surface_writers_create_agent_specific_configs(
         "--workspace",
         str(tmp_path.resolve()),
     ]
+
+
+def test_hermes_config_preserves_existing_yaml_without_pyyaml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    original = "theme: dark\nhooks:\n  enabled: true\n"
+    config_path.write_text(original, encoding="utf-8")
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "yaml":
+            raise ModuleNotFoundError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    assert write_hermes_mcp_config(tmp_path, config_path) == config_path
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_simple_yaml_fallback_serializes_nested_values_as_valid_yaml() -> None:
+    payload = {
+        "mcpServers": {
+            "prime_lab": {
+                "type": "stdio",
+                "command": "/path with spaces/python",
+                "args": ["-c", "from prime_cli.main import run; run()", {"nested": "a: b # c"}],
+                "disabled": False,
+            }
+        }
+    }
+
+    dumped = _dump_simple_yaml(payload)
+
+    assert json.loads(dumped) == payload
 
 
 def test_agent_runtime_handles_external_mcp_widget_calls(tmp_path: Path) -> None:
@@ -2938,6 +3194,7 @@ def test_agent_runtime_supports_opencode_with_workspace_mcp_config(tmp_path: Pat
     assert commands[0] == ["opencode", "acp", "--cwd", str(tmp_path.resolve())]
     assert session_new_params[0]["cwd"] == str(tmp_path.resolve())
     assert session_new_params[0]["mcpServers"][0]["name"] == "prime_lab"
+    assert session_new_params[0]["mcpServers"][0]["env"] == {}
 
     runtime.send_prompt("hello")
 
@@ -3161,6 +3418,7 @@ def test_agent_runtime_supports_hermes_with_mcp_config(
     assert str(tmp_path.resolve()) in hermes_config
     assert commands[0] == ["hermes", "acp", "--accept-hooks"]
     assert session_new_params[0]["mcpServers"][0]["name"] == "prime_lab"
+    assert session_new_params[0]["mcpServers"][0]["env"] == {}
 
     runtime.send_prompt("hello")
 
@@ -4793,6 +5051,46 @@ def test_training_model_options_expand_reasoning_variants() -> None:
         ("future/gpt-oss-next", {"reasoning_effort": "medium"}),
         ("future/gpt-oss-next", {"reasoning_effort": "high"}),
     ]
+
+
+def test_training_model_options_does_not_cache_auth_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoAuthConfig:
+        api_key = ""
+        team_id = None
+
+    class AuthConfig:
+        api_key = "token"
+        team_id = "team-123"
+
+    class FakeModelsClient:
+        def __init__(self, _api_client: Any) -> None:
+            pass
+
+        def list_models(self, team_id: str | None = None) -> list[Any]:
+            assert team_id == "team-123"
+            return [types.SimpleNamespace(name="future/gpt-oss-next")]
+
+    monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_OPTIONS_CACHE", None)
+    monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_OPTION_METADATA", {})
+    monkeypatch.setattr(agent_widget_model, "Config", NoAuthConfig)
+
+    assert agent_widget_model._training_model_options() == ()
+    assert agent_widget_model._TRAINING_MODEL_OPTIONS_CACHE is None
+
+    monkeypatch.setattr(agent_widget_model, "Config", AuthConfig)
+    monkeypatch.setattr(agent_widget_model, "APIClient", lambda: object())
+    monkeypatch.setattr(agent_widget_model, "RLClient", FakeModelsClient)
+
+    options = agent_widget_model._training_model_options()
+
+    assert [label for label, _value in options] == [
+        "future/gpt-oss-next (low)",
+        "future/gpt-oss-next (medium)",
+        "future/gpt-oss-next (high)",
+    ]
+    assert agent_widget_model._TRAINING_MODEL_OPTIONS_CACHE == options
 
 
 def test_prime_lab_app_chat_widget_shows_all_train_models_for_rl_dropdown(

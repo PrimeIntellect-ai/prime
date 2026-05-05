@@ -227,10 +227,12 @@ def training_data_page(raw: dict[str, Any], progress: dict[str, Any]) -> list[Wi
 def training_progress_summary(
     raw: dict[str, Any], progress: dict[str, Any], metrics: list[Any]
 ) -> dict[str, int | float | bool]:
-    max_steps = int_value(raw.get("max_steps") or raw.get("maxSteps")) or 0
+    max_steps = int_value(_first_present(raw.get("max_steps"), raw.get("maxSteps"))) or 0
     status = str(raw.get("status") or "")
-    latest_step = int_value(progress.get("latest_step") or progress.get("latestStep"))
-    steps_with_samples = progress.get("steps_with_samples") or progress.get("stepsWithSamples")
+    latest_step = int_value(_first_present(progress.get("latest_step"), progress.get("latestStep")))
+    steps_with_samples = _first_present(
+        progress.get("steps_with_samples"), progress.get("stepsWithSamples")
+    )
     latest_sample_step = (
         max(step for step in steps_with_samples if isinstance(step, int))
         if isinstance(steps_with_samples, list)
@@ -254,7 +256,7 @@ def training_progress_summary(
     if latest_sample_step is not None:
         completed_candidates.append(latest_sample_step + 1)
     if latest_step is not None:
-        completed_candidates.append(latest_step + 1 if latest_step > 0 else 0)
+        completed_candidates.append(latest_step + 1)
 
     current_candidates = [
         step for step in (latest_metric_step, latest_sample_step, latest_step) if step is not None
@@ -284,6 +286,13 @@ def training_progress_summary(
         "has_progress": has_stored_progress or is_completed,
         "progress_percent": progress_percent,
     }
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
 
 
 def _training_overview_widgets(

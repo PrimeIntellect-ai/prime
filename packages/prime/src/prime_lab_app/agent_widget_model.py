@@ -14,6 +14,7 @@ from prime_cli.api.rl import RLClient
 from prime_cli.client import APIClient, APIError
 from prime_cli.core import Config
 
+from .agent_widget_titles import clean_widget_title
 from .config_factory import evaluation_config, filter_empty_config_values, rl_config
 from .config_screen import initial_config_field_values
 from .models import LabItem
@@ -209,7 +210,7 @@ def _widget_config_context(action: dict[str, Any], workspace: Path) -> dict[str,
     if not config:
         config = _widget_default_config(payload, config_kind, config_path, workspace)
         toml_text = format_toml_blocks(toml.dumps(config)).rstrip() + "\n"
-    fallback_name = config_path.stem or _clean_widget_title(
+    fallback_name = config_path.stem or clean_widget_title(
         str(action.get("title") or payload.get("title") or "config")
     )
     values = initial_config_field_values(config, config_kind, fallback_name=fallback_name)
@@ -256,7 +257,7 @@ def _widget_config_context(action: dict[str, Any], workspace: Path) -> dict[str,
 
 def _widget_display_title(action: dict[str, Any], context: dict[str, Any] | None) -> str:
     payload = _widget_payload(action)
-    raw_title = _clean_widget_title(str(action.get("title") or payload.get("title") or "Action"))
+    raw_title = clean_widget_title(str(action.get("title") or payload.get("title") or "Action"))
     if context is None:
         return raw_title
     config_kind = str(context.get("config_kind") or "")
@@ -515,9 +516,7 @@ def _widget_generated_config_path(
         if env_id:
             stem = _slug(env_id.rsplit("/", 1)[-1])
             return workspace / ".prime" / "lab" / "configs" / config_kind / f"{stem}.toml"
-    title = _clean_widget_title(
-        str(action.get("title") or payload.get("title") or source_path.stem)
-    )
+    title = clean_widget_title(str(action.get("title") or payload.get("title") or source_path.stem))
     stem = _slug(title) or source_path.stem or "run"
     return workspace / ".prime" / "lab" / "configs" / config_kind / f"{stem}.toml"
 
@@ -568,18 +567,17 @@ def _training_model_options() -> tuple[tuple[str, str], ...]:
     try:
         config = Config()
         if not config.api_key:
-            _TRAINING_MODEL_OPTIONS_CACHE = ()
-            return _TRAINING_MODEL_OPTIONS_CACHE
+            return ()
         models = RLClient(APIClient()).list_models(team_id=config.team_id)
     except APIError:
-        _TRAINING_MODEL_OPTIONS_CACHE = ()
-        return _TRAINING_MODEL_OPTIONS_CACHE
+        return ()
     names: list[str] = []
     for model in sorted(models, key=lambda model: model.name):
         name = str(model.name).strip()
         if not name:
             continue
         names.append(name)
+    _TRAINING_MODEL_OPTION_METADATA.clear()
     _TRAINING_MODEL_OPTIONS_CACHE = _training_model_options_from_names(names)
     return _TRAINING_MODEL_OPTIONS_CACHE
 
@@ -1029,15 +1027,6 @@ def _filter_widget_empty_values(value: Any) -> Any:
             if child is not None and child != {} and child != [] and child != ""
         ]
     return value
-
-
-def _clean_widget_title(value: str) -> str:
-    title = value.strip() or "Action"
-    lowered = title.lower()
-    for prefix in ("eval:", "evaluation:", "train:", "training:", "run:"):
-        if lowered.startswith(prefix):
-            return title[len(prefix) :].strip() or title
-    return title
 
 
 def _slug(value: str) -> str:

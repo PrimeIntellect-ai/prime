@@ -383,14 +383,7 @@ def _run_lab_setup_steps(
     _sync_lab_metadata(workspace, options.agents, setup_source="prime lab setup")
 
     if not options.skip_agents_md:
-        _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", emit, force=True)
-        _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=True)
-        _download_file(
-            ENVS_AGENTS_MD_SRC,
-            workspace / "environments" / "AGENTS.md",
-            emit,
-            force=True,
-        )
+        _sync_workspace_guidance(workspace, emit)
 
     if options.prime_rl:
         _install_prime_rl(workspace, emit, runner)
@@ -422,17 +415,21 @@ def _run_lab_sync_steps(
     _sync_config_templates(workspace, emit)
 
     if not options.skip_docs:
-        _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", emit, force=True)
-        _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=True)
-        _download_file(
-            ENVS_AGENTS_MD_SRC,
-            workspace / "environments" / "AGENTS.md",
-            emit,
-            force=True,
-        )
+        _sync_workspace_guidance(workspace, emit, force=True)
         _write_lab_docs_index(workspace)
 
     emit("Lab sync completed\n")
+
+
+def _sync_workspace_guidance(workspace: Path, emit: Emit, *, force: bool = False) -> None:
+    _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", emit, force=force)
+    _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=force)
+    _download_file(
+        ENVS_AGENTS_MD_SRC,
+        workspace / "environments" / "AGENTS.md",
+        emit,
+        force=force,
+    )
 
 
 def _sync_prime_skills(emit: Emit) -> tuple[str, ...]:
@@ -910,7 +907,7 @@ def _config_environment_reference_check(workspace: Path) -> LabDoctorCheck:
         except (OSError, toml.TomlDecodeError):
             continue
         for ref in _config_environment_refs(parsed):
-            if "/" not in ref and local_names and ref not in local_names:
+            if "/" not in ref and ref not in local_names:
                 missing_local.append(f"{path.relative_to(workspace)}:{ref}")
     if missing_local:
         return LabDoctorCheck(

@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import sys
+import tempfile
 import threading
 import uuid
 from collections.abc import Callable
@@ -24,8 +25,16 @@ def lab_mcp_runtime_dir(workspace: Path) -> Path:
     """Runtime directory for a workspace-scoped Lab MCP socket."""
 
     digest = hashlib.sha256(str(workspace.expanduser().resolve()).encode("utf-8")).hexdigest()[:24]
-    root = Path(os.environ.get("PRIME_LAB_RUNTIME_DIR", "/tmp"))
-    return root / f"prime-lab-{os.getuid()}" / digest
+    root = Path(os.environ.get("PRIME_LAB_RUNTIME_DIR", tempfile.gettempdir()))
+    return root / f"prime-lab-{_runtime_owner_key()}" / digest
+
+
+def _runtime_owner_key() -> str:
+    getuid = getattr(os, "getuid", None)
+    if callable(getuid):
+        return str(getuid())
+    name = os.environ.get("USERNAME") or os.environ.get("USER") or "user"
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
 
 
 def lab_mcp_socket_path(workspace: Path) -> Path:
@@ -110,6 +119,8 @@ def write_hermes_mcp_config(workspace: Path, path: Path | None = None) -> Path:
 
     path = path or Path.home() / ".hermes" / "config.yaml"
     payload = _read_yaml_object(path)
+    if payload is None:
+        return path
     servers = payload.get("mcp_servers")
     if not isinstance(servers, dict):
         servers = {}
@@ -302,13 +313,26 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _read_yaml_object(path: Path) -> dict[str, Any]:
+def _read_yaml_object(path: Path) -> dict[str, Any] | None:
+    text = ""
+    if path.is_file():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
     try:
         import yaml
     except ModuleNotFoundError:
-        return {}
+        stripped = text.strip()
+        if not stripped:
+            return {}
+        try:
+            loaded = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        return loaded if isinstance(loaded, dict) else {}
     try:
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        loaded = yaml.safe_load(text) if text else {}
     except (OSError, yaml.YAMLError):
         loaded = {}
     return loaded if isinstance(loaded, dict) else {}
@@ -323,25 +347,4 @@ def _dump_yaml_object(payload: dict[str, Any]) -> str:
 
 
 def _dump_simple_yaml(payload: dict[str, Any]) -> str:
-    lines: list[str] = []
-
-    def emit_value(key: str, value: Any, indent: int) -> None:
-        prefix = " " * indent
-        if isinstance(value, dict):
-            lines.append(f"{prefix}{key}:")
-            for child_key, child_value in value.items():
-                emit_value(str(child_key), child_value, indent + 2)
-            return
-        if isinstance(value, list):
-            lines.append(f"{prefix}{key}:")
-            for item in value:
-                lines.append(f"{prefix}  - {item}")
-            return
-        if isinstance(value, bool):
-            lines.append(f"{prefix}{key}: {'true' if value else 'false'}")
-            return
-        lines.append(f"{prefix}{key}: {value}")
-
-    for key, value in payload.items():
-        emit_value(str(key), value, 0)
-    return "\n".join(lines).rstrip() + "\n"
+    return json.dumps(payload, indent=2) + "\n"

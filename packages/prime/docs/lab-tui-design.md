@@ -1,7 +1,5 @@
 # Lab V1 Design
 
-> Overnight implementation directive: continue working in incremental slices without stopping for review until the planned Lab TUI scope described here is fully implemented, tested, and reviewed, or until a real blocker requires user input.
-
 ## Summary
 
 `prime lab` is the primary terminal interface for Lab. It brings local workspace state, authenticated platform data, environment source browsing, config editing, launch flows, rollout inspection, metrics, logs, and coding-agent help into one coherent research environment.

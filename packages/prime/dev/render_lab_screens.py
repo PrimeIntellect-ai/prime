@@ -297,7 +297,9 @@ def _footer(*items: str) -> str:
 def _button_grid(labels: Iterable[str]) -> str:
     values = list(labels)
     rows = [values[index : index + 2] for index in range(0, len(values), 2)]
-    return "\n".join(f"{left:^28}    {right:^28}" for left, right in rows)
+    return "\n".join(
+        f"{row[0]:^28}    {row[1]:^28}" if len(row) == 2 else f"{row[0]:^28}" for row in rows
+    )
 
 
 def _kv_line(*items: str) -> str:
@@ -313,7 +315,7 @@ def _panel_text(value: str) -> Panel:
 
 
 def _nav(active: str) -> Panel:
-    items = ["Environments", "Training", "Evaluations"]
+    items = ["Environments", "Training", "Evaluations", "Settings"]
     lines = [f"> {item}" if item == active else f"  {item}" for item in items]
     return Panel("\n".join(lines), title="Sections")
 

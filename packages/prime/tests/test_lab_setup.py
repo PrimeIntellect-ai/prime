@@ -19,6 +19,8 @@ from prime_cli.lab_setup import (
     run_lab_sync_service,
 )
 
+AGENT_WHICH = "prime_lab_app.agent_capabilities.shutil.which"
+
 
 @pytest.fixture(autouse=True)
 def fake_lab_asset_downloads(monkeypatch: Any) -> list[str]:
@@ -72,7 +74,7 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: None)
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: None)
     commands: list[list[str]] = []
     emitted: list[str] = []
 
@@ -97,7 +99,64 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     assert (tmp_path / ".prime" / "lab" / "docs" / "index.md").is_file()
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert "/outputs/" in gitignore.splitlines()
-    assert any("npm install -g pi-acp" in line for line in emitted)
+    assert (tmp_path / ".pi" / "extensions" / "prime-lab" / "index.ts").is_file()
+    assert not any("pi-acp" in line for line in emitted)
+
+
+def test_lab_setup_preserves_existing_workspace_guidance(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    existing_files = {
+        tmp_path / "AGENTS.md": "workspace agents\n",
+        tmp_path / "CLAUDE.md": "workspace claude\n",
+        tmp_path / "environments" / "AGENTS.md": "environment agents\n",
+    }
+    for path, text in existing_files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    emitted: list[str] = []
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=False, agents=("codex",)),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    assert result.exit_code == 0
+    for path, text in existing_files.items():
+        assert path.read_text(encoding="utf-8") == text
+    assert sum("already exists" in line for line in emitted) == len(existing_files)
+
+
+def test_lab_sync_refreshes_existing_workspace_guidance(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    existing_files = (
+        tmp_path / "AGENTS.md",
+        tmp_path / "CLAUDE.md",
+        tmp_path / "environments" / "AGENTS.md",
+    )
+    for path in existing_files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("stale guidance\n", encoding="utf-8")
+    emitted: list[str] = []
+
+    result = run_lab_sync_service(
+        LabSyncOptions(agents=("codex",), skip_docs=False),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    assert result.exit_code == 0
+    for path in existing_files:
+        assert path.read_text(encoding="utf-8").startswith("downloaded from ")
+    assert not any("already exists" in line for line in emitted)
 
 
 def test_lab_setup_uses_existing_verifiers_sources(
@@ -106,7 +165,7 @@ def test_lab_setup_uses_existing_verifiers_sources(
     fake_lab_asset_downloads: list[str],
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
 
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=False, agents=("codex",)),
@@ -137,7 +196,7 @@ def test_lab_setup_manifest_tracks_skill_source(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
 
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
@@ -160,7 +219,7 @@ def test_lab_setup_rejects_duplicate_skill_sources(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
     monkeypatch.setattr(
         "prime_cli.lab_setup.SKILL_SOURCES",
         (
@@ -191,7 +250,7 @@ def test_lab_sync_all_scaffolds_amp_and_factory_skills(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
 
     result = run_lab_sync_service(
         LabSyncOptions(agents=("droid", "amp"), skip_docs=True),
@@ -215,7 +274,7 @@ def test_lab_doctor_reports_missing_selected_agent_guidance(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: None)
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: None)
     run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("amp",)),
         workspace=tmp_path,
@@ -272,6 +331,21 @@ def test_lab_doctor_validates_environment_table_refs(tmp_path: Path) -> None:
     assert "missing-env" in checks["Config environment refs"].message
 
 
+def test_lab_doctor_warns_on_local_env_refs_when_environment_dir_empty(tmp_path: Path) -> None:
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "rl.toml").write_text(
+        'model = "openai/gpt-oss-20b"\nenvironments = ["missing-env"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "environments").mkdir()
+
+    result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
+    checks = {check.name: check for check in result.checks}
+
+    assert checks["Config environment refs"].status == "WARN"
+    assert "missing-env" in checks["Config environment refs"].message
+
+
 def test_lab_setup_installs_prime_rl_envs_with_split_editable_args(tmp_path: Path) -> None:
     (tmp_path / "prime-rl" / ".venv" / "bin").mkdir(parents=True)
     (tmp_path / "prime-rl" / ".venv" / "bin" / "python").write_text("", encoding="utf-8")
@@ -317,7 +391,7 @@ def test_lab_sync_skips_user_owned_skill_conflicts(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
     user_skill = home / ".config" / "amp" / "skills" / "create-environments"
     user_skill.mkdir(parents=True)
     (user_skill / "SKILL.md").write_text("user skill\n", encoding="utf-8")
@@ -340,7 +414,7 @@ def test_lab_sync_removes_stale_managed_skill_links(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
     stale_source = home / ".prime" / "skills" / "old-lab-skill"
     stale_source.mkdir(parents=True)
     stale_target = home / ".config" / "amp" / "skills" / "old-lab-skill"
@@ -363,7 +437,7 @@ def test_lab_sync_removes_stale_global_managed_skills(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
     stale_skill = home / ".prime" / "skills" / "old-lab-skill"
     stale_skill.mkdir(parents=True)
     (stale_skill / "SKILL.md").write_text("old skill\n", encoding="utf-8")
@@ -386,7 +460,7 @@ def test_lab_sync_removes_stale_global_managed_skills(
 
 def test_lab_setup_accepts_amp_and_factory_aliases(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
 
     result = run_lab_sync_service(
         LabSyncOptions(agents=("droid", "amp"), skip_docs=True),

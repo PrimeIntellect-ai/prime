@@ -46,7 +46,7 @@ def acp_lab_mcp_servers(workspace: Path) -> list[dict[str, Any]]:
                 "--workspace",
                 str(workspace.expanduser().resolve()),
             ],
-            "env": [],
+            "env": {},
         }
     ]
 

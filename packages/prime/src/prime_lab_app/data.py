@@ -316,11 +316,14 @@ class LabDataSource:
             auth_section = _auth_required_section(
                 "evaluations", "Evaluations", "Local and platform evaluation runs."
             )
+            items = tuple([*local_items[: max(options.limit - 1, 0)], *auth_section.items])[
+                : options.limit
+            ]
             return LabSection(
                 key="evaluations",
                 title="Evaluations",
                 description="Local and platform evaluation runs.",
-                items=tuple([*local_items, *auth_section.items]),
+                items=items,
                 status=f"{len(local_items)} local",
                 status_style=STATUS_INFO if local_items else STATUS_WARNING,
             )
@@ -335,7 +338,7 @@ class LabDataSource:
             platform_items = tuple(
                 _evaluation_item(eval_data, idx) for idx, eval_data in enumerate(evaluations)
             )
-            items = tuple([*platform_items, *local_items])
+            items = tuple([*platform_items, *local_items])[: options.limit]
             return LabSection(
                 key="evaluations",
                 title="Evaluations",
@@ -357,7 +360,9 @@ class LabDataSource:
                     key="evaluations",
                     title="Evaluations",
                     description="Local and platform evaluation runs.",
-                    items=tuple([*local_items, *error.items]),
+                    items=tuple([*local_items[: max(options.limit - 1, 0)], *error.items])[
+                        : options.limit
+                    ],
                     status=f"{len(local_items)} local",
                     status_style=STATUS_WARNING,
                 )
@@ -404,17 +409,6 @@ class LabDataSource:
                 "Training runs for the active account or team.",
                 exc,
             )
-
-    def _local_eval_section(self, options: LabLoadOptions) -> LabSection:
-        items = tuple(_local_eval_items(options, section="local-evals"))
-        return LabSection(
-            key="local-evals",
-            title="Local Evals",
-            description="Eval outputs discovered in this workspace.",
-            items=items,
-            status=f"{len(items)} found",
-            status_style=STATUS_INFO if items else "dim",
-        )
 
     def _load_rl_detail(
         self,

@@ -508,6 +508,53 @@ class RolloutCopyScreen(ModalScreen[None]):
         self.query_one("#rollout-copy-preview", TextArea).load_text(item.body)
 
 
+class _RolloutRecordSequence(Sequence[dict[str, Any]]):
+    def __init__(self, records: Sequence[dict[str, Any]] | LazyRunResults) -> None:
+        self._lazy_records = records if isinstance(records, LazyRunResults) else None
+        self._cache: dict[int, dict[str, Any]] = {}
+        if self._lazy_records is None:
+            self._records = [
+                normalize_rollout_record(record) for record in records if isinstance(record, dict)
+            ]
+            self._count = len(self._records)
+        else:
+            self._records = []
+            self._count = self._lazy_records.count_hint()
+
+    def __len__(self) -> int:
+        if self._count is None and self._lazy_records is not None:
+            self._count = len(self._lazy_records)
+        return self._count
+
+    def __bool__(self) -> bool:
+        if self._count is None and self._lazy_records is not None:
+            return bool(self._lazy_records)
+        return self._count > 0
+
+    def __getitem__(self, index: int | slice) -> dict[str, Any] | list[dict[str, Any]]:
+        count = len(self)
+        if isinstance(index, slice):
+            return [self[idx] for idx in range(*index.indices(count))]
+        if index < 0:
+            index += count
+        if index < 0 or index >= count:
+            raise IndexError(index)
+        if self._lazy_records is None:
+            return self._records[index]
+        cached = self._cache.get(index)
+        if cached is not None:
+            return cached
+        raw = self._lazy_records[index]
+        record = normalize_rollout_record(raw if isinstance(raw, dict) else {})
+        self._cache[index] = record
+        return record
+
+    def loaded(self, index: int) -> dict[str, Any] | None:
+        if self._lazy_records is None:
+            return self._records[index] if 0 <= index < self._count else None
+        return self._cache.get(index)
+
+
 class RolloutViewer(Container):
     """Reusable rollout transcript viewer for evals and training samples."""
 
@@ -740,7 +787,7 @@ class RolloutViewer(Container):
 
     def __init__(
         self,
-        records: Sequence[dict[str, Any]],
+        records: Sequence[dict[str, Any]] | LazyRunResults,
         *,
         metadata: dict[str, Any] | None = None,
         title: str = "Rollouts",
@@ -749,9 +796,11 @@ class RolloutViewer(Container):
         id: str | None = None,
     ) -> None:
         super().__init__(id=id, classes=classes)
-        self.records = [
-            normalize_rollout_record(record) for record in records if isinstance(record, dict)
-        ]
+        self.records: _RolloutRecordSequence = (
+            records
+            if isinstance(records, _RolloutRecordSequence)
+            else _RolloutRecordSequence(records)
+        )
         self.metadata = metadata or {}
         self.title = title
         self._on_record_changed = on_record_changed
@@ -892,10 +941,16 @@ class RolloutViewer(Container):
         if rollout_list is None:
             return
         rollout_list.clear_options()
-        for idx, record in enumerate(self.records):
-            rollout_list.add_option(Option(build_rollout_prompt(idx, record), id=str(idx)))
+        for idx in range(len(self.records)):
+            rollout_list.add_option(Option(self._rollout_option_label(idx), id=str(idx)))
         rollout_list.highlighted = self.current_record_idx
         rollout_list.scroll_to_highlight()
+
+    def _rollout_option_label(self, idx: int) -> Text:
+        record = self.records.loaded(idx)
+        if record is not None:
+            return build_rollout_prompt(idx, record)
+        return Text(f"Rollout {idx + 1}")
 
     def _move_record_cursor(self, delta: int) -> None:
         if not self.records:
@@ -1677,9 +1732,7 @@ class LocalEvalRunScreen(Screen[None]):
         self.records = LazyRunResults(run)
         self._record_count = self.records.count_hint()
         self.current_record_idx = 0
-        self._rollout_records = (
-            [self.records[idx] for idx in range(len(self.records))] if self.records else []
-        )
+        self._rollout_records = _RolloutRecordSequence(self.records)
         self._prompt_text = ""
         self._completion_text = ""
         self._highlight_regex: re.Pattern[str] | None = None

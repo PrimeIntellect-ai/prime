@@ -1,4 +1,4 @@
-from prime_cli.commands.env import _resolve_push_environment_path
+from prime_cli.commands.env import _environment_push_metadata, _resolve_push_environment_path
 
 
 def test_defaults_to_current_directory_without_env_id(tmp_path, monkeypatch):
@@ -39,3 +39,31 @@ def test_respects_explicit_path_without_env_id(tmp_path):
     resolved = _resolve_push_environment_path(path=str(custom_path), env_id=None)
 
     assert resolved == custom_path.resolve()
+
+
+def test_push_metadata_replaces_existing_version() -> None:
+    metadata = _environment_push_metadata(
+        {
+            "environment_id": "old-id",
+            "owner": "base",
+            "name": "math-env",
+            "version": "0.1.0",
+        },
+        environment_id="new-id",
+        owner="research",
+        name="math-env",
+        version="0.2.0",
+        pushed_at="2026-05-05T12:00:00",
+        wheel_sha256="abc123",
+    )
+
+    assert metadata["environment_id"] == "new-id"
+    assert metadata["owner"] == "research"
+    assert metadata["name"] == "math-env"
+    assert metadata["version"] == "0.2.0"
+    assert metadata["forked_from"] == {
+        "environment_id": "old-id",
+        "owner": "base",
+        "name": "math-env",
+        "version": "0.1.0",
+    }

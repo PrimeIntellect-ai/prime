@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 from prime_lab_app.agent_adapters import (
@@ -44,6 +43,5 @@ __all__ = [
     "agent_capability",
     "agent_user_skills_dir",
     "known_agent_names",
-    "shutil",
     "write_agent_native_surface",
 ]

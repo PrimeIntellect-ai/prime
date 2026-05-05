@@ -983,10 +983,11 @@ def _merge_training_detail(previous: LabItem | None, incoming: LabItem) -> LabIt
     incoming_min_step = incoming.raw.get("metrics_min_step")
     previous_metrics = _list_value(previous.raw.get("recent_metrics"))
     incoming_metrics = _list_value(incoming.raw.get("recent_metrics"))
-    if incoming_min_step is None:
-        return incoming
-
-    combined_metrics = _append_metric_rows(previous_metrics, incoming_metrics)
+    combined_metrics = (
+        _append_metric_rows(previous_metrics, incoming_metrics)
+        if incoming_min_step is not None
+        else _append_metric_rows(incoming_metrics, previous_metrics)
+    )
     raw = {
         **incoming.raw,
         "recent_metrics": combined_metrics,

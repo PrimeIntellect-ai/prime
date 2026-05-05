@@ -510,6 +510,46 @@ def _environment_fork_chain(
     return deduped
 
 
+def _environment_push_metadata(
+    existing_metadata: Dict[str, Any],
+    *,
+    environment_id: str,
+    owner: str,
+    name: str,
+    version: Any,
+    pushed_at: str,
+    wheel_sha256: str,
+) -> Dict[str, Any]:
+    old_owner = existing_metadata.get("owner")
+    old_name = existing_metadata.get("name")
+    upstream_changed = bool(existing_metadata and (old_owner != owner or old_name != name))
+    old_upstream = _environment_ref(
+        old_owner,
+        old_name,
+        environment_id=existing_metadata.get("environment_id"),
+        version=existing_metadata.get("version"),
+    )
+    fork_chain = _environment_fork_chain(
+        existing_metadata,
+        old_upstream if upstream_changed else None,
+    )
+    metadata = {
+        **existing_metadata,
+        "environment_id": environment_id,
+        "owner": owner,
+        "name": name,
+        "version": version,
+        "pushed_at": pushed_at,
+        "wheel_sha256": wheel_sha256,
+    }
+    if fork_chain:
+        metadata["origin"] = fork_chain[0]
+        metadata["fork_chain"] = fork_chain
+    if upstream_changed and old_upstream:
+        metadata["forked_from"] = old_upstream
+    return metadata
+
+
 def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
     """Determine if a file should be included in the archive based on filtering rules."""
     if not file_path.is_file():
@@ -1472,37 +1512,15 @@ def push(
                             )
                             existing_metadata = {}
 
-                    # Check if upstream (owner/name) changed
-                    old_owner = existing_metadata.get("owner")
-                    old_name = existing_metadata.get("name")
-                    upstream_changed = False
-                    if existing_metadata and (old_owner != owner_name or old_name != env_name):
-                        upstream_changed = True
-                    old_upstream = _environment_ref(
-                        old_owner,
-                        old_name,
-                        environment_id=existing_metadata.get("environment_id"),
-                        version=existing_metadata.get("version"),
-                    )
-                    fork_chain = _environment_fork_chain(
+                    env_metadata = _environment_push_metadata(
                         existing_metadata,
-                        old_upstream if upstream_changed else None,
+                        environment_id=env_id,
+                        owner=owner_name,
+                        name=env_name,
+                        version=project_metadata.get("version"),
+                        pushed_at=datetime.now().isoformat(),
+                        wheel_sha256=wheel_sha256,
                     )
-
-                    # Merge existing metadata with new push information
-                    env_metadata = {
-                        **existing_metadata,  # Preserve existing fields
-                        "environment_id": env_id,
-                        "owner": owner_name,
-                        "name": env_name,
-                        "pushed_at": datetime.now().isoformat(),
-                        "wheel_sha256": wheel_sha256,
-                    }
-                    if fork_chain:
-                        env_metadata["origin"] = fork_chain[0]
-                        env_metadata["fork_chain"] = fork_chain
-                    if upstream_changed and old_upstream:
-                        env_metadata["forked_from"] = old_upstream
 
                     with open(metadata_path, "w") as f:
                         json.dump(env_metadata, f, indent=2)
@@ -1517,7 +1535,7 @@ def push(
                         console.print(message)
 
                     # Report upstream change if it occurred
-                    if upstream_changed:
+                    if env_metadata.get("forked_from"):
                         upstream_message = Text("Upstream set to ", style="dim")
                         upstream_message.append(f"{owner_name}/{env_name}", style="dim")
                         console.print(upstream_message)

@@ -14,6 +14,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .agent_runtime import AgentChatMessage, AgentConnectionState
+from .agent_widget_titles import clean_widget_title
 from .palette import PRIMARY, STATUS_ERROR, STATUS_SUCCESS, STATUS_WARNING, SUCCESS
 
 ReferenceKind = Literal["environment", "config", "run", "eval", "file"]
@@ -158,7 +159,7 @@ def _render_system_turn(parts: tuple[ChatPart, ...], *, status: str) -> Table:
 def _render_widget_turn(message: AgentChatMessage) -> Panel:
     payload = message.metadata.get("payload")
     action = payload if isinstance(payload, dict) else message.metadata
-    title = _clean_widget_title(str(action.get("title") or "Action"))
+    title = clean_widget_title(str(action.get("title") or "Action"))
     description = str(action.get("description") or "").strip()
 
     body = Table.grid(padding=(0, 2))
@@ -205,15 +206,6 @@ def _parts_text(parts: tuple[ChatPart, ...]) -> Text:
 def _turn_gap(index: int) -> Text:
     pattern = "· · ·" if index % 2 else "· ·"
     return Text(f"\n{pattern}\n", style="dim")
-
-
-def _clean_widget_title(value: str) -> str:
-    title = value.strip() or "Action"
-    lowered = title.lower()
-    for prefix in ("eval:", "evaluation:", "train:", "training:", "run:"):
-        if lowered.startswith(prefix):
-            return title[len(prefix) :].strip() or title
-    return title
 
 
 def _reference_kind(value: str) -> ReferenceKind:

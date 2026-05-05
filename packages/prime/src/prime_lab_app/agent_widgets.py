@@ -7,6 +7,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .agent_widget_titles import clean_widget_title
+
 LAB_WIDGET_NAMESPACE = "lab"
 
 LAB_WIDGET_KINDS = (
@@ -102,7 +104,7 @@ LAB_WIDGET_TOOLS = (
         ),
         required=("title", "config_kind"),
         properties={
-            "config_kind": {"type": "string", "enum": ["eval", "gepa"]},
+            "config_kind": {"type": "string", "enum": ["eval", "rl", "gepa"]},
             "config": {"type": "object"},
             "source": {"type": "object"},
             "editable_fields": {"type": "array", "items": {"type": "string"}},
@@ -136,7 +138,7 @@ LAB_WIDGET_TOOLS = (
         ),
         required=("title", "config_kind"),
         properties={
-            "config_kind": {"type": "string", "enum": ["eval", "gepa"]},
+            "config_kind": {"type": "string", "enum": ["eval", "rl", "gepa"]},
             "config_path": {"type": "string"},
             "config": {"type": "object"},
             "command": {"type": "array", "items": {"type": "string"}},
@@ -306,8 +308,6 @@ def normalize_widget_arguments(tool: str, arguments: dict[str, Any]) -> dict[str
             normalized["title"] = str(normalized.get("prompt") or "Choose")
     if tool == "train_model":
         normalized = _normalize_train_model_arguments(normalized)
-    if tool in {"edit_config", "launch_run"} and normalized.get("config_kind") == "rl":
-        return None
     return {**normalized, "kind": spec.kind, "tool": tool}
 
 
@@ -427,7 +427,7 @@ def _widget_summary(
     description: str,
     arguments: dict[str, Any],
 ) -> str:
-    visible_title = _clean_widget_title(title)
+    visible_title = clean_widget_title(title)
     lines = [visible_title]
     if widget_id:
         lines.append(f"ID {widget_id}")
@@ -439,12 +439,3 @@ def _widget_summary(
         if count:
             lines.append(f"{key.capitalize()}  {count}")
     return "\n".join(lines)
-
-
-def _clean_widget_title(value: str) -> str:
-    title = value.strip() or "Action"
-    lowered = title.lower()
-    for prefix in ("eval:", "evaluation:", "train:", "training:", "run:"):
-        if lowered.startswith(prefix):
-            return title[len(prefix) :].strip() or title
-    return title

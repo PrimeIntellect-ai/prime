@@ -10,8 +10,6 @@ from typing import Any, TextIO
 from prime_lab_app.agent_mcp_bridge import (
     LabMcpIpcError,
     call_lab_mcp_tool,
-    lab_mcp_server_config,
-    write_lab_mcp_config,
 )
 from prime_lab_app.agent_widgets import lab_dynamic_tools
 
@@ -46,10 +44,8 @@ def lab_mcp_tool_definitions() -> list[dict[str, Any]]:
 
 
 __all__ = [
-    "lab_mcp_server_config",
     "lab_mcp_tool_definitions",
     "run_lab_mcp_server",
-    "write_lab_mcp_config",
 ]
 
 
@@ -113,10 +109,18 @@ def _handle_mcp_request(workspace: Path, request: dict[str, Any]) -> dict[str, A
             {
                 "content": [{"type": "text", "text": json.dumps(result, sort_keys=True)}],
                 "structuredContent": result,
-                "isError": not bool(result.get("ok", True)),
+                "isError": _tool_result_is_error(result),
             },
         )
     return _error_response(request_id, -32601, f"Method not found: {method}")
+
+
+def _tool_result_is_error(result: dict[str, Any]) -> bool:
+    if "ok" in result:
+        return not bool(result["ok"])
+    if "success" in result:
+        return not bool(result["success"])
+    return bool(result.get("error"))
 
 
 def _call_lab_tool(workspace: Path, name: str, arguments: dict[str, Any]) -> dict[str, Any]:

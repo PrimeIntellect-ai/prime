@@ -45,11 +45,7 @@ def lab(
 )
 def setup(ctx: typer.Context) -> None:
     """Set up a Lab workspace."""
-    args = list(ctx.args)
-    if any(arg in {"-h", "--help"} for arg in args):
-        print_lab_setup_help()
-        return
-    code = run_lab_setup(args, console=console)
+    code = run_lab_setup(list(ctx.args), console=console)
     if code != 0:
         raise typer.Exit(code)
 
@@ -102,8 +98,8 @@ def view(
 
 @app.command("mcp")
 def mcp(
-    workspace: Path = typer.Option(
-        Path.cwd(),
+    workspace: Path | None = typer.Option(
+        None,
         "--workspace",
         help="Workspace whose running Lab TUI should receive MCP tool calls.",
     ),
@@ -112,7 +108,7 @@ def mcp(
 
     from ..lab_mcp import run_lab_mcp_server
 
-    run_lab_mcp_server(workspace)
+    run_lab_mcp_server(workspace or Path.cwd())
 
 
 def _launch_view(*, limit: int, env_dir: str, outputs_dir: str) -> None:
@@ -128,9 +124,3 @@ def _launch_view(*, limit: int, env_dir: str, outputs_dir: str) -> None:
         outputs_dir=outputs_dir,
         workspace=Path.cwd(),
     )
-
-
-def print_lab_setup_help() -> None:
-    """Print help for the Prime-owned Lab setup backend."""
-
-    run_lab_setup(["--help"], console=console)

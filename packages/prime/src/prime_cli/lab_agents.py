@@ -7,19 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .lab_mcp_config import (
-    write_amp_mcp_config,
-    write_factory_mcp_config,
-    write_hermes_mcp_config,
-    write_lab_mcp_config,
-    write_opencode_mcp_config,
-)
-
 AgentCapabilityStatus = Literal["supported", "not_supported"]
 AgentNativeSurface = Literal[
     "codex_app_server",
-    "mcp_config",
-    "acp_mcp",
     "pi_acp",
     "none",
 ]
@@ -93,21 +83,8 @@ class AgentCapability:
         workspace = workspace.expanduser().resolve()
         paths: list[Path] = []
         for raw_path in self.expected_surface_paths:
-            if raw_path == "{claude_mcp}":
-                paths.append(agent_mcp_config_path(workspace, "claude"))
-            elif raw_path == "{cursor_mcp}":
-                paths.append(workspace / ".cursor" / "mcp.json")
-            elif raw_path == "{opencode_config}":
-                paths.append(workspace / "opencode.json")
-            elif raw_path == "{hermes_config}":
-                paths.append(Path.home() / ".hermes" / "config.yaml")
-            elif raw_path == "{factory_mcp}":
-                paths.append(workspace / ".factory" / "mcp.json")
-            elif raw_path == "{amp_settings}":
-                paths.append(workspace / ".amp" / "settings.json")
-            else:
-                path = Path(raw_path).expanduser()
-                paths.append(path if path.is_absolute() else workspace / path)
+            path = Path(raw_path).expanduser()
+            paths.append(path if path.is_absolute() else workspace / path)
         return tuple(paths)
 
 
@@ -200,25 +177,22 @@ _CAPABILITIES: dict[str, AgentCapability] = {
     "claude": AgentCapability(
         name="claude",
         label="Claude",
-        native_surface="mcp_config",
+        native_surface="none",
         requirements=(AgentInstallRequirement("claude", description="Claude CLI"),),
-        expected_surface_paths=("{claude_mcp}",),
         user_skill_root="~/.claude/skills",
     ),
     "cursor": AgentCapability(
         name="cursor",
         label="Cursor",
-        native_surface="mcp_config",
+        native_surface="none",
         requirements=(AgentInstallRequirement("cursor-agent", description="Cursor Agent CLI"),),
-        expected_surface_paths=("{cursor_mcp}",),
         user_skill_root="~/.cursor/skills",
     ),
     "opencode": AgentCapability(
         name="opencode",
         label="OpenCode",
-        native_surface="acp_mcp",
+        native_surface="none",
         requirements=(AgentInstallRequirement("opencode", description="OpenCode CLI"),),
-        expected_surface_paths=("{opencode_config}",),
         user_skill_root="~/.opencode/skills",
     ),
     "pi": AgentCapability(
@@ -238,15 +212,14 @@ _CAPABILITIES: dict[str, AgentCapability] = {
     "hermes": AgentCapability(
         name="hermes",
         label="Hermes Agent",
-        native_surface="acp_mcp",
+        native_surface="none",
         requirements=(AgentInstallRequirement("hermes", description="Hermes Agent CLI"),),
-        expected_surface_paths=("{hermes_config}",),
         user_skill_root="~/.hermes/skills",
     ),
     "droid": AgentCapability(
         name="droid",
         label="Factory Droid Agent",
-        native_surface="mcp_config",
+        native_surface="none",
         requirements=(
             AgentInstallRequirement(
                 "droid",
@@ -254,13 +227,12 @@ _CAPABILITIES: dict[str, AgentCapability] = {
                 description="Factory Droid Agent CLI",
             ),
         ),
-        expected_surface_paths=("{factory_mcp}",),
         user_skill_root="~/.factory/skills",
     ),
     "amp": AgentCapability(
         name="amp",
         label="Amp Code",
-        native_surface="mcp_config",
+        native_surface="none",
         requirements=(
             AgentInstallRequirement(
                 "amp",
@@ -268,7 +240,6 @@ _CAPABILITIES: dict[str, AgentCapability] = {
                 description="Amp Code CLI",
             ),
         ),
-        expected_surface_paths=("{amp_settings}",),
         user_skill_root="~/.config/amp/skills",
     ),
 }
@@ -317,31 +288,11 @@ def agent_adapter(name: str) -> AgentAdapter:
     return AgentAdapter(name=normalized, label=normalized, prompt_prefix=(normalized,))
 
 
-def agent_mcp_config_path(workspace: Path, agent: str) -> Path:
-    """Workspace-scoped MCP config file for an agent."""
-
-    return workspace / ".prime" / "lab" / "agent-mcp" / f"{agent}.json"
-
-
 def write_agent_native_surface(workspace: Path, agent: str) -> tuple[Path, ...]:
     """Write the native Lab control surface for a supported coding agent."""
 
-    adapter = agent_adapter(agent)
-    if adapter.lab_widget_contract != "mcp-stdio-tools":
-        return ()
-    if adapter.name == "pi":
-        return ()
-    if adapter.name == "opencode":
-        return (write_opencode_mcp_config(workspace),)
-    if adapter.name == "hermes":
-        return (write_hermes_mcp_config(workspace),)
-    if adapter.name == "droid":
-        return (write_factory_mcp_config(workspace),)
-    if adapter.name == "amp":
-        return (write_amp_mcp_config(workspace),)
-    if adapter.name == "cursor":
-        return (write_lab_mcp_config(workspace, workspace / ".cursor" / "mcp.json"),)
-    return (write_lab_mcp_config(workspace, agent_mcp_config_path(workspace, adapter.name)),)
+    _ = workspace, agent
+    return ()
 
 
 def agent_user_skills_dir(agent: str) -> Path | None:

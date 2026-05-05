@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import json
 from pathlib import Path
 from typing import Any
@@ -8,8 +7,6 @@ from typing import Any
 import pytest
 from prime_cli import lab_setup
 from prime_cli.lab_agents import known_agent_names
-from prime_cli.lab_mcp_config import write_hermes_mcp_config
-from prime_cli.lab_mcp_server import run_lab_mcp_server
 from prime_cli.lab_setup import (
     LabDoctorOptions,
     LabSetupOptions,
@@ -184,7 +181,7 @@ def test_lab_setup_rejects_duplicate_skill_sources(
     assert any("defined by both" in line for line in emitted)
 
 
-def test_lab_sync_all_scaffolds_amp_and_factory_surfaces(
+def test_lab_sync_all_scaffolds_amp_and_factory_skills(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -203,8 +200,6 @@ def test_lab_sync_all_scaffolds_amp_and_factory_surfaces(
     assert (home / ".config" / "amp" / "skills" / "create-environments").exists()
     assert not (tmp_path / ".factory" / "skills").exists()
     assert not (tmp_path / ".amp" / "skills").exists()
-    assert (tmp_path / ".factory" / "mcp.json").is_file()
-    assert (tmp_path / ".amp" / "settings.json").is_file()
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
 
 
@@ -275,47 +270,6 @@ def test_lab_setup_installs_prime_rl_envs_with_split_editable_args(tmp_path: Pat
             "environments/foo",
         ]
     ]
-
-
-def test_hermes_mcp_config_preserves_existing_yaml(tmp_path: Path) -> None:
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        "\n".join(
-            [
-                "theme: dark",
-                "hooks:",
-                "  - echo hello",
-                "mcp_servers:",
-                "  existing:",
-                '    command: "old"',
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    write_hermes_mcp_config(tmp_path, config)
-    first = config.read_text(encoding="utf-8")
-    write_hermes_mcp_config(tmp_path, config)
-    second = config.read_text(encoding="utf-8")
-
-    assert "theme: dark" in second
-    assert "  - echo hello" in second
-    assert "  existing:" in second
-    assert second.count("  prime_lab:") == 1
-    assert second == first
-
-
-def test_lab_mcp_server_initializes(tmp_path: Path) -> None:
-    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}).encode("utf-8")
-    stdin = io.BytesIO(
-        b"Content-Length: " + str(len(payload)).encode("ascii") + b"\r\n\r\n" + payload
-    )
-    stdout = io.BytesIO()
-
-    assert run_lab_mcp_server(workspace=tmp_path, stdin=stdin, stdout=stdout) == 0
-    response = json.loads(stdout.getvalue().split(b"\r\n\r\n", 1)[1].decode("utf-8"))
-    assert response["result"]["serverInfo"]["name"] == "prime-lab"
 
 
 def test_lab_sync_skips_user_owned_skill_conflicts(
@@ -404,5 +358,5 @@ def test_lab_setup_accepts_amp_and_factory_aliases(tmp_path: Path, monkeypatch: 
     metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
     assert result.exit_code == 0
     assert metadata["choices"]["agents"] == ["droid", "amp"]
-    assert (tmp_path / ".factory" / "mcp.json").is_file()
-    assert (tmp_path / ".amp" / "settings.json").is_file()
+    assert (tmp_path / "home" / ".factory" / "skills" / "create-environments").exists()
+    assert (tmp_path / "home" / ".config" / "amp" / "skills" / "create-environments").exists()

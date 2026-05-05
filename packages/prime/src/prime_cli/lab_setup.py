@@ -785,6 +785,12 @@ def _agent_native_surface_check(agent: str, workspace: Path) -> LabDoctorCheck:
                 f"{capability.label} receives native Lab tools through {capability.native_surface}."
             ),
         )
+    if capability.native_surface == "none":
+        return LabDoctorCheck(
+            name=name,
+            status="PASS",
+            message=f"{capability.label} native Lab tools are not scaffolded by setup yet.",
+        )
     expected_paths = capability.resolved_surface_paths(workspace)
     missing_paths = [path for path in expected_paths if not path.exists()]
     if not missing_paths:

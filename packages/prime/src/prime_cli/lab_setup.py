@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from importlib import metadata
@@ -33,16 +34,6 @@ VERIFIERS_REF = "main"
 PRIME_RL_REF = "main"
 PRIME_RL_INSTALL_SCRIPT_REF = "main"
 
-LAB_SKILLS = (
-    "create-environments",
-    "browse-environments",
-    "review-environments",
-    "evaluate-environments",
-    "optimize-with-environments",
-    "train-with-environments",
-    "brainstorm",
-)
-PRIME_MANAGED_SKILLS = LAB_SKILLS
 SUPPORTED_AGENTS = known_agent_names()
 LAB_GITIGNORE_PATTERNS = (
     "./outputs",
@@ -65,7 +56,7 @@ class SkillSource:
 
     repo: str
     ref: str
-    skills: tuple[str, ...]
+    path: str = "skills"
 
 
 @dataclass(frozen=True)
@@ -176,9 +167,7 @@ EVAL_CONFIGS: tuple[ConfigSpec, ...] = tuple(
         "configs/eval/multi-env.toml",
     )
 )
-SKILL_SOURCES: tuple[SkillSource, ...] = (
-    SkillSource(repo=VERIFIERS_REPO, ref=VERIFIERS_REF, skills=LAB_SKILLS),
-)
+SKILL_SOURCES: tuple[SkillSource, ...] = (SkillSource(repo=VERIFIERS_REPO, ref=VERIFIERS_REF),)
 
 
 def run_lab_setup(passthrough_args: list[str], *, console: Console | None = None) -> int:
@@ -383,8 +372,8 @@ def _run_lab_setup_steps(
 
     (workspace / "configs").mkdir(exist_ok=True)
     (workspace / "environments").mkdir(exist_ok=True)
-    _sync_prime_skills(emit)
-    _prepare_agent_skill_dirs(options.agents, emit)
+    managed_skill_names = _sync_prime_skills(emit)
+    _prepare_agent_skill_dirs(options.agents, managed_skill_names, emit)
     _report_missing_agent_requirements(options.agents, emit)
     _prepare_agent_native_surfaces(workspace, options.agents, emit)
     _sync_lab_metadata(workspace, options.agents)
@@ -420,8 +409,8 @@ def _run_lab_sync_steps(
     emit(f"Syncing Lab assets in {workspace}\n")
     agents = options.agents or _workspace_agents_from_metadata(workspace) or ("codex",)
 
-    _sync_prime_skills(emit)
-    _prepare_agent_skill_dirs(agents, emit)
+    managed_skill_names = _sync_prime_skills(emit)
+    _prepare_agent_skill_dirs(agents, managed_skill_names, emit)
     _report_missing_agent_requirements(agents, emit)
     _prepare_agent_native_surfaces(workspace, agents, emit)
     _sync_lab_metadata(workspace, agents)
@@ -441,48 +430,118 @@ def _run_lab_sync_steps(
     emit("Lab sync completed\n")
 
 
-def _sync_prime_skills(emit: Emit) -> None:
+def _sync_prime_skills(emit: Emit) -> tuple[str, ...]:
+    skills_dir = _global_prime_skills_dir()
+    skills_dir.parent.mkdir(parents=True, exist_ok=True)
+    manifest_skills: dict[str, dict[str, str]] = {}
     manifest: dict[str, Any] = {
         "version": 1,
         "source": {"package": "prime", "version": _prime_package_version()},
-        "skills": {},
+        "skills": manifest_skills,
     }
-    for source in SKILL_SOURCES:
-        for skill_name in source.skills:
-            _sync_prime_skill_source(source, skill_name, manifest, emit)
-    manifest_path = _global_prime_skills_dir() / PRIME_SKILLS_MANIFEST
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    previous_manifest = _read_prime_skills_manifest(skills_dir)
+    with tempfile.TemporaryDirectory(
+        prefix=".skills-staging-",
+        dir=str(skills_dir.parent),
+    ) as staging_dir:
+        staging_skills_dir = Path(staging_dir) / "skills"
+        for source in SKILL_SOURCES:
+            for skill_name in _discover_skill_names(source):
+                _sync_prime_skill_source(
+                    source,
+                    skill_name,
+                    staging_skills_dir,
+                    manifest_skills,
+                    emit,
+                )
+        managed_skill_names = tuple(manifest_skills)
+        _replace_prime_skills(
+            skills_dir,
+            staging_skills_dir,
+            previous_manifest,
+            managed_skill_names,
+            emit,
+        )
+        (skills_dir / PRIME_SKILLS_MANIFEST).write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return managed_skill_names
 
 
 def _sync_prime_skill_source(
     source: SkillSource,
     skill_name: str,
-    manifest: dict[str, Any],
+    staging_skills_dir: Path,
+    manifest_skills: dict[str, dict[str, str]],
     emit: Emit,
 ) -> None:
-    if skill_name in manifest["skills"]:
-        existing = manifest["skills"][skill_name]
+    if skill_name in manifest_skills:
+        existing = manifest_skills[skill_name]
         raise RuntimeError(
             f"Skill '{skill_name}' is defined by both {existing['repo']} and {source.repo}."
         )
-    skill_dir = _global_prime_skills_dir() / skill_name
+    skill_dir = staging_skills_dir / skill_name
     skill_path = skill_dir / "SKILL.md"
+    source_path = f"{source.path}/{skill_name}/SKILL.md"
     _download_file(
-        _repo_raw_url(source.repo, source.ref, f"skills/{skill_name}/SKILL.md"),
+        _repo_raw_url(source.repo, source.ref, source_path),
         skill_path,
         emit,
         force=True,
     )
     content = skill_path.read_text(encoding="utf-8")
-    manifest["skills"][skill_name] = {
+    manifest_skills[skill_name] = {
         "repo": source.repo,
         "ref": source.ref,
-        "path": f"skills/{skill_name}/SKILL.md",
+        "path": source_path,
         "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
     }
+
+
+def _discover_skill_names(source: SkillSource) -> tuple[str, ...]:
+    payload = _download_json(_github_contents_url(source.repo, source.ref, source.path))
+    if not isinstance(payload, list):
+        raise RuntimeError(f"Expected a directory listing for {source.repo}/{source.path}.")
+    names: list[str] = []
+    for entry in payload:
+        if (
+            isinstance(entry, dict)
+            and entry.get("type") == "dir"
+            and isinstance(entry.get("name"), str)
+        ):
+            names.append(entry["name"])
+    return tuple(sorted(names))
+
+
+def _replace_prime_skills(
+    skills_dir: Path,
+    staging_skills_dir: Path,
+    previous_manifest: dict[str, Any],
+    managed_skill_names: tuple[str, ...],
+    emit: Emit,
+) -> None:
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    managed = set(managed_skill_names)
+    previous = previous_manifest.get("skills")
+    previous_names = set(previous) if isinstance(previous, dict) else set()
+    for stale_name in sorted(previous_names - managed):
+        stale_path = skills_dir / stale_name
+        _remove_path(stale_path)
+        emit(f"Warning: removed stale managed skill {stale_path}\n")
+    for skill_name in managed_skill_names:
+        target = skills_dir / skill_name
+        _remove_path(target)
+        shutil.move(str(staging_skills_dir / skill_name), str(target))
+
+
+def _read_prime_skills_manifest(skills_dir: Path) -> dict[str, Any]:
+    path = skills_dir / PRIME_SKILLS_MANIFEST
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _copy_setup_configs(workspace: Path, emit: Emit, *, prime_rl: bool) -> None:
@@ -516,14 +575,18 @@ def _sync_config_templates(workspace: Path, emit: Emit) -> None:
         )
 
 
-def _prepare_agent_skill_dirs(agents: tuple[str, ...], emit: Emit) -> None:
+def _prepare_agent_skill_dirs(
+    agents: tuple[str, ...],
+    managed_skill_names: tuple[str, ...],
+    emit: Emit,
+) -> None:
     prime_skills_dir = _global_prime_skills_dir()
     for agent in agents:
         skills_dir = agent_user_skills_dir(agent)
         if skills_dir is None:
             continue
-        _remove_stale_managed_skill_links(skills_dir, prime_skills_dir)
-        for skill_name in PRIME_MANAGED_SKILLS:
+        _remove_stale_managed_skill_links(skills_dir, prime_skills_dir, managed_skill_names)
+        for skill_name in managed_skill_names:
             source_dir = prime_skills_dir / skill_name
             if not source_dir.exists():
                 continue
@@ -591,12 +654,7 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
         _config_validity_check(workspace),
         _config_environment_reference_check(workspace),
         _environment_source_hygiene_check(workspace),
-        _path_check(
-            "Lab skills",
-            _global_prime_skills_dir() / "create-environments" / "SKILL.md",
-            "Run prime lab sync.",
-            warning=True,
-        ),
+        _managed_skill_manifest_check(),
         _path_check(
             "Lab templates",
             workspace / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml",
@@ -616,14 +674,7 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
             agent_skill_dir = agent_user_skills_dir(agent)
             label = agent_capability(agent).label
             if agent_skill_dir is not None:
-                checks.append(
-                    _path_check(
-                        f"{label} skills",
-                        agent_skill_dir / "create-environments",
-                        f"Run prime lab sync --agent {agent}.",
-                        warning=True,
-                    )
-                )
+                checks.append(_agent_managed_skills_check(label, agent_skill_dir, agent))
             checks.append(_agent_native_surface_check(agent, workspace))
     else:
         checks.append(
@@ -646,6 +697,60 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
         )
 
     return checks
+
+
+def _managed_skill_manifest_check() -> LabDoctorCheck:
+    manifest = _read_prime_skills_manifest(_global_prime_skills_dir())
+    skills = manifest.get("skills")
+    if isinstance(skills, dict) and skills:
+        return LabDoctorCheck(
+            name="Lab skills",
+            status="PASS",
+            message=f"{len(skills)} managed skill(s) installed.",
+        )
+    return LabDoctorCheck(
+        name="Lab skills",
+        status="WARN",
+        message=f"Missing {_global_prime_skills_dir() / PRIME_SKILLS_MANIFEST}",
+        remediation="Run prime lab sync.",
+    )
+
+
+def _agent_managed_skills_check(label: str, agent_skill_dir: Path, agent: str) -> LabDoctorCheck:
+    skill_names = _managed_skill_names_from_manifest()
+    if not skill_names:
+        return LabDoctorCheck(
+            name=f"{label} skills",
+            status="WARN",
+            message="No managed Lab skills are installed.",
+            remediation="Run prime lab sync.",
+        )
+    missing = [
+        skill_name
+        for skill_name in skill_names
+        if not (agent_skill_dir / skill_name).exists()
+        and not (agent_skill_dir / skill_name).is_symlink()
+    ]
+    if not missing:
+        return LabDoctorCheck(
+            name=f"{label} skills",
+            status="PASS",
+            message=f"{len(skill_names)} managed skill link(s) are present.",
+        )
+    return LabDoctorCheck(
+        name=f"{label} skills",
+        status="WARN",
+        message="Missing " + ", ".join(missing[:5]),
+        remediation=f"Run prime lab sync --agent {agent}.",
+    )
+
+
+def _managed_skill_names_from_manifest() -> tuple[str, ...]:
+    manifest = _read_prime_skills_manifest(_global_prime_skills_dir())
+    skills = manifest.get("skills")
+    if not isinstance(skills, dict):
+        return ()
+    return tuple(str(name) for name in skills)
 
 
 def _agent_native_surface_check(agent: str, workspace: Path) -> LabDoctorCheck:
@@ -672,7 +777,7 @@ def _agent_native_surface_check(agent: str, workspace: Path) -> LabDoctorCheck:
             message="Missing " + ", ".join(requirement.binary for requirement in missing),
             remediation="Install selected agent dependency: " + ", ".join(remediations) + ".",
         )
-    if capability.native_surface in {"codex_app_server", "claude_sdk", "pi_acp"}:
+    if capability.native_surface in {"codex_app_server", "pi_acp"}:
         return LabDoctorCheck(
             name=name,
             status="PASS",
@@ -1026,8 +1131,20 @@ def _download_file(url: str, dest: Path, emit: Emit, *, force: bool = False) -> 
     emit(f"Downloaded {dest}\n")
 
 
+def _download_json(url: str) -> Any:
+    try:
+        with urlopen(url, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Failed to download {url}") from exc
+
+
 def _repo_raw_url(repo: str, ref: str, source_path: str) -> str:
     return f"https://raw.githubusercontent.com/{repo}/refs/heads/{ref}/{source_path}"
+
+
+def _github_contents_url(repo: str, ref: str, source_path: str) -> str:
+    return f"https://api.github.com/repos/{repo}/contents/{source_path}?ref={ref}"
 
 
 def _dedupe_config_destinations(configs: list[ConfigSpec]) -> list[ConfigSpec]:
@@ -1123,11 +1240,16 @@ def _skill_target_is_user_owned(target: Path, prime_skills_dir: Path) -> bool:
     return not _is_managed_skill_target(target, prime_skills_dir)
 
 
-def _remove_stale_managed_skill_links(skills_dir: Path, prime_skills_dir: Path) -> None:
+def _remove_stale_managed_skill_links(
+    skills_dir: Path,
+    prime_skills_dir: Path,
+    managed_skill_names: tuple[str, ...],
+) -> None:
     if not skills_dir.exists():
         return
+    managed = set(managed_skill_names)
     for target in skills_dir.iterdir():
-        if target.name in PRIME_MANAGED_SKILLS:
+        if target.name in managed:
             continue
         _remove_managed_skill_target(target, prime_skills_dir)
 
@@ -1135,10 +1257,16 @@ def _remove_stale_managed_skill_links(skills_dir: Path, prime_skills_dir: Path) 
 def _remove_managed_skill_target(target: Path, prime_skills_dir: Path) -> None:
     if not _is_managed_skill_target(target, prime_skills_dir):
         return
-    if target.is_symlink() or target.is_file():
-        target.unlink()
-    elif target.is_dir():
-        shutil.rmtree(target)
+    _remove_path(target)
+
+
+def _remove_path(path: Path) -> None:
+    if not (path.exists() or path.is_symlink()):
+        return
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
 
 
 def _is_managed_skill_target(target: Path, prime_skills_dir: Path) -> bool:

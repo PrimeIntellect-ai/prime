@@ -22,6 +22,15 @@ from prime_cli.lab_setup import (
 @pytest.fixture(autouse=True)
 def fake_lab_asset_downloads(monkeypatch: Any) -> list[str]:
     urls: list[str] = []
+    skill_names = (
+        "create-environments",
+        "browse-environments",
+        "review-environments",
+        "evaluate-environments",
+        "optimize-with-environments",
+        "train-with-environments",
+        "brainstorm",
+    )
 
     def fake_download_file(
         url: str,
@@ -42,14 +51,18 @@ def fake_lab_asset_downloads(monkeypatch: Any) -> list[str]:
         emit(f"Downloaded {dest}\n")
 
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download_file)
+    monkeypatch.setattr(
+        "prime_cli.lab_setup._download_json",
+        lambda _url: [{"name": name, "type": "dir"} for name in skill_names],
+    )
     return urls
 
 
 def test_lab_setup_parses_selected_agents_and_all() -> None:
-    selected = parse_lab_setup_args(["--agent", "droid,amp-code,claude-cli"])
+    selected = parse_lab_setup_args(["--agent", "factory-droid,amp-code,claude"])
     all_agents = parse_lab_sync_args(["--agents", "all"])
 
-    assert selected.agents == ("factory-droid", "amp", "claude-code")
+    assert selected.agents == ("droid", "amp", "claude-code")
     assert all_agents.agents == known_agent_names()
 
 
@@ -148,12 +161,10 @@ def test_lab_setup_rejects_duplicate_skill_sources(
             SkillSource(
                 repo="primeintellect-ai/verifiers",
                 ref="main",
-                skills=("create-environments",),
             ),
             SkillSource(
                 repo="primeintellect-ai/research-skills",
                 ref="main",
-                skills=("create-environments",),
             ),
         ),
     )
@@ -177,7 +188,7 @@ def test_lab_sync_all_scaffolds_amp_and_factory_surfaces(
     monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
 
     result = run_lab_sync_service(
-        LabSyncOptions(agents=("factory-droid", "amp"), skip_docs=True),
+        LabSyncOptions(agents=("droid", "amp"), skip_docs=True),
         workspace=tmp_path,
         emit=lambda _text: None,
     )
@@ -258,18 +269,45 @@ def test_lab_sync_removes_stale_managed_skill_links(
     assert not stale_target.exists()
 
 
+def test_lab_sync_removes_stale_global_managed_skills(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    stale_skill = home / ".prime" / "skills" / "old-lab-skill"
+    stale_skill.mkdir(parents=True)
+    (stale_skill / "SKILL.md").write_text("old skill\n", encoding="utf-8")
+    (home / ".prime" / "skills" / ".prime-managed.json").write_text(
+        json.dumps({"skills": {"old-lab-skill": {"repo": "old/repo"}}}),
+        encoding="utf-8",
+    )
+    emitted: list[str] = []
+
+    result = run_lab_sync_service(
+        LabSyncOptions(agents=("amp",), skip_docs=True),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    assert result.exit_code == 0
+    assert not stale_skill.exists()
+    assert any("Warning: removed stale managed skill" in line for line in emitted)
+
+
 def test_lab_setup_accepts_amp_and_factory_aliases(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
 
     result = run_lab_sync_service(
-        LabSyncOptions(agents=("factory-droid", "amp"), skip_docs=True),
+        LabSyncOptions(agents=("droid", "amp"), skip_docs=True),
         workspace=tmp_path,
         emit=lambda _text: None,
     )
 
     metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
     assert result.exit_code == 0
-    assert metadata["choices"]["agents"] == ["factory-droid", "amp"]
+    assert metadata["choices"]["agents"] == ["droid", "amp"]
     assert (tmp_path / ".factory" / "mcp.json").is_file()
     assert (tmp_path / ".amp" / "settings.json").is_file()

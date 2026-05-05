@@ -18,7 +18,6 @@ from .lab_mcp_config import (
 AgentCapabilityStatus = Literal["supported", "not_supported"]
 AgentNativeSurface = Literal[
     "codex_app_server",
-    "claude_sdk",
     "mcp_config",
     "acp_mcp",
     "pi_acp",
@@ -33,7 +32,6 @@ AgentTransport = Literal[
 ]
 LabWidgetContract = Literal[
     "codex-dynamic-tools",
-    "claude-sdk-tools",
     "mcp-stdio-tools",
     "not-supported",
 ]
@@ -123,20 +121,12 @@ KNOWN_AGENT_ADAPTERS = {
         server_description="Codex app-server JSON-RPC transport.",
         lab_widget_contract="codex-dynamic-tools",
     ),
-    "claude": AgentAdapter(
-        name="claude",
-        label="Claude",
-        prompt_prefix=("claude", "-p"),
-        server_transport="claude-agent-sdk",
-        server_description="Claude Agent SDK session runtime.",
-        lab_widget_contract="claude-sdk-tools",
-    ),
     "claude-code": AgentAdapter(
         name="claude-code",
         label="Claude Code",
         prompt_prefix=("claude", "-p"),
         stream_prefix=("claude", "-p", "--output-format", "stream-json"),
-        aliases=("claude-cli",),
+        aliases=("claude", "claude-cli"),
         lab_widget_contract="mcp-stdio-tools",
     ),
     "cursor": AgentAdapter(
@@ -166,23 +156,23 @@ KNOWN_AGENT_ADAPTERS = {
         stream_prefix=("pi", "--print", "--mode", "json"),
         lab_widget_contract="mcp-stdio-tools",
     ),
-    "hermes-agent": AgentAdapter(
-        name="hermes-agent",
+    "hermes": AgentAdapter(
+        name="hermes",
         label="Hermes Agent",
         prompt_prefix=("hermes", "--oneshot"),
         server_prefix=("hermes", "acp", "--accept-hooks"),
         server_transport="acp-stdio",
         server_description="Hermes Agent Client Protocol stdio transport.",
         stream_prefix=("hermes", "chat", "--quiet", "--accept-hooks", "--source", "prime-lab"),
-        aliases=("hermes",),
+        aliases=("hermes-agent",),
         lab_widget_contract="mcp-stdio-tools",
     ),
-    "factory-droid": AgentAdapter(
-        name="factory-droid",
+    "droid": AgentAdapter(
+        name="droid",
         label="Factory Droid Agent",
         prompt_prefix=("droid", "exec"),
         stream_prefix=("droid", "exec", "--output-format", "stream-json"),
-        aliases=("droid", "factory"),
+        aliases=("factory", "factory-droid"),
         lab_widget_contract="mcp-stdio-tools",
     ),
     "amp": AgentAdapter(
@@ -206,12 +196,6 @@ _CAPABILITIES: dict[str, AgentCapability] = {
         native_surface="codex_app_server",
         requirements=(AgentInstallRequirement("codex", description="Codex CLI"),),
         user_skill_root="~/.agents/skills",
-    ),
-    "claude": AgentCapability(
-        name="claude",
-        label="Claude",
-        native_surface="claude_sdk",
-        user_skill_root="~/.claude/skills",
     ),
     "claude-code": AgentCapability(
         name="claude-code",
@@ -251,16 +235,16 @@ _CAPABILITIES: dict[str, AgentCapability] = {
             ),
         ),
     ),
-    "hermes-agent": AgentCapability(
-        name="hermes-agent",
+    "hermes": AgentCapability(
+        name="hermes",
         label="Hermes Agent",
         native_surface="acp_mcp",
         requirements=(AgentInstallRequirement("hermes", description="Hermes Agent CLI"),),
         expected_surface_paths=("{hermes_config}",),
         user_skill_root="~/.hermes/skills",
     ),
-    "factory-droid": AgentCapability(
-        name="factory-droid",
+    "droid": AgentCapability(
+        name="droid",
         label="Factory Droid Agent",
         native_surface="mcp_config",
         requirements=(
@@ -288,12 +272,22 @@ _CAPABILITIES: dict[str, AgentCapability] = {
         user_skill_root="~/.config/amp/skills",
     ),
 }
+AGENT_DISPLAY_ORDER = (
+    "codex",
+    "claude-code",
+    "cursor",
+    "amp",
+    "droid",
+    "opencode",
+    "pi",
+    "hermes",
+)
 
 
 def known_agent_names() -> tuple[str, ...]:
     """Return Lab-supported agent names in stable display order."""
 
-    return tuple(_CAPABILITIES)
+    return AGENT_DISPLAY_ORDER
 
 
 def agent_capability(name: str) -> AgentCapability:
@@ -339,9 +333,9 @@ def write_agent_native_surface(workspace: Path, agent: str) -> tuple[Path, ...]:
         return ()
     if adapter.name == "opencode":
         return (write_opencode_mcp_config(workspace),)
-    if adapter.name == "hermes-agent":
+    if adapter.name == "hermes":
         return (write_hermes_mcp_config(workspace),)
-    if adapter.name == "factory-droid":
+    if adapter.name == "droid":
         return (write_factory_mcp_config(workspace),)
     if adapter.name == "amp":
         return (write_amp_mcp_config(workspace),)

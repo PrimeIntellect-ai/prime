@@ -16,14 +16,16 @@ def test_eval_run_help_flags_use_backend_help(monkeypatch):
         assert "BACKEND_HELP" in result.output
 
 
-def test_lab_setup_help_flag_uses_backend_help(monkeypatch):
-    def fake_help() -> None:
-        print("BACKEND_HELP")
-
-    monkeypatch.setattr("prime_cli.commands.lab.print_lab_setup_help", fake_help)
-    result = runner.invoke(app, ["lab", "setup", "-h"], env={"PRIME_DISABLE_VERSION_CHECK": "1"})
-    assert result.exit_code == 0, result.output
-    assert "BACKEND_HELP" in result.output
+def test_lab_setup_help_flags_use_prime_owned_help():
+    for flag in ("-h", "--help"):
+        result = runner.invoke(
+            app,
+            ["lab", "setup", flag],
+            env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+        )
+        assert result.exit_code == 0, result.output
+        assert "Set up a Lab workspace." in result.output
+        assert "--skip-install" in result.output
 
 
 def test_sanitize_help_removes_vf_eval_aliases():

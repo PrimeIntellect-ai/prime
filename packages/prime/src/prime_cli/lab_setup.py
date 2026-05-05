@@ -60,6 +60,15 @@ Runner = Callable[[Sequence[str], Path, Emit], int]
 
 
 @dataclass(frozen=True)
+class SkillSource:
+    """Predefined repository source for managed Lab skills."""
+
+    repo: str
+    ref: str
+    skills: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class LabSetupOptions:
     """Options for initializing a Lab workspace."""
 
@@ -166,6 +175,9 @@ EVAL_CONFIGS: tuple[ConfigSpec, ...] = tuple(
         "configs/eval/minimal.toml",
         "configs/eval/multi-env.toml",
     )
+)
+SKILL_SOURCES: tuple[SkillSource, ...] = (
+    SkillSource(repo=VERIFIERS_REPO, ref=VERIFIERS_REF, skills=LAB_SKILLS),
 )
 
 
@@ -435,24 +447,42 @@ def _sync_prime_skills(emit: Emit) -> None:
         "source": {"package": "prime", "version": _prime_package_version()},
         "skills": {},
     }
-    for skill_name in PRIME_MANAGED_SKILLS:
-        skill_dir = _global_prime_skills_dir() / skill_name
-        skill_path = skill_dir / "SKILL.md"
-        _download_file(
-            _repo_raw_url(VERIFIERS_REPO, VERIFIERS_REF, f"skills/{skill_name}/SKILL.md"),
-            skill_path,
-            emit,
-            force=True,
-        )
-        content = skill_path.read_text(encoding="utf-8")
-        manifest["skills"][skill_name] = {
-            "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-        }
+    for source in SKILL_SOURCES:
+        for skill_name in source.skills:
+            _sync_prime_skill_source(source, skill_name, manifest, emit)
     manifest_path = _global_prime_skills_dir() / PRIME_SKILLS_MANIFEST
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _sync_prime_skill_source(
+    source: SkillSource,
+    skill_name: str,
+    manifest: dict[str, Any],
+    emit: Emit,
+) -> None:
+    if skill_name in manifest["skills"]:
+        existing = manifest["skills"][skill_name]
+        raise RuntimeError(
+            f"Skill '{skill_name}' is defined by both {existing['repo']} and {source.repo}."
+        )
+    skill_dir = _global_prime_skills_dir() / skill_name
+    skill_path = skill_dir / "SKILL.md"
+    _download_file(
+        _repo_raw_url(source.repo, source.ref, f"skills/{skill_name}/SKILL.md"),
+        skill_path,
+        emit,
+        force=True,
+    )
+    content = skill_path.read_text(encoding="utf-8")
+    manifest["skills"][skill_name] = {
+        "repo": source.repo,
+        "ref": source.ref,
+        "path": f"skills/{skill_name}/SKILL.md",
+        "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    }
 
 
 def _copy_setup_configs(workspace: Path, emit: Emit, *, prime_rl: bool) -> None:

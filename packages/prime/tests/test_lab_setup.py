@@ -10,6 +10,7 @@ from prime_cli.lab_setup import (
     LabDoctorOptions,
     LabSetupOptions,
     LabSyncOptions,
+    SkillSource,
     parse_lab_setup_args,
     parse_lab_sync_args,
     run_lab_doctor_service,
@@ -109,6 +110,63 @@ def test_lab_setup_uses_existing_verifiers_sources(
         url.endswith("/primeintellect-ai/verifiers/refs/heads/main/assets/lab/AGENTS.md")
         for url in fake_lab_asset_downloads
     )
+
+
+def test_lab_setup_manifest_tracks_skill_source(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
+        workspace=tmp_path,
+        emit=lambda _text: None,
+    )
+
+    manifest = json.loads(
+        (home / ".prime" / "skills" / ".prime-managed.json").read_text(encoding="utf-8")
+    )
+    assert result.exit_code == 0
+    assert manifest["skills"]["create-environments"]["repo"] == "primeintellect-ai/verifiers"
+    assert manifest["skills"]["create-environments"]["path"] == (
+        "skills/create-environments/SKILL.md"
+    )
+
+
+def test_lab_setup_rejects_duplicate_skill_sources(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(
+        "prime_cli.lab_setup.SKILL_SOURCES",
+        (
+            SkillSource(
+                repo="primeintellect-ai/verifiers",
+                ref="main",
+                skills=("create-environments",),
+            ),
+            SkillSource(
+                repo="primeintellect-ai/research-skills",
+                ref="main",
+                skills=("create-environments",),
+            ),
+        ),
+    )
+    emitted: list[str] = []
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    assert result.exit_code == 1
+    assert any("defined by both" in line for line in emitted)
 
 
 def test_lab_sync_all_scaffolds_amp_and_factory_surfaces(

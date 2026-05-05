@@ -329,15 +329,13 @@ def run_lab_sync_service(
     *,
     workspace: Path,
     emit: Emit | None = None,
-    runner: Runner | None = None,
 ) -> LabSyncResult:
-    """Refresh Lab skills, local agent guidance, and Lab-owned agent bridges."""
+    """Refresh Lab skills and local agent guidance."""
 
     workspace = workspace.expanduser().resolve()
     emit = emit or (lambda _text: None)
-    runner = runner or _run_command
     try:
-        _run_lab_sync_steps(options, workspace=workspace, emit=emit, runner=runner)
+        _run_lab_sync_steps(options, workspace=workspace, emit=emit)
     except Exception as exc:
         emit(f"Sync failed: {exc}\n")
         return LabSyncResult(exit_code=1, workspace=workspace)
@@ -401,7 +399,6 @@ def _run_lab_sync_steps(
     *,
     workspace: Path,
     emit: Emit,
-    runner: Runner,
 ) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "configs").mkdir(exist_ok=True)

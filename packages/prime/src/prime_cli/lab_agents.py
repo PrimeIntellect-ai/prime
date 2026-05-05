@@ -273,14 +273,14 @@ _CAPABILITIES: dict[str, AgentCapability] = {
     ),
 }
 AGENT_DISPLAY_ORDER = (
-    "codex",
-    "claude-code",
-    "cursor",
     "amp",
+    "claude-code",
+    "codex",
+    "cursor",
     "droid",
+    "hermes",
     "opencode",
     "pi",
-    "hermes",
 )
 
 

@@ -917,6 +917,9 @@ def _config_environment_reference_check(workspace: Path) -> LabDoctorCheck:
 
 def _config_environment_refs(config: dict[str, Any]) -> list[str]:
     refs: list[str] = []
+    environment = config.get("environment")
+    if isinstance(environment, dict):
+        refs.append(str(environment.get("id") or environment.get("name") or ""))
     for key in ("env", "environments"):
         value = config.get(key)
         if isinstance(value, list):
@@ -1026,15 +1029,16 @@ def _install_environments_to_prime_rl(workspace: Path, emit: Emit, runner: Runne
     if not envs_dir.is_dir() or not prime_rl_python.exists():
         return
     env_paths = [
-        f"-e environments/{path.name}"
+        str(Path("environments") / path.name)
         for path in sorted(envs_dir.iterdir())
         if path.is_dir() and (path / "pyproject.toml").is_file()
     ]
     if not env_paths:
         return
     emit(f"Installing {len(env_paths)} local environments into prime-rl\n")
+    editable_args = [arg for env_path in env_paths for arg in ("-e", env_path)]
     code = runner(
-        ["uv", "pip", "install", "--python", str(prime_rl_python), *env_paths],
+        ["uv", "pip", "install", "--python", str(prime_rl_python), *editable_args],
         workspace,
         emit,
     )

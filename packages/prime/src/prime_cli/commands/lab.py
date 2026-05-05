@@ -4,6 +4,7 @@ from pathlib import Path
 
 import typer
 
+from ..lab_mcp_server import run_lab_mcp_server
 from ..lab_setup import run_lab_doctor, run_lab_setup, run_lab_sync
 from ..utils import PlainTyper, get_console
 
@@ -62,9 +63,4 @@ def doctor(ctx: typer.Context) -> None:
 def mcp(workspace: Path = typer.Option(Path.cwd(), "--workspace")) -> None:
     """Run the Lab MCP server over stdio."""
 
-    _ = workspace
-    console.print(
-        "Prime Lab MCP is available from the interactive Lab viewer. "
-        "Open `prime lab view` before using native Lab controls."
-    )
-    raise typer.Exit(1)
+    raise typer.Exit(run_lab_mcp_server(workspace=workspace))

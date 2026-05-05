@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
+from prime_cli import lab_setup
 from prime_cli.lab_agents import known_agent_names
+from prime_cli.lab_mcp_config import write_hermes_mcp_config
+from prime_cli.lab_mcp_server import run_lab_mcp_server
 from prime_cli.lab_setup import (
     LabDoctorOptions,
     LabSetupOptions,
@@ -221,6 +225,97 @@ def test_lab_doctor_reports_missing_selected_agent_guidance(
 
     assert checks["Amp Code native tools"].status == "WARN"
     assert "npm install -g @sourcegraph/amp@latest" in checks["Amp Code native tools"].remediation
+
+
+def test_lab_doctor_validates_environment_table_refs(tmp_path: Path) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        json.dumps({"choices": {"agents": ["codex"], "primary_agent": "codex"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'lab'\n", encoding="utf-8")
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "gepa.toml").write_text(
+        "[environment]\nid = 'missing-env'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "environments" / "other-env").mkdir(parents=True)
+
+    result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
+    checks = {check.name: check for check in result.checks}
+
+    assert checks["Config environment refs"].status == "WARN"
+    assert "missing-env" in checks["Config environment refs"].message
+
+
+def test_lab_setup_installs_prime_rl_envs_with_split_editable_args(tmp_path: Path) -> None:
+    (tmp_path / "prime-rl" / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / "prime-rl" / ".venv" / "bin" / "python").write_text("", encoding="utf-8")
+    (tmp_path / "environments" / "foo").mkdir(parents=True)
+    (tmp_path / "environments" / "foo" / "pyproject.toml").write_text(
+        "[project]\nname = 'foo'\n",
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+
+    lab_setup._install_environments_to_prime_rl(
+        tmp_path,
+        emit=lambda _text: None,
+        runner=lambda command, _cwd, _emit: commands.append(list(command)) or 0,
+    )
+
+    assert commands == [
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(tmp_path / "prime-rl" / ".venv" / "bin" / "python"),
+            "-e",
+            "environments/foo",
+        ]
+    ]
+
+
+def test_hermes_mcp_config_preserves_existing_yaml(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "theme: dark",
+                "hooks:",
+                "  - echo hello",
+                "mcp_servers:",
+                "  existing:",
+                '    command: "old"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    write_hermes_mcp_config(tmp_path, config)
+    first = config.read_text(encoding="utf-8")
+    write_hermes_mcp_config(tmp_path, config)
+    second = config.read_text(encoding="utf-8")
+
+    assert "theme: dark" in second
+    assert "  - echo hello" in second
+    assert "  existing:" in second
+    assert second.count("  prime_lab:") == 1
+    assert second == first
+
+
+def test_lab_mcp_server_initializes(tmp_path: Path) -> None:
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}).encode("utf-8")
+    stdin = io.BytesIO(
+        b"Content-Length: " + str(len(payload)).encode("ascii") + b"\r\n\r\n" + payload
+    )
+    stdout = io.BytesIO()
+
+    assert run_lab_mcp_server(workspace=tmp_path, stdin=stdin, stdout=stdout) == 0
+    response = json.loads(stdout.getvalue().split(b"\r\n\r\n", 1)[1].decode("utf-8"))
+    assert response["result"]["serverInfo"]["name"] == "prime-lab"
 
 
 def test_lab_sync_skips_user_owned_skill_conflicts(

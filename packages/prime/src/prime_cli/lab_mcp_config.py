@@ -95,19 +95,10 @@ def write_hermes_mcp_config(workspace: Path, path: Path | None = None) -> Path:
     """Write the Hermes user config that exposes Prime Lab MCP tools."""
 
     path = path or Path.home() / ".hermes" / "config.yaml"
-    payload = _read_simple_yaml_object(path)
-    servers = payload.get("mcp_servers")
-    if not isinstance(servers, dict):
-        servers = {}
     server = lab_mcp_server_config(workspace)
-    servers["prime_lab"] = {
-        "command": server["command"],
-        "args": server["args"],
-        "enabled": True,
-    }
-    payload["mcp_servers"] = servers
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_dump_simple_yaml_object(payload), encoding="utf-8")
+    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+    path.write_text(_upsert_hermes_prime_lab_server(existing, server), encoding="utf-8")
     return path
 
 
@@ -124,36 +115,57 @@ def _write_json_object(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _read_simple_yaml_object(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    payload: dict[str, Any] = {}
-    current_section: str | None = None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        if not line.startswith(" ") and line.endswith(":"):
-            current_section = line[:-1].strip()
-            payload[current_section] = {}
-            continue
-        if current_section and line.startswith("  ") and ":" in line:
-            key, value = line.strip().split(":", 1)
-            payload[current_section][key.strip()] = value.strip().strip('"')
-    return payload
+def _upsert_hermes_prime_lab_server(existing: str, server: dict[str, Any]) -> str:
+    lines = existing.splitlines()
+    block = [
+        "  prime_lab:",
+        f"    command: {json.dumps(server['command'])}",
+        f"    args: {json.dumps(server['args'])}",
+        "    enabled: true",
+    ]
+    section_start = _top_level_section_index(lines, "mcp_servers")
+    if section_start is None:
+        prefix = [*lines, ""] if lines else []
+        return "\n".join([*prefix, "mcp_servers:", *block]) + "\n"
+
+    section_end = _next_top_level_index(lines, section_start + 1)
+    body = lines[section_start + 1 : section_end]
+    body = _remove_yaml_child_block(body, "prime_lab")
+    updated = [
+        *lines[: section_start + 1],
+        *block,
+        *body,
+        *lines[section_end:],
+    ]
+    return "\n".join(updated) + "\n"
 
 
-def _dump_simple_yaml_object(payload: dict[str, Any]) -> str:
-    lines: list[str] = []
-    for key, value in payload.items():
-        if isinstance(value, dict):
-            lines.append(f"{key}:")
-            for child_key, child_value in value.items():
-                if isinstance(child_value, dict):
-                    lines.append(f"  {child_key}:")
-                    for grandchild_key, grandchild_value in child_value.items():
-                        lines.append(f"    {grandchild_key}: {json.dumps(grandchild_value)}")
-                else:
-                    lines.append(f"  {child_key}: {json.dumps(child_value)}")
-        else:
-            lines.append(f"{key}: {json.dumps(value)}")
-    return "\n".join(lines) + "\n"
+def _top_level_section_index(lines: list[str], section: str) -> int | None:
+    target = f"{section}:"
+    for index, line in enumerate(lines):
+        if line == target:
+            return index
+    return None
+
+
+def _next_top_level_index(lines: list[str], start: int) -> int:
+    for index in range(start, len(lines)):
+        line = lines[index]
+        if line and not line.startswith((" ", "\t")):
+            return index
+    return len(lines)
+
+
+def _remove_yaml_child_block(lines: list[str], child: str) -> list[str]:
+    target = f"  {child}:"
+    result: list[str] = []
+    index = 0
+    while index < len(lines):
+        if lines[index] != target:
+            result.append(lines[index])
+            index += 1
+            continue
+        index += 1
+        while index < len(lines) and (not lines[index].strip() or lines[index].startswith("    ")):
+            index += 1
+    return result

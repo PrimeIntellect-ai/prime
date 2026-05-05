@@ -87,6 +87,7 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     home = tmp_path / "home"
     assert result.exit_code == 0
     assert commands == []
+    assert metadata["setup_source"] == "prime lab setup"
     assert metadata["choices"]["primary_agent"] == "pi"
     assert (home / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
     assert (home / ".pi" / "skills" / "create-environments").exists()
@@ -389,6 +390,7 @@ def test_lab_setup_accepts_amp_and_factory_aliases(tmp_path: Path, monkeypatch: 
 
     metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
     assert result.exit_code == 0
+    assert metadata["setup_source"] == "prime lab sync"
     assert metadata["choices"]["agents"] == ["droid", "amp"]
     assert (tmp_path / "home" / ".factory" / "skills" / "create-environments").exists()
     assert (tmp_path / "home" / ".config" / "amp" / "skills" / "create-environments").exists()

@@ -379,7 +379,7 @@ def _run_lab_setup_steps(
     _prepare_agent_skill_dirs(options.agents, managed_skill_names, emit)
     _report_missing_agent_requirements(options.agents, emit)
     _prepare_agent_native_surfaces(workspace, options.agents, emit)
-    _sync_lab_metadata(workspace, options.agents)
+    _sync_lab_metadata(workspace, options.agents, setup_source="prime lab setup")
 
     if not options.skip_agents_md:
         _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", emit, force=True)
@@ -415,7 +415,7 @@ def _run_lab_sync_steps(
     _prepare_agent_skill_dirs(agents, managed_skill_names, emit)
     _report_missing_agent_requirements(agents, emit)
     _prepare_agent_native_surfaces(workspace, agents, emit)
-    _sync_lab_metadata(workspace, agents)
+    _sync_lab_metadata(workspace, agents, setup_source="prime lab sync")
     _sync_config_templates(workspace, emit)
 
     if not options.skip_docs:
@@ -1085,12 +1085,12 @@ def _write_lab_docs_index(workspace: Path) -> None:
     )
 
 
-def _sync_lab_metadata(workspace: Path, agents: tuple[str, ...]) -> None:
+def _sync_lab_metadata(workspace: Path, agents: tuple[str, ...], *, setup_source: str) -> None:
     prime_dir = workspace / ".prime"
     prime_dir.mkdir(exist_ok=True)
     path = prime_dir / "lab.json"
     metadata = _read_lab_metadata(workspace)
-    metadata["setup_source"] = "prime lab setup"
+    metadata["setup_source"] = setup_source
     metadata["choices"] = {
         "agents": list(agents),
         "primary_agent": agents[0],

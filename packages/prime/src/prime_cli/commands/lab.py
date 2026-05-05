@@ -1,7 +1,5 @@
 """Prime Lab workspace commands."""
 
-from pathlib import Path
-
 import typer
 
 from ..lab_setup import run_lab_doctor, run_lab_setup, run_lab_sync
@@ -56,12 +54,9 @@ def doctor(ctx: typer.Context) -> None:
         raise typer.Exit(code)
 
 
-@app.command(
-    add_help_option=True,
-)
-def mcp(workspace: Path = typer.Option(Path.cwd(), "--workspace")) -> None:
+@app.command(add_help_option=True)
+def mcp() -> None:
     """Run the Lab MCP server over stdio."""
 
-    _ = workspace
     console.print("Prime Lab MCP support is not enabled yet.")
     raise typer.Exit(1)

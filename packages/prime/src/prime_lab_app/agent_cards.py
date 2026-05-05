@@ -351,7 +351,6 @@ def _widget_card_heading(model: AgentWidgetModel) -> Group:
 
 def _widget_card_body(model: AgentWidgetModel) -> Group:
     payload = widget_payload(model.action)
-    title = model.title
     description = str(payload.get("description") or "").strip()
     table = Table.grid(padding=(0, 2))
     table.add_column(style="bold dim", no_wrap=True)
@@ -364,8 +363,7 @@ def _widget_card_body(model: AgentWidgetModel) -> Group:
         count = len(candidates) if isinstance(candidates, list) else 0
         if count:
             table.add_row("Choices", str(count))
-    heading = Text.assemble((title, "bold"))
-    return Group(heading, Text(""), table)
+    return Group(table)
 
 
 def _short_path(value: str) -> str:

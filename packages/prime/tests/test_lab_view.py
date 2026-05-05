@@ -49,7 +49,7 @@ from prime_lab_app.agent_adapters import (
     pi_lab_extension_path,
 )
 from prime_lab_app.agent_capabilities import agent_capability, known_agent_names
-from prime_lab_app.agent_cards import AgentWidgetCard
+from prime_lab_app.agent_cards import AgentWidgetCard, _widget_card_body, _widget_card_heading
 from prime_lab_app.agent_mcp_bridge import (
     LabMcpIpcServer,
     _dump_simple_yaml,
@@ -2505,6 +2505,37 @@ def test_agent_runtime_suppresses_empty_lab_tool_update_after_widget() -> None:
             {"tool": "choose", "kind": "choice_picker"},
         ),
     )
+
+
+def test_agent_widget_choice_body_does_not_repeat_heading(tmp_path: Path) -> None:
+    title = "What would you like to train on?"
+    message = AgentChatMessage(
+        "system",
+        "Choice ready",
+        "widget",
+        {
+            "kind": "choice_picker",
+            "title": title,
+            "payload": {
+                "kind": "choice_picker",
+                "title": title,
+                "prompt": title,
+                "candidates": [
+                    {"id": "search", "label": "Search for an environment"},
+                    {"id": "known", "label": "I know the env"},
+                    {"id": "local", "label": "Use a local environment"},
+                ],
+            },
+        },
+    )
+    model = build_agent_widget_model(message, tmp_path)
+
+    assert title in _render_renderable(_widget_card_heading(model))
+    body = _render_renderable(_widget_card_body(model))
+
+    assert title not in body
+    assert "Choices" in body
+    assert "3" in body
 
 
 class _FakeJsonRpcProcess:

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from prime_cli.lab_agents import agent_adapter, agent_capability, known_agent_names
+from prime_cli.lab_agents import known_agent_names
 from prime_cli.lab_setup import (
     LabDoctorOptions,
     LabSetupOptions,
@@ -200,18 +200,18 @@ def test_lab_sync_removes_stale_managed_skill_links(
     assert not stale_target.exists()
 
 
-def test_lab_agent_metadata_includes_amp_and_factory() -> None:
-    factory = agent_capability("droid")
-    amp = agent_capability("amp-code")
+def test_lab_setup_accepts_amp_and_factory_aliases(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
 
-    assert factory.name == "factory-droid"
-    assert factory.requirements[0].install_command == ("npm", "install", "-g", "@factory/cli")
-    assert agent_adapter("factory").prompt_command("hello") == ["droid", "exec", "hello"]
-    assert amp.name == "amp"
-    assert amp.requirements[0].install_command == (
-        "npm",
-        "install",
-        "-g",
-        "@sourcegraph/amp@latest",
+    result = run_lab_sync_service(
+        LabSyncOptions(agents=("factory-droid", "amp"), skip_docs=True),
+        workspace=tmp_path,
+        emit=lambda _text: None,
     )
-    assert agent_adapter("amp-code").prompt_command("hello") == ["amp", "--execute", "hello"]
+
+    metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
+    assert result.exit_code == 0
+    assert metadata["choices"]["agents"] == ["factory-droid", "amp"]
+    assert (tmp_path / ".factory" / "mcp.json").is_file()
+    assert (tmp_path / ".amp" / "settings.json").is_file()

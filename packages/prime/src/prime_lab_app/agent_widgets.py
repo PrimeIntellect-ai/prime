@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +18,7 @@ LAB_WIDGET_KINDS = (
     "rollout_insight",
 )
 LAB_WIDGET_DIAGNOSTIC_TITLE = "Lab tool diagnostic"
+EnvironmentSearch = Callable[[str, int], list[dict[str, str]]]
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,7 @@ class LabWidgetTool:
     description: str
     required: tuple[str, ...]
     properties: dict[str, Any]
+    common: bool = True
 
 
 LAB_WIDGET_TOOLS = (
@@ -47,6 +50,50 @@ LAB_WIDGET_TOOLS = (
         },
     ),
     LabWidgetTool(
+        name="search_environments",
+        kind="environment_search",
+        description=(
+            "Search platform environments through the Prime CLI. Use before creating eval or "
+            "training configs when the user names an environment."
+        ),
+        required=(),
+        properties={
+            "query": {"type": "string"},
+            "limit": {"type": "integer"},
+        },
+        common=False,
+    ),
+    LabWidgetTool(
+        name="train_model",
+        kind="run_launcher",
+        description=(
+            "Open a native hosted-training config editor from explicit training fields. "
+            "Use this for RL training requests after resolving an environment with "
+            "`search_environments`."
+        ),
+        required=(
+            "env",
+            "model",
+            "max_steps",
+            "batch_size",
+            "rollouts_per_example",
+            "max_tokens",
+        ),
+        properties={
+            "env": {
+                "type": "string",
+                "description": "Platform environment in owner/name form.",
+                "pattern": "^[^/]+/[^/]+$",
+            },
+            "model": {"type": "string"},
+            "max_steps": {"type": "integer", "minimum": 1},
+            "batch_size": {"type": "integer", "minimum": 1},
+            "rollouts_per_example": {"type": "integer", "minimum": 1},
+            "max_tokens": {"type": "integer", "minimum": 1},
+        },
+        common=False,
+    ),
+    LabWidgetTool(
         name="edit_config",
         kind="config_editor",
         description=(
@@ -55,7 +102,7 @@ LAB_WIDGET_TOOLS = (
         ),
         required=("title", "config_kind"),
         properties={
-            "config_kind": {"type": "string", "enum": ["eval", "rl", "gepa"]},
+            "config_kind": {"type": "string", "enum": ["eval", "gepa"]},
             "config": {"type": "object"},
             "source": {"type": "object"},
             "editable_fields": {"type": "array", "items": {"type": "string"}},
@@ -89,7 +136,7 @@ LAB_WIDGET_TOOLS = (
         ),
         required=("title", "config_kind"),
         properties={
-            "config_kind": {"type": "string", "enum": ["eval", "rl", "gepa"]},
+            "config_kind": {"type": "string", "enum": ["eval", "gepa"]},
             "config_path": {"type": "string"},
             "config": {"type": "object"},
             "command": {"type": "array", "items": {"type": "string"}},
@@ -156,17 +203,17 @@ def lab_widget_developer_instructions() -> str:
         "Do not name internal implementation surfaces, tool plumbing, or rendering mechanics. "
         "Use the smallest specific native Lab tool that matches the next decision: "
         "`choose` for "
-        "ambiguity, `edit_config` for eval/training/GEPA config creation or tweaks, "
+        "ambiguity, `search_environments` to resolve platform environments, `train_model` for "
+        "hosted-training config creation, `edit_config` for eval/GEPA config creation or tweaks, "
         "`preview_action` for side effects, `launch_run` for launch handoff, `show_patch` for "
-        "code/config file changes, and `inspect_rollouts` for sample or metric diagnosis. Eval "
-        "and training runs use mirrored edit, preview, and launch flows; set `config_kind` to "
-        "`eval` or `rl`. Before calling a widget tool, decide: the Lab object kind, candidate "
-        "IDs/paths, the default selection, editable versus read-only fields, validation blockers, "
-        "and the next confirmed action. Lab owns rendering, validation, confirmation, execution, "
-        "and result logging. After calling a native Lab tool, do not narrate that a control "
-        "appeared, do not restate the full config, and do not ask the user to open another page; "
-        "let the embedded control carry the action details. Keep payloads small and "
-        "JSON-compatible."
+        "code/config file changes, and `inspect_rollouts` for sample or metric diagnosis. "
+        "Before calling a widget tool, decide: the Lab object kind, "
+        "candidate IDs/paths, the default selection, editable versus read-only fields, "
+        "validation blockers, and the next confirmed action. Lab owns rendering, validation, "
+        "confirmation, execution, and result logging. After calling a native Lab tool, do not "
+        "narrate that a control appeared, do not restate the full config, and do not ask the "
+        "user to open another page; let the embedded control carry the action details. "
+        "Keep payloads small and JSON-compatible."
     )
 
 
@@ -181,7 +228,11 @@ def lab_widget_diagnostic_prompt() -> str:
     )
 
 
-def handle_lab_widget_tool_call(params: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+def handle_lab_widget_tool_call(
+    params: dict[str, Any],
+    *,
+    environment_search: EnvironmentSearch | None = None,
+) -> tuple[str, str, dict[str, Any]]:
     """Validate and convert a Codex dynamic tool call into chat text and tool output."""
 
     namespace = params.get("namespace")
@@ -192,6 +243,8 @@ def handle_lab_widget_tool_call(params: dict[str, Any]) -> tuple[str, str, dict[
     arguments = _coerce_arguments(params.get("arguments"))
     if not isinstance(arguments, dict):
         return _tool_error("Action arguments must be an object.")
+    if tool == "search_environments":
+        return _handle_search_environments(arguments, environment_search)
 
     normalized = normalize_widget_arguments(str(tool or ""), arguments)
     if normalized is None:
@@ -242,7 +295,56 @@ def normalize_widget_arguments(tool: str, arguments: dict[str, Any]) -> dict[str
             normalized["candidates"] = normalized["options"]
         if not str(normalized.get("title") or "").strip():
             normalized["title"] = str(normalized.get("prompt") or "Choose")
+    if tool == "train_model":
+        normalized = _normalize_train_model_arguments(normalized)
+    if tool in {"edit_config", "launch_run"} and normalized.get("config_kind") == "rl":
+        return None
     return {**normalized, "kind": spec.kind, "tool": tool}
+
+
+def _normalize_train_model_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    env_id = str(arguments.get("env") or "").strip()
+    config: dict[str, Any] = {
+        "model": str(arguments.get("model") or "").strip(),
+        "max_steps": arguments.get("max_steps"),
+        "batch_size": arguments.get("batch_size"),
+        "rollouts_per_example": arguments.get("rollouts_per_example"),
+        "env": [{"id": env_id}],
+        "sampling": {"max_tokens": arguments.get("max_tokens")},
+    }
+    return {
+        "title": f"Train {env_id.rsplit('/', 1)[-1] or 'model'}",
+        "config_kind": "rl",
+        "config": config,
+    }
+
+
+def _handle_search_environments(
+    arguments: dict[str, Any],
+    environment_search: EnvironmentSearch | None,
+) -> tuple[str, str, dict[str, Any]]:
+    query = str(arguments.get("query") or "").strip()
+    limit = _positive_limit(arguments.get("limit"), default=12, maximum=30)
+    results = environment_search(query, limit) if environment_search is not None else []
+    output = {"ok": True, "query": query, "environments": results}
+    return (
+        "tool",
+        f"Environment search\n{len(results)} result(s)",
+        {
+            "success": True,
+            "contentItems": [{"type": "inputText", "text": json.dumps(output, sort_keys=True)}],
+        },
+    )
+
+
+def _positive_limit(value: Any, *, default: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(maximum, parsed))
 
 
 def lab_widget_action_from_tool_call(params: dict[str, Any]) -> dict[str, Any]:
@@ -273,12 +375,13 @@ def _coerce_arguments(value: Any) -> Any:
 
 
 def _tool_spec(tool: LabWidgetTool) -> dict[str, Any]:
-    properties: dict[str, Any] = {
-        "title": {"type": "string"},
-        "description": {"type": "string"},
-        "metadata": {"type": "object"},
-        **tool.properties,
-    }
+    properties = dict(tool.properties)
+    if tool.common:
+        properties = {
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            **properties,
+        }
     return {
         "namespace": LAB_WIDGET_NAMESPACE,
         "name": tool.name,
@@ -287,7 +390,7 @@ def _tool_spec(tool: LabWidgetTool) -> dict[str, Any]:
             "type": "object",
             "required": list(tool.required),
             "properties": properties,
-            "additionalProperties": True,
+            "additionalProperties": False,
         },
     }
 

@@ -325,8 +325,7 @@ Lab owns a coding-agent runtime abstraction.
 Tool-backed Lab targets:
 
 - Codex
-- Claude via Claude Agent SDK
-- Claude Code via the Prime Lab MCP bridge
+- Claude via Claude Code and the Prime Lab MCP bridge
 - Cursor via the Prime Lab MCP bridge
 - OpenCode via ACP plus Prime Lab MCP tools
 - Pi Coding Agent via `pi-acp` plus Prime Lab MCP tools
@@ -341,9 +340,7 @@ Runtime behavior:
 - Agent Client Protocol is Lab's preferred chat/session/event protocol for agents that expose it. ACP owns session lifecycle, prompt turns, assistant deltas, tool-call progress, slash-command announcements, cancel/close, and resumable session metadata.
 - MCP remains Lab's native control/tool protocol. ACP sessions receive the Prime Lab MCP server through `session/new`, and MCP-backed headless agents receive generated native MCP config files.
 - Codex app-server stdio is a native streaming chat transport with dynamic Lab tools.
-- Claude uses `claude_agent_sdk.query`; the SDK is a Lab dependency so the configured Claude target is first-class.
-- Claude receives an SDK MCP server with native Lab tools.
-- Claude Code receives a generated `--mcp-config` pointing to `prime lab mcp --workspace ...`; that stdio MCP server forwards tool calls into the running Lab TUI over workspace-scoped local IPC.
+- Claude uses the Claude Code CLI path and receives a generated `--mcp-config` pointing to `prime lab mcp --workspace ...`; that stdio MCP server forwards tool calls into the running Lab TUI over workspace-scoped local IPC.
 - Cursor receives a generated `.cursor/mcp.json` entry for `prime_lab` and runs headless with MCP and tool approvals enabled.
 - OpenCode starts `opencode acp --cwd <workspace>` and receives Prime Lab MCP tools in the ACP session.
 - Pi starts `pi-acp` and receives Prime Lab MCP tools in the ACP session. `prime lab setup` and `prime lab sync` install the Lab-owned `pi-acp` bridge when Pi is selected and the Pi CLI is already present.
@@ -839,8 +836,7 @@ The renderer prints lightweight terminal sketches from deterministic state. It i
 Live native-agent validation should be run when changing adapter contracts:
 
 - Codex app-server dynamic tools call `choose` and emit a Lab control action.
-- Claude Agent SDK receives an in-process SDK MCP server, has Lab tools pre-allowed, calls `choose`, and emits a Lab control action.
-- Claude Code headless chat loads the generated MCP config, has Lab MCP tools explicitly allowed, calls `mcp__prime_lab__choose`, and reaches the running Lab IPC bridge.
+- Claude headless chat loads the generated MCP config, has Lab MCP tools explicitly allowed, calls `mcp__prime_lab__choose`, and reaches the running Lab IPC bridge.
 - Cursor headless chat loads the generated `.cursor/mcp.json`, runs with MCP approval enabled, calls `prime_lab-choose`, and reaches the running Lab IPC bridge.
 - OpenCode loads workspace `opencode.json`, calls `prime_lab_choose`, and reaches the running Lab IPC bridge.
 - Pi starts through `pi-acp`, receives Prime Lab MCP servers during ACP `session/new`, calls `choose`, and reaches the running Lab IPC bridge.

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 import threading
 import time
 from collections.abc import Callable
@@ -29,6 +31,7 @@ from .agent_sessions import (
     ensure_agent_session,
     write_agent_session,
 )
+from .agent_widgets import handle_lab_widget_tool_call
 from .config_screen import ConfigLaunchScreen, ConfigRunScreen
 from .data import LabLoadOptions
 from .details import (
@@ -162,8 +165,9 @@ class PrimeLabView(App[None]):
     PRIME_THEME = LAB_THEME
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit", show=False),
+        Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+w", "show_welcome", "Welcome", key_display="Ctrl+W"),
+        Binding("w", "workspace_settings", "Workspace", key_display="W", show=False),
         Binding("c", "open_agent_chat", "Agent"),
         Binding("enter", "load_detail", "Open", key_display="Enter"),
         Binding("g", "load_more_rows", "More rows", show=False),
@@ -370,6 +374,7 @@ class PrimeLabView(App[None]):
             on_action=lambda action: self._dispatch_agent_callback(
                 self._record_agent_action, action
             ),
+            lab_tool_handler=self._handle_agent_lab_tool,
         )
         self._agent_state = AgentConnectionState()
         self._agent_messages: tuple[AgentChatMessage, ...] = ()
@@ -506,6 +511,14 @@ class PrimeLabView(App[None]):
                 self._launch_screen.dismiss("agent")
             return
         self._open_agent_or_setup()
+
+    def action_workspace_settings(self) -> None:
+        if self._launch_screen_active():
+            if self._launch_screen is not None:
+                self._launch_screen.dismiss("home")
+            self.call_after_refresh(self.open_workspace_settings)
+            return
+        self.open_workspace_settings()
 
     def action_clear_filter(self) -> None:
         if not self._filter:
@@ -890,6 +903,20 @@ class PrimeLabView(App[None]):
         server = LabMcpIpcServer(workspace, self._agent_runtime.handle_external_lab_tool)
         server.start()
         self._lab_mcp_ipc = server
+
+    def _handle_agent_lab_tool(self, params: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+        return handle_lab_widget_tool_call(
+            params,
+            environment_search=self._search_agent_environments,
+        )
+
+    def _search_agent_environments(self, query: str, limit: int) -> list[dict[str, str]]:
+        return _search_platform_environments(query, limit, self._current_workspace())
+
+    def _current_workspace(self) -> Path | None:
+        if self._snapshot is not None:
+            return self._snapshot.workspace
+        return self._agent_state.workspace
 
     def _agent_for_workspace_snapshot(self, snapshot: LabSnapshot) -> str:
         workspace = snapshot.workspace.expanduser().resolve()
@@ -1989,6 +2016,88 @@ def _agent_reference_row(item: LabItem, *, kind: str, prefix: str) -> dict[str, 
         "insert": f"@{prefix}:{token}",
         "detail": item.subtitle or item.status or "-",
     }
+
+
+def _search_platform_environments(
+    query: str,
+    limit: int,
+    workspace: Path | None,
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for mine_only in (True, False):
+        for row in _run_prime_env_search(query, limit, workspace, mine_only=mine_only):
+            env_id = row.get("id", "")
+            if not env_id or env_id in seen:
+                continue
+            seen.add(env_id)
+            rows.append(row)
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+def _run_prime_env_search(
+    query: str,
+    limit: int,
+    workspace: Path | None,
+    *,
+    mine_only: bool,
+) -> list[dict[str, str]]:
+    command = [
+        "prime",
+        "env",
+        "list",
+        "--output",
+        "json",
+        "--num",
+        str(limit),
+        "--sort",
+        "updated_at" if mine_only else "stars",
+        "--order",
+        "desc",
+    ]
+    if query.strip():
+        command.extend(["--search", query.strip()])
+    if mine_only:
+        command.append("--mine")
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(workspace) if workspace is not None else None,
+            capture_output=True,
+            text=True,
+            timeout=12,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if completed.returncode != 0:
+        return []
+    try:
+        parsed = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return []
+    environments = parsed.get("environments") if isinstance(parsed, dict) else None
+    if not isinstance(environments, list):
+        return []
+    rows: list[dict[str, str]] = []
+    for env in environments:
+        if not isinstance(env, dict):
+            continue
+        env_id = str(env.get("environment") or "").strip()
+        if "/" not in env_id:
+            continue
+        rows.append(
+            {
+                "id": env_id,
+                "label": env_id,
+                "description": str(env.get("description") or ""),
+                "status": str(env.get("action_status") or ""),
+                "scope": "mine" if mine_only else "platform",
+            }
+        )
+    return rows
 
 
 def _agent_reference_token(value: str) -> str:

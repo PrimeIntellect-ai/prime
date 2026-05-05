@@ -16,7 +16,6 @@ from .agent_adapters import (
 AgentCapabilityStatus = Literal["supported", "needs_setup", "not_supported"]
 AgentNativeSurface = Literal[
     "codex_app_server",
-    "claude_sdk",
     "mcp_config",
     "acp_mcp",
     "pi_acp",
@@ -61,8 +60,8 @@ class AgentCapability:
         workspace = workspace.expanduser().resolve()
         paths: list[Path] = []
         for raw_path in self.expected_surface_paths:
-            if raw_path == "{claude_code_mcp}":
-                paths.append(agent_mcp_config_path(workspace, "claude-code"))
+            if raw_path == "{claude_mcp}":
+                paths.append(agent_mcp_config_path(workspace, "claude"))
             elif raw_path == "{cursor_mcp}":
                 paths.append(workspace / ".cursor" / "mcp.json")
             elif raw_path == "{opencode_config}":
@@ -76,23 +75,30 @@ class AgentCapability:
 
 
 _CAPABILITIES: dict[str, AgentCapability] = {
+    "amp": AgentCapability(
+        name="amp",
+        label="Amp Code",
+        native_surface="none",
+        requirements=(
+            AgentInstallRequirement(
+                "amp",
+                install_command=("npm", "install", "-g", "@sourcegraph/amp@latest"),
+                description="Amp Code CLI",
+            ),
+        ),
+    ),
+    "claude": AgentCapability(
+        name="claude",
+        label="Claude",
+        native_surface="mcp_config",
+        requirements=(AgentInstallRequirement("claude", description="Claude Code CLI"),),
+        expected_surface_paths=("{claude_mcp}",),
+    ),
     "codex": AgentCapability(
         name="codex",
         label="Codex",
         native_surface="codex_app_server",
         requirements=(AgentInstallRequirement("codex", description="Codex CLI"),),
-    ),
-    "claude": AgentCapability(
-        name="claude",
-        label="Claude",
-        native_surface="claude_sdk",
-    ),
-    "claude-code": AgentCapability(
-        name="claude-code",
-        label="Claude Code",
-        native_surface="mcp_config",
-        requirements=(AgentInstallRequirement("claude", description="Claude Code CLI"),),
-        expected_surface_paths=("{claude_code_mcp}",),
     ),
     "cursor": AgentCapability(
         name="cursor",
@@ -100,6 +106,25 @@ _CAPABILITIES: dict[str, AgentCapability] = {
         native_surface="mcp_config",
         requirements=(AgentInstallRequirement("cursor-agent", description="Cursor Agent CLI"),),
         expected_surface_paths=("{cursor_mcp}",),
+    ),
+    "droid": AgentCapability(
+        name="droid",
+        label="Factory Droid Agent",
+        native_surface="none",
+        requirements=(
+            AgentInstallRequirement(
+                "droid",
+                install_command=("npm", "install", "-g", "@factory/cli"),
+                description="Factory Droid Agent CLI",
+            ),
+        ),
+    ),
+    "hermes": AgentCapability(
+        name="hermes",
+        label="Hermes Agent",
+        native_surface="acp_mcp",
+        requirements=(AgentInstallRequirement("hermes", description="Hermes Agent CLI"),),
+        expected_surface_paths=("{hermes_config}",),
     ),
     "opencode": AgentCapability(
         name="opencode",
@@ -121,30 +146,38 @@ _CAPABILITIES: dict[str, AgentCapability] = {
             ),
         ),
     ),
-    "hermes-agent": AgentCapability(
-        name="hermes-agent",
-        label="Hermes Agent",
-        native_surface="acp_mcp",
-        requirements=(AgentInstallRequirement("hermes", description="Hermes Agent CLI"),),
-        expected_surface_paths=("{hermes_config}",),
-    ),
 }
 _ALIASES = {
-    "claude-cli": "claude-code",
-    "hermes": "hermes-agent",
+    "amp-code": "amp",
+    "claude-cli": "claude",
+    "claude-code": "claude",
+    "factory": "droid",
+    "factory-droid": "droid",
+    "hermes-agent": "hermes",
 }
+AGENT_DISPLAY_ORDER = (
+    "amp",
+    "claude",
+    "codex",
+    "cursor",
+    "droid",
+    "hermes",
+    "opencode",
+    "pi",
+)
 
 
 def known_agent_names() -> tuple[str, ...]:
     """Return Lab-supported agent names in stable display order."""
 
-    return tuple(_CAPABILITIES)
+    return AGENT_DISPLAY_ORDER
 
 
 def agent_capability(name: str) -> AgentCapability:
     """Return the declared Lab capability for a coding agent."""
 
-    normalized = _ALIASES.get(name.strip() or "codex", name.strip() or "codex")
+    raw = (name.strip() or "codex").lower()
+    normalized = _ALIASES.get(raw, raw)
     capability = _CAPABILITIES.get(normalized)
     if capability is not None:
         return capability
@@ -165,7 +198,8 @@ def agent_select_options(active_agent: str) -> list[tuple[str, str]]:
     seen: set[str] = set()
     options: list[tuple[str, str]] = []
     for name in names:
-        normalized = _ALIASES.get(name.strip(), name.strip())
+        raw = name.strip().lower()
+        normalized = _ALIASES.get(raw, raw)
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)

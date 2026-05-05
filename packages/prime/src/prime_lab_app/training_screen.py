@@ -103,6 +103,7 @@ class TrainingRunScreen(Screen[None]):
 
     BINDINGS = [
         Binding("escape", "back", "Back", key_display="Esc"),
+        Binding("b", "back", "Back", key_display="B"),
         Binding("l", "toggle_logs", "Logs"),
         Binding("left", "previous_tab", "Prev tab"),
         Binding("right", "next_tab", "Next tab"),
@@ -485,8 +486,11 @@ class TrainingRunScreen(Screen[None]):
     def action_open_platform(self) -> None:
         item = self._detail or self._base_item
         url = _training_platform_url(self._frontend_url, item.raw, fallback_id=item.title)
-        if url is not None:
-            webbrowser.open(url)
+        if url is None:
+            self.notify("No platform URL is available for this training run.", severity="warning")
+            return
+        if not webbrowser.open(url):
+            self.notify("Could not open the training run in a browser.", severity="warning")
 
     @work(thread=True, exclusive=True)
     def _load(

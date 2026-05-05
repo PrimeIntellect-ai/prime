@@ -3,23 +3,24 @@
 from __future__ import annotations
 
 import shlex
+from collections.abc import Iterable
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 import toml
+from prime_cli.api.rl import RLClient
+from prime_cli.client import APIClient, APIError
+from prime_cli.core import Config
 
+from .config_factory import evaluation_config, filter_empty_config_values, rl_config
 from .config_screen import initial_config_field_values
 from .models import LabItem
 from .toml_format import format_toml_blocks
 
-_PRIME_INFERENCE_MODEL_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("openai/gpt-4.1-mini", "openai/gpt-4.1-mini"),
-    ("openai/gpt-5-mini", "openai/gpt-5-mini"),
-    ("anthropic/claude-sonnet-4-5", "anthropic/claude-sonnet-4-5"),
-    ("google/gemini-2.5-flash", "google/gemini-2.5-flash"),
-    ("qwen/qwen3-30b-a3b-instruct-2507", "qwen/qwen3-30b-a3b-instruct-2507"),
-)
+_TRAINING_MODEL_OPTIONS_CACHE: tuple[tuple[str, str], ...] | None = None
+_TRAINING_MODEL_OPTION_METADATA: dict[str, tuple[str, dict[str, str]]] = {}
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,12 @@ def widget_config_field_name(field_id: str) -> str:
     """Map a visible field id to the shared config field name."""
 
     return _widget_config_field_name(field_id)
+
+
+def widget_training_model_option_parts(value: str) -> tuple[str, dict[str, str]]:
+    """Return the model name and sampling controls encoded by a training model option."""
+
+    return _training_model_option_parts(value)
 
 
 def widget_config_path(payload: dict[str, Any], workspace: Path) -> Path:
@@ -209,8 +216,14 @@ def _widget_config_context(action: dict[str, Any], workspace: Path) -> dict[str,
     values.update(_widget_extra_field_values(config, config_kind))
     if not values.get("envs"):
         values["envs"] = env_hint
-    model_options = _widget_model_options(workspace, config, config_path)
-    if not values.get("model") and model_options:
+    model_options = _widget_model_options(workspace, config, config_path, config_kind)
+    if config_kind == "rl" and model_options:
+        values["model"] = _selected_training_model_option_value(
+            str(values.get("model") or ""),
+            config,
+            model_options,
+        )
+    elif not values.get("model") and model_options:
         values["model"] = str(model_options[0][1])
     if config_kind == "eval":
         if not values.get("num_examples"):
@@ -263,6 +276,7 @@ def _widget_field_specs(context: dict[str, Any] | None) -> tuple[AgentWidgetFiel
         return ()
     values = context["values"]
     config_kind = str(context["config_kind"])
+    model_options = tuple(context.get("model_options") or ())
     names = (
         ("envs", "Environment", "text", False),
         ("model", "Model", "text", False),
@@ -277,7 +291,7 @@ def _widget_field_specs(context: dict[str, Any] | None) -> tuple[AgentWidgetFiel
             ("model", "Model", "text", False),
             ("max_steps", "Steps", "integer", False),
             ("rollouts_per_example", "Rollouts per example", "integer", False),
-            ("batch_size", "Batch", "integer", False),
+            ("batch_size", "Rollouts per batch", "integer", False),
             ("max_tokens", "Max tokens", "integer", False),
             ("seq_len", "Seq len", "integer", True),
         )
@@ -287,25 +301,17 @@ def _widget_field_specs(context: dict[str, Any] | None) -> tuple[AgentWidgetFiel
             ("model", "Model", "text", False),
         )
     fields: list[AgentWidgetFieldSpec] = []
-    model_options = tuple(context.get("model_options") or ())
-    environment_options = _widget_environment_options(context)
     for name, label, input_type, disabled in names:
         value = str(values.get(name) or "")
         if not value and name in {"seq_len"}:
             continue
         widget = "input"
         options: tuple[tuple[str, str], ...] = ()
-        if name == "envs" and environment_options and "," not in value:
-            option_values = {str(option_value) for _label, option_value in environment_options}
-            if value and value not in option_values:
-                environment_options = ((value, value), *environment_options)
-            elif not value:
-                value = str(environment_options[0][1])
-            widget = "select"
-            options = environment_options
         if name == "model" and model_options:
             option_values = {str(option_value) for _label, option_value in model_options}
-            if value and value not in option_values:
+            if config_kind == "rl" and value not in option_values:
+                value = str(model_options[0][1])
+            elif value and value not in option_values:
                 model_options = ((value, value), *model_options)
             elif not value:
                 value = str(model_options[0][1])
@@ -323,26 +329,6 @@ def _widget_field_specs(context: dict[str, Any] | None) -> tuple[AgentWidgetFiel
             )
         )
     return tuple(fields)
-
-
-def _widget_environment_options(context: dict[str, Any]) -> tuple[tuple[str, str], ...]:
-    workspace = context.get("workspace")
-    if not isinstance(workspace, Path):
-        return ()
-    values = context.get("values")
-    current = str(values.get("envs") or "").strip() if isinstance(values, dict) else ""
-    if "," in current:
-        return ()
-    options: list[tuple[str, str]] = []
-    for name in _widget_local_environment_names(workspace):
-        option = (name, name)
-        if option not in options:
-            options.append(option)
-    if not options:
-        return ()
-    if current and current not in {value for _label, value in options}:
-        options.insert(0, (current, current))
-    return tuple(options)
 
 
 def _widget_actions(action: dict[str, Any]) -> tuple[AgentWidgetActionSpec, ...]:
@@ -408,37 +394,32 @@ def _widget_default_config(
     model = str(
         defaults.get("model")
         or payload.get("model")
-        or _widget_default_model(workspace, {}, config_path)
+        or _widget_default_model(workspace, {}, config_path, config_kind)
     )
     if config_kind == "eval":
-        eval_config: dict[str, Any] = {"env_id": env_id}
-        config: dict[str, Any] = {
-            "model": model,
-            "num_examples": _coerce_int(defaults.get("num_examples"), 50),
-            "rollouts_per_example": _coerce_int(defaults.get("rollouts_per_example"), 3),
-            "save_results": True,
-            "eval": [eval_config],
-        }
-        if max_concurrent := _coerce_optional_int(defaults.get("max_concurrent")):
-            config["max_concurrent"] = max_concurrent
         sampling = defaults.get("sampling_args")
         if not isinstance(sampling, dict):
             sampling = defaults.get("sampling")
+        max_tokens = _coerce_int(defaults.get("max_tokens"), 1024)
+        config = evaluation_config(
+            env_id=env_id,
+            model=model,
+            num_examples=_coerce_int(defaults.get("num_examples"), 50),
+            rollouts_per_example=_coerce_int(defaults.get("rollouts_per_example"), 3),
+            max_tokens=None if isinstance(sampling, dict) and sampling else max_tokens,
+            max_concurrent=_coerce_optional_int(defaults.get("max_concurrent")),
+        )
         if isinstance(sampling, dict) and sampling:
-            eval_config["sampling_args"] = dict(sampling)
-        elif max_tokens := _coerce_int(defaults.get("max_tokens"), 1024):
-            eval_config["sampling_args"] = {"max_tokens": max_tokens}
-        return _filter_widget_empty_values(config)
+            config["eval"][0]["sampling_args"] = dict(sampling)
+        return filter_empty_config_values(config)
     if config_kind == "rl":
-        return _filter_widget_empty_values(
-            {
-                "model": model,
-                "max_steps": _coerce_int(defaults.get("max_steps"), 100),
-                "rollouts_per_example": _coerce_int(defaults.get("rollouts_per_example"), 8),
-                "batch_size": _coerce_int(defaults.get("batch_size"), 256),
-                "sampling": {"max_tokens": _coerce_int(defaults.get("max_tokens"), 8192)},
-                "env": [{"id": env_id}],
-            }
+        return rl_config(
+            env_id=env_id,
+            model=model,
+            max_steps=_coerce_int(defaults.get("max_steps"), 100),
+            rollouts_per_example=_coerce_int(defaults.get("rollouts_per_example"), 8),
+            batch_size=_coerce_int(defaults.get("batch_size"), 256),
+            max_tokens=_coerce_int(defaults.get("max_tokens"), 8192),
         )
     return _filter_widget_empty_values(
         {
@@ -476,6 +457,8 @@ def _widget_config_field_name(field_id: str) -> str:
         "batch_size": "batch_size",
         "max_tokens": "max_tokens",
         "seq_len": "seq_len",
+        "enable_thinking": "enable_thinking",
+        "reasoning_effort": "reasoning_effort",
         "config-name": "name",
         "config-model": "model",
         "config-envs": "envs",
@@ -484,6 +467,8 @@ def _widget_config_field_name(field_id: str) -> str:
         "config-batch-size": "batch_size",
         "config-max-tokens": "max_tokens",
         "config-seq-len": "seq_len",
+        "config-enable-thinking": "enable_thinking",
+        "config-reasoning-effort": "reasoning_effort",
     }
     return names.get(field_id, "")
 
@@ -525,6 +510,11 @@ def _widget_generated_config_path(
     source_path: Path,
 ) -> Path:
     payload = _widget_payload(action)
+    if config_kind == "rl":
+        env_id = _widget_environment_from_payload(payload, source_path, workspace)
+        if env_id:
+            stem = _slug(env_id.rsplit("/", 1)[-1])
+            return workspace / ".prime" / "lab" / "configs" / config_kind / f"{stem}.toml"
     title = _clean_widget_title(
         str(action.get("title") or payload.get("title") or source_path.stem)
     )
@@ -536,19 +526,21 @@ def _widget_model_options(
     workspace: Path,
     config: dict[str, Any],
     config_path: Path,
+    config_kind: str,
 ) -> tuple[tuple[str, str], ...]:
     options: list[tuple[str, str]] = []
-    for endpoint_path in _widget_endpoint_paths(workspace, config, config_path):
-        for option in _read_endpoint_model_options(endpoint_path):
-            if option not in options:
-                options.append(option)
-    if not options:
-        options.extend(_PRIME_INFERENCE_MODEL_OPTIONS)
+    if config_kind == "rl":
+        options.extend(_training_model_options())
+    else:
+        for endpoint_path in _widget_endpoint_paths(workspace, config, config_path):
+            for option in _read_endpoint_model_options(endpoint_path):
+                if option not in options:
+                    options.append(option)
     current = str(config.get("model") or "").strip()
     if not current:
         endpoint_id = str(config.get("endpoint_id") or "").strip()
         current = _model_for_endpoint_id(endpoint_id, workspace, config, config_path)
-    if current and current not in {value for _label, value in options}:
+    if current and config_kind != "rl" and current not in {value for _label, value in options}:
         options.insert(0, (current, current))
     return tuple(options)
 
@@ -557,9 +549,139 @@ def _widget_default_model(
     workspace: Path,
     config: dict[str, Any],
     config_path: Path,
+    config_kind: str,
 ) -> str:
-    options = _widget_model_options(workspace, config, config_path)
-    return str(options[0][1]) if options else "openai/gpt-4.1-mini"
+    options = _widget_model_options(workspace, config, config_path, config_kind)
+    if options:
+        value = str(options[0][1])
+        if config_kind == "rl":
+            model, _controls = _training_model_option_parts(value)
+            return model
+        return value
+    return ""
+
+
+def _training_model_options() -> tuple[tuple[str, str], ...]:
+    global _TRAINING_MODEL_OPTIONS_CACHE
+    if _TRAINING_MODEL_OPTIONS_CACHE is not None:
+        return _TRAINING_MODEL_OPTIONS_CACHE
+    try:
+        config = Config()
+        if not config.api_key:
+            _TRAINING_MODEL_OPTIONS_CACHE = ()
+            return _TRAINING_MODEL_OPTIONS_CACHE
+        models = RLClient(APIClient()).list_models(team_id=config.team_id)
+    except APIError:
+        _TRAINING_MODEL_OPTIONS_CACHE = ()
+        return _TRAINING_MODEL_OPTIONS_CACHE
+    names: list[str] = []
+    for model in sorted(models, key=lambda model: model.name):
+        name = str(model.name).strip()
+        if not name:
+            continue
+        names.append(name)
+    _TRAINING_MODEL_OPTIONS_CACHE = _training_model_options_from_names(names)
+    return _TRAINING_MODEL_OPTIONS_CACHE
+
+
+def _training_model_options_from_names(names: Iterable[str]) -> tuple[tuple[str, str], ...]:
+    options: list[tuple[str, str]] = []
+    for name in names:
+        for option in _training_model_options_for_name(name):
+            if option not in options:
+                options.append(option)
+    return tuple(options)
+
+
+def _training_model_options_for_name(name: str) -> tuple[tuple[str, str], ...]:
+    normalized = name.strip()
+    if not normalized:
+        return ()
+    lowered = normalized.lower()
+    if "gpt-oss" in lowered:
+        return tuple(
+            (
+                f"{normalized} ({effort})",
+                _training_model_option_value(normalized, reasoning_effort=effort),
+            )
+            for effort in ("low", "medium", "high")
+        )
+    if "qwen3.5" in lowered or "qwen3.6" in lowered or "nemotron" in lowered:
+        return (
+            (
+                f"{normalized} (thinking)",
+                _training_model_option_value(normalized, enable_thinking="true"),
+            ),
+            (
+                f"{normalized} (instruct)",
+                _training_model_option_value(normalized, enable_thinking="false"),
+            ),
+        )
+    return ((normalized, normalized),)
+
+
+def _training_model_option_value(
+    model: str,
+    *,
+    enable_thinking: str = "",
+    reasoning_effort: str = "",
+) -> str:
+    controls: dict[str, str] = {}
+    if enable_thinking:
+        controls["enable_thinking"] = enable_thinking
+    if reasoning_effort:
+        controls["reasoning_effort"] = reasoning_effort
+    control_key = ",".join(f"{key}={value}" for key, value in sorted(controls.items()))
+    digest = sha256(f"{model}\0{control_key}".encode("utf-8")).hexdigest()[:16]
+    value = f"training-model-{digest}"
+    _TRAINING_MODEL_OPTION_METADATA[value] = (model, controls)
+    return value
+
+
+def _selected_training_model_option_value(
+    model: str,
+    config: dict[str, Any],
+    options: tuple[tuple[str, str], ...],
+) -> str:
+    option_values = {str(value) for _label, value in options}
+    sampling = config.get("sampling")
+    sampling = sampling if isinstance(sampling, dict) else {}
+    if sampling.get("enable_thinking") is not None:
+        candidate = _training_model_option_value(
+            model,
+            enable_thinking=str(bool(sampling["enable_thinking"])).lower(),
+        )
+        if candidate in option_values:
+            return candidate
+    reasoning_effort = str(sampling.get("reasoning_effort") or "").strip()
+    if reasoning_effort:
+        candidate = _training_model_option_value(model, reasoning_effort=reasoning_effort)
+        if candidate in option_values:
+            return candidate
+    medium_reasoning = _training_model_option_value(model, reasoning_effort="medium")
+    if medium_reasoning in option_values:
+        return medium_reasoning
+    for _label, value in _training_model_options_for_name(model):
+        if value in option_values:
+            return value
+    return _preferred_training_model_option_value(options)
+
+
+def _preferred_training_model_option_value(options: tuple[tuple[str, str], ...]) -> str:
+    first_value = str(options[0][1])
+    first_model, _controls = _training_model_option_parts(first_value)
+    medium_reasoning = _training_model_option_value(first_model, reasoning_effort="medium")
+    if medium_reasoning in {str(value) for _label, value in options}:
+        return medium_reasoning
+    return first_value
+
+
+def _training_model_option_parts(value: str) -> tuple[str, dict[str, str]]:
+    metadata = _TRAINING_MODEL_OPTION_METADATA.get(value)
+    if metadata is None:
+        return value, {}
+    model, controls = metadata
+    return model, dict(controls)
 
 
 def _widget_endpoint_paths(
@@ -629,13 +751,20 @@ def _model_for_endpoint_id(
     return ""
 
 
-def _resolve_widget_environment(workspace: Path, value: str) -> str:
+def _resolve_widget_environment(
+    workspace: Path,
+    value: str,
+    *,
+    allow_inference: bool = True,
+) -> str:
     candidate = value.strip()
+    if not candidate:
+        return ""
+    if not allow_inference:
+        return candidate
     if "/" in candidate:
         return candidate
     local_names = _widget_local_environment_names(workspace)
-    if not candidate:
-        return local_names[0] if local_names else "primeintellect/gsm8k"
     normalized = _normalize_widget_env_name(candidate)
     for local_name in local_names:
         if _normalize_widget_env_name(local_name) == normalized:
@@ -696,18 +825,37 @@ def _widget_environment_from_payload(
             return _resolve_widget_environment(
                 workspace,
                 _widget_environment_token(envs["envs"]),
+                allow_inference=config_kind != "rl",
             )
-        if env_value := _widget_environment_from_mapping(config):
-            return _resolve_widget_environment(workspace, _widget_environment_token(env_value))
+        if env_value := _widget_environment_from_mapping(config, config_kind):
+            return _resolve_widget_environment(
+                workspace,
+                _widget_environment_token(env_value),
+                allow_inference=config_kind != "rl",
+            )
     defaults = payload.get("defaults")
     if isinstance(defaults, dict):
         envs = initial_config_field_values(defaults, config_kind, fallback_name="")
         if envs.get("envs"):
-            return _resolve_widget_environment(workspace, _widget_environment_token(envs["envs"]))
-        if env_value := _widget_environment_from_mapping(defaults):
-            return _resolve_widget_environment(workspace, _widget_environment_token(env_value))
-    if env_value := _widget_environment_from_mapping(payload):
-        return _resolve_widget_environment(workspace, _widget_environment_token(env_value))
+            return _resolve_widget_environment(
+                workspace,
+                _widget_environment_token(envs["envs"]),
+                allow_inference=config_kind != "rl",
+            )
+        if env_value := _widget_environment_from_mapping(defaults, config_kind):
+            return _resolve_widget_environment(
+                workspace,
+                _widget_environment_token(env_value),
+                allow_inference=config_kind != "rl",
+            )
+    if env_value := _widget_environment_from_mapping(payload, config_kind):
+        return _resolve_widget_environment(
+            workspace,
+            _widget_environment_token(env_value),
+            allow_inference=config_kind != "rl",
+        )
+    if config_kind == "rl":
+        return ""
     command_env = _environment_from_command(payload.get("command"))
     if command_env:
         return _resolve_widget_environment(workspace, _widget_environment_token(command_env))
@@ -721,11 +869,33 @@ def _widget_environment_from_payload(
     return _resolve_widget_environment(workspace, "")
 
 
-def _widget_environment_from_mapping(value: dict[str, Any]) -> str:
-    for key in ("env_id", "environment", "environment_id", "env", "envs", "environments"):
+def _widget_environment_from_mapping(value: dict[str, Any], config_kind: str) -> str:
+    if config_kind == "rl":
+        return _widget_rl_environment_value(value.get("env"))
+    keys = (
+        "env_id",
+        "environment",
+        "environment_id",
+        "env",
+        "envs",
+        "environments",
+    )
+    for key in keys:
         env_value = _widget_environment_value(value.get(key))
         if env_value:
             return env_value
+    return ""
+
+
+def _widget_rl_environment_value(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        env_id = item.get("id")
+        if isinstance(env_id, str) and env_id.strip():
+            return env_id.strip()
     return ""
 
 
@@ -937,7 +1107,7 @@ def _widget_command_text(payload: dict[str, Any], workspace: Path) -> str:
     rel_path = _relative_path(config_path, workspace)
     config_kind = str(payload.get("config_kind") or "")
     if config_kind == "rl":
-        return f"prime rl run {rel_path}"
+        return f"prime train run {rel_path}"
     if config_kind == "eval":
         return f"prime eval run {rel_path} --hosted"
     if config_kind == "gepa":

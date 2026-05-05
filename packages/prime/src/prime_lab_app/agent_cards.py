@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from rich.table import Table
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import Button, Select, Static
 
 from .agent_runtime import AgentChatMessage
@@ -55,6 +57,7 @@ class AgentWidgetCard(Vertical):
         self._runner: ConfigLaunchRunner | None = None
         self._launch_running = False
         self._active_launch_action: dict[str, Any] | None = None
+        self._closed = False
 
     def compose(self) -> ComposeResult:
         yield Static(
@@ -66,7 +69,12 @@ class AgentWidgetCard(Vertical):
         if fields:
             with Vertical(classes="agent-widget-fields"):
                 for field in fields:
-                    with Vertical(classes="agent-widget-field-row"):
+                    row_classes = (
+                        "agent-widget-field-row agent-widget-model-row"
+                        if field.name == "model"
+                        else "agent-widget-field-row"
+                    )
+                    with Vertical(classes=row_classes):
                         yield Static(
                             field.label,
                             classes="agent-widget-field-label",
@@ -79,7 +87,7 @@ class AgentWidgetCard(Vertical):
                                 allow_blank=False,
                                 name=field.name,
                                 classes="agent-widget-select",
-                                compact=True,
+                                compact=False,
                             )
                         else:
                             yield ClearableInput(
@@ -109,7 +117,14 @@ class AgentWidgetCard(Vertical):
         yield Static("", classes="agent-widget-log", markup=False)
 
     def on_mount(self) -> None:
-        self._set_launch_buttons(running=False)
+        self._closed = False
+        self._set_launch_buttons(running=self._launch_running)
+
+    def on_unmount(self) -> None:
+        self._closed = True
+        if self._launch_running and self._runner is not None:
+            self._runner.stop()
+        self._launch_running = False
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         name = event.button.name or ""
@@ -157,13 +172,16 @@ class AgentWidgetCard(Vertical):
             command=plan.command,
             workspace=self._workspace,
             follow_training_logs=plan.follow_training_logs,
-            append_output=lambda text: self.app.call_from_thread(self._append_widget_output, text),
-            update_status=lambda text, style: self.app.call_from_thread(
+            append_output=lambda text: self._call_from_launch_thread(
+                self._append_widget_output,
+                text,
+            ),
+            update_status=lambda text, style: self._call_from_launch_thread(
                 self._set_widget_status,
                 text,
                 style,
             ),
-            finish=lambda kind, returncode: self.app.call_from_thread(
+            finish=lambda kind, returncode: self._call_from_launch_thread(
                 self._finish_inline_runner,
                 kind,
                 returncode,
@@ -177,12 +195,27 @@ class AgentWidgetCard(Vertical):
             return
         self._runner.stop()
 
+    def _call_from_launch_thread(self, callback: Any, *args: Any) -> None:
+        if self._closed:
+            return
+        if getattr(self.app, "_thread_id", None) == threading.get_ident():
+            callback(*args)
+            return
+        try:
+            self.app.call_from_thread(callback, *args)
+        except RuntimeError:
+            return
+
     def _append_widget_output(self, text: str) -> None:
+        if self._closed:
+            return
         self._output = (self._output + text)[-50_000:]
         self._set_widget_log(self._output, visible=True)
 
     def _finish_inline_launch(self, returncode: int) -> None:
         self._launch_running = False
+        if self._closed:
+            return
         if returncode == 0:
             self._set_widget_status("Completed", SUCCESS)
         else:
@@ -204,6 +237,8 @@ class AgentWidgetCard(Vertical):
 
     def _finish_inline_logs(self) -> None:
         self._launch_running = False
+        if self._closed:
+            return
         self._set_widget_status("Live log stream completed", SUCCESS)
         if self._active_launch_action is not None:
             self._record_widget_action(
@@ -217,6 +252,8 @@ class AgentWidgetCard(Vertical):
 
     def _finish_inline_stopped(self) -> None:
         self._launch_running = False
+        if self._closed:
+            return
         self._set_widget_status("Stopped", STATUS_WARNING)
         if self._active_launch_action is not None:
             self._record_widget_action(
@@ -237,11 +274,21 @@ class AgentWidgetCard(Vertical):
             self._finish_inline_launch(int(returncode or 0))
 
     def _set_widget_status(self, text: str, style: str = "") -> None:
+        if self._closed:
+            return
         status = Text(text, style=style)
-        self.query_one(".agent-widget-status", Static).update(status)
+        try:
+            self.query_one(".agent-widget-status", Static).update(status)
+        except NoMatches:
+            return
 
     def _set_widget_log(self, text: str, *, visible: bool) -> None:
-        log = self.query_one(".agent-widget-log", Static)
+        if self._closed:
+            return
+        try:
+            log = self.query_one(".agent-widget-log", Static)
+        except NoMatches:
+            return
         log.set_class(visible, "visible")
         log.update(Text(text))
 

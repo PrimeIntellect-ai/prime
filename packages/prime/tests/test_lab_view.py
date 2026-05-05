@@ -6,7 +6,6 @@ import sys
 import tarfile
 import threading
 import time
-import types
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from io import BytesIO, StringIO
@@ -15,7 +14,9 @@ from typing import Any
 
 import pytest
 import toml
+from prime_cli.api.rl import RLClient
 from prime_cli.commands.env import _environment_fork_chain, _environment_ref
+from prime_cli.commands.evals import _preview_hosted_evaluation
 from prime_cli.commands.lab import app as lab_cli_app
 from prime_cli.commands.rl import RLConfig as HostedRLConfig
 from prime_cli.lab_mcp import _serve_lab_mcp_stdio, lab_mcp_tool_definitions
@@ -30,6 +31,7 @@ from prime_cli.lab_setup import (
     run_lab_setup_service,
     run_lab_sync_service,
 )
+from prime_cli.utils.hosted_eval import HostedEvalConfig
 from prime_lab_app.agent_acp import (
     acp_lab_mcp_servers,
     acp_session_params,
@@ -60,6 +62,7 @@ from prime_lab_app.agent_runtime import (
 from prime_lab_app.agent_screen import (
     AgentChatScreen,
     AgentPrompt,
+    _agent_thinking_turn,
     _chat_transcript,
 )
 from prime_lab_app.agent_sessions import (
@@ -70,9 +73,17 @@ from prime_lab_app.agent_sessions import (
     workspace_session_key,
     write_agent_session,
 )
+from prime_lab_app.agent_validation import validate_agent_surfaces
 from prime_lab_app.agent_widget_actions import build_agent_widget_config
-from prime_lab_app.agent_widget_model import build_agent_widget_model
-from prime_lab_app.agent_widgets import lab_widget_diagnostic_prompt
+from prime_lab_app.agent_widget_model import (
+    _training_model_options_for_name,
+    build_agent_widget_model,
+    widget_training_model_option_parts,
+)
+from prime_lab_app.agent_widgets import (
+    lab_widget_action_from_tool_call,
+    lab_widget_diagnostic_prompt,
+)
 from prime_lab_app.app import (
     EvaluationTree,
     LabOptionList,
@@ -80,6 +91,7 @@ from prime_lab_app.app import (
     _item_details,
     _ladder_limits,
     _parse_log_records,
+    _search_platform_environments,
 )
 from prime_lab_app.cache import (
     cached_environment_source,
@@ -87,13 +99,19 @@ from prime_lab_app.cache import (
     environment_source_blob_cache_path,
     environment_source_cache_path,
     forget_recent_workspace,
+    lab_row_cache_path,
     load_cached_lab_sections,
     recent_workspaces,
     record_recent_workspace,
     write_cached_lab_sections,
 )
 from prime_lab_app.chat_parts import ReferencePart, message_parts
-from prime_lab_app.config_screen import ConfigLaunchScreen, ConfigRunScreen
+from prime_lab_app.config_factory import evaluation_config, format_lab_config, rl_config
+from prime_lab_app.config_screen import (
+    ConfigLaunchScreen,
+    ConfigRunScreen,
+    build_config_from_fields,
+)
 from prime_lab_app.data import LabDataSource, LabLoadOptions, discover_local_eval_runs
 from prime_lab_app.environment_screen import (
     AddWorkspaceScreen,
@@ -104,7 +122,7 @@ from prime_lab_app.environment_screen import (
 from prime_lab_app.eval_markdown import MathMarkdown, make_math_parser
 from prime_lab_app.eval_records import LazyRunResults, LocalEvalRun
 from prime_lab_app.eval_render import compute_run_overview_stats, history_groups
-from prime_lab_app.eval_screen import LocalEvalRunScreen, RolloutViewer
+from prime_lab_app.eval_screen import LocalEvalRunScreen, RolloutCopyScreen, RolloutViewer
 from prime_lab_app.evaluation_browser import (
     evaluation_index,
     evaluation_model_selection_details,
@@ -112,15 +130,22 @@ from prime_lab_app.evaluation_browser import (
 )
 from prime_lab_app.filters import FilterChoice, filter_choices
 from prime_lab_app.launch_backdrop import LaunchBackdrop
+from prime_lab_app.launch_runner import extract_training_log_follow_command
 from prime_lab_app.launch_screen import LaunchScreen
-from prime_lab_app.models import LabItem, LabSection
+from prime_lab_app.models import LabItem, LabSection, LabSnapshot
 from prime_lab_app.palette import TOOL_CALL
+from prime_lab_app.platform_preview import preview_lab_config
 from prime_lab_app.readme import readme_links as _readme_links
 from prime_lab_app.readme import readme_markdown as _readme_markdown
 from prime_lab_app.rows import item_badges_text
 from prime_lab_app.setup_screens import AgentSyncScreen, DoctorScreen, SetupScreen
 from prime_lab_app.shell import compact_path, configured_workspace_agent, lab_header
+from prime_lab_app.snapshots import merge_snapshot_rows
 from prime_lab_app.source_browser import source_entries, source_preview
+from prime_lab_app.training_charts import (
+    ChartSpec,
+    LabPlotWidget,
+)
 from prime_lab_app.training_charts import (
     chart_count as _chart_count,
 )
@@ -813,6 +838,8 @@ def test_lab_view_initial_snapshot_hydrates_cached_platform_rows(
     assert environments.items[0].title == "research/private-env"
     assert evaluations.items[0].title == "eval-1"
     assert training.status == "10 cached" or training.status.endswith("cached")
+    assert training.row_data_origin == "disk"
+    assert training.refreshed_at
 
 
 def test_lab_view_row_cache_never_shrinks_on_smaller_refresh(
@@ -860,6 +887,93 @@ def test_lab_view_row_cache_never_shrinks_on_smaller_refresh(
     assert [item.title for item in cached["training"].items] == [
         f"run-{index}" for index in range(10)
     ]
+    assert cached["training"].row_data_origin == "disk"
+    assert cached["training"].refreshed_at
+
+
+def test_lab_view_row_cache_stores_per_section_freshness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cache_key = "row-cache-freshness"
+
+    write_cached_lab_sections(
+        cache_key,
+        (
+            LabSection(
+                key="training",
+                title="Training",
+                description="Training runs.",
+                items=(LabItem(key="rl-run:1", section="training", title="run-1"),),
+                refreshed_at="2026-05-01T00:00:00+00:00",
+                row_data_origin="live",
+            ),
+        ),
+    )
+
+    payload = json.loads(lab_row_cache_path(cache_key).read_text(encoding="utf-8"))
+    cached = load_cached_lab_sections(cache_key, limit=10)
+
+    assert payload["sections"]["training"]["refreshed_at"] == "2026-05-01T00:00:00+00:00"
+    assert cached["training"].refreshed_at == "2026-05-01T00:00:00+00:00"
+    assert cached["training"].row_data_origin == "disk"
+
+
+def test_lab_view_live_sections_include_freshness(tmp_path: Path) -> None:
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    training = snapshot.section("training")
+
+    assert training is not None
+    assert training.refreshed_at
+    assert training.row_data_origin == "live"
+
+
+def test_merge_snapshot_rows_preserves_newer_freshness(tmp_path: Path) -> None:
+    previous = LabSnapshot(
+        workspace=tmp_path,
+        base_url="https://api.test",
+        frontend_url="https://app.test",
+        authenticated=True,
+        team="team",
+        sections=(
+            LabSection(
+                key="training",
+                title="Training",
+                description="Training runs.",
+                items=(
+                    LabItem(key="rl-run:1", section="training", title="run-1"),
+                    LabItem(key="rl-run:2", section="training", title="run-2"),
+                ),
+                refreshed_at="2026-05-01T00:00:00+00:00",
+                row_data_origin="disk",
+            ),
+        ),
+    )
+    incoming = LabSnapshot(
+        workspace=tmp_path,
+        base_url="https://api.test",
+        frontend_url="https://app.test",
+        authenticated=True,
+        team="team",
+        sections=(
+            LabSection(
+                key="training",
+                title="Training",
+                description="Training runs.",
+                items=(LabItem(key="rl-run:1", section="training", title="run-1"),),
+                refreshed_at="2026-05-02T00:00:00+00:00",
+                row_data_origin="live",
+            ),
+        ),
+    )
+
+    merged = merge_snapshot_rows(previous, incoming)
+    training = merged.section("training")
+
+    assert training is not None
+    assert [item.title for item in training.items] == ["run-1", "run-2"]
+    assert training.refreshed_at == "2026-05-02T00:00:00+00:00"
+    assert training.row_data_origin == "mixed"
 
 
 def test_lab_view_platform_cache_survives_refresh_errors(
@@ -941,6 +1055,52 @@ def test_lab_view_home_shows_remembered_non_sibling_workspaces(
     assert remembered.resolve() not in recent_workspaces()
 
 
+def test_agent_surface_validation_reports_missing_native_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "prime_lab_app.agent_capabilities.shutil.which",
+        lambda _binary: "/bin/tool",
+    )
+
+    class Completed:
+        returncode = 0
+
+    results = validate_agent_surfaces(
+        tmp_path,
+        agents=("cursor",),
+        runner=lambda *_args, **_kwargs: Completed(),
+    )
+
+    assert len(results) == 1
+    assert results[0].agent == "cursor"
+    assert results[0].ok is False
+    assert "Missing native surface files" in results[0].message
+
+
+def test_agent_surface_validation_passes_when_binary_and_surface_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "prime_lab_app.agent_capabilities.shutil.which",
+        lambda _binary: "/bin/tool",
+    )
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".cursor" / "mcp.json").write_text("{}", encoding="utf-8")
+
+    class Completed:
+        returncode = 0
+
+    results = validate_agent_surfaces(
+        tmp_path,
+        agents=("cursor",),
+        runner=lambda *_args, **_kwargs: Completed(),
+    )
+
+    assert len(results) == 1
+    assert results[0].ok is True
+
+
 def test_lab_view_loads_training_logs_and_environment_status() -> None:
     source = make_source()
     snapshot = source.load(LabLoadOptions(limit=10))
@@ -974,6 +1134,28 @@ def test_training_data_tab_uses_rollout_viewer() -> None:
     widgets = _training_run_widgets(item, include_logs=False, active_tab="data")
 
     assert any(isinstance(widget, RolloutViewer) for widget in widgets)
+
+
+def test_training_chart_failure_marks_plot_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_draw(_plot: Any, _chart: ChartSpec) -> None:
+        raise RuntimeError("plot failed")
+
+    monkeypatch.setattr("prime_lab_app.training_charts.draw_plot", fail_draw)
+    plot = LabPlotWidget(
+        ChartSpec(
+            title="Reward",
+            kind="line",
+            x=(1, 2),
+            y=(0.1, 0.2),
+            xlabel="step",
+            ylabel="reward",
+        )
+    )
+
+    plot._draw_chart()
+
+    assert plot.border_title == "Chart unavailable"
+    assert plot.border_subtitle == "Could not render chart"
 
 
 def test_training_data_tab_normalizes_serialized_rollout_samples() -> None:
@@ -1052,6 +1234,12 @@ def test_rollout_tool_calls_use_non_error_palette() -> None:
     assert TOOL_CALL in RolloutViewer.DEFAULT_CSS
     tool_call_block = RolloutViewer.DEFAULT_CSS.split(".tool-call-section", 1)[1].split("}", 1)[0]
     assert "$accent" not in tool_call_block
+
+
+def test_y_copies_on_rollout_copy_surfaces() -> None:
+    for surface in (RolloutCopyScreen, RolloutViewer, LocalEvalRunScreen):
+        copy_keys = {binding.key for binding in surface.BINDINGS if binding.action == "copy"}
+        assert "y" in copy_keys
 
 
 def test_lab_view_renders_platform_histogram_data() -> None:
@@ -1191,6 +1379,22 @@ def test_lab_view_training_config_uses_sampling_for_max_tokens() -> None:
     assert parsed["sampling"]["max_tokens"] == 8192
     assert parsed["env"] == [{"id": "primeintellect/alphabet-sort", "version": "0.1.8"}]
     HostedRLConfig.model_validate(parsed)
+
+
+def test_lab_config_factory_renders_shared_eval_and_rl_templates() -> None:
+    eval_toml = format_lab_config(
+        evaluation_config(env_id="primeintellect/wordle", num_examples=-1, max_tokens=None)
+    )
+    rl_toml = format_lab_config(rl_config(env_id="primeintellect/wordle", version="1.0.0"))
+
+    parsed_eval = toml.loads(eval_toml)
+    parsed_rl = toml.loads(rl_toml)
+
+    assert parsed_eval["eval"][0]["env_id"] == "primeintellect/wordle"
+    assert parsed_eval["eval"][0]["num_examples"] == -1
+    assert "sampling_args" not in parsed_eval["eval"][0]
+    assert parsed_rl["env"] == [{"id": "primeintellect/wordle", "version": "1.0.0"}]
+    assert parsed_rl["sampling"]["max_tokens"] == 512
 
 
 def test_lab_view_parses_json_logs() -> None:
@@ -1499,8 +1703,11 @@ def test_prime_lab_doctor_service_checks_and_fixes_workspace(tmp_path: Path) -> 
     assert (tmp_path / "configs").is_dir()
     assert (tmp_path / "environments").is_dir()
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
-    assert "./outputs" in gitignore
-    assert "*.pyc" in gitignore
+    gitignore_lines = set(gitignore.splitlines())
+    assert ".env" in gitignore_lines
+    assert "/outputs/" in gitignore_lines
+    assert "/prime-rl/" in gitignore_lines
+    assert "*.py[cod]" in gitignore_lines
     assert any(
         check.name == "Configs directory" and check.status == "PASS" for check in fixed.checks
     )
@@ -1536,7 +1743,7 @@ def test_prime_lab_doctor_checks_all_configured_agent_surfaces(
 def test_prime_lab_doctor_service_checks_configs_and_source_hygiene(tmp_path: Path) -> None:
     configs_dir = tmp_path / "configs" / "rl"
     configs_dir.mkdir(parents=True)
-    (configs_dir / "broken.toml").write_text("model = [\n", encoding="utf-8")
+    (configs_dir / "broken.toml").write_text("model = 'openai/gpt-5-mini'\n[", encoding="utf-8")
     env_dir = tmp_path / "environments" / "demo"
     (env_dir / "outputs").mkdir(parents=True)
     (env_dir / "pyproject.toml").write_text('[project]\nname = "demo"\n', encoding="utf-8")
@@ -1558,7 +1765,7 @@ def test_prime_lab_doctor_service_warns_on_config_environment_refs(tmp_path: Pat
         'model = "openai/gpt-5-mini"\nenvironments = ["missing-env"]\n',
         encoding="utf-8",
     )
-    (tmp_path / "environments").mkdir()
+    (tmp_path / "environments" / "other-env").mkdir(parents=True)
 
     missing = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
 
@@ -1576,13 +1783,11 @@ def test_prime_lab_doctor_service_warns_on_config_environment_refs(tmp_path: Pat
         encoding="utf-8",
     )
     (env_dir / "README.md").write_text("# missing\n", encoding="utf-8")
-    unpinned = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
+    resolved = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
 
     assert any(
-        check.name == "Config environment refs"
-        and check.status == "WARN"
-        and "Unpinned" in check.message
-        for check in unpinned.checks
+        check.name == "Config environment refs" and check.status == "PASS"
+        for check in resolved.checks
     )
 
 
@@ -1598,17 +1803,16 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"{dest.name}\n", encoding="utf-8")
 
-    commands: list[list[str]] = []
-
-    def fake_runner(command: Any, cwd: Path, emit: Any) -> int:
-        commands.append(list(command))
-        return 0
-
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
+    monkeypatch.setattr(
+        "prime_cli.lab_setup._download_json",
+        lambda _url: [{"name": "create-environments", "type": "dir"}],
+    )
     monkeypatch.setattr(
         "prime_lab_app.agent_capabilities.shutil.which",
         lambda command: "/bin/pi" if command == "pi" else None,
     )
+    emitted: list[str] = []
 
     assert parse_lab_sync_args(["--agent", "pi"]).agents == ("pi",)
     assert parse_lab_sync_args([]).agents == ()
@@ -1616,26 +1820,13 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
     result = run_lab_sync_service(
         LabSyncOptions(agents=("pi",)),
         workspace=tmp_path,
-        emit=lambda _text: None,
-        runner=fake_runner,
+        emit=emitted.append,
     )
 
     assert result.exit_code == 0
     assert (tmp_path / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
-    assert (tmp_path / ".prime" / "skills" / "lab-widgets" / "SKILL.md").is_file()
-    assert (tmp_path / ".prime" / "lab" / "skills" / "lab-widgets" / "SKILL.md").is_file()
-    skill_text = (tmp_path / ".prime" / "skills" / "lab-widgets" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    assert "native Lab controls" in skill_text
-    assert "not a shell" in skill_text
-    assert "Do not suggest CLI" in skill_text
-    assert "Do not name internal implementation surfaces" in skill_text
-    assert "native tools, not markdown conventions" in skill_text
-    assert "not yet supported" not in skill_text
     assert (tmp_path / ".pi" / "skills" / "create-environments").exists()
-    assert (tmp_path / ".pi" / "skills" / "lab-widgets").exists()
-    assert ["npm", "install", "-g", "pi-acp"] in commands
+    assert any("npm install -g pi-acp" in line for line in emitted)
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
     assert (tmp_path / ".prime" / "lab" / "docs" / "index.md").is_file()
     assert (tmp_path / "AGENTS.md").is_file()
@@ -1658,6 +1849,10 @@ def test_prime_lab_sync_service_preserves_workspace_agent(
         dest.write_text(f"{dest.name}\n", encoding="utf-8")
 
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
+    monkeypatch.setattr(
+        "prime_cli.lab_setup._download_json",
+        lambda _url: [{"name": "create-environments", "type": "dir"}],
+    )
 
     result = run_lab_sync_service(LabSyncOptions(), workspace=tmp_path)
 
@@ -1665,17 +1860,7 @@ def test_prime_lab_sync_service_preserves_workspace_agent(
     assert result.exit_code == 0
     assert metadata["choices"]["primary_agent"] == "opencode"
     assert (tmp_path / ".opencode" / "skills" / "create-environments").exists()
-    assert (tmp_path / ".opencode" / "skills" / "lab-widgets").exists()
-    opencode_config = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
-    assert opencode_config["mcp"]["prime_lab"]["command"] == [
-        sys.executable,
-        "-c",
-        "from prime_cli.main import run; run()",
-        "lab",
-        "mcp",
-        "--workspace",
-        str(tmp_path.resolve()),
-    ]
+    assert metadata["setup_source"] == "prime lab sync"
 
 
 def test_prime_lab_setup_service_supports_pi_agent(
@@ -1688,33 +1873,30 @@ def test_prime_lab_setup_service_supports_pi_agent(
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
 
-    commands: list[list[str]] = []
-
-    def fake_runner(command: Any, cwd: Path, emit: Any) -> int:
-        commands.append(list(command))
-        return 0
-
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
+    monkeypatch.setattr(
+        "prime_cli.lab_setup._download_json",
+        lambda _url: [{"name": "create-environments", "type": "dir"}],
+    )
     monkeypatch.setattr(
         "prime_lab_app.agent_capabilities.shutil.which",
         lambda command: "/bin/pi" if command == "pi" else None,
     )
+    emitted: list[str] = []
 
     assert parse_lab_setup_args(["--agent", "pi"]).agents == ("pi",)
 
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("pi",)),
         workspace=tmp_path,
-        emit=lambda _text: None,
-        runner=fake_runner,
+        emit=emitted.append,
     )
 
     metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
     assert result.exit_code == 0
     assert metadata["choices"]["primary_agent"] == "pi"
     assert (tmp_path / ".pi" / "skills" / "create-environments").exists()
-    assert (tmp_path / ".pi" / "skills" / "lab-widgets").exists()
-    assert ["npm", "install", "-g", "pi-acp"] in commands
+    assert any("npm install -g pi-acp" in line for line in emitted)
 
 
 def test_prime_lab_setup_service_supports_claude_code_agent(
@@ -1731,11 +1913,15 @@ def test_prime_lab_setup_service_supports_claude_code_agent(
         return 0
 
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
+    monkeypatch.setattr(
+        "prime_cli.lab_setup._download_json",
+        lambda _url: [{"name": "create-environments", "type": "dir"}],
+    )
 
-    assert parse_lab_setup_args(["--agent", "claude-code"]).agents == ("claude-code",)
+    assert parse_lab_setup_args(["--agent", "claude-code"]).agents == ("claude",)
 
     result = run_lab_setup_service(
-        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("claude-code",)),
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("claude",)),
         workspace=tmp_path,
         emit=lambda _text: None,
         runner=fake_runner,
@@ -1743,10 +1929,8 @@ def test_prime_lab_setup_service_supports_claude_code_agent(
 
     metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
     assert result.exit_code == 0
-    assert metadata["choices"]["primary_agent"] == "claude-code"
+    assert metadata["choices"]["primary_agent"] == "claude"
     assert (tmp_path / ".claude" / "skills" / "create-environments").exists()
-    assert (tmp_path / ".claude" / "skills" / "lab-widgets").exists()
-    assert agent_mcp_config_path(tmp_path, "claude-code").is_file()
 
 
 def test_prime_lab_setup_service_supports_hermes_agent(
@@ -1763,11 +1947,15 @@ def test_prime_lab_setup_service_supports_hermes_agent(
         return 0
 
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
+    monkeypatch.setattr(
+        "prime_cli.lab_setup._download_json",
+        lambda _url: [{"name": "create-environments", "type": "dir"}],
+    )
 
-    assert parse_lab_setup_args(["--agent", "hermes-agent"]).agents == ("hermes-agent",)
+    assert parse_lab_setup_args(["--agent", "hermes-agent"]).agents == ("hermes",)
 
     result = run_lab_setup_service(
-        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("hermes-agent",)),
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("hermes",)),
         workspace=tmp_path,
         emit=lambda _text: None,
         runner=fake_runner,
@@ -1775,18 +1963,16 @@ def test_prime_lab_setup_service_supports_hermes_agent(
 
     metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
     assert result.exit_code == 0
-    assert metadata["choices"]["primary_agent"] == "hermes-agent"
+    assert metadata["choices"]["primary_agent"] == "hermes"
     assert (tmp_path / ".hermes" / "skills" / "create-environments").exists()
-    assert (tmp_path / ".hermes" / "skills" / "lab-widgets").exists()
-    assert (tmp_path / ".hermes" / "config.yaml").is_file()
 
 
 def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
     assert agent_adapter("codex").prompt_command("hello") == ["codex", "exec", "hello"]
     assert agent_adapter("claude").prompt_command("hello") == ["claude", "-p", "hello"]
-    assert agent_adapter("claude").server_spec(Path("/workspace")).transport == "claude-agent-sdk"
+    assert agent_adapter("claude").server_spec(Path("/workspace")).transport == "resumable-cli"
     assert agent_adapter("codex").lab_widget_contract == "codex-dynamic-tools"
-    assert agent_adapter("claude").lab_widget_contract == "claude-sdk-tools"
+    assert agent_adapter("claude").lab_widget_contract == "mcp-stdio-tools"
     assert agent_adapter("claude-code").lab_widget_contract == "mcp-stdio-tools"
     assert agent_adapter("cursor").lab_widget_contract == "mcp-stdio-tools"
     assert agent_adapter("opencode").lab_widget_contract == "mcp-stdio-tools"
@@ -1796,6 +1982,8 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
     allowed_lab_tools = ",".join(
         (
             "mcp__prime_lab__choose",
+            "mcp__prime_lab__search_environments",
+            "mcp__prime_lab__train_model",
             "mcp__prime_lab__edit_config",
             "mcp__prime_lab__preview_action",
             "mcp__prime_lab__launch_run",
@@ -1813,11 +2001,12 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
         "--allowedTools",
         allowed_lab_tools,
         "--mcp-config",
-        "/workspace/.prime/lab/agent-mcp/claude-code.json",
+        "/workspace/.prime/lab/agent-mcp/claude.json",
         "--",
         "hello",
     ]
-    assert agent_adapter("claude-cli").name == "claude-code"
+    assert agent_adapter("claude-code").name == "claude"
+    assert agent_adapter("claude-cli").name == "claude"
     assert agent_adapter("cursor").stream_command("hello", "session-1") == [
         "cursor-agent",
         "-p",
@@ -1847,10 +2036,12 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
         "--accept-hooks",
     )
     assert agent_adapter("hermes-agent").server_spec(workspace).transport == "acp-stdio"
+    assert agent_adapter("factory-droid").name == "droid"
+    assert agent_adapter("amp-code").name == "amp"
     pi_server = agent_adapter("pi").server_spec(Path("/workspace"))
     assert pi_server.command == ("pi-acp",)
     assert pi_server.transport == "acp-stdio"
-    assert agent_adapter("hermes").name == "hermes-agent"
+    assert agent_adapter("hermes").name == "hermes"
     assert agent_adapter("codex").server_spec(Path("/workspace")).command == (
         "codex",
         "app-server",
@@ -1870,13 +2061,25 @@ def test_lab_agent_capabilities_centralize_supported_agents(
         lambda command: "/bin/tool" if command in {"pi", "codex"} else None,
     )
 
-    assert "pi" in known_agent_names()
+    assert known_agent_names() == (
+        "amp",
+        "claude",
+        "codex",
+        "cursor",
+        "droid",
+        "hermes",
+        "opencode",
+        "pi",
+    )
     pi = agent_capability("pi")
     assert pi.label == "Pi Coding Agent"
     assert pi.native_surface == "pi_acp"
     assert [requirement.binary for requirement in pi.missing_requirements()] == ["pi-acp"]
     assert pi.requirements[1].install_command == ("npm", "install", "-g", "pi-acp")
     assert agent_capability("codex").native_surface == "codex_app_server"
+    assert agent_capability("claude-code").name == "claude"
+    assert agent_capability("claude").native_surface == "mcp_config"
+    assert agent_capability("factory-droid").name == "droid"
     assert agent_capability("custom-agent").status == "not_supported"
     assert agent_capability("cursor").resolved_surface_paths(tmp_path) == (
         tmp_path.resolve() / ".cursor" / "mcp.json",
@@ -2120,6 +2323,8 @@ def test_lab_mcp_tool_definitions_include_widget_tools() -> None:
 
     assert {
         "choose",
+        "search_environments",
+        "train_model",
         "edit_config",
         "preview_action",
         "launch_run",
@@ -2128,6 +2333,139 @@ def test_lab_mcp_tool_definitions_include_widget_tools() -> None:
     }.issubset(names)
     choose_tool = next(tool for tool in tools if tool["name"] == "choose")
     assert choose_tool["inputSchema"]["type"] == "object"
+    train_tool = next(tool for tool in tools if tool["name"] == "train_model")
+    train_schema = train_tool["inputSchema"]
+    assert train_schema["additionalProperties"] is False
+    assert train_schema["required"] == [
+        "env",
+        "model",
+        "max_steps",
+        "batch_size",
+        "rollouts_per_example",
+        "max_tokens",
+    ]
+    assert set(train_schema["properties"]) == {
+        "env",
+        "model",
+        "max_steps",
+        "batch_size",
+        "rollouts_per_example",
+        "max_tokens",
+    }
+    assert "environments" not in train_schema["properties"]
+    assert "config" not in train_schema["properties"]
+    assert "title" not in train_schema["properties"]
+    edit_tool = next(tool for tool in tools if tool["name"] == "edit_config")
+    assert edit_tool["inputSchema"]["additionalProperties"] is False
+    assert edit_tool["inputSchema"]["properties"]["config_kind"]["enum"] == ["eval", "gepa"]
+
+
+def test_lab_train_model_tool_uses_explicit_training_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "prime_lab_app.agent_widget_model._training_model_options",
+        lambda: _training_model_options_for_name("openai/gpt-oss-20b"),
+    )
+    action = lab_widget_action_from_tool_call(
+        {
+            "namespace": "lab",
+            "tool": "train_model",
+            "callId": "train-1",
+            "arguments": {
+                "env": "primeintellect/wordle",
+                "model": "openai/gpt-oss-20b",
+                "max_steps": 10,
+                "rollouts_per_example": 8,
+                "batch_size": 256,
+                "max_tokens": 2048,
+            },
+        }
+    )
+
+    assert action["kind"] == "run_launcher"
+    assert action["title"] == "Train wordle"
+    assert action["payload"]["config_kind"] == "rl"
+    assert action["payload"]["config"] == {
+        "model": "openai/gpt-oss-20b",
+        "env": [{"id": "primeintellect/wordle"}],
+        "max_steps": 10,
+        "rollouts_per_example": 8,
+        "batch_size": 256,
+        "sampling": {"max_tokens": 2048},
+    }
+    model = build_agent_widget_model(
+        AgentChatMessage("system", "Action ready", "widget", action),
+        tmp_path,
+    )
+    fields = {field.name: field for field in model.fields}
+    build = build_agent_widget_config(model, {})
+
+    selected_model, selected_controls = widget_training_model_option_parts(fields["model"].value)
+    assert selected_model == "openai/gpt-oss-20b"
+    assert selected_controls == {"reasoning_effort": "medium"}
+    assert build.parsed["sampling"] == {
+        "max_tokens": 2048,
+        "reasoning_effort": "medium",
+    }
+
+
+def test_lab_environment_search_uses_prime_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class Completed:
+        returncode = 0
+        stdout = json.dumps(
+            {
+                "environments": [
+                    {
+                        "environment": "primeintellect/wordle",
+                        "description": "Wordle environment",
+                        "action_status": "SUCCESS",
+                    }
+                ]
+            }
+        )
+
+    def fake_run(command: list[str], **kwargs: Any) -> Completed:
+        calls.append(command)
+        assert kwargs["cwd"] == str(tmp_path)
+        assert kwargs["timeout"] == 12
+        return Completed()
+
+    monkeypatch.setattr("prime_lab_app.app.subprocess.run", fake_run)
+
+    rows = _search_platform_environments("wordle", 5, tmp_path)
+
+    assert rows == [
+        {
+            "id": "primeintellect/wordle",
+            "label": "primeintellect/wordle",
+            "description": "Wordle environment",
+            "status": "SUCCESS",
+            "scope": "mine",
+        }
+    ]
+    assert calls[0] == [
+        "prime",
+        "env",
+        "list",
+        "--output",
+        "json",
+        "--num",
+        "5",
+        "--sort",
+        "updated_at",
+        "--order",
+        "desc",
+        "--search",
+        "wordle",
+        "--mine",
+    ]
 
 
 def test_lab_mcp_stdio_server_lists_and_forwards_tools(tmp_path: Path) -> None:
@@ -2245,71 +2583,6 @@ def test_agent_runtime_widget_call_closes_active_assistant_turn(tmp_path: Path) 
     assert messages[0] == AgentChatMessage("assistant", "Preparing launch.")
     assert messages[1].status == "widget"
     assert messages[1].metadata["kind"] == "choice_picker"
-
-
-def test_agent_runtime_supports_claude_code_with_lab_mcp_config(tmp_path: Path) -> None:
-    commands: list[list[str]] = []
-    messages: tuple[Any, ...] = ()
-
-    class FakeCliProcess:
-        def __init__(self) -> None:
-            self.stdin = None
-            self.stderr = iter(())
-            self.stdout = iter(
-                [
-                    json.dumps(
-                        {
-                            "type": "assistant",
-                            "message": {
-                                "role": "assistant",
-                                "content": [{"type": "text", "text": "ready"}],
-                            },
-                            "session_id": "claude-code-session",
-                        }
-                    )
-                    + "\n"
-                ]
-            )
-
-        def poll(self) -> int | None:
-            return None
-
-        def wait(self, timeout: float | None = None) -> int:
-            return 0
-
-    def fake_popen(command: list[str], **_kwargs: Any) -> FakeCliProcess:
-        commands.append(command)
-        return FakeCliProcess()
-
-    def on_messages(value: Any) -> None:
-        nonlocal messages
-        messages = value
-
-    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
-    runtime.start(tmp_path, "claude-code")
-
-    assert runtime.state.status == "connected"
-    assert runtime.state.transport == "resumable-cli"
-    config_path = agent_mcp_config_path(tmp_path, "claude-code")
-    assert config_path.exists()
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    assert config["mcpServers"]["prime_lab"]["args"] == [
-        "-c",
-        "from prime_cli.main import run; run()",
-        "lab",
-        "mcp",
-        "--workspace",
-        str(tmp_path.resolve()),
-    ]
-
-    runtime.send_prompt("hello")
-
-    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
-    assert "--mcp-config" in commands[-1]
-    assert str(config_path) in commands[-1]
-    assert "Native Lab tools are available" in commands[-1][-1]
-    assert messages
-    assert messages[-1].content == "ready"
 
 
 def test_agent_runtime_supports_cursor_with_workspace_mcp_config(tmp_path: Path) -> None:
@@ -2619,117 +2892,70 @@ def test_agent_runtime_supports_hermes_with_mcp_config(
     runtime.stop()
 
 
-def test_agent_runtime_supports_claude_agent_sdk(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeOptions:
-        def __init__(
-            self,
-            cwd: str = "",
-            resume_session_id: str = "",
-            mcp_servers: dict[str, Any] | None = None,
-            allowed_tools: list[str] | None = None,
-            system_prompt: str = "",
-        ) -> None:
-            self.cwd = cwd
-            self.resume_session_id = resume_session_id
-            self.mcp_servers = mcp_servers or {}
-            self.allowed_tools = allowed_tools or []
-            self.system_prompt = system_prompt
+def test_agent_runtime_supports_claude_code_with_lab_mcp_config(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    messages: tuple[Any, ...] = ()
 
-    async def fake_query(prompt: str, options: FakeOptions) -> Any:
-        assert prompt.endswith("\n\nhello")
-        assert "lab_edit_config" not in prompt
-        assert "Native Lab tools are available" in prompt
-        assert "not visible" not in prompt
-        assert "not yet supported" not in prompt
-        assert "not yet supported" not in options.system_prompt
-        assert options.cwd == str(tmp_path)
-        assert "prime_lab" in options.mcp_servers
-        assert "choose" in options.allowed_tools
-        assert "mcp__prime_lab__choose" in options.allowed_tools
-        assert "launch_run" in options.allowed_tools
-        assert "edit_config" in options.system_prompt
-        tools = options.mcp_servers["prime_lab"]["tools"]
-        choose_tool = next(tool for tool in tools if tool["name"] == "choose")
-        tool_result = await choose_tool["callback"](
-            {"prompt": "Pick env", "options": [{"id": "env", "label": "Env"}]}
-        )
-        assert '"ok": true' in tool_result["content"][0]["text"]
-        yield {"type": "system", "session_id": "sdk-session-1"}
-        yield {
-            "type": "assistant",
-            "message": {
-                "id": "sdk-message-1",
-                "content": [{"type": "text", "text": "hello"}],
-            },
-        }
-        yield {
-            "type": "assistant",
-            "message": {
-                "id": "sdk-message-1",
-                "content": [{"type": "text", "text": "hello world"}],
-            },
-        }
+    class FakeCliProcess:
+        def __init__(self) -> None:
+            self.stdin = None
+            self.stderr = iter(())
+            self.stdout = iter(
+                [
+                    json.dumps(
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "ready"}],
+                            },
+                            "session_id": "claude-session",
+                        }
+                    )
+                    + "\n"
+                ]
+            )
 
-    def fake_tool(name: str, description: str, input_schema: dict[str, Any]) -> Any:
-        assert name
-        assert description
-        assert input_schema.get("type") == "object"
+        def poll(self) -> int | None:
+            return None
 
-        def decorate(callback: Any) -> dict[str, Any]:
-            return {"name": name, "callback": callback}
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
 
-        return decorate
+    def fake_popen(command: list[str], **_kwargs: Any) -> FakeCliProcess:
+        commands.append(command)
+        return FakeCliProcess()
 
-    def fake_create_server(
-        name: str,
-        *,
-        version: str = "1.0.0",
-        tools: list[Any] | None = None,
-    ) -> dict[str, Any]:
-        return {"name": name, "version": version, "tools": tools or []}
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
 
-    monkeypatch.setitem(
-        sys.modules,
-        "claude_agent_sdk",
-        types.SimpleNamespace(
-            query=fake_query,
-            ClaudeAgentOptions=FakeOptions,
-            tool=fake_tool,
-            create_sdk_mcp_server=fake_create_server,
-        ),
-    )
-
-    done = threading.Event()
-    latest_messages: tuple[Any, ...] | None = None
-    actions: list[dict[str, Any]] = []
-
-    def on_messages(messages: Any) -> None:
-        nonlocal latest_messages
-        latest_messages = messages
-        if messages and messages[-1].role == "assistant" and messages[-1].status != "streaming":
-            done.set()
-
-    runtime = AgentRuntime(on_messages=on_messages, on_action=actions.append)
-    runtime.start(tmp_path, "claude")
+    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime.start(tmp_path, "claude-code")
 
     assert runtime.state.status == "connected"
-    assert runtime.state.transport == "claude-agent-sdk"
+    assert runtime.state.agent == "claude"
+    assert runtime.state.transport == "resumable-cli"
+    config_path = agent_mcp_config_path(tmp_path, "claude")
+    assert config_path.exists()
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["mcpServers"]["prime_lab"]["args"] == [
+        "-c",
+        "from prime_cli.main import run; run()",
+        "lab",
+        "mcp",
+        "--workspace",
+        str(tmp_path.resolve()),
+    ]
 
     runtime.send_prompt("hello")
 
-    assert done.wait(timeout=2)
-    assert runtime.state.session_id == "sdk-session-1"
-    assert latest_messages is not None
-    assert len(latest_messages) > 0
-    assert latest_messages[-1].content == "hello world"
-    assert actions
-    assert actions[-1]["source"] == "native_tool"
-    assert actions[-1]["tool"] == "choose"
-    assert actions[-1]["title"] == "Pick env"
-    assert actions[-1]["payload"]["candidates"] == [{"id": "env", "label": "Env"}]
+    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
+    assert "--mcp-config" in commands[-1]
+    assert str(config_path) in commands[-1]
+    assert "Native Lab tools are available" in commands[-1][-1]
+    assert messages
+    assert messages[-1].content == "ready"
 
 
 def test_agent_runtime_supports_codex_app_stdio_chat(tmp_path: Path) -> None:
@@ -2915,6 +3141,15 @@ def test_agent_chat_transcript_renders_assistant_markdown() -> None:
     assert "print" in rendered
     assert "hello" in rendered
     assert "```" not in rendered
+
+
+def test_agent_thinking_turn_animates_empty_streaming_response() -> None:
+    first = _render_renderable(_agent_thinking_turn(0))
+    second = _render_renderable(_agent_thinking_turn(1))
+
+    assert "Thinking" in first
+    assert "Thinking" in second
+    assert first != second
 
 
 def test_agent_chat_transcript_renders_lab_widget_card() -> None:
@@ -3301,6 +3536,22 @@ async def test_prime_lab_app_ctrl_w_reopens_launch_screen(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_prime_lab_app_w_opens_workspace_settings(tmp_path: Path) -> None:
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, LaunchScreen)
+
+        await pilot.press("w")
+        await pilot.pause()
+
+        assert not isinstance(app.screen, LaunchScreen)
+        assert app._active_section_key == "workspace"
+
+
+@pytest.mark.asyncio
 async def test_prime_lab_app_auto_starts_configured_agent(tmp_path: Path) -> None:
     (tmp_path / ".prime").mkdir()
     (tmp_path / ".prime" / "lab.json").write_text(
@@ -3315,7 +3566,7 @@ async def test_prime_lab_app_auto_starts_configured_agent(tmp_path: Path) -> Non
 
         assert app._agent_state.agent == "claude"
         assert app._agent_state.status == "connected"
-        assert app._agent_state.transport == "claude-agent-sdk"
+        assert app._agent_state.transport == "resumable-cli"
         status_text = _render_renderable(app._statusbar_text())
         assert "✓ Claude" in status_text
         assert "Claude connected" not in status_text
@@ -3608,7 +3859,7 @@ async def test_prime_lab_app_agent_slash_menu_uses_arrow_selection(tmp_path: Pat
         await pilot.press("enter")
         await pilot.pause()
 
-        assert app._agent_state.agent == "claude-code"
+        assert app._agent_state.agent == "codex"
 
 
 @pytest.mark.asyncio
@@ -3668,13 +3919,22 @@ async def test_prime_lab_app_agent_prompt_expands_and_preserves_large_paste(
         await pilot.pause()
 
         assert isinstance(app.screen, AgentChatScreen)
-        assert prompt.text == ""
-        assert quit_calls == 0
+        assert prompt.text == "clear me"
+        assert quit_calls == 1
 
+        prompt.clear_prompt()
+        prompt.focus()
+        await pilot.press("b")
+        await pilot.pause()
+
+        assert isinstance(app.screen, AgentChatScreen)
+        assert prompt.text == "b"
+
+        prompt.clear_prompt()
         await pilot.press("ctrl+c")
         await pilot.pause()
 
-        assert quit_calls == 1
+        assert quit_calls == 2
 
 
 @pytest.mark.asyncio
@@ -3899,10 +4159,43 @@ async def test_prime_lab_app_chat_mounts_lab_widget_cards(tmp_path: Path) -> Non
         assert input_values["rollouts_per_example"] == "3"
         assert "max_concurrent" in input_values
         assert input_values["max_concurrent"] == "auto"
-        assert list(cards[0].query(Select))
+        assert input_values["model"] == ""
+        assert not list(cards[0].query(Select))
         button_labels = {str(button.label) for button in app.screen.query(Button)}
         assert "Launch" in button_labels
         assert "Stop" in button_labels
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_ctrl_c_quits_from_agent_chat_screen(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "cursor"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+    quit_calls = 0
+
+    def fake_quit() -> None:
+        nonlocal quit_calls
+        quit_calls += 1
+
+    app.action_quit = fake_quit  # type: ignore[method-assign]
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+
+        assert isinstance(app.screen, AgentChatScreen)
+        app.screen.query_one("#agent-header", Static).focus()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert quit_calls == 1
 
 
 @pytest.mark.asyncio
@@ -4102,7 +4395,7 @@ def test_prime_lab_app_chat_widget_completes_partial_eval_config(tmp_path: Path)
 
     assert model.title == "Evaluate reverse-text"
     assert values["envs"] == "reverse-text"
-    assert values["model"] == "openai/gpt-4.1-mini"
+    assert values["model"] == ""
     assert values["num_examples"] == "50"
     assert values["rollouts_per_example"] == "3"
     assert values["max_tokens"] == "1024"
@@ -4111,7 +4404,12 @@ def test_prime_lab_app_chat_widget_completes_partial_eval_config(tmp_path: Path)
 
 def test_prime_lab_app_chat_widget_uses_default_environment_for_rl_config(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "prime_lab_app.agent_widget_model._training_model_options",
+        lambda: _training_model_options_for_name("future/gpt-oss-next"),
+    )
     message = AgentChatMessage(
         "system",
         "Action ready",
@@ -4123,8 +4421,8 @@ def test_prime_lab_app_chat_widget_uses_default_environment_for_rl_config(
                 "kind": "run_launcher",
                 "config_kind": "rl",
                 "defaults": {
-                    "model": "openai/gpt-oss-20b",
-                    "environment": "primeintellect/wordle",
+                    "model": "future/gpt-oss-next",
+                    "env": [{"id": "primeintellect/wordle"}],
                 },
             },
         },
@@ -4136,8 +4434,191 @@ def test_prime_lab_app_chat_widget_uses_default_environment_for_rl_config(
 
     assert model.title == "Train wordle"
     assert values["envs"] == "primeintellect/wordle"
-    assert values["model"] == "openai/gpt-oss-20b"
+    selected_model, selected_controls = widget_training_model_option_parts(values["model"])
+    assert selected_model == "future/gpt-oss-next"
+    assert selected_controls == {"reasoning_effort": "medium"}
     assert build.parsed["env"] == [{"id": "primeintellect/wordle"}]
+    assert build.parsed["model"] == "future/gpt-oss-next"
+    assert build.parsed["sampling"]["reasoning_effort"] == "medium"
+
+
+def test_training_model_options_expand_reasoning_variants() -> None:
+    qwen35 = _training_model_options_for_name("future/Qwen3.5-New")
+    assert [label for label, _value in qwen35] == [
+        "future/Qwen3.5-New (thinking)",
+        "future/Qwen3.5-New (instruct)",
+    ]
+    assert [widget_training_model_option_parts(value) for _label, value in qwen35] == [
+        ("future/Qwen3.5-New", {"enable_thinking": "true"}),
+        ("future/Qwen3.5-New", {"enable_thinking": "false"}),
+    ]
+
+    qwen36 = _training_model_options_for_name("future/Qwen3.6-New")
+    assert [label for label, _value in qwen36] == [
+        "future/Qwen3.6-New (thinking)",
+        "future/Qwen3.6-New (instruct)",
+    ]
+    assert [widget_training_model_option_parts(value) for _label, value in qwen36] == [
+        ("future/Qwen3.6-New", {"enable_thinking": "true"}),
+        ("future/Qwen3.6-New", {"enable_thinking": "false"}),
+    ]
+
+    nemotron = _training_model_options_for_name("future/Nemotron-Next")
+    assert [label for label, _value in nemotron] == [
+        "future/Nemotron-Next (thinking)",
+        "future/Nemotron-Next (instruct)",
+    ]
+    assert [widget_training_model_option_parts(value) for _label, value in nemotron] == [
+        ("future/Nemotron-Next", {"enable_thinking": "true"}),
+        ("future/Nemotron-Next", {"enable_thinking": "false"}),
+    ]
+
+    gpt_oss = _training_model_options_for_name("future/gpt-oss-next")
+    assert [label for label, _value in gpt_oss] == [
+        "future/gpt-oss-next (low)",
+        "future/gpt-oss-next (medium)",
+        "future/gpt-oss-next (high)",
+    ]
+    assert [widget_training_model_option_parts(value) for _label, value in gpt_oss] == [
+        ("future/gpt-oss-next", {"reasoning_effort": "low"}),
+        ("future/gpt-oss-next", {"reasoning_effort": "medium"}),
+        ("future/gpt-oss-next", {"reasoning_effort": "high"}),
+    ]
+
+
+def test_prime_lab_app_chat_widget_shows_all_train_models_for_rl_dropdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "endpoints.toml").write_text(
+        '[[endpoint]]\nmodel = "endpoint/should-not-drive-training"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "prime_lab_app.agent_widget_model._training_model_options",
+        lambda: (
+            *_training_model_options_for_name("future/gpt-oss-next"),
+            *_training_model_options_for_name("future/Qwen3.5-New"),
+            *_training_model_options_for_name("other/plain-model"),
+        ),
+    )
+    message = AgentChatMessage(
+        "system",
+        "Action ready",
+        "widget",
+        {
+            "kind": "run_launcher",
+            "title": "Train: wordle",
+            "payload": {
+                "kind": "run_launcher",
+                "config_kind": "rl",
+                "defaults": {
+                    "model": "future/Qwen3.5-New",
+                    "env": [{"id": "primeintellect/wordle"}],
+                },
+            },
+        },
+    )
+
+    model = build_agent_widget_model(message, tmp_path)
+    fields = {field.name: field for field in model.fields}
+
+    assert fields["envs"].widget == "input"
+    assert fields["envs"].value == "primeintellect/wordle"
+    assert fields["model"].widget == "select"
+    selected_model, selected_controls = widget_training_model_option_parts(fields["model"].value)
+    assert selected_model == "future/Qwen3.5-New"
+    assert selected_controls == {"enable_thinking": "true"}
+    assert [label for label, _value in fields["model"].options] == [
+        "future/gpt-oss-next (low)",
+        "future/gpt-oss-next (medium)",
+        "future/gpt-oss-next (high)",
+        "future/Qwen3.5-New (thinking)",
+        "future/Qwen3.5-New (instruct)",
+        "other/plain-model",
+    ]
+    assert [
+        widget_training_model_option_parts(value) for _label, value in fields["model"].options
+    ] == [
+        ("future/gpt-oss-next", {"reasoning_effort": "low"}),
+        ("future/gpt-oss-next", {"reasoning_effort": "medium"}),
+        ("future/gpt-oss-next", {"reasoning_effort": "high"}),
+        ("future/Qwen3.5-New", {"enable_thinking": "true"}),
+        ("future/Qwen3.5-New", {"enable_thinking": "false"}),
+        ("other/plain-model", {}),
+    ]
+    assert "enable_thinking" not in fields
+    assert "reasoning_effort" not in fields
+    build = build_agent_widget_config(model, {})
+
+    assert build.parsed["model"] == "future/Qwen3.5-New"
+    assert build.parsed["sampling"]["enable_thinking"] is True
+
+
+def test_prime_lab_app_chat_widget_drops_unavailable_rl_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "prime_lab_app.agent_widget_model._training_model_options",
+        lambda: (
+            *_training_model_options_for_name("future/gpt-oss-next"),
+            *_training_model_options_for_name("future/Qwen3.5-New"),
+        ),
+    )
+    message = AgentChatMessage(
+        "system",
+        "Action ready",
+        "widget",
+        {
+            "kind": "run_launcher",
+            "payload": {
+                "kind": "run_launcher",
+                "config_kind": "rl",
+                "defaults": {
+                    "model": "unavailable-requested-model",
+                    "env": [{"id": "primeintellect/wordle"}],
+                },
+            },
+        },
+    )
+
+    model = build_agent_widget_model(message, tmp_path)
+    fields = {field.name: field for field in model.fields}
+
+    selected_model, selected_controls = widget_training_model_option_parts(fields["model"].value)
+    assert selected_model == "future/gpt-oss-next"
+    assert selected_controls == {"reasoning_effort": "medium"}
+    assert [label for label, _value in fields["model"].options] == [
+        "future/gpt-oss-next (low)",
+        "future/gpt-oss-next (medium)",
+        "future/gpt-oss-next (high)",
+        "future/Qwen3.5-New (thinking)",
+        "future/Qwen3.5-New (instruct)",
+    ]
+    build = build_agent_widget_config(model, {})
+
+    assert build.parsed["model"] == "future/gpt-oss-next"
+    assert build.parsed["sampling"]["reasoning_effort"] == "medium"
+    assert "unavailable-requested-model" not in {value for _label, value in fields["model"].options}
+
+
+def test_config_builder_requires_rl_model_and_environment() -> None:
+    values = {
+        "config-name": "missing-required",
+        "config-model": "",
+        "config-envs": "",
+        "config-max-steps": "5",
+        "config-rollouts": "1",
+        "config-batch-size": "1",
+        "config-max-tokens": "64",
+    }
+
+    build = build_config_from_fields({}, "rl", lambda field_id: values.get(field_id, ""))
+
+    assert "model is required" in build.errors
+    assert "at least one environment is required" in build.errors
 
 
 @pytest.mark.asyncio
@@ -4256,8 +4737,8 @@ async def test_prime_lab_app_chat_widget_prefills_local_env_and_endpoint_model(
             input_widget.name: input_widget.value for input_widget in card.query(ClearableInput)
         }
         selects = {select.name: select.value for select in card.query(Select)}
-        assert "envs" not in fields
-        assert selects["envs"] == "reverse-text"
+        assert fields["envs"] == "reverse-text"
+        assert "envs" not in selects
         assert selects["model"] == "local/reverse-model"
 
 
@@ -4424,6 +4905,73 @@ async def test_prime_lab_app_chat_widget_launch_button_streams_inline_output(
 
 
 @pytest.mark.asyncio
+async def test_prime_lab_app_chat_widget_stops_launch_when_unmounted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "cursor"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+    widget_message = AgentChatMessage(
+        "system",
+        "Action ready",
+        "widget",
+        {
+            "type": "widget_requested",
+            "kind": "run_launcher",
+            "title": "Eval: reverse-text",
+            "payload": {
+                "kind": "run_launcher",
+                "title": "Eval: reverse-text",
+                "config_kind": "eval",
+                "env_id": "reverse-text",
+                "defaults": {"model": "openai/gpt-4.1-mini"},
+            },
+        },
+    )
+    runners: list[Any] = []
+
+    class FakeLaunchRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.stopped = False
+            runners.append(self)
+
+        def run(self) -> None:
+            deadline = time.monotonic() + 1
+            while not self.stopped and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setattr("prime_lab_app.agent_cards.ConfigLaunchRunner", FakeLaunchRunner)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, AgentChatScreen)
+        app._set_agent_messages((widget_message,))
+        app.screen._refresh_runtime_view()
+        await pilot.pause()
+
+        card = app.screen.query_one(AgentWidgetCard)
+        card.query_one(".agent-widget-action-launch", Button).press()
+        await pilot.pause()
+        assert runners
+
+        app._set_agent_messages(())
+        app.screen._refresh_runtime_view()
+        await pilot.pause()
+
+        assert runners[0].stopped is True
+
+
+@pytest.mark.asyncio
 async def test_prime_lab_app_launch_grid_training_and_explore(tmp_path: Path) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
@@ -4572,6 +5120,35 @@ def test_training_platform_url_uses_dashboard_route() -> None:
         _training_platform_url("https://app.test/", {"id": "run-123"})
         == "https://app.test/dashboard/training/run-123"
     )
+
+
+def test_training_run_screen_reports_platform_open_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notifications: list[tuple[str, str | None]] = []
+    screen = TrainingRunScreen(
+        LabItem(
+            key="training:run-123",
+            section="training",
+            title="run-123",
+            subtitle="",
+            status="RUNNING",
+            raw={"id": "run-123"},
+        ),
+        lambda item, *_args: item,
+        frontend_url="https://app.test",
+    )
+
+    monkeypatch.setattr("prime_lab_app.training_screen.webbrowser.open", lambda _url: False)
+    monkeypatch.setattr(
+        screen,
+        "notify",
+        lambda message, **kwargs: notifications.append((message, kwargs.get("severity"))),
+    )
+
+    screen.action_open_platform()
+
+    assert notifications == [("Could not open the training run in a browser.", "warning")]
 
 
 @pytest.mark.asyncio
@@ -4791,7 +5368,7 @@ async def test_prime_lab_app_opens_config_run_screen(tmp_path: Path) -> None:
     config_path = tmp_path / "configs" / "rl" / "train.toml"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
-        'model = "openai/gpt-5-mini"\nmax_steps = 10\nenvironments = ["gsm8k"]\n',
+        'model = "openai/gpt-5-mini"\nmax_steps = 10\n[[env]]\nid = "primeintellect/gsm8k"\n',
         encoding="utf-8",
     )
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
@@ -4808,6 +5385,59 @@ async def test_prime_lab_app_opens_config_run_screen(tmp_path: Path) -> None:
 
         assert isinstance(app.screen, ConfigRunScreen)
         assert config_item.raw["workspace"] == str(tmp_path.resolve())
+
+
+@pytest.mark.asyncio
+async def test_config_run_keeps_b_as_text_when_input_focused(tmp_path: Path) -> None:
+    config_path = tmp_path / "configs" / "rl" / "train.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        'model = ""\nmax_steps = 10\n[[env]]\nid = "primeintellect/gsm8k"\n',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot)
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        app.set_home_group("configs")
+        await pilot.pause()
+        config_item = next(item for item in app._visible_items if item.raw["type"] == "config_file")
+        app._show_item(config_item)
+        app.action_load_detail()
+        await pilot.pause()
+
+        assert isinstance(app.screen, ConfigRunScreen)
+        model_input = app.screen.query_one("#config-model", ClearableInput)
+        model_input.focus()
+        await pilot.press("b")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ConfigRunScreen)
+        assert model_input.value == "b"
+
+
+@pytest.mark.asyncio
+async def test_b_goes_back_from_setup_screen(tmp_path: Path) -> None:
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._dismiss_launch_screen()
+        await pilot.pause()
+        section = snapshot.section("workspace")
+        assert section is not None
+        setup_item = next(item for item in section.items if item.raw.get("type") == "setup_action")
+        app._show_item(setup_item)
+        app.action_load_detail()
+        await pilot.pause()
+
+        assert isinstance(app.screen, SetupScreen)
+        await pilot.press("b")
+        await pilot.pause()
+
+        assert not isinstance(app.screen, SetupScreen)
 
 
 @pytest.mark.asyncio
@@ -4838,7 +5468,7 @@ async def test_config_run_launch_uses_native_follow_screen(
     config_path = tmp_path / "configs" / "rl" / "train.toml"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
-        'model = "openai/gpt-5-mini"\nmax_steps = 10\nenvironments = ["gsm8k"]\n',
+        'model = "openai/gpt-5-mini"\nmax_steps = 10\n[[env]]\nid = "primeintellect/gsm8k"\n',
         encoding="utf-8",
     )
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
@@ -4860,8 +5490,37 @@ async def test_config_run_launch_uses_native_follow_screen(
         await pilot.pause()
 
         assert isinstance(app.screen, ConfigLaunchScreen)
-        assert commands and commands[0][:3] == ["prime", "rl", "run"]
+        assert commands and commands[0][:3] == ["prime", "train", "run"]
         assert (tmp_path / ".prime" / "lab" / "configs" / "rl" / "train.toml").is_file()
+
+
+def test_config_launch_unmount_stops_active_runner(tmp_path: Path) -> None:
+    runners: list[Any] = []
+
+    class FakeLaunchRunner:
+        def __init__(self) -> None:
+            self.stopped = False
+            runners.append(self)
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    screen = ConfigLaunchScreen(
+        command="prime train run train.toml",
+        workspace=tmp_path,
+        follow_training_logs=True,
+    )
+    runner = FakeLaunchRunner()
+    screen._runner = runner
+    screen._running = True
+
+    screen.on_unmount()
+    screen._append_output("late output\n")
+    screen._finish_runner("launch", 0)
+
+    assert runners[0].stopped is True
+    assert screen._closed is True
+    assert screen._running is False
 
 
 @pytest.mark.asyncio
@@ -4896,7 +5555,7 @@ async def test_config_launch_follows_training_logs_from_hint(
     config_path = tmp_path / "configs" / "rl" / "train.toml"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
-        'model = "openai/gpt-5-mini"\nmax_steps = 10\nenvironments = ["gsm8k"]\n',
+        'model = "openai/gpt-5-mini"\nmax_steps = 10\n[[env]]\nid = "primeintellect/gsm8k"\n',
         encoding="utf-8",
     )
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
@@ -4920,12 +5579,158 @@ async def test_config_launch_follows_training_logs_from_hint(
                 break
 
         assert commands[:2] == [
-            ["prime", "rl", "run", ".prime/lab/configs/rl/train.toml"],
+            ["prime", "train", "run", ".prime/lab/configs/rl/train.toml"],
             ["prime", "rl", "logs", "abc123run", "-f"],
         ]
         assert isinstance(app.screen, ConfigLaunchScreen)
         assert "Following run logs with: prime rl logs abc123run -f" in app.screen._output
         assert "step 1 reward 0.5" in app.screen._output
+
+
+def test_training_log_follow_command_uses_dashboard_and_run_id_hints() -> None:
+    from_url = extract_training_log_follow_command(
+        "Created run: https://app.test/dashboard/training/urlrun123"
+    )
+    from_hint = extract_training_log_follow_command("Training run id: hint_run_123")
+
+    assert from_url is not None
+    assert from_url.argv == ("prime", "rl", "logs", "urlrun123", "-f")
+    assert from_hint is not None
+    assert from_hint.argv == ("prime", "rl", "logs", "hint_run_123", "-f")
+
+
+def test_rl_client_preview_run_uses_preview_endpoint() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class FakeClient:
+        def post(self, path: str, *, json: dict[str, Any]) -> dict[str, Any]:
+            calls.append((path, json))
+            return {"ok": True, "warnings": []}
+
+    result = RLClient(FakeClient()).preview_run({"model": {"name": "openai/gpt-5-mini"}})
+
+    assert result == {"ok": True, "warnings": []}
+    assert calls == [("/rft/runs/preview", {"model": {"name": "openai/gpt-5-mini"}})]
+
+
+def test_hosted_eval_preview_uses_preview_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class FakeConfig:
+        team_id = "team-123"
+
+    class FakeClient:
+        config = FakeConfig()
+
+        def post(self, path: str, *, json: dict[str, Any]) -> dict[str, Any]:
+            calls.append((path, json))
+            return {"ok": True}
+
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", FakeClient)
+
+    result = _preview_hosted_evaluation(
+        HostedEvalConfig(
+            environment_id="primeintellect/gsm8k",
+            inference_model="openai/gpt-4.1-mini",
+            num_examples=5,
+            rollouts_per_example=1,
+        )
+    )
+
+    assert result == {"ok": True}
+    assert calls[0][0] == "/hosted-evaluations/preview"
+    assert calls[0][1]["team_id"] == "team-123"
+
+
+def test_lab_platform_preview_reports_success_and_warnings() -> None:
+    class FakeRLPreviewClient:
+        def __init__(self, _api_client: object) -> None:
+            pass
+
+        def preview_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+            assert payload["model"] == "openai/gpt-5-mini"
+            return {"message": "Preview ready", "warnings": ["Queue is busy"]}
+
+    result = preview_lab_config(
+        "rl",
+        {"model": "openai/gpt-5-mini"},
+        api_client_factory=lambda: object(),
+        rl_client_factory=FakeRLPreviewClient,
+    )
+
+    assert result.status == "warning"
+    assert result.message == "Preview ready"
+    assert result.warnings == ("Queue is busy",)
+
+
+def test_lab_platform_preview_falls_back_when_unavailable() -> None:
+    class FakeAPIClient:
+        def post(self, _path: str, *, json: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError("404 Not Found")
+
+    result = preview_lab_config(
+        "eval",
+        {"model": "openai/gpt-5-mini"},
+        api_client_factory=FakeAPIClient,
+    )
+
+    assert result.status == "unavailable"
+    assert "Platform preview unavailable" in result.message
+
+
+@pytest.mark.asyncio
+async def test_config_launch_reports_missing_training_log_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        stdout = ["Created training run.\n"]
+
+        def wait(self) -> int:
+            return 0
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            return None
+
+    def fake_popen(_command: list[str], **_kwargs: Any) -> FakeProcess:
+        return FakeProcess()
+
+    monkeypatch.setattr("prime_lab_app.launch_runner.subprocess.Popen", fake_popen)
+
+    config_path = tmp_path / "configs" / "rl" / "train.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        'model = "openai/gpt-5-mini"\nmax_steps = 10\n[[env]]\nid = "primeintellect/gsm8k"\n',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot)
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        app.set_home_group("configs")
+        await pilot.pause()
+        config_item = next(item for item in app._visible_items if item.raw["type"] == "config_file")
+        app._show_item(config_item)
+        app.action_load_detail()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, ConfigRunScreen)
+
+        screen.launch()
+        for _ in range(10):
+            await pilot.pause()
+            if (
+                isinstance(app.screen, ConfigLaunchScreen)
+                and "no live log command" in app.screen._output
+            ):
+                break
+
+        assert isinstance(app.screen, ConfigLaunchScreen)
+        assert "no live log command was detected" in app.screen._output
 
 
 @pytest.mark.asyncio
@@ -4966,7 +5771,7 @@ async def test_config_launch_retries_training_logs_until_ready(
     config_path = tmp_path / "configs" / "rl" / "train.toml"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
-        'model = "openai/gpt-5-mini"\nmax_steps = 10\nenvironments = ["gsm8k"]\n',
+        'model = "openai/gpt-5-mini"\nmax_steps = 10\n[[env]]\nid = "primeintellect/gsm8k"\n',
         encoding="utf-8",
     )
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))

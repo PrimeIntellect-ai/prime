@@ -22,6 +22,7 @@ from textual.widgets import Button, Footer, Input, Markdown, OptionList, Static
 from textual.widgets._option_list import Option
 
 from .cache import CachedEnvironmentSource, cached_environment_source, ensure_environment_source
+from .config_factory import evaluation_config, format_lab_config, rl_config
 from .config_screen import ConfigLaunchScreen, ConfigRunScreen
 from .environment_records import environment_platform_url
 from .models import LabItem
@@ -30,7 +31,6 @@ from .readme import readme_markdown as _readme_markdown
 from .rows import item_badges_text
 from .shell import lab_header
 from .source_browser import SourceEntry, format_size, readme_path, source_entries, source_preview
-from .toml_format import format_toml_blocks
 from .widgets import ClearableInput, LoadingChart
 
 DetailLoader = Callable[[LabItem, bool, int, int, int | None], LabItem]
@@ -51,6 +51,7 @@ class EnvironmentScreen(Screen[None]):
 
     BINDINGS = [
         Binding("escape", "back", "Back", key_display="Esc"),
+        Binding("b", "back", "Back", key_display="B"),
         Binding("enter", "open_entry", "Open", key_display="Enter"),
         Binding("space", "parent_dir", "Parent", key_display="Space"),
     ]
@@ -450,6 +451,7 @@ class WorkspaceScreen(Screen[None]):
 
     BINDINGS = [
         Binding("escape", "back", "Back", key_display="Esc"),
+        Binding("b", "back", "Back", key_display="B"),
         Binding("enter", "open_entry", "Open", key_display="Enter"),
         Binding("space", "parent_dir", "Parent", key_display="Space"),
         Binding("s", "switch_workspace", "Switch active"),
@@ -842,32 +844,16 @@ def _environment_config_item(item: LabItem, *, config_kind: str, workspace: Path
 
 def _environment_config_toml(slug: str, *, config_kind: str, version: str = "") -> str:
     if config_kind == "eval":
-        eval_config: dict[str, Any] = {
-            "env_id": slug,
-            "num_examples": -1,
-            "rollouts_per_example": 1,
-        }
-        if version:
-            eval_config["version"] = version
-        config: dict[str, Any] = {
-            "model": "",
-            "save_results": True,
-            "eval": [eval_config],
-        }
-        return format_toml_blocks(toml.dumps(config)).rstrip()
+        return format_lab_config(
+            evaluation_config(
+                env_id=slug,
+                version=version,
+                num_examples=-1,
+                max_tokens=None,
+            )
+        )
 
-    env: dict[str, Any] = {"id": slug}
-    if version:
-        env["version"] = version
-    config = {
-        "model": "",
-        "max_steps": 100,
-        "batch_size": 256,
-        "rollouts_per_example": 8,
-        "sampling": {"max_tokens": 512},
-        "env": [env],
-    }
-    return format_toml_blocks(toml.dumps(config)).rstrip()
+    return format_lab_config(rl_config(env_id=slug, version=version))
 
 
 def _safe_toml_loads(value: str) -> dict[str, Any]:

@@ -40,6 +40,7 @@ class SetupScreen(Screen[None]):
 
     BINDINGS = [
         Binding("escape", "back", "Back", key_display="Esc"),
+        Binding("b", "back", "Back", key_display="B"),
         Binding("enter", "run_setup", "Run setup", key_display="Enter"),
     ]
 
@@ -175,6 +176,7 @@ class AgentSyncScreen(Screen[None]):
 
     BINDINGS = [
         Binding("escape", "back", "Back", key_display="Esc"),
+        Binding("b", "back", "Back", key_display="B"),
         Binding("enter", "run_sync", "Run sync", key_display="Enter"),
     ]
 
@@ -271,6 +273,7 @@ class DoctorScreen(Screen[None]):
 
     BINDINGS = [
         Binding("escape", "back", "Back", key_display="Esc"),
+        Binding("b", "back", "Back", key_display="B"),
         Binding("enter", "run_check", "Run check", key_display="Enter"),
         Binding("f", "fix", "Apply fixes"),
     ]

@@ -8,9 +8,9 @@ from typing import Any
 
 import toml
 
+from .config_factory import evaluation_config, format_lab_config, rl_config
 from .models import LabItem
 from .palette import PRIMARY
-from .toml_format import format_toml_blocks
 
 
 @dataclass(frozen=True)
@@ -86,21 +86,7 @@ def evaluation_config_item(workspace: Path) -> LabItem:
     """Create a starter hosted-evaluation config item."""
 
     path = workspace / ".prime" / "lab" / "configs" / "eval" / "new-evaluation.toml"
-    toml_text = format_toml_blocks(
-        toml.dumps(
-            {
-                "model": "",
-                "save_results": True,
-                "eval": [
-                    {
-                        "env_id": "primeintellect/gsm8k",
-                        "rollouts_per_example": 1,
-                        "sampling_args": {"max_tokens": 512},
-                    }
-                ],
-            }
-        )
-    ).rstrip()
+    toml_text = format_lab_config(evaluation_config())
     return _config_item(
         key=f"quickstart:config:eval:{workspace}",
         title="Run Evaluation",
@@ -116,18 +102,7 @@ def training_config_item(workspace: Path) -> LabItem:
     """Create a starter training config item."""
 
     path = workspace / ".prime" / "lab" / "configs" / "rl" / "new-training.toml"
-    toml_text = format_toml_blocks(
-        toml.dumps(
-            {
-                "model": "",
-                "max_steps": 100,
-                "batch_size": 256,
-                "rollouts_per_example": 8,
-                "sampling": {"max_tokens": 512},
-                "env": [{"id": "primeintellect/gsm8k"}],
-            }
-        )
-    ).rstrip()
+    toml_text = format_lab_config(rl_config())
     return _config_item(
         key=f"quickstart:config:rl:{workspace}",
         title="Launch Training",

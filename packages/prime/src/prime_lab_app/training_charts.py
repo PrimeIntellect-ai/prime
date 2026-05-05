@@ -138,10 +138,14 @@ class LabPlotWidget(PlotWidget, can_focus=False):
             )
 
     def _draw_chart(self) -> None:
+        self.border_title = ""
+        self.border_subtitle = ""
         try:
             draw_plot(self, self._chart)
         except Exception:
             self.clear()
+            self.border_title = "Chart unavailable"
+            self.border_subtitle = "Could not render chart"
 
     def update_chart(self, chart: ChartSpec) -> None:
         self._chart = chart

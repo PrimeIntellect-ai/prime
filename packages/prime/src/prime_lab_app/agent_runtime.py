@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import importlib
-import inspect
 import json
 import re
 import subprocess
@@ -60,6 +57,7 @@ class AgentChatMessage:
 StateCallback = Callable[[AgentConnectionState], None]
 MessagesCallback = Callable[[tuple[AgentChatMessage, ...]], None]
 ActionCallback = Callable[[dict[str, Any]], None]
+LabToolHandler = Callable[[dict[str, Any]], tuple[str, str, dict[str, Any]]]
 PopenFactory = Callable[..., subprocess.Popen[str]]
 
 
@@ -72,11 +70,13 @@ class AgentRuntime:
         on_state: StateCallback | None = None,
         on_messages: MessagesCallback | None = None,
         on_action: ActionCallback | None = None,
+        lab_tool_handler: LabToolHandler | None = None,
         popen_factory: PopenFactory = subprocess.Popen,
     ) -> None:
         self._on_state = on_state
         self._on_messages = on_messages
         self._on_action = on_action
+        self._lab_tool_handler = lab_tool_handler
         self._popen_factory = popen_factory
         self._lock = threading.RLock()
         self._pending: dict[int, tuple[threading.Event, dict[str, Any]]] = {}
@@ -173,9 +173,6 @@ class AgentRuntime:
             )
         )
 
-        if spec.transport == "claude-agent-sdk":
-            self._set_connected(message=_ready_message(spec.transport))
-            return
         if spec.transport == "acp-stdio":
             try:
                 write_agent_native_surface(workspace, adapter.name)
@@ -329,13 +326,6 @@ class AgentRuntime:
                 )
                 transport = "acp-stdio"
                 session_id = state.session_id
-            elif self._spec.transport == "claude-agent-sdk":
-                self._append_message_locked(
-                    AgentChatMessage("user", prompt),
-                    AgentChatMessage("assistant", "", "streaming"),
-                )
-                transport = self._spec.transport
-                session_id = state.session_id
             elif self._spec.transport == "resumable-cli":
                 self._append_message_locked(
                     AgentChatMessage("user", prompt),
@@ -364,14 +354,6 @@ class AgentRuntime:
                 )
                 self._record_codex_turn(result)
             else:
-                if transport == "claude-agent-sdk":
-                    threading.Thread(
-                        target=self._run_claude_agent_sdk_prompt,
-                        args=(prompt, session_id),
-                        name=f"lab-agent-{self._agent}-sdk",
-                        daemon=True,
-                    ).start()
-                    return
                 if transport == "resumable-cli":
                     threading.Thread(
                         target=self._run_resumable_cli_prompt,
@@ -416,7 +398,7 @@ class AgentRuntime:
             "callId": str(uuid.uuid4()),
             "arguments": arguments,
         }
-        status, content, response = handle_lab_widget_tool_call(params)
+        status, content, response = self._handle_lab_tool_call(params)
         action = lab_widget_action_from_tool_call(params) if status == "widget" else None
         self._record_dynamic_tool_call(status, content, action)
         if status == "widget":
@@ -489,98 +471,6 @@ class AgentRuntime:
         if code != 0 and stderr_lines:
             self._append_streaming_assistant_text("\n".join(stderr_lines).strip())
         self._finish_streaming_process(code, failure_label=f"{adapter.label} request failed")
-
-    def _run_claude_agent_sdk_prompt(self, prompt: str, session_id: str) -> None:
-        try:
-            asyncio.run(self._run_claude_agent_sdk_prompt_async(prompt, session_id))
-        except ModuleNotFoundError as exc:
-            if exc.name != "claude_agent_sdk":
-                message = f"Claude SDK request failed: {exc}"
-            else:
-                message = (
-                    "Claude Agent SDK is not installed in this environment. "
-                    "Use Claude Code or install claude-agent-sdk for SDK-backed chat."
-                )
-            with self._lock:
-                self._replace_last_streaming_locked(AgentChatMessage("system", message, "error"))
-                self._emit_messages_locked()
-        except Exception as exc:
-            with self._lock:
-                self._replace_last_streaming_locked(
-                    AgentChatMessage("system", f"Claude SDK request failed: {exc}", "error")
-                )
-                self._emit_messages_locked()
-
-    async def _run_claude_agent_sdk_prompt_async(self, prompt: str, session_id: str) -> None:
-        workspace = self._workspace
-        if workspace is None:
-            with self._lock:
-                self._replace_last_streaming_locked(
-                    AgentChatMessage("system", "No Claude SDK workspace is configured.", "error")
-                )
-                self._emit_messages_locked()
-            return
-
-        module = importlib.import_module("claude_agent_sdk")
-        query = getattr(module, "query")
-        options_cls = getattr(module, "ClaudeAgentOptions", None)
-        options = _build_claude_agent_options(
-            options_cls,
-            workspace,
-            session_id,
-            mcp_servers=_claude_lab_mcp_servers(module, self._handle_claude_lab_tool_call),
-            system_prompt=lab_widget_developer_instructions(),
-        )
-        query_result = _call_claude_agent_query(
-            query,
-            _agent_prompt_with_lab_context(prompt),
-            options,
-        )
-        if inspect.isawaitable(query_result):
-            query_result = await query_result
-
-        emitted_text = False
-        seen_messages: dict[str, str] = {}
-        current_session_id = session_id
-        async for event in query_result:
-            next_session_id = _extract_agent_session_id(event)
-            if next_session_id and next_session_id != current_session_id:
-                current_session_id = next_session_id
-                self._set_connected(message="Connected", session_id=next_session_id)
-            text = _extract_stream_delta(event, seen_messages)
-            if text:
-                emitted_text = True
-                self._append_streaming_assistant_text(text)
-                continue
-            if not emitted_text:
-                result = _extract_result_text(event)
-                if result:
-                    emitted_text = True
-                    self._append_streaming_assistant_text(result)
-
-        self._finish_streaming_process(0, failure_label="Claude SDK request failed")
-
-    async def _handle_claude_lab_tool_call(self, tool: str, arguments: Any) -> dict[str, Any]:
-        call_id = str(uuid.uuid4())
-        params = {
-            "namespace": "lab",
-            "tool": tool,
-            "callId": call_id,
-            "arguments": arguments if isinstance(arguments, dict) else {},
-        }
-        status, content, response = handle_lab_widget_tool_call(params)
-        action = lab_widget_action_from_tool_call(params) if status == "widget" else None
-        self._record_dynamic_tool_call(status, content, action)
-        if status == "widget":
-            self._emit_action(action or {})
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": _tool_response_text(response),
-                }
-            ]
-        }
 
     def _initialize_acp_stdio(self) -> None:
         workspace = self._workspace
@@ -762,7 +652,7 @@ class AgentRuntime:
                 self._respond(request_id, None)
             return
         if method == "item/tool/call":
-            status, content, response = handle_lab_widget_tool_call(params)
+            status, content, response = self._handle_lab_tool_call(params)
             action = lab_widget_action_from_tool_call(params) if status == "widget" else None
             self._record_dynamic_tool_call(status, content, action)
             if status == "widget":
@@ -780,6 +670,11 @@ class AgentRuntime:
             return
         if request_id is not None:
             self._respond_error(request_id, -32601, f"Unsupported client method: {method}")
+
+    def _handle_lab_tool_call(self, params: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+        if self._lab_tool_handler is not None:
+            return self._lab_tool_handler(params)
+        return handle_lab_widget_tool_call(params)
 
     def _handle_session_update(self, params: dict[str, Any]) -> None:
         update = params.get("update")
@@ -1057,12 +952,6 @@ class AgentRuntime:
             self._on_action(action)
 
 
-def _ready_message(transport: str) -> str:
-    if transport == "claude-agent-sdk":
-        return "Claude SDK ready"
-    return "Server ready"
-
-
 def _collect_stream_lines(stream: Any, lines: list[str]) -> None:
     for line in stream:
         text = str(line).rstrip()
@@ -1077,113 +966,6 @@ def _unsupported_agent_message(capability: AgentCapability) -> str:
         f"{capability.label} is not yet supported for Lab-native chat actions.{reason} "
         f"Switch to {supported} for native Lab actions."
     )
-
-
-def _claude_lab_mcp_servers(
-    module: Any,
-    handler: Callable[[str, Any], Any],
-) -> dict[str, Any]:
-    tool_factory = getattr(module, "tool", None)
-    create_server = getattr(module, "create_sdk_mcp_server", None)
-    if not callable(tool_factory) or not callable(create_server):
-        return {}
-
-    tools: list[Any] = []
-    for spec in lab_dynamic_tools():
-        name = str(spec.get("name") or "")
-        description = str(spec.get("description") or "")
-        input_schema = spec.get("inputSchema") if isinstance(spec.get("inputSchema"), dict) else {}
-        if not name:
-            continue
-
-        async def call_tool(arguments: Any, *, _name: str = name) -> dict[str, Any]:
-            result = handler(_name, arguments)
-            if inspect.isawaitable(result):
-                return await result
-            return result
-
-        tools.append(tool_factory(name, description, input_schema)(call_tool))
-
-    if not tools:
-        return {}
-    return {"prime_lab": create_server("prime_lab", version="0.1.0", tools=tools)}
-
-
-def _tool_response_text(response: dict[str, Any]) -> str:
-    items = response.get("contentItems")
-    if isinstance(items, list):
-        for item in items:
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    return text
-    return json.dumps(response, sort_keys=True)
-
-
-def _call_claude_agent_query(query: Any, prompt: str, options: Any) -> Any:
-    try:
-        signature = inspect.signature(query)
-    except (TypeError, ValueError):
-        if options is None:
-            return query(prompt)
-        return query(prompt=prompt, options=options)
-
-    params = signature.parameters
-    if "prompt" in params:
-        kwargs: dict[str, Any] = {"prompt": prompt}
-        if options is not None and "options" in params:
-            kwargs["options"] = options
-        return query(**kwargs)
-    if options is None:
-        return query(prompt)
-    return query(prompt, options)
-
-
-def _build_claude_agent_options(
-    options_cls: Any,
-    workspace: Path,
-    session_id: str,
-    *,
-    mcp_servers: dict[str, Any] | None = None,
-    system_prompt: str = "",
-) -> Any:
-    if options_cls is None:
-        return None
-    try:
-        signature = inspect.signature(options_cls)
-    except (TypeError, ValueError):
-        try:
-            return options_cls()
-        except TypeError:
-            return None
-
-    params = signature.parameters
-    kwargs: dict[str, Any] = {}
-    if "cwd" in params:
-        kwargs["cwd"] = str(workspace)
-    elif "working_directory" in params:
-        kwargs["working_directory"] = str(workspace)
-    if session_id:
-        if "resume_session_id" in params:
-            kwargs["resume_session_id"] = session_id
-        elif "resume" in params:
-            kwargs["resume"] = session_id
-        elif "session_id" in params:
-            kwargs["session_id"] = session_id
-    if mcp_servers and "mcp_servers" in params:
-        kwargs["mcp_servers"] = mcp_servers
-    if mcp_servers and "allowed_tools" in params:
-        tool_names = [str(spec.get("name") or "") for spec in lab_dynamic_tools()]
-        kwargs["allowed_tools"] = [
-            *(name for name in tool_names if name),
-            *(f"mcp__prime_lab__{name}" for name in tool_names if name),
-        ]
-    if system_prompt and "system_prompt" in params:
-        kwargs["system_prompt"] = system_prompt
-    try:
-        return options_cls(**kwargs)
-    except TypeError:
-        return options_cls()
 
 
 def _extract_agent_session_id(value: Any) -> str:

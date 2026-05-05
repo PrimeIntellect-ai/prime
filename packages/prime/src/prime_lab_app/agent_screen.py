@@ -26,7 +26,7 @@ from .chat_parts import chat_transcript as _render_chat_transcript
 from .chat_parts import render_chat_turn
 from .launch_backdrop import LaunchBackdrop
 from .models import LabItem
-from .palette import BUTTON_CSS
+from .palette import BUTTON_CSS, SUCCESS
 from .shell import action_hint_text, lab_header
 
 AgentStateProvider = Callable[[], AgentConnectionState]
@@ -180,8 +180,9 @@ class AgentChatScreen(Screen[None]):
     """Server-backed coding-agent chat for a Lab workspace."""
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit", show=False),
+        Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
         Binding("escape", "back", "Back", key_display="Esc", show=False),
+        Binding("b", "back_if_not_typing", "Back", key_display="B", show=False),
         Binding("ctrl+w", "show_welcome", "Welcome", key_display="Ctrl+W", show=False),
         Binding("tab", "focus_next", "Next", key_display="Tab", show=False),
         Binding("shift+tab", "focus_previous", "Previous", key_display="Shift+Tab", show=False),
@@ -265,6 +266,11 @@ class AgentChatScreen(Screen[None]):
         height: 4;
     }
 
+    .agent-widget-model-row {
+        column-span: 2;
+        height: auto;
+    }
+
     .agent-widget-field-label {
         height: 1;
         color: $text-muted;
@@ -276,7 +282,14 @@ class AgentChatScreen(Screen[None]):
     }
 
     .agent-widget-select {
-        height: 3;
+        height: auto;
+        background: $panel;
+    }
+
+    .agent-widget-select > SelectOverlay {
+        height: auto;
+        max-height: 24;
+        border: tall $primary;
         background: $panel;
     }
 
@@ -458,6 +471,11 @@ class AgentChatScreen(Screen[None]):
 
     def action_quit(self) -> None:
         self.app.action_quit()
+
+    def action_back_if_not_typing(self) -> None:
+        if isinstance(self.focused, AgentPrompt):
+            return
+        self.action_back()
 
     def action_show_welcome(self) -> None:
         show_welcome = getattr(self.app, "action_show_welcome", None)
@@ -680,7 +698,15 @@ class AgentChatScreen(Screen[None]):
                     width=self._atmosphere_width(),
                 )
             )
-        chat_key = (messages, state.status, state.label, state.agent, state.message)
+        thinking_frame = self._frame % 8 if _has_waiting_agent_response(messages) else -1
+        chat_key = (
+            messages,
+            state.status,
+            state.label,
+            state.agent,
+            state.message,
+            thinking_frame,
+        )
         if chat_key != self._last_chat_key:
             self._last_chat_key = chat_key
             self._render_chat(messages, state)
@@ -743,7 +769,7 @@ class AgentChatScreen(Screen[None]):
             else:
                 if not isinstance(child, Static):
                     return False
-                child.update(render_chat_turn(message))
+                child.update(_render_agent_chat_turn(message, frame=self._frame))
             cursor += 1
         if len(messages) > len(previous):
             body.mount(*self._chat_widgets(messages[len(previous) :], start_index=len(previous)))
@@ -770,7 +796,11 @@ class AgentChatScreen(Screen[None]):
                 )
             else:
                 widgets.append(
-                    Static(render_chat_turn(message), classes="agent-turn", markup=False)
+                    Static(
+                        _render_agent_chat_turn(message, frame=self._frame),
+                        classes="agent-turn",
+                        markup=False,
+                    )
                 )
         return widgets
 
@@ -839,6 +869,36 @@ def _chat_child_count(message_count: int) -> int:
     if message_count <= 0:
         return 0
     return message_count * 2 - 1
+
+
+def _render_agent_chat_turn(message: AgentChatMessage, *, frame: int) -> RenderableType:
+    if (
+        message.role == "assistant"
+        and message.status == "streaming"
+        and not message.content.strip()
+    ):
+        return _agent_thinking_turn(frame)
+    return render_chat_turn(message)
+
+
+def _agent_thinking_turn(frame: int) -> Table:
+    table = Table.grid(expand=True)
+    table.add_column(width=2, no_wrap=True)
+    table.add_column(ratio=1)
+    spinner = "|/-\\"[frame % 4]
+    dots = "." * ((frame // 2) % 4)
+    body = Text.assemble((spinner, SUCCESS), " Thinking", (dots.ljust(3), "dim"))
+    table.add_row(Text("│", style=SUCCESS), body)
+    return table
+
+
+def _has_waiting_agent_response(messages: tuple[AgentChatMessage, ...]) -> bool:
+    return any(
+        message.role == "assistant"
+        and message.status == "streaming"
+        and not message.content.strip()
+        for message in messages
+    )
 
 
 def _chat_transport_ready(state: AgentConnectionState) -> bool:

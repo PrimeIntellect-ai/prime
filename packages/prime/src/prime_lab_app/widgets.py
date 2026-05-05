@@ -30,6 +30,7 @@ class LabOptionList(OptionList):
 
     BINDINGS = [
         Binding("escape", "back", "Back", key_display="Esc"),
+        Binding("b", "back", "Back", key_display="B"),
     ]
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -221,6 +222,7 @@ class SegmentedToggle(Static, can_focus=True):
         Binding("down", "next_segment", "Next", key_display="Down"),
         Binding("enter", "select_segment", "Select", key_display="Enter"),
         Binding("escape", "back", "Back", key_display="Esc"),
+        Binding("b", "back", "Back", key_display="B"),
     ]
 
     previous_action = ""

@@ -14,6 +14,12 @@ from .palette import PRIMARY, STATUS_ERROR, STATUS_SUCCESS, STATUS_WARNING
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{5,}")
+_TRAINING_URL_RE = re.compile(r"/dashboard/training/([A-Za-z0-9][A-Za-z0-9_-]{5,})")
+_RUN_ID_HINT_RE = re.compile(
+    r"\b(?:run[_ -]?id|training[_ -]?run(?:\s+id)?|created\s+run)\b\s*[:=]?\s*"
+    r"([A-Za-z0-9][A-Za-z0-9_-]{5,})",
+    re.IGNORECASE,
+)
 _LOG_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 12.0)
 
 LaunchOutputCallback = Callable[[str], None]
@@ -69,6 +75,10 @@ class ConfigLaunchRunner:
         if returncode == 0 and logs_command is not None and not self._stop_requested.is_set():
             self._follow_logs_with_backoff(logs_command)
             return
+        if returncode == 0 and self._follow_training_logs and logs_command is None:
+            self._append_output(
+                "\nTraining launch completed, but no live log command was detected.\n"
+            )
         self._finish_once("launch", returncode)
 
     def stop(self) -> None:
@@ -166,6 +176,12 @@ def extract_training_log_follow_command(text: str) -> LogFollowCommand | None:
             run_id = _first_run_id(tokens[index + 2 : index + 7])
             if run_id:
                 return _training_log_follow_command(run_id)
+    url_match = _TRAINING_URL_RE.search(cleaned)
+    if url_match:
+        return _training_log_follow_command(url_match.group(1))
+    hint_match = _RUN_ID_HINT_RE.search(cleaned)
+    if hint_match:
+        return _training_log_follow_command(hint_match.group(1))
     return None
 
 

@@ -15,7 +15,6 @@ AgentNativeSurface = Literal[
 ]
 AgentTransport = Literal[
     "codex-app-stdio",
-    "claude-agent-sdk",
     "resumable-cli",
     "acp-stdio",
     "one-shot",

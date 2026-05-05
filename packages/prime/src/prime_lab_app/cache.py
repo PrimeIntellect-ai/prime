@@ -99,6 +99,7 @@ def load_cached_lab_sections(cache_key: str, *, limit: int) -> dict[str, LabSect
     raw_sections = payload.get("sections")
     if not isinstance(raw_sections, dict):
         return {}
+    fallback_updated_at = str(payload.get("updated_at") or "") or None
 
     sections: dict[str, LabSection] = {}
     for key in ROW_CACHE_SECTION_KEYS:
@@ -122,6 +123,8 @@ def load_cached_lab_sections(cache_key: str, *, limit: int) -> dict[str, LabSect
             items=items,
             status=f"{len(items)} cached",
             status_style="dim",
+            refreshed_at=str(raw_section.get("refreshed_at") or "") or fallback_updated_at,
+            row_data_origin="disk",
         )
     return sections
 
@@ -162,6 +165,7 @@ def write_cached_lab_sections(cache_key: str, sections: Iterable[LabSection]) ->
     raw_sections = payload.get("sections")
     cached_sections: dict[str, Any] = raw_sections if isinstance(raw_sections, dict) else {}
     changed = False
+    updated_at = datetime.now(timezone.utc).isoformat()
 
     for section in sections:
         if section.key not in ROW_CACHE_SECTION_KEYS:
@@ -180,6 +184,8 @@ def write_cached_lab_sections(cache_key: str, sections: Iterable[LabSection]) ->
             "description": section.description,
             "status": section.status,
             "status_style": section.status_style,
+            "refreshed_at": section.refreshed_at or updated_at,
+            "row_data_origin": section.row_data_origin or "live",
             "items": items,
         }
         changed = True
@@ -192,7 +198,7 @@ def write_cached_lab_sections(cache_key: str, sections: Iterable[LabSection]) ->
         json.dumps(
             {
                 "version": 1,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": updated_at,
                 "sections": cached_sections,
             },
             indent=2,

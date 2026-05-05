@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+LabSectionOrigin = Literal["live", "disk", "mixed"]
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,8 @@ class LabSection:
     items: tuple[LabItem, ...] = ()
     status: str = ""
     status_style: str = "dim"
+    refreshed_at: str | None = None
+    row_data_origin: LabSectionOrigin | None = None
 
 
 @dataclass(frozen=True)

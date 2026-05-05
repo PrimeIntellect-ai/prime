@@ -457,7 +457,7 @@ def _training_overview_table(
         f"{summary['steps_completed']}/{summary['total_steps']} steps",
     )
     table.add_row(
-        "Batch size",
+        "Rollouts per batch",
         str(raw.get("batch_size") or raw.get("batchSize") or "-"),
         "Rollouts per example",
         str(raw.get("rollouts_per_example") or raw.get("rolloutsPerExample") or "-"),

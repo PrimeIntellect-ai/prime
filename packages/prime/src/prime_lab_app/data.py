@@ -7,6 +7,7 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,7 @@ class LabDataSource:
             self._evaluation_section(options, config, authenticated, warnings),
         ]
         sections = _hydrate_platform_sections(detail_cache_key, sections, cached_sections)
+        sections = _mark_live_sections(sections, refreshed_at=_utc_now_iso())
 
         snapshot = LabSnapshot(
             workspace=options.workspace.resolve(),
@@ -692,6 +694,11 @@ def _hydrate_platform_sections(
         if items == section.items:
             hydrated.append(section)
             continue
+        refreshed_at = section.refreshed_at
+        row_data_origin = section.row_data_origin
+        if cached is not None and cached.refreshed_at:
+            refreshed_at = _newer_iso(refreshed_at, cached.refreshed_at)
+            row_data_origin = _merged_origin(row_data_origin, cached.row_data_origin)
         hydrated.append(
             LabSection(
                 key=section.key,
@@ -700,9 +707,56 @@ def _hydrate_platform_sections(
                 items=items,
                 status=f"{len(items)} shown",
                 status_style=STATUS_INFO if items else section.status_style,
+                refreshed_at=refreshed_at,
+                row_data_origin=row_data_origin,
             )
         )
     return hydrated
+
+
+def _mark_live_sections(sections: list[LabSection], *, refreshed_at: str) -> list[LabSection]:
+    marked: list[LabSection] = []
+    for section in sections:
+        is_platform_section = section.key in {"environments", "training", "evaluations"}
+        if is_platform_section and not _section_has_only_placeholder(section):
+            marked.append(
+                LabSection(
+                    key=section.key,
+                    title=section.title,
+                    description=section.description,
+                    items=section.items,
+                    status=section.status,
+                    status_style=section.status_style,
+                    refreshed_at=_newer_iso(section.refreshed_at, refreshed_at),
+                    row_data_origin=_merged_origin("live", section.row_data_origin),
+                )
+            )
+        else:
+            marked.append(section)
+    return marked
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _newer_iso(left: str | None, right: str | None) -> str | None:
+    if not left:
+        return right
+    if not right:
+        return left
+    return max(left, right)
+
+
+def _merged_origin(left: str | None, right: str | None) -> str | None:
+    origins = {origin for origin in (left, right) if origin}
+    if not origins:
+        return None
+    if origins == {"live"}:
+        return "live"
+    if origins == {"disk"}:
+        return "disk"
+    return "mixed"
 
 
 def _hydrate_item_detail(detail_cache_key: str, item: LabItem) -> LabItem:
@@ -797,6 +851,8 @@ def _cached_or_loading_section(
             items=items,
             status=f"{len(items)} cached",
             status_style=STATUS_DIM,
+            refreshed_at=cached_section.refreshed_at,
+            row_data_origin="mixed" if local_items else cached_section.row_data_origin,
         )
 
     return LabSection(
@@ -1517,7 +1573,7 @@ def _read_toml_preview(path: Path) -> tuple[dict[str, Any], str]:
 
 def _workspace_config_command(config_kind: str, rel_path: str) -> str:
     if config_kind == "rl":
-        return f"prime rl run {rel_path}"
+        return f"prime train run {rel_path}"
     if config_kind == "eval":
         return f"prime eval run {rel_path} --hosted"
     return f"prime gepa run {rel_path}"

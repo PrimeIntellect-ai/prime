@@ -371,7 +371,9 @@ class RolloutCopyScreen(ModalScreen[None]):
 
     BINDINGS = [
         Binding("escape", "close", "Back", key_display="Esc"),
+        Binding("b", "close", "Back", key_display="B"),
         Binding("c", "copy", "Copy"),
+        Binding("y", "copy", "Copy"),
     ]
 
     CSS = """
@@ -521,6 +523,7 @@ class RolloutViewer(Container):
         Binding("/", "search", "Search"),
         Binding("m", "toggle_markdown_math", "Toggle markdown", show=False),
         Binding("c", "copy", "Copy", show=False),
+        Binding("y", "copy", "Copy"),
     ]
 
     DEFAULT_CSS = (
@@ -1559,6 +1562,7 @@ class LocalEvalRunScreen(Screen[None]):
 
     BINDINGS = [
         Binding("escape", "back", "Back", key_display="Esc"),
+        Binding("b", "back", "Back", key_display="B"),
         Binding("p", "prev_record", "Prev rollout"),
         Binding("n", "next_record", "Next rollout"),
         Binding("l", "show_logs", "Logs"),
@@ -1573,6 +1577,7 @@ class LocalEvalRunScreen(Screen[None]):
         Binding("x", "collapse_all", "Collapse all", show=False),
         Binding("/", "search", "Search"),
         Binding("c", "copy", "Copy", show=False),
+        Binding("y", "copy", "Copy"),
     ]
 
     CSS = """

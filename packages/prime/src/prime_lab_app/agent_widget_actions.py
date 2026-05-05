@@ -23,6 +23,7 @@ from .agent_widget_model import (
     widget_display_title,
     widget_generated_config_path,
     widget_single_eval_config,
+    widget_training_model_option_parts,
 )
 from .config_screen import (
     ConfigBuildResult,
@@ -52,11 +53,18 @@ def build_agent_widget_config(
     context = model.config_context
     if context is None:
         return ConfigBuildResult({}, "", ())
+    model_value = field_values.get("model", str(context["values"].get("model", ""))).strip()
+    model_name, model_controls = widget_training_model_option_parts(model_value)
 
     def field_value(field_id: str) -> str:
         field_name = widget_config_field_name(field_id)
         if not field_name:
             return ""
+        if str(context["config_kind"]) == "rl":
+            if field_name == "model":
+                return model_name
+            if field_name in {"enable_thinking", "reasoning_effort"}:
+                return model_controls.get(field_name, "")
         if field_name in field_values:
             return field_values[field_name].strip()
         return str(context["values"].get(field_name, "")).strip()

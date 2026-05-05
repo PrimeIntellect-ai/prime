@@ -20,8 +20,21 @@ def merge_snapshot_rows(previous: LabSnapshot | None, incoming: LabSnapshot) -> 
             merged_sections.append(section)
             continue
         merged_items = _merge_section_rows(previous_section.items, section.items)
+        refreshed_at = _newer_iso(previous_section.refreshed_at, section.refreshed_at)
+        row_data_origin = _merged_origin(previous_section.row_data_origin, section.row_data_origin)
         if merged_items == section.items:
-            merged_sections.append(section)
+            merged_sections.append(
+                LabSection(
+                    key=section.key,
+                    title=section.title,
+                    description=section.description,
+                    items=section.items,
+                    status=section.status,
+                    status_style=section.status_style,
+                    refreshed_at=refreshed_at,
+                    row_data_origin=row_data_origin,
+                )
+            )
             continue
         merged_sections.append(
             LabSection(
@@ -31,6 +44,8 @@ def merge_snapshot_rows(previous: LabSnapshot | None, incoming: LabSnapshot) -> 
                 items=merged_items,
                 status=f"{len(merged_items)} shown",
                 status_style=section.status_style,
+                refreshed_at=refreshed_at,
+                row_data_origin=row_data_origin,
             )
         )
     return LabSnapshot(
@@ -66,3 +81,22 @@ def _is_placeholder_lab_item(item: LabItem) -> bool:
         or item.key.endswith(":auth-required")
         or item.title in {"Unavailable", "Sign in required"}
     )
+
+
+def _newer_iso(left: str | None, right: str | None) -> str | None:
+    if not left:
+        return right
+    if not right:
+        return left
+    return max(left, right)
+
+
+def _merged_origin(left: str | None, right: str | None) -> str | None:
+    origins = {origin for origin in (left, right) if origin}
+    if not origins:
+        return None
+    if origins == {"live"}:
+        return "live"
+    if origins == {"disk"}:
+        return "disk"
+    return "mixed"

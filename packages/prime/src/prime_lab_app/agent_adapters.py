@@ -19,7 +19,6 @@ AgentTransport = Literal[
     "stdio-jsonl",
     "stdio-jsonrpc",
     "codex-app-stdio",
-    "claude-agent-sdk",
     "resumable-cli",
     "websocket",
     "http",
@@ -30,7 +29,6 @@ AgentTransport = Literal[
 ]
 LabWidgetContract = Literal[
     "codex-dynamic-tools",
-    "claude-sdk-tools",
     "mcp-stdio-tools",
     "not-supported",
 ]
@@ -135,15 +133,6 @@ KNOWN_AGENT_ADAPTERS = {
         label="Claude",
         prompt_prefix=("claude", "-p"),
         server_prefix=(),
-        server_transport="claude-agent-sdk",
-        server_description="Claude Agent SDK session runtime.",
-        lab_widget_contract="claude-sdk-tools",
-    ),
-    "claude-code": AgentAdapter(
-        name="claude-code",
-        label="Claude Code",
-        prompt_prefix=("claude", "-p"),
-        server_prefix=(),
         server_transport="resumable-cli",
         server_description="Claude Code headless CLI with resumable stream-json sessions.",
         stream_prefix=(
@@ -157,9 +146,9 @@ KNOWN_AGENT_ADAPTERS = {
             _LAB_MCP_ALLOWED_TOOLS,
         ),
         resume_flag="--resume",
-        aliases=("claude-cli",),
         mcp_config_flag="--mcp-config",
         prompt_separator="--",
+        aliases=("claude-code", "claude-cli"),
         lab_widget_contract="mcp-stdio-tools",
     ),
     "cursor": AgentAdapter(
@@ -206,8 +195,8 @@ KNOWN_AGENT_ADAPTERS = {
         stream_prefix=("pi", "--print", "--mode", "json"),
         lab_widget_contract="mcp-stdio-tools",
     ),
-    "hermes-agent": AgentAdapter(
-        name="hermes-agent",
+    "hermes": AgentAdapter(
+        name="hermes",
         label="Hermes Agent",
         prompt_prefix=("hermes", "--oneshot"),
         server_prefix=("hermes", "acp", "--accept-hooks"),
@@ -217,7 +206,29 @@ KNOWN_AGENT_ADAPTERS = {
         resume_flag="--resume",
         prompt_flag="--query",
         lab_widget_contract="mcp-stdio-tools",
-        aliases=("hermes",),
+        aliases=("hermes-agent",),
+    ),
+    "droid": AgentAdapter(
+        name="droid",
+        label="Factory Droid Agent",
+        prompt_prefix=("droid", "exec"),
+        server_prefix=(),
+        server_transport="resumable-cli",
+        server_description="Factory Droid Agent headless CLI with resumable JSON sessions.",
+        stream_prefix=("droid", "exec", "--output-format", "stream-json"),
+        aliases=("factory", "factory-droid"),
+        lab_widget_contract="mcp-stdio-tools",
+    ),
+    "amp": AgentAdapter(
+        name="amp",
+        label="Amp Code",
+        prompt_prefix=("amp", "--execute"),
+        server_prefix=(),
+        server_transport="resumable-cli",
+        server_description="Amp Code headless CLI with stream-json output.",
+        stream_prefix=("amp", "--execute", "--stream-json"),
+        aliases=("amp-code",),
+        lab_widget_contract="mcp-stdio-tools",
     ),
 }
 _AGENT_ALIASES = {
@@ -255,7 +266,7 @@ def write_agent_native_surface(workspace: Path, agent: str) -> tuple[Path, ...]:
             return ()
         if adapter.name == "opencode":
             return (write_opencode_mcp_config(workspace),)
-        if adapter.name == "hermes-agent":
+        if adapter.name == "hermes":
             return (write_hermes_mcp_config(workspace),)
         return (write_agent_mcp_config(workspace, adapter.name),)
     return ()
@@ -264,7 +275,7 @@ def write_agent_native_surface(workspace: Path, agent: str) -> tuple[Path, ...]:
 def agent_adapter(name: str) -> AgentAdapter:
     """Return a known or generic command adapter."""
 
-    normalized = name.strip() or "codex"
+    normalized = (name.strip() or "codex").lower()
     normalized = _AGENT_ALIASES.get(normalized, normalized)
     adapter = KNOWN_AGENT_ADAPTERS.get(normalized)
     if adapter is not None:

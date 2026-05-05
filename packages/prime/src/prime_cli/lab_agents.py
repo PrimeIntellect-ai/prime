@@ -93,8 +93,8 @@ class AgentCapability:
         workspace = workspace.expanduser().resolve()
         paths: list[Path] = []
         for raw_path in self.expected_surface_paths:
-            if raw_path == "{claude_code_mcp}":
-                paths.append(agent_mcp_config_path(workspace, "claude-code"))
+            if raw_path == "{claude_mcp}":
+                paths.append(agent_mcp_config_path(workspace, "claude"))
             elif raw_path == "{cursor_mcp}":
                 paths.append(workspace / ".cursor" / "mcp.json")
             elif raw_path == "{opencode_config}":
@@ -121,12 +121,12 @@ KNOWN_AGENT_ADAPTERS = {
         server_description="Codex app-server JSON-RPC transport.",
         lab_widget_contract="codex-dynamic-tools",
     ),
-    "claude-code": AgentAdapter(
-        name="claude-code",
-        label="Claude Code",
+    "claude": AgentAdapter(
+        name="claude",
+        label="Claude",
         prompt_prefix=("claude", "-p"),
         stream_prefix=("claude", "-p", "--output-format", "stream-json"),
-        aliases=("claude", "claude-cli"),
+        aliases=("claude-code", "claude-cli"),
         lab_widget_contract="mcp-stdio-tools",
     ),
     "cursor": AgentAdapter(
@@ -197,12 +197,12 @@ _CAPABILITIES: dict[str, AgentCapability] = {
         requirements=(AgentInstallRequirement("codex", description="Codex CLI"),),
         user_skill_root="~/.agents/skills",
     ),
-    "claude-code": AgentCapability(
-        name="claude-code",
-        label="Claude Code",
+    "claude": AgentCapability(
+        name="claude",
+        label="Claude",
         native_surface="mcp_config",
-        requirements=(AgentInstallRequirement("claude", description="Claude Code CLI"),),
-        expected_surface_paths=("{claude_code_mcp}",),
+        requirements=(AgentInstallRequirement("claude", description="Claude CLI"),),
+        expected_surface_paths=("{claude_mcp}",),
         user_skill_root="~/.claude/skills",
     ),
     "cursor": AgentCapability(
@@ -274,7 +274,7 @@ _CAPABILITIES: dict[str, AgentCapability] = {
 }
 AGENT_DISPLAY_ORDER = (
     "amp",
-    "claude-code",
+    "claude",
     "codex",
     "cursor",
     "droid",

@@ -59,10 +59,10 @@ def fake_lab_asset_downloads(monkeypatch: Any) -> list[str]:
 
 
 def test_lab_setup_parses_selected_agents_and_all() -> None:
-    selected = parse_lab_setup_args(["--agent", "factory-droid,amp-code,claude"])
+    selected = parse_lab_setup_args(["--agent", "factory-droid,amp-code,claude-code"])
     all_agents = parse_lab_sync_args(["--agents", "all"])
 
-    assert selected.agents == ("droid", "amp", "claude-code")
+    assert selected.agents == ("droid", "amp", "claude")
     assert all_agents.agents == known_agent_names()
 
 

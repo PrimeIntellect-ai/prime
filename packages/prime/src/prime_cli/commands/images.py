@@ -356,6 +356,16 @@ def push_image(
         click_type=click.Choice(["linux/amd64", "linux/arm64"]),
         help="Target platform (defaults to linux/amd64 for Kubernetes compatibility)",
     ),
+    region: Optional[str] = typer.Option(
+        None,
+        "--region",
+        help=(
+            "Cluster region to build in and push the image to "
+            "(e.g. 'eu-west'). Image is stored in the regional repo "
+            "a sandbox using it should run in the same region "
+            "to avoid cross-region pulls. Default: us-central1."
+        ),
+    ),
 ):
     """
     Build and push a Docker image to Prime Intellect registry.
@@ -365,6 +375,7 @@ def push_image(
         prime images push myapp:v1.0.0
         prime images push myapp:latest --context ./app --dockerfile ../docker/Dockerfile.prod
         prime images push myapp:v1 --platform linux/arm64
+        prime images push myapp:v1 --region eu-west
     """
     try:
         # Parse image reference
@@ -466,6 +477,8 @@ def push_image(
                 }
                 if config.team_id:
                     build_payload["team_id"] = config.team_id
+                if region:
+                    build_payload["region"] = region
 
                 build_response = client.request(
                     "POST",

@@ -1,4 +1,4 @@
-"""Tests for `prime rl logs` (orchestrator + env-server) and `prime rl components`."""
+"""Tests for `prime train logs` (orchestrator + env-server) and components."""
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 import pytest
 from prime_cli.api.rl import RLClient
 from prime_cli.client import APIError
+from prime_cli.commands import rl as rl_commands
 from prime_cli.main import app
 from typer.testing import CliRunner
 
@@ -64,7 +65,7 @@ def _make_mock_get(
     return mock_get
 
 
-# ---------- prime rl logs (orchestrator default) ----------
+# ---------- prime train logs (orchestrator default) ----------
 
 
 def test_logs_default_hits_orchestrator(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -116,7 +117,7 @@ def test_logs_explicit_orchestrator_with_env_errors(monkeypatch: pytest.MonkeyPa
     assert result.exit_code != 0
 
 
-# ---------- prime rl logs -c env-server ----------
+# ---------- prime train logs -c env-server ----------
 
 
 def test_logs_env_server_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -234,17 +235,46 @@ def test_logs_invalid_component(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_logs_run_not_started(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Queued runs return 404 with 'queued'; CLI should exit 0 with a friendly message."""
+    """Queued runs poll for the startup window before exiting with a friendly message."""
+    assert (
+        rl_commands.HOSTED_TRAINING_LOG_STARTUP_POLLS
+        * rl_commands.HOSTED_TRAINING_LOG_STARTUP_POLL_SECONDS
+        >= 180
+    )
+    calls = {"n": 0}
 
     def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        raise APIError("Failed to get RL run logs: 404 run is queued")
+        calls["n"] += 1
+        raise APIError("Failed to get Hosted Training run logs: 404 run is queued")
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "--raw"])
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID, "--raw"])
 
     assert result.exit_code == 0, result.output
-    assert "has not started yet" in result.output
+    assert calls["n"] == rl_commands.HOSTED_TRAINING_LOG_STARTUP_POLLS + 1
+    assert "Hosted Training run is starting" in result.output
+    assert "Hosted Training run has not started yet" in result.output
+    assert "RL" not in result.output
+
+
+def test_logs_queued_run_succeeds_when_logs_appear(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise APIError("Failed to get Hosted Training run logs: 404 run is queued")
+        return {"logs": "orch-ready"}
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID, "--raw"])
+
+    assert result.exit_code == 0, result.output
+    assert calls["n"] == 3
+    assert "orch-ready" in result.output
+    assert "Failed" not in result.output
 
 
 def test_logs_env_server_follow_dedupes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,7 +319,7 @@ def test_logs_env_server_follow_dedupes(monkeypatch: pytest.MonkeyPatch) -> None
     assert call_count["n"] >= 2
 
 
-# ---------- prime rl components ----------
+# ---------- prime train components ----------
 
 
 def test_components_lists_orchestrator_and_env_servers(monkeypatch: pytest.MonkeyPatch) -> None:

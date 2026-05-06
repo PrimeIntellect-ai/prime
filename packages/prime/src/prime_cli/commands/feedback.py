@@ -1,3 +1,5 @@
+from typing import Literal
+
 import typer
 from click.exceptions import Abort
 
@@ -13,15 +15,17 @@ app = PlainTyper(
 )
 console = get_console()
 
+FeedbackCategory = Literal["bug", "feature", "general"]
 
-_CATEGORY_CHOICES: tuple[tuple[str, str], ...] = (
+
+_CATEGORY_CHOICES: tuple[tuple[FeedbackCategory, str], ...] = (
     ("bug", "Bug report"),
     ("feature", "Feature request"),
     ("general", "General feedback"),
 )
 
 
-def _prompt_category() -> str:
+def _prompt_category() -> FeedbackCategory:
     console.print("\n[bold]What are you sharing?[/bold]")
     for idx, (_, label) in enumerate(_CATEGORY_CHOICES, start=1):
         console.print(f"  [cyan]({idx})[/cyan] {label}")
@@ -51,6 +55,23 @@ def _prompt_run_id() -> str | None:
     return run_id or None
 
 
+def submit_feedback(
+    *,
+    message: str,
+    category: FeedbackCategory,
+    run_id: str | None = None,
+) -> None:
+    payload = {
+        "message": message,
+        "category": category,
+        "cli_version": __version__,
+        "run_id": run_id,
+    }
+
+    with console.status("Submitting...", spinner="dots"):
+        APIClient().post("/feedback", json=payload)
+
+
 @app.callback(invoke_without_command=True)
 def feedback(ctx: typer.Context) -> None:
     """Submit feedback (bug, feature request, or general) to the Prime team."""
@@ -68,16 +89,8 @@ def feedback(ctx: typer.Context) -> None:
         console.print("\n[yellow]Cancelled[/yellow]")
         raise typer.Exit(0)
 
-    payload = {
-        "message": message,
-        "category": category,
-        "cli_version": __version__,
-        "run_id": run_id,
-    }
-
     try:
-        with console.status("Submitting...", spinner="dots"):
-            APIClient().post("/feedback", json=payload)
+        submit_feedback(message=message, category=category, run_id=run_id)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

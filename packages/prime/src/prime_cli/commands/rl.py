@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import toml
 import typer
+from click.exceptions import Abort
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic import ValidationError as PydanticValidationError
 from rich.markup import escape as rich_escape
@@ -36,6 +37,7 @@ from ..utils.formatters import (
     strip_ansi,
 )
 from ..utils.prompt import confirm_or_skip
+from .feedback import submit_feedback
 from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
 console = get_console()
@@ -1213,6 +1215,62 @@ def list_models(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:
+    console.print(f"\n[bold]{label}[/bold] [dim](required)[/dim]")
+    console.print(f"[dim]{help_text}[/dim]")
+    while True:
+        value = typer.prompt("", prompt_suffix="> ").strip()
+        if value:
+            return value
+        console.print(f"[red]{empty_error}[/red]")
+
+
+def _prompt_optional_text(label: str, help_text: str) -> str | None:
+    console.print(f"\n[bold]{label}[/bold] [dim](optional)[/dim]")
+    console.print(f"[dim]{help_text}[/dim]")
+    value = typer.prompt("", default="", show_default=False, prompt_suffix="> ").strip()
+    return value or None
+
+
+def _format_model_request_feedback(models: str, context: str | None) -> str:
+    message = f"Hosted Training model request\n\nModels:\n{models}"
+    if context:
+        message += f"\n\nContext:\n{context}"
+    return message
+
+
+@app.command("request", rich_help_panel="Commands")
+def request_models() -> None:
+    """Request models for Hosted Training."""
+    console.print("[bold]Hosted Training Model Request[/bold]")
+    console.print("[dim]Tell us which models you want available for training.[/dim]")
+
+    try:
+        models = _prompt_required_text(
+            "Model(s)",
+            "Use provider/model names if you know them; comma-separated is fine.",
+            "At least one model is required.",
+        )
+        context = _prompt_optional_text(
+            "Use case or context",
+            "Share what you want to train or why this model matters.",
+        )
+    except Abort:
+        console.print("\n[yellow]Cancelled[/yellow]")
+        raise typer.Exit(0)
+
+    try:
+        submit_feedback(
+            message=_format_model_request_feedback(models, context),
+            category="feature",
+        )
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    console.print("[green]Request submitted. Thanks![/green]")
 
 
 def _unwrap_single_schema_variant(prop: Dict[str, Any]) -> Dict[str, Any]:

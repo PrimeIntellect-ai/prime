@@ -13,6 +13,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.message import Message
 from textual.widgets import Button, Select, Static
 
 from .agent_runtime import AgentChatMessage
@@ -39,6 +40,20 @@ AgentActionRecorder = Callable[[dict[str, Any]], None]
 class AgentWidgetCard(Vertical):
     """Interactive Lab control request embedded in the agent chat."""
 
+    class ChoiceSelected(Message):
+        """A choice widget option was selected."""
+
+        def __init__(self, action: dict[str, Any]) -> None:
+            self.action = action
+            super().__init__()
+
+    class ChoiceEntered(Message):
+        """The user confirmed the selected choice."""
+
+        def __init__(self, action: dict[str, Any]) -> None:
+            self.action = action
+            super().__init__()
+
     def __init__(
         self,
         message: AgentChatMessage,
@@ -57,6 +72,7 @@ class AgentWidgetCard(Vertical):
         self._runner: ConfigLaunchRunner | None = None
         self._launch_running = False
         self._active_launch_action: dict[str, Any] | None = None
+        self._selected_choice_action: dict[str, Any] | None = None
         self._closed = False
 
     def compose(self) -> ComposeResult:
@@ -113,6 +129,15 @@ class AgentWidgetCard(Vertical):
                         variant=action.variant,
                         classes=f"agent-widget-action {_action_class(action.name)}",
                     )
+                if any(action.name.startswith("choice:") for action in actions):
+                    enter_button = Button(
+                        "Enter",
+                        name="choice-enter",
+                        variant="primary",
+                        classes="agent-widget-action agent-widget-enter",
+                    )
+                    enter_button.disabled = True
+                    yield enter_button
         yield Static(Text("Ready", style="dim"), classes="agent-widget-status", markup=False)
         yield Static("", classes="agent-widget-log", markup=False)
 
@@ -139,6 +164,10 @@ class AgentWidgetCard(Vertical):
         if name.startswith("choice:"):
             event.stop()
             self._select_choice(name.removeprefix("choice:"))
+            return
+        if name == "choice-enter":
+            event.stop()
+            self._enter_selected_choice()
 
     def _start_inline_launch(self) -> None:
         if self._launch_running:
@@ -309,9 +338,25 @@ class AgentWidgetCard(Vertical):
             choice_id=choice_id,
             workspace=self._workspace,
         )
-        self._set_widget_status(_choice_followup_status(label, choice_id=choice_id), SUCCESS)
+        self._selected_choice_action = action
+        self._set_widget_status(_choice_followup_status(label), SUCCESS)
+        self._set_choice_enter_enabled(True)
         self._focus_agent_prompt()
         self._record_widget_action(action)
+        self.post_message(self.ChoiceSelected(action))
+
+    def _enter_selected_choice(self) -> None:
+        if self._selected_choice_action is None:
+            self._set_widget_status("Choose an option first.", STATUS_WARNING)
+            return
+        self._set_choice_enter_enabled(False)
+        self.post_message(self.ChoiceEntered(self._selected_choice_action))
+
+    def _set_choice_enter_enabled(self, enabled: bool) -> None:
+        for button in self.query(Button):
+            if button.name == "choice-enter":
+                button.disabled = not enabled
+                return
 
     def _focus_agent_prompt(self) -> None:
         try:
@@ -376,18 +421,8 @@ def _widget_card_body(model: AgentWidgetModel) -> Group:
     return Group(table)
 
 
-def _choice_followup_status(label: str, *, choice_id: str = "") -> str:
-    normalized_id = choice_id.lower()
-    normalized = label.lower()
-    if normalized_id == "search" or "search" in normalized:
-        next_step = "Type a search query below, then press Enter."
-    elif normalized_id == "known" or "owner/name" in normalized:
-        next_step = "Type the environment owner/name below, then press Enter."
-    elif normalized_id == "local" or "local" in normalized:
-        next_step = "Type the local environment path below, then press Enter."
-    else:
-        next_step = "Type any follow-up below, then press Enter."
-    return f"Selected {label}. {next_step}"
+def _choice_followup_status(label: str) -> str:
+    return f"Selected {label}. Click Enter to continue, or add details below first if you want."
 
 
 def _short_path(value: str) -> str:

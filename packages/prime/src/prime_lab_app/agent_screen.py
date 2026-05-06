@@ -307,6 +307,10 @@ class AgentChatScreen(Screen[None]):
         min-width: 16;
     }
 
+    .agent-widget-enter {
+        min-width: 8;
+    }
+
     .agent-widget-status {
         height: auto;
         margin-top: 1;
@@ -413,6 +417,7 @@ class AgentChatScreen(Screen[None]):
         self._global_prompt_history = load_agent_prompt_history(limit=50)
         self._prompt_history: tuple[str, ...] = ()
         self._history_index = 0
+        self._pending_widget_choice: dict[str, Any] | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(_agent_header(), id="agent-header", markup=False)
@@ -504,6 +509,16 @@ class AgentChatScreen(Screen[None]):
             return
         self._send_current_prompt()
 
+    @on(AgentWidgetCard.ChoiceSelected)
+    def _choice_selected(self, event: AgentWidgetCard.ChoiceSelected) -> None:
+        self._pending_widget_choice = event.action
+
+    @on(AgentWidgetCard.ChoiceEntered)
+    def _choice_entered(self, event: AgentWidgetCard.ChoiceEntered) -> None:
+        event.stop()
+        self._pending_widget_choice = event.action
+        self._send_current_prompt()
+
     @on(AgentPrompt.CommandPrevious)
     def _command_previous(self, _event: AgentPrompt.CommandPrevious) -> None:
         if not self._command_menu_rows:
@@ -544,12 +559,14 @@ class AgentChatScreen(Screen[None]):
             return
         prompt_widget = self.query_one("#agent-prompt", AgentPrompt)
         prompt = prompt_widget.submitted_text
-        if not prompt.strip():
+        prompt_to_send = _choice_followup_prompt(self._pending_widget_choice, prompt)
+        if not prompt_to_send.strip():
             return
-        append_agent_prompt_history(self._workspace, self._agent, prompt)
+        append_agent_prompt_history(self._workspace, self._agent, prompt_to_send)
         self._global_prompt_history = load_agent_prompt_history(limit=50)
         prompt_widget.clear_prompt()
-        self._send_prompt(prompt)
+        self._pending_widget_choice = None
+        self._send_prompt(prompt_to_send)
         self._refresh_runtime_view()
 
     def _handle_agent_command(self, value: str) -> None:
@@ -910,6 +927,17 @@ def _agent_prompt_placeholder(state: AgentConnectionState, fallback_agent: str) 
     if state.status == "unsupported":
         return f"{label} not yet supported in Lab"
     return f"Message {label}, Enter to send  •  /  ?  @"
+
+
+def _choice_followup_prompt(action: dict[str, Any] | None, prompt: str) -> str:
+    prompt = prompt.strip()
+    if action is None:
+        return prompt
+    label = str(action.get("choice_label") or action.get("choice_id") or "this option").strip()
+    selection = f"I chose: {label}."
+    if prompt:
+        return f"{selection}\n\n{prompt}"
+    return selection
 
 
 def _agent_statusbar(status_text_provider: StatusTextProvider) -> Table:

@@ -79,6 +79,7 @@ from prime_lab_app.agent_screen import (
     AgentPrompt,
     _agent_thinking_turn,
     _chat_transcript,
+    _choice_followup_prompt,
 )
 from prime_lab_app.agent_sessions import (
     append_agent_prompt_history,
@@ -2544,15 +2545,25 @@ def test_agent_widget_choice_body_does_not_repeat_heading(tmp_path: Path) -> Non
 
 
 def test_agent_widget_choice_followup_status_names_next_input() -> None:
-    assert _choice_followup_status("Search for an environment", choice_id="search") == (
-        "Selected Search for an environment. Type a search query below, then press Enter."
+    assert _choice_followup_status("Search for an environment") == (
+        "Selected Search for an environment. "
+        "Click Enter to continue, or add details below first if you want."
     )
-    assert _choice_followup_status("I know the env", choice_id="known") == (
-        "Selected I know the env. Type the environment owner/name below, then press Enter."
+    assert _choice_followup_status("I know the env") == (
+        "Selected I know the env. Click Enter to continue, or add details below first if you want."
     )
-    assert _choice_followup_status("Use a local environment", choice_id="local") == (
-        "Selected Use a local environment. Type the local environment path below, then press Enter."
+    assert _choice_followup_status("Use a local environment") == (
+        "Selected Use a local environment. "
+        "Click Enter to continue, or add details below first if you want."
     )
+
+
+def test_agent_widget_choice_followup_prompt_carries_selection_context() -> None:
+    action = {"choice_label": "reverse-text"}
+
+    assert _choice_followup_prompt(action, "") == "I chose: reverse-text."
+    assert _choice_followup_prompt(action, "use Qwen") == "I chose: reverse-text.\n\nuse Qwen"
+    assert _choice_followup_prompt(None, "plain prompt") == "plain prompt"
 
 
 class _FakeJsonRpcProcess:
@@ -4825,6 +4836,8 @@ async def test_prime_lab_app_chat_choice_picker_records_selection(tmp_path: Path
     )
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+    sent: list[str] = []
+    app._send_agent_prompt = sent.append  # type: ignore[method-assign]
     widget_messages = (
         AgentChatMessage(
             "system",
@@ -4859,8 +4872,11 @@ async def test_prime_lab_app_chat_choice_picker_records_selection(tmp_path: Path
         await pilot.pause()
 
         card = app.screen.query_one(AgentWidgetCard)
-        labels = [str(button.label) for button in card.query(Button)]
-        assert labels == ["reverse-text", "wordle"]
+        buttons = list(card.query(Button))
+        labels = [str(button.label) for button in buttons]
+        assert labels == ["reverse-text", "wordle", "Enter"]
+        enter_button = next(button for button in buttons if button.name == "choice-enter")
+        assert enter_button.disabled
 
         card.query(Button).first().press()
         await pilot.pause()
@@ -4877,8 +4893,18 @@ async def test_prime_lab_app_chat_choice_picker_records_selection(tmp_path: Path
         assert actions[-1]["choice_id"] == "reverse-text"
         status = _render_renderable(card.query_one(".agent-widget-status", Static).content)
         assert "Selected reverse-text" in status
-        assert "Type any follow-up below, then press Enter." in status
+        assert "Click Enter to continue, or add details below first if you want." in status
         assert app.screen.focused is app.screen.query_one("#agent-prompt", AgentPrompt)
+        assert not enter_button.disabled
+
+        prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
+        prompt.load_text("use Qwen")
+        enter_button.press()
+        await pilot.pause()
+
+        assert sent == ["I chose: reverse-text.\n\nuse Qwen"]
+        assert prompt.text == ""
+        assert enter_button.disabled
 
 
 @pytest.mark.asyncio

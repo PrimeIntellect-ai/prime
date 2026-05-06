@@ -909,7 +909,7 @@ def _agent_prompt_placeholder(state: AgentConnectionState, fallback_agent: str) 
     label = state.label or agent_adapter(fallback_agent).label
     if state.status == "unsupported":
         return f"{label} not yet supported in Lab"
-    return f"Ask {label}  •  /  ?  @"
+    return f"Message {label}, Enter to send  •  /  ?  @"
 
 
 def _agent_statusbar(status_text_provider: StatusTextProvider) -> Table:

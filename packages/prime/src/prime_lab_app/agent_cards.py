@@ -309,8 +309,18 @@ class AgentWidgetCard(Vertical):
             choice_id=choice_id,
             workspace=self._workspace,
         )
-        self._set_widget_status(f"Selected {label}", SUCCESS)
+        self._set_widget_status(_choice_followup_status(label, choice_id=choice_id), SUCCESS)
+        self._focus_agent_prompt()
         self._record_widget_action(action)
+
+    def _focus_agent_prompt(self) -> None:
+        try:
+            prompt = self.screen.query_one("#agent-prompt")
+        except NoMatches:
+            return
+        focus = getattr(prompt, "focus", None)
+        if callable(focus):
+            self.call_after_refresh(focus)
 
     def _current_config_build(self) -> ConfigBuildResult:
         return build_agent_widget_config(self._model, self._widget_input_values())
@@ -364,6 +374,20 @@ def _widget_card_body(model: AgentWidgetModel) -> Group:
         if count:
             table.add_row("Choices", str(count))
     return Group(table)
+
+
+def _choice_followup_status(label: str, *, choice_id: str = "") -> str:
+    normalized_id = choice_id.lower()
+    normalized = label.lower()
+    if normalized_id == "search" or "search" in normalized:
+        next_step = "Type a search query below, then press Enter."
+    elif normalized_id == "known" or "owner/name" in normalized:
+        next_step = "Type the environment owner/name below, then press Enter."
+    elif normalized_id == "local" or "local" in normalized:
+        next_step = "Type the local environment path below, then press Enter."
+    else:
+        next_step = "Type any follow-up below, then press Enter."
+    return f"Selected {label}. {next_step}"
 
 
 def _short_path(value: str) -> str:

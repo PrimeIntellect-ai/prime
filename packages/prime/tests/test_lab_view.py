@@ -49,7 +49,12 @@ from prime_lab_app.agent_adapters import (
     pi_lab_extension_path,
 )
 from prime_lab_app.agent_capabilities import agent_capability, known_agent_names
-from prime_lab_app.agent_cards import AgentWidgetCard, _widget_card_body, _widget_card_heading
+from prime_lab_app.agent_cards import (
+    AgentWidgetCard,
+    _choice_followup_status,
+    _widget_card_body,
+    _widget_card_heading,
+)
 from prime_lab_app.agent_mcp_bridge import (
     LabMcpIpcServer,
     _dump_simple_yaml,
@@ -2538,6 +2543,18 @@ def test_agent_widget_choice_body_does_not_repeat_heading(tmp_path: Path) -> Non
     assert "3" in body
 
 
+def test_agent_widget_choice_followup_status_names_next_input() -> None:
+    assert _choice_followup_status("Search for an environment", choice_id="search") == (
+        "Selected Search for an environment. Type a search query below, then press Enter."
+    )
+    assert _choice_followup_status("I know the env", choice_id="known") == (
+        "Selected I know the env. Type the environment owner/name below, then press Enter."
+    )
+    assert _choice_followup_status("Use a local environment", choice_id="local") == (
+        "Selected Use a local environment. Type the local environment path below, then press Enter."
+    )
+
+
 class _FakeJsonRpcProcess:
     stderr: list[str] = []
 
@@ -4173,7 +4190,7 @@ async def test_agent_chat_uses_centered_stage_without_sidebar(tmp_path: Path) ->
         assert isinstance(app.screen.query_one("#agent-chat"), VerticalScroll)
         assert app.screen.query_one("#agent-atmosphere").display is True
         prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
-        assert prompt.placeholder == "Ask Claude  •  /  ?  @"
+        assert prompt.placeholder == "Message Claude, Enter to send  •  /  ?  @"
 
 
 def test_launch_backdrop_renders_stable_terminal_field() -> None:
@@ -4860,6 +4877,8 @@ async def test_prime_lab_app_chat_choice_picker_records_selection(tmp_path: Path
         assert actions[-1]["choice_id"] == "reverse-text"
         status = _render_renderable(card.query_one(".agent-widget-status", Static).content)
         assert "Selected reverse-text" in status
+        assert "Type any follow-up below, then press Enter." in status
+        assert app.screen.focused is app.screen.query_one("#agent-prompt", AgentPrompt)
 
 
 @pytest.mark.asyncio

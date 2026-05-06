@@ -66,6 +66,7 @@ class AgentCapability:
     native_surface: AgentNativeSurface
     requirements: tuple[AgentInstallRequirement, ...] = ()
     expected_surface_paths: tuple[str, ...] = ()
+    project_skill_roots: tuple[str, ...] = ()
     user_skill_root: str = ""
     status: AgentCapabilityStatus = "supported"
     unsupported_reason: str = ""
@@ -172,6 +173,7 @@ _CAPABILITIES: dict[str, AgentCapability] = {
         label="Codex",
         native_surface="codex_app_server",
         requirements=(AgentInstallRequirement("codex", description="Codex CLI"),),
+        project_skill_roots=(".agents/skills",),
         user_skill_root="~/.agents/skills",
     ),
     "claude": AgentCapability(
@@ -179,6 +181,7 @@ _CAPABILITIES: dict[str, AgentCapability] = {
         label="Claude",
         native_surface="none",
         requirements=(AgentInstallRequirement("claude", description="Claude CLI"),),
+        project_skill_roots=(".claude/skills",),
         user_skill_root="~/.claude/skills",
     ),
     "cursor": AgentCapability(
@@ -186,6 +189,7 @@ _CAPABILITIES: dict[str, AgentCapability] = {
         label="Cursor",
         native_surface="none",
         requirements=(AgentInstallRequirement("cursor-agent", description="Cursor Agent CLI"),),
+        project_skill_roots=(".cursor/skills",),
         user_skill_root="~/.cursor/skills",
     ),
     "opencode": AgentCapability(
@@ -193,13 +197,15 @@ _CAPABILITIES: dict[str, AgentCapability] = {
         label="OpenCode",
         native_surface="none",
         requirements=(AgentInstallRequirement("opencode", description="OpenCode CLI"),),
-        user_skill_root="~/.opencode/skills",
+        project_skill_roots=(".opencode/skills",),
+        user_skill_root="~/.config/opencode/skills",
     ),
     "pi": AgentCapability(
         name="pi",
         label="Pi Coding Agent",
         native_surface="pi_acp",
-        user_skill_root="~/.pi/skills",
+        project_skill_roots=(".pi/skills",),
+        user_skill_root="~/.pi/agent/skills",
         requirements=(
             AgentInstallRequirement("pi", description="Pi Coding Agent CLI"),
             AgentInstallRequirement(
@@ -227,6 +233,7 @@ _CAPABILITIES: dict[str, AgentCapability] = {
                 description="Factory Droid Agent CLI",
             ),
         ),
+        project_skill_roots=(".factory/skills",),
         user_skill_root="~/.factory/skills",
     ),
     "amp": AgentCapability(
@@ -240,7 +247,8 @@ _CAPABILITIES: dict[str, AgentCapability] = {
                 description="Amp Code CLI",
             ),
         ),
-        user_skill_root="~/.config/amp/skills",
+        project_skill_roots=(".agents/skills",),
+        user_skill_root="~/.config/agents/skills",
     ),
 }
 AGENT_DISPLAY_ORDER = (
@@ -300,6 +308,13 @@ def agent_user_skills_dir(agent: str) -> Path | None:
 
     root = agent_capability(agent).user_skill_root
     return Path(root).expanduser() if root else None
+
+
+def agent_project_skills_dirs(agent: str, workspace: Path) -> tuple[Path, ...]:
+    """Return project-local skill roots for a supported agent."""
+
+    workspace = workspace.expanduser().resolve()
+    return tuple(workspace / root for root in agent_capability(agent).project_skill_roots)
 
 
 def _normalize_agent_name(name: str) -> str:

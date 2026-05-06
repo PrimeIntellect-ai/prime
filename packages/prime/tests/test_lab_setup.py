@@ -52,11 +52,35 @@ def fake_lab_asset_downloads(monkeypatch: Any) -> list[str]:
             dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
         emit(f"Downloaded {dest}\n")
 
+    def fake_download_json(url: str) -> list[dict[str, str]]:
+        if "/contents/skills?" in url:
+            return [{"name": name, "type": "dir"} for name in skill_names]
+        if "/contents/skills/" in url:
+            source_path = url.split("/contents/", 1)[1].split("?", 1)[0]
+            if source_path.endswith("/references"):
+                return [
+                    {
+                        "name": "notes.md",
+                        "type": "file",
+                        "path": f"{source_path}/notes.md",
+                    }
+                ]
+            return [
+                {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "path": f"{source_path}/SKILL.md",
+                },
+                {
+                    "name": "references",
+                    "type": "dir",
+                    "path": f"{source_path}/references",
+                },
+            ]
+        return []
+
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download_file)
-    monkeypatch.setattr(
-        "prime_cli.lab_setup._download_json",
-        lambda _url: [{"name": name, "type": "dir"} for name in skill_names],
-    )
+    monkeypatch.setattr("prime_cli.lab_setup._download_json", fake_download_json)
     return urls
 
 
@@ -70,6 +94,45 @@ def test_lab_setup_parses_selected_agents_and_all() -> None:
 
     assert selected.agents == ("droid", "amp", "claude")
     assert all_agents.agents == known_agent_names()
+
+
+def test_lab_setup_prompts_for_agent_when_interactive(
+    monkeypatch: Any,
+) -> None:
+    class FakeStdin:
+        def isatty(self) -> bool:
+            return True
+
+    answers = iter(("droid", "y", "amp-code,claude-code"))
+    monkeypatch.setattr(lab_setup.sys, "stdin", FakeStdin())
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    options = parse_lab_setup_args([])
+
+    assert options.agents == ("droid", "amp", "claude")
+
+
+def test_lab_setup_non_interactive_requires_explicit_agent(
+    monkeypatch: Any,
+) -> None:
+    class FakeStdin:
+        def isatty(self) -> bool:
+            return False
+
+    monkeypatch.setattr(lab_setup.sys, "stdin", FakeStdin())
+
+    with pytest.raises(ValueError, match="No --agent provided"):
+        parse_lab_setup_args([])
+
+
+def test_lab_setup_service_requires_configured_agent(tmp_path: Path) -> None:
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True),
+        workspace=tmp_path,
+        emit=lambda _text: None,
+    )
+
+    assert result.exit_code == 1
 
 
 def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
@@ -95,8 +158,15 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     assert metadata["setup_source"] == "prime lab setup"
     assert metadata["choices"]["primary_agent"] == "pi"
     assert (home / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
-    assert (home / ".pi" / "skills" / "create-environments").exists()
-    assert not (tmp_path / ".pi" / "skills").exists()
+    assert (
+        home / ".prime" / "skills" / "create-environments" / "references" / "notes.md"
+    ).is_file()
+    assert (tmp_path / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
+    assert (
+        tmp_path / ".prime" / "skills" / "create-environments" / "references" / "notes.md"
+    ).is_file()
+    assert (tmp_path / ".pi" / "skills" / "create-environments").exists()
+    assert not (home / ".pi" / "agent" / "skills").exists()
     assert (tmp_path / "configs" / "rl" / "gsm8k.toml").is_file()
     assert any("npm install -g pi-acp" in line for line in emitted)
 
@@ -242,9 +312,7 @@ def test_lab_setup_manifest_tracks_skill_source(
     )
     assert result.exit_code == 0
     assert manifest["skills"]["create-environments"]["repo"] == "primeintellect-ai/verifiers"
-    assert manifest["skills"]["create-environments"]["path"] == (
-        "skills/create-environments/SKILL.md"
-    )
+    assert manifest["skills"]["create-environments"]["path"] == "skills/create-environments"
 
 
 def test_lab_setup_rejects_duplicate_skill_sources(
@@ -291,11 +359,12 @@ def test_lab_sync_all_scaffolds_amp_and_factory_skills(
         emit=lambda _text: None,
     )
 
-    home = tmp_path / "home"
     assert result.exit_code == 0
-    assert (home / ".factory" / "skills" / "create-environments").exists()
-    assert (home / ".config" / "amp" / "skills" / "create-environments").exists()
-    assert not (tmp_path / ".factory" / "skills").exists()
+    assert (tmp_path / ".factory" / "skills" / "create-environments").exists()
+    assert (tmp_path / ".agents" / "skills" / "create-environments").exists()
+    assert (tmp_path / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
+    assert not (tmp_path / "home" / ".factory" / "skills").exists()
+    assert not (tmp_path / "home" / ".config" / "agents" / "skills").exists()
     assert not (tmp_path / ".amp" / "skills").exists()
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
 
@@ -401,14 +470,65 @@ def test_workspace_agents_from_metadata_ignores_non_string_values(tmp_path: Path
     assert lab_setup._workspace_agents_from_metadata(tmp_path) == ("amp",)
 
 
+def test_lab_sync_requires_agent_or_workspace_metadata(tmp_path: Path) -> None:
+    result = run_lab_sync_service(
+        LabSyncOptions(skip_docs=True),
+        workspace=tmp_path,
+        emit=lambda _text: None,
+    )
+
+    assert result.exit_code == 1
+
+
+def test_lab_sync_no_agent_refreshes_shared_assets_without_metadata(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    result = run_lab_sync_service(
+        LabSyncOptions(skip_docs=True, no_agent=True),
+        workspace=tmp_path,
+        emit=lambda _text: None,
+    )
+
+    assert result.exit_code == 0
+    assert (tmp_path / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
+    assert not (tmp_path / ".agents" / "skills").exists()
+    assert not (tmp_path / ".prime" / "lab.json").exists()
+
+
+def test_lab_sync_replaces_workspace_skill_bundle_without_marker(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    skill_dir = tmp_path / ".prime" / "skills" / "create-environments"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("stale skill\n", encoding="utf-8")
+
+    result = run_lab_sync_service(
+        LabSyncOptions(skip_docs=True, no_agent=True),
+        workspace=tmp_path,
+        emit=lambda _text: None,
+    )
+
+    assert result.exit_code == 0
+    assert "downloaded from" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_lab_sync_rejects_agent_with_no_agent() -> None:
+    with pytest.raises(ValueError, match="cannot be used together"):
+        parse_lab_sync_args(["--agent", "codex", "--no-agent"])
+
+
 def test_lab_sync_skips_user_owned_skill_conflicts(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
-    user_skill = home / ".config" / "amp" / "skills" / "create-environments"
+    user_skill = tmp_path / ".agents" / "skills" / "create-environments"
     user_skill.mkdir(parents=True)
     (user_skill / "SKILL.md").write_text("user skill\n", encoding="utf-8")
     emitted: list[str] = []
@@ -431,9 +551,9 @@ def test_lab_sync_removes_stale_managed_skill_links(
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
-    stale_source = home / ".prime" / "skills" / "old-lab-skill"
+    stale_source = tmp_path / ".prime" / "skills" / "old-lab-skill"
     stale_source.mkdir(parents=True)
-    stale_target = home / ".config" / "amp" / "skills" / "old-lab-skill"
+    stale_target = tmp_path / ".agents" / "skills" / "old-lab-skill"
     stale_target.parent.mkdir(parents=True)
     stale_target.symlink_to(stale_source, target_is_directory=True)
 
@@ -488,5 +608,5 @@ def test_lab_setup_accepts_amp_and_factory_aliases(tmp_path: Path, monkeypatch: 
     assert result.exit_code == 0
     assert metadata["setup_source"] == "prime lab sync"
     assert metadata["choices"]["agents"] == ["droid", "amp"]
-    assert (tmp_path / "home" / ".factory" / "skills" / "create-environments").exists()
-    assert (tmp_path / "home" / ".config" / "amp" / "skills" / "create-environments").exists()
+    assert (tmp_path / ".factory" / "skills" / "create-environments").exists()
+    assert (tmp_path / ".agents" / "skills" / "create-environments").exists()

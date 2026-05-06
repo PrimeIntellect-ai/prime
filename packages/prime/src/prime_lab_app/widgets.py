@@ -284,9 +284,22 @@ class SegmentedToggle(Static, can_focus=True):
 class HomeGroupToggle(SegmentedToggle):
     """Segmented control for Settings item groups."""
 
+    BINDINGS = [
+        Binding("left", "previous_segment", "Previous", key_display="Left", show=False),
+        Binding("right", "next_segment", "Next", key_display="Right", show=False),
+        Binding("up", "stay_on_segment", "Previous", key_display="Up", show=False),
+        Binding("down", "select_segment", "Rows", key_display="Down", show=False),
+        Binding("enter", "select_segment", "Rows", key_display="Enter"),
+        Binding("escape", "back", "Back", key_display="Esc", show=False),
+        Binding("b", "back", "Back", key_display="B", show=False),
+    ]
+
     previous_action = "action_previous_home_group"
     next_action = "action_next_home_group"
     select_action = "focus_home_rows"
+
+    def action_stay_on_segment(self) -> None:
+        return
 
     def update_groups(
         self,

@@ -193,7 +193,13 @@ from prime_lab_app.training_screen import (
     _merge_training_detail,
     _next_log_tail_lines,
 )
-from prime_lab_app.widgets import ClearableInput, EvaluationViewToggle, HomeLaunchPanel, ScopeToggle
+from prime_lab_app.widgets import (
+    ClearableInput,
+    EvaluationViewToggle,
+    HomeGroupToggle,
+    HomeLaunchPanel,
+    ScopeToggle,
+)
 from rich.console import Console
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Button, Label, OptionList, Select, Static, Tree
@@ -4360,6 +4366,35 @@ async def test_prime_lab_app_settings_is_reachable_from_section_nav(tmp_path: Pa
         assert app.query_one("#inspector-pane").display is True
         assert app.query_one("#statusbar").display is True
         assert app.query("Footer").first().display is True
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_settings_subcolumn_vertical_keys_enter_rows(
+    tmp_path: Path,
+) -> None:
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        toggle = app.query_one("#home-toggle", HomeGroupToggle)
+        toggle.focus()
+        active_group = app._home_group
+
+        await pilot.press("up")
+        await pilot.pause()
+
+        assert app.focused is toggle
+        assert app._home_group == active_group
+
+        await pilot.press("down")
+        await pilot.pause()
+
+        assert isinstance(app.focused, LabOptionList)
+        assert app._home_group == active_group
 
 
 @pytest.mark.asyncio

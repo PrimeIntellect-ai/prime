@@ -5139,6 +5139,49 @@ def test_prime_lab_app_chat_widget_uses_default_environment_for_rl_config(
     assert build.parsed["env"] == [{"id": "primeintellect/wordle"}]
     assert build.parsed["model"] == "future/gpt-oss-next"
     assert build.parsed["sampling"]["reasoning_effort"] == "medium"
+    assert "name" not in build.parsed
+    assert "name =" not in build.toml_text
+
+
+def test_prime_lab_app_chat_widget_strips_agent_training_run_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "prime_lab_app.agent_widget_model._training_model_options",
+        lambda: _training_model_options_for_name("future/gpt-oss-next"),
+    )
+    message = AgentChatMessage(
+        "system",
+        "Action ready",
+        "widget",
+        {
+            "kind": "run_launcher",
+            "title": "Train: wordle",
+            "payload": {
+                "kind": "run_launcher",
+                "config_kind": "rl",
+                "config": {
+                    "name": "wordle-short-name",
+                    "model": "future/gpt-oss-next",
+                    "env": [{"id": "primeintellect/wordle"}],
+                    "max_steps": 10,
+                    "batch_size": 32,
+                    "rollouts_per_example": 4,
+                    "sampling": {
+                        "max_tokens": 1024,
+                        "reasoning_effort": "medium",
+                    },
+                },
+            },
+        },
+    )
+
+    model = build_agent_widget_model(message, tmp_path)
+    build = build_agent_widget_config(model, {})
+
+    assert "name" not in build.parsed
+    assert "wordle-short-name" not in build.toml_text
 
 
 def test_training_model_options_expand_reasoning_variants() -> None:
@@ -5757,6 +5800,10 @@ async def test_prime_lab_app_chat_training_launch_opens_run_screen(
         app.screen._refresh_runtime_view()
         await pilot.pause()
 
+        card = app.screen.query_one(AgentWidgetCard)
+        view_button = next(button for button in card.query(Button) if button.name == "view-run")
+        assert view_button.disabled is True
+
         app.screen.query_one(".agent-widget-action-launch", Button).press()
         for _ in range(10):
             await pilot.pause()
@@ -5765,6 +5812,36 @@ async def test_prime_lab_app_chat_training_launch_opens_run_screen(
 
         assert isinstance(app.screen, TrainingRunScreen)
         assert app.screen._base_item.title == "abc123run"
+        app.pop_screen()
+        await pilot.pause()
+        assert isinstance(app.screen, AgentChatScreen)
+        card = app.screen.query_one(AgentWidgetCard)
+        view_button = next(button for button in card.query(Button) if button.name == "view-run")
+        assert view_button.disabled is False
+
+        view_button.press()
+        await pilot.pause()
+
+        assert isinstance(app.screen, TrainingRunScreen)
+        assert app.screen._base_item.title == "abc123run"
+        assert app._agent_session is not None
+        actions = [
+            json.loads(line)
+            for line in (app._agent_session.path / "actions.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        launch_actions = [
+            action for action in actions if action.get("type") == "agent_inline_launch"
+        ]
+        assert [action["status"] for action in launch_actions[-3:]] == [
+            "started",
+            "run_created",
+            "completed",
+        ]
+        assert launch_actions[-2]["run_id"] == "abc123run"
+        assert launch_actions[-1]["run_id"] == "abc123run"
 
 
 @pytest.mark.asyncio
@@ -6409,9 +6486,9 @@ async def test_config_launch_follows_training_logs_from_hint(
 
     def fake_popen(command: list[str], **_kwargs: Any) -> FakeProcess:
         commands.append(command)
-        if command[:3] == ["prime", "rl", "logs"]:
+        if command[:3] == ["prime", "train", "logs"]:
             return FakeProcess(["Watching logs for run abc123run...\n", "step 1 reward 0.5\n"])
-        return FakeProcess(["Creating RL training run...\n", "  prime rl logs abc123run -f\n"])
+        return FakeProcess(["Creating RL training run...\n", "  prime train logs abc123run -f\n"])
 
     monkeypatch.setattr("prime_lab_app.launch_runner.subprocess.Popen", fake_popen)
 
@@ -6443,10 +6520,10 @@ async def test_config_launch_follows_training_logs_from_hint(
 
         assert commands[:2] == [
             ["prime", "train", "run", ".prime/lab/configs/rl/train.toml", "--yes"],
-            ["prime", "rl", "logs", "abc123run", "-f"],
+            ["prime", "train", "logs", "abc123run", "-f"],
         ]
         assert isinstance(app.screen, ConfigLaunchScreen)
-        assert "Following run logs with: prime rl logs abc123run -f" in app.screen._output
+        assert "Following run logs with: prime train logs abc123run -f" in app.screen._output
         assert "step 1 reward 0.5" in app.screen._output
 
 
@@ -6455,13 +6532,18 @@ def test_training_log_follow_command_uses_dashboard_and_run_id_hints() -> None:
         "Created run: https://app.test/dashboard/training/urlrun123"
     )
     from_hint = extract_training_log_follow_command("Training run id: hint_run_123")
+    from_train_logs = extract_training_log_follow_command(
+        "View logs with: prime train logs run123x -f"
+    )
 
     assert from_url is not None
     assert from_url.run_id == "urlrun123"
-    assert from_url.argv == ("prime", "rl", "logs", "urlrun123", "-f")
+    assert from_url.argv == ("prime", "train", "logs", "urlrun123", "-f")
     assert from_hint is not None
     assert from_hint.run_id == "hint_run_123"
-    assert from_hint.argv == ("prime", "rl", "logs", "hint_run_123", "-f")
+    assert from_hint.argv == ("prime", "train", "logs", "hint_run_123", "-f")
+    assert from_train_logs is not None
+    assert from_train_logs.run_id == "run123x"
 
 
 def test_config_launch_runner_opens_training_run_instead_of_following_inline_logs(
@@ -6664,12 +6746,12 @@ async def test_config_launch_retries_training_logs_until_ready(
     def fake_popen(command: list[str], **_kwargs: Any) -> FakeProcess:
         nonlocal log_attempts
         commands.append(command)
-        if command[:3] == ["prime", "rl", "logs"]:
+        if command[:3] == ["prime", "train", "logs"]:
             log_attempts += 1
             if log_attempts == 1:
                 return FakeProcess(["No logs available yet.\n"], 1)
             return FakeProcess(["logs ready\n"], 0)
-        return FakeProcess(["  prime rl logs retryrun -f\n"])
+        return FakeProcess(["  prime train logs retryrun -f\n"])
 
     monkeypatch.setattr("prime_lab_app.launch_runner.subprocess.Popen", fake_popen)
     monkeypatch.setattr("prime_lab_app.launch_runner._LOG_RETRY_DELAYS", (0.01,))
@@ -6700,7 +6782,7 @@ async def test_config_launch_retries_training_logs_until_ready(
             if log_attempts >= 2:
                 break
 
-        assert commands.count(["prime", "rl", "logs", "retryrun", "-f"]) == 2
+        assert commands.count(["prime", "train", "logs", "retryrun", "-f"]) == 2
         assert isinstance(app.screen, ConfigLaunchScreen)
         assert "Logs are not ready yet; retrying in 0.01s." in app.screen._output
         assert "logs ready" in app.screen._output

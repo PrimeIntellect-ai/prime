@@ -74,6 +74,7 @@ def build_agent_widget_config(
         context["config_kind"],
         field_value,
     )
+    build = remove_agent_training_run_name(build, str(context["config_kind"]))
     return apply_agent_widget_extra_fields(build, str(context["config_kind"]), field_values)
 
 
@@ -134,6 +135,7 @@ def agent_widget_launch_action(
     workspace: Path,
     status: str,
     returncode: int | None = None,
+    run_id: str = "",
 ) -> dict[str, Any]:
     """Return a durable action log record for a widget launch state."""
 
@@ -164,6 +166,8 @@ def agent_widget_launch_action(
     }
     if returncode is not None:
         action["returncode"] = returncode
+    if run_id:
+        action["run_id"] = run_id
     return action
 
 
@@ -227,3 +231,17 @@ def apply_agent_widget_extra_fields(
     dedupe_single_eval_globals(config)
     toml_text = format_toml_blocks(toml.dumps(filter_widget_empty_values(config))).rstrip()
     return ConfigBuildResult(config, toml_text, tuple(errors))
+
+
+def remove_agent_training_run_name(
+    build: ConfigBuildResult,
+    config_kind: str,
+) -> ConfigBuildResult:
+    """Keep agent-generated Hosted Training configs on the platform-generated run name path."""
+
+    if config_kind != "rl" or "name" not in build.parsed:
+        return build
+    config = dict(build.parsed)
+    config.pop("name", None)
+    toml_text = format_toml_blocks(toml.dumps(filter_widget_empty_values(config))).rstrip()
+    return ConfigBuildResult(config, toml_text, build.errors)

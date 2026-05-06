@@ -30,7 +30,7 @@ from .agent_widget_model import (
     widget_payload,
 )
 from .config_screen import ConfigBuildResult
-from .launch_runner import ConfigLaunchRunner
+from .launch_runner import ConfigLaunchRunner, extract_training_log_follow_command
 from .palette import PRIMARY, STATUS_ERROR, STATUS_WARNING, SUCCESS
 from .widgets import ClearableInput
 
@@ -80,6 +80,7 @@ class AgentWidgetCard(Vertical):
         self._launch_running = False
         self._active_launch_action: dict[str, Any] | None = None
         self._selected_choice_action: dict[str, Any] | None = None
+        self._training_run_id = _message_training_run_id(message)
         self._closed = False
 
     def compose(self) -> ComposeResult:
@@ -136,6 +137,15 @@ class AgentWidgetCard(Vertical):
                         variant=action.variant,
                         classes=f"agent-widget-action {_action_class(action.name)}",
                     )
+                if self._supports_training_run_view():
+                    view_button = Button(
+                        "View run",
+                        name="view-run",
+                        variant="default",
+                        classes="agent-widget-action agent-widget-view-run",
+                    )
+                    view_button.disabled = not bool(self._training_run_id)
+                    yield view_button
                 if any(action.name.startswith("choice:") for action in actions):
                     enter_button = Button(
                         "Enter",
@@ -167,6 +177,10 @@ class AgentWidgetCard(Vertical):
         if name == "stop":
             event.stop()
             self._stop_inline_launch()
+            return
+        if name == "view-run":
+            event.stop()
+            self._view_training_run()
             return
         if name.startswith("choice:"):
             event.stop()
@@ -236,7 +250,24 @@ class AgentWidgetCard(Vertical):
         self._runner.stop()
 
     def _notify_training_run_created(self, run_id: str) -> None:
-        self._call_from_launch_thread(self._open_training_run, run_id)
+        self._call_from_launch_thread(self._handle_training_run_created, run_id)
+
+    def _handle_training_run_created(self, run_id: str) -> None:
+        if self._set_training_run_id(run_id):
+            self._record_widget_action(
+                agent_widget_launch_action(
+                    self._model,
+                    command=(
+                        self._active_launch_action.get("command", "")
+                        if self._active_launch_action
+                        else ""
+                    ),
+                    workspace=self._workspace,
+                    status="run_created",
+                    run_id=self._training_run_id,
+                )
+            )
+        self._open_training_run(self._training_run_id)
 
     def _call_from_launch_thread(self, callback: Any, *args: Any) -> None:
         if self._closed:
@@ -259,6 +290,9 @@ class AgentWidgetCard(Vertical):
         self._launch_running = False
         if self._closed:
             return
+        if returncode == 0 and not self._training_run_id:
+            if logs_command := extract_training_log_follow_command(self._output):
+                self._set_training_run_id(logs_command.run_id)
         if returncode == 0:
             self._set_widget_status("Completed", SUCCESS)
         else:
@@ -274,6 +308,7 @@ class AgentWidgetCard(Vertical):
                 workspace=self._workspace,
                 status="completed" if returncode == 0 else "failed",
                 returncode=returncode,
+                run_id=self._training_run_id,
             )
         )
         self._set_launch_buttons(running=False)
@@ -319,6 +354,21 @@ class AgentWidgetCard(Vertical):
     def _open_training_run(self, run_id: str) -> None:
         self.post_message(self.TrainingRunOpened(run_id))
 
+    def _view_training_run(self) -> None:
+        if self._training_run_id:
+            self._open_training_run(self._training_run_id)
+
+    def _set_training_run_id(self, run_id: str) -> bool:
+        run_id = run_id.strip()
+        if not run_id:
+            return False
+        if self._training_run_id == run_id:
+            return False
+        self._training_run_id = run_id
+        self._message.metadata["launched_run_id"] = run_id
+        self._set_view_run_enabled(True)
+        return True
+
     def _set_widget_status(self, text: str, style: str = "") -> None:
         if self._closed:
             return
@@ -344,6 +394,19 @@ class AgentWidgetCard(Vertical):
                 button.disabled = running
             elif button.name == "stop":
                 button.disabled = not running
+            elif button.name == "view-run":
+                button.disabled = running or not bool(self._training_run_id)
+
+    def _set_view_run_enabled(self, enabled: bool) -> None:
+        for button in self.query(Button):
+            if button.name == "view-run":
+                button.disabled = not enabled
+                return
+
+    def _supports_training_run_view(self) -> bool:
+        if self._config_context is not None:
+            return str(self._config_context.get("config_kind") or "") == "rl"
+        return str(self._model.payload.get("config_kind") or "") == "rl"
 
     def _record_widget_action(self, action: dict[str, Any]) -> None:
         if self._record_action is not None:
@@ -406,6 +469,21 @@ class AgentWidgetCard(Vertical):
                 value = select_widget.value
                 values[select_widget.name] = "" if value is Select.BLANK else str(value).strip()
         return values
+
+
+def _message_training_run_id(message: AgentChatMessage) -> str:
+    metadata = message.metadata if isinstance(message.metadata, dict) else {}
+    for key in ("launched_run_id", "run_id", "runId"):
+        value = str(metadata.get(key) or "").strip()
+        if value:
+            return value
+    payload = metadata.get("payload")
+    if isinstance(payload, dict):
+        for key in ("launched_run_id", "run_id", "runId"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+    return ""
 
 
 def _widget_card_heading(model: AgentWidgetModel) -> Group:

@@ -188,7 +188,7 @@ def extract_training_log_follow_command(text: str) -> LogFollowCommand | None:
         tokens = cleaned.split()
     for index in range(len(tokens)):
         command_head = tokens[index : index + 3]
-        if command_head == ["prime", "rl", "logs"]:
+        if command_head in (["prime", "rl", "logs"], ["prime", "train", "logs"]):
             run_id = _first_run_id(tokens[index + 3 : index + 8])
             if run_id:
                 return _training_log_follow_command(run_id)
@@ -222,5 +222,5 @@ def _first_run_id(tokens: list[str]) -> str:
 
 
 def _training_log_follow_command(run_id: str) -> LogFollowCommand:
-    argv = ("prime", "rl", "logs", run_id, "-f")
+    argv = ("prime", "train", "logs", run_id, "-f")
     return LogFollowCommand(run_id, argv, " ".join(argv))

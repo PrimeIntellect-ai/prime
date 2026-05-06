@@ -792,8 +792,11 @@ def _dispatch_full_finetune_run(
     # `--output json` is a formatting switch: still dispatch the run,
     # then print the result as JSON. Same contract as the LoRA path
     # ("create then format"), which automation relies on to parse back
-    # run_id from the response.
-    if output != "json" and not yes:
+    # run_id from the response. Confirmation gating is purely on `--yes`
+    # so the JSON output path doesn't accidentally launch an expensive
+    # training job without an explicit ack — matches confirm_or_skip
+    # in the LoRA path.
+    if not yes:
         if not typer.confirm("Dispatch full_finetune run on auto-picked PrimeCluster?"):
             raise typer.Exit(0)
 

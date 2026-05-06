@@ -13,6 +13,7 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Static, TextArea
@@ -26,7 +27,7 @@ from .chat_parts import chat_transcript as _render_chat_transcript
 from .chat_parts import render_chat_turn
 from .launch_backdrop import LaunchBackdrop
 from .models import LabItem
-from .palette import BUTTON_CSS, SUCCESS
+from .palette import BUTTON_CSS, STATUS_WARNING, SUCCESS
 from .shell import action_hint_text, lab_header
 
 AgentStateProvider = Callable[[], AgentConnectionState]
@@ -37,11 +38,31 @@ AgentSessionStarter = Callable[[Path, str], None]
 AgentActionRecorder = Callable[[dict[str, Any]], None]
 TrainingRunOpener = Callable[[str], None]
 StatusTextProvider = Callable[[], Text]
+WarningsProvider = Callable[[], tuple[str, ...]]
 CommandMenuRow = tuple[str, str, str]
 
 _LARGE_PASTE_LINE_THRESHOLD = 6
 _LARGE_PASTE_CHAR_THRESHOLD = 800
 _MAX_PROMPT_LINES = 8
+
+
+class AgentStatusBar(Static):
+    """Agent screen status line with warning hover affordance."""
+
+    def on_enter(self, _event: events.Enter) -> None:
+        set_warning_hover = getattr(self.screen, "set_warning_hover", None)
+        if callable(set_warning_hover):
+            set_warning_hover(True)
+
+    def on_leave(self, _event: events.Leave) -> None:
+        set_warning_hover = getattr(self.screen, "set_warning_hover", None)
+        if callable(set_warning_hover):
+            set_warning_hover(False)
+
+    def on_click(self, event: events.Click) -> None:
+        toggle_warning_popover = getattr(self.screen, "toggle_warning_popover", None)
+        if callable(toggle_warning_popover) and toggle_warning_popover():
+            event.stop()
 
 
 class AgentPrompt(TextArea):
@@ -380,6 +401,23 @@ class AgentChatScreen(Screen[None]):
         padding: 0 1;
         background: $background;
     }
+
+    #agent-statusbar.-has-warnings:hover {
+        background: $panel;
+    }
+
+    #agent-warning-popover {
+        display: none;
+        height: auto;
+        max-height: 8;
+        background: $surface;
+        border-top: solid $primary;
+        padding: 0 1;
+    }
+
+    #agent-warning-popover-body {
+        background: $surface;
+    }
     """
     )
 
@@ -395,6 +433,7 @@ class AgentChatScreen(Screen[None]):
         record_action: AgentActionRecorder,
         open_training_run: TrainingRunOpener,
         status_text_provider: StatusTextProvider,
+        warnings_provider: WarningsProvider,
     ) -> None:
         super().__init__()
         self._item = item
@@ -408,6 +447,7 @@ class AgentChatScreen(Screen[None]):
         self._record_action = record_action
         self._open_training_run = open_training_run
         self._status_text_provider = status_text_provider
+        self._warnings_provider = warnings_provider
         self._template_prompts_by_id = _prompt_templates(item)
         self._references_by_value = _agent_references(item)
         self._frame = 0
@@ -421,6 +461,8 @@ class AgentChatScreen(Screen[None]):
         self._prompt_history: tuple[str, ...] = ()
         self._history_index = 0
         self._pending_widget_choice: dict[str, Any] | None = None
+        self._warnings_hovered = False
+        self._warnings_visible = False
 
     def compose(self) -> ComposeResult:
         yield Static(_agent_header(), id="agent-header", markup=False)
@@ -463,7 +505,9 @@ class AgentChatScreen(Screen[None]):
                             highlight_cursor_line=False,
                             compact=True,
                         )
-        yield Static(
+        with VerticalScroll(id="agent-warning-popover"):
+            yield Static("", id="agent-warning-popover-body", markup=False)
+        yield AgentStatusBar(
             _agent_statusbar(self._status_text_provider),
             id="agent-statusbar",
             markup=False,
@@ -743,7 +787,49 @@ class AgentChatScreen(Screen[None]):
         status_key = status_text.plain
         if status_key != self._last_status_key:
             self._last_status_key = status_key
-            self.query_one("#agent-statusbar", Static).update(_agent_statusbar(lambda: status_text))
+            self.query_one("#agent-statusbar", AgentStatusBar).update(
+                _agent_statusbar(lambda: status_text)
+            )
+        self._render_warning_popover()
+
+    def set_warning_hover(self, visible: bool) -> None:
+        self._warnings_hovered = visible
+        self._render_warning_popover()
+
+    def toggle_warning_popover(self) -> bool:
+        warnings = self._current_warnings()
+        if not warnings:
+            self._warnings_visible = False
+            self._render_warning_popover()
+            return False
+        self._warnings_visible = not self._warnings_visible
+        self._render_warning_popover()
+        return True
+
+    def _render_warning_popover(self) -> None:
+        try:
+            statusbar = self.query_one("#agent-statusbar", AgentStatusBar)
+            popover = self.query_one("#agent-warning-popover", VerticalScroll)
+            body = self.query_one("#agent-warning-popover-body", Static)
+        except NoMatches:
+            return
+        warnings = self._current_warnings()
+        statusbar.set_class(bool(warnings), "-has-warnings")
+        if not warnings:
+            self._warnings_hovered = False
+            self._warnings_visible = False
+        popover.display = bool((self._warnings_hovered or self._warnings_visible) and warnings)
+        if not popover.display:
+            body.update("")
+            return
+        body.update(_agent_warning_popover_text(warnings))
+
+    def _current_warnings(self) -> tuple[str, ...]:
+        return tuple(
+            warning_text
+            for warning in self._warnings_provider()
+            if (warning_text := str(warning).strip())
+        )
 
     def _render_chat(
         self,
@@ -954,6 +1040,16 @@ def _agent_statusbar(status_text_provider: StatusTextProvider) -> Table:
     bar.add_column(justify="right", no_wrap=True)
     bar.add_row(status_text_provider(), action_hint_text(("Esc", "Back"), ("Ctrl+W", "Welcome")))
     return bar
+
+
+def _agent_warning_popover_text(warnings: tuple[str, ...]) -> Text:
+    text = Text()
+    text.append("Warnings", style=STATUS_WARNING)
+    for index, warning in enumerate(warnings, start=1):
+        text.append("\n")
+        text.append(f"{index}. ", style=STATUS_WARNING)
+        text.append(warning)
+    return text
 
 
 def _agent_command_menu(

@@ -4183,7 +4183,11 @@ async def test_agent_chat_uses_centered_stage_without_sidebar(tmp_path: Path) ->
         '{"choices": {"primary_agent": "claude"}}',
         encoding="utf-8",
     )
-    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    base_snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    snapshot = replace(
+        base_snapshot,
+        warnings=("Training runs unavailable: retry later",),
+    )
     app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
 
     async with app.run_test(size=(140, 44)) as pilot:
@@ -4205,6 +4209,25 @@ async def test_agent_chat_uses_centered_stage_without_sidebar(tmp_path: Path) ->
         assert app.screen.query_one("#agent-atmosphere").display is True
         prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
         assert prompt.placeholder == "Message Claude, Enter to send  •  /  ?  @"
+        warning_popover = app.screen.query_one("#agent-warning-popover")
+        assert warning_popover.display is False
+        status_text = _render_renderable(app.screen.query_one("#agent-statusbar", Static).content)
+        assert "1 warning" in status_text
+
+        await pilot.hover("#agent-statusbar")
+        await pilot.pause()
+
+        assert warning_popover.display is True
+        rendered = _render_renderable(
+            app.screen.query_one("#agent-warning-popover-body", Static).render()
+        )
+        assert "Warnings" in rendered
+        assert "Training runs unavailable" in rendered
+
+        await pilot.hover("#agent-prompt")
+        await pilot.pause()
+
+        assert warning_popover.display is False
 
 
 def test_launch_backdrop_renders_stable_terminal_field() -> None:
@@ -4299,6 +4322,14 @@ async def test_prime_lab_app_warning_status_opens_warning_viewer(tmp_path: Path)
         status_text = _render_renderable(app._statusbar_text())
         assert "1 warning" in status_text
         assert "1 warnings" not in status_text
+        await pilot.hover("#statusbar")
+        await pilot.pause()
+
+        assert warning_viewer.display is True
+        await pilot.hover("#item-list")
+        await pilot.pause()
+
+        assert warning_viewer.display is False
         await pilot.click("#statusbar")
         await pilot.pause()
 

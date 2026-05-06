@@ -140,6 +140,16 @@ class WorkspacePathLink(Static):
 class StatusBar(Static):
     """Global status line with warning-tray affordance."""
 
+    def on_enter(self, _event: events.Enter) -> None:
+        set_warning_hover = getattr(self.app, "set_warning_hover", None)
+        if callable(set_warning_hover):
+            set_warning_hover(True)
+
+    def on_leave(self, _event: events.Leave) -> None:
+        set_warning_hover = getattr(self.app, "set_warning_hover", None)
+        if callable(set_warning_hover):
+            set_warning_hover(False)
+
     def on_click(self, event: events.Click) -> None:
         snapshot = getattr(self.app, "_snapshot", None)
         if snapshot is not None and getattr(snapshot, "warnings", ()):
@@ -383,6 +393,7 @@ class PrimeLabView(App[None]):
         self._lab_mcp_ipc: LabMcpIpcServer | None = None
         self._workspace_agent_overrides: dict[Path, str] = {}
         self._warnings_visible = False
+        self._warnings_hovered = False
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
@@ -838,11 +849,18 @@ class PrimeLabView(App[None]):
     def _statusbar_text(self) -> Text:
         return statusbar_text(self._snapshot, self._agent_state)
 
+    def _snapshot_warnings(self) -> tuple[str, ...]:
+        return self._snapshot.warnings if self._snapshot is not None else ()
+
     def toggle_warning_viewer(self) -> None:
         if self._snapshot is None or not self._snapshot.warnings:
             self._warnings_visible = False
         else:
             self._warnings_visible = not self._warnings_visible
+        self._render_warning_viewer()
+
+    def set_warning_hover(self, visible: bool) -> None:
+        self._warnings_hovered = visible
         self._render_warning_viewer()
 
     def _render_warning_viewer(self) -> None:
@@ -854,7 +872,8 @@ class PrimeLabView(App[None]):
         warnings = self._snapshot.warnings if self._snapshot is not None else ()
         if not warnings:
             self._warnings_visible = False
-        viewer.display = bool(self._warnings_visible and warnings)
+            self._warnings_hovered = False
+        viewer.display = bool((self._warnings_visible or self._warnings_hovered) and warnings)
         if not viewer.display:
             body.update("")
             return
@@ -1312,6 +1331,7 @@ class PrimeLabView(App[None]):
                 record_action=self._record_agent_action,
                 open_training_run=self._open_training_run_from_agent,
                 status_text_provider=self._statusbar_text,
+                warnings_provider=self._snapshot_warnings,
             )
         )
 
@@ -1562,6 +1582,7 @@ class PrimeLabView(App[None]):
                     record_action=self._record_agent_action,
                     open_training_run=self._open_training_run_from_agent,
                     status_text_provider=self._statusbar_text,
+                    warnings_provider=self._snapshot_warnings,
                 )
             )
             return

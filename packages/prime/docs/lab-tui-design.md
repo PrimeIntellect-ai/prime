@@ -46,14 +46,14 @@ Known post-V1 follow-up work:
 
 - The TUI launches by default from `prime lab`.
 - The global bottom status bar shows compact auth, team, warnings, and coding-agent connection state.
-- The active workspace path is a top-level clickable workspace affordance. It is the single global home for workspace location and opens workspace/profile/settings controls.
+- The center header shows authenticated identity, active profile, and active workspace path as a top-level clickable workspace affordance. It is the single global home for workspace location and opens workspace/profile/settings controls.
 - Primary destinations are Environments, Training, Evaluations, and Settings. Agent is a global shell surface opened from the status bar or `c` binding.
 - Section selectors are destinations only. Counts, loading state, auth state, and team context live in page subtitles, top chrome, bottom status, or explicit detail panels.
 - Non-zero warnings are clickable in the bottom status bar and open a compact warning tray above the bar. The tray points users toward workspace settings and Doctor for deterministic checks and fixes.
 - The bottom status bar is a compact shell control: auth/team, workspace, warnings, and agent state are displayed once. Non-zero warnings open the warning tray; otherwise the left side opens workspace/profile controls and the right side opens Agent.
 - Footer actions come from screen bindings/action descriptors rather than handwritten footer text.
 - Mouse, arrow keys, Enter, Esc, and Space are the main navigation primitives.
-- `Esc` backs out of child/full-screen views. `Enter` opens, submits, or confirms. `/` activates filters or slash commands. Arrow keys move selection or tabs. `Space` is reserved for local toggles/pickers and explicit control actions such as chart selection or source parent navigation.
+- `w` opens Welcome. `Esc` backs out of child/full-screen views. `Enter` opens, submits, or confirms. `/` activates filters or slash commands. Arrow keys move selection or tabs. `Space` is reserved for local toggles/pickers and explicit control actions such as chart selection or source parent navigation.
 - `Ctrl+C` exits the app and is intentionally not advertised. Focused text inputs consume `Ctrl+C` to clear their value instead of closing Lab.
 - `prime lab view` preserves the explicit viewer alias.
 
@@ -143,6 +143,8 @@ Launch: Explore Environments
 
 The selector and detail sidebar should stay identical for local-only, platform-only, and merged local/platform records except for source/badge differences.
 
+Environment scope defaults to account-owned or local workspace rows. A compact source toggle exposes the full public Environments Hub list when the user wants broader discovery.
+
 ### Agent Research Flow
 
 ```text
@@ -181,6 +183,7 @@ Current direction:
 
 - No permanent sidebar.
 - A centered chat stage owns the page.
+- The page carries a one-line experimental warning: Agent mode is experimental, and generated configs plus launch details should be reviewed before jobs run.
 - A subtle animated backdrop strip stretches with the stage width, giving the surface identity without competing with content.
 - The composer is an Enter-to-send command bar; visible controls stay minimal.
 - The composer is one line by default, expands upward only after explicit newlines, and collapses large paste payloads to a colored `[N lines pasted]` placeholder while preserving the submitted text.
@@ -279,9 +282,10 @@ Evaluations combine hosted/platform evals and local eval outputs.
 
 Selector behavior:
 
+- Account scope defaults to hosted evals for the logged-in account/team plus local eval outputs from the current workspace. Hosted-only and local-only scopes are one toggle away.
 - By-run and by-environment views.
 - Live filter with reusable filter components.
-- Local/platform badges.
+- Hosted/local badges use the same row structure and reserve score details for metadata and detail views.
 - Selection details aligned with the Verifiers eval TUI.
 - Raw JSON is not a default selector tab.
 

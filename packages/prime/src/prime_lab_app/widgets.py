@@ -29,8 +29,8 @@ class LabOptionList(OptionList):
     """Option list where mouse clicks can be guarded by the host app."""
 
     BINDINGS = [
-        Binding("escape", "back", "Back", key_display="Esc"),
-        Binding("b", "back", "Back", key_display="B"),
+        Binding("escape", "back", "Back", key_display="Esc", show=False),
+        Binding("b", "back", "Back", key_display="B", show=False),
     ]
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -102,10 +102,10 @@ class EvaluationTree(Tree[EvaluationNodeData]):
             for binding in Tree.BINDINGS
             if _binding_key(binding) not in {"enter", "space", "left", "right"}
         ),
-        Binding("left", "cursor_parent", "Parent", key_display="Left"),
-        Binding("right", "cursor_right", "Expand/next", key_display="Right"),
+        Binding("left", "cursor_parent", "Parent", key_display="Left", show=False),
+        Binding("right", "cursor_right", "Expand/next", key_display="Right", show=False),
         Binding("enter", "enter_cursor", "Open/toggle", key_display="Enter"),
-        Binding("space", "toggle_node", "Toggle", key_display="Space"),
+        Binding("space", "toggle_node", "Toggle", key_display="Space", show=False),
     ]
 
     def _visible_depth(self, node: TreeNode[Any]) -> int:
@@ -218,11 +218,13 @@ class SegmentedToggle(Static, can_focus=True):
     """Focusable segmented control for switching related views."""
 
     BINDINGS = [
-        Binding("up", "previous_segment", "Prev", key_display="Up"),
-        Binding("down", "next_segment", "Next", key_display="Down"),
-        Binding("enter", "select_segment", "Select", key_display="Enter"),
-        Binding("escape", "back", "Back", key_display="Esc"),
-        Binding("b", "back", "Back", key_display="B"),
+        Binding("left", "previous_segment", "Previous", key_display="Left", show=False),
+        Binding("right", "next_segment", "Next", key_display="Right", show=False),
+        Binding("up", "previous_segment", "Previous", key_display="Up", show=False),
+        Binding("down", "next_segment", "Next", key_display="Down", show=False),
+        Binding("enter", "select_segment", "Rows", key_display="Enter"),
+        Binding("escape", "back", "Back", key_display="Esc", show=False),
+        Binding("b", "back", "Back", key_display="B", show=False),
     ]
 
     previous_action = ""
@@ -306,6 +308,21 @@ class EvaluationViewToggle(SegmentedToggle):
 
     def update_views(self, views: Sequence[tuple[str, str]], active_view: str) -> None:
         self.update_segments([(key, label, None) for key, label in views], active_view)
+
+
+class ScopeToggle(SegmentedToggle):
+    """Segmented control for source/account scoping."""
+
+    previous_action = "action_previous_scope_view"
+    next_action = "action_next_scope_view"
+    select_action = "focus_after_scope_toggle"
+
+    def update_scopes(
+        self,
+        scopes: Sequence[tuple[str, str, int]],
+        active_scope: str,
+    ) -> None:
+        self.update_segments(scopes, active_scope)
 
 
 @dataclass(frozen=True)

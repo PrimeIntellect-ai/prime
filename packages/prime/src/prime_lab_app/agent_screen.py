@@ -27,7 +27,7 @@ from .chat_parts import chat_transcript as _render_chat_transcript
 from .chat_parts import render_chat_turn
 from .launch_backdrop import LaunchBackdrop
 from .models import LabItem
-from .palette import BUTTON_CSS, SUCCESS
+from .palette import BUTTON_CSS, SUCCESS, WARNING
 from .shell import action_hint_text, lab_header, warning_popover_text
 
 AgentStateProvider = Callable[[], AgentConnectionState]
@@ -205,7 +205,6 @@ class AgentChatScreen(Screen[None]):
         Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
         Binding("escape", "back", "Back", key_display="Esc", show=False),
         Binding("b", "back_if_not_typing", "Back", key_display="B", show=False),
-        Binding("ctrl+w", "show_welcome", "Welcome", key_display="Ctrl+W", show=False),
         Binding("tab", "focus_next", "Next", key_display="Tab", show=False),
         Binding("shift+tab", "focus_previous", "Previous", key_display="Shift+Tab", show=False),
     ]
@@ -224,6 +223,13 @@ class AgentChatScreen(Screen[None]):
         padding: 0 1;
         border-bottom: solid $primary;
         background: $background;
+    }
+
+    #agent-experimental-note {
+        height: 1;
+        padding: 0 1;
+        background: $background;
+        color: $text-muted;
     }
 
     #agent-body {
@@ -469,6 +475,7 @@ class AgentChatScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Static(_agent_header(), id="agent-header", markup=False)
+        yield Static(_agent_experimental_note(), id="agent-experimental-note", markup=False)
         with Vertical(id="agent-body"):
             with Vertical(id="agent-stage"):
                 yield Static(
@@ -531,11 +538,6 @@ class AgentChatScreen(Screen[None]):
         if isinstance(self.focused, AgentPrompt):
             return
         self.action_back()
-
-    def action_show_welcome(self) -> None:
-        show_welcome = getattr(self.app, "action_show_welcome", None)
-        if callable(show_welcome):
-            show_welcome()
 
     @on(TextArea.Changed, "#agent-prompt")
     def _prompt_changed(self, event: TextArea.Changed) -> None:
@@ -939,6 +941,17 @@ def _agent_header() -> Group:
     return Group(lab_header("Agent"))
 
 
+def _agent_experimental_note() -> Text:
+    text = Text()
+    text.append("Experimental", style=f"bold {WARNING}")
+    text.append(
+        " · Agent mode is experimental. Review generated configs and launch details before "
+        "running jobs.",
+        style="dim",
+    )
+    return text
+
+
 def _agent_atmosphere(
     _item: LabItem,
     _workspace: Path,
@@ -1041,7 +1054,7 @@ def _agent_statusbar(status_text_provider: StatusTextProvider) -> Table:
     bar = Table.grid(expand=True)
     bar.add_column(ratio=1)
     bar.add_column(justify="right", no_wrap=True)
-    bar.add_row(status_text_provider(), action_hint_text(("Esc", "Back"), ("Ctrl+W", "Welcome")))
+    bar.add_row(status_text_provider(), action_hint_text(("Esc", "Back")))
     return bar
 
 

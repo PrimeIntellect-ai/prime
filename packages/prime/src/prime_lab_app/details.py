@@ -398,7 +398,12 @@ def _evaluation_overview_table(raw: dict[str, Any]) -> Table:
     table.add_column()
     rows = [
         ("Name", raw.get("name")),
-        ("Type", raw.get("eval_type") or ("hosted" if raw.get("is_hosted") else None)),
+        (
+            "Type",
+            raw.get("source")
+            or raw.get("eval_type")
+            or ("hosted" if raw.get("is_hosted") else None),
+        ),
         ("Dataset", raw.get("dataset")),
         ("Task", raw.get("task_type")),
         ("Total samples", raw.get("total_samples") or raw.get("totalSamples")),

@@ -35,6 +35,7 @@ from .palette import (
     STATUS_DIM,
     STATUS_ERROR,
     STATUS_INFO,
+    STATUS_LOCAL,
     STATUS_SUCCESS,
     STATUS_WARNING,
 )
@@ -338,7 +339,11 @@ class LabDataSource:
             platform_items = tuple(
                 _evaluation_item(eval_data, idx) for idx, eval_data in enumerate(evaluations)
             )
-            items = tuple([*platform_items, *local_items])[: options.limit]
+            items = _combined_evaluation_items(
+                platform_items=platform_items,
+                local_items=tuple(local_items),
+                limit=options.limit,
+            )
             return LabSection(
                 key="evaluations",
                 title="Evaluations",
@@ -490,7 +495,9 @@ class LabDataSource:
             except Exception as exc:
                 environment_statuses.append({"environment": slug, "error": str(exc)})
 
+        detail_item = _rl_run_item(run, 0)
         raw = {
+            **detail_item.raw,
             **run_data,
             "progress": progress,
             "recent_metrics": metrics,
@@ -511,7 +518,6 @@ class LabDataSource:
             raw["logs_loaded"] = logs_loaded
             raw["log_tail_lines"] = log_tail_lines
 
-        detail_item = _rl_run_item(run, 0)
         metadata = list(detail_item.metadata)
         latest_step = progress.get("latest_step")
         steps_with_samples = progress.get("steps_with_samples")
@@ -546,6 +552,7 @@ class LabDataSource:
 
         raw = {**detail, "samples_preview": samples}
         detail_item = _evaluation_item(raw, 0)
+        raw = detail_item.raw
         metadata = list(detail_item.metadata)
         total = samples.get("total") if isinstance(samples, dict) else None
         if total is not None:
@@ -759,7 +766,27 @@ def _hydrate_item_detail(detail_cache_key: str, item: LabItem) -> LabItem:
         return item
     if item.section == "environments":
         return _merge_environment_cached_detail(item, cached)
-    return cached
+    return _merge_cached_item_detail(item, cached)
+
+
+def _merge_cached_item_detail(item: LabItem, cached: LabItem) -> LabItem:
+    raw = {**cached.raw, **item.raw}
+    metadata = list(item.metadata)
+    existing = {label for label, _ in metadata}
+    for label, value in cached.metadata:
+        if label not in existing:
+            metadata.append((label, value))
+            existing.add(label)
+    return LabItem(
+        key=item.key,
+        section=item.section,
+        title=item.title,
+        subtitle=item.subtitle,
+        status=item.status,
+        status_style=item.status_style,
+        metadata=tuple(metadata),
+        raw=raw,
+    )
 
 
 def _merge_environment_cached_detail(item: LabItem, cached: LabItem) -> LabItem:
@@ -978,6 +1005,23 @@ def _local_eval_items(options: LabLoadOptions, *, section: str) -> list[LabItem]
     ]
 
 
+def _combined_evaluation_items(
+    *,
+    platform_items: tuple[LabItem, ...],
+    local_items: tuple[LabItem, ...],
+    limit: int,
+) -> tuple[LabItem, ...]:
+    if limit <= 0:
+        return ()
+    if not platform_items:
+        return local_items[:limit]
+    if not local_items:
+        return platform_items[:limit]
+    local_budget = min(len(local_items), max(1, limit // 3))
+    platform_budget = max(0, limit - local_budget)
+    return (*platform_items[:platform_budget], *local_items[:local_budget])
+
+
 def _environment_item(env: dict[str, Any], idx: int, *, section: str, scope: str) -> LabItem:
     owner = env.get("owner") or {}
     owner_name = owner.get("name") or owner.get("slug") or env.get("owner_name") or "-"
@@ -1016,7 +1060,13 @@ def _evaluation_item(eval_data: dict[str, Any], idx: int) -> LabItem:
     status = str(eval_data.get("status") or "UNKNOWN")
     raw_metadata = eval_data.get("metadata")
     metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
-    eval_type = "hosted" if eval_data.get("is_hosted") else "local"
+    updated = _format_optional_time(eval_data.get("updated_at") or eval_data.get("updatedAt"))
+    created = _format_optional_time(eval_data.get("created_at") or eval_data.get("createdAt"))
+    row_date = created if created != "-" else updated
+    badges = [
+        {"label": "HOSTED", "style": STATUS_INFO},
+        {"label": status.upper(), "style": _status_style(status)},
+    ]
 
     return LabItem(
         key=f"evaluation:{eval_id}",
@@ -1028,13 +1078,19 @@ def _evaluation_item(eval_data: dict[str, Any], idx: int) -> LabItem:
         metadata=(
             ("Environment", str(env_name)),
             ("Model", model),
-            ("Type", eval_type),
+            ("Type", "hosted"),
             ("Examples", str(metadata.get("num_examples", "-"))),
             ("Rollouts", str(metadata.get("rollouts_per_example", "-"))),
             ("Samples", str(eval_data.get("total_samples", eval_data.get("totalSamples", "-")))),
-            ("Updated", _format_optional_time(eval_data.get("updated_at"))),
+            ("Created", created),
+            ("Updated", updated),
         ),
-        raw=eval_data,
+        raw={
+            **eval_data,
+            "source": "hosted",
+            "row_date": "" if row_date == "-" else row_date,
+            "badges": badges,
+        },
     )
 
 
@@ -1051,6 +1107,8 @@ def _rl_run_item(run: Any, idx: int) -> LabItem:
         env_names += f", +{len(envs) - 3}"
     if not env_names:
         env_names = "-"
+    created = _format_optional_time(data.get("created_at") or data.get("createdAt"))
+    updated = _format_optional_time(data.get("updated_at") or data.get("updatedAt"))
 
     return LabItem(
         key=f"rl-run:{run_id}",
@@ -1065,10 +1123,15 @@ def _rl_run_item(run: Any, idx: int) -> LabItem:
             ("Environments", env_names),
             ("Max steps", str(data.get("max_steps") or data.get("maxSteps") or "-")),
             ("Batch", str(data.get("batch_size") or data.get("batchSize") or "-")),
-            ("Created", _format_optional_time(data.get("created_at") or data.get("createdAt"))),
-            ("Updated", _format_optional_time(data.get("updated_at") or data.get("updatedAt"))),
+            ("Created", created),
+            ("Updated", updated),
         ),
-        raw=data,
+        raw={
+            **data,
+            "source": "hosted",
+            "row_date": "" if created == "-" else created,
+            "badges": [{"label": status.upper(), "style": _status_style(status)}],
+        },
     )
 
 
@@ -1079,23 +1142,34 @@ def _local_eval_item(run: dict[str, Any], idx: int, *, section: str = "local-eva
     reward_is_numeric = isinstance(reward, int | float)
     reward_text = f"{reward:.4g}" if reward_is_numeric else "-"
     run_id = str(run.get("run_id") or idx)
+    row_date = _local_path_time_ago(run.get("path"))
 
     return LabItem(
         key=f"local-eval:{run_id}:{idx}",
         section=section,
         title=run_id,
         subtitle=f"{run.get('env_id', '-')} · {run.get('model', '-')}",
-        status=reward_text,
-        status_style=STATUS_SUCCESS if reward_is_numeric and float(reward) > 0 else "dim",
+        status="COMPLETED",
+        status_style=STATUS_SUCCESS,
         metadata=(
             ("Environment", str(run.get("env_id") or "-")),
             ("Model", str(run.get("model") or "-")),
+            ("Type", "local"),
             ("Avg reward", reward_text),
             ("Examples", str(metadata.get("num_examples", "-"))),
             ("Rollouts", str(metadata.get("rollouts_per_example", "-"))),
             ("Path", str(run.get("path") or "-")),
         ),
-        raw={**run, "type": "local_eval"},
+        raw={
+            **run,
+            "type": "local_eval",
+            "source": "local",
+            "row_date": row_date,
+            "badges": [
+                {"label": "LOCAL", "style": STATUS_LOCAL},
+                {"label": "COMPLETED", "style": STATUS_SUCCESS},
+            ],
+        },
     )
 
 
@@ -1694,6 +1768,18 @@ def _format_optional_time(value: Any) -> str:
         return format_time_ago(value)
     except (TypeError, ValueError):
         return str(value)
+
+
+def _local_path_time_ago(value: Any) -> str:
+    if not value:
+        return ""
+    try:
+        path = Path(str(value))
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    except OSError:
+        return ""
+    formatted = _format_optional_time(mtime.isoformat())
+    return "" if formatted == "-" else formatted
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:

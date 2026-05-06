@@ -193,7 +193,7 @@ from prime_lab_app.training_screen import (
     _merge_training_detail,
     _next_log_tail_lines,
 )
-from prime_lab_app.widgets import ClearableInput, HomeLaunchPanel
+from prime_lab_app.widgets import ClearableInput, EvaluationViewToggle, HomeLaunchPanel, ScopeToggle
 from rich.console import Console
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Button, Label, OptionList, Select, Static, Tree
@@ -535,7 +535,56 @@ def test_lab_view_caps_combined_evaluation_rows(tmp_path: Path) -> None:
 
     assert evaluations is not None
     assert len(evaluations.items) == 3
+    assert [item.raw.get("source") for item in evaluations.items] == ["hosted", "hosted", "local"]
     assert evaluations.status == "3 shown"
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_environment_scope_defaults_to_account_and_can_show_public(
+    tmp_path: Path,
+) -> None:
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        app._active_section_key = "environments"
+        app._render_active_section()
+        await pilot.pause()
+
+        assert app.query_one("#scope-toggle", ScopeToggle).display is True
+        assert [item.title for item in app._visible_items] == ["research/private-env"]
+
+        app.set_scope_view("public")
+        await pilot.pause()
+
+        assert "primeintellect/gsm8k" in {item.title for item in app._visible_items}
+
+
+def test_lab_view_evaluation_rows_mark_source_and_keep_status_consistent(tmp_path: Path) -> None:
+    run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        '{"avg_reward": 0.5, "num_examples": 1}',
+        encoding="utf-8",
+    )
+    (run_dir / "results.jsonl").write_text('{"reward": 0.5}\n', encoding="utf-8")
+
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    evaluations = snapshot.section("evaluations")
+
+    assert evaluations is not None
+    hosted = next(item for item in evaluations.items if item.raw.get("source") == "hosted")
+    local = next(item for item in evaluations.items if item.raw.get("source") == "local")
+
+    assert hosted.metadata[2] == ("Type", "hosted")
+    assert [badge["label"] for badge in hosted.raw["badges"]] == ["HOSTED", "COMPLETED"]
+    assert local.status == "COMPLETED"
+    assert local.metadata[2] == ("Type", "local")
+    assert [badge["label"] for badge in local.raw["badges"]] == ["LOCAL", "COMPLETED"]
 
 
 def test_lab_view_merges_local_and_platform_environments(tmp_path: Path) -> None:
@@ -4127,7 +4176,7 @@ async def test_prime_lab_app_home_launch_panel_shows_for_loaded_workspace(
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_app_ctrl_w_reopens_launch_screen(tmp_path: Path) -> None:
+async def test_prime_lab_app_w_reopens_launch_screen(tmp_path: Path) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
 
@@ -4139,13 +4188,13 @@ async def test_prime_lab_app_ctrl_w_reopens_launch_screen(tmp_path: Path) -> Non
         await pilot.pause()
         assert not isinstance(app.screen, LaunchScreen)
 
-        await pilot.press("ctrl+w")
+        await pilot.press("w")
         await pilot.pause()
         assert isinstance(app.screen, LaunchScreen)
 
 
 @pytest.mark.asyncio
-async def test_prime_lab_app_w_opens_workspace_settings(tmp_path: Path) -> None:
+async def test_prime_lab_app_s_opens_workspace_settings(tmp_path: Path) -> None:
     snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
     app = PrimeLabView(lambda: snapshot, initial_loader=lambda: snapshot)
 
@@ -4153,7 +4202,7 @@ async def test_prime_lab_app_w_opens_workspace_settings(tmp_path: Path) -> None:
         await pilot.pause()
         assert isinstance(app.screen, LaunchScreen)
 
-        await pilot.press("w")
+        await pilot.press("s")
         await pilot.pause()
 
         assert not isinstance(app.screen, LaunchScreen)
@@ -4212,12 +4261,15 @@ async def test_agent_chat_uses_centered_stage_without_sidebar(tmp_path: Path) ->
         assert not app.screen.query("#agent-controls")
         assert isinstance(app.screen.query_one("#agent-chat"), VerticalScroll)
         assert app.screen.query_one("#agent-atmosphere").display is True
+        note = _render_renderable(app.screen.query_one("#agent-experimental-note", Static).content)
+        assert "Agent mode is experimental" in note
         prompt = app.screen.query_one("#agent-prompt", AgentPrompt)
         assert prompt.placeholder == "Message Claude, Enter to send  •  /  ?  @"
         warning_popover = app.screen.query_one("#agent-warning-popover")
         assert warning_popover.display is False
         status_text = _render_renderable(app.screen.query_one("#agent-statusbar", Static).content)
         assert "1 warning" in status_text
+        assert "Welcome" not in status_text
 
         await pilot.hover("#agent-statusbar")
         await pilot.pause()
@@ -4261,6 +4313,8 @@ async def test_prime_lab_app_home_launch_panel_dismisses_into_workspace(
         assert app._active_section_key == "workspace"
         assert str(app.query_one("#section-title", Label).render()) == "Settings"
         workspace_path = _render_renderable(app.query_one("#workspace-path").render())
+        assert "✓ research" in workspace_path
+        assert "production" in workspace_path
         assert compact_path(tmp_path) in workspace_path
         status_text = _render_renderable(app._statusbar_text())
         assert "research" in status_text
@@ -6860,6 +6914,30 @@ async def test_prime_lab_app_evaluations_by_env_groups_runs(tmp_path: Path) -> N
         assert "gsm8k" in app._evaluation_tree_index
         assert "openai/gpt-4.1-mini" in app._evaluation_tree_index["gsm8k"]
         assert str(app.query_one("#inspector-title", Label).render()) == "Selection Details"
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_evaluation_view_arrows_change_selector(tmp_path: Path) -> None:
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        app._active_section_key = "evaluations"
+        app._render_active_section()
+        toggle = app.query_one("#evaluation-toggle", EvaluationViewToggle)
+        toggle.focus()
+        await pilot.pause()
+
+        assert app._evaluation_view == "runs"
+
+        await pilot.press("left")
+        await pilot.pause()
+
+        assert app._evaluation_view == "env"
+        assert app.focused is toggle
 
 
 @pytest.mark.asyncio

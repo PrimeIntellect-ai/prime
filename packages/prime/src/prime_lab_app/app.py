@@ -83,6 +83,7 @@ from .palette import (
     LAB_THEME,
     PRIMARY,
     STATUS_ERROR,
+    STATUS_SUCCESS,
     STATUS_WARNING,
 )
 from .quickstart import (
@@ -121,11 +122,16 @@ from .widgets import (
     HomeLaunchState,
     LabInspector,
     LabOptionList,
+    ScopeToggle,
 )
 
 WorkspaceSwitcher = Callable[[Path], None]
 NAV_SECTION_ORDER = ("environments", "training", "evaluations", "workspace")
 NAV_SECTION_KEYS = frozenset(NAV_SECTION_ORDER)
+SECTION_SCOPE_OPTIONS: dict[str, tuple[tuple[str, str], ...]] = {
+    "environments": (("account", "Account + local"), ("public", "Public")),
+    "evaluations": (("account", "Account + local"), ("hosted", "Hosted"), ("local", "Local")),
+}
 
 
 class WorkspacePathLink(Static):
@@ -178,14 +184,14 @@ class PrimeLabView(App[None]):
 
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
-        Binding("ctrl+w", "show_welcome", "Welcome", key_display="Ctrl+W"),
-        Binding("w", "workspace_settings", "Workspace", key_display="W", show=False),
+        Binding("w", "show_welcome", "Welcome", key_display="w"),
+        Binding("s", "workspace_settings", "Settings", key_display="s", show=False),
         Binding("c", "open_agent_chat", "Agent"),
         Binding("enter", "load_detail", "Open", key_display="Enter"),
         Binding("g", "load_more_rows", "More rows", show=False),
         Binding("/", "search", "Filter"),
-        Binding("left", "previous_pane", "Prev pane", key_display="Left"),
-        Binding("right", "next_pane", "Next pane", key_display="Right"),
+        Binding("left", "previous_pane", "Prev pane", key_display="Left", show=False),
+        Binding("right", "next_pane", "Next pane", key_display="Right", show=False),
         Binding("escape", "clear_filter", "Clear filter", key_display="Esc", show=False),
         Binding("tab", "focus_next", "Next pane", key_display="Tab", show=False),
         Binding("shift+tab", "focus_previous", "Prev pane", key_display="Shift+Tab", show=False),
@@ -302,6 +308,12 @@ class PrimeLabView(App[None]):
         color: $foreground;
     }
 
+    #scope-toggle {
+        display: none;
+        height: 1;
+        color: $foreground;
+    }
+
     #evaluation-tree {
         display: none;
         background: $surface;
@@ -374,6 +386,10 @@ class PrimeLabView(App[None]):
         self._prefetching_detail_key: str | None = None
         self._expand_ready_run_key: str | None = None
         self._home_group = "workspaces"
+        self._scope_by_section = {
+            "environments": "account",
+            "evaluations": "account",
+        }
         self._launch_screen: LaunchScreen | None = None
         self._evaluation_view = "runs"
         self._evaluation_tree_index: dict[str, dict[str, list[LabItem]]] = {}
@@ -413,6 +429,7 @@ class PrimeLabView(App[None]):
                 yield Static("", id="section-subtitle", classes="pane-subtitle", markup=False)
                 yield HomeGroupToggle("", id="home-toggle", markup=False)
                 yield Horizontal(id="home-actions", classes="home-actions")
+                yield ScopeToggle("", id="scope-toggle", markup=False)
                 yield EvaluationViewToggle("", id="evaluation-toggle", markup=False)
                 yield LabOptionList(id="item-list")
                 yield EvaluationTree("Evaluations", id="evaluation-tree")
@@ -550,6 +567,26 @@ class PrimeLabView(App[None]):
         if isinstance(focused, LabInspector):
             self._focus_main_pane(prefer_rows=True)
             return
+        if isinstance(focused, LabOptionList | EvaluationTree):
+            if self._active_section_key == "evaluations":
+                toggle = self.query_one("#evaluation-toggle", EvaluationViewToggle)
+                if toggle.display:
+                    toggle.focus()
+                    return
+            scope_toggle = self.query_one("#scope-toggle", ScopeToggle)
+            if scope_toggle.display:
+                scope_toggle.focus()
+                return
+            if self._active_section_key == "workspace":
+                toggle = self.query_one("#home-toggle", HomeGroupToggle)
+                if toggle.display:
+                    toggle.focus()
+                    return
+        if isinstance(focused, EvaluationViewToggle):
+            scope_toggle = self.query_one("#scope-toggle", ScopeToggle)
+            if scope_toggle.display:
+                scope_toggle.focus()
+                return
         self.focus_nav_pane()
 
     def action_next_pane(self) -> None:
@@ -557,10 +594,19 @@ class PrimeLabView(App[None]):
             self._focus_main_pane(prefer_rows=False)
             return
         focused = self.focused
+        if isinstance(focused, EvaluationTree):
+            self._focus_inspector_pane()
+            return
         if isinstance(focused, Tree):
             self._focus_main_pane(prefer_rows=False)
             return
-        if isinstance(focused, LabOptionList | HomeGroupToggle | EvaluationViewToggle | Button):
+        if isinstance(focused, ScopeToggle):
+            self.focus_after_scope_toggle()
+            return
+        if isinstance(focused, HomeGroupToggle | EvaluationViewToggle):
+            self._focus_main_pane(prefer_rows=True)
+            return
+        if isinstance(focused, LabOptionList | Button):
             self._focus_inspector_pane()
             return
         self._focus_main_pane(prefer_rows=False)
@@ -578,6 +624,10 @@ class PrimeLabView(App[None]):
             if toggle.display:
                 toggle.focus()
                 return
+        scope_toggle = self.query_one("#scope-toggle", ScopeToggle)
+        if scope_toggle.display:
+            scope_toggle.focus()
+            return
         self.focus_nav_pane()
 
     def focus_nav_pane(self) -> None:
@@ -633,6 +683,9 @@ class PrimeLabView(App[None]):
         if toggle_id == "home-toggle":
             self.set_home_group(key)
             self.focus_home_rows()
+        elif toggle_id == "scope-toggle":
+            self.set_scope_view(key)
+            self.focus_after_scope_toggle()
         elif toggle_id == "evaluation-toggle":
             self.set_evaluation_view(key)
             self.focus_evaluation_rows()
@@ -662,7 +715,51 @@ class PrimeLabView(App[None]):
         self._evaluation_click_selected_node = None
         self._render_active_section()
 
+    def action_previous_scope_view(self) -> None:
+        self._switch_scope_view(-1)
+
+    def action_next_scope_view(self) -> None:
+        self._switch_scope_view(1)
+
+    def _switch_scope_view(self, direction: int) -> None:
+        section_key = self._active_section_key
+        keys = [key for key, _ in _scope_options_for_section(section_key)]
+        if not keys:
+            return
+        try:
+            index = keys.index(self._scope_for_section(section_key))
+        except ValueError:
+            index = 0
+        self.set_scope_view(keys[(index + direction) % len(keys)])
+
+    def set_scope_view(self, scope: str) -> None:
+        section_key = self._active_section_key
+        keys = {key for key, _ in _scope_options_for_section(section_key)}
+        if scope not in keys:
+            return
+        if self._scope_for_section(section_key) == scope:
+            return
+        self._scope_by_section[section_key] = scope
+        if section_key == "evaluations":
+            self._evaluation_click_selected_node = None
+        self._render_active_section()
+
+    def _scope_for_section(self, section_key: str) -> str:
+        options = _scope_options_for_section(section_key)
+        if not options:
+            return ""
+        scope = self._scope_by_section.get(section_key) or options[0][0]
+        if scope not in {key for key, _ in options}:
+            scope = options[0][0]
+            self._scope_by_section[section_key] = scope
+        return scope
+
     def _focus_main_pane(self, *, prefer_rows: bool) -> None:
+        if not prefer_rows:
+            scope_toggle = self.query_one("#scope-toggle", ScopeToggle)
+            if scope_toggle.display:
+                scope_toggle.focus()
+                return
         if self._active_section_key == "workspace" and not prefer_rows:
             toggle = self.query_one("#home-toggle", HomeGroupToggle)
             if toggle.display:
@@ -680,6 +777,14 @@ class PrimeLabView(App[None]):
                     tree.focus()
                     return
         self.query_one("#item-list", OptionList).focus()
+
+    def focus_after_scope_toggle(self) -> None:
+        if self._active_section_key == "evaluations":
+            toggle = self.query_one("#evaluation-toggle", EvaluationViewToggle)
+            if toggle.display:
+                toggle.focus()
+                return
+        self._focus_main_pane(prefer_rows=True)
 
     def _focus_inspector_pane(self) -> None:
         self.query_one("#inspector", LabInspector).focus()
@@ -835,7 +940,7 @@ class PrimeLabView(App[None]):
         title = section.title if section is not None else "Settings"
         self.query_one("#topbar-title", Static).update(_topbar_title(title))
         self.query_one("#workspace-path", WorkspacePathLink).update(
-            _workspace_path_text(self._snapshot.workspace)
+            _workspace_path_text(self._snapshot)
         )
         self.query_one("#topbar-logo", Static).update(lab_logo_text())
 
@@ -1071,6 +1176,7 @@ class PrimeLabView(App[None]):
 
         self.query_one("#home-toggle", Static).display = False
         self.query_one("#home-actions", Horizontal).display = False
+        self.query_one("#scope-toggle", Static).display = False
         self._home_action_items_by_id = {}
 
         if section.key == "workspace":
@@ -1078,6 +1184,8 @@ class PrimeLabView(App[None]):
             self.query_one("#evaluation-tree", EvaluationTree).display = False
             self._render_workspace_home(section, selected_key)
             return
+
+        self._render_scope_toggle(section)
 
         if section.key == "evaluations":
             self._render_evaluations_section(section, selected_key)
@@ -1090,7 +1198,7 @@ class PrimeLabView(App[None]):
         option_list.clear_options()
         self._items_by_key = {}
         self._visible_items = []
-        for item in section.items:
+        for item in self._scoped_section_items(section):
             item = self._detail_cache.get(item.key, item)
             if not self._filter or self._matches_filter(item):
                 self._visible_items.append(item)
@@ -1100,7 +1208,7 @@ class PrimeLabView(App[None]):
                 key=f"{section.key}:empty",
                 section=section.key,
                 title="No rows",
-                subtitle="Clear the filter or wait for loading to finish.",
+                subtitle="Clear the filter, switch scope, or wait for loading to finish.",
                 status="empty",
                 status_style="dim",
             )
@@ -1112,6 +1220,39 @@ class PrimeLabView(App[None]):
 
         self.call_after_refresh(lambda: self._highlight_item(option_list, selected_key))
 
+    def _render_scope_toggle(self, section: LabSection) -> None:
+        toggle = self.query_one("#scope-toggle", ScopeToggle)
+        options = _scope_options_for_section(section.key)
+        if not options:
+            toggle.display = False
+            return
+        active_scope = self._scope_for_section(section.key)
+        segments = tuple(
+            (
+                key,
+                label,
+                sum(
+                    1
+                    for item in section.items
+                    if not _is_scope_placeholder(item)
+                    and _item_matches_section_scope(item, section.key, key)
+                ),
+            )
+            for key, label in options
+        )
+        toggle.display = True
+        toggle.update_scopes(segments, active_scope)
+
+    def _scoped_section_items(self, section: LabSection) -> list[LabItem]:
+        scope = self._scope_for_section(section.key)
+        if not scope:
+            return [self._detail_cache.get(item.key, item) for item in section.items]
+        return [
+            self._detail_cache.get(item.key, item)
+            for item in section.items
+            if _is_scope_placeholder(item) or _item_matches_section_scope(item, section.key, scope)
+        ]
+
     def _render_evaluations_section(self, section: LabSection, selected_key: str | None) -> None:
         toggle = self.query_one("#evaluation-toggle", EvaluationViewToggle)
         toggle.display = True
@@ -1119,7 +1260,7 @@ class PrimeLabView(App[None]):
 
         self._items_by_key = {}
         self._visible_items = []
-        for item in section.items:
+        for item in self._scoped_section_items(section):
             item = self._detail_cache.get(item.key, item)
             if not self._filter or self._matches_filter(item):
                 self._visible_items.append(item)
@@ -1145,7 +1286,7 @@ class PrimeLabView(App[None]):
                 key="evaluations:empty",
                 section="evaluations",
                 title="No rows",
-                subtitle="Clear the filter or wait for loading to finish.",
+                subtitle="Clear the filter, switch scope, or wait for loading to finish.",
                 status="empty",
                 status_style="dim",
             )
@@ -1863,7 +2004,7 @@ class PrimeLabView(App[None]):
         if section.key == "workspace":
             items = self._workspace_items()
         else:
-            items = [self._detail_cache.get(item.key, item) for item in section.items]
+            items = self._scoped_section_items(section)
         return [filter_choice_for_item(item) for item in items]
 
 
@@ -1892,10 +2033,31 @@ def _topbar_title(title: str) -> Text:
     return text
 
 
-def _workspace_path_text(workspace: Path) -> Text:
+def _workspace_path_text(snapshot: LabSnapshot) -> Text:
     text = Text()
-    text.append(compact_path(workspace), style="dim")
+    text.append(
+        "✓" if snapshot.authenticated else "×",
+        style=STATUS_SUCCESS if snapshot.authenticated else STATUS_ERROR,
+    )
+    text.append(" ")
+    text.append(status_identity(snapshot), style="dim")
+    profile = _snapshot_profile(snapshot)
+    if profile:
+        text.append(" · ", style="dim")
+        text.append(profile, style="dim")
+    text.append(" · ", style="dim")
+    text.append(compact_path(snapshot.workspace), style="dim")
     return text
+
+
+def _snapshot_profile(snapshot: LabSnapshot) -> str:
+    section = snapshot.section("workspace")
+    if section is None:
+        return ""
+    for item in section.items:
+        if item.raw.get("type") == "workspace_context" and item.raw.get("active") is True:
+            return str(item.raw.get("profile") or "")
+    return ""
 
 
 def _nav_sections(snapshot: LabSnapshot) -> tuple[LabSection, ...]:
@@ -1916,6 +2078,41 @@ def _section_subtitle(section: LabSection) -> Text:
         text.append(" · ", style="dim")
         text.append(section.status, style=section.status_style)
     return text
+
+
+def _scope_options_for_section(section_key: str) -> tuple[tuple[str, str], ...]:
+    return SECTION_SCOPE_OPTIONS.get(section_key, ())
+
+
+def _is_scope_placeholder(item: LabItem) -> bool:
+    return (
+        item.raw.get("loading") is True
+        or item.key.endswith(":empty")
+        or item.key.endswith(":error")
+        or item.key.endswith(":auth-required")
+        or item.title in {"No rows", "Unavailable", "Sign in required"}
+    )
+
+
+def _item_matches_section_scope(item: LabItem, section_key: str, scope: str) -> bool:
+    if section_key == "environments":
+        scopes = {str(value) for value in item.raw.get("scopes") or ()}
+        if scope == "account":
+            return bool(scopes & {"local", "mine"})
+        if scope == "public":
+            return "public" in scopes
+    if section_key == "evaluations":
+        source = _evaluation_source(item)
+        if scope == "account":
+            return source in {"hosted", "local"}
+        return source == scope
+    return True
+
+
+def _evaluation_source(item: LabItem) -> str:
+    if item.raw.get("type") == "local_eval":
+        return "local"
+    return str(item.raw.get("source") or "hosted")
 
 
 def _with_workspace_agent_choice(item: LabItem, workspace: Path, agent: str) -> LabItem:

@@ -31,6 +31,9 @@ def item_search_text(item: LabItem) -> str:
 def item_label(item: LabItem) -> Text:
     text = Text()
     text.append(item.title, style="bold")
+    if row_date := str(item.raw.get("row_date") or "").strip():
+        text.append("  ")
+        text.append(row_date, style="dim")
     text.append_text(item_badges_text(item))
     if item.subtitle:
         text.append("\n")

@@ -252,6 +252,7 @@ def _environment_item_from_record(
             "slug": record.slug,
             "owner": record.owner,
             "name": record.name,
+            "row_date": "" if updated == "-" else updated,
             "badges": badges,
             "sources": _source_labels(record),
             "local": _local_raw(local) if local else None,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
 
 import pytest
 from prime_cli import lab_setup
@@ -59,6 +60,10 @@ def fake_lab_asset_downloads(monkeypatch: Any) -> list[str]:
         lambda _url: [{"name": name, "type": "dir"} for name in skill_names],
     )
     return urls
+
+
+def _is_pinned_ref(ref: str) -> bool:
+    return len(ref) == 40 and all(char in "0123456789abcdef" for char in ref)
 
 
 def test_lab_setup_parses_selected_agents_and_all() -> None:
@@ -174,20 +179,111 @@ def test_lab_setup_uses_existing_verifiers_sources(
     )
 
     assert result.exit_code == 0
+    assert _is_pinned_ref(lab_setup.VERIFIERS_REF)
+    assert _is_pinned_ref(lab_setup.PRIME_RL_REF)
     assert any(
         url.endswith(
-            "/primeintellect-ai/verifiers/refs/heads/main/skills/create-environments/SKILL.md"
+            f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_REF}/skills/create-environments/SKILL.md"
         )
         for url in fake_lab_asset_downloads
     )
     assert any(
-        url.endswith("/primeintellect-ai/verifiers/refs/heads/main/configs/rl/gsm8k.toml")
+        url.endswith(
+            f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_REF}/configs/rl/gsm8k.toml"
+        )
         for url in fake_lab_asset_downloads
     )
     assert any(
-        url.endswith("/primeintellect-ai/verifiers/refs/heads/main/assets/lab/AGENTS.md")
+        url.endswith(f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_REF}/assets/lab/AGENTS.md")
         for url in fake_lab_asset_downloads
     )
+
+
+def test_lab_setup_downloads_retry_transient_failures(monkeypatch: Any) -> None:
+    calls: list[str] = []
+    emitted: list[str] = []
+    sleeps: list[float] = []
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"ok"
+
+    def fake_urlopen(url: str, *, timeout: int) -> FakeResponse:
+        assert timeout == 60
+        calls.append(url)
+        if len(calls) == 1:
+            raise URLError("temporary failure")
+        return FakeResponse()
+
+    monkeypatch.setattr(lab_setup, "urlopen", fake_urlopen)
+    monkeypatch.setattr(lab_setup.time, "sleep", sleeps.append)
+
+    assert lab_setup._read_url("https://example.test/file", emit=emitted.append) == b"ok"
+    assert calls == ["https://example.test/file", "https://example.test/file"]
+    assert sleeps == [lab_setup.DOWNLOAD_RETRY_DELAY_SECONDS]
+    assert emitted == ["Download failed for https://example.test/file; retrying (2/3)\n"]
+
+
+def test_lab_setup_installs_prime_rl_from_pinned_checkout(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(lab_setup, "_ensure_prime_rl_supported_platform", lambda: None)
+    commands: list[tuple[list[str], Path]] = []
+
+    def runner(command: Any, cwd: Path, _emit: Any) -> int:
+        command_list = list(command)
+        commands.append((command_list, cwd))
+        if command_list[:3] == ["git", "clone", "--no-checkout"]:
+            (tmp_path / "prime-rl" / "scripts").mkdir(parents=True)
+            (tmp_path / "prime-rl" / "scripts" / "install.sh").write_text(
+                "#!/usr/bin/env bash\n",
+                encoding="utf-8",
+            )
+        return 0
+
+    lab_setup._install_prime_rl(tmp_path, emit=lambda _text: None, runner=runner)
+
+    assert commands == [
+        (
+            [
+                "git",
+                "clone",
+                "--no-checkout",
+                "https://github.com/primeintellect-ai/prime-rl.git",
+                "prime-rl",
+            ],
+            tmp_path,
+        ),
+        (["git", "checkout", lab_setup.PRIME_RL_REF], tmp_path / "prime-rl"),
+        (
+            ["env", "SKIP_CLONE=1", "bash", "scripts/install.sh"],
+            tmp_path / "prime-rl",
+        ),
+    ]
+
+
+def test_lab_setup_prime_rl_fails_early_on_unsupported_platform(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(lab_setup, "_prime_rl_platform", lambda: ("darwin", "arm64"))
+
+    with pytest.raises(RuntimeError, match="prime-rl only supports Linux"):
+        lab_setup._install_prime_rl(
+            tmp_path,
+            emit=lambda _text: None,
+            runner=lambda command, _cwd, _emit: commands.append(list(command)) or 0,
+        )
+
+    assert commands == []
 
 
 def test_lab_setup_manifest_tracks_skill_source(
@@ -331,7 +427,7 @@ def test_lab_doctor_validates_environment_table_refs(tmp_path: Path) -> None:
     assert "missing-env" in checks["Config environment refs"].message
 
 
-def test_lab_doctor_warns_on_local_env_refs_when_environment_dir_empty(tmp_path: Path) -> None:
+def test_lab_doctor_allows_local_env_refs_when_environment_dir_empty(tmp_path: Path) -> None:
     (tmp_path / "configs").mkdir()
     (tmp_path / "configs" / "rl.toml").write_text(
         'model = "openai/gpt-oss-20b"\nenvironments = ["missing-env"]\n',
@@ -342,8 +438,7 @@ def test_lab_doctor_warns_on_local_env_refs_when_environment_dir_empty(tmp_path:
     result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
     checks = {check.name: check for check in result.checks}
 
-    assert checks["Config environment refs"].status == "WARN"
-    assert "missing-env" in checks["Config environment refs"].message
+    assert checks["Config environment refs"].status == "PASS"
 
 
 def test_lab_setup_installs_prime_rl_envs_with_split_editable_args(tmp_path: Path) -> None:

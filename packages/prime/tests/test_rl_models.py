@@ -128,6 +128,9 @@ def test_models_table_renders_promo_arrow_and_caption(
     assert "$0.5" in plain
     assert "$1" in plain
     assert "$3" in plain
+    normalized = " ".join(plain.split())
+    expected_footer = "Prices are per 1M tokens. All models support context windows of 64K tokens."
+    assert expected_footer in normalized
     # Promo label rendered once below the table.
     assert plain.count("Free RFT week") == 1
 

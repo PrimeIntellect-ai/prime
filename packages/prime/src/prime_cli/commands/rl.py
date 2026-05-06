@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import toml
 import typer
+from click.exceptions import Abort
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic import ValidationError as PydanticValidationError
 from rich.markup import escape as rich_escape
@@ -36,6 +37,7 @@ from ..utils.formatters import (
     strip_ansi,
 )
 from ..utils.prompt import confirm_or_skip
+from .feedback import submit_feedback
 from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
 console = get_console()
@@ -208,7 +210,7 @@ def generate_rl_config_template(environment: str | None = None) -> str:
     env_value = environment or "primeintellect/reverse-text"
 
     return f'''\
-model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
+model = "Qwen/Qwen3.5-0.8B"
 max_steps = 100
 
 # env_files = ["secrets.env"] # optional file(s) for secrets
@@ -216,10 +218,7 @@ max_steps = 100
 # Training
 batch_size = 128
 rollouts_per_example = 8
-# learning_rate = 1e-6
-# lora_alpha = 16
-# oversampling_factor = 1.0
-# max_async_level = 4
+# learning_rate = 3e-5 # optional; default is 1e-4
 
 # Optional: warm-start from an existing checkpoint
 # checkpoint_id = "..."
@@ -227,20 +226,10 @@ rollouts_per_example = 8
 [sampling]
 max_tokens = 2048
 # temperature = 0.7
-# repetition_penalty = 1.0
-# min_tokens = 0
-# seed = 42
 
 # Optional: hosted RL reasoning controls (mutually exclusive)
 # enable_thinking = false    # supported models: Qwen3.5, Nemotron
 # reasoning_effort = "high"  # supported models: GPT-OSS ("low" | "medium" | "high")
-
-# Optional: temperature scheduling (use instead of temperature)
-# [sampling.temp_scheduler]
-# type = "linear"               # "linear" or "cosine"
-# start_temperature = 1.5
-# end_temperature = 0.3
-# total_steps = 1000            # defaults to max_steps if not set
 
 [[env]]
 id = "{env_value}"
@@ -248,12 +237,6 @@ id = "{env_value}"
 # [[env]] # add multiple [[env]] sections for multi-env training
 # id = "primeintellect/another-env"
 # args = {{ split = "train", max_examples = 1000 }}
-
-# Optional: W&B logging
-# [wandb]
-# project = "my-project"
-# entity = "my-team"
-# name = "my-run-name"
 
 # Optional: online evaluation
 # [eval]
@@ -285,7 +268,6 @@ id = "{env_value}"
 # online_difficulty_filtering = false
 # env_ratios = [0.5, 0.5]
 # skip_verification = false
-# seed = 42
 
 # Optional: checkpoint configuration
 # [checkpoints]
@@ -296,10 +278,6 @@ id = "{env_value}"
 # [adapters]
 # interval = 0                # Upload adapter every N steps (0 = only at run end)
 # keep_last = 3               # Keep N adapters in cloud (-1 = keep all)
-
-# Optional: infrastructure configuration
-# [infrastructure]
-# compute_size = "M"          # S, M (default), or L
 '''
 
 
@@ -1203,7 +1181,10 @@ def list_models(
             if model.promo_label and model.promo_label not in promo_labels:
                 promo_labels.append(model.promo_label)
 
-        caption_lines = ["[dim]Prices per 1M tokens[/dim]"]
+        caption = (
+            "[dim]Prices are per 1M tokens. All models support context windows of 64K tokens.[/dim]"
+        )
+        caption_lines = [caption]
         if promo_labels:
             joined = ", ".join(rich_escape(label) for label in promo_labels)
             caption_lines.append(f"[bold yellow]{joined}[/bold yellow]")
@@ -1213,6 +1194,62 @@ def list_models(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:
+    console.print(f"\n[bold]{label}[/bold] [dim](required)[/dim]")
+    console.print(f"[dim]{help_text}[/dim]")
+    while True:
+        value = typer.prompt("", prompt_suffix="> ").strip()
+        if value:
+            return value
+        console.print(f"[red]{empty_error}[/red]")
+
+
+def _prompt_optional_text(label: str, help_text: str) -> str | None:
+    console.print(f"\n[bold]{label}[/bold] [dim](optional)[/dim]")
+    console.print(f"[dim]{help_text}[/dim]")
+    value = typer.prompt("", default="", show_default=False, prompt_suffix="> ").strip()
+    return value or None
+
+
+def _format_model_request_feedback(models: str, context: str | None) -> str:
+    message = f"Hosted Training model request\n\nModels:\n{models}"
+    if context:
+        message += f"\n\nContext:\n{context}"
+    return message
+
+
+@app.command("request", rich_help_panel="Commands")
+def request_models() -> None:
+    """Request models for Hosted Training."""
+    console.print("[bold]Hosted Training Model Request[/bold]")
+    console.print("[dim]Tell us which models you want available for training.[/dim]")
+
+    try:
+        models = _prompt_required_text(
+            "Model(s)",
+            "Use provider/model names if you know them; comma-separated is fine.",
+            "At least one model is required.",
+        )
+        context = _prompt_optional_text(
+            "Use case or context",
+            "Share what you want to train or why this model matters.",
+        )
+    except Abort:
+        console.print("\n[yellow]Cancelled[/yellow]")
+        raise typer.Exit(0)
+
+    try:
+        submit_feedback(
+            message=_format_model_request_feedback(models, context),
+            category="feature",
+        )
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    console.print("[green]Request submitted. Thanks![/green]")
 
 
 def _unwrap_single_schema_variant(prop: Dict[str, Any]) -> Dict[str, Any]:

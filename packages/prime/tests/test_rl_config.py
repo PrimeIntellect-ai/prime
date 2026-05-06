@@ -50,6 +50,27 @@ def test_generate_rl_config_template_uses_broad_buffer_threshold_examples() -> N
     assert "# hard_threshold = 0.0" in template
 
 
+def test_generate_rl_config_template_keeps_default_surface_minimal() -> None:
+    template = generate_rl_config_template()
+
+    assert 'model = "Qwen/Qwen3.5-0.8B"' in template
+    assert "# learning_rate = 3e-5 # optional; default is 1e-4" in template
+
+    hidden_fields = [
+        "oversampling_factor",
+        "max_async_level",
+        "lora_alpha",
+        "repetition_penalty",
+        "min_tokens",
+        "temp_scheduler",
+        "seed",
+        "[wandb]",
+        "[infrastructure]",
+    ]
+    for field in hidden_fields:
+        assert field not in template
+
+
 def test_flatten_config_schema_expands_optional_nested_models() -> None:
     schema = RLConfig.model_json_schema()
     rows = _flatten_config_schema(schema, schema.get("$defs", {}))

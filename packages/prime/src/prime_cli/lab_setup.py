@@ -6,9 +6,12 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from importlib import metadata
@@ -30,9 +33,10 @@ from .lab_agents import (
 
 PRIME_RL_REPO = "primeintellect-ai/prime-rl"
 VERIFIERS_REPO = "primeintellect-ai/verifiers"
-VERIFIERS_REF = "main"
-PRIME_RL_REF = "main"
-PRIME_RL_INSTALL_SCRIPT_REF = "main"
+VERIFIERS_REF = "7bdc769caae0ba339ea8b67e362aa75331dcc79d"
+PRIME_RL_REF = "38b524925d09ce917b51e54bd99446b822f0a87f"
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
 
 SUPPORTED_AGENTS = known_agent_names()
 LAB_GITIGNORE_PATTERNS = (
@@ -125,19 +129,16 @@ class LabDoctorResult:
 
 
 ENDPOINTS_SRC = (
-    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/refs/heads/{VERIFIERS_REF}"
-    "/configs/endpoints.toml"
+    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/{VERIFIERS_REF}/configs/endpoints.toml"
 )
 AGENTS_MD_SRC = (
-    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/refs/heads/{VERIFIERS_REF}"
-    "/assets/lab/AGENTS.md"
+    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/{VERIFIERS_REF}/assets/lab/AGENTS.md"
 )
 CLAUDE_MD_SRC = (
-    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/refs/heads/{VERIFIERS_REF}"
-    "/assets/lab/CLAUDE.md"
+    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/{VERIFIERS_REF}/assets/lab/CLAUDE.md"
 )
 ENVS_AGENTS_MD_SRC = (
-    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/refs/heads/{VERIFIERS_REF}"
+    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/{VERIFIERS_REF}"
     "/assets/lab/environments/AGENTS.md"
 )
 PRIME_RL_CONFIGS: tuple[ConfigSpec, ...] = (
@@ -907,7 +908,7 @@ def _config_environment_reference_check(workspace: Path) -> LabDoctorCheck:
         except (OSError, toml.TomlDecodeError):
             continue
         for ref in _config_environment_refs(parsed):
-            if "/" not in ref and ref not in local_names:
+            if "/" not in ref and local_names and ref not in local_names:
                 missing_local.append(f"{path.relative_to(workspace)}:{ref}")
     if missing_local:
         return LabDoctorCheck(
@@ -1016,19 +1017,50 @@ def _ensure_uv_project(workspace: Path, emit: Emit, runner: Runner) -> None:
 
 
 def _install_prime_rl(workspace: Path, emit: Emit, runner: Runner) -> None:
-    if (workspace / "prime-rl").is_dir():
+    _ensure_prime_rl_supported_platform()
+    prime_rl_dir = workspace / "prime-rl"
+    if prime_rl_dir.is_dir():
         emit("prime-rl already exists\n")
     else:
-        install_url = (
-            f"https://raw.githubusercontent.com/{PRIME_RL_REPO}/{PRIME_RL_INSTALL_SCRIPT_REF}"
-            "/scripts/install.sh"
+        emit(f"Cloning prime-rl at {PRIME_RL_REF}\n")
+        _check_command(
+            [
+                "git",
+                "clone",
+                "--no-checkout",
+                f"https://github.com/{PRIME_RL_REPO}.git",
+                "prime-rl",
+            ],
+            workspace,
+            emit,
+            runner,
         )
-        emit(f"Installing prime-rl from {install_url}\n")
-        _check_command(["bash", "-c", f"curl -sSL {install_url} | bash"], workspace, emit, runner)
 
-    _check_command(["git", "checkout", PRIME_RL_REF], workspace / "prime-rl", emit, runner)
-    _check_command(["uv", "sync"], workspace / "prime-rl", emit, runner)
-    _check_command(["uv", "sync", "--all-extras"], workspace / "prime-rl", emit, runner)
+    _check_command(["git", "checkout", PRIME_RL_REF], prime_rl_dir, emit, runner)
+    if (prime_rl_dir / ".venv").is_dir():
+        _check_command(["uv", "sync"], prime_rl_dir, emit, runner)
+        _check_command(["uv", "sync", "--all-extras"], prime_rl_dir, emit, runner)
+    else:
+        _check_command(
+            ["env", "SKIP_CLONE=1", "bash", "scripts/install.sh"],
+            prime_rl_dir,
+            emit,
+            runner,
+        )
+
+
+def _ensure_prime_rl_supported_platform() -> None:
+    host_platform, machine = _prime_rl_platform()
+    supported_machine = machine in {"x86_64", "amd64", "aarch64", "arm64"}
+    if host_platform.startswith("linux") and supported_machine:
+        return
+    raise RuntimeError(
+        f"prime-rl only supports Linux x86_64/aarch64 hosts; detected {host_platform}/{machine}."
+    )
+
+
+def _prime_rl_platform() -> tuple[str, str]:
+    return sys.platform, platform.machine().lower()
 
 
 def _install_environments_to_prime_rl(workspace: Path, emit: Emit, runner: Runner) -> None:
@@ -1136,29 +1168,40 @@ def _download_file(url: str, dest: Path, emit: Emit, *, force: bool = False) -> 
         emit(f"{dest.name} already exists\n")
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with urlopen(url, timeout=60) as response:
-            content = response.read()
-    except (HTTPError, URLError, TimeoutError) as exc:
-        raise RuntimeError(f"Failed to download {url}") from exc
+    content = _read_url(url, emit=emit)
     dest.write_bytes(content)
     emit(f"Downloaded {dest}\n")
 
 
 def _download_json(url: str) -> Any:
     try:
-        with urlopen(url, timeout=60) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return json.loads(_read_url(url).decode("utf-8"))
+    except (RuntimeError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Failed to download {url}") from exc
 
 
 def _repo_raw_url(repo: str, ref: str, source_path: str) -> str:
-    return f"https://raw.githubusercontent.com/{repo}/refs/heads/{ref}/{source_path}"
+    return f"https://raw.githubusercontent.com/{repo}/{ref}/{source_path}"
 
 
 def _github_contents_url(repo: str, ref: str, source_path: str) -> str:
     return f"https://api.github.com/repos/{repo}/contents/{source_path}?ref={ref}"
+
+
+def _read_url(url: str, *, emit: Emit | None = None) -> bytes:
+    last_exc: BaseException | None = None
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            with urlopen(url, timeout=60) as response:
+                return response.read()
+        except (HTTPError, URLError, TimeoutError) as exc:
+            last_exc = exc
+            if attempt == DOWNLOAD_ATTEMPTS:
+                break
+            if emit is not None:
+                emit(f"Download failed for {url}; retrying ({attempt + 1}/{DOWNLOAD_ATTEMPTS})\n")
+            time.sleep(DOWNLOAD_RETRY_DELAY_SECONDS * attempt)
+    raise RuntimeError(f"Failed to download {url}") from last_exc
 
 
 def _dedupe_config_destinations(configs: list[ConfigSpec]) -> list[ConfigSpec]:

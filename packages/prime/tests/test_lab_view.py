@@ -2067,6 +2067,21 @@ def test_prime_lab_doctor_service_warns_on_config_environment_refs(tmp_path: Pat
     )
 
 
+def _fake_lab_skill_download_json(url: str) -> list[dict[str, str]]:
+    if "/contents/skills?" in url:
+        return [{"name": "create-environments", "type": "dir"}]
+    if "/contents/skills/" in url:
+        source_path = url.split("/contents/", 1)[1].split("?", 1)[0]
+        return [
+            {
+                "name": "SKILL.md",
+                "type": "file",
+                "path": f"{source_path}/SKILL.md",
+            }
+        ]
+    return []
+
+
 def test_prime_lab_sync_service_refreshes_agent_assets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2080,10 +2095,7 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
         dest.write_text(f"{dest.name}\n", encoding="utf-8")
 
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
-    monkeypatch.setattr(
-        "prime_cli.lab_setup._download_json",
-        lambda _url: [{"name": "create-environments", "type": "dir"}],
-    )
+    monkeypatch.setattr("prime_cli.lab_setup._download_json", _fake_lab_skill_download_json)
     monkeypatch.setattr(
         "prime_lab_app.agent_capabilities.shutil.which",
         lambda command: "/bin/pi" if command == "pi" else None,
@@ -2125,10 +2137,7 @@ def test_prime_lab_sync_service_preserves_workspace_agent(
         dest.write_text(f"{dest.name}\n", encoding="utf-8")
 
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
-    monkeypatch.setattr(
-        "prime_cli.lab_setup._download_json",
-        lambda _url: [{"name": "create-environments", "type": "dir"}],
-    )
+    monkeypatch.setattr("prime_cli.lab_setup._download_json", _fake_lab_skill_download_json)
 
     result = run_lab_sync_service(LabSyncOptions(), workspace=tmp_path)
 
@@ -2150,10 +2159,7 @@ def test_prime_lab_setup_service_supports_pi_agent(
         dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
 
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
-    monkeypatch.setattr(
-        "prime_cli.lab_setup._download_json",
-        lambda _url: [{"name": "create-environments", "type": "dir"}],
-    )
+    monkeypatch.setattr("prime_cli.lab_setup._download_json", _fake_lab_skill_download_json)
     monkeypatch.setattr(
         "prime_lab_app.agent_capabilities.shutil.which",
         lambda command: "/bin/pi" if command == "pi" else None,
@@ -2190,10 +2196,7 @@ def test_prime_lab_setup_service_supports_claude_code_agent(
         return 0
 
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
-    monkeypatch.setattr(
-        "prime_cli.lab_setup._download_json",
-        lambda _url: [{"name": "create-environments", "type": "dir"}],
-    )
+    monkeypatch.setattr("prime_cli.lab_setup._download_json", _fake_lab_skill_download_json)
 
     assert parse_lab_setup_args(["--agent", "claude-code"]).agents == ("claude",)
 
@@ -2224,10 +2227,7 @@ def test_prime_lab_setup_service_supports_hermes_agent(
         return 0
 
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
-    monkeypatch.setattr(
-        "prime_cli.lab_setup._download_json",
-        lambda _url: [{"name": "create-environments", "type": "dir"}],
-    )
+    monkeypatch.setattr("prime_cli.lab_setup._download_json", _fake_lab_skill_download_json)
 
     assert parse_lab_setup_args(["--agent", "hermes-agent"]).agents == ("hermes",)
 

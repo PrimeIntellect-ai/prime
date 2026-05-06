@@ -26,6 +26,7 @@ from rich.table import Table
 
 from .lab_agents import (
     agent_capability,
+    agent_project_skills_dirs,
     agent_user_skills_dir,
     known_agent_names,
     write_agent_native_surface,
@@ -53,6 +54,7 @@ LAB_GITIGNORE_PATTERNS = (
     ".ruff_cache/",
 )
 PRIME_SKILLS_MANIFEST = ".prime-managed.json"
+WORKSPACE_SKILLS_DIR = Path(".prime") / "skills"
 ConfigSpec = tuple[str, str, str]
 
 Emit = Callable[[str], None]
@@ -75,7 +77,7 @@ class LabSetupOptions:
     prime_rl: bool = False
     skip_agents_md: bool = False
     skip_install: bool = False
-    agents: tuple[str, ...] = ("codex",)
+    agents: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,7 @@ class LabSyncOptions:
 
     agents: tuple[str, ...] = ()
     skip_docs: bool = False
+    no_agent: bool = False
 
 
 @dataclass(frozen=True)
@@ -256,17 +259,13 @@ def parse_lab_setup_args(args: list[str]) -> LabSetupOptions:
         dest="agents",
         help="Comma-separated coding agents to scaffold, or 'all' for diagnostics.",
     )
-    parser.add_argument(
-        "--no-interactive",
-        action="store_true",
-        help="Use setup defaults without prompts.",
-    )
     namespace = parser.parse_args(args)
+    agents = _resolve_setup_agents(namespace.agents)
     return LabSetupOptions(
         prime_rl=bool(namespace.prime_rl),
         skip_agents_md=bool(namespace.skip_agents_md),
         skip_install=bool(namespace.skip_install),
-        agents=tuple(_parse_agents(namespace.agents)),
+        agents=agents,
     )
 
 
@@ -286,10 +285,18 @@ def parse_lab_sync_args(args: list[str]) -> LabSyncOptions:
         action="store_true",
         help="Skip AGENTS.md, CLAUDE.md, and environments/AGENTS.md refresh.",
     )
+    parser.add_argument(
+        "--no-agent",
+        action="store_true",
+        help="Refresh shared Lab assets without configuring coding-agent skill roots.",
+    )
     namespace = parser.parse_args(args)
+    if namespace.agents is not None and namespace.no_agent:
+        raise ValueError("--agent and --no-agent cannot be used together.")
     return LabSyncOptions(
-        agents=tuple(_parse_agents(namespace.agents)) if namespace.agents else (),
+        agents=_resolve_explicit_agents(namespace.agents) if namespace.agents is not None else (),
         skip_docs=bool(namespace.skip_docs),
+        no_agent=bool(namespace.no_agent),
     )
 
 
@@ -367,6 +374,8 @@ def _run_lab_setup_steps(
 ) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     emit(f"Setting up Lab workspace at {workspace}\n")
+    if not options.agents:
+        raise RuntimeError("No coding agent configured. Pass --agent to prime lab setup.")
 
     if not options.skip_install:
         _ensure_uv_project(workspace, emit, runner)
@@ -374,7 +383,8 @@ def _run_lab_setup_steps(
     (workspace / "configs").mkdir(exist_ok=True)
     (workspace / "environments").mkdir(exist_ok=True)
     managed_skill_names = _sync_prime_skills(emit)
-    _prepare_agent_skill_dirs(options.agents, managed_skill_names, emit)
+    _prepare_workspace_skill_dir(workspace, managed_skill_names, emit)
+    _prepare_agent_skill_dirs(workspace, options.agents, managed_skill_names, emit)
     _report_missing_agent_requirements(options.agents, emit)
     _prepare_agent_native_surfaces(workspace, options.agents, emit)
     _sync_lab_metadata(workspace, options.agents, source="prime lab setup")
@@ -407,13 +417,17 @@ def _run_lab_sync_steps(
     (workspace / "configs").mkdir(exist_ok=True)
     (workspace / "environments").mkdir(exist_ok=True)
     emit(f"Syncing Lab assets in {workspace}\n")
-    agents = options.agents or _workspace_agents_from_metadata(workspace) or ("codex",)
+    agents = _resolve_sync_agents(workspace, options.agents, no_agent=options.no_agent)
 
     managed_skill_names = _sync_prime_skills(emit)
-    _prepare_agent_skill_dirs(agents, managed_skill_names, emit)
-    _report_missing_agent_requirements(agents, emit)
-    _prepare_agent_native_surfaces(workspace, agents, emit)
-    _sync_lab_metadata(workspace, agents, source="prime lab sync")
+    _prepare_workspace_skill_dir(workspace, managed_skill_names, emit)
+    if agents:
+        _prepare_agent_skill_dirs(workspace, agents, managed_skill_names, emit)
+        _report_missing_agent_requirements(agents, emit)
+        _prepare_agent_native_surfaces(workspace, agents, emit)
+        _sync_lab_metadata(workspace, agents, source="prime lab sync")
+    else:
+        emit("Skipped coding-agent skill roots (--no-agent)\n")
     _sync_config_templates(workspace, emit)
 
     if not options.skip_docs:
@@ -482,21 +496,56 @@ def _sync_prime_skill_source(
             f"Skill '{skill_name}' is defined by both {existing['repo']} and {source.repo}."
         )
     skill_dir = staging_skills_dir / skill_name
+    source_path = f"{source.path}/{skill_name}"
+    _download_repo_directory(source.repo, source.ref, source_path, skill_dir, emit)
     skill_path = skill_dir / "SKILL.md"
-    source_path = f"{source.path}/{skill_name}/SKILL.md"
-    _download_file(
-        _repo_raw_url(source.repo, source.ref, source_path),
-        skill_path,
-        emit,
-        force=True,
-    )
-    content = skill_path.read_text(encoding="utf-8")
+    if not skill_path.is_file():
+        raise RuntimeError(f"Skill '{skill_name}' is missing SKILL.md.")
     manifest_skills[skill_name] = {
         "repo": source.repo,
         "ref": source.ref,
         "path": source_path,
-        "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "sha256": _hash_directory(skill_dir),
     }
+
+
+def _download_repo_directory(
+    repo: str,
+    ref: str,
+    source_path: str,
+    dest: Path,
+    emit: Emit,
+) -> None:
+    payload = _download_json(_github_contents_url(repo, ref, source_path))
+    if not isinstance(payload, list):
+        raise RuntimeError(f"Expected a directory listing for {repo}/{source_path}.")
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        entry_type = entry.get("type")
+        entry_path = entry.get("path")
+        if not isinstance(name, str) or not isinstance(entry_path, str):
+            continue
+        if entry_type == "dir":
+            _download_repo_directory(repo, ref, entry_path, dest / name, emit)
+        elif entry_type == "file":
+            _download_file(
+                _repo_raw_url(repo, ref, entry_path),
+                dest / name,
+                emit,
+                force=True,
+            )
+
+
+def _hash_directory(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _discover_skill_names(source: SkillSource) -> tuple[str, ...]:
@@ -575,28 +624,110 @@ def _sync_config_templates(workspace: Path, emit: Emit) -> None:
         )
 
 
+def _prepare_workspace_skill_dir(
+    workspace: Path,
+    managed_skill_names: tuple[str, ...],
+    emit: Emit,
+) -> None:
+    skills_dir = workspace / WORKSPACE_SKILLS_DIR
+    global_skills_dir = _global_prime_skills_dir()
+    _prepare_managed_skill_dir(
+        skills_dir,
+        managed_skill_names,
+        emit,
+        source_root=global_skills_dir,
+        managed_roots=(global_skills_dir,),
+        prefer_link=False,
+        protect_user_owned=False,
+    )
+    emit(f"Prepared {skills_dir}\n")
+
+
 def _prepare_agent_skill_dirs(
+    workspace: Path,
     agents: tuple[str, ...],
     managed_skill_names: tuple[str, ...],
     emit: Emit,
 ) -> None:
-    prime_skills_dir = _global_prime_skills_dir()
+    prepared_dirs: set[Path] = set()
+    workspace_skills_dir = workspace / WORKSPACE_SKILLS_DIR
+    global_skills_dir = _global_prime_skills_dir()
     for agent in agents:
-        skills_dir = agent_user_skills_dir(agent)
-        if skills_dir is None:
+        project_dirs = agent_project_skills_dirs(agent, workspace)
+        if project_dirs:
+            for skills_dir in project_dirs:
+                _prepare_managed_skill_dir_once(
+                    skills_dir,
+                    prepared_dirs,
+                    managed_skill_names,
+                    emit,
+                    source_root=workspace_skills_dir,
+                    managed_roots=(workspace_skills_dir, global_skills_dir),
+                )
             continue
-        _remove_stale_managed_skill_links(skills_dir, prime_skills_dir, managed_skill_names)
-        for skill_name in managed_skill_names:
-            source_dir = prime_skills_dir / skill_name
-            if not source_dir.exists():
-                continue
-            target_dir = skills_dir / skill_name
-            if _skill_target_is_user_owned(target_dir, prime_skills_dir):
-                emit(f"Skipped {target_dir} because a user-owned skill already exists\n")
-                continue
-            _remove_managed_skill_target(target_dir, prime_skills_dir)
-            _safe_link_or_copy_managed_skill_dir(source_dir, target_dir)
-        emit(f"Prepared {skills_dir}\n")
+        user_skills_dir = agent_user_skills_dir(agent)
+        if user_skills_dir is not None:
+            _prepare_managed_skill_dir_once(
+                user_skills_dir,
+                prepared_dirs,
+                managed_skill_names,
+                emit,
+                source_root=global_skills_dir,
+                managed_roots=(global_skills_dir,),
+            )
+
+
+def _prepare_managed_skill_dir_once(
+    skills_dir: Path,
+    prepared_dirs: set[Path],
+    managed_skill_names: tuple[str, ...],
+    emit: Emit,
+    *,
+    source_root: Path,
+    managed_roots: tuple[Path, ...],
+) -> None:
+    resolved_dir = skills_dir.resolve(strict=False)
+    if resolved_dir in prepared_dirs:
+        return
+    prepared_dirs.add(resolved_dir)
+    _prepare_managed_skill_dir(
+        skills_dir,
+        managed_skill_names,
+        emit,
+        source_root=source_root,
+        managed_roots=managed_roots,
+    )
+    emit(f"Prepared {skills_dir}\n")
+
+
+def _prepare_managed_skill_dir(
+    skills_dir: Path,
+    managed_skill_names: tuple[str, ...],
+    emit: Emit,
+    *,
+    source_root: Path,
+    managed_roots: tuple[Path, ...],
+    prefer_link: bool = True,
+    protect_user_owned: bool = True,
+) -> None:
+    _remove_stale_managed_skill_links(skills_dir, managed_roots, managed_skill_names)
+    for skill_name in managed_skill_names:
+        source_dir = source_root / skill_name
+        if not source_dir.exists():
+            continue
+        target_dir = skills_dir / skill_name
+        if protect_user_owned and _skill_target_is_user_owned(target_dir, managed_roots):
+            emit(f"Skipped {target_dir} because a user-owned skill already exists\n")
+            continue
+        if protect_user_owned:
+            _remove_managed_skill_target(target_dir, managed_roots)
+        else:
+            _remove_path(target_dir)
+        _safe_link_or_copy_managed_skill_dir(
+            source_dir,
+            target_dir,
+            prefer_link=prefer_link,
+        )
 
 
 def _report_missing_agent_requirements(agents: tuple[str, ...], emit: Emit) -> None:
@@ -655,6 +786,7 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
         _config_environment_reference_check(workspace),
         _environment_source_hygiene_check(workspace),
         _managed_skill_manifest_check(),
+        _workspace_managed_skills_check(workspace),
         _path_check(
             "Lab templates",
             workspace / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml",
@@ -671,10 +803,13 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
 
     if agents:
         for agent in agents:
-            agent_skill_dir = agent_user_skills_dir(agent)
             label = agent_capability(agent).label
-            if agent_skill_dir is not None:
-                checks.append(_agent_managed_skills_check(label, agent_skill_dir, agent))
+            agent_skill_dirs = agent_project_skills_dirs(agent, workspace) or (
+                (agent_user_skills_dir(agent),) if agent_user_skills_dir(agent) else ()
+            )
+            for agent_skill_dir in agent_skill_dirs:
+                if agent_skill_dir is not None:
+                    checks.append(_agent_managed_skills_check(label, agent_skill_dir, agent))
             checks.append(_agent_native_surface_check(agent, workspace))
     else:
         checks.append(
@@ -704,14 +839,43 @@ def _managed_skill_manifest_check() -> LabDoctorCheck:
     skills = manifest.get("skills")
     if isinstance(skills, dict) and skills:
         return LabDoctorCheck(
-            name="Lab skills",
+            name="Global Lab skill cache",
             status="PASS",
             message=f"{len(skills)} managed skill(s) installed.",
         )
     return LabDoctorCheck(
-        name="Lab skills",
+        name="Global Lab skill cache",
         status="WARN",
         message=f"Missing {_global_prime_skills_dir() / PRIME_SKILLS_MANIFEST}",
+        remediation="Run prime lab sync.",
+    )
+
+
+def _workspace_managed_skills_check(workspace: Path) -> LabDoctorCheck:
+    skill_names = _managed_skill_names_from_manifest()
+    if not skill_names:
+        return LabDoctorCheck(
+            name="Workspace Lab skills",
+            status="WARN",
+            message="No managed Lab skills are installed.",
+            remediation="Run prime lab sync.",
+        )
+    skills_dir = workspace / WORKSPACE_SKILLS_DIR
+    missing = [
+        skill_name
+        for skill_name in skill_names
+        if not (skills_dir / skill_name).exists() and not (skills_dir / skill_name).is_symlink()
+    ]
+    if not missing:
+        return LabDoctorCheck(
+            name="Workspace Lab skills",
+            status="PASS",
+            message=f"{len(skill_names)} managed skill link(s) are present.",
+        )
+    return LabDoctorCheck(
+        name="Workspace Lab skills",
+        status="WARN",
+        message="Missing " + ", ".join(missing[:5]),
         remediation="Run prime lab sync.",
     )
 
@@ -1099,7 +1263,7 @@ def _write_lab_docs_index(workspace: Path) -> None:
                 "- `AGENTS.md`",
                 "- `CLAUDE.md`",
                 "- `environments/AGENTS.md`",
-                "- `~/.prime/skills/*/SKILL.md`",
+                "- `.prime/skills/*/SKILL.md`",
                 "- `.prime/lab/templates/configs/**`",
                 "",
                 "## Prime docs",
@@ -1152,6 +1316,22 @@ def _workspace_agents_from_metadata(workspace: Path) -> tuple[str, ...]:
     if isinstance(primary_agent, str) and primary_agent.strip():
         return (primary_agent.strip(),)
     return ()
+
+
+def _resolve_sync_agents(
+    workspace: Path,
+    agents: tuple[str, ...],
+    *,
+    no_agent: bool,
+) -> tuple[str, ...]:
+    if no_agent:
+        return ()
+    if agents:
+        return agents
+    stored_agents = _workspace_agents_from_metadata(workspace)
+    if stored_agents:
+        return stored_agents
+    raise RuntimeError("No configured coding agent found. Run prime lab setup or pass --agent.")
 
 
 def _download_configs(workspace: Path, configs: list[ConfigSpec], emit: Emit) -> None:
@@ -1240,27 +1420,90 @@ def _check_command(command: Sequence[str], cwd: Path, emit: Emit, runner: Runner
         raise RuntimeError(f"{' '.join(command)} exited with {code}")
 
 
+def _resolve_setup_agents(value: str | None) -> tuple[str, ...]:
+    if value is not None:
+        return _resolve_explicit_agents(value)
+    if sys.stdin.isatty():
+        return _prompt_for_agents()
+    raise ValueError(
+        "No --agent provided and stdin is not interactive. "
+        "Pass --agent codex, --agent amp, or another supported agent."
+    )
+
+
+def _prompt_for_agents() -> tuple[str, ...]:
+    print(f"Supported coding agents: {', '.join(SUPPORTED_AGENTS)}")
+    while True:
+        raw_primary = _prompt_input("Primary coding agent [codex]: ").strip()
+        primary = raw_primary if raw_primary else "codex"
+        try:
+            selected = [_normalize_supported_agent(primary, allow_all=False)]
+            break
+        except ValueError as exc:
+            print(exc)
+
+    use_multiple_raw = _prompt_input("Using multiple coding agents? [y/N]: ").strip().lower()
+    if use_multiple_raw not in {"y", "yes"}:
+        return tuple(selected)
+
+    while True:
+        additional_raw = _prompt_input("Additional agents (comma-separated): ").strip()
+        try:
+            additional_agents = _parse_agents(additional_raw) if additional_raw else []
+        except ValueError as exc:
+            print(exc)
+            continue
+        for agent in additional_agents:
+            if agent not in selected:
+                selected.append(agent)
+        return tuple(selected)
+
+
+def _prompt_input(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except EOFError as exc:
+        raise ValueError("Agent selection was cancelled before setup could continue.") from exc
+
+
+def _resolve_explicit_agents(value: str) -> tuple[str, ...]:
+    parsed = _parse_agents(value)
+    if parsed:
+        return tuple(parsed)
+    raise ValueError(
+        "No valid coding agents provided. Supported values: "
+        + ", ".join((*SUPPORTED_AGENTS, "all"))
+    )
+
+
 def _parse_agents(value: str | None) -> list[str]:
     if value and value.strip().lower() == "all":
         return list(SUPPORTED_AGENTS)
-    raw_agents = value.split(",") if value else ["codex"]
+    raw_agents = value.split(",") if value else []
     agents: list[str] = []
     seen: set[str] = set()
     for raw_agent in raw_agents:
-        raw_name = raw_agent.strip().lower()
-        if not raw_name:
+        if not raw_agent.strip():
             continue
-        agent = agent_capability(raw_name).name
-        if agent not in SUPPORTED_AGENTS:
-            raise ValueError(
-                f"Unsupported coding agent '{raw_agent}'. Supported values: "
-                + ", ".join((*SUPPORTED_AGENTS, "all"))
-            )
+        agent = _normalize_supported_agent(raw_agent, allow_all=False)
         if agent in seen:
             continue
         seen.add(agent)
         agents.append(agent)
-    return agents or ["codex"]
+    return agents
+
+
+def _normalize_supported_agent(raw_agent: str, *, allow_all: bool) -> str:
+    raw_name = raw_agent.strip().lower()
+    if allow_all and raw_name == "all":
+        return raw_name
+    agent = agent_capability(raw_name).name
+    if agent not in SUPPORTED_AGENTS:
+        raise ValueError(
+            f"Unsupported coding agent '{raw_agent}'. Supported values: "
+            + ", ".join((*SUPPORTED_AGENTS, "all"))
+        )
+    return agent
 
 
 def _append_gitignore(workspace: Path) -> None:
@@ -1285,27 +1528,38 @@ def _global_prime_skills_dir() -> Path:
     return Path.home() / ".prime" / "skills"
 
 
-def _safe_link_or_copy_managed_skill_dir(source: Path, target: Path) -> None:
+def _safe_link_or_copy_managed_skill_dir(
+    source: Path,
+    target: Path,
+    *,
+    prefer_link: bool = True,
+) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        target.symlink_to(os.path.relpath(source, start=target.parent), target_is_directory=True)
-    except OSError:
-        shutil.copytree(source, target, dirs_exist_ok=True)
-        (target / ".prime-managed-link").write_text(
-            str(source.resolve(strict=False)),
-            encoding="utf-8",
-        )
+    if prefer_link:
+        try:
+            target.symlink_to(
+                os.path.relpath(source, start=target.parent),
+                target_is_directory=True,
+            )
+            return
+        except OSError:
+            pass
+    shutil.copytree(source, target, dirs_exist_ok=True)
+    (target / ".prime-managed-link").write_text(
+        str(source.resolve(strict=False)),
+        encoding="utf-8",
+    )
 
 
-def _skill_target_is_user_owned(target: Path, prime_skills_dir: Path) -> bool:
+def _skill_target_is_user_owned(target: Path, managed_roots: tuple[Path, ...]) -> bool:
     if not (target.exists() or target.is_symlink()):
         return False
-    return not _is_managed_skill_target(target, prime_skills_dir)
+    return not _is_managed_skill_target(target, managed_roots)
 
 
 def _remove_stale_managed_skill_links(
     skills_dir: Path,
-    prime_skills_dir: Path,
+    managed_roots: tuple[Path, ...],
     managed_skill_names: tuple[str, ...],
 ) -> None:
     if not skills_dir.exists():
@@ -1314,11 +1568,11 @@ def _remove_stale_managed_skill_links(
     for target in skills_dir.iterdir():
         if target.name in managed:
             continue
-        _remove_managed_skill_target(target, prime_skills_dir)
+        _remove_managed_skill_target(target, managed_roots)
 
 
-def _remove_managed_skill_target(target: Path, prime_skills_dir: Path) -> None:
-    if not _is_managed_skill_target(target, prime_skills_dir):
+def _remove_managed_skill_target(target: Path, managed_roots: tuple[Path, ...]) -> None:
+    if not _is_managed_skill_target(target, managed_roots):
         return
     _remove_path(target)
 
@@ -1332,12 +1586,15 @@ def _remove_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def _is_managed_skill_target(target: Path, prime_skills_dir: Path) -> bool:
+def _is_managed_skill_target(target: Path, managed_roots: tuple[Path, ...]) -> bool:
     try:
         resolved = target.resolve(strict=False)
-        prime_root = prime_skills_dir.resolve(strict=False)
-        if target.is_symlink() and (resolved == prime_root or prime_root in resolved.parents):
-            return True
+        for root in managed_roots:
+            managed_root = root.resolve(strict=False)
+            if target.is_symlink() and (
+                resolved == managed_root or managed_root in resolved.parents
+            ):
+                return True
     except OSError:
         return False
 
@@ -1346,10 +1603,10 @@ def _is_managed_skill_target(target: Path, prime_skills_dir: Path) -> bool:
         return False
     try:
         resolved = Path(marker.read_text(encoding="utf-8").strip()).resolve(strict=False)
-        prime_root = prime_skills_dir.resolve(strict=False)
+        managed_roots = tuple(root.resolve(strict=False) for root in managed_roots)
     except OSError:
         return False
-    return resolved == prime_root or prime_root in resolved.parents
+    return any(resolved == root or root in resolved.parents for root in managed_roots)
 
 
 def _remove_if_exists(path: Path) -> None:

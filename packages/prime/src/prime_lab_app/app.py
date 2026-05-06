@@ -1895,7 +1895,7 @@ def _workspace_path_text(workspace: Path) -> Text:
 
 def _warning_viewer_text(warnings: tuple[str, ...]) -> Text:
     text = Text()
-    text.append("Warnings", style=f"bold {STATUS_WARNING}")
+    text.append("Warnings", style=STATUS_WARNING)
     text.append("  ", style="dim")
     text.append("Open workspace settings and run Doctor for deterministic fixes.", style="dim")
     for index, warning in enumerate(warnings, start=1):

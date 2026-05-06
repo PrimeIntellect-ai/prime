@@ -1,14 +1,11 @@
-"""Lab commands for verifiers development."""
-
-import subprocess
+"""Prime Lab workspace commands."""
 
 import typer
 
+from ..lab_setup import run_lab_doctor, run_lab_setup, run_lab_sync
 from ..utils import PlainTyper, get_console
-from ..verifiers_bridge import is_help_request, print_lab_setup_help
-from ..verifiers_plugin import load_verifiers_prime_plugin
 
-app = PlainTyper(help="Lab commands for verifiers development", no_args_is_help=True)
+app = PlainTyper(help="Lab platform commands", no_args_is_help=True)
 console = get_console()
 
 
@@ -20,14 +17,46 @@ console = get_console()
     },
 )
 def setup(ctx: typer.Context) -> None:
-    """Set up a verifiers training workspace."""
-    passthrough_args = list(ctx.args)
-    if is_help_request("", passthrough_args):
-        print_lab_setup_help()
-        raise typer.Exit(0)
+    """Set up a Lab workspace."""
 
-    plugin = load_verifiers_prime_plugin(console=console)
-    command = plugin.build_module_command(plugin.setup_module, passthrough_args)
-    result = subprocess.run(command)
-    if result.returncode != 0:
-        raise typer.Exit(result.returncode)
+    code = run_lab_setup(list(ctx.args), console=console)
+    if code != 0:
+        raise typer.Exit(code)
+
+
+@app.command(
+    add_help_option=False,
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+    },
+)
+def sync(ctx: typer.Context) -> None:
+    """Refresh Lab skills and local agent guidance."""
+
+    code = run_lab_sync(list(ctx.args), console=console)
+    if code != 0:
+        raise typer.Exit(code)
+
+
+@app.command(
+    add_help_option=False,
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+    },
+)
+def doctor(ctx: typer.Context) -> None:
+    """Check a Lab workspace."""
+
+    code = run_lab_doctor(list(ctx.args), console=console)
+    if code != 0:
+        raise typer.Exit(code)
+
+
+@app.command(add_help_option=True)
+def mcp() -> None:
+    """Run the Lab MCP server over stdio."""
+
+    console.print("Prime Lab MCP support is not enabled yet.")
+    raise typer.Exit(1)

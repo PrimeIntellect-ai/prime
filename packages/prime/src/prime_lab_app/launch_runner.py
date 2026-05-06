@@ -25,10 +25,12 @@ _LOG_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 12.0)
 LaunchOutputCallback = Callable[[str], None]
 LaunchStatusCallback = Callable[[str, str], None]
 LaunchDoneCallback = Callable[[str, int | None], None]
+TrainingRunCreatedCallback = Callable[[str], None]
 
 
 @dataclass(frozen=True)
 class LogFollowCommand:
+    run_id: str
     argv: tuple[str, ...]
     display: str
 
@@ -45,6 +47,7 @@ class ConfigLaunchRunner:
         append_output: LaunchOutputCallback,
         update_status: LaunchStatusCallback,
         finish: LaunchDoneCallback,
+        training_run_created: TrainingRunCreatedCallback | None = None,
         popen_factory: Callable[..., subprocess.Popen[str]] | None = None,
     ) -> None:
         self._command = command
@@ -53,11 +56,13 @@ class ConfigLaunchRunner:
         self._append_output = append_output
         self._update_status = update_status
         self._finish = finish
+        self._training_run_created = training_run_created
         self._popen_factory = popen_factory or subprocess.Popen
         self._process: subprocess.Popen[str] | None = None
         self._process_lock = threading.Lock()
         self._stop_requested = threading.Event()
         self._completed = threading.Event()
+        self._opened_training_run_id = ""
 
     def run(self) -> None:
         try:
@@ -73,6 +78,9 @@ class ConfigLaunchRunner:
             self._finish_once("stopped", None)
             return
         if returncode == 0 and logs_command is not None and not self._stop_requested.is_set():
+            if self._training_run_created is not None:
+                self._finish_once("launch", returncode)
+                return
             self._follow_logs_with_backoff(logs_command)
             return
         if returncode == 0 and self._follow_training_logs and logs_command is None:
@@ -137,13 +145,25 @@ class ConfigLaunchRunner:
                     if detect_training_logs and logs_command is None:
                         logs_command = extract_training_log_follow_command(line)
                         if logs_command is not None:
-                            self._update_status("Run created. Preparing live logs", PRIMARY)
+                            if self._training_run_created is None:
+                                self._update_status("Run created. Preparing live logs", PRIMARY)
+                            else:
+                                self._update_status("Run created. Opening training view", PRIMARY)
+                                self._notify_training_run_created(logs_command.run_id)
                     self._append_output(line)
             return process.wait(), logs_command
         finally:
             with self._process_lock:
                 if self._process is process:
                     self._process = None
+
+    def _notify_training_run_created(self, run_id: str) -> None:
+        if self._training_run_created is None or not run_id:
+            return
+        if self._opened_training_run_id == run_id:
+            return
+        self._opened_training_run_id = run_id
+        self._training_run_created(run_id)
 
     def _finish_once(self, kind: str, returncode: int | None) -> None:
         if self._completed.is_set():
@@ -203,4 +223,4 @@ def _first_run_id(tokens: list[str]) -> str:
 
 def _training_log_follow_command(run_id: str) -> LogFollowCommand:
     argv = ("prime", "rl", "logs", run_id, "-f")
-    return LogFollowCommand(argv, " ".join(argv))
+    return LogFollowCommand(run_id, argv, " ".join(argv))

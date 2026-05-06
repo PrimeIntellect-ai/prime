@@ -35,6 +35,7 @@ AgentSelector = Callable[[Path, str], None]
 AgentSender = Callable[[str], None]
 AgentSessionStarter = Callable[[Path, str], None]
 AgentActionRecorder = Callable[[dict[str, Any]], None]
+TrainingRunOpener = Callable[[str], None]
 StatusTextProvider = Callable[[], Text]
 CommandMenuRow = tuple[str, str, str]
 
@@ -392,6 +393,7 @@ class AgentChatScreen(Screen[None]):
         send_prompt: AgentSender,
         start_new_session: AgentSessionStarter,
         record_action: AgentActionRecorder,
+        open_training_run: TrainingRunOpener,
         status_text_provider: StatusTextProvider,
     ) -> None:
         super().__init__()
@@ -404,6 +406,7 @@ class AgentChatScreen(Screen[None]):
         self._send_prompt = send_prompt
         self._start_new_session = start_new_session
         self._record_action = record_action
+        self._open_training_run = open_training_run
         self._status_text_provider = status_text_provider
         self._template_prompts_by_id = _prompt_templates(item)
         self._references_by_value = _agent_references(item)
@@ -518,6 +521,11 @@ class AgentChatScreen(Screen[None]):
         event.stop()
         self._pending_widget_choice = event.action
         self._send_current_prompt()
+
+    @on(AgentWidgetCard.TrainingRunOpened)
+    def _training_run_opened(self, event: AgentWidgetCard.TrainingRunOpened) -> None:
+        event.stop()
+        self._open_training_run(event.run_id)
 
     @on(AgentPrompt.CommandPrevious)
     def _command_previous(self, _event: AgentPrompt.CommandPrevious) -> None:

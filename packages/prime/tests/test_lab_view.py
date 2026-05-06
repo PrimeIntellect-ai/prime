@@ -97,7 +97,10 @@ from prime_lab_app.agent_widget_model import (
     widget_training_model_option_parts,
 )
 from prime_lab_app.agent_widgets import (
+    handle_lab_widget_tool_call,
+    lab_dynamic_tools,
     lab_widget_action_from_tool_call,
+    lab_widget_developer_instructions,
     lab_widget_diagnostic_prompt,
 )
 from prime_lab_app.app import (
@@ -146,7 +149,7 @@ from prime_lab_app.evaluation_browser import (
 )
 from prime_lab_app.filters import FilterChoice, filter_choices
 from prime_lab_app.launch_backdrop import LaunchBackdrop
-from prime_lab_app.launch_runner import extract_training_log_follow_command
+from prime_lab_app.launch_runner import ConfigLaunchRunner, extract_training_log_follow_command
 from prime_lab_app.launch_screen import LaunchScreen
 from prime_lab_app.models import LabItem, LabSection, LabSnapshot
 from prime_lab_app.palette import TOOL_CALL
@@ -5152,11 +5155,13 @@ def test_training_model_options_does_not_cache_auth_failures(
             return [types.SimpleNamespace(name="future/gpt-oss-next")]
 
     monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_OPTIONS_CACHE", None)
+    monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_NAMES_CACHE", None)
     monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_OPTION_METADATA", {})
     monkeypatch.setattr(agent_widget_model, "Config", NoAuthConfig)
 
     assert agent_widget_model._training_model_options() == ()
     assert agent_widget_model._TRAINING_MODEL_OPTIONS_CACHE is None
+    assert agent_widget_model._TRAINING_MODEL_NAMES_CACHE is None
 
     monkeypatch.setattr(agent_widget_model, "Config", AuthConfig)
     monkeypatch.setattr(agent_widget_model, "APIClient", lambda: object())
@@ -5169,7 +5174,53 @@ def test_training_model_options_does_not_cache_auth_failures(
         "future/gpt-oss-next (medium)",
         "future/gpt-oss-next (high)",
     ]
+    assert agent_widget_model.training_model_names() == ("future/gpt-oss-next",)
     assert agent_widget_model._TRAINING_MODEL_OPTIONS_CACHE == options
+
+
+def test_lab_agent_training_tools_include_current_model_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    models = ("openai/gpt-oss-120b", "qwen/qwen3-8b")
+    monkeypatch.setattr(agent_widget_model, "training_model_names", lambda: models)
+
+    tools = {tool["name"]: tool for tool in lab_dynamic_tools()}
+    model_schema = tools["train_model"]["inputSchema"]["properties"]["model"]
+    instructions = lab_widget_developer_instructions()
+
+    assert model_schema["enum"] == list(models)
+    assert "openai/gpt-oss-120b" in instructions
+    assert "qwen/qwen3-8b" in instructions
+
+
+def test_lab_agent_training_tool_rejects_unavailable_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        agent_widget_model,
+        "training_model_names",
+        lambda: ("openai/gpt-oss-120b",),
+    )
+
+    status, summary, payload = handle_lab_widget_tool_call(
+        {
+            "namespace": "lab",
+            "tool": "train_model",
+            "callId": "train-1",
+            "arguments": {
+                "env": "primeintellect/wiki-search",
+                "model": "Qwen3-4B",
+                "max_steps": 10,
+                "batch_size": 32,
+                "rollouts_per_example": 4,
+                "max_tokens": 1024,
+            },
+        }
+    )
+
+    assert status == "error"
+    assert "Qwen3-4B" in summary
+    assert "openai/gpt-oss-120b" in payload["contentItems"][0]["text"]
 
 
 def test_prime_lab_app_chat_widget_shows_all_train_models_for_rl_dropdown(
@@ -5588,6 +5639,82 @@ async def test_prime_lab_app_chat_widget_launch_button_streams_inline_output(
         assert actions[-1]["type"] == "agent_inline_launch"
         assert actions[-1]["config_kind"] == "eval"
         assert actions[-1]["config_path"] == ".prime/lab/configs/eval/reverse-text.toml"
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_chat_training_launch_opens_run_screen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "prime_lab_app.agent_widget_model._training_model_options",
+        lambda: _training_model_options_for_name("openai/gpt-oss-120b"),
+    )
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        '{"choices": {"primary_agent": "cursor"}}',
+        encoding="utf-8",
+    )
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(
+        lambda: snapshot,
+        lambda item, include_logs, log_tail_lines, metrics_limit, metrics_min_step: item,
+        initial_loader=lambda: snapshot,
+    )
+    widget_messages = (
+        AgentChatMessage(
+            "system",
+            "Action ready",
+            "widget",
+            lab_widget_action_from_tool_call(
+                {
+                    "namespace": "lab",
+                    "tool": "train_model",
+                    "callId": "train-1",
+                    "arguments": {
+                        "env": "primeintellect/wiki-search",
+                        "model": "openai/gpt-oss-120b",
+                        "max_steps": 10,
+                        "batch_size": 32,
+                        "rollouts_per_example": 4,
+                        "max_tokens": 1024,
+                    },
+                }
+            ),
+        ),
+    )
+
+    class FakeLaunchRunner:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def run(self) -> None:
+            assert self.kwargs["training_run_created"] is not None
+            self.kwargs["training_run_created"]("abc123run")
+            self.kwargs["finish"]("launch", 0)
+
+        def stop(self) -> None:
+            self.kwargs["finish"]("stopped", None)
+
+    monkeypatch.setattr("prime_lab_app.agent_cards.ConfigLaunchRunner", FakeLaunchRunner)
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, AgentChatScreen)
+        app._set_agent_messages(widget_messages)
+        app.screen._refresh_runtime_view()
+        await pilot.pause()
+
+        app.screen.query_one(".agent-widget-action-launch", Button).press()
+        for _ in range(10):
+            await pilot.pause()
+            if isinstance(app.screen, TrainingRunScreen):
+                break
+
+        assert isinstance(app.screen, TrainingRunScreen)
+        assert app.screen._base_item.title == "abc123run"
 
 
 @pytest.mark.asyncio
@@ -6265,7 +6392,7 @@ async def test_config_launch_follows_training_logs_from_hint(
                 break
 
         assert commands[:2] == [
-            ["prime", "train", "run", ".prime/lab/configs/rl/train.toml"],
+            ["prime", "train", "run", ".prime/lab/configs/rl/train.toml", "--yes"],
             ["prime", "rl", "logs", "abc123run", "-f"],
         ]
         assert isinstance(app.screen, ConfigLaunchScreen)
@@ -6280,9 +6407,52 @@ def test_training_log_follow_command_uses_dashboard_and_run_id_hints() -> None:
     from_hint = extract_training_log_follow_command("Training run id: hint_run_123")
 
     assert from_url is not None
+    assert from_url.run_id == "urlrun123"
     assert from_url.argv == ("prime", "rl", "logs", "urlrun123", "-f")
     assert from_hint is not None
+    assert from_hint.run_id == "hint_run_123"
     assert from_hint.argv == ("prime", "rl", "logs", "hint_run_123", "-f")
+
+
+def test_config_launch_runner_opens_training_run_instead_of_following_inline_logs(
+    tmp_path: Path,
+) -> None:
+    class FakeProcess:
+        stdout = ["Training run id: abc123run\n"]
+
+        def wait(self) -> int:
+            return 0
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            return None
+
+    commands: list[list[str]] = []
+    opened: list[str] = []
+    finishes: list[tuple[str, int | None]] = []
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> FakeProcess:
+        commands.append(command)
+        return FakeProcess()
+
+    runner = ConfigLaunchRunner(
+        command="prime train run train.toml --yes",
+        workspace=tmp_path,
+        follow_training_logs=True,
+        append_output=lambda _text: None,
+        update_status=lambda _text, _style: None,
+        finish=lambda kind, returncode: finishes.append((kind, returncode)),
+        training_run_created=opened.append,
+        popen_factory=fake_popen,
+    )
+
+    runner.run()
+
+    assert commands == [["prime", "train", "run", "train.toml", "--yes"]]
+    assert opened == ["abc123run"]
+    assert finishes == [("launch", 0)]
 
 
 def test_rl_client_preview_run_uses_preview_endpoint() -> None:

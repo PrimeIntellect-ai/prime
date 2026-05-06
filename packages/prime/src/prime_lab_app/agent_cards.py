@@ -54,6 +54,13 @@ class AgentWidgetCard(Vertical):
             self.action = action
             super().__init__()
 
+    class TrainingRunOpened(Message):
+        """A training launch created a run that should open in Lab."""
+
+        def __init__(self, run_id: str) -> None:
+            self.run_id = run_id
+            super().__init__()
+
     def __init__(
         self,
         message: AgentChatMessage,
@@ -197,6 +204,9 @@ class AgentWidgetCard(Vertical):
         self._set_launch_buttons(running=True)
         self._set_widget_status("Launching ...", PRIMARY)
         self._set_widget_log(self._output, visible=True)
+        training_run_created = (
+            self._notify_training_run_created if plan.follow_training_logs else None
+        )
         self._runner = ConfigLaunchRunner(
             command=plan.command,
             workspace=self._workspace,
@@ -215,6 +225,7 @@ class AgentWidgetCard(Vertical):
                 kind,
                 returncode,
             ),
+            training_run_created=training_run_created,
         )
         self.run_worker(self._runner.run, exclusive=True, thread=True)
 
@@ -223,6 +234,9 @@ class AgentWidgetCard(Vertical):
             self._finish_inline_stopped()
             return
         self._runner.stop()
+
+    def _notify_training_run_created(self, run_id: str) -> None:
+        self._call_from_launch_thread(self._open_training_run, run_id)
 
     def _call_from_launch_thread(self, callback: Any, *args: Any) -> None:
         if self._closed:
@@ -301,6 +315,9 @@ class AgentWidgetCard(Vertical):
             self._finish_inline_logs()
         else:
             self._finish_inline_launch(int(returncode or 0))
+
+    def _open_training_run(self, run_id: str) -> None:
+        self.post_message(self.TrainingRunOpened(run_id))
 
     def _set_widget_status(self, text: str, style: str = "") -> None:
         if self._closed:

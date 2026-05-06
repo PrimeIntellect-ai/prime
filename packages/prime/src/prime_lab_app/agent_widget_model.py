@@ -21,6 +21,7 @@ from .models import LabItem
 from .toml_format import format_toml_blocks
 
 _TRAINING_MODEL_OPTIONS_CACHE: tuple[tuple[str, str], ...] | None = None
+_TRAINING_MODEL_NAMES_CACHE: tuple[str, ...] | None = None
 _TRAINING_MODEL_OPTION_METADATA: dict[str, tuple[str, dict[str, str]]] = {}
 
 
@@ -111,6 +112,12 @@ def widget_training_model_option_parts(value: str) -> tuple[str, dict[str, str]]
     """Return the model name and sampling controls encoded by a training model option."""
 
     return _training_model_option_parts(value)
+
+
+def training_model_names() -> tuple[str, ...]:
+    """Return Hosted Training model ids available to the active account."""
+
+    return _training_model_names()
 
 
 def widget_config_path(payload: dict[str, Any], workspace: Path) -> Path:
@@ -564,6 +571,18 @@ def _training_model_options() -> tuple[tuple[str, str], ...]:
     global _TRAINING_MODEL_OPTIONS_CACHE
     if _TRAINING_MODEL_OPTIONS_CACHE is not None:
         return _TRAINING_MODEL_OPTIONS_CACHE
+    names = _training_model_names()
+    if not names:
+        return ()
+    _TRAINING_MODEL_OPTION_METADATA.clear()
+    _TRAINING_MODEL_OPTIONS_CACHE = _training_model_options_from_names(names)
+    return _TRAINING_MODEL_OPTIONS_CACHE
+
+
+def _training_model_names() -> tuple[str, ...]:
+    global _TRAINING_MODEL_NAMES_CACHE
+    if _TRAINING_MODEL_NAMES_CACHE is not None:
+        return _TRAINING_MODEL_NAMES_CACHE
     try:
         config = Config()
         if not config.api_key:
@@ -577,9 +596,8 @@ def _training_model_options() -> tuple[tuple[str, str], ...]:
         if not name:
             continue
         names.append(name)
-    _TRAINING_MODEL_OPTION_METADATA.clear()
-    _TRAINING_MODEL_OPTIONS_CACHE = _training_model_options_from_names(names)
-    return _TRAINING_MODEL_OPTIONS_CACHE
+    _TRAINING_MODEL_NAMES_CACHE = tuple(names)
+    return _TRAINING_MODEL_NAMES_CACHE
 
 
 def _training_model_options_from_names(names: Iterable[str]) -> tuple[tuple[str, str], ...]:
@@ -1096,7 +1114,7 @@ def _widget_command_text(payload: dict[str, Any], workspace: Path) -> str:
     rel_path = _relative_path(config_path, workspace)
     config_kind = str(payload.get("config_kind") or "")
     if config_kind == "rl":
-        return f"prime train run {rel_path}"
+        return f"prime train run {rel_path} --yes"
     if config_kind == "eval":
         return f"prime eval run {rel_path} --hosted"
     if config_kind == "gepa":

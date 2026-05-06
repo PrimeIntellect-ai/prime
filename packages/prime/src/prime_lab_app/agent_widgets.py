@@ -184,12 +184,14 @@ _TOOL_BY_NAME = {tool.name: tool for tool in LAB_WIDGET_TOOLS}
 def lab_dynamic_tools() -> list[dict[str, Any]]:
     """Dynamic tool specs passed to Codex app-server threads."""
 
-    return [_tool_spec(tool) for tool in LAB_WIDGET_TOOLS]
+    training_models = _current_training_model_names()
+    return [_tool_spec(tool, training_models=training_models) for tool in LAB_WIDGET_TOOLS]
 
 
 def lab_widget_developer_instructions() -> str:
     """Instructions that teach the agent how Lab control requests work."""
 
+    training_model_guidance = _training_model_guidance(_current_training_model_names())
     return (
         "You are running inside Prime Intellect Lab. Apply the Prime-managed Lab controls "
         "guidance for this session. Lab is an interactive terminal research app, so your "
@@ -218,6 +220,7 @@ def lab_widget_developer_instructions() -> str:
         "environment and model are known, or call `choose` if either is ambiguous. For training "
         "requests, call `train_model` once environment, model, and core run limits are known, "
         "or `choose` for missing/ambiguous choices. "
+        f"{training_model_guidance}"
         "Before calling a widget tool, decide: the Lab object kind, "
         "candidate IDs/paths, the default selection, editable versus read-only fields, "
         "validation blockers, and the next confirmed action. Lab owns rendering, validation, "
@@ -256,6 +259,10 @@ def handle_lab_widget_tool_call(
         return _tool_error("Action arguments must be an object.")
     if tool == "search_environments":
         return _handle_search_environments(arguments, environment_search)
+    if tool == "train_model":
+        model_error = _validate_train_model_model(arguments)
+        if model_error:
+            return _tool_error(model_error)
 
     normalized = normalize_widget_arguments(str(tool or ""), arguments)
     if normalized is None:
@@ -383,8 +390,19 @@ def _coerce_arguments(value: Any) -> Any:
     return value
 
 
-def _tool_spec(tool: LabWidgetTool) -> dict[str, Any]:
+def _tool_spec(
+    tool: LabWidgetTool,
+    *,
+    training_models: tuple[str, ...] = (),
+) -> dict[str, Any]:
     properties = dict(tool.properties)
+    if tool.name == "train_model" and training_models:
+        model_property = dict(properties.get("model") or {})
+        model_property["enum"] = list(training_models)
+        model_property["description"] = (
+            "Hosted Training model id. Use exactly one currently available id from this enum."
+        )
+        properties["model"] = model_property
     if tool.common:
         properties = {
             "title": {"type": "string"},
@@ -402,6 +420,40 @@ def _tool_spec(tool: LabWidgetTool) -> dict[str, Any]:
             "additionalProperties": False,
         },
     }
+
+
+def _validate_train_model_model(arguments: dict[str, Any]) -> str:
+    model = str(arguments.get("model") or "").strip()
+    training_models = _current_training_model_names()
+    if not model or not training_models or model in set(training_models):
+        return ""
+    return (
+        f"Hosted Training model '{model}' is not available. Available model ids: "
+        f"{_format_training_models(training_models)}"
+    )
+
+
+def _training_model_guidance(training_models: tuple[str, ...]) -> str:
+    if not training_models:
+        return ""
+    return (
+        "Available Hosted Training model ids for `train_model.model`: "
+        f"{_format_training_models(training_models)}. Use one exactly as written; do not invent "
+        "short aliases or future model names. "
+    )
+
+
+def _format_training_models(training_models: tuple[str, ...]) -> str:
+    return ", ".join(training_models)
+
+
+def _current_training_model_names() -> tuple[str, ...]:
+    try:
+        from .agent_widget_model import training_model_names
+
+        return training_model_names()
+    except Exception:
+        return ()
 
 
 def _tool_error(message: str) -> tuple[str, str, dict[str, Any]]:

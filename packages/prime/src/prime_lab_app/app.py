@@ -1310,6 +1310,7 @@ class PrimeLabView(App[None]):
                 send_prompt=self._send_agent_prompt,
                 start_new_session=self._start_new_agent_session,
                 record_action=self._record_agent_action,
+                open_training_run=self._open_training_run_from_agent,
                 status_text_provider=self._statusbar_text,
             )
         )
@@ -1559,6 +1560,7 @@ class PrimeLabView(App[None]):
                     send_prompt=self._send_agent_prompt,
                     start_new_session=self._start_new_agent_session,
                     record_action=self._record_agent_action,
+                    open_training_run=self._open_training_run_from_agent,
                     status_text_provider=self._statusbar_text,
                 )
             )
@@ -1658,6 +1660,32 @@ class PrimeLabView(App[None]):
     @work(thread=True, exclusive=True, group="agent-prompt")
     def _send_agent_prompt_worker(self, prompt: str) -> None:
         self._agent_runtime.send_prompt(prompt)
+
+    def _open_training_run_from_agent(self, run_id: str) -> None:
+        run_id = run_id.strip()
+        if not run_id or self._detail_loader is None:
+            return
+        frontend_url = self._snapshot.frontend_url if self._snapshot is not None else ""
+        workspace = self._snapshot.workspace if self._snapshot is not None else Path.cwd()
+        item = LabItem(
+            key=f"rl-run:{run_id}",
+            section="training",
+            title=run_id,
+            subtitle="Hosted Training run",
+            status="Opening",
+            status_style=PRIMARY,
+            metadata=(("Run", run_id),),
+            raw={"id": run_id, "status": "Opening"},
+        )
+        self.push_screen(
+            TrainingRunScreen(
+                item,
+                self._detail_loader,
+                include_logs=True,
+                frontend_url=frontend_url,
+                workspace=workspace,
+            )
+        )
 
     def _refresh_after_workspace_memory_change(self) -> None:
         self._detail_cache.clear()

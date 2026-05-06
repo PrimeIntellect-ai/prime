@@ -100,6 +100,7 @@ from .shell import (
     lab_mark_text,
     status_identity,
     statusbar_text,
+    warning_popover_text,
     write_workspace_agent_choice,
 )
 from .snapshots import merge_snapshot_rows
@@ -318,10 +319,14 @@ class PrimeLabView(App[None]):
 
     #warning-viewer {
         display: none;
+        height: auto;
+        width: 88;
+        max-width: 100%;
         max-height: 8;
         background: $surface;
-        border-top: solid $primary;
+        border: solid $primary;
         padding: 0 1;
+        margin-left: 1;
     }
 
     #warning-viewer-body {
@@ -877,7 +882,7 @@ class PrimeLabView(App[None]):
         if not viewer.display:
             body.update("")
             return
-        body.update(_warning_viewer_text(warnings))
+        body.update(warning_popover_text(warnings, include_doctor_hint=True))
 
     def _set_agent_state(self, state: AgentConnectionState) -> None:
         self._agent_state = state
@@ -1890,18 +1895,6 @@ def _topbar_title(title: str) -> Text:
 def _workspace_path_text(workspace: Path) -> Text:
     text = Text()
     text.append(compact_path(workspace), style="dim")
-    return text
-
-
-def _warning_viewer_text(warnings: tuple[str, ...]) -> Text:
-    text = Text()
-    text.append("Warnings", style=STATUS_WARNING)
-    text.append("  ", style="dim")
-    text.append("Open workspace settings and run Doctor for deterministic fixes.", style="dim")
-    for index, warning in enumerate(warnings, start=1):
-        text.append("\n")
-        text.append(f"{index}. ", style=STATUS_WARNING)
-        text.append(warning)
     return text
 
 

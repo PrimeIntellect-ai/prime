@@ -158,7 +158,12 @@ from prime_lab_app.readme import readme_links as _readme_links
 from prime_lab_app.readme import readme_markdown as _readme_markdown
 from prime_lab_app.rows import item_badges_text
 from prime_lab_app.setup_screens import AgentSyncScreen, DoctorScreen, SetupScreen
-from prime_lab_app.shell import compact_path, configured_workspace_agent, lab_header
+from prime_lab_app.shell import (
+    compact_path,
+    configured_workspace_agent,
+    lab_header,
+    warning_popover_text,
+)
 from prime_lab_app.snapshots import merge_snapshot_rows
 from prime_lab_app.source_browser import source_entries, source_preview
 from prime_lab_app.training_charts import (
@@ -4337,6 +4342,20 @@ async def test_prime_lab_app_warning_status_opens_warning_viewer(tmp_path: Path)
         rendered = _render_renderable(app.query_one("#warning-viewer-body", Static).render())
         assert "Warnings" in rendered
         assert "Training runs unavailable" in rendered
+
+
+def test_warning_popover_text_formats_multiline_validation_errors() -> None:
+    text = warning_popover_text(
+        (
+            "Evaluations unavailable: Validation failed:\n"
+            "- query.limit: Input should be less than or equal to 100",
+        )
+    )
+    rendered = _render_renderable(text)
+
+    assert "Warnings" in rendered
+    assert "1. Evaluations unavailable: Validation failed:" in rendered
+    assert "- query.limit: Input should be less than or equal to 100" in rendered
 
 
 @pytest.mark.asyncio

@@ -27,8 +27,8 @@ from .chat_parts import chat_transcript as _render_chat_transcript
 from .chat_parts import render_chat_turn
 from .launch_backdrop import LaunchBackdrop
 from .models import LabItem
-from .palette import BUTTON_CSS, STATUS_WARNING, SUCCESS
-from .shell import action_hint_text, lab_header
+from .palette import BUTTON_CSS, SUCCESS
+from .shell import action_hint_text, lab_header, warning_popover_text
 
 AgentStateProvider = Callable[[], AgentConnectionState]
 AgentMessagesProvider = Callable[[], tuple[AgentChatMessage, ...]]
@@ -409,10 +409,13 @@ class AgentChatScreen(Screen[None]):
     #agent-warning-popover {
         display: none;
         height: auto;
+        width: 88;
+        max-width: 100%;
         max-height: 8;
         background: $surface;
-        border-top: solid $primary;
+        border: solid $primary;
         padding: 0 1;
+        margin-left: 1;
     }
 
     #agent-warning-popover-body {
@@ -822,7 +825,7 @@ class AgentChatScreen(Screen[None]):
         if not popover.display:
             body.update("")
             return
-        body.update(_agent_warning_popover_text(warnings))
+        body.update(warning_popover_text(warnings))
 
     def _current_warnings(self) -> tuple[str, ...]:
         return tuple(
@@ -1040,16 +1043,6 @@ def _agent_statusbar(status_text_provider: StatusTextProvider) -> Table:
     bar.add_column(justify="right", no_wrap=True)
     bar.add_row(status_text_provider(), action_hint_text(("Esc", "Back"), ("Ctrl+W", "Welcome")))
     return bar
-
-
-def _agent_warning_popover_text(warnings: tuple[str, ...]) -> Text:
-    text = Text()
-    text.append("Warnings", style=STATUS_WARNING)
-    for index, warning in enumerate(warnings, start=1):
-        text.append("\n")
-        text.append(f"{index}. ", style=STATUS_WARNING)
-        text.append(warning)
-    return text
 
 
 def _agent_command_menu(

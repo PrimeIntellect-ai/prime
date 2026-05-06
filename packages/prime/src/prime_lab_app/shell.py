@@ -82,9 +82,35 @@ def action_hint_text(*pairs: tuple[str, str]) -> Text:
     return text
 
 
+def warning_popover_text(
+    warnings: tuple[str, ...],
+    *,
+    include_doctor_hint: bool = False,
+) -> Text:
+    text = Text()
+    text.append("Warnings", style=STATUS_WARNING)
+    if include_doctor_hint:
+        text.append("  ", style="dim")
+        text.append("Open workspace settings and run Doctor for deterministic fixes.", style="dim")
+    for index, warning in enumerate(warnings, start=1):
+        lines = _warning_lines(warning)
+        text.append("\n")
+        text.append(f"{index}. ", style=STATUS_WARNING)
+        text.append(lines[0])
+        for line in lines[1:]:
+            text.append("\n   ", style="dim")
+            text.append(line)
+    return text
+
+
 def _count_label(count: int, singular: str) -> str:
     suffix = "" if count == 1 else "s"
     return f"{count} {singular}{suffix}"
+
+
+def _warning_lines(warning: str) -> tuple[str, ...]:
+    lines = tuple(line.strip() for line in str(warning).splitlines() if line.strip())
+    return lines or ("Unknown warning",)
 
 
 def agent_status_label(state: AgentConnectionState) -> str:

@@ -22,6 +22,8 @@ from .toml_format import format_toml_blocks
 
 _TRAINING_MODEL_OPTIONS_CACHE: tuple[tuple[str, str], ...] | None = None
 _TRAINING_MODEL_NAMES_CACHE: tuple[str, ...] | None = None
+_TRAINING_MODEL_OPTIONS_CACHE_KEY: tuple[str, str, str] | None = None
+_TRAINING_MODEL_NAMES_CACHE_KEY: tuple[str, str, str] | None = None
 _TRAINING_MODEL_OPTION_METADATA: dict[str, tuple[str, dict[str, str]]] = {}
 
 
@@ -568,28 +570,35 @@ def _widget_default_model(
 
 
 def _training_model_options() -> tuple[tuple[str, str], ...]:
-    global _TRAINING_MODEL_OPTIONS_CACHE
-    if _TRAINING_MODEL_OPTIONS_CACHE is not None:
-        return _TRAINING_MODEL_OPTIONS_CACHE
+    global _TRAINING_MODEL_OPTIONS_CACHE, _TRAINING_MODEL_OPTIONS_CACHE_KEY
     names = _training_model_names()
     if not names:
         return ()
+    cache_key = _TRAINING_MODEL_NAMES_CACHE_KEY
+    if _TRAINING_MODEL_OPTIONS_CACHE is not None and _TRAINING_MODEL_OPTIONS_CACHE_KEY == cache_key:
+        return _TRAINING_MODEL_OPTIONS_CACHE
     _TRAINING_MODEL_OPTION_METADATA.clear()
     _TRAINING_MODEL_OPTIONS_CACHE = _training_model_options_from_names(names)
+    _TRAINING_MODEL_OPTIONS_CACHE_KEY = _TRAINING_MODEL_NAMES_CACHE_KEY
     return _TRAINING_MODEL_OPTIONS_CACHE
 
 
 def _training_model_names() -> tuple[str, ...]:
-    global _TRAINING_MODEL_NAMES_CACHE
-    if _TRAINING_MODEL_NAMES_CACHE is not None:
+    global _TRAINING_MODEL_NAMES_CACHE, _TRAINING_MODEL_NAMES_CACHE_KEY
+    global _TRAINING_MODEL_OPTIONS_CACHE, _TRAINING_MODEL_OPTIONS_CACHE_KEY
+    config = Config()
+    if not config.api_key:
+        return ()
+    cache_key = _training_model_cache_key(config)
+    if _TRAINING_MODEL_NAMES_CACHE is not None and _TRAINING_MODEL_NAMES_CACHE_KEY == cache_key:
         return _TRAINING_MODEL_NAMES_CACHE
     try:
-        config = Config()
-        if not config.api_key:
-            return ()
         models = RLClient(APIClient()).list_models(team_id=config.team_id)
     except APIError:
         return ()
+    if _TRAINING_MODEL_NAMES_CACHE_KEY != cache_key:
+        _TRAINING_MODEL_OPTIONS_CACHE = None
+        _TRAINING_MODEL_OPTIONS_CACHE_KEY = None
     names: list[str] = []
     for model in sorted(models, key=lambda model: model.name):
         name = str(model.name).strip()
@@ -597,7 +606,16 @@ def _training_model_names() -> tuple[str, ...]:
             continue
         names.append(name)
     _TRAINING_MODEL_NAMES_CACHE = tuple(names)
+    _TRAINING_MODEL_NAMES_CACHE_KEY = cache_key
     return _TRAINING_MODEL_NAMES_CACHE
+
+
+def _training_model_cache_key(config: Any) -> tuple[str, str, str]:
+    return (
+        str(getattr(config, "base_url", "")),
+        str(getattr(config, "current_environment", "")),
+        str(getattr(config, "team_id", None) or getattr(config, "team_name", "") or ""),
+    )
 
 
 def _training_model_options_from_names(names: Iterable[str]) -> tuple[tuple[str, str], ...]:

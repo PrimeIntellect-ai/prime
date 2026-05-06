@@ -98,7 +98,7 @@ def _welcome(console: Console, *, width: int, frame: int) -> None:
     console.print(_center("Create. Evaluate. Train. Deploy.", art_width), style="dim")
     console.print()
     console.print(LaunchBackdrop(frame=frame).render_text(art_width, 12))
-    console.print(_kv_line("ready", "~/dev/verifiers", "PI Applied Research", "Codex"))
+    console.print(_status("PI Applied Research", "~/dev/verifiers", "production", "Codex"))
     console.print(
         _button_grid(
             ("Explore Environments", "Train Models", "Run Evaluations", "Build with Codex")
@@ -114,17 +114,19 @@ def _settings(console: Console, *, width: int, frame: int) -> None:
     table.add_row(
         _nav("Settings"),
         _panel_text(
-            "Settings\n\nWorkspaces, profiles, local assets, setup.\n\n"
-            "[Setup Lab workspace] [Sync assets] [Doctor]\n\n"
-            "verifiers       active\n~/dev/verifiers\n\nprime-cli       inactive\n~/dev/prime-cli"
+            "Settings\nWorkspaces 2   Profiles 1   Local assets 8   Setup 3\n\n"
+            "[Set up Lab workspace] [Sync Lab assets] [Check workspace]\n\n"
+            "verifiers       active\n~/dev/verifiers\n\n"
+            "prime-cli       inactive\n~/dev/prime-cli"
         ),
         _panel_text(
             "verifiers\n~/dev/verifiers\n\nStatus       active\nAuth         authenticated\n"
-            "Team         PI Applied Research\nPrimary      Codex\n\nProfiles\nproduction   current"
+            "Team         PI Applied Research\nProfile      production\n"
+            "Primary      Codex\n\nDoctor\nconfigs pass · assets pass · 0 blockers"
         ),
     )
     console.print(table)
-    console.print(_status("PI Applied Research", "~/dev/verifiers", "Codex"))
+    console.print(_footer("w Welcome", "c Agent", "Enter Open", "/ Filter"))
 
 
 def _environments(console: Console, *, width: int, frame: int) -> None:
@@ -135,14 +137,15 @@ def _environments(console: Console, *, width: int, frame: int) -> None:
         _nav("Environments"),
         _panel_text(
             "Environments\nLocal and platform environments. 33 shown\n\n"
-            "primeintellect/alphabet-sort   LOCAL PUBLIC\n"
-            "sentence-repeater              LOCAL\n"
-            "primeintellect/math-python     PUBLIC\n"
-            "research/private-env           PRIVATE"
+            " Account + local 3   Public 4\n\n"
+            "primeintellect/wiki-search      2h ago  LOCAL MINE\n"
+            "sentence-repeater               1d ago  LOCAL\n"
+            "research/private-env            4d ago  MINE\n"
+            "primeintellect/math-python       6d ago  PUBLIC"
         ),
         _panel_text(
-            "primeintellect/alphabet-sort\nAlphabetized list updates across turns.\n\n"
-            "Status       LOCAL PUBLIC\nSource       local, platform\nVersion      0.1.8\n"
+            "primeintellect/wiki-search\nRetrieval task with tool-assisted answers.\n\n"
+            "Source       local, platform\nVersion      0.1.8\n"
             "Stars        6\nPath         environments/alphabet_sort\n\n"
             "[Open] [Train] [Evaluate] [Platform]"
         ),
@@ -181,13 +184,18 @@ def _environment(console: Console, *, width: int, frame: int) -> None:
 
 def _training(console: Console, *, width: int, frame: int) -> None:
     del width, frame
-    console.print(_chrome("wiki-search--qwen3-4b--tlabzb  COMPLETED", "~/dev/verifiers"))
+    console.print(_chrome("Training", "~/dev/verifiers"))
+    console.print("Training runs for the active account or team. 12 shown\n")
+    console.print("tlabzbtv2f2ajhzp2hecm18i   18m ago  RUNNING")
+    console.print("wiki-search--gpt-oss-120b   2h ago   COMPLETED\n")
+    console.print("Run  tlabzbtv2f2ajhzp2hecm18i\n")
     console.print("Overview   Data   System\n")
     console.print(
         "Run ID      tlabzbtv2f2ajhzp2hecm18i      Status      COMPLETED\n"
         "Model       Qwen/Qwen3.5-4B               Progress    100/100 steps\n"
         "Batch size  512                            Rollouts    16\n"
-        "Progress    [########################################] 100.0%\n"
+        "Progress    [########################################] 100.0%\n",
+        markup=False,
     )
     table = Table.grid(expand=True)
     table.add_column(ratio=7)
@@ -213,13 +221,16 @@ def _evaluations(console: Console, *, width: int, frame: int) -> None:
         _nav("Evaluations"),
         _panel_text(
             "Evaluations\nLocal and platform evaluation runs.\n\n"
-            "reverse-text--gpt-4.1-mini     COMPLETED  avg 0.98\n"
-            "alphabet-sort--gpt-4.1-mini    RUNNING    42/50\n"
-            "wiki-search--qwen3              FAILED     12/50"
+            " Account + local 5   Hosted 3   Local 2\n"
+            " By run   By env\n\n"
+            "eval_4z91       8m ago   HOSTED COMPLETED\n"
+            "run-a           35m ago  LOCAL COMPLETED\n"
+            "eval_2fp0       1d ago   HOSTED FAILED"
         ),
         _panel_text(
             "Selection Details\n\nEnvironment   reverse-text\nModel         openai/gpt-4.1-mini\n"
-            "Examples      50\nRollouts per example 3\nAverage score 0.98\n\n"
+            "Source        hosted\nExamples      50\nRollouts per example 3\n"
+            "Average score 0.98\n\n"
             "[Open] [Modify and run]"
         ),
     )
@@ -229,6 +240,10 @@ def _evaluations(console: Console, *, width: int, frame: int) -> None:
 def _agent(console: Console, *, width: int, frame: int) -> None:
     del width, frame
     console.print(_chrome("Agent", "~/dev/verifiers"))
+    console.print(
+        "Experimental · Agent mode is experimental. Review generated configs and launch "
+        "details before running jobs.\n"
+    )
     console.print("│ › make an eval for reverse-text\n")
     console.print("· · ·\n")
     console.print("│ Ready to launch reverse-text.\n")
@@ -241,7 +256,7 @@ def _agent(console: Console, *, width: int, frame: int) -> None:
             border_style="green",
         )
     )
-    console.print("\nAsk Codex  ·  /  ?  @")
+    console.print("\n✓ PI Applied Research · ~/dev/verifiers | ✓ Codex        Esc Back")
 
 
 def _config(console: Console, *, width: int, frame: int) -> None:
@@ -251,8 +266,7 @@ def _config(console: Console, *, width: int, frame: int) -> None:
     table.add_row(
         _panel_text("Source run\n\nRun ID abc123\nModel openai/gpt-oss-20b\nStatus COMPLETED"),
         _panel_text(
-            "Edit configuration\n\nName        wiki-search-rerun-001\n"
-            "Model       openai/gpt-oss-20b\n"
+            "Edit configuration\n\nModel       openai/gpt-oss-20b\n"
             "Max steps   150\nRollouts per example 16\nBatch size  512\nMax tokens  24576"
         ),
         _panel_text(
@@ -283,11 +297,12 @@ def _rollouts(console: Console, *, width: int, frame: int) -> None:
 
 
 def _chrome(title: str, path: str) -> str:
-    return f"L A B  {title:<48} {path:<26} PRIME Intellect\n" + "─" * 110
+    identity = f"✓ PI Applied Research · production · {path}"
+    return f"L A B  {title:<34} {identity:<54} PRIME Intellect\n" + "─" * 110
 
 
-def _status(team: str, path: str, agent: str) -> str:
-    return f"✓ {team} · {path} | ✓ {agent}"
+def _status(team: str, path: str, profile: str, agent: str) -> str:
+    return f"✓ {team} · {profile} · {path} | ✓ {agent}"
 
 
 def _footer(*items: str) -> str:
@@ -300,10 +315,6 @@ def _button_grid(labels: Iterable[str]) -> str:
     return "\n".join(
         f"{row[0]:^28}    {row[1]:^28}" if len(row) == 2 else f"{row[0]:^28}" for row in rows
     )
-
-
-def _kv_line(*items: str) -> str:
-    return " · ".join(items)
 
 
 def _center(value: str, width: int) -> str:

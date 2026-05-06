@@ -5338,6 +5338,8 @@ def test_training_model_options_does_not_cache_auth_failures(
 
     monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_OPTIONS_CACHE", None)
     monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_NAMES_CACHE", None)
+    monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_OPTIONS_CACHE_KEY", None)
+    monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_NAMES_CACHE_KEY", None)
     monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_OPTION_METADATA", {})
     monkeypatch.setattr(agent_widget_model, "Config", NoAuthConfig)
 
@@ -5358,6 +5360,47 @@ def test_training_model_options_does_not_cache_auth_failures(
     ]
     assert agent_widget_model.training_model_names() == ("future/gpt-oss-next",)
     assert agent_widget_model._TRAINING_MODEL_OPTIONS_CACHE == options
+
+
+def test_training_model_options_cache_scopes_by_active_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {"profile": "production", "team_id": "team-a"}
+    calls: list[str | None] = []
+
+    class DynamicConfig:
+        def __init__(self) -> None:
+            self.api_key = "token"
+            self.base_url = "https://api.test"
+            self.current_environment = state["profile"]
+            self.team_id = state["team_id"]
+            self.team_name = ""
+
+    class FakeModelsClient:
+        def __init__(self, _api_client: Any) -> None:
+            pass
+
+        def list_models(self, team_id: str | None = None) -> list[Any]:
+            calls.append(team_id)
+            return [types.SimpleNamespace(name=f"future/{team_id}-model")]
+
+    monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_OPTIONS_CACHE", None)
+    monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_NAMES_CACHE", None)
+    monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_OPTIONS_CACHE_KEY", None)
+    monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_NAMES_CACHE_KEY", None)
+    monkeypatch.setattr(agent_widget_model, "_TRAINING_MODEL_OPTION_METADATA", {})
+    monkeypatch.setattr(agent_widget_model, "Config", DynamicConfig)
+    monkeypatch.setattr(agent_widget_model, "APIClient", lambda: object())
+    monkeypatch.setattr(agent_widget_model, "RLClient", FakeModelsClient)
+
+    assert agent_widget_model.training_model_names() == ("future/team-a-model",)
+
+    state["team_id"] = "team-b"
+
+    options = agent_widget_model._training_model_options()
+
+    assert calls == ["team-a", "team-b"]
+    assert options == (("future/team-b-model", "future/team-b-model"),)
 
 
 def test_lab_agent_training_tools_include_current_model_ids(

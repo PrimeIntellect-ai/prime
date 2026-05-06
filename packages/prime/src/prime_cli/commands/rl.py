@@ -220,8 +220,8 @@ batch_size = 128
 rollouts_per_example = 8
 # learning_rate = 1e-6
 # lora_alpha = 16
-# oversampling_factor = 1.0
-# max_async_level = 4
+# oversampling_factor = 1.5
+# max_async_level = 2
 
 # Optional: warm-start from an existing checkpoint
 # checkpoint_id = "..."
@@ -607,7 +607,7 @@ class RLConfig(BaseModel):
     rollouts_per_example: int = 8
     learning_rate: float | None = None
     lora_alpha: int | None = None
-    oversampling_factor: float | None = None
+    oversampling_factor: float | None = 1.5
     max_async_level: int | None = None
     checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
     cluster_name: str | None = None  # Admin-only: target a specific cluster by name

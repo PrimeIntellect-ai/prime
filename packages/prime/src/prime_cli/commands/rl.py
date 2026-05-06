@@ -1633,7 +1633,7 @@ def _is_log_startup_error(error: APIError) -> bool:
         "logs are not available",
         "logs not available",
     )
-    return any(marker in message for marker in startup_markers)
+    return "404" in message and any(marker in message for marker in startup_markers)
 
 
 def _fetch_logs_with_startup_poll(fetch_fn: Any, tail: int, label: str) -> str:

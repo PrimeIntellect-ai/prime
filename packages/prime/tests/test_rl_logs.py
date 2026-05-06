@@ -258,6 +258,25 @@ def test_logs_run_not_started(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "RL" not in result.output
 
 
+def test_logs_startup_marker_without_404_exits_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"n": 0}
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        calls["n"] += 1
+        raise APIError("Failed to get Hosted Training run logs: HTTP 403: run is pending")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID, "--raw"])
+
+    assert result.exit_code == 1
+    assert calls["n"] == 1
+    assert "Error:" in result.output
+    assert "Hosted Training run has not started yet" not in result.output
+
+
 def test_logs_queued_run_succeeds_when_logs_appear(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"n": 0}
 

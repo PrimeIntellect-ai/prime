@@ -291,10 +291,10 @@ def parse_lab_sync_args(args: list[str]) -> LabSyncOptions:
         help="Refresh shared Lab assets without configuring coding-agent skill roots.",
     )
     namespace = parser.parse_args(args)
-    if namespace.agents and namespace.no_agent:
+    if namespace.agents is not None and namespace.no_agent:
         raise ValueError("--agent and --no-agent cannot be used together.")
     return LabSyncOptions(
-        agents=tuple(_parse_agents(namespace.agents)) if namespace.agents else (),
+        agents=_resolve_explicit_agents(namespace.agents) if namespace.agents is not None else (),
         skip_docs=bool(namespace.skip_docs),
         no_agent=bool(namespace.no_agent),
     )
@@ -1422,13 +1422,7 @@ def _check_command(command: Sequence[str], cwd: Path, emit: Emit, runner: Runner
 
 def _resolve_setup_agents(value: str | None) -> tuple[str, ...]:
     if value is not None:
-        parsed = _parse_agents(value)
-        if parsed:
-            return tuple(parsed)
-        raise ValueError(
-            "No valid coding agents provided. Supported values: "
-            + ", ".join((*SUPPORTED_AGENTS, "all"))
-        )
+        return _resolve_explicit_agents(value)
     if sys.stdin.isatty():
         return _prompt_for_agents()
     raise ValueError(
@@ -1440,7 +1434,7 @@ def _resolve_setup_agents(value: str | None) -> tuple[str, ...]:
 def _prompt_for_agents() -> tuple[str, ...]:
     print(f"Supported coding agents: {', '.join(SUPPORTED_AGENTS)}")
     while True:
-        raw_primary = input("Primary coding agent [codex]: ").strip()
+        raw_primary = _prompt_input("Primary coding agent [codex]: ").strip()
         primary = raw_primary if raw_primary else "codex"
         try:
             selected = [_normalize_supported_agent(primary, allow_all=False)]
@@ -1448,12 +1442,12 @@ def _prompt_for_agents() -> tuple[str, ...]:
         except ValueError as exc:
             print(exc)
 
-    use_multiple_raw = input("Using multiple coding agents? [y/N]: ").strip().lower()
+    use_multiple_raw = _prompt_input("Using multiple coding agents? [y/N]: ").strip().lower()
     if use_multiple_raw not in {"y", "yes"}:
         return tuple(selected)
 
     while True:
-        additional_raw = input("Additional agents (comma-separated): ").strip()
+        additional_raw = _prompt_input("Additional agents (comma-separated): ").strip()
         try:
             additional_agents = _parse_agents(additional_raw) if additional_raw else []
         except ValueError as exc:
@@ -1463,6 +1457,23 @@ def _prompt_for_agents() -> tuple[str, ...]:
             if agent not in selected:
                 selected.append(agent)
         return tuple(selected)
+
+
+def _prompt_input(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except EOFError as exc:
+        raise ValueError("Agent selection was cancelled before setup could continue.") from exc
+
+
+def _resolve_explicit_agents(value: str) -> tuple[str, ...]:
+    parsed = _parse_agents(value)
+    if parsed:
+        return tuple(parsed)
+    raise ValueError(
+        "No valid coding agents provided. Supported values: "
+        + ", ".join((*SUPPORTED_AGENTS, "all"))
+    )
 
 
 def _parse_agents(value: str | None) -> list[str]:

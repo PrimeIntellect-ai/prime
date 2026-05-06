@@ -125,6 +125,18 @@ def test_lab_setup_non_interactive_requires_explicit_agent(
         parse_lab_setup_args([])
 
 
+def test_lab_setup_interactive_eof_returns_cli_error(monkeypatch: Any) -> None:
+    class FakeStdin:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(lab_setup.sys, "stdin", FakeStdin())
+    monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(EOFError))
+
+    with pytest.raises(ValueError, match="Agent selection was cancelled"):
+        parse_lab_setup_args([])
+
+
 def test_lab_setup_service_requires_configured_agent(tmp_path: Path) -> None:
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=True),
@@ -520,6 +532,11 @@ def test_lab_sync_replaces_workspace_skill_bundle_without_marker(
 def test_lab_sync_rejects_agent_with_no_agent() -> None:
     with pytest.raises(ValueError, match="cannot be used together"):
         parse_lab_sync_args(["--agent", "codex", "--no-agent"])
+
+
+def test_lab_sync_rejects_empty_agent_value() -> None:
+    with pytest.raises(ValueError, match="No valid coding agents"):
+        parse_lab_sync_args(["--agent", ","])
 
 
 def test_lab_sync_skips_user_owned_skill_conflicts(

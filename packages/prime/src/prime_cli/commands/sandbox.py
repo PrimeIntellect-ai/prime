@@ -146,7 +146,6 @@ def _guard_vm_unsupported(sandbox: Sandbox, feature_name: str) -> None:
 
 
 @app.command("list", epilog=LIST_SANDBOXES_JSON_HELP)
-@app.command("ls", hidden=True)
 def list_sandboxes_cmd(
     team_id: Optional[str] = typer.Option(
         None, help="Filter by team ID (uses config team_id if not specified)"

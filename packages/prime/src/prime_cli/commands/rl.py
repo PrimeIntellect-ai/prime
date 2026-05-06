@@ -1474,7 +1474,6 @@ def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> No
 
 
 @app.command("list", rich_help_panel="Commands", epilog=RL_LIST_JSON_HELP)
-@app.command("ls", rich_help_panel="Commands", hidden=True)
 def list_runs(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
     num: int = typer.Option(20, "--num", "-n", help="Items per page"),

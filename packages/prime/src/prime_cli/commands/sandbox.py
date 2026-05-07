@@ -483,6 +483,13 @@ def create(
             )
             raise typer.Exit(1)
 
+        if guaranteed and vm:
+            console.print(
+                "[red]--guaranteed is not supported for VM sandboxes.[/red] "
+                "Drop --vm or drop --guaranteed."
+            )
+            raise typer.Exit(1)
+
         if not docker_image:
             console.print(
                 "[red]Docker image is required.[/red] Provide a DOCKER_IMAGE positional argument."

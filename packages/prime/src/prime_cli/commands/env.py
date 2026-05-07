@@ -533,8 +533,7 @@ def _environment_push_metadata(
         existing_metadata,
         old_upstream if upstream_changed else None,
     )
-    metadata = {
-        **existing_metadata,
+    metadata = {key: value for key, value in existing_metadata.items() if key != "forked_from"} | {
         "environment_id": environment_id,
         "owner": owner,
         "name": name,

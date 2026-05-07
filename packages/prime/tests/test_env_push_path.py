@@ -67,3 +67,38 @@ def test_push_metadata_replaces_existing_version() -> None:
         "name": "math-env",
         "version": "0.1.0",
     }
+
+
+def test_push_metadata_clears_stale_forked_from_without_new_upstream_change() -> None:
+    origin = {
+        "environment_id": "old-id",
+        "owner": "base",
+        "name": "math-env",
+        "version": "0.1.0",
+    }
+
+    metadata = _environment_push_metadata(
+        {
+            "environment_id": "new-id",
+            "owner": "research",
+            "name": "math-env",
+            "version": "0.2.0",
+            "origin": origin,
+            "fork_chain": [origin],
+            "forked_from": origin,
+        },
+        environment_id="new-id",
+        owner="research",
+        name="math-env",
+        version="0.3.0",
+        pushed_at="2026-05-05T12:30:00",
+        wheel_sha256="def456",
+    )
+
+    assert metadata["environment_id"] == "new-id"
+    assert metadata["owner"] == "research"
+    assert metadata["name"] == "math-env"
+    assert metadata["version"] == "0.3.0"
+    assert metadata["origin"] == origin
+    assert metadata["fork_chain"] == [origin]
+    assert "forked_from" not in metadata

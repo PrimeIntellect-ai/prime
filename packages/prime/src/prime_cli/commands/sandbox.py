@@ -429,6 +429,15 @@ def create(
         "-l",
         help="Labels/tags for the sandbox. Can be specified multiple times.",
     ),
+    guaranteed: bool = typer.Option(
+        False,
+        "--guaranteed",
+        help=(
+            "Admin/manager only. Schedule with CPU/memory requests equal to limits "
+            "(Guaranteed QoS), bypassing the default oversubscription. Not supported "
+            "with --vm."
+        ),
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Create a new sandbox"""
@@ -519,6 +528,7 @@ def create(
             team_id=team_id,
             region=region,
             registry_credentials_id=registry_credentials_id,
+            guaranteed=guaranteed,
         )
 
         # Show configuration summary
@@ -527,6 +537,8 @@ def create(
         console.print(f"Docker Image: {docker_image}")
         console.print(f"Start Command: {start_command or 'N/A'}")
         console.print(f"Resources: {cpu_cores} CPU, {memory_gb}GB RAM, {disk_size_gb}GB disk")
+        if guaranteed:
+            console.print("Scheduling: [green]Guaranteed QoS[/green]")
         console.print(f"VM: {'Enabled' if vm else 'Disabled'}")
         if gpu_count > 0:
             console.print(f"GPUs: {gpu_type} x{gpu_count}")

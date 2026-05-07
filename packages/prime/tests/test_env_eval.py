@@ -38,7 +38,11 @@ def install_math_env():
 
 @pytest.mark.skipif(
     sys.version_info >= (3, 12),
-    reason="Live Prime Inference eval smoke runs on Python 3.11 in CI.",
+    reason="Live Prime Inference eval smoke runs on Python 3.11.",
+)
+@pytest.mark.skipif(
+    os.environ.get("PRIME_LIVE_EVAL_SMOKE") != "1",
+    reason="Live Prime Inference eval smoke is opt-in.",
 )
 def test_env_eval_single_turn_math(install_math_env):
     """Test running prime eval run with single_turn_math environment

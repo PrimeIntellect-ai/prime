@@ -2067,7 +2067,7 @@ def test_prime_lab_doctor_service_warns_on_config_environment_refs(tmp_path: Pat
     )
 
 
-def _fake_lab_skill_download_json(url: str) -> list[dict[str, str]]:
+def _fake_lab_skill_download_json(url: str) -> Any:
     config_tree: dict[str, list[tuple[str, str]]] = {
         "configs": [
             ("endpoints.toml", "file"),
@@ -2098,27 +2098,22 @@ def _fake_lab_skill_download_json(url: str) -> list[dict[str, str]]:
             ("wordle.toml", "file"),
         ],
     }
-    if "/contents/skills?" in url:
-        return [{"name": "create-environments", "type": "dir"}]
-    if "/contents/skills/" in url:
-        source_path = url.split("/contents/", 1)[1].split("?", 1)[0]
-        return [
-            {
-                "name": "SKILL.md",
-                "type": "file",
-                "path": f"{source_path}/SKILL.md",
-            }
+    if "/git/trees/" in url:
+        tree = [
+            {"path": "skills", "type": "tree"},
+            {"path": "skills/create-environments", "type": "tree"},
+            {"path": "skills/create-environments/SKILL.md", "type": "blob"},
         ]
-    if "/contents/configs" in url:
-        source_path = url.split("/contents/", 1)[1].split("?", 1)[0]
-        return [
-            {
-                "name": name,
-                "type": entry_type,
-                "path": f"{source_path}/{name}",
-            }
-            for name, entry_type in config_tree[source_path]
-        ]
+        for source_path, entries in config_tree.items():
+            tree.append({"path": source_path, "type": "tree"})
+            for name, entry_type in entries:
+                tree.append(
+                    {
+                        "path": f"{source_path}/{name}",
+                        "type": "tree" if entry_type == "dir" else "blob",
+                    }
+                )
+        return {"tree": tree}
     return []
 
 

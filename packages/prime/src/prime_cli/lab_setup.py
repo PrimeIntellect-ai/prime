@@ -57,6 +57,7 @@ LAB_GITIGNORE_PATTERNS = (
 PRIME_SKILLS_MANIFEST = ".prime-managed.json"
 WORKSPACE_SKILLS_DIR = Path(".prime") / "skills"
 DeprecatedConfigField = tuple[tuple[str, ...], str]
+RepoTreeEntry = tuple[str, str]
 DEPRECATED_CONFIG_FIELDS: tuple[DeprecatedConfigField, ...] = (
     (("trajectory_strategy",), "`trajectory_strategy` is deprecated and ignored."),
     (("trajectoryStrategy",), "`trajectoryStrategy` is deprecated and ignored."),
@@ -65,6 +66,7 @@ DEPRECATED_CONFIG_FIELDS: tuple[DeprecatedConfigField, ...] = (
     (("max_async_level",), "`max_async_level` is outdated; remove it from Lab configs."),
     (("max_off_policy_steps",), "`max_off_policy_steps` is outdated; remove it from Lab configs."),
 )
+_REPO_TREE_CACHE: dict[tuple[str, str, int], tuple[RepoTreeEntry, ...]] = {}
 
 Emit = Callable[[str], None]
 Runner = Callable[[Sequence[str], Path, Emit], int]
@@ -502,26 +504,26 @@ def _download_repo_directory(
     *,
     force: bool = True,
 ) -> None:
-    payload = _download_json(_github_contents_url(repo, ref, source_path))
-    if not isinstance(payload, list):
+    normalized_source_path = _normalize_repo_path(source_path)
+    tree_entries = _repo_tree_entries(repo, ref)
+    prefix = f"{normalized_source_path}/" if normalized_source_path else ""
+    source_exists = any(
+        path == normalized_source_path and entry_type == "tree" for path, entry_type in tree_entries
+    )
+    file_entries = [
+        (path, path.removeprefix(prefix))
+        for path, entry_type in tree_entries
+        if entry_type == "blob" and path.startswith(prefix)
+    ]
+    if not source_exists and not file_entries:
         raise RuntimeError(f"Expected a directory listing for {repo}/{source_path}.")
-    for entry in payload:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name")
-        entry_type = entry.get("type")
-        entry_path = entry.get("path")
-        if not isinstance(name, str) or not isinstance(entry_path, str):
-            continue
-        if entry_type == "dir":
-            _download_repo_directory(repo, ref, entry_path, dest / name, emit, force=force)
-        elif entry_type == "file":
-            _download_file(
-                _repo_raw_url(repo, ref, entry_path),
-                dest / name,
-                emit,
-                force=force,
-            )
+    for entry_path, relative_path in sorted(file_entries):
+        _download_file(
+            _repo_raw_url(repo, ref, entry_path),
+            dest / relative_path,
+            emit,
+            force=force,
+        )
 
 
 def _hash_directory(root: Path) -> str:
@@ -535,17 +537,22 @@ def _hash_directory(root: Path) -> str:
 
 
 def _discover_skill_names(source: SkillSource) -> tuple[str, ...]:
-    payload = _download_json(_github_contents_url(source.repo, source.ref, source.path))
-    if not isinstance(payload, list):
+    normalized_source_path = _normalize_repo_path(source.path)
+    tree_entries = _repo_tree_entries(source.repo, source.ref)
+    source_exists = any(
+        path == normalized_source_path and entry_type == "tree" for path, entry_type in tree_entries
+    )
+    if not source_exists:
         raise RuntimeError(f"Expected a directory listing for {source.repo}/{source.path}.")
-    names: list[str] = []
-    for entry in payload:
-        if (
-            isinstance(entry, dict)
-            and entry.get("type") == "dir"
-            and isinstance(entry.get("name"), str)
-        ):
-            names.append(entry["name"])
+    prefix = f"{normalized_source_path}/" if normalized_source_path else ""
+    names = {
+        relative_path
+        for path, entry_type in tree_entries
+        if entry_type == "tree"
+        and path.startswith(prefix)
+        and (relative_path := path.removeprefix(prefix))
+        and "/" not in relative_path
+    }
     return tuple(sorted(names))
 
 
@@ -1442,8 +1449,35 @@ def _repo_raw_url(repo: str, ref: str, source_path: str) -> str:
     return f"https://raw.githubusercontent.com/{repo}/{ref}/{source_path}"
 
 
-def _github_contents_url(repo: str, ref: str, source_path: str) -> str:
-    return f"https://api.github.com/repos/{repo}/contents/{source_path}?ref={ref}"
+def _github_tree_url(repo: str, ref: str) -> str:
+    return f"https://api.github.com/repos/{repo}/git/trees/{ref}?recursive=1"
+
+
+def _normalize_repo_path(path: str) -> str:
+    return path.strip("/")
+
+
+def _repo_tree_entries(repo: str, ref: str) -> tuple[RepoTreeEntry, ...]:
+    cache_key = (repo, ref, id(_download_json))
+    cached = _REPO_TREE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    payload = _download_json(_github_tree_url(repo, ref))
+    if not isinstance(payload, dict) or not isinstance(payload.get("tree"), list):
+        raise RuntimeError(f"Expected a repository tree for {repo}/{ref}.")
+    if payload.get("truncated") is True:
+        raise RuntimeError(f"Repository tree for {repo}/{ref} is too large to download.")
+    entries: list[RepoTreeEntry] = []
+    for entry in payload["tree"]:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        entry_type = entry.get("type")
+        if isinstance(path, str) and isinstance(entry_type, str):
+            entries.append((_normalize_repo_path(path), entry_type))
+    tree_entries = tuple(entries)
+    _REPO_TREE_CACHE[cache_key] = tree_entries
+    return tree_entries
 
 
 def _read_url(url: str, *, emit: Emit | None = None) -> bytes:

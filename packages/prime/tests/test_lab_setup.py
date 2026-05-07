@@ -84,41 +84,29 @@ def fake_lab_asset_downloads(monkeypatch: Any) -> list[str]:
             dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
         emit(f"Downloaded {dest}\n")
 
-    def fake_download_json(url: str) -> list[dict[str, str]]:
-        if "/contents/skills?" in url:
-            return [{"name": name, "type": "dir"} for name in skill_names]
-        if "/contents/skills/" in url:
-            source_path = url.split("/contents/", 1)[1].split("?", 1)[0]
-            if source_path.endswith("/references"):
-                return [
-                    {
-                        "name": "notes.md",
-                        "type": "file",
-                        "path": f"{source_path}/notes.md",
-                    }
-                ]
-            return [
-                {
-                    "name": "SKILL.md",
-                    "type": "file",
-                    "path": f"{source_path}/SKILL.md",
-                },
-                {
-                    "name": "references",
-                    "type": "dir",
-                    "path": f"{source_path}/references",
-                },
-            ]
-        if "/contents/configs" in url:
-            source_path = url.split("/contents/", 1)[1].split("?", 1)[0]
-            return [
-                {
-                    "name": name,
-                    "type": entry_type,
-                    "path": f"{source_path}/{name}",
-                }
-                for name, entry_type in config_tree[source_path]
-            ]
+    def fake_download_json(url: str) -> Any:
+        if "/git/trees/" in url:
+            tree = [{"path": "skills", "type": "tree"}]
+            for skill_name in skill_names:
+                source_path = f"skills/{skill_name}"
+                tree.extend(
+                    [
+                        {"path": source_path, "type": "tree"},
+                        {"path": f"{source_path}/SKILL.md", "type": "blob"},
+                        {"path": f"{source_path}/references", "type": "tree"},
+                        {"path": f"{source_path}/references/notes.md", "type": "blob"},
+                    ]
+                )
+            for source_path, entries in config_tree.items():
+                tree.append({"path": source_path, "type": "tree"})
+                for name, entry_type in entries:
+                    tree.append(
+                        {
+                            "path": f"{source_path}/{name}",
+                            "type": "tree" if entry_type == "dir" else "blob",
+                        }
+                    )
+            return {"tree": tree}
         return []
 
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download_file)

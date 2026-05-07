@@ -24,9 +24,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Static
+from textual.widgets import Button, Footer, Select, Static
 
-from .agent_capabilities import agent_capability, known_agent_names
+from .agent_capabilities import agent_select_options
 from .environment_screen import EnvironmentScreen
 from .models import LabItem
 from .palette import STATUS_ERROR, STATUS_SUCCESS, STATUS_WARNING
@@ -41,7 +41,6 @@ class SetupScreen(Screen[None]):
     BINDINGS = [
         Binding("escape", "back", "Back", key_display="Esc"),
         Binding("b", "back", "Back", key_display="B"),
-        Binding("enter", "run_setup", "Run setup", key_display="Enter"),
     ]
 
     CSS = (
@@ -55,9 +54,34 @@ class SetupScreen(Screen[None]):
         height: 1fr;
     }
 
-    .setup-option-button {
-        width: 1fr;
-        margin-right: 1;
+    .setup-controls {
+        width: 42;
+        height: auto;
+        margin-top: 1;
+    }
+
+    .setup-field-label {
+        height: 1;
+        color: $text-muted;
+    }
+
+    .setup-agent-select {
+        width: 40;
+        height: auto;
+        background: $panel;
+    }
+
+    .setup-agent-select > SelectOverlay {
+        height: auto;
+        max-height: 20;
+        border: tall $primary;
+        background: $panel;
+    }
+
+    .setup-run-button {
+        width: auto;
+        min-width: 16;
+        margin-top: 1;
     }
 
     .setup-log {
@@ -75,28 +99,36 @@ class SetupScreen(Screen[None]):
         super().__init__()
         self._item = item
         self._on_complete = on_complete
-        self._agents = known_agent_names()
-        self._agent_index = 0
-        self._prime_rl = False
-        self._running = False
+        self._agent_options = agent_select_options("codex")
+        self._default_agent = str(self._agent_options[0][1])
+        self._command_running = False
         self._output = ""
 
     def compose(self) -> ComposeResult:
         yield Static(_setup_header(self._item), id="env-header", classes="page-header")
         with Vertical(classes="empty-panel setup-shell"):
             yield Static(_setup_body(self._item), markup=False)
-            with Horizontal(classes="setup-actions"):
-                yield Button(
-                    self._agent_label(),
+            with Vertical(classes="setup-controls"):
+                yield Static(
+                    "Choose your coding agent",
+                    id="setup-agent-label",
+                    classes="setup-field-label",
+                    markup=False,
+                )
+                yield Select(
+                    self._agent_options,
+                    value=self._default_agent,
+                    allow_blank=False,
                     id="setup-agent",
-                    classes="setup-option-button",
+                    classes="setup-agent-select",
+                    compact=False,
                 )
                 yield Button(
-                    self._prime_rl_label(),
-                    id="setup-prime-rl",
-                    classes="setup-option-button",
+                    "Run setup",
+                    id="setup-run",
+                    classes="setup-run-button",
+                    variant="primary",
                 )
-                yield Button("Run setup", id="setup-run", variant="primary")
             yield Static("Ready", id="setup-status", markup=False)
             with VerticalScroll(classes="setup-log"):
                 yield Static("Setup output will appear here.", id="setup-output", markup=False)
@@ -106,20 +138,20 @@ class SetupScreen(Screen[None]):
         self.app.pop_screen()
 
     def action_run_setup(self) -> None:
-        if self._running:
+        if self._command_running:
             return
         workspace = Path(str(self._item.raw.get("workspace") or self._item.subtitle)).resolve()
-        self._running = True
+        self._command_running = True
         self._output = ""
         self._set_setup_buttons_disabled(True)
         self.query_one("#setup-status", Static).update("Running setup ...")
         self.query_one("#setup-output", Static).update("")
-        self._run_setup_worker(workspace, self._selected_agent(), self._prime_rl)
+        self._run_setup_worker(workspace, self._selected_agent())
 
     @work(thread=True, exclusive=True)
-    def _run_setup_worker(self, workspace: Path, agent: str, prime_rl: bool) -> None:
+    def _run_setup_worker(self, workspace: Path, agent: str) -> None:
         result = run_lab_setup_service(
-            LabSetupOptions(prime_rl=prime_rl, agents=(agent,)),
+            LabSetupOptions(agents=(agent,)),
             workspace=workspace,
             emit=lambda text: self.app.call_from_thread(self._append_setup_output, text),
         )
@@ -130,7 +162,7 @@ class SetupScreen(Screen[None]):
         self.query_one("#setup-output", Static).update(Text(self._output))
 
     def _finish_setup(self, result: LabSetupResult) -> None:
-        self._running = False
+        self._command_running = False
         self._set_setup_buttons_disabled(False)
         if result.exit_code == 0:
             self.query_one("#setup-status", Static).update("Setup completed")
@@ -140,35 +172,16 @@ class SetupScreen(Screen[None]):
             self.query_one("#setup-status", Static).update("Setup failed")
 
     def _selected_agent(self) -> str:
-        return self._agents[self._agent_index % len(self._agents)]
-
-    def _agent_label(self) -> str:
-        return f"Agent: {agent_capability(self._selected_agent()).label}"
-
-    def _prime_rl_label(self) -> str:
-        return f"Prime RL: {'on' if self._prime_rl else 'off'}"
+        value = self.query_one("#setup-agent", Select).value
+        return self._default_agent if value is Select.BLANK else str(value)
 
     def _set_setup_buttons_disabled(self, disabled: bool) -> None:
-        for button_id in ("setup-agent", "setup-prime-rl", "setup-run"):
-            self.query_one(f"#{button_id}", Button).disabled = disabled
+        self.query_one("#setup-agent", Select).disabled = disabled
+        self.query_one("#setup-run", Button).disabled = disabled
 
     @on(Button.Pressed, "#setup-run")
     def _setup_pressed(self, _event: Button.Pressed) -> None:
         self.action_run_setup()
-
-    @on(Button.Pressed, "#setup-agent")
-    def _agent_pressed(self, _event: Button.Pressed) -> None:
-        if self._running:
-            return
-        self._agent_index = (self._agent_index + 1) % len(self._agents)
-        self.query_one("#setup-agent", Button).label = self._agent_label()
-
-    @on(Button.Pressed, "#setup-prime-rl")
-    def _prime_rl_pressed(self, _event: Button.Pressed) -> None:
-        if self._running:
-            return
-        self._prime_rl = not self._prime_rl
-        self.query_one("#setup-prime-rl", Button).label = self._prime_rl_label()
 
 
 class AgentSyncScreen(Screen[None]):
@@ -211,7 +224,7 @@ class AgentSyncScreen(Screen[None]):
         super().__init__()
         self._item = item
         self._on_complete = on_complete
-        self._running = False
+        self._command_running = False
         self._output = ""
 
     def compose(self) -> ComposeResult:
@@ -229,10 +242,10 @@ class AgentSyncScreen(Screen[None]):
         self.app.pop_screen()
 
     def action_run_sync(self) -> None:
-        if self._running:
+        if self._command_running:
             return
         workspace = Path(str(self._item.raw.get("workspace") or self._item.subtitle)).resolve()
-        self._running = True
+        self._command_running = True
         self._output = ""
         self.query_one("#sync-run", Button).disabled = True
         self.query_one("#sync-status", Static).update("Running sync ...")
@@ -254,7 +267,7 @@ class AgentSyncScreen(Screen[None]):
         self.query_one("#sync-output", Static).update(Text(self._output))
 
     def _finish_sync(self, result: LabSyncResult) -> None:
-        self._running = False
+        self._command_running = False
         self.query_one("#sync-run", Button).disabled = False
         if result.exit_code == 0:
             self.query_one("#sync-status", Static).update("Sync completed")
@@ -309,7 +322,7 @@ class DoctorScreen(Screen[None]):
         super().__init__()
         self._item = item
         self._on_complete = on_complete
-        self._running = False
+        self._command_running = False
 
     def compose(self) -> ComposeResult:
         yield Static(_doctor_header(self._item), id="env-header", classes="page-header")
@@ -345,10 +358,10 @@ class DoctorScreen(Screen[None]):
         self._run_doctor(fix=True)
 
     def _run_doctor(self, *, fix: bool) -> None:
-        if self._running:
+        if self._command_running:
             return
         workspace = Path(str(self._item.raw.get("workspace") or self._item.subtitle)).resolve()
-        self._running = True
+        self._command_running = True
         self._set_doctor_buttons_disabled(True)
         self.query_one("#doctor-status", Static).update(
             "Applying safe fixes ..." if fix else "Checking workspace ..."
@@ -361,7 +374,7 @@ class DoctorScreen(Screen[None]):
         self.app.call_from_thread(self._finish_doctor, result, fix)
 
     def _finish_doctor(self, result: LabDoctorResult, fix: bool) -> None:
-        self._running = False
+        self._command_running = False
         self._set_doctor_buttons_disabled(False)
         self.query_one("#doctor-status", Static).update(
             "Workspace passed" if result.exit_code == 0 else "Workspace needs attention"
@@ -410,7 +423,7 @@ def _setup_body(item: LabItem) -> Group:
     table.add_column()
     table.add_row("Workspace", str(item.raw.get("workspace") or item.subtitle))
     table.add_row("Command", str(item.raw.get("command") or "prime lab setup"))
-    note = Text("Press Enter to run setup in this workspace.", style=STATUS_WARNING)
+    note = Text("Choose an agent, then run setup in this workspace.", style=STATUS_WARNING)
     return Group(Text("Setup", style="bold"), table, Text(""), note)
 
 

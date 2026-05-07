@@ -203,8 +203,20 @@ class _PlainTyperCommand(_PlainMixin, TyperCommand):
     pass
 
 
+COMMAND_ALIASES = {
+    "ls": "list",
+}
+
+
 class PlainAwareTyperGroup(_PlainMixin, TyperGroup):
-    pass
+    def get_command(self, ctx, cmd_name):
+        cmd = super().get_command(ctx, cmd_name)
+        if cmd is not None:
+            return cmd
+        target = COMMAND_ALIASES.get(cmd_name)
+        if target is None:
+            return None
+        return super().get_command(ctx, target)
 
 
 class DefaultCommandGroup(PlainAwareTyperGroup):
@@ -223,7 +235,7 @@ class DefaultCommandGroup(PlainAwareTyperGroup):
         if decision_args[0] in ("--help", "-h"):
             return super().parse_args(ctx, args)
 
-        if decision_args[0] in self.commands:
+        if self.get_command(ctx, decision_args[0]) is not None:
             return super().parse_args(ctx, args)
 
         args = [self.default_cmd_name] + list(args)

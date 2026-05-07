@@ -368,4 +368,54 @@ def _dump_yaml_object(payload: dict[str, Any]) -> str:
 
 
 def _dump_simple_yaml(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, indent=2) + "\n"
+    return "\n".join(_simple_yaml_lines(payload, 0)) + "\n"
+
+
+def _simple_yaml_lines(value: Any, indent: int) -> list[str]:
+    prefix = " " * indent
+    if isinstance(value, dict):
+        if not value:
+            return [prefix + "{}"]
+        lines: list[str] = []
+        for key, child in value.items():
+            key_text = _simple_yaml_scalar(str(key))
+            if isinstance(child, (dict, list)):
+                if child:
+                    lines.append(f"{prefix}{key_text}:")
+                    lines.extend(_simple_yaml_lines(child, indent + 2))
+                else:
+                    lines.append(f"{prefix}{key_text}: {_simple_yaml_scalar(child)}")
+            else:
+                lines.append(f"{prefix}{key_text}: {_simple_yaml_scalar(child)}")
+        return lines
+    if isinstance(value, list):
+        if not value:
+            return [prefix + "[]"]
+        lines = []
+        for child in value:
+            if isinstance(child, (dict, list)):
+                if child:
+                    lines.append(prefix + "-")
+                    lines.extend(_simple_yaml_lines(child, indent + 2))
+                else:
+                    lines.append(f"{prefix}- {_simple_yaml_scalar(child)}")
+            else:
+                lines.append(f"{prefix}- {_simple_yaml_scalar(child)}")
+        return lines
+    return [prefix + _simple_yaml_scalar(value)]
+
+
+def _simple_yaml_scalar(value: Any) -> str:
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        return "null"
+    if value == {}:
+        return "{}"
+    if value == []:
+        return "[]"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return json.dumps(str(value))

@@ -128,6 +128,29 @@ def test_push_metadata_clears_stale_forked_from_without_new_upstream_change() ->
     assert "forked_from" not in metadata
 
 
+def test_push_metadata_clears_malformed_stale_fork_provenance() -> None:
+    metadata = _environment_push_metadata(
+        {
+            "environment_id": "new-id",
+            "owner": "research",
+            "name": "math-env",
+            "origin": {"owner": "", "name": ""},
+            "fork_chain": [{"owner": "", "name": ""}],
+            "forked_from": {"owner": "base", "name": "old-env"},
+        },
+        environment_id="new-id",
+        owner="research",
+        name="math-env",
+        version=None,
+        pushed_at="2026-05-05T12:45:00",
+        wheel_sha256="def456",
+    )
+
+    assert "origin" not in metadata
+    assert "fork_chain" not in metadata
+    assert "forked_from" not in metadata
+
+
 def test_environment_ref_preserves_zero_identifiers() -> None:
     assert _environment_ref("owner", "env", environment_id=0, version=0) == {
         "owner": "owner",

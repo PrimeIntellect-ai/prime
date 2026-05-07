@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import threading
 from copy import deepcopy
 from dataclasses import dataclass
@@ -1073,11 +1074,12 @@ def _display(value: Any) -> str:
 
 
 def _launch_command(config_kind: str, rel_path: str) -> str:
+    quoted_path = shlex.quote(rel_path)
     if config_kind == "rl":
-        return f"prime train run {rel_path} --yes"
+        return f"prime train run {quoted_path} --yes"
     if config_kind == "eval":
-        return f"prime eval run {rel_path} --hosted"
-    return f"prime gepa run {rel_path}"
+        return f"prime eval run {quoted_path} --hosted"
+    return f"prime gepa run {quoted_path}"
 
 
 def _filter_empty_values(value: Any) -> Any:

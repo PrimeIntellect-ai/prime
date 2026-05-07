@@ -4,6 +4,7 @@ import builtins
 import json
 import os
 import queue
+import shlex
 import sys
 import tarfile
 import threading
@@ -128,6 +129,7 @@ from prime_lab_app.config_screen import (
     ConfigLaunchScreen,
     ConfigRunScreen,
     build_config_from_fields,
+    launch_command_for_config,
 )
 from prime_lab_app.data import LabDataSource, LabLoadOptions, discover_local_eval_runs
 from prime_lab_app.environment_screen import (
@@ -3113,6 +3115,8 @@ def test_hermes_config_preserves_existing_yaml_without_pyyaml(
 
 
 def test_simple_yaml_fallback_serializes_nested_values_as_valid_yaml() -> None:
+    import yaml
+
     payload = {
         "mcpServers": {
             "prime_lab": {
@@ -3126,7 +3130,8 @@ def test_simple_yaml_fallback_serializes_nested_values_as_valid_yaml() -> None:
 
     dumped = _dump_simple_yaml(payload)
 
-    assert json.loads(dumped) == payload
+    assert yaml.safe_load(dumped) == payload
+    assert not dumped.lstrip().startswith("{")
 
 
 def test_agent_runtime_handles_external_mcp_widget_calls(tmp_path: Path) -> None:
@@ -6637,6 +6642,29 @@ def test_config_launch_unmount_stops_active_runner(tmp_path: Path) -> None:
     assert runners[0].stopped is True
     assert screen._closed is True
     assert screen._running is False
+
+
+def test_launch_command_quotes_config_paths_with_spaces() -> None:
+    assert shlex.split(launch_command_for_config("rl", ".prime/lab/configs/rl/my run.toml")) == [
+        "prime",
+        "train",
+        "run",
+        ".prime/lab/configs/rl/my run.toml",
+        "--yes",
+    ]
+    assert shlex.split(launch_command_for_config("eval", "configs/eval/my eval.toml")) == [
+        "prime",
+        "eval",
+        "run",
+        "configs/eval/my eval.toml",
+        "--hosted",
+    ]
+    assert shlex.split(launch_command_for_config("gepa", "configs/gepa/my prompt.toml")) == [
+        "prime",
+        "gepa",
+        "run",
+        "configs/gepa/my prompt.toml",
+    ]
 
 
 @pytest.mark.asyncio

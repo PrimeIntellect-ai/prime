@@ -35,6 +35,36 @@ def fake_lab_asset_downloads(monkeypatch: Any) -> list[str]:
         "train-with-environments",
         "brainstorm",
     )
+    config_tree: dict[str, list[tuple[str, str]]] = {
+        "configs": [
+            ("endpoints.toml", "file"),
+            ("eval", "dir"),
+            ("gepa", "dir"),
+            ("local", "dir"),
+            ("rl", "dir"),
+            ("zero3.yaml", "file"),
+        ],
+        "configs/eval": [
+            ("debug.toml", "file"),
+            ("minimal.toml", "file"),
+            ("multi-env.toml", "file"),
+            ("wordle.toml", "file"),
+        ],
+        "configs/gepa": [
+            ("base.toml", "file"),
+            ("wordle.toml", "file"),
+        ],
+        "configs/local": [("prime-rl", "dir")],
+        "configs/local/prime-rl": [("wiki-search.toml", "file")],
+        "configs/rl": [
+            ("alphabet-sort.toml", "file"),
+            ("gsm8k.toml", "file"),
+            ("math-python.toml", "file"),
+            ("reverse-text.toml", "file"),
+            ("wiki-search.toml", "file"),
+            ("wordle.toml", "file"),
+        ],
+    }
 
     def fake_download_file(
         url: str,
@@ -78,6 +108,16 @@ def fake_lab_asset_downloads(monkeypatch: Any) -> list[str]:
                     "type": "dir",
                     "path": f"{source_path}/references",
                 },
+            ]
+        if "/contents/configs" in url:
+            source_path = url.split("/contents/", 1)[1].split("?", 1)[0]
+            return [
+                {
+                    "name": name,
+                    "type": entry_type,
+                    "path": f"{source_path}/{name}",
+                }
+                for name, entry_type in config_tree[source_path]
             ]
         return []
 
@@ -167,6 +207,8 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     assert (tmp_path / ".pi" / "skills" / "create-environments").exists()
     assert not (home / ".pi" / "agent" / "skills").exists()
     assert (tmp_path / "configs" / "rl" / "gsm8k.toml").is_file()
+    assert (tmp_path / "configs" / "eval" / "debug.toml").is_file()
+    assert (tmp_path / "configs" / "zero3.yaml").is_file()
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
     assert (tmp_path / ".prime" / "lab" / "docs" / "index.md").is_file()
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
@@ -248,6 +290,7 @@ def test_lab_setup_uses_existing_verifiers_sources(
 
     assert result.exit_code == 0
     assert _is_pinned_ref(lab_setup.VERIFIERS_REF)
+    assert lab_setup.VERIFIERS_CONFIG_REF == "main"
     assert _is_pinned_ref(lab_setup.PRIME_RL_REF)
     assert any(
         url.endswith(
@@ -257,7 +300,7 @@ def test_lab_setup_uses_existing_verifiers_sources(
     )
     assert any(
         url.endswith(
-            f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_REF}/configs/rl/gsm8k.toml"
+            f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_CONFIG_REF}/configs/rl/gsm8k.toml"
         )
         for url in fake_lab_asset_downloads
     )
@@ -432,6 +475,36 @@ def test_lab_sync_all_scaffolds_amp_and_factory_skills(
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
 
 
+def test_lab_sync_fully_refreshes_global_and_workspace_config_templates(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+
+    global_templates = home / ".prime" / "lab" / "templates"
+    workspace_templates = tmp_path / ".prime" / "lab" / "templates"
+    for root in (global_templates, workspace_templates):
+        (root / "configs" / "rl").mkdir(parents=True)
+        (root / "configs" / "rl" / "gsm8k.toml").write_text("stale\n", encoding="utf-8")
+        (root / "configs" / "old.toml").write_text("old\n", encoding="utf-8")
+
+    result = run_lab_sync_service(
+        LabSyncOptions(skip_docs=True, no_agent=True),
+        workspace=tmp_path,
+        emit=lambda _text: None,
+    )
+
+    assert result.exit_code == 0
+    for root in (global_templates, workspace_templates):
+        refreshed = root / "configs" / "rl" / "gsm8k.toml"
+        assert refreshed.read_text(encoding="utf-8") == 'model = "openai/gpt-4.1-mini"\n'
+        assert not (root / "configs" / "old.toml").exists()
+        assert (root / "configs" / "eval" / "debug.toml").is_file()
+        assert (root / "configs" / "eval" / "wordle.toml").is_file()
+        assert (root / "configs" / "zero3.yaml").is_file()
+
+
 def test_lab_doctor_reports_missing_selected_agent_guidance(
     tmp_path: Path,
     monkeypatch: Any,
@@ -506,6 +579,34 @@ def test_lab_doctor_allows_local_env_refs_when_environment_dir_empty(tmp_path: P
     checks = {check.name: check for check in result.checks}
 
     assert checks["Config environment refs"].status == "PASS"
+
+
+def test_lab_doctor_warns_on_deprecated_config_fields(tmp_path: Path) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        json.dumps({"choices": {"agents": ["codex"], "primary_agent": "codex"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "configs" / "rl").mkdir(parents=True)
+    (tmp_path / "configs" / "rl" / "old.toml").write_text(
+        'model = "Qwen/Qwen3.5-0.8B"\n'
+        'trajectory_strategy = "interleaved"\n'
+        'env_file = ["secrets.env"]\n'
+        "oversampling_factor = 2.0\n"
+        "max_async_level = 2\n"
+        "max_off_policy_steps = 4\n",
+        encoding="utf-8",
+    )
+
+    result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
+    checks = {check.name: check for check in result.checks}
+
+    assert checks["Config deprecated fields"].status == "WARN"
+    assert "configs/rl/old.toml:trajectory_strategy" in checks["Config deprecated fields"].message
+    assert "configs/rl/old.toml:env_file" in checks["Config deprecated fields"].message
+    assert "configs/rl/old.toml:oversampling_factor" in checks["Config deprecated fields"].message
+    assert "configs/rl/old.toml:max_async_level" in checks["Config deprecated fields"].message
+    assert "configs/rl/old.toml:max_off_policy_steps" in checks["Config deprecated fields"].message
 
 
 def test_lab_setup_installs_prime_rl_envs_with_split_editable_args(tmp_path: Path) -> None:

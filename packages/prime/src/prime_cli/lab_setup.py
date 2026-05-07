@@ -34,7 +34,8 @@ from .lab_agents import (
 
 PRIME_RL_REPO = "primeintellect-ai/prime-rl"
 VERIFIERS_REPO = "primeintellect-ai/verifiers"
-VERIFIERS_REF = "7bdc769caae0ba339ea8b67e362aa75331dcc79d"
+VERIFIERS_REF = "7d8a522df67308327cb9b8931ce6a5873a99834a"
+VERIFIERS_CONFIG_REF = "main"
 PRIME_RL_REF = "38b524925d09ce917b51e54bd99446b822f0a87f"
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
@@ -55,7 +56,15 @@ LAB_GITIGNORE_PATTERNS = (
 )
 PRIME_SKILLS_MANIFEST = ".prime-managed.json"
 WORKSPACE_SKILLS_DIR = Path(".prime") / "skills"
-ConfigSpec = tuple[str, str, str]
+DeprecatedConfigField = tuple[tuple[str, ...], str]
+DEPRECATED_CONFIG_FIELDS: tuple[DeprecatedConfigField, ...] = (
+    (("trajectory_strategy",), "`trajectory_strategy` is deprecated and ignored."),
+    (("trajectoryStrategy",), "`trajectoryStrategy` is deprecated and ignored."),
+    (("env_file",), "`env_file` is deprecated; use `env_files`."),
+    (("oversampling_factor",), "`oversampling_factor` is outdated; remove it from Lab configs."),
+    (("max_async_level",), "`max_async_level` is outdated; remove it from Lab configs."),
+    (("max_off_policy_steps",), "`max_off_policy_steps` is outdated; remove it from Lab configs."),
+)
 
 Emit = Callable[[str], None]
 Runner = Callable[[Sequence[str], Path, Emit], int]
@@ -131,9 +140,6 @@ class LabDoctorResult:
     checks: tuple[LabDoctorCheck, ...]
 
 
-ENDPOINTS_SRC = (
-    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/{VERIFIERS_REF}/configs/endpoints.toml"
-)
 AGENTS_MD_SRC = (
     f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/{VERIFIERS_REF}/assets/lab/AGENTS.md"
 )
@@ -143,38 +149,6 @@ CLAUDE_MD_SRC = (
 ENVS_AGENTS_MD_SRC = (
     f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/{VERIFIERS_REF}"
     "/assets/lab/environments/AGENTS.md"
-)
-PRIME_RL_CONFIGS: tuple[ConfigSpec, ...] = (
-    (
-        VERIFIERS_REPO,
-        "configs/local/prime-rl/wiki-search.toml",
-        "configs/prime-rl/wiki-search.toml",
-    ),
-)
-RL_CONFIGS: tuple[ConfigSpec, ...] = tuple(
-    (VERIFIERS_REPO, path, path)
-    for path in (
-        "configs/rl/alphabet-sort.toml",
-        "configs/rl/gsm8k.toml",
-        "configs/rl/math-python.toml",
-        "configs/rl/reverse-text.toml",
-        "configs/rl/wiki-search.toml",
-        "configs/rl/wordle.toml",
-    )
-)
-GEPA_CONFIGS: tuple[ConfigSpec, ...] = tuple(
-    (VERIFIERS_REPO, path, path)
-    for path in (
-        "configs/gepa/base.toml",
-        "configs/gepa/wordle.toml",
-    )
-)
-EVAL_CONFIGS: tuple[ConfigSpec, ...] = tuple(
-    (VERIFIERS_REPO, path, path)
-    for path in (
-        "configs/eval/minimal.toml",
-        "configs/eval/multi-env.toml",
-    )
 )
 SKILL_SOURCES: tuple[SkillSource, ...] = (SkillSource(repo=VERIFIERS_REPO, ref=VERIFIERS_REF),)
 
@@ -244,7 +218,7 @@ def parse_lab_setup_args(args: list[str]) -> LabSetupOptions:
     parser.add_argument(
         "--prime-rl",
         action="store_true",
-        help="Install prime-rl and download prime-rl configs.",
+        help="Install prime-rl.",
     )
     parser.add_argument(
         "--skip-agents-md",
@@ -407,7 +381,7 @@ def _run_lab_setup_steps(
         _install_prime_rl(workspace, emit, runner)
         _install_environments_to_prime_rl(workspace, emit, runner)
 
-    _copy_setup_configs(workspace, emit, prime_rl=options.prime_rl)
+    _copy_setup_configs(workspace, emit)
     _sync_config_templates(workspace, emit)
     _write_lab_docs_index(workspace)
     emit("Lab setup completed\n")
@@ -525,6 +499,8 @@ def _download_repo_directory(
     source_path: str,
     dest: Path,
     emit: Emit,
+    *,
+    force: bool = True,
 ) -> None:
     payload = _download_json(_github_contents_url(repo, ref, source_path))
     if not isinstance(payload, list):
@@ -538,13 +514,13 @@ def _download_repo_directory(
         if not isinstance(name, str) or not isinstance(entry_path, str):
             continue
         if entry_type == "dir":
-            _download_repo_directory(repo, ref, entry_path, dest / name, emit)
+            _download_repo_directory(repo, ref, entry_path, dest / name, emit, force=force)
         elif entry_type == "file":
             _download_file(
                 _repo_raw_url(repo, ref, entry_path),
                 dest / name,
                 emit,
-                force=True,
+                force=force,
             )
 
 
@@ -603,35 +579,47 @@ def _read_prime_skills_manifest(skills_dir: Path) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _copy_setup_configs(workspace: Path, emit: Emit, *, prime_rl: bool) -> None:
-    _download_file(ENDPOINTS_SRC, workspace / "configs" / "endpoints.toml", emit)
-    configs: list[ConfigSpec] = []
-    if prime_rl:
-        configs.extend(PRIME_RL_CONFIGS)
-    configs.extend(GEPA_CONFIGS)
-    configs.extend(EVAL_CONFIGS)
-    if not prime_rl:
-        configs.extend(RL_CONFIGS)
-    _download_configs(workspace, _dedupe_config_destinations(configs), emit)
+def _copy_setup_configs(workspace: Path, emit: Emit) -> None:
+    _download_repo_directory(
+        VERIFIERS_REPO,
+        VERIFIERS_CONFIG_REF,
+        "configs",
+        workspace / "configs",
+        emit,
+        force=False,
+    )
 
 
 def _sync_config_templates(workspace: Path, emit: Emit) -> None:
-    template_root = workspace / ".prime" / "lab" / "templates"
-    _download_file(
-        ENDPOINTS_SRC,
-        template_root / "configs" / "endpoints.toml",
-        emit,
-        force=True,
-    )
-    configs: list[ConfigSpec] = [*GEPA_CONFIGS, *EVAL_CONFIGS, *RL_CONFIGS]
-    for repo, source_path, dest_path in _dedupe_config_destinations(configs):
-        ref = PRIME_RL_REF if repo == PRIME_RL_REPO else VERIFIERS_REF
-        _download_file(
-            _repo_raw_url(repo, ref, source_path),
-            template_root / dest_path,
+    global_template_root = _global_lab_templates_dir()
+    global_template_root.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".templates-staging-",
+        dir=str(global_template_root.parent),
+    ) as staging_dir:
+        staging_template_root = Path(staging_dir) / "templates"
+        _download_repo_directory(
+            VERIFIERS_REPO,
+            VERIFIERS_CONFIG_REF,
+            "configs",
+            staging_template_root / "configs",
             emit,
-            force=True,
         )
+        _remove_path(global_template_root)
+        shutil.move(str(staging_template_root), str(global_template_root))
+    emit(f"Refreshed {global_template_root}\n")
+
+    template_root = workspace / ".prime" / "lab" / "templates"
+    if template_root.resolve(strict=False) == global_template_root.resolve(strict=False):
+        return
+    _remove_path(template_root)
+    template_root.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(global_template_root, template_root)
+    emit(f"Refreshed {template_root}\n")
+
+
+def _global_lab_templates_dir() -> Path:
+    return Path.home() / ".prime" / "lab" / "templates"
 
 
 def _prepare_workspace_skill_dir(
@@ -796,9 +784,11 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
         ),
         _gitignore_check(workspace),
         _config_validity_check(workspace),
+        _config_deprecated_fields_check(workspace),
         _config_environment_reference_check(workspace),
         _environment_source_hygiene_check(workspace),
         _managed_skill_manifest_check(),
+        _global_lab_templates_check(),
         _workspace_managed_skills_check(workspace),
         _path_check(
             "Lab templates",
@@ -860,6 +850,22 @@ def _managed_skill_manifest_check() -> LabDoctorCheck:
         name="Global Lab skill cache",
         status="WARN",
         message=f"Missing {_global_prime_skills_dir() / PRIME_SKILLS_MANIFEST}",
+        remediation="Run prime lab sync.",
+    )
+
+
+def _global_lab_templates_check() -> LabDoctorCheck:
+    path = _global_lab_templates_dir() / "configs" / "rl" / "gsm8k.toml"
+    if path.is_file():
+        return LabDoctorCheck(
+            name="Global Lab template cache",
+            status="PASS",
+            message=f"Installed at {_global_lab_templates_dir()}.",
+        )
+    return LabDoctorCheck(
+        name="Global Lab template cache",
+        status="WARN",
+        message=f"Missing {_global_lab_templates_dir()}",
         remediation="Run prime lab sync.",
     )
 
@@ -1055,6 +1061,59 @@ def _config_validity_check(workspace: Path) -> LabDoctorCheck:
         status="PASS",
         message=f"{len(config_paths)} config file(s) parse cleanly.",
     )
+
+
+def _config_deprecated_fields_check(workspace: Path) -> LabDoctorCheck:
+    configs_dir = workspace / "configs"
+    if not configs_dir.is_dir():
+        return LabDoctorCheck(
+            name="Config deprecated fields",
+            status="FAIL",
+            message="Missing configs directory.",
+            remediation="Run prime lab doctor --fix to create configs/.",
+        )
+    config_paths = sorted(configs_dir.rglob("*.toml"))
+    if not config_paths:
+        return LabDoctorCheck(
+            name="Config deprecated fields",
+            status="WARN",
+            message="No TOML configs found.",
+            remediation="Run prime lab setup or save a config copy from Lab.",
+        )
+    findings: list[str] = []
+    for path in config_paths:
+        try:
+            parsed = toml.loads(path.read_text(encoding="utf-8"))
+        except (OSError, toml.TomlDecodeError):
+            continue
+        for field_path, message in _deprecated_config_fields(parsed):
+            location = ".".join(field_path)
+            findings.append(f"{path.relative_to(workspace)}:{location} ({message})")
+    if findings:
+        return LabDoctorCheck(
+            name="Config deprecated fields",
+            status="WARN",
+            message="Deprecated " + ", ".join(findings[:5]),
+            remediation="Remove deprecated config fields or replace them with the suggested names.",
+        )
+    return LabDoctorCheck(
+        name="Config deprecated fields",
+        status="PASS",
+        message="No deprecated config fields found.",
+    )
+
+
+def _deprecated_config_fields(config: dict[str, Any]) -> list[DeprecatedConfigField]:
+    findings: list[DeprecatedConfigField] = []
+    for field_path, message in DEPRECATED_CONFIG_FIELDS:
+        value: Any = config
+        for part in field_path:
+            if not isinstance(value, dict) or part not in value:
+                break
+            value = value[part]
+        else:
+            findings.append((field_path, message))
+    return findings
 
 
 def _config_environment_reference_check(workspace: Path) -> LabDoctorCheck:
@@ -1347,12 +1406,6 @@ def _resolve_sync_agents(
     raise RuntimeError("No configured coding agent found. Run prime lab setup or pass --agent.")
 
 
-def _download_configs(workspace: Path, configs: list[ConfigSpec], emit: Emit) -> None:
-    for repo, source_path, dest_path in configs:
-        ref = PRIME_RL_REF if repo == PRIME_RL_REPO else VERIFIERS_REF
-        _download_file(_repo_raw_url(repo, ref, source_path), workspace / dest_path, emit)
-
-
 def _download_file(url: str, dest: Path, emit: Emit, *, force: bool = False) -> None:
     if dest.exists() and not force:
         emit(f"{dest.name} already exists\n")
@@ -1392,17 +1445,6 @@ def _read_url(url: str, *, emit: Emit | None = None) -> bytes:
                 emit(f"Download failed for {url}; retrying ({attempt + 1}/{DOWNLOAD_ATTEMPTS})\n")
             time.sleep(DOWNLOAD_RETRY_DELAY_SECONDS * attempt)
     raise RuntimeError(f"Failed to download {url}") from last_exc
-
-
-def _dedupe_config_destinations(configs: list[ConfigSpec]) -> list[ConfigSpec]:
-    deduped: list[ConfigSpec] = []
-    seen: set[str] = set()
-    for config in configs:
-        if config[2] in seen:
-            continue
-        seen.add(config[2])
-        deduped.append(config)
-    return deduped
 
 
 def _prime_package_version() -> str:

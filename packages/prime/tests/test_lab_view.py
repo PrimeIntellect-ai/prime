@@ -2068,6 +2068,36 @@ def test_prime_lab_doctor_service_warns_on_config_environment_refs(tmp_path: Pat
 
 
 def _fake_lab_skill_download_json(url: str) -> list[dict[str, str]]:
+    config_tree: dict[str, list[tuple[str, str]]] = {
+        "configs": [
+            ("endpoints.toml", "file"),
+            ("eval", "dir"),
+            ("gepa", "dir"),
+            ("local", "dir"),
+            ("rl", "dir"),
+            ("zero3.yaml", "file"),
+        ],
+        "configs/eval": [
+            ("debug.toml", "file"),
+            ("minimal.toml", "file"),
+            ("multi-env.toml", "file"),
+            ("wordle.toml", "file"),
+        ],
+        "configs/gepa": [
+            ("base.toml", "file"),
+            ("wordle.toml", "file"),
+        ],
+        "configs/local": [("prime-rl", "dir")],
+        "configs/local/prime-rl": [("wiki-search.toml", "file")],
+        "configs/rl": [
+            ("alphabet-sort.toml", "file"),
+            ("gsm8k.toml", "file"),
+            ("math-python.toml", "file"),
+            ("reverse-text.toml", "file"),
+            ("wiki-search.toml", "file"),
+            ("wordle.toml", "file"),
+        ],
+    }
     if "/contents/skills?" in url:
         return [{"name": "create-environments", "type": "dir"}]
     if "/contents/skills/" in url:
@@ -2078,6 +2108,16 @@ def _fake_lab_skill_download_json(url: str) -> list[dict[str, str]]:
                 "type": "file",
                 "path": f"{source_path}/SKILL.md",
             }
+        ]
+    if "/contents/configs" in url:
+        source_path = url.split("/contents/", 1)[1].split("?", 1)[0]
+        return [
+            {
+                "name": name,
+                "type": entry_type,
+                "path": f"{source_path}/{name}",
+            }
+            for name, entry_type in config_tree[source_path]
         ]
     return []
 

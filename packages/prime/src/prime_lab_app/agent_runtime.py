@@ -649,7 +649,24 @@ class AgentRuntime:
             return
         request_id = message.get("id")
         if request_id is not None and "method" not in message:
-            self._complete_pending(int(request_id), message)
+            pending_id = _jsonrpc_response_id(request_id)
+            if pending_id is None:
+                message_text = (
+                    "Agent returned response with unsupported JSON-RPC id: "
+                    f"{_short_repr(request_id)}"
+                )
+                self._set_state(
+                    AgentConnectionState(
+                        agent=self._agent,
+                        label=self._label,
+                        status="error",
+                        transport=self._spec.transport if self._spec else "",
+                        workspace=self._workspace,
+                        message=message_text,
+                    )
+                )
+                return
+            self._complete_pending(pending_id, message)
             return
         method = message.get("method")
         if not isinstance(method, str):
@@ -1288,6 +1305,24 @@ def _suffix_prefix_overlap(existing: str, delta: str) -> int:
         if existing.endswith(delta[:size]):
             return size
     return 0
+
+
+def _jsonrpc_response_id(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _short_repr(value: Any) -> str:
+    rendered = repr(value)
+    return rendered if len(rendered) <= 80 else rendered[:77] + "..."
 
 
 def _agent_prompt_with_lab_context(prompt: str) -> str:

@@ -533,6 +533,15 @@ def _environment_push_metadata(
         existing_metadata,
         old_upstream if upstream_changed else None,
     )
+    existing_forked_from: Dict[str, str] = {}
+    if isinstance(existing_metadata.get("forked_from"), dict):
+        forked_from = existing_metadata["forked_from"]
+        existing_forked_from = _environment_ref(
+            forked_from.get("owner"),
+            forked_from.get("name"),
+            environment_id=forked_from.get("environment_id"),
+            version=forked_from.get("version"),
+        )
     stale_fork_keys = {"forked_from", "origin", "fork_chain"}
     metadata = {
         key: value for key, value in existing_metadata.items() if key not in stale_fork_keys
@@ -550,6 +559,8 @@ def _environment_push_metadata(
         metadata["fork_chain"] = fork_chain
     if upstream_changed and old_upstream:
         metadata["forked_from"] = old_upstream
+    elif existing_forked_from:
+        metadata["forked_from"] = existing_forked_from
     return metadata
 
 

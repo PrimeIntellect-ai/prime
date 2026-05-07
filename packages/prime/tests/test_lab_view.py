@@ -2743,6 +2743,19 @@ def _last_message(messages: tuple[Any, ...]) -> Any:
     return messages[-1]
 
 
+def test_agent_runtime_rejects_malformed_jsonrpc_response_ids(tmp_path: Path) -> None:
+    states: list[AgentConnectionState] = []
+    runtime = AgentRuntime(on_state=states.append)
+    runtime._agent = "codex"
+    runtime._label = "Codex"
+    runtime._workspace = tmp_path
+
+    runtime._handle_jsonrpc_message({"jsonrpc": "2.0", "id": {"bad": True}, "result": {}})
+
+    assert states[-1].status == "error"
+    assert "unsupported JSON-RPC id" in states[-1].message
+
+
 @pytest.mark.parametrize(
     "agent_name",
     ("my-agent",),

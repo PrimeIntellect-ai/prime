@@ -93,7 +93,7 @@ def test_push_metadata_preserves_existing_version_when_project_version_is_missin
     assert metadata["version"] == "0.2.0"
 
 
-def test_push_metadata_clears_stale_forked_from_without_new_upstream_change() -> None:
+def test_push_metadata_preserves_existing_forked_from_without_new_upstream_change() -> None:
     origin = {
         "environment_id": "old-id",
         "owner": "base",
@@ -125,7 +125,7 @@ def test_push_metadata_clears_stale_forked_from_without_new_upstream_change() ->
     assert metadata["version"] == "0.3.0"
     assert metadata["origin"] == origin
     assert metadata["fork_chain"] == [origin]
-    assert "forked_from" not in metadata
+    assert metadata["forked_from"] == origin
 
 
 def test_push_metadata_clears_malformed_stale_fork_provenance() -> None:
@@ -136,7 +136,7 @@ def test_push_metadata_clears_malformed_stale_fork_provenance() -> None:
             "name": "math-env",
             "origin": {"owner": "", "name": ""},
             "fork_chain": [{"owner": "", "name": ""}],
-            "forked_from": {"owner": "base", "name": "old-env"},
+            "forked_from": {"owner": "", "name": ""},
         },
         environment_id="new-id",
         owner="research",
@@ -149,6 +149,26 @@ def test_push_metadata_clears_malformed_stale_fork_provenance() -> None:
     assert "origin" not in metadata
     assert "fork_chain" not in metadata
     assert "forked_from" not in metadata
+
+
+def test_push_metadata_preserves_existing_valid_forked_from() -> None:
+    forked_from = {"owner": "base", "name": "old-env", "environment_id": "base-id"}
+    metadata = _environment_push_metadata(
+        {
+            "environment_id": "new-id",
+            "owner": "research",
+            "name": "math-env",
+            "forked_from": forked_from,
+        },
+        environment_id="new-id",
+        owner="research",
+        name="math-env",
+        version=None,
+        pushed_at="2026-05-05T12:45:00",
+        wheel_sha256="def456",
+    )
+
+    assert metadata["forked_from"] == forked_from
 
 
 def test_environment_ref_preserves_zero_identifiers() -> None:

@@ -5,8 +5,6 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from ..lab_setup import run_lab_doctor, run_lab_setup, run_lab_sync
-
 app = typer.Typer(
     help="Lab platform commands",
     invoke_without_command=True,
@@ -45,6 +43,8 @@ def lab(
 )
 def setup(ctx: typer.Context) -> None:
     """Set up a Lab workspace."""
+    from ..lab_setup import run_lab_setup
+
     code = run_lab_setup(list(ctx.args), console=console)
     if code != 0:
         raise typer.Exit(code)
@@ -59,6 +59,8 @@ def setup(ctx: typer.Context) -> None:
 )
 def sync(ctx: typer.Context) -> None:
     """Refresh Lab skills and local agent guidance."""
+    from ..lab_setup import run_lab_sync
+
     code = run_lab_sync(list(ctx.args), console=console)
     if code != 0:
         raise typer.Exit(code)
@@ -73,6 +75,8 @@ def sync(ctx: typer.Context) -> None:
 )
 def doctor(ctx: typer.Context) -> None:
     """Check a Lab workspace."""
+    from ..lab_setup import run_lab_doctor
+
     code = run_lab_doctor(list(ctx.args), console=console)
     if code != 0:
         raise typer.Exit(code)

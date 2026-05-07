@@ -1922,7 +1922,7 @@ def test_prime_lab_setup_uses_setup_service(monkeypatch: pytest.MonkeyPatch) -> 
         calls.append(args)
         return 0
 
-    monkeypatch.setattr("prime_cli.commands.lab.run_lab_setup", fake_run_lab_setup)
+    monkeypatch.setattr("prime_cli.lab_setup.run_lab_setup", fake_run_lab_setup)
 
     result = CliRunner().invoke(lab_cli_app, ["setup", "--agent", "codex"])
 
@@ -1937,7 +1937,7 @@ def test_prime_lab_sync_uses_sync_service(monkeypatch: pytest.MonkeyPatch) -> No
         calls.append(args)
         return 0
 
-    monkeypatch.setattr("prime_cli.commands.lab.run_lab_sync", fake_run_lab_sync)
+    monkeypatch.setattr("prime_cli.lab_setup.run_lab_sync", fake_run_lab_sync)
 
     result = CliRunner().invoke(lab_cli_app, ["sync", "--agent", "codex"])
 
@@ -1952,7 +1952,7 @@ def test_prime_lab_doctor_uses_doctor_service(monkeypatch: pytest.MonkeyPatch) -
         calls.append(args)
         return 0
 
-    monkeypatch.setattr("prime_cli.commands.lab.run_lab_doctor", fake_run_lab_doctor)
+    monkeypatch.setattr("prime_cli.lab_setup.run_lab_doctor", fake_run_lab_doctor)
 
     result = CliRunner().invoke(lab_cli_app, ["doctor", "--fix"])
 

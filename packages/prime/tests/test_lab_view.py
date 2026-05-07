@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from io import BytesIO, StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import prime_lab_app.agent_widget_model as agent_widget_model
 import pytest
@@ -27,6 +27,7 @@ from prime_cli.lab_mcp import _serve_lab_mcp_stdio, lab_mcp_tool_definitions
 from prime_cli.lab_setup import (
     LabDoctorOptions,
     LabSetupOptions,
+    LabSetupResult,
     LabSyncOptions,
     parse_lab_doctor_args,
     parse_lab_setup_args,
@@ -157,7 +158,7 @@ from prime_lab_app.platform_preview import preview_lab_config
 from prime_lab_app.readme import readme_links as _readme_links
 from prime_lab_app.readme import readme_markdown as _readme_markdown
 from prime_lab_app.rows import item_badges_text
-from prime_lab_app.setup_screens import AgentSyncScreen, DoctorScreen, SetupScreen
+from prime_lab_app.setup_screens import AgentSyncScreen, DoctorScreen, SetupScreen, _setup_body
 from prime_lab_app.shell import (
     compact_path,
     configured_workspace_agent,
@@ -6405,6 +6406,103 @@ async def test_prime_lab_app_opens_setup_screen_for_uninitialized_workspace(
         await pilot.pause()
 
         assert isinstance(app.screen, SetupScreen)
+
+
+@pytest.mark.asyncio
+async def test_setup_screen_uses_agent_select_without_prime_rl_option(
+    tmp_path: Path,
+) -> None:
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._dismiss_launch_screen()
+        await pilot.pause()
+        section = snapshot.section("workspace")
+        assert section is not None
+        setup_item = next(item for item in section.items if item.raw.get("type") == "setup_action")
+        app._show_item(setup_item)
+        app.action_load_detail()
+        await pilot.pause()
+
+        screen = app.screen
+        assert isinstance(screen, SetupScreen)
+        setup_body = _render_renderable(_setup_body(setup_item))
+        assert "Choose an agent, then run setup in this workspace." in setup_body
+        assert "Press Enter to run setup" not in setup_body
+        picker_label = _render_renderable(screen.query_one("#setup-agent-label", Static).content)
+        assert "Choose your coding agent" in picker_label
+        assert not screen.query("#setup-prime-rl")
+
+        agent_select = screen.query_one("#setup-agent", Select)
+        assert agent_select.value == "codex"
+        assert agent_select._options[0] == ("Codex", "codex")
+        assert all("Agent:" not in str(label) for label, _value in agent_select._options)
+
+        agent_select.value = "claude"
+        await pilot.pause()
+        assert screen._selected_agent() == "claude"
+
+        agent_select.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert agent_select.expanded is True
+        assert screen._command_running is False
+
+
+@pytest.mark.asyncio
+async def test_setup_screen_run_uses_selected_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = make_source().load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(lambda: snapshot)
+    captured: list[tuple[LabSetupOptions, Path]] = []
+
+    def fake_run_lab_setup_service(
+        options: LabSetupOptions,
+        *,
+        workspace: Path,
+        emit: Callable[[str], None],
+    ) -> LabSetupResult:
+        _ = emit
+        captured.append((options, workspace))
+        return LabSetupResult(exit_code=0, workspace=workspace)
+
+    monkeypatch.setattr(
+        "prime_lab_app.setup_screens.run_lab_setup_service",
+        fake_run_lab_setup_service,
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._dismiss_launch_screen()
+        await pilot.pause()
+        section = snapshot.section("workspace")
+        assert section is not None
+        setup_item = next(item for item in section.items if item.raw.get("type") == "setup_action")
+        app._show_item(setup_item)
+        app.action_load_detail()
+        await pilot.pause()
+
+        screen = app.screen
+        assert isinstance(screen, SetupScreen)
+        agent_select = screen.query_one("#setup-agent", Select)
+        agent_select.value = "claude"
+        await pilot.pause()
+
+        screen.action_run_setup()
+        for _ in range(20):
+            if captured:
+                break
+            await pilot.pause()
+
+        assert captured
+        options, workspace = captured[0]
+        assert options.agents == ("claude",)
+        assert options.prime_rl is False
+        assert workspace == tmp_path.resolve()
 
 
 @pytest.mark.asyncio

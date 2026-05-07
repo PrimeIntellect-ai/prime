@@ -323,7 +323,7 @@ const TOOLS = {specs_json};
 function labSocketPath(cwd: string): string {{
   const workspace = path.resolve(cwd);
   const digest = crypto.createHash("sha256").update(workspace).digest("hex").slice(0, 24);
-  const root = process.env.PRIME_LAB_RUNTIME_DIR || "/tmp";
+  const root = process.env.PRIME_LAB_RUNTIME_DIR || os.tmpdir();
   return path.join(root, `prime-lab-${{os.userInfo().uid}}`, digest, "lab.sock");
 }}
 

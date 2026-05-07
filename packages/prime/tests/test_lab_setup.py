@@ -158,6 +158,25 @@ def test_lab_setup_prompts_for_agent_when_interactive(monkeypatch: Any) -> None:
     assert options.agents == ("droid", "amp", "claude")
 
 
+def test_lab_setup_interactive_agent_prompt_retries_invalid_input(
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    class FakeStdin:
+        def isatty(self) -> bool:
+            return True
+
+    answers = iter(("codx", "droid", "y", "amp-code,codx", "amp-code,claude-code"))
+    monkeypatch.setattr(lab_setup.sys, "stdin", FakeStdin())
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    options = parse_lab_setup_args([])
+
+    assert options.agents == ("droid", "amp", "claude")
+    output = capsys.readouterr().out
+    assert "Unsupported coding agent 'codx'" in output
+
+
 def test_lab_setup_non_interactive_requires_explicit_agent(monkeypatch: Any) -> None:
     class FakeStdin:
         def isatty(self) -> bool:
@@ -218,7 +237,7 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     assert any("Pi Coding Agent requires pi" in line for line in emitted)
 
 
-def test_lab_setup_preserves_existing_workspace_guidance(
+def test_lab_setup_refreshes_existing_workspace_guidance(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -241,9 +260,9 @@ def test_lab_setup_preserves_existing_workspace_guidance(
     )
 
     assert result.exit_code == 0
-    for path, text in existing_files.items():
-        assert path.read_text(encoding="utf-8") == text
-    assert sum("already exists" in line for line in emitted) == len(existing_files)
+    for path in existing_files:
+        assert path.read_text(encoding="utf-8").startswith("downloaded from ")
+    assert not any("already exists" in line for line in emitted)
 
 
 def test_lab_sync_refreshes_existing_workspace_guidance(

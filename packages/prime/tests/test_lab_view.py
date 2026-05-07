@@ -2219,6 +2219,9 @@ def test_prime_lab_setup_service_supports_pi_agent(
     assert metadata["choices"]["primary_agent"] == "pi"
     assert (tmp_path / ".pi" / "skills" / "create-environments").exists()
     assert pi_lab_extension_path(tmp_path).is_file()
+    extension_source = pi_lab_extension_path(tmp_path).read_text(encoding="utf-8")
+    assert "process.env.PRIME_LAB_RUNTIME_DIR || os.tmpdir()" in extension_source
+    assert 'process.env.PRIME_LAB_RUNTIME_DIR || "/tmp"' not in extension_source
     assert not any("pi-acp" in line for line in emitted)
 
 
@@ -2783,6 +2786,9 @@ def test_lab_mcp_ipc_roundtrip(tmp_path: Path) -> None:
     server = LabMcpIpcServer(tmp_path, handler)
     server.start()
     try:
+        assert (server.path.parent.parent.stat().st_mode & 0o777) == 0o700
+        assert (server.path.parent.stat().st_mode & 0o777) == 0o700
+        assert (server.path.stat().st_mode & 0o777) == 0o600
         result = call_lab_mcp_tool(tmp_path, "choose", {"title": "Pick one"})
     finally:
         server.stop()

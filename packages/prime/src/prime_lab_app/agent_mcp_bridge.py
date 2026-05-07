@@ -43,6 +43,19 @@ def lab_mcp_socket_path(workspace: Path) -> Path:
     return lab_mcp_runtime_dir(workspace) / "lab.sock"
 
 
+def _prepare_private_runtime_dir(runtime_dir: Path) -> None:
+    previous_umask = os.umask(0o077)
+    try:
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+    finally:
+        os.umask(previous_umask)
+    for path in (runtime_dir.parent, runtime_dir):
+        try:
+            path.chmod(0o700)
+        except OSError:
+            pass
+
+
 def lab_mcp_server_config(workspace: Path) -> dict[str, Any]:
     """MCP server config object for agents that accept JSON MCP definitions."""
 
@@ -172,13 +185,21 @@ class LabMcpIpcServer:
         """Start serving tool calls for the workspace."""
 
         self.stop()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        _prepare_private_runtime_dir(self.path.parent)
         try:
             self.path.unlink()
         except FileNotFoundError:
             pass
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(str(self.path))
+        previous_umask = os.umask(0o077)
+        try:
+            server.bind(str(self.path))
+        finally:
+            os.umask(previous_umask)
+        try:
+            self.path.chmod(0o600)
+        except OSError:
+            pass
         server.listen()
         self._socket = server
         self._stop_event.clear()

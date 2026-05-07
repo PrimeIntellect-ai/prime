@@ -375,7 +375,7 @@ def _run_lab_setup_steps(
     _sync_lab_metadata(workspace, options.agents, setup_source="prime lab setup")
 
     if not options.skip_agents_md:
-        _sync_workspace_guidance(workspace, emit)
+        _sync_workspace_guidance(workspace, emit, force=True)
 
     if options.prime_rl:
         _install_prime_rl(workspace, emit, runner)
@@ -1490,12 +1490,16 @@ def _resolve_setup_agents(value: str | None, *, no_interactive: bool) -> tuple[s
 
 def _prompt_for_agents() -> tuple[str, ...]:
     print(f"Supported coding agents: {', '.join(SUPPORTED_AGENTS)}")
-    try:
-        raw_primary = _prompt_input("Primary coding agent [codex]: ").strip()
-        primary = raw_primary or "codex"
-        selected = [_normalize_supported_agent(primary, allow_all=False)]
-    except EOFError as exc:
-        raise ValueError("Agent selection was cancelled.") from exc
+    while True:
+        try:
+            raw_primary = _prompt_input("Primary coding agent [codex]: ").strip()
+            primary = raw_primary or "codex"
+            selected = [_normalize_supported_agent(primary, allow_all=False)]
+            break
+        except EOFError as exc:
+            raise ValueError("Agent selection was cancelled.") from exc
+        except ValueError as exc:
+            print(exc)
 
     try:
         use_multiple_raw = _prompt_input("Using multiple coding agents? [y/N]: ").strip().lower()
@@ -1503,11 +1507,15 @@ def _prompt_for_agents() -> tuple[str, ...]:
         raise ValueError("Agent selection was cancelled.") from exc
 
     if use_multiple_raw in {"y", "yes"}:
-        try:
-            additional_raw = _prompt_input("Additional agents (comma-separated): ").strip()
-            additional_agents = _parse_agents(additional_raw) if additional_raw else []
-        except EOFError as exc:
-            raise ValueError("Agent selection was cancelled.") from exc
+        while True:
+            try:
+                additional_raw = _prompt_input("Additional agents (comma-separated): ").strip()
+                additional_agents = _parse_agents(additional_raw) if additional_raw else []
+                break
+            except EOFError as exc:
+                raise ValueError("Agent selection was cancelled.") from exc
+            except ValueError as exc:
+                print(exc)
         for agent in additional_agents:
             if agent not in selected:
                 selected.append(agent)

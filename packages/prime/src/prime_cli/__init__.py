@@ -21,7 +21,7 @@ from prime_cli.core import (
     Config,
 )
 
-__version__ = "0.5.82"
+__version__ = "0.6.0"
 
 __all__ = [
     "APIClient",

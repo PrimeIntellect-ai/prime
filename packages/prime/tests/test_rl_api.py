@@ -23,6 +23,7 @@ class FakeAPIClient:
                 ]
             },
             "step": 160,
+            "unexpected": "raw response detail",
         }
 
 
@@ -35,6 +36,14 @@ def test_get_distributions_preserves_chart_histogram_data() -> None:
     assert api_client.requests == [
         ("/rft/runs/run-1/distributions", {"type": "rewards", "step": 160})
     ]
-    assert result["chartData"]["histogramData"][0]["range"] == "0.000-0.200"
-    assert result["bins"] == result["chartData"]["histogramData"]
-    assert result["step"] == 160
+    assert result == {
+        "bins": [
+            {
+                "binStart": 0.0,
+                "binEnd": 0.2,
+                "count": 1,
+                "range": "0.000-0.200",
+            }
+        ],
+        "step": 160,
+    }

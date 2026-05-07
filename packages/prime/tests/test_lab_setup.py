@@ -7,7 +7,7 @@ from urllib.error import URLError
 
 import pytest
 from prime_cli import lab_setup
-from prime_cli.lab_agents import known_agent_names
+from prime_cli.lab_agents import AgentCapability, known_agent_names
 from prime_cli.lab_setup import (
     LabDoctorOptions,
     LabSetupOptions,
@@ -541,6 +541,32 @@ def test_lab_doctor_reports_missing_selected_agent_guidance(
 
     assert checks["Amp Code native tools"].status == "WARN"
     assert "npm install -g @sourcegraph/amp@latest" in checks["Amp Code native tools"].remediation
+
+
+def test_lab_doctor_warns_when_native_surface_has_no_paths(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        json.dumps({"choices": {"agents": ["future"], "primary_agent": "future"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        lab_setup,
+        "agent_capability",
+        lambda agent: AgentCapability(
+            name=agent,
+            label="Future Agent",
+            native_surface="mcp_config",
+        ),
+    )
+
+    result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
+    checks = {check.name: check for check in result.checks}
+
+    assert checks["Future Agent native tools"].status == "WARN"
+    assert "declares mcp_config but no path" in checks["Future Agent native tools"].message
 
 
 def test_lab_doctor_fix_writes_standard_gitignore_patterns(tmp_path: Path) -> None:

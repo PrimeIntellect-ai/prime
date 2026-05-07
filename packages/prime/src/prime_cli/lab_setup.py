@@ -939,6 +939,7 @@ def _managed_skill_names_from_manifest() -> tuple[str, ...]:
 def _agent_native_surface_check(agent: str, workspace: Path) -> LabDoctorCheck:
     capability = agent_capability(agent)
     name = f"{capability.label} native tools"
+    path_based_surfaces = {"mcp_config", "acp_mcp", "droid_mcp_config", "pi_extension"}
     if capability.status == "not_supported":
         return LabDoctorCheck(
             name=name,
@@ -974,7 +975,21 @@ def _agent_native_surface_check(agent: str, workspace: Path) -> LabDoctorCheck:
             status="PASS",
             message=f"{capability.label} native Lab tools are not scaffolded by setup yet.",
         )
+    if capability.native_surface not in path_based_surfaces:
+        return LabDoctorCheck(
+            name=name,
+            status="WARN",
+            message=f"Unknown native surface type: {capability.native_surface}.",
+            remediation="Update Lab doctor native-surface handling.",
+        )
     expected_paths = capability.resolved_surface_paths(workspace)
+    if not expected_paths:
+        return LabDoctorCheck(
+            name=name,
+            status="WARN",
+            message=f"{capability.label} declares {capability.native_surface} but no path.",
+            remediation=f"Add an expected surface path or update {capability.name} setup.",
+        )
     missing_paths = [path for path in expected_paths if not path.exists()]
     if not missing_paths:
         return LabDoctorCheck(

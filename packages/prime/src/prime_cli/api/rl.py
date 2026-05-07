@@ -525,7 +525,6 @@ class RLClient:
             if bins is None and isinstance(chart_data, dict):
                 bins = chart_data.get("histogramData")
             return {
-                **response,
                 "bins": bins or [],
                 "step": response.get("step"),
             }

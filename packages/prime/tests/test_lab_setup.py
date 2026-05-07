@@ -7,7 +7,7 @@ from urllib.error import URLError
 
 import pytest
 from prime_cli import lab_setup
-from prime_cli.lab_agents import known_agent_names
+from prime_cli.lab_agents import AgentCapability, known_agent_names
 from prime_cli.lab_setup import (
     LabDoctorOptions,
     LabSetupOptions,
@@ -19,6 +19,8 @@ from prime_cli.lab_setup import (
     run_lab_setup_service,
     run_lab_sync_service,
 )
+
+AGENT_WHICH = "prime_lab_app.agent_capabilities.shutil.which"
 
 
 @pytest.fixture(autouse=True)
@@ -136,9 +138,13 @@ def test_lab_setup_parses_selected_agents_and_all() -> None:
     assert all_agents.agents == known_agent_names()
 
 
-def test_lab_setup_prompts_for_agent_when_interactive(
-    monkeypatch: Any,
-) -> None:
+def test_lab_setup_no_interactive_uses_codex_default() -> None:
+    options = parse_lab_setup_args(["--no-interactive"])
+
+    assert options.agents == ("codex",)
+
+
+def test_lab_setup_prompts_for_agent_when_interactive(monkeypatch: Any) -> None:
     class FakeStdin:
         def isatty(self) -> bool:
             return True
@@ -152,9 +158,26 @@ def test_lab_setup_prompts_for_agent_when_interactive(
     assert options.agents == ("droid", "amp", "claude")
 
 
-def test_lab_setup_non_interactive_requires_explicit_agent(
+def test_lab_setup_interactive_agent_prompt_retries_invalid_input(
     monkeypatch: Any,
+    capsys: Any,
 ) -> None:
+    class FakeStdin:
+        def isatty(self) -> bool:
+            return True
+
+    answers = iter(("codx", "droid", "y", "amp-code,codx", "amp-code,claude-code"))
+    monkeypatch.setattr(lab_setup.sys, "stdin", FakeStdin())
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    options = parse_lab_setup_args([])
+
+    assert options.agents == ("droid", "amp", "claude")
+    output = capsys.readouterr().out
+    assert "Unsupported coding agent 'codx'" in output
+
+
+def test_lab_setup_non_interactive_requires_explicit_agent(monkeypatch: Any) -> None:
     class FakeStdin:
         def isatty(self) -> bool:
             return False
@@ -165,26 +188,9 @@ def test_lab_setup_non_interactive_requires_explicit_agent(
         parse_lab_setup_args([])
 
 
-def test_lab_setup_interactive_eof_returns_cli_error(monkeypatch: Any) -> None:
-    class FakeStdin:
-        def isatty(self) -> bool:
-            return True
-
-    monkeypatch.setattr(lab_setup.sys, "stdin", FakeStdin())
-    monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(EOFError))
-
-    with pytest.raises(ValueError, match="Agent selection was cancelled"):
-        parse_lab_setup_args([])
-
-
-def test_lab_setup_service_requires_configured_agent(tmp_path: Path) -> None:
-    result = run_lab_setup_service(
-        LabSetupOptions(skip_install=True, skip_agents_md=True),
-        workspace=tmp_path,
-        emit=lambda _text: None,
-    )
-
-    assert result.exit_code == 1
+def test_lab_sync_rejects_agent_with_no_agent() -> None:
+    with pytest.raises(ValueError, match="--agent and --no-agent"):
+        parse_lab_sync_args(["--agent", "codex", "--no-agent"])
 
 
 def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
@@ -192,7 +198,7 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: None)
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: None)
     commands: list[list[str]] = []
     emitted: list[str] = []
 
@@ -222,7 +228,69 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     assert (tmp_path / "configs" / "rl" / "gsm8k.toml").is_file()
     assert (tmp_path / "configs" / "eval" / "debug.toml").is_file()
     assert (tmp_path / "configs" / "zero3.yaml").is_file()
-    assert any("npm install -g pi-acp" in line for line in emitted)
+    assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
+    assert (tmp_path / ".prime" / "lab" / "docs" / "index.md").is_file()
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert "/outputs/" in gitignore.splitlines()
+    assert (tmp_path / ".pi" / "extensions" / "prime-lab" / "index.ts").is_file()
+    assert not any("pi-acp" in line for line in emitted)
+    assert any("Pi Coding Agent requires pi" in line for line in emitted)
+
+
+def test_lab_setup_refreshes_existing_workspace_guidance(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    existing_files = {
+        tmp_path / "AGENTS.md": "workspace agents\n",
+        tmp_path / "CLAUDE.md": "workspace claude\n",
+        tmp_path / "environments" / "AGENTS.md": "environment agents\n",
+    }
+    for path, text in existing_files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    emitted: list[str] = []
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=False, agents=("codex",)),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    assert result.exit_code == 0
+    for path in existing_files:
+        assert path.read_text(encoding="utf-8").startswith("downloaded from ")
+    assert not any("already exists" in line for line in emitted)
+
+
+def test_lab_sync_refreshes_existing_workspace_guidance(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    existing_files = (
+        tmp_path / "AGENTS.md",
+        tmp_path / "CLAUDE.md",
+        tmp_path / "environments" / "AGENTS.md",
+    )
+    for path in existing_files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("stale guidance\n", encoding="utf-8")
+    emitted: list[str] = []
+
+    result = run_lab_sync_service(
+        LabSyncOptions(agents=("codex",), skip_docs=False),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    assert result.exit_code == 0
+    for path in existing_files:
+        assert path.read_text(encoding="utf-8").startswith("downloaded from ")
+    assert not any("already exists" in line for line in emitted)
 
 
 def test_lab_setup_uses_existing_verifiers_sources(
@@ -231,7 +299,7 @@ def test_lab_setup_uses_existing_verifiers_sources(
     fake_lab_asset_downloads: list[str],
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
 
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=False, agents=("codex",)),
@@ -354,7 +422,7 @@ def test_lab_setup_manifest_tracks_skill_source(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
 
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
@@ -375,7 +443,7 @@ def test_lab_setup_rejects_duplicate_skill_sources(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
     monkeypatch.setattr(
         "prime_cli.lab_setup.SKILL_SOURCES",
         (
@@ -406,7 +474,7 @@ def test_lab_sync_all_scaffolds_amp_and_factory_skills(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
 
     result = run_lab_sync_service(
         LabSyncOptions(agents=("droid", "amp"), skip_docs=True),
@@ -421,6 +489,8 @@ def test_lab_sync_all_scaffolds_amp_and_factory_skills(
     assert not (tmp_path / "home" / ".factory" / "skills").exists()
     assert not (tmp_path / "home" / ".config" / "agents" / "skills").exists()
     assert not (tmp_path / ".amp" / "skills").exists()
+    assert (tmp_path / ".prime" / "lab" / "agent-mcp" / "amp.json").is_file()
+    assert not (tmp_path / ".prime" / "lab" / "agent-mcp" / "droid.json").exists()
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
 
 
@@ -459,7 +529,7 @@ def test_lab_doctor_reports_missing_selected_agent_guidance(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: None)
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: None)
     run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("amp",)),
         workspace=tmp_path,
@@ -471,6 +541,32 @@ def test_lab_doctor_reports_missing_selected_agent_guidance(
 
     assert checks["Amp Code native tools"].status == "WARN"
     assert "npm install -g @sourcegraph/amp@latest" in checks["Amp Code native tools"].remediation
+
+
+def test_lab_doctor_warns_when_native_surface_has_no_paths(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        json.dumps({"choices": {"agents": ["future"], "primary_agent": "future"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        lab_setup,
+        "agent_capability",
+        lambda agent: AgentCapability(
+            name=agent,
+            label="Future Agent",
+            native_surface="mcp_config",
+        ),
+    )
+
+    result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
+    checks = {check.name: check for check in result.checks}
+
+    assert checks["Future Agent native tools"].status == "WARN"
+    assert "declares mcp_config but no path" in checks["Future Agent native tools"].message
 
 
 def test_lab_doctor_fix_writes_standard_gitignore_patterns(tmp_path: Path) -> None:
@@ -514,6 +610,20 @@ def test_lab_doctor_validates_environment_table_refs(tmp_path: Path) -> None:
 
     assert checks["Config environment refs"].status == "WARN"
     assert "missing-env" in checks["Config environment refs"].message
+
+
+def test_lab_doctor_allows_local_env_refs_when_environment_dir_empty(tmp_path: Path) -> None:
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "rl.toml").write_text(
+        'model = "openai/gpt-oss-20b"\nenvironments = ["missing-env"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "environments").mkdir()
+
+    result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
+    checks = {check.name: check for check in result.checks}
+
+    assert checks["Config environment refs"].status == "PASS"
 
 
 def test_lab_doctor_warns_on_deprecated_config_fields(tmp_path: Path) -> None:
@@ -583,69 +693,12 @@ def test_workspace_agents_from_metadata_ignores_non_string_values(tmp_path: Path
     assert lab_setup._workspace_agents_from_metadata(tmp_path) == ("amp",)
 
 
-def test_lab_sync_requires_agent_or_workspace_metadata(tmp_path: Path) -> None:
-    result = run_lab_sync_service(
-        LabSyncOptions(skip_docs=True),
-        workspace=tmp_path,
-        emit=lambda _text: None,
-    )
-
-    assert result.exit_code == 1
-
-
-def test_lab_sync_no_agent_refreshes_shared_assets_without_metadata(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-
-    result = run_lab_sync_service(
-        LabSyncOptions(skip_docs=True, no_agent=True),
-        workspace=tmp_path,
-        emit=lambda _text: None,
-    )
-
-    assert result.exit_code == 0
-    assert (tmp_path / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
-    assert not (tmp_path / ".agents" / "skills").exists()
-    assert not (tmp_path / ".prime" / "lab.json").exists()
-
-
-def test_lab_sync_replaces_workspace_skill_bundle_without_marker(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    skill_dir = tmp_path / ".prime" / "skills" / "create-environments"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("stale skill\n", encoding="utf-8")
-
-    result = run_lab_sync_service(
-        LabSyncOptions(skip_docs=True, no_agent=True),
-        workspace=tmp_path,
-        emit=lambda _text: None,
-    )
-
-    assert result.exit_code == 0
-    assert "downloaded from" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
-
-
-def test_lab_sync_rejects_agent_with_no_agent() -> None:
-    with pytest.raises(ValueError, match="cannot be used together"):
-        parse_lab_sync_args(["--agent", "codex", "--no-agent"])
-
-
-def test_lab_sync_rejects_empty_agent_value() -> None:
-    with pytest.raises(ValueError, match="No valid coding agents"):
-        parse_lab_sync_args(["--agent", ","])
-
-
 def test_lab_sync_skips_user_owned_skill_conflicts(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
     user_skill = tmp_path / ".agents" / "skills" / "create-environments"
     user_skill.mkdir(parents=True)
     (user_skill / "SKILL.md").write_text("user skill\n", encoding="utf-8")
@@ -666,9 +719,8 @@ def test_lab_sync_removes_stale_managed_skill_links(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
     stale_source = tmp_path / ".prime" / "skills" / "old-lab-skill"
     stale_source.mkdir(parents=True)
     stale_target = tmp_path / ".agents" / "skills" / "old-lab-skill"
@@ -691,7 +743,7 @@ def test_lab_sync_removes_stale_global_managed_skills(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
     stale_skill = home / ".prime" / "skills" / "old-lab-skill"
     stale_skill.mkdir(parents=True)
     (stale_skill / "SKILL.md").write_text("old skill\n", encoding="utf-8")
@@ -714,7 +766,7 @@ def test_lab_sync_removes_stale_global_managed_skills(
 
 def test_lab_setup_accepts_amp_and_factory_aliases(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("prime_cli.lab_agents.shutil.which", lambda _command: "/bin/tool")
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
 
     result = run_lab_sync_service(
         LabSyncOptions(agents=("droid", "amp"), skip_docs=True),

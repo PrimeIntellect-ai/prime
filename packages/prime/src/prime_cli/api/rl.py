@@ -318,6 +318,16 @@ class RLClient:
                 raise APIError(f"Failed to create RL run: {e.response.text}")
             raise APIError(f"Failed to create RL run: {str(e)}")
 
+    def preview_run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Preview or validate an RL run payload without creating a run."""
+
+        try:
+            return self.client.post("/rft/runs/preview", json=payload)
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to preview RL run: {e.response.text}")
+            raise APIError(f"Failed to preview RL run: {str(e)}")
+
     def stop_run(self, run_id: str) -> RLRun:
         """Stop a running RL training run."""
         try:
@@ -510,8 +520,12 @@ class RLClient:
                 params["step"] = step
 
             response = self.client.get(f"/rft/runs/{run_id}/distributions", params=params)
+            chart_data = response.get("chartData") or response.get("chart_data")
+            bins = response.get("bins")
+            if bins is None and isinstance(chart_data, dict):
+                bins = chart_data.get("histogramData")
             return {
-                "bins": response.get("bins", []),
+                "bins": bins or [],
                 "step": response.get("step"),
             }
         except Exception as e:

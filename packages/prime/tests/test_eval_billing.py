@@ -7,6 +7,7 @@ from prime_cli.api.inference import (
     InferencePaymentRequiredError,
 )
 from prime_cli.verifiers_bridge import run_eval_passthrough
+from typing_extensions import cast
 
 
 class DummyConfig:
@@ -93,7 +94,7 @@ def test_eval_run_blocks_when_inference_billing_is_missing(monkeypatch, error_me
             env_path=None,
         )
 
-    assert exc_info.value.exit_code == 1
+    assert cast(typer.Exit, exc_info.value).exit_code == 1
 
 
 def test_eval_preflight_omits_max_tokens(monkeypatch):
@@ -129,7 +130,7 @@ def test_eval_preflight_omits_max_tokens(monkeypatch):
             env_path=None,
         )
 
-    assert exc_info.value.exit_code == 0
+    assert cast(typer.Exit, exc_info.value).exit_code == 0
     assert seen_payloads == [
         {
             "model": "openai/gpt-4.1-mini",

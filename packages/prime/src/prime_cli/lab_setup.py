@@ -146,7 +146,10 @@ AGENTS_MD_SRC = (
 CLAUDE_MD_SRC = (
     f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/{VERIFIERS_REF}/assets/lab/CLAUDE.md"
 )
-ENVS_AGENTS_MD_SRC = f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/{VERIFIERS_REF}/assets/lab/environments/AGENTS.md"
+ENVS_AGENTS_MD_SRC = (
+    f"https://raw.githubusercontent.com/{VERIFIERS_REPO}/{VERIFIERS_REF}"
+    "/assets/lab/environments/AGENTS.md"
+)
 SKILL_SOURCES: tuple[SkillSource, ...] = (SkillSource(repo=VERIFIERS_REPO, ref=VERIFIERS_REF),)
 
 
@@ -233,13 +236,20 @@ def parse_lab_setup_args(args: list[str]) -> LabSetupOptions:
         dest="agents",
         help="Comma-separated coding agents to scaffold, or 'all' for diagnostics.",
     )
+    parser.add_argument(
+        "--no-interactive",
+        action="store_true",
+        help="Use setup defaults without prompts.",
+    )
     namespace = parser.parse_args(args)
-    agents = _resolve_setup_agents(namespace.agents)
     return LabSetupOptions(
         prime_rl=bool(namespace.prime_rl),
         skip_agents_md=bool(namespace.skip_agents_md),
         skip_install=bool(namespace.skip_install),
-        agents=agents,
+        agents=_resolve_setup_agents(
+            namespace.agents,
+            no_interactive=bool(namespace.no_interactive),
+        ),
     )
 
 
@@ -356,28 +366,24 @@ def _run_lab_setup_steps(
 
     (workspace / "configs").mkdir(exist_ok=True)
     (workspace / "environments").mkdir(exist_ok=True)
+    _append_gitignore(workspace)
     managed_skill_names = _sync_prime_skills(emit)
     _prepare_workspace_skill_dir(workspace, managed_skill_names, emit)
     _prepare_agent_skill_dirs(workspace, options.agents, managed_skill_names, emit)
     _report_missing_agent_requirements(options.agents, emit)
     _prepare_agent_native_surfaces(workspace, options.agents, emit)
-    _sync_lab_metadata(workspace, options.agents, source="prime lab setup")
+    _sync_lab_metadata(workspace, options.agents, setup_source="prime lab setup")
 
     if not options.skip_agents_md:
-        _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", emit, force=True)
-        _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=True)
-        _download_file(
-            ENVS_AGENTS_MD_SRC,
-            workspace / "environments" / "AGENTS.md",
-            emit,
-            force=True,
-        )
+        _sync_workspace_guidance(workspace, emit, force=True)
 
     if options.prime_rl:
         _install_prime_rl(workspace, emit, runner)
         _install_environments_to_prime_rl(workspace, emit, runner)
 
     _copy_setup_configs(workspace, emit)
+    _sync_config_templates(workspace, emit)
+    _write_lab_docs_index(workspace)
     emit("Lab setup completed\n")
 
 
@@ -399,23 +405,27 @@ def _run_lab_sync_steps(
         _prepare_agent_skill_dirs(workspace, agents, managed_skill_names, emit)
         _report_missing_agent_requirements(agents, emit)
         _prepare_agent_native_surfaces(workspace, agents, emit)
-        _sync_lab_metadata(workspace, agents, source="prime lab sync")
+        _sync_lab_metadata(workspace, agents, setup_source="prime lab sync")
     else:
         emit("Skipped coding-agent skill roots (--no-agent)\n")
     _sync_config_templates(workspace, emit)
 
     if not options.skip_docs:
-        _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", emit, force=True)
-        _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=True)
-        _download_file(
-            ENVS_AGENTS_MD_SRC,
-            workspace / "environments" / "AGENTS.md",
-            emit,
-            force=True,
-        )
+        _sync_workspace_guidance(workspace, emit, force=True)
         _write_lab_docs_index(workspace)
 
     emit("Lab sync completed\n")
+
+
+def _sync_workspace_guidance(workspace: Path, emit: Emit, *, force: bool = False) -> None:
+    _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", emit, force=force)
+    _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=force)
+    _download_file(
+        ENVS_AGENTS_MD_SRC,
+        workspace / "environments" / "AGENTS.md",
+        emit,
+        force=force,
+    )
 
 
 def _sync_prime_skills(emit: Emit) -> tuple[str, ...]:
@@ -619,6 +629,9 @@ def _prepare_workspace_skill_dir(
 ) -> None:
     skills_dir = workspace / WORKSPACE_SKILLS_DIR
     global_skills_dir = _global_prime_skills_dir()
+    if skills_dir.resolve(strict=False) == global_skills_dir.resolve(strict=False):
+        emit(f"Prepared {skills_dir}\n")
+        return
     _prepare_managed_skill_dir(
         skills_dir,
         managed_skill_names,
@@ -926,6 +939,7 @@ def _managed_skill_names_from_manifest() -> tuple[str, ...]:
 def _agent_native_surface_check(agent: str, workspace: Path) -> LabDoctorCheck:
     capability = agent_capability(agent)
     name = f"{capability.label} native tools"
+    path_based_surfaces = {"mcp_config", "acp_mcp", "droid_mcp_config", "pi_extension"}
     if capability.status == "not_supported":
         return LabDoctorCheck(
             name=name,
@@ -947,7 +961,7 @@ def _agent_native_surface_check(agent: str, workspace: Path) -> LabDoctorCheck:
             message="Missing " + ", ".join(requirement.binary for requirement in missing),
             remediation="Install selected agent dependency: " + ", ".join(remediations) + ".",
         )
-    if capability.native_surface in {"codex_app_server", "pi_acp"}:
+    if capability.native_surface == "codex_app_server":
         return LabDoctorCheck(
             name=name,
             status="PASS",
@@ -961,7 +975,21 @@ def _agent_native_surface_check(agent: str, workspace: Path) -> LabDoctorCheck:
             status="PASS",
             message=f"{capability.label} native Lab tools are not scaffolded by setup yet.",
         )
+    if capability.native_surface not in path_based_surfaces:
+        return LabDoctorCheck(
+            name=name,
+            status="WARN",
+            message=f"Unknown native surface type: {capability.native_surface}.",
+            remediation="Update Lab doctor native-surface handling.",
+        )
     expected_paths = capability.resolved_surface_paths(workspace)
+    if not expected_paths:
+        return LabDoctorCheck(
+            name=name,
+            status="WARN",
+            message=f"{capability.label} declares {capability.native_surface} but no path.",
+            remediation=f"Add an expected surface path or update {capability.name} setup.",
+        )
     missing_paths = [path for path in expected_paths if not path.exists()]
     if not missing_paths:
         return LabDoctorCheck(
@@ -1322,7 +1350,7 @@ def _write_lab_docs_index(workspace: Path) -> None:
                 "- `AGENTS.md`",
                 "- `CLAUDE.md`",
                 "- `environments/AGENTS.md`",
-                "- `.prime/skills/*/SKILL.md`",
+                "- `~/.prime/skills/*/SKILL.md`",
                 "- `.prime/lab/templates/configs/**`",
                 "",
                 "## Prime docs",
@@ -1337,12 +1365,12 @@ def _write_lab_docs_index(workspace: Path) -> None:
     )
 
 
-def _sync_lab_metadata(workspace: Path, agents: tuple[str, ...], *, source: str) -> None:
+def _sync_lab_metadata(workspace: Path, agents: tuple[str, ...], *, setup_source: str) -> None:
     prime_dir = workspace / ".prime"
     prime_dir.mkdir(exist_ok=True)
     path = prime_dir / "lab.json"
     metadata = _read_lab_metadata(workspace)
-    metadata["setup_source"] = source
+    metadata["setup_source"] = setup_source
     metadata["choices"] = {
         "agents": list(agents),
         "primary_agent": agents[0],
@@ -1462,9 +1490,11 @@ def _check_command(command: Sequence[str], cwd: Path, emit: Emit, runner: Runner
         raise RuntimeError(f"{' '.join(command)} exited with {code}")
 
 
-def _resolve_setup_agents(value: str | None) -> tuple[str, ...]:
+def _resolve_setup_agents(value: str | None, *, no_interactive: bool) -> tuple[str, ...]:
     if value is not None:
         return _resolve_explicit_agents(value)
+    if no_interactive:
+        return ("codex",)
     if sys.stdin.isatty():
         return _prompt_for_agents()
     raise ValueError(
@@ -1476,36 +1506,39 @@ def _resolve_setup_agents(value: str | None) -> tuple[str, ...]:
 def _prompt_for_agents() -> tuple[str, ...]:
     print(f"Supported coding agents: {', '.join(SUPPORTED_AGENTS)}")
     while True:
-        raw_primary = _prompt_input("Primary coding agent [codex]: ").strip()
-        primary = raw_primary if raw_primary else "codex"
         try:
+            raw_primary = _prompt_input("Primary coding agent [codex]: ").strip()
+            primary = raw_primary or "codex"
             selected = [_normalize_supported_agent(primary, allow_all=False)]
             break
+        except EOFError as exc:
+            raise ValueError("Agent selection was cancelled.") from exc
         except ValueError as exc:
             print(exc)
 
-    use_multiple_raw = _prompt_input("Using multiple coding agents? [y/N]: ").strip().lower()
-    if use_multiple_raw not in {"y", "yes"}:
-        return tuple(selected)
+    try:
+        use_multiple_raw = _prompt_input("Using multiple coding agents? [y/N]: ").strip().lower()
+    except EOFError as exc:
+        raise ValueError("Agent selection was cancelled.") from exc
 
-    while True:
-        additional_raw = _prompt_input("Additional agents (comma-separated): ").strip()
-        try:
-            additional_agents = _parse_agents(additional_raw) if additional_raw else []
-        except ValueError as exc:
-            print(exc)
-            continue
+    if use_multiple_raw in {"y", "yes"}:
+        while True:
+            try:
+                additional_raw = _prompt_input("Additional agents (comma-separated): ").strip()
+                additional_agents = _parse_agents(additional_raw) if additional_raw else []
+                break
+            except EOFError as exc:
+                raise ValueError("Agent selection was cancelled.") from exc
+            except ValueError as exc:
+                print(exc)
         for agent in additional_agents:
             if agent not in selected:
                 selected.append(agent)
-        return tuple(selected)
+    return tuple(selected)
 
 
 def _prompt_input(prompt: str) -> str:
-    try:
-        return input(prompt)
-    except EOFError as exc:
-        raise ValueError("Agent selection was cancelled before setup could continue.") from exc
+    return input(prompt)
 
 
 def _resolve_explicit_agents(value: str) -> tuple[str, ...]:
@@ -1577,20 +1610,21 @@ def _safe_link_or_copy_managed_skill_dir(
     prefer_link: bool = True,
 ) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    if prefer_link:
-        try:
-            target.symlink_to(
-                os.path.relpath(source, start=target.parent),
-                target_is_directory=True,
-            )
-            return
-        except OSError:
-            pass
-    shutil.copytree(source, target, dirs_exist_ok=True)
-    (target / ".prime-managed-link").write_text(
-        str(source.resolve(strict=False)),
-        encoding="utf-8",
-    )
+    if not prefer_link:
+        shutil.copytree(source, target, dirs_exist_ok=True)
+        (target / ".prime-managed-link").write_text(
+            str(source.resolve(strict=False)),
+            encoding="utf-8",
+        )
+        return
+    try:
+        target.symlink_to(os.path.relpath(source, start=target.parent), target_is_directory=True)
+    except OSError:
+        shutil.copytree(source, target, dirs_exist_ok=True)
+        (target / ".prime-managed-link").write_text(
+            str(source.resolve(strict=False)),
+            encoding="utf-8",
+        )
 
 
 def _skill_target_is_user_owned(target: Path, managed_roots: tuple[Path, ...]) -> bool:
@@ -1631,12 +1665,11 @@ def _remove_path(path: Path) -> None:
 def _is_managed_skill_target(target: Path, managed_roots: tuple[Path, ...]) -> bool:
     try:
         resolved = target.resolve(strict=False)
-        for root in managed_roots:
-            managed_root = root.resolve(strict=False)
-            if target.is_symlink() and (
-                resolved == managed_root or managed_root in resolved.parents
-            ):
-                return True
+        roots = tuple(root.resolve(strict=False) for root in managed_roots)
+        if target.is_symlink() and any(
+            resolved == root or root in resolved.parents for root in roots
+        ):
+            return True
     except OSError:
         return False
 
@@ -1645,10 +1678,10 @@ def _is_managed_skill_target(target: Path, managed_roots: tuple[Path, ...]) -> b
         return False
     try:
         resolved = Path(marker.read_text(encoding="utf-8").strip()).resolve(strict=False)
-        managed_roots = tuple(root.resolve(strict=False) for root in managed_roots)
+        roots = tuple(root.resolve(strict=False) for root in managed_roots)
     except OSError:
         return False
-    return any(resolved == root or root in resolved.parents for root in managed_roots)
+    return any(resolved == root or root in resolved.parents for root in roots)
 
 
 def _remove_if_exists(path: Path) -> None:

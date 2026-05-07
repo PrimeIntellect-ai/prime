@@ -449,6 +449,121 @@ def display_upstream_environment_info(
         return False
 
 
+def _environment_ref(
+    owner: Any,
+    name: Any,
+    *,
+    environment_id: Any = None,
+    version: Any = None,
+) -> Dict[str, str]:
+    if not owner or not name:
+        return {}
+    ref = {"owner": str(owner), "name": str(name)}
+    if environment_id is not None:
+        ref["environment_id"] = str(environment_id)
+    if version is not None:
+        ref["version"] = str(version)
+    return ref
+
+
+def _environment_fork_chain(
+    metadata: Dict[str, Any],
+    upstream: Dict[str, str] | None = None,
+) -> List[Dict[str, str]]:
+    chain: List[Dict[str, str]] = []
+    for value in metadata.get("fork_chain") or ():
+        if isinstance(value, dict):
+            ref = _environment_ref(
+                value.get("owner"),
+                value.get("name"),
+                environment_id=value.get("environment_id"),
+                version=value.get("version"),
+            )
+            if ref:
+                chain.append(ref)
+    if isinstance(metadata.get("origin"), dict):
+        origin = metadata["origin"]
+        ref = _environment_ref(
+            origin.get("owner"),
+            origin.get("name"),
+            environment_id=origin.get("environment_id"),
+            version=origin.get("version"),
+        )
+        if ref:
+            chain.insert(0, ref)
+    if upstream:
+        chain.append(upstream)
+
+    deduped: List[Dict[str, str]] = []
+    seen: set[Tuple[str, str, str, str]] = set()
+    for ref in chain:
+        key = (
+            ref.get("owner", ""),
+            ref.get("name", ""),
+            ref.get("environment_id", ""),
+            ref.get("version", ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ref)
+    return deduped
+
+
+def _environment_push_metadata(
+    existing_metadata: Dict[str, Any],
+    *,
+    environment_id: str,
+    owner: str,
+    name: str,
+    version: Any,
+    pushed_at: str,
+    wheel_sha256: str,
+) -> Dict[str, Any]:
+    old_owner = existing_metadata.get("owner")
+    old_name = existing_metadata.get("name")
+    upstream_changed = bool(existing_metadata and (old_owner != owner or old_name != name))
+    old_upstream = _environment_ref(
+        old_owner,
+        old_name,
+        environment_id=existing_metadata.get("environment_id"),
+        version=existing_metadata.get("version"),
+    )
+    fork_chain = _environment_fork_chain(
+        existing_metadata,
+        old_upstream if upstream_changed else None,
+    )
+    existing_forked_from: Dict[str, str] = {}
+    if isinstance(existing_metadata.get("forked_from"), dict):
+        forked_from = existing_metadata["forked_from"]
+        existing_forked_from = _environment_ref(
+            forked_from.get("owner"),
+            forked_from.get("name"),
+            environment_id=forked_from.get("environment_id"),
+            version=forked_from.get("version"),
+        )
+    stale_fork_keys = {"forked_from", "origin", "fork_chain"}
+    metadata = {
+        key: value for key, value in existing_metadata.items() if key not in stale_fork_keys
+    } | {
+        "environment_id": environment_id,
+        "owner": owner,
+        "name": name,
+        "pushed_at": pushed_at,
+        "wheel_sha256": wheel_sha256,
+    }
+    if version is not None:
+        metadata["version"] = version
+    if fork_chain:
+        metadata["origin"] = fork_chain[0]
+        metadata["fork_chain"] = fork_chain
+    if upstream_changed and old_upstream:
+        metadata["forked_from"] = old_upstream
+    elif existing_forked_from:
+        metadata["forked_from"] = existing_forked_from
+    return metadata
+
+
 def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
     """Determine if a file should be included in the archive based on filtering rules."""
     if not file_path.is_file():
@@ -1411,22 +1526,15 @@ def push(
                             )
                             existing_metadata = {}
 
-                    # Check if upstream (owner/name) changed
-                    old_owner = existing_metadata.get("owner")
-                    old_name = existing_metadata.get("name")
-                    upstream_changed = False
-                    if existing_metadata and (old_owner != owner_name or old_name != env_name):
-                        upstream_changed = True
-
-                    # Merge existing metadata with new push information
-                    env_metadata = {
-                        **existing_metadata,  # Preserve existing fields
-                        "environment_id": env_id,
-                        "owner": owner_name,
-                        "name": env_name,
-                        "pushed_at": datetime.now().isoformat(),
-                        "wheel_sha256": wheel_sha256,
-                    }
+                    env_metadata = _environment_push_metadata(
+                        existing_metadata,
+                        environment_id=env_id,
+                        owner=owner_name,
+                        name=env_name,
+                        version=project_metadata.get("version"),
+                        pushed_at=datetime.now().isoformat(),
+                        wheel_sha256=wheel_sha256,
+                    )
 
                     with open(metadata_path, "w") as f:
                         json.dump(env_metadata, f, indent=2)
@@ -1441,7 +1549,7 @@ def push(
                         console.print(message)
 
                     # Report upstream change if it occurred
-                    if upstream_changed:
+                    if env_metadata.get("forked_from"):
                         upstream_message = Text("Upstream set to ", style="dim")
                         upstream_message.append(f"{owner_name}/{env_name}", style="dim")
                         console.print(upstream_message)
@@ -1676,10 +1784,30 @@ def pull(
             prime_dir = target_dir / ".prime"
             prime_dir.mkdir(exist_ok=True)
             metadata_path = prime_dir / ".env-metadata.json"
+            version_value = (
+                details.get("semantic_version")
+                or details.get("semanticVersion")
+                or details.get("version")
+                or version
+            )
+            source_metadata = details.get("metadata")
+            if not isinstance(source_metadata, dict):
+                source_metadata = {}
+            origin = _environment_ref(
+                owner,
+                name,
+                environment_id=details.get("id"),
+                version=version_value,
+            )
+            fork_chain = _environment_fork_chain(source_metadata, origin)
             env_metadata = {
                 "environment_id": details.get("id"),
                 "owner": owner,
                 "name": name,
+                "version": version_value,
+                "origin": origin,
+                "fork_chain": fork_chain,
+                "pulled_at": datetime.now().isoformat(),
             }
             with open(metadata_path, "w") as f:
                 json.dump(env_metadata, f, indent=2)

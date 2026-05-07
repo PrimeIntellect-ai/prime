@@ -354,9 +354,6 @@ class AgentRuntime:
                 )
                 self._record_codex_turn(result)
             else:
-                prompt_text = (
-                    _agent_prompt_with_lab_context(prompt) if transport == "acp-stdio" else prompt
-                )
                 if transport == "resumable-cli":
                     threading.Thread(
                         target=self._run_resumable_cli_prompt,
@@ -365,6 +362,9 @@ class AgentRuntime:
                         daemon=True,
                     ).start()
                     return
+                prompt_text = (
+                    _agent_prompt_with_lab_context(prompt) if transport == "acp-stdio" else prompt
+                )
                 self._request(
                     "session/prompt",
                     {

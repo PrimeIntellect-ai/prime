@@ -459,9 +459,9 @@ def _environment_ref(
     if not owner or not name:
         return {}
     ref = {"owner": str(owner), "name": str(name)}
-    if environment_id:
+    if environment_id is not None:
         ref["environment_id"] = str(environment_id)
-    if version:
+    if version is not None:
         ref["version"] = str(version)
     return ref
 
@@ -537,10 +537,11 @@ def _environment_push_metadata(
         "environment_id": environment_id,
         "owner": owner,
         "name": name,
-        "version": version,
         "pushed_at": pushed_at,
         "wheel_sha256": wheel_sha256,
     }
+    if version is not None:
+        metadata["version"] = version
     if fork_chain:
         metadata["origin"] = fork_chain[0]
         metadata["fork_chain"] = fork_chain

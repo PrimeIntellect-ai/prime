@@ -20,7 +20,6 @@ import pytest
 import toml
 from prime_cli.api.rl import RLClient
 from prime_cli.commands.env import _environment_fork_chain, _environment_ref
-from prime_cli.commands.evals import _preview_hosted_evaluation
 from prime_cli.commands.lab import app as lab_cli_app
 from prime_cli.commands.rl import RLConfig as HostedRLConfig
 from prime_cli.lab_mcp import _serve_lab_mcp_stdio, lab_mcp_tool_definitions
@@ -35,7 +34,6 @@ from prime_cli.lab_setup import (
     run_lab_setup_service,
     run_lab_sync_service,
 )
-from prime_cli.utils.hosted_eval import HostedEvalConfig
 from prime_lab_app.agent_acp import (
     acp_lab_mcp_servers,
     acp_session_params,
@@ -6777,35 +6775,6 @@ def test_rl_client_preview_run_uses_preview_endpoint() -> None:
 
     assert result == {"ok": True, "warnings": []}
     assert calls == [("/rft/runs/preview", {"model": {"name": "openai/gpt-5-mini"}})]
-
-
-def test_hosted_eval_preview_uses_preview_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, dict[str, Any]]] = []
-
-    class FakeConfig:
-        team_id = "team-123"
-
-    class FakeClient:
-        config = FakeConfig()
-
-        def post(self, path: str, *, json: dict[str, Any]) -> dict[str, Any]:
-            calls.append((path, json))
-            return {"ok": True}
-
-    monkeypatch.setattr("prime_cli.commands.evals.APIClient", FakeClient)
-
-    result = _preview_hosted_evaluation(
-        HostedEvalConfig(
-            environment_id="primeintellect/gsm8k",
-            inference_model="openai/gpt-4.1-mini",
-            num_examples=5,
-            rollouts_per_example=1,
-        )
-    )
-
-    assert result == {"ok": True}
-    assert calls[0][0] == "/hosted-evaluations/preview"
-    assert calls[0][1]["team_id"] == "team-123"
 
 
 def test_lab_platform_preview_reports_success_and_warnings() -> None:

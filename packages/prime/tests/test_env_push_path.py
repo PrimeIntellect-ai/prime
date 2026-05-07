@@ -1,4 +1,8 @@
-from prime_cli.commands.env import _environment_push_metadata, _resolve_push_environment_path
+from prime_cli.commands.env import (
+    _environment_push_metadata,
+    _environment_ref,
+    _resolve_push_environment_path,
+)
 
 
 def test_defaults_to_current_directory_without_env_id(tmp_path, monkeypatch):
@@ -69,6 +73,26 @@ def test_push_metadata_replaces_existing_version() -> None:
     }
 
 
+def test_push_metadata_preserves_existing_version_when_project_version_is_missing() -> None:
+    metadata = _environment_push_metadata(
+        {
+            "environment_id": "env-id",
+            "owner": "research",
+            "name": "math-env",
+            "version": "0.2.0",
+        },
+        environment_id="env-id",
+        owner="research",
+        name="math-env",
+        version=None,
+        pushed_at="2026-05-05T12:15:00",
+        wheel_sha256="def456",
+    )
+
+    assert metadata["environment_id"] == "env-id"
+    assert metadata["version"] == "0.2.0"
+
+
 def test_push_metadata_clears_stale_forked_from_without_new_upstream_change() -> None:
     origin = {
         "environment_id": "old-id",
@@ -102,3 +126,12 @@ def test_push_metadata_clears_stale_forked_from_without_new_upstream_change() ->
     assert metadata["origin"] == origin
     assert metadata["fork_chain"] == [origin]
     assert "forked_from" not in metadata
+
+
+def test_environment_ref_preserves_zero_identifiers() -> None:
+    assert _environment_ref("owner", "env", environment_id=0, version=0) == {
+        "owner": "owner",
+        "name": "env",
+        "environment_id": "0",
+        "version": "0",
+    }

@@ -561,21 +561,6 @@ def _create_hosted_evaluations(
     return created
 
 
-def _preview_hosted_evaluation(
-    config: HostedEvalConfig, environment_ids: Optional[list[str]] = None
-) -> dict[str, Any]:
-    client = APIClient()
-    payload = _build_hosted_evaluation_payload(config)
-
-    if environment_ids is not None:
-        payload["environment_ids"] = environment_ids
-
-    if client.config.team_id:
-        payload["team_id"] = client.config.team_id
-
-    return client.post("/hosted-evaluations/preview", json=payload)
-
-
 def _print_eval_status(eval_data: dict[str, Any]) -> None:
     status_str, status = _parse_eval_status(eval_data)
     color = status.color if status else "white"

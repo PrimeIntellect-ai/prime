@@ -1,7 +1,10 @@
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class Config:
@@ -24,7 +27,12 @@ class Config:
             try:
                 config_data = json.loads(self.config_file.read_text())
                 self.config = config_data if isinstance(config_data, dict) else {}
-            except (json.JSONDecodeError, IOError):
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning(
+                    "Failed to load config file %s: %s. Using empty config.",
+                    self.config_file,
+                    exc,
+                )
                 self.config = {}
         else:
             self.config = {}

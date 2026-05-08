@@ -28,6 +28,22 @@ AgentRole = Literal["user", "assistant", "system"]
 _ASSISTANT_STREAM_KEY = "__assistant_stream__"
 _ASSISTANT_CHUNK_SEEN_KEY = "__assistant_chunk_seen__"
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_INTERNAL_SKILL_LINE_PREFIXES = (
+    "using ",
+    "loading ",
+    "loaded ",
+    "applying ",
+    "activated ",
+    "selected ",
+    "running ",
+    "i'm using ",
+    "i'm loading ",
+    "i'll use ",
+    "i will use ",
+    "i\u2019m using ",
+    "i\u2019m loading ",
+    "i\u2019ll use ",
+)
 
 
 @dataclass(frozen=True)
@@ -732,7 +748,11 @@ class AgentRuntime:
     def _record_acp_tool_event(self, title: str, status: str, text: str) -> None:
         title = title.strip()
         status = status.strip()
-        text = text.strip()
+        text = _clean_agent_output_text(text.strip())
+        if _is_internal_skill_disclosure_line(title):
+            if not text:
+                return
+            title = "Agent update"
         if not title and not text:
             return
         if text and _is_lab_widget_tool_result_text(text):
@@ -813,9 +833,12 @@ class AgentRuntime:
         content: str,
         action: dict[str, Any] | None = None,
     ) -> None:
+        display_content = _dynamic_tool_chat_content(status, content, action)
+        if display_content is None:
+            return
         with self._lock:
             self._finish_latest_streaming_assistant_locked(fallback="")
-            self._messages.append(AgentChatMessage("system", content, status, action or {}))
+            self._messages.append(AgentChatMessage("system", display_content, status, action or {}))
             self._emit_messages_locked()
 
     def _record_codex_turn(self, result: dict[str, Any]) -> None:
@@ -1192,9 +1215,55 @@ def _clean_agent_output_text(text: str) -> str:
     if not text:
         return ""
     cleaned = _ANSI_RE.sub("", text)
+    cleaned = _strip_internal_skill_disclosures(cleaned)
     if cleaned != text and not cleaned.strip():
         return ""
     return cleaned
+
+
+def _strip_internal_skill_disclosures(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return "" if _is_internal_skill_disclosure_line(text) else text
+    return "".join(
+        raw_line for raw_line in lines if not _is_internal_skill_disclosure_line(raw_line)
+    )
+
+
+def _is_internal_skill_disclosure_line(line: str) -> bool:
+    normalized = " ".join(line.strip().lower().split())
+    if "skill" not in normalized:
+        return False
+    return normalized.startswith(_INTERNAL_SKILL_LINE_PREFIXES)
+
+
+def _dynamic_tool_chat_content(
+    status: str,
+    content: str,
+    action: dict[str, Any] | None,
+) -> str | None:
+    if status == "tool":
+        return None
+    if status == "widget":
+        if isinstance(action, dict):
+            title = str(action.get("title") or "").strip()
+            if title:
+                return title
+            payload = action.get("payload")
+            if isinstance(payload, dict):
+                payload_title = str(payload.get("title") or "").strip()
+                if payload_title:
+                    return payload_title
+        return _first_nonempty_line(content) or "Action ready"
+    return content
+
+
+def _first_nonempty_line(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
 
 
 def _is_lab_widget_tool_result_text(text: str) -> bool:

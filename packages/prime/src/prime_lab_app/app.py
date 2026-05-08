@@ -2169,7 +2169,7 @@ def _with_workspace_agent_choice(item: LabItem, workspace: Path, agent: str) -> 
             key=item.key,
             section=item.section,
             title=item.title,
-            subtitle=f"{agent} · refresh templates, skills, docs, and local guidance",
+            subtitle=f"{agent} · refresh Lab assets and local guidance",
             status=item.status,
             status_style=item.status_style,
             metadata=_replace_metadata(

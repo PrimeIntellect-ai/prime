@@ -29,6 +29,7 @@ from .agent_widget_model import (
     build_agent_widget_model,
     widget_payload,
 )
+from .agent_widget_titles import config_picker_summary
 from .config_screen import ConfigBuildResult
 from .launch_runner import ConfigLaunchRunner, extract_training_log_follow_command
 from .palette import PRIMARY, STATUS_ERROR, STATUS_WARNING, SUCCESS
@@ -502,10 +503,14 @@ def _widget_card_heading(model: AgentWidgetModel) -> Group:
 def _widget_card_body(model: AgentWidgetModel) -> Group:
     payload = widget_payload(model.action)
     description = str(payload.get("description") or "").strip()
+    kind = str(payload.get("kind") or "").strip()
+    config_kind = str(payload.get("config_kind") or "").strip()
     table = Table.grid(padding=(0, 2))
     table.add_column(style="bold dim", no_wrap=True)
     table.add_column()
-    if config_path := str(payload.get("config_path") or "").strip():
+    if kind in {"config_editor", "run_launcher"} and config_kind:
+        table.add_row("Pickers", config_picker_summary(config_kind))
+    elif config_path := str(payload.get("config_path") or "").strip():
         table.add_row("Path", _short_path(config_path))
     if description:
         table.add_row("Summary", description)

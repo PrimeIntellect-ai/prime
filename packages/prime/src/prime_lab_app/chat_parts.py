@@ -14,7 +14,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .agent_runtime import AgentChatMessage, AgentConnectionState
-from .agent_widget_titles import clean_widget_title
+from .agent_widget_titles import clean_widget_title, config_picker_summary
 from .palette import PRIMARY, STATUS_ERROR, STATUS_SUCCESS, STATUS_WARNING, SUCCESS
 
 ReferenceKind = Literal["environment", "config", "run", "eval", "file"]
@@ -161,11 +161,15 @@ def _render_widget_turn(message: AgentChatMessage) -> Panel:
     action = payload if isinstance(payload, dict) else message.metadata
     title = clean_widget_title(str(action.get("title") or "Action"))
     description = str(action.get("description") or "").strip()
+    kind = str(action.get("kind") or "").strip()
+    config_kind = str(action.get("config_kind") or "").strip()
 
     body = Table.grid(padding=(0, 2))
     body.add_column(style="bold dim", no_wrap=True)
     body.add_column()
-    if config_path := str(action.get("config_path") or "").strip():
+    if kind in {"config_editor", "run_launcher"} and config_kind:
+        body.add_row("Pickers", config_picker_summary(config_kind))
+    elif config_path := str(action.get("config_path") or "").strip():
         body.add_row("Path", config_path)
     if description:
         body.add_row("Summary", description)

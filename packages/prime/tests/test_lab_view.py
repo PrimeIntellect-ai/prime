@@ -25,7 +25,9 @@ from prime_cli.commands.lab import app as lab_cli_app
 from prime_cli.commands.rl import RLConfig as HostedRLConfig
 from prime_cli.lab_mcp import _serve_lab_mcp_stdio, lab_mcp_tool_definitions
 from prime_cli.lab_setup import (
+    LabDoctorCheck,
     LabDoctorOptions,
+    LabDoctorResult,
     LabSetupOptions,
     LabSetupResult,
     LabSyncOptions,
@@ -158,7 +160,15 @@ from prime_lab_app.platform_preview import preview_lab_config
 from prime_lab_app.readme import readme_links as _readme_links
 from prime_lab_app.readme import readme_markdown as _readme_markdown
 from prime_lab_app.rows import item_badges_text
-from prime_lab_app.setup_screens import AgentSyncScreen, DoctorScreen, SetupScreen, _setup_body
+from prime_lab_app.setup_screens import (
+    AgentSyncScreen,
+    DoctorScreen,
+    SetupScreen,
+    _agent_sync_body,
+    _doctor_result_table,
+    _setup_body,
+    _user_visible_sync_output,
+)
 from prime_lab_app.shell import (
     compact_path,
     configured_workspace_agent,
@@ -2157,6 +2167,82 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
     assert downloads
 
 
+def test_agent_sync_screen_keeps_skill_details_internal(tmp_path: Path) -> None:
+    item = LabItem(
+        key="workspace:sync",
+        section="workspace",
+        title="Sync Lab assets",
+        subtitle="codex",
+        status="sync",
+        status_style="",
+        metadata=(),
+        raw={
+            "type": "agent_sync",
+            "workspace": str(tmp_path),
+            "agent": "codex",
+            "command": "prime lab sync --agent codex",
+        },
+    )
+
+    rendered = _render_renderable(_agent_sync_body(item))
+
+    assert "skill" not in rendered.lower()
+    assert "Lab assets" in rendered
+
+
+def test_agent_sync_output_keeps_skill_paths_internal(tmp_path: Path) -> None:
+    visible = _user_visible_sync_output(
+        "\n".join(
+            [
+                f"Prepared {tmp_path / '.prime' / 'skills'}",
+                f"Prepared {tmp_path / '.agents' / 'skills'}",
+                (
+                    f"Skipped {tmp_path / '.agents' / 'skills' / 'create-environments'} "
+                    "because a user-owned skill already exists"
+                ),
+                f"Warning: removed stale managed skill {tmp_path / '.prime' / 'skills' / 'old'}",
+                "Lab sync completed",
+            ]
+        )
+        + "\n"
+    )
+
+    assert "skill" not in visible.lower()
+    assert str(tmp_path) not in visible
+    assert visible.count("Prepared local Lab assets") == 1
+    assert "Prepared local Lab assets" in visible
+    assert "Skipped user-owned local Lab asset" in visible
+    assert "Warning: removed stale managed Lab asset" in visible
+    assert "Lab sync completed" in visible
+
+
+def test_doctor_screen_keeps_skill_details_internal(tmp_path: Path) -> None:
+    result = LabDoctorResult(
+        exit_code=1,
+        workspace=tmp_path,
+        checks=(
+            LabDoctorCheck(
+                name="Global Lab skill cache",
+                status="WARN",
+                message=f"Missing {tmp_path / '.prime' / 'skills' / '.prime-managed.json'}",
+                remediation="Run prime lab sync.",
+            ),
+            LabDoctorCheck(
+                name="Codex skills",
+                status="PASS",
+                message="1 managed skill link(s) are present.",
+            ),
+        ),
+    )
+
+    rendered = _render_renderable(_doctor_result_table(result))
+
+    assert "skill" not in rendered.lower()
+    assert "Global Lab asset cache" in rendered
+    assert "Missing local Lab asset cache" in rendered
+    assert "Codex assets" in rendered
+
+
 def test_prime_lab_sync_service_preserves_workspace_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2613,6 +2699,14 @@ def test_agent_runtime_suppresses_empty_lab_tool_update_after_widget() -> None:
             {"tool": "choose", "kind": "choice_picker"},
         ),
     )
+
+
+def test_agent_runtime_suppresses_internal_skill_tool_events() -> None:
+    runtime = AgentRuntime()
+
+    runtime._record_acp_tool_event("Using skill create-environments", "running", "")
+
+    assert runtime.messages() == ()
 
 
 def test_agent_widget_choice_body_does_not_repeat_heading(tmp_path: Path) -> None:
@@ -3835,12 +3929,22 @@ def test_agent_runtime_exposes_codex_lab_widget_tools(tmp_path: Path) -> None:
     assert tool_responses[-1]["success"] is True
     assert _wait_for(lambda: messages and messages[-1].status == "widget")
     latest_message = _last_message(messages)
-    assert "Pick a config" in latest_message.content
+    assert latest_message.content == "Pick a config"
+    assert "widget-1" not in latest_message.content
+    assert "Candidates" not in latest_message.content
     assert actions[-1]["type"] == "widget_requested"
     assert actions[-1]["tool"] == "choose"
     assert actions[-1]["kind"] == "choice_picker"
     assert actions[-1]["title"] == "Pick a config"
     runtime.stop()
+
+
+def test_agent_runtime_hides_codex_non_widget_tool_chatter() -> None:
+    runtime = AgentRuntime()
+
+    runtime._record_dynamic_tool_call("tool", "Environment search\n2 result(s)")
+
+    assert runtime.messages() == ()
 
 
 def test_agent_chat_transcript_renders_assistant_markdown() -> None:
@@ -3903,7 +4007,9 @@ def test_agent_chat_transcript_renders_lab_widget_card() -> None:
     assert "alphabet-sort" in rendered
     assert "Eval: alphabet-sort" not in rendered
     assert "Run launcher" not in rendered
-    assert "configs/eval/alphabet-sort.toml" in rendered
+    assert "configs/eval/alphabet-sort.toml" not in rendered
+    assert "Pickers" in rendered
+    assert "Environment, model" in rendered
 
 
 def test_agent_chat_parts_parse_lab_references() -> None:
@@ -4080,6 +4186,21 @@ def test_agent_stream_delta_ignores_lab_widget_ack_payload() -> None:
     )
 
     assert text == ""
+
+
+def test_agent_stream_delta_ignores_internal_skill_disclosures() -> None:
+    text = _extract_stream_delta(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": "Using skill create-environments for local setup.\nReady.",
+            },
+        },
+        {},
+    )
+
+    assert text == "Ready."
 
 
 def test_agent_stream_delta_ignores_final_snapshot_after_streamed_chunks() -> None:
@@ -4983,13 +5104,13 @@ async def test_prime_lab_app_chat_mounts_lab_widget_cards(tmp_path: Path) -> Non
         input_values = {
             input_widget.name: input_widget.value for input_widget in cards[0].query(ClearableInput)
         }
-        assert input_values["envs"] == "primeintellect/alphabet-sort"
+        select_values = {select.name: select.value for select in cards[0].query(Select)}
+        assert select_values["envs"] == "primeintellect/alphabet-sort"
         assert input_values["num_examples"] == "50"
         assert input_values["rollouts_per_example"] == "3"
         assert "max_concurrent" in input_values
         assert input_values["max_concurrent"] == "auto"
         assert input_values["model"] == ""
-        assert not list(cards[0].query(Select))
         button_labels = {str(button.label) for button in app.screen.query(Button)}
         assert "Launch" in button_labels
         assert "Stop" in button_labels
@@ -5757,8 +5878,8 @@ async def test_prime_lab_app_chat_widget_prefills_local_env_and_endpoint_model(
             input_widget.name: input_widget.value for input_widget in card.query(ClearableInput)
         }
         selects = {select.name: select.value for select in card.query(Select)}
-        assert fields["envs"] == "reverse-text"
-        assert "envs" not in selects
+        assert "envs" not in fields
+        assert selects["envs"] == "reverse-text"
         assert selects["model"] == "local/reverse-model"
 
 
@@ -5826,13 +5947,13 @@ async def test_prime_lab_app_chat_widget_prefills_existing_eval_config(
         fields = {
             input_widget.name: input_widget.value for input_widget in card.query(ClearableInput)
         }
-        model_select = card.query_one(Select)
-        assert fields["envs"] == "reverse-text"
+        selects = {select.name: select.value for select in card.query(Select)}
+        assert selects["envs"] == "reverse-text"
         assert fields["num_examples"] == "12"
         assert fields["rollouts_per_example"] == "5"
         assert fields["max_tokens"] == "2048"
         assert fields["max_concurrent"] == "3"
-        assert model_select.value == "existing/model"
+        assert selects["model"] == "existing/model"
 
 
 @pytest.mark.asyncio

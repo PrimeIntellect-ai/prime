@@ -1448,16 +1448,8 @@ def _lab_workspace_search_roots(active_workspace: Path) -> list[Path]:
     return roots
 
 
-def _safe_is_file(path: Path) -> bool:
-    try:
-        return path.is_file()
-    except OSError:
-        return False
-
-
-def _iter_lab_workspace_markers(root: Path) -> list[Path]:
-    workspaces: list[Path] = []
-    skip_dirs = {
+_LAB_BASE_SKIP_DIRS = frozenset(
+    {
         ".git",
         ".mypy_cache",
         ".pytest_cache",
@@ -1468,16 +1460,30 @@ def _iter_lab_workspace_markers(root: Path) -> list[Path]:
         "dist",
         "node_modules",
         "outputs",
-        # macOS user-home dirs that are typically TCC-protected or noisy.
-        "Applications",
-        "Desktop",
-        "Downloads",
-        "Library",
-        "Movies",
-        "Music",
-        "Pictures",
-        "Public",
     }
+)
+
+# Top-level dirs under $HOME that are TCC-protected on macOS — stat'ing files
+# inside them raises PermissionError without Full Disk Access. Only skip these
+# when we are walking $HOME itself, not at arbitrary depths in the tree.
+_HOME_SKIP_DIRS = frozenset(
+    {"Applications", "Desktop", "Downloads", "Library", "Movies", "Pictures"}
+)
+
+
+def _safe_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except PermissionError:
+        return False
+
+
+def _iter_lab_workspace_markers(root: Path) -> list[Path]:
+    workspaces: list[Path] = []
+    try:
+        home = Path.home()
+    except (OSError, RuntimeError):
+        home = None
     max_depth = 3
     for current, dirs, _files in os.walk(root, onerror=lambda _err: None):
         current_path = Path(current)
@@ -1492,10 +1498,13 @@ def _iter_lab_workspace_markers(root: Path) -> list[Path]:
         if depth >= max_depth:
             dirs[:] = []
             continue
+        skip = _LAB_BASE_SKIP_DIRS
+        if home is not None and current_path == home:
+            skip = skip | _HOME_SKIP_DIRS
         dirs[:] = [
             directory
             for directory in dirs
-            if directory not in skip_dirs and not directory.startswith(".")
+            if directory not in skip and not directory.startswith(".")
         ]
     return sorted(workspaces, key=lambda path: path.name.lower())
 

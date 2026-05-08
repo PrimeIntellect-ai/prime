@@ -132,7 +132,12 @@ from prime_lab_app.config_screen import (
     build_config_from_fields,
     launch_command_for_config,
 )
-from prime_lab_app.data import LabDataSource, LabLoadOptions, discover_local_eval_runs
+from prime_lab_app.data import (
+    LabDataSource,
+    LabLoadOptions,
+    _iter_lab_workspace_markers,
+    discover_local_eval_runs,
+)
 from prime_lab_app.environment_screen import (
     AddWorkspaceScreen,
     EnvironmentAction,
@@ -7353,3 +7358,32 @@ def _local_eval_item(
             "metadata": metadata,
         },
     )
+
+
+def test_iter_lab_workspace_markers_skips_unreadable_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Real lab workspace that should still be discovered.
+    good = tmp_path / "good"
+    (good / ".prime").mkdir(parents=True)
+    (good / ".prime" / "lab.json").write_text("{}", encoding="utf-8")
+
+    # A sibling whose .prime/lab.json triggers PermissionError on stat,
+    # mirroring macOS TCC behaviour for protected user dirs.
+    blocked = tmp_path / "blocked"
+    (blocked / ".prime").mkdir(parents=True)
+    blocked_marker = blocked / ".prime" / "lab.json"
+
+    real_is_file = Path.is_file
+
+    def fake_is_file(self: Path) -> bool:
+        if self == blocked_marker:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", fake_is_file)
+
+    result = _iter_lab_workspace_markers(tmp_path)
+
+    assert good in result
+    assert blocked not in result

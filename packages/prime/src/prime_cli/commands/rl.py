@@ -1396,7 +1396,9 @@ def list_configs(
     )
 
 
-def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> None:
+def _list_runs_impl(
+    team: Optional[str], num: int, page: int, output: str, mine: bool = False
+) -> None:
     """Implementation for listing Hosted Training runs."""
     validate_output_format(output, console)
 
@@ -1412,6 +1414,17 @@ def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> No
         team_id = team or config.team_id
 
         all_runs = rl_client.list_runs(team_id=team_id)
+
+        if mine:
+            current_user_id = config.user_id
+            if not current_user_id:
+                console.print(
+                    "[red]Error:[/red] Cannot filter by user - no user_id configured. "
+                    "Run [bold]prime whoami[/bold] to refresh your config."
+                )
+                raise typer.Exit(1)
+            all_runs = [r for r in all_runs if r.user_id == current_user_id]
+
         total_count = len(all_runs)
 
         # Sort by created_at descending and paginate
@@ -1476,12 +1489,15 @@ def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> No
 @app.command("list", rich_help_panel="Commands", epilog=RL_LIST_JSON_HELP)
 def list_runs(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
+    mine: bool = typer.Option(
+        False, "--mine", help="Filter to only your own runs (useful for admin accounts)"
+    ),
     num: int = typer.Option(20, "--num", "-n", help="Items per page"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List your runs (alias: ls)."""
-    _list_runs_impl(team, num, page, output)
+    _list_runs_impl(team, num, page, output, mine=mine)
 
 
 @app.command("get", rich_help_panel="Commands", epilog=RL_RUN_JSON_HELP)

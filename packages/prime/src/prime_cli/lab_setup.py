@@ -39,6 +39,7 @@ VERIFIERS_CONFIG_REF = "main"
 PRIME_RL_REF = "38b524925d09ce917b51e54bd99446b822f0a87f"
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
+LAB_CONFIG_FOLDERS = ("rl", "gepa", "eval", "sft", "opd", "fft")
 
 SUPPORTED_AGENTS = known_agent_names()
 LAB_GITIGNORE_PATTERNS = (
@@ -503,6 +504,7 @@ def _download_repo_directory(
     emit: Emit,
     *,
     force: bool = True,
+    missing_ok: bool = False,
 ) -> None:
     normalized_source_path = _normalize_repo_path(source_path)
     tree_entries = _repo_tree_entries(repo, ref)
@@ -516,6 +518,8 @@ def _download_repo_directory(
         if entry_type == "blob" and path.startswith(prefix)
     ]
     if not source_exists and not file_entries:
+        if missing_ok:
+            return
         raise RuntimeError(f"Expected a directory listing for {repo}/{source_path}.")
     for entry_path, relative_path in sorted(file_entries):
         _download_file(
@@ -587,14 +591,20 @@ def _read_prime_skills_manifest(skills_dir: Path) -> dict[str, Any]:
 
 
 def _copy_setup_configs(workspace: Path, emit: Emit) -> None:
-    _download_repo_directory(
-        VERIFIERS_REPO,
-        VERIFIERS_CONFIG_REF,
-        "configs",
-        workspace / "configs",
-        emit,
-        force=False,
-    )
+    _download_lab_config_folders(workspace / "configs", emit, force=False)
+
+
+def _download_lab_config_folders(dest: Path, emit: Emit, *, force: bool = True) -> None:
+    for folder in LAB_CONFIG_FOLDERS:
+        _download_repo_directory(
+            VERIFIERS_REPO,
+            VERIFIERS_CONFIG_REF,
+            f"configs/{folder}",
+            dest / folder,
+            emit,
+            force=force,
+            missing_ok=True,
+        )
 
 
 def _sync_config_templates(workspace: Path, emit: Emit) -> None:
@@ -605,13 +615,7 @@ def _sync_config_templates(workspace: Path, emit: Emit) -> None:
         dir=str(global_template_root.parent),
     ) as staging_dir:
         staging_template_root = Path(staging_dir) / "templates"
-        _download_repo_directory(
-            VERIFIERS_REPO,
-            VERIFIERS_CONFIG_REF,
-            "configs",
-            staging_template_root / "configs",
-            emit,
-        )
+        _download_lab_config_folders(staging_template_root / "configs", emit)
         _remove_path(global_template_root)
         shutil.move(str(staging_template_root), str(global_template_root))
     emit(f"Refreshed {global_template_root}\n")

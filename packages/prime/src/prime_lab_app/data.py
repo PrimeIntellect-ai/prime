@@ -1448,6 +1448,13 @@ def _lab_workspace_search_roots(active_workspace: Path) -> list[Path]:
     return roots
 
 
+def _safe_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def _iter_lab_workspace_markers(root: Path) -> list[Path]:
     workspaces: list[Path] = []
     skip_dirs = {
@@ -1461,17 +1468,26 @@ def _iter_lab_workspace_markers(root: Path) -> list[Path]:
         "dist",
         "node_modules",
         "outputs",
+        # macOS user-home dirs that are typically TCC-protected or noisy.
+        "Applications",
+        "Desktop",
+        "Downloads",
+        "Library",
+        "Movies",
+        "Music",
+        "Pictures",
+        "Public",
     }
     max_depth = 3
-    for current, dirs, _files in os.walk(root):
+    for current, dirs, _files in os.walk(root, onerror=lambda _err: None):
         current_path = Path(current)
         try:
             depth = len(current_path.relative_to(root).parts)
         except ValueError:
             depth = 0
-        if (current_path / ".prime" / "lab.json").is_file() or (
+        if _safe_is_file(current_path / ".prime" / "lab.json") or _safe_is_file(
             current_path / ".prime" / "lab_setup.json"
-        ).is_file():
+        ):
             workspaces.append(current_path)
         if depth >= max_depth:
             dirs[:] = []
@@ -1488,7 +1504,7 @@ def _read_lab_workspace_metadata(workspace: Path) -> dict[str, Any] | None:
     metadata: dict[str, Any] = {}
     for filename in ("lab_setup.json", "lab.json"):
         path = workspace / ".prime" / filename
-        if not path.is_file():
+        if not _safe_is_file(path):
             continue
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))

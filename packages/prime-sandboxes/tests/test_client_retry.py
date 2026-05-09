@@ -244,6 +244,17 @@ class TestSyncAPIClientRetry:
 
         assert transport.call_count == 1
 
+    def test_get_with_idempotent_post_flag_still_raises_status_error(self):
+        """idempotent_post=True must not bypass status checks for non-POST requests."""
+        transport = StatusThenSucceedTransport(404)
+        client = APIClient(api_key="test-key")
+        client.client = httpx.Client(transport=transport)
+
+        with pytest.raises(APIError, match="HTTP 404"):
+            client.request("GET", "test", idempotent_post=True)
+
+        assert transport.call_count == 1
+
 
 class TestAsyncAPIClientRetry:
     """Tests for async AsyncAPIClient retry behavior."""
@@ -305,6 +316,18 @@ class TestAsyncAPIClientRetry:
 
         assert result == {"success": True}
         assert transport.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_get_with_idempotent_post_flag_still_raises_status_error(self):
+        """Async idempotent_post=True must not bypass status checks for non-POST requests."""
+        transport = AsyncStatusThenSucceedTransport(404)
+        client = AsyncAPIClient(api_key="test-key")
+        client.client = httpx.AsyncClient(transport=transport)
+
+        with pytest.raises(APIError, match="HTTP 404"):
+            await client.request("GET", "test", idempotent_post=True)
+
+        assert transport.call_count == 1
 
 
 class TestCreateSandboxIdempotencyPayload:

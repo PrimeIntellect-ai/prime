@@ -174,16 +174,17 @@ class APIClient:
         url = f"{self.base_url}{endpoint}"
 
         try:
+            is_idempotent_post = method.upper() == "POST" and idempotent_post
             if method.upper() == "POST":
                 request_fn = (
                     self._idempotent_post_request_with_retry
-                    if idempotent_post
+                    if is_idempotent_post
                     else self._post_request_with_retry
                 )
             else:
                 request_fn = self._idempotent_request_with_retry
             response = request_fn(method, url, params=params, json=json, timeout=timeout)
-            if not idempotent_post:
+            if not is_idempotent_post:
                 response.raise_for_status()
 
             result = response.json()
@@ -329,16 +330,17 @@ class AsyncAPIClient:
         url = f"{self.base_url}{endpoint}"
 
         try:
+            is_idempotent_post = method.upper() == "POST" and idempotent_post
             if method.upper() == "POST":
                 request_fn = (
                     self._idempotent_post_request_with_retry
-                    if idempotent_post
+                    if is_idempotent_post
                     else self._post_request_with_retry
                 )
             else:
                 request_fn = self._idempotent_request_with_retry
             response = await request_fn(method, url, params=params, json=json, timeout=timeout)
-            if not idempotent_post:
+            if not is_idempotent_post:
                 response.raise_for_status()
 
             result = response.json()

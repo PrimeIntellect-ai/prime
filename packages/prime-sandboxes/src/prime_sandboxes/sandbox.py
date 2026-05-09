@@ -935,7 +935,7 @@ class SandboxClient:
 
         # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
         bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        self.execute_command(sandbox_id, bg_cmd, timeout=10)
+        self.execute_command(sandbox_id, bg_cmd, timeout=30)
 
         return BackgroundJob(
             job_id=job_id,
@@ -1843,7 +1843,7 @@ class AsyncSandboxClient:
 
         # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
         bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        await self.execute_command(sandbox_id, bg_cmd, timeout=10)
+        await self.execute_command(sandbox_id, bg_cmd, timeout=30)
 
         return BackgroundJob(
             job_id=job_id,

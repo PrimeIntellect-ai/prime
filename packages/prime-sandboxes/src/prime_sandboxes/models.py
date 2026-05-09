@@ -98,6 +98,7 @@ class CreateSandboxRequest(BaseModel):
     advanced_configs: Optional[AdvancedConfigs] = None
     registry_credentials_id: Optional[str] = None
     guaranteed: bool = False
+    idempotency_key: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_gpu_fields(self) -> "CreateSandboxRequest":

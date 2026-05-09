@@ -579,14 +579,17 @@ class SandboxClient:
 
     def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
+        payload = request.model_dump(by_alias=False, exclude_none=True)
         # Auto-populate team_id from config if not specified
-        if request.team_id is None:
-            request.team_id = self.client.config.team_id
+        if request.team_id is None and self.client.config.team_id is not None:
+            payload["team_id"] = self.client.config.team_id
+        payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
 
         response = self.client.request(
             "POST",
             "/sandbox",
-            json=request.model_dump(by_alias=False, exclude_none=True),
+            json=payload,
+            idempotent_post=True,
         )
         return Sandbox.model_validate(response)
 
@@ -1473,13 +1476,16 @@ class AsyncSandboxClient:
 
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
-        if request.team_id is None:
-            request.team_id = self.client.config.team_id
+        payload = request.model_dump(by_alias=False, exclude_none=True)
+        if request.team_id is None and self.client.config.team_id is not None:
+            payload["team_id"] = self.client.config.team_id
+        payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
 
         response = await self.client.request(
             "POST",
             "/sandbox",
-            json=request.model_dump(by_alias=False, exclude_none=True),
+            json=payload,
+            idempotent_post=True,
         )
         return Sandbox.model_validate(response)
 

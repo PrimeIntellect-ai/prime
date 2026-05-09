@@ -1,9 +1,14 @@
 """Tests for retry logic on transient connection errors."""
 
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
 from prime_sandboxes.core.client import APIClient, APIError, AsyncAPIClient
+from prime_sandboxes.models import CreateSandboxRequest
+from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
 
 
 class FailThenSucceedTransport(httpx.BaseTransport):
@@ -29,6 +34,98 @@ class AlwaysFailTransport(httpx.BaseTransport):
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         self.call_count += 1
         raise httpx.RemoteProtocolError("Server disconnected")
+
+
+class ReadErrorThenSucceedTransport(httpx.BaseTransport):
+    """Transport that raises ReadError once then succeeds."""
+
+    def __init__(self):
+        self.call_count = 0
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.call_count += 1
+        if self.call_count == 1:
+            raise httpx.ReadError("Connection broken", request=request)
+        return httpx.Response(200, json={"success": True})
+
+
+class StatusThenSucceedTransport(httpx.BaseTransport):
+    """Transport that returns an HTTP status once then succeeds."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        self.call_count = 0
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.call_count += 1
+        if self.call_count == 1:
+            return httpx.Response(self.status_code, request=request, text="Bad Gateway")
+        return httpx.Response(200, json={"success": True})
+
+
+class AsyncReadErrorThenSucceedTransport(httpx.AsyncBaseTransport):
+    """Async transport that raises ReadError once then succeeds."""
+
+    def __init__(self):
+        self.call_count = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.call_count += 1
+        if self.call_count == 1:
+            raise httpx.ReadError("Connection broken", request=request)
+        return httpx.Response(200, json={"success": True})
+
+
+class AsyncStatusThenSucceedTransport(httpx.AsyncBaseTransport):
+    """Async transport that returns an HTTP status once then succeeds."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        self.call_count = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.call_count += 1
+        if self.call_count == 1:
+            return httpx.Response(self.status_code, request=request, text="Bad Gateway")
+        return httpx.Response(200, json={"success": True})
+
+
+def _sandbox_response(sandbox_id: str = "sandbox-1"):
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "id": sandbox_id,
+        "name": sandbox_id,
+        "docker_image": "python:3.11-slim",
+        "cpu_cores": 1.0,
+        "memory_gb": 2.0,
+        "disk_size_gb": 5.0,
+        "disk_mount_path": "/workspace",
+        "gpu_count": 0,
+        "status": "RUNNING",
+        "timeout_minutes": 60,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+class RecordingCreateAPIClient:
+    def __init__(self):
+        self.config = SimpleNamespace(team_id="team-1")
+        self.calls = []
+
+    def request(self, method: str, path: str, **kwargs):
+        self.calls.append((method, path, kwargs))
+        return _sandbox_response(f"sandbox-{len(self.calls)}")
+
+
+class AsyncRecordingCreateAPIClient:
+    def __init__(self):
+        self.config = SimpleNamespace(team_id="team-1")
+        self.calls = []
+
+    async def request(self, method: str, path: str, **kwargs):
+        self.calls.append((method, path, kwargs))
+        return _sandbox_response(f"sandbox-{len(self.calls)}")
 
 
 class AsyncFailThenSucceedTransport(httpx.AsyncBaseTransport):
@@ -81,6 +178,72 @@ class TestSyncAPIClientRetry:
 
         assert transport.call_count == 3
 
+    def test_get_retries_read_error(self):
+        """GET retries ReadError because it is idempotent."""
+        transport = ReadErrorThenSucceedTransport()
+        client = APIClient(api_key="test-key")
+        client.client = httpx.Client(transport=transport)
+
+        result = client.request("GET", "test")
+
+        assert result == {"success": True}
+        assert transport.call_count == 2
+
+    def test_post_does_not_retry_read_error(self):
+        """POST does not retry ReadError because the server may have committed."""
+        transport = ReadErrorThenSucceedTransport()
+        client = APIClient(api_key="test-key")
+        client.client = httpx.Client(transport=transport)
+
+        with pytest.raises(APIError, match="ReadError"):
+            client.request("POST", "test", json={"name": "sandbox"})
+
+        assert transport.call_count == 1
+
+    def test_idempotent_post_retries_read_error(self):
+        """Idempotency-keyed POST retries ReadError safely."""
+        transport = ReadErrorThenSucceedTransport()
+        client = APIClient(api_key="test-key")
+        client.client = httpx.Client(transport=transport)
+
+        result = client.request(
+            "POST",
+            "test",
+            json={"name": "sandbox", "idempotency_key": "key-1"},
+            idempotent_post=True,
+        )
+
+        assert result == {"success": True}
+        assert transport.call_count == 2
+
+    @pytest.mark.parametrize("status_code", [502, 503, 504])
+    def test_idempotent_post_retries_transient_gateway_statuses(self, status_code):
+        """Idempotency-keyed POST retries transient gateway failures."""
+        transport = StatusThenSucceedTransport(status_code)
+        client = APIClient(api_key="test-key")
+        client.client = httpx.Client(transport=transport)
+
+        result = client.request(
+            "POST",
+            "test",
+            json={"name": "sandbox", "idempotency_key": "key-1"},
+            idempotent_post=True,
+        )
+
+        assert result == {"success": True}
+        assert transport.call_count == 2
+
+    def test_post_does_not_retry_502(self):
+        """Generic POST still does not retry 502."""
+        transport = StatusThenSucceedTransport(502)
+        client = APIClient(api_key="test-key")
+        client.client = httpx.Client(transport=transport)
+
+        with pytest.raises(APIError, match="HTTP 502"):
+            client.request("POST", "test", json={"name": "sandbox"})
+
+        assert transport.call_count == 1
+
 
 class TestAsyncAPIClientRetry:
     """Tests for async AsyncAPIClient retry behavior."""
@@ -108,6 +271,77 @@ class TestAsyncAPIClientRetry:
             await client.request("GET", "test")
 
         assert transport.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_idempotent_post_retries_read_error(self):
+        """Async idempotency-keyed POST retries ReadError safely."""
+        transport = AsyncReadErrorThenSucceedTransport()
+        client = AsyncAPIClient(api_key="test-key")
+        client.client = httpx.AsyncClient(transport=transport)
+
+        result = await client.request(
+            "POST",
+            "test",
+            json={"name": "sandbox", "idempotency_key": "key-1"},
+            idempotent_post=True,
+        )
+
+        assert result == {"success": True}
+        assert transport.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_idempotent_post_retries_502(self):
+        """Async idempotency-keyed POST retries transient gateway failures."""
+        transport = AsyncStatusThenSucceedTransport(502)
+        client = AsyncAPIClient(api_key="test-key")
+        client.client = httpx.AsyncClient(transport=transport)
+
+        result = await client.request(
+            "POST",
+            "test",
+            json={"name": "sandbox", "idempotency_key": "key-1"},
+            idempotent_post=True,
+        )
+
+        assert result == {"success": True}
+        assert transport.call_count == 2
+
+
+class TestCreateSandboxIdempotencyPayload:
+    def test_sync_create_does_not_reuse_generated_idempotency_key_on_request_reuse(self):
+        client = SandboxClient(APIClient(api_key="test-key"))
+        recording = RecordingCreateAPIClient()
+        client.client = recording
+        request = CreateSandboxRequest(name="sandbox", docker_image="python:3.11-slim")
+
+        client.create(request)
+        client.create(request)
+
+        first_payload = recording.calls[0][2]["json"]
+        second_payload = recording.calls[1][2]["json"]
+        assert first_payload["idempotency_key"] != second_payload["idempotency_key"]
+        assert first_payload["team_id"] == "team-1"
+        assert second_payload["team_id"] == "team-1"
+        assert request.idempotency_key is None
+        assert request.team_id is None
+
+    @pytest.mark.asyncio
+    async def test_async_create_does_not_reuse_generated_idempotency_key_on_request_reuse(self):
+        client = AsyncSandboxClient(api_key="test-key")
+        recording = AsyncRecordingCreateAPIClient()
+        client.client = recording
+        request = CreateSandboxRequest(name="sandbox", docker_image="python:3.11-slim")
+
+        await client.create(request)
+        await client.create(request)
+
+        first_payload = recording.calls[0][2]["json"]
+        second_payload = recording.calls[1][2]["json"]
+        assert first_payload["idempotency_key"] != second_payload["idempotency_key"]
+        assert first_payload["team_id"] == "team-1"
+        assert second_payload["team_id"] == "team-1"
+        assert request.idempotency_key is None
+        assert request.team_id is None
 
 
 class TestSyncGatewayRetry:

@@ -329,6 +329,46 @@ def test_lab_setup_uses_existing_verifiers_sources(
         url.endswith(f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_REF}/assets/lab/AGENTS.md")
         for url in fake_lab_asset_downloads
     )
+    assert not any("/configs/endpoints.toml" in url for url in fake_lab_asset_downloads)
+    assert not any("/configs/local/" in url for url in fake_lab_asset_downloads)
+    assert not any("/configs/zero3.yaml" in url for url in fake_lab_asset_downloads)
+
+
+def test_lab_config_downloader_targets_known_config_folders(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    calls: list[tuple[str, Path, bool]] = []
+
+    def fake_download_repo_directory(
+        _repo: str,
+        _ref: str,
+        source_path: str,
+        dest: Path,
+        _emit: Any,
+        *,
+        force: bool = True,
+        missing_ok: bool = False,
+    ) -> None:
+        assert missing_ok is True
+        calls.append((source_path, dest, force))
+
+    monkeypatch.setattr(lab_setup, "_download_repo_directory", fake_download_repo_directory)
+
+    lab_setup._download_lab_config_folders(
+        tmp_path / "configs",
+        emit=lambda _text: None,
+        force=False,
+    )
+
+    assert calls == [
+        ("configs/rl", tmp_path / "configs" / "rl", False),
+        ("configs/gepa", tmp_path / "configs" / "gepa", False),
+        ("configs/eval", tmp_path / "configs" / "eval", False),
+        ("configs/sft", tmp_path / "configs" / "sft", False),
+        ("configs/opd", tmp_path / "configs" / "opd", False),
+        ("configs/fft", tmp_path / "configs" / "fft", False),
+    ]
 
 
 def test_lab_setup_downloads_retry_transient_failures(monkeypatch: Any) -> None:

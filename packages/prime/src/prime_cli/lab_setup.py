@@ -39,6 +39,7 @@ VERIFIERS_CONFIG_REF = "main"
 PRIME_RL_REF = "38b524925d09ce917b51e54bd99446b822f0a87f"
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
+LAB_CONFIG_FOLDERS = ("rl", "gepa", "eval", "sft", "opd", "fft")
 
 SUPPORTED_AGENTS = known_agent_names()
 LAB_GITIGNORE_PATTERNS = (
@@ -56,7 +57,6 @@ LAB_GITIGNORE_PATTERNS = (
 )
 PRIME_SKILLS_MANIFEST = ".prime-managed.json"
 WORKSPACE_SKILLS_DIR = Path(".prime") / "skills"
-LAB_CONFIG_FOLDERS = ("rl", "gepa", "eval", "sft", "opd", "fft")
 DeprecatedConfigField = tuple[tuple[str, ...], str]
 RepoTreeEntry = tuple[str, str]
 DEPRECATED_CONFIG_FIELDS: tuple[DeprecatedConfigField, ...] = (

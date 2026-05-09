@@ -132,7 +132,13 @@ from prime_lab_app.config_screen import (
     build_config_from_fields,
     launch_command_for_config,
 )
-from prime_lab_app.data import LabDataSource, LabLoadOptions, discover_local_eval_runs
+from prime_lab_app.data import (
+    LabDataSource,
+    LabLoadOptions,
+    _iter_lab_workspace_markers,
+    discover_local_eval_runs,
+)
+from prime_lab_app.environment_records import local_environment_items
 from prime_lab_app.environment_screen import (
     AddWorkspaceScreen,
     EnvironmentAction,
@@ -1691,6 +1697,49 @@ def test_discover_local_eval_runs(tmp_path: Path) -> None:
             "metadata": {"avg_reward": 0.5, "num_examples": 1, "rollouts_per_example": 2},
         }
     ]
+
+
+def test_discover_local_eval_runs_skips_unreadable_output_dirs(tmp_path: Path) -> None:
+    blocked = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4"
+    blocked.mkdir(parents=True)
+    blocked.chmod(0)
+    try:
+        if os.access(blocked, os.R_OK | os.X_OK):
+            pytest.skip("filesystem permissions do not block the current test user")
+        assert discover_local_eval_runs(tmp_path) == []
+    finally:
+        blocked.chmod(0o700)
+
+
+def test_iter_lab_workspace_markers_skips_unreadable_siblings(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / ".prime").mkdir(parents=True)
+    (workspace / ".prime" / "lab.json").write_text("{}", encoding="utf-8")
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    blocked.chmod(0)
+    try:
+        if os.access(blocked, os.R_OK | os.X_OK):
+            pytest.skip("filesystem permissions do not block the current test user")
+        assert _iter_lab_workspace_markers(tmp_path) == [workspace]
+    finally:
+        blocked.chmod(0o700)
+
+
+def test_local_environment_items_tolerates_unreadable_environment_dirs(tmp_path: Path) -> None:
+    blocked = tmp_path / "environments" / "blocked-env"
+    blocked.mkdir(parents=True)
+    blocked.chmod(0)
+    try:
+        if os.access(blocked, os.R_OK | os.X_OK):
+            pytest.skip("filesystem permissions do not block the current test user")
+        items = local_environment_items(tmp_path, "./environments", 10, section="environments")
+    finally:
+        blocked.chmod(0o700)
+
+    assert len(items) == 1
+    assert items[0].title == "blocked-env"
+    assert items[0].raw["local"]["files"] == []
 
 
 def test_local_eval_lazy_records_and_overview_stats(tmp_path: Path) -> None:

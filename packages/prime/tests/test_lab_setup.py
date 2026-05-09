@@ -215,7 +215,9 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     assert not (home / ".pi" / "agent" / "skills").exists()
     assert (tmp_path / "configs" / "rl" / "gsm8k.toml").is_file()
     assert (tmp_path / "configs" / "eval" / "debug.toml").is_file()
-    assert (tmp_path / "configs" / "zero3.yaml").is_file()
+    assert not (tmp_path / "configs" / "zero3.yaml").exists()
+    assert not (tmp_path / "configs" / "endpoints.toml").exists()
+    assert not (tmp_path / "configs" / "local").exists()
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
     assert (tmp_path / ".prime" / "lab" / "docs" / "index.md").is_file()
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
@@ -223,6 +225,8 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     assert (tmp_path / ".pi" / "extensions" / "prime-lab" / "index.ts").is_file()
     assert not any("pi-acp" in line for line in emitted)
     assert any("Pi Coding Agent requires pi" in line for line in emitted)
+    assert not any(line.startswith("Downloaded ") for line in emitted)
+    assert not any(".skills-staging-" in line or ".templates-staging-" in line for line in emitted)
 
 
 def test_lab_setup_refreshes_existing_workspace_guidance(
@@ -310,6 +314,16 @@ def test_lab_setup_uses_existing_verifiers_sources(
             f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_CONFIG_REF}/configs/rl/gsm8k.toml"
         )
         for url in fake_lab_asset_downloads
+    )
+    assert (
+        sum(
+            url.endswith(
+                f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_CONFIG_REF}"
+                "/configs/rl/gsm8k.toml"
+            )
+            for url in fake_lab_asset_downloads
+        )
+        == 1
     )
     assert any(
         url.endswith(f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_REF}/assets/lab/AGENTS.md")
@@ -509,7 +523,9 @@ def test_lab_sync_fully_refreshes_global_and_workspace_config_templates(
         assert not (root / "configs" / "old.toml").exists()
         assert (root / "configs" / "eval" / "debug.toml").is_file()
         assert (root / "configs" / "eval" / "wordle.toml").is_file()
-        assert (root / "configs" / "zero3.yaml").is_file()
+        assert not (root / "configs" / "zero3.yaml").exists()
+        assert not (root / "configs" / "endpoints.toml").exists()
+        assert not (root / "configs" / "local").exists()
 
 
 def test_lab_doctor_reports_missing_selected_agent_guidance(

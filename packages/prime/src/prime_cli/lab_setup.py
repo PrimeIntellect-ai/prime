@@ -56,6 +56,7 @@ LAB_GITIGNORE_PATTERNS = (
 )
 PRIME_SKILLS_MANIFEST = ".prime-managed.json"
 WORKSPACE_SKILLS_DIR = Path(".prime") / "skills"
+LAB_CONFIG_FOLDERS = ("rl", "gepa", "eval", "sft", "opd", "fft")
 DeprecatedConfigField = tuple[tuple[str, ...], str]
 RepoTreeEntry = tuple[str, str]
 DEPRECATED_CONFIG_FIELDS: tuple[DeprecatedConfigField, ...] = (
@@ -383,8 +384,8 @@ def _run_lab_setup_steps(
         _install_prime_rl(workspace, emit, runner)
         _install_environments_to_prime_rl(workspace, emit, runner)
 
-    _copy_setup_configs(workspace, emit)
     _sync_config_templates(workspace, emit)
+    _copy_setup_configs(workspace, emit)
     _write_lab_docs_index(workspace)
     emit("Lab setup completed\n")
 
@@ -420,14 +421,16 @@ def _run_lab_sync_steps(
 
 
 def _sync_workspace_guidance(workspace: Path, emit: Emit, *, force: bool = False) -> None:
-    _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", emit, force=force)
-    _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=force)
+    download_emit = _download_status_emit(emit, verbose=False)
+    _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", download_emit, force=force)
+    _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", download_emit, force=force)
     _download_file(
         ENVS_AGENTS_MD_SRC,
         workspace / "environments" / "AGENTS.md",
-        emit,
+        download_emit,
         force=force,
     )
+    emit("Refreshed workspace guidance\n")
 
 
 def _sync_prime_skills(emit: Emit) -> tuple[str, ...]:
@@ -466,6 +469,7 @@ def _sync_prime_skills(emit: Emit) -> tuple[str, ...]:
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        emit(f"Refreshed {skills_dir}\n")
     return managed_skill_names
 
 
@@ -503,6 +507,8 @@ def _download_repo_directory(
     emit: Emit,
     *,
     force: bool = True,
+    missing_ok: bool = False,
+    emit_files: bool = False,
 ) -> None:
     normalized_source_path = _normalize_repo_path(source_path)
     tree_entries = _repo_tree_entries(repo, ref)
@@ -516,12 +522,15 @@ def _download_repo_directory(
         if entry_type == "blob" and path.startswith(prefix)
     ]
     if not source_exists and not file_entries:
+        if missing_ok:
+            return
         raise RuntimeError(f"Expected a directory listing for {repo}/{source_path}.")
+    download_emit = _download_status_emit(emit, verbose=emit_files)
     for entry_path, relative_path in sorted(file_entries):
         _download_file(
             _repo_raw_url(repo, ref, entry_path),
             dest / relative_path,
-            emit,
+            download_emit,
             force=force,
         )
 
@@ -587,14 +596,12 @@ def _read_prime_skills_manifest(skills_dir: Path) -> dict[str, Any]:
 
 
 def _copy_setup_configs(workspace: Path, emit: Emit) -> None:
-    _download_repo_directory(
-        VERIFIERS_REPO,
-        VERIFIERS_CONFIG_REF,
-        "configs",
-        workspace / "configs",
-        emit,
-        force=False,
-    )
+    template_configs = _global_lab_templates_dir() / "configs"
+    if template_configs.is_dir():
+        _copy_lab_config_folders(template_configs, workspace / "configs")
+    else:
+        _download_lab_config_folders(workspace / "configs", emit, force=False)
+    emit(f"Prepared {workspace / 'configs'}\n")
 
 
 def _sync_config_templates(workspace: Path, emit: Emit) -> None:
@@ -605,13 +612,7 @@ def _sync_config_templates(workspace: Path, emit: Emit) -> None:
         dir=str(global_template_root.parent),
     ) as staging_dir:
         staging_template_root = Path(staging_dir) / "templates"
-        _download_repo_directory(
-            VERIFIERS_REPO,
-            VERIFIERS_CONFIG_REF,
-            "configs",
-            staging_template_root / "configs",
-            emit,
-        )
+        _download_lab_config_folders(staging_template_root / "configs", emit, force=True)
         _remove_path(global_template_root)
         shutil.move(str(staging_template_root), str(global_template_root))
     emit(f"Refreshed {global_template_root}\n")
@@ -623,6 +624,33 @@ def _sync_config_templates(workspace: Path, emit: Emit) -> None:
     template_root.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(global_template_root, template_root)
     emit(f"Refreshed {template_root}\n")
+
+
+def _download_lab_config_folders(dest: Path, emit: Emit, *, force: bool) -> None:
+    for folder in LAB_CONFIG_FOLDERS:
+        _download_repo_directory(
+            VERIFIERS_REPO,
+            VERIFIERS_CONFIG_REF,
+            f"configs/{folder}",
+            dest / folder,
+            emit,
+            force=force,
+            missing_ok=True,
+        )
+
+
+def _copy_lab_config_folders(source_configs: Path, dest_configs: Path) -> None:
+    for folder in LAB_CONFIG_FOLDERS:
+        source_folder = source_configs / folder
+        if not source_folder.is_dir():
+            continue
+        for source_path in sorted(path for path in source_folder.rglob("*") if path.is_file()):
+            relative_path = source_path.relative_to(source_configs)
+            dest_path = dest_configs / relative_path
+            if dest_path.exists():
+                continue
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, dest_path)
 
 
 def _global_lab_templates_dir() -> Path:
@@ -1436,6 +1464,17 @@ def _download_file(url: str, dest: Path, emit: Emit, *, force: bool = False) -> 
     content = _read_url(url, emit=emit)
     dest.write_bytes(content)
     emit(f"Downloaded {dest}\n")
+
+
+def _download_status_emit(emit: Emit, *, verbose: bool) -> Emit:
+    if verbose:
+        return emit
+
+    def filtered(text: str) -> None:
+        if text.startswith("Download failed"):
+            emit(text)
+
+    return filtered
 
 
 def _download_json(url: str) -> Any:

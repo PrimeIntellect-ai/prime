@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
@@ -19,6 +20,7 @@ from prime_cli.lab_setup import (
     run_lab_setup_service,
     run_lab_sync_service,
 )
+from rich.console import Console
 
 AGENT_WHICH = "prime_lab_app.agent_capabilities.shutil.which"
 
@@ -118,11 +120,18 @@ def _is_pinned_ref(ref: str) -> bool:
     return len(ref) == 40 and all(char in "0123456789abcdef" for char in ref)
 
 
+def _render_emitted(items: list[Any]) -> str:
+    console = Console(file=StringIO(), record=True, width=120)
+    for item in items:
+        lab_setup._emit_to_console(console, item)
+    return console.export_text()
+
+
 def test_lab_setup_parses_selected_agents_and_all() -> None:
-    selected = parse_lab_setup_args(["--agent", "factory-droid,amp-code,claude-code"])
+    selected = parse_lab_setup_args(["--agent", "factory-droid,amp-code,claude-code,letta-code"])
     all_agents = parse_lab_sync_args(["--agents", "all"])
 
-    assert selected.agents == ("droid", "amp", "claude")
+    assert selected.agents == ("droid", "amp", "claude", "letta")
     assert all_agents.agents == known_agent_names()
 
 
@@ -130,6 +139,17 @@ def test_lab_setup_no_interactive_uses_codex_default() -> None:
     options = parse_lab_setup_args(["--no-interactive"])
 
     assert options.agents == ("codex",)
+
+
+def test_lab_setup_help_lists_supported_agents(capsys: Any) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        parse_lab_setup_args(["--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "Supported:" in output
+    for agent in (*known_agent_names(), "all"):
+        assert agent in output
 
 
 def test_lab_setup_prompts_for_agent_when_interactive(monkeypatch: Any) -> None:
@@ -188,7 +208,7 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(AGENT_WHICH, lambda _command: None)
     commands: list[list[str]] = []
-    emitted: list[str] = []
+    emitted: list[Any] = []
 
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("pi",)),
@@ -221,8 +241,45 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert "/outputs/" in gitignore.splitlines()
     assert (tmp_path / ".pi" / "extensions" / "prime-lab" / "index.ts").is_file()
-    assert not any("pi-acp" in line for line in emitted)
-    assert any("Pi Coding Agent requires pi" in line for line in emitted)
+    output = _render_emitted(emitted)
+    assert "pi-acp" not in output
+    assert "Pi Coding Agent requires pi" in output
+
+
+def test_lab_setup_service_emits_post_setup_call_to_action(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    emitted: list[Any] = []
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    output = _render_emitted(emitted)
+    assert result.exit_code == 0
+    assert "get started" in output
+    assert "idea -> environment -> eval -> training" in output
+    assert "ask codex" in output
+    assert "I want to train a model for <my task domain>" in output
+    assert "prime env init my-env" in output
+    assert "prime eval run my-env -m openai/gpt-5-nano -n 5" in output
+    assert "prime rl run configs/rl/qwen-3-5.toml" in output
+    assert "prime gepa run my-env -m openai/gpt-5-nano" in output
+
+
+def test_post_setup_call_to_action_uses_prime_rl_command_when_requested() -> None:
+    output = _render_emitted(
+        [lab_setup._post_setup_call_to_action(LabSetupOptions(prime_rl=True, agents=("pi",)))]
+    )
+
+    assert "ask pi" in output
+    assert "uv run prime-rl configs/prime-rl/wiki-search.toml" in output
+    assert "prime rl run configs/rl/qwen-3-5.toml" not in output
 
 
 def test_lab_setup_refreshes_existing_workspace_guidance(
@@ -239,7 +296,7 @@ def test_lab_setup_refreshes_existing_workspace_guidance(
     for path, text in existing_files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-    emitted: list[str] = []
+    emitted: list[Any] = []
 
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=False, agents=("codex",)),
@@ -250,7 +307,7 @@ def test_lab_setup_refreshes_existing_workspace_guidance(
     assert result.exit_code == 0
     for path in existing_files:
         assert path.read_text(encoding="utf-8").startswith("downloaded from ")
-    assert not any("already exists" in line for line in emitted)
+    assert "already exists" not in _render_emitted(emitted)
 
 
 def test_lab_sync_refreshes_existing_workspace_guidance(
@@ -768,3 +825,19 @@ def test_lab_setup_accepts_amp_and_factory_aliases(tmp_path: Path, monkeypatch: 
     assert metadata["choices"]["agents"] == ["droid", "amp"]
     assert (tmp_path / ".factory" / "skills" / "create-environments").exists()
     assert (tmp_path / ".agents" / "skills" / "create-environments").exists()
+
+
+def test_lab_setup_supports_letta_project_skills(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/letta")
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("letta",)),
+        workspace=tmp_path,
+        emit=lambda _text: None,
+    )
+
+    metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
+    assert result.exit_code == 0
+    assert metadata["choices"]["agents"] == ["letta"]
+    assert (tmp_path / ".agents" / "skills" / "create-environments" / "SKILL.md").is_file()

@@ -16,7 +16,7 @@ from prime_cli.lab_setup import (
     run_lab_setup_service,
     run_lab_sync_service,
 )
-from rich.console import Group
+from rich.console import Group, RenderableType
 from rich.table import Table
 from rich.text import Text
 from textual import on, work
@@ -103,6 +103,7 @@ class SetupScreen(Screen[None]):
         self._default_agent = str(self._agent_options[0][1])
         self._command_running = False
         self._output = ""
+        self._output_renderables: list[RenderableType] = []
 
     def compose(self) -> ComposeResult:
         yield Static(_setup_header(self._item), id="env-header", classes="page-header")
@@ -143,6 +144,7 @@ class SetupScreen(Screen[None]):
         workspace = Path(str(self._item.raw.get("workspace") or self._item.subtitle)).resolve()
         self._command_running = True
         self._output = ""
+        self._output_renderables = []
         self._set_setup_buttons_disabled(True)
         self.query_one("#setup-status", Static).update("Running setup ...")
         self.query_one("#setup-output", Static).update("")
@@ -157,9 +159,17 @@ class SetupScreen(Screen[None]):
         )
         self.app.call_from_thread(self._finish_setup, result)
 
-    def _append_setup_output(self, text: str) -> None:
-        self._output = (self._output + text)[-50000:]
-        self.query_one("#setup-output", Static).update(Text(self._output))
+    def _append_setup_output(self, item: str | RenderableType) -> None:
+        if isinstance(item, str):
+            self._output = (self._output + item)[-50000:]
+        else:
+            self._output_renderables.append(item)
+
+        renderables: list[RenderableType] = []
+        if self._output:
+            renderables.append(Text(self._output))
+        renderables.extend(self._output_renderables)
+        self.query_one("#setup-output", Static).update(Group(*renderables))
 
     def _finish_setup(self, result: LabSetupResult) -> None:
         self._command_running = False

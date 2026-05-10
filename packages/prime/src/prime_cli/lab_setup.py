@@ -400,6 +400,9 @@ def _run_lab_sync_steps(
     (workspace / "environments").mkdir(exist_ok=True)
     emit(f"Syncing Lab assets in {workspace}\n")
     agents = _resolve_sync_agents(workspace, options.agents, no_agent=options.no_agent)
+    guidance_agents = agents
+    if not guidance_agents and options.no_agent:
+        guidance_agents = _workspace_agents_from_metadata(workspace)
 
     managed_skill_names = _sync_prime_skills(emit)
     _prepare_workspace_skill_dir(workspace, managed_skill_names, emit)
@@ -413,8 +416,8 @@ def _run_lab_sync_steps(
     _sync_config_templates(workspace, emit)
 
     if not options.skip_docs:
-        _sync_workspace_guidance(workspace, agents, emit, force=True)
-        _write_lab_docs_index(workspace, agents)
+        _sync_workspace_guidance(workspace, guidance_agents, emit, force=True)
+        _write_lab_docs_index(workspace, guidance_agents)
 
     emit("Lab sync completed\n")
 

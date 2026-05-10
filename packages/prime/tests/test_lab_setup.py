@@ -315,6 +315,42 @@ def test_lab_sync_refreshes_existing_workspace_guidance(
     assert not any("already exists" in line for line in emitted)
 
 
+def test_lab_sync_no_agent_keeps_stored_claude_guidance(
+    tmp_path: Path,
+    monkeypatch: Any,
+    fake_lab_asset_downloads: list[str],
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        json.dumps({"choices": {"agents": ["claude"], "primary_agent": "claude"}}),
+        encoding="utf-8",
+    )
+    for path in (
+        tmp_path / "AGENTS.md",
+        tmp_path / "CLAUDE.md",
+        tmp_path / "environments" / "AGENTS.md",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("stale guidance\n", encoding="utf-8")
+    emitted: list[str] = []
+
+    result = run_lab_sync_service(
+        LabSyncOptions(skip_docs=False, no_agent=True),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    assert result.exit_code == 0
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8").startswith("downloaded from ")
+    docs_index = (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(encoding="utf-8")
+    assert "- `CLAUDE.md`" in docs_index
+    assert any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
+    assert not (tmp_path / ".claude" / "skills").exists()
+    assert any("Skipped coding-agent skill roots (--no-agent)" in line for line in emitted)
+
+
 def test_lab_setup_uses_existing_verifiers_sources(
     tmp_path: Path,
     monkeypatch: Any,

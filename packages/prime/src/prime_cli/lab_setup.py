@@ -377,7 +377,7 @@ def _run_lab_setup_steps(
     _sync_lab_metadata(workspace, options.agents, setup_source="prime lab setup")
 
     if not options.skip_agents_md:
-        _sync_workspace_guidance(workspace, emit, force=True)
+        _sync_workspace_guidance(workspace, options.agents, emit, force=True)
 
     if options.prime_rl:
         _install_prime_rl(workspace, emit, runner)
@@ -385,7 +385,7 @@ def _run_lab_setup_steps(
 
     _copy_setup_configs(workspace, emit)
     _sync_config_templates(workspace, emit)
-    _write_lab_docs_index(workspace)
+    _write_lab_docs_index(workspace, options.agents)
     emit("Lab setup completed\n")
 
 
@@ -413,15 +413,22 @@ def _run_lab_sync_steps(
     _sync_config_templates(workspace, emit)
 
     if not options.skip_docs:
-        _sync_workspace_guidance(workspace, emit, force=True)
-        _write_lab_docs_index(workspace)
+        _sync_workspace_guidance(workspace, agents, emit, force=True)
+        _write_lab_docs_index(workspace, agents)
 
     emit("Lab sync completed\n")
 
 
-def _sync_workspace_guidance(workspace: Path, emit: Emit, *, force: bool = False) -> None:
+def _sync_workspace_guidance(
+    workspace: Path,
+    agents: tuple[str, ...],
+    emit: Emit,
+    *,
+    force: bool = False,
+) -> None:
     _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", emit, force=force)
-    _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=force)
+    if "claude" in agents:
+        _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=force)
     _download_file(
         ENVS_AGENTS_MD_SRC,
         workspace / "environments" / "AGENTS.md",
@@ -1341,9 +1348,15 @@ def _install_environments_to_prime_rl(workspace: Path, emit: Emit, runner: Runne
         emit("Local environment install into prime-rl failed; continuing\n")
 
 
-def _write_lab_docs_index(workspace: Path) -> None:
+def _write_lab_docs_index(workspace: Path, agents: tuple[str, ...]) -> None:
     docs_dir = workspace / ".prime" / "lab" / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
+    guidance_files = [
+        "- `AGENTS.md`",
+        "- `environments/AGENTS.md`",
+    ]
+    if "claude" in agents:
+        guidance_files.insert(1, "- `CLAUDE.md`")
     index = docs_dir / "index.md"
     index.write_text(
         "\n".join(
@@ -1354,9 +1367,7 @@ def _write_lab_docs_index(workspace: Path) -> None:
                 "",
                 "## Local workspace guidance",
                 "",
-                "- `AGENTS.md`",
-                "- `CLAUDE.md`",
-                "- `environments/AGENTS.md`",
+                *guidance_files,
                 "- `~/.prime/skills/*/SKILL.md`",
                 "- `.prime/lab/templates/configs/**`",
                 "",

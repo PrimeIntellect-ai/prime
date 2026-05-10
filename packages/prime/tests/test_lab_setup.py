@@ -228,6 +228,7 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
 def test_lab_setup_refreshes_existing_workspace_guidance(
     tmp_path: Path,
     monkeypatch: Any,
+    fake_lab_asset_downloads: list[str],
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
@@ -248,14 +249,42 @@ def test_lab_setup_refreshes_existing_workspace_guidance(
     )
 
     assert result.exit_code == 0
-    for path in existing_files:
+    for path in (
+        tmp_path / "AGENTS.md",
+        tmp_path / "environments" / "AGENTS.md",
+    ):
         assert path.read_text(encoding="utf-8").startswith("downloaded from ")
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == "workspace claude\n"
+    docs_index = (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(encoding="utf-8")
+    assert "- `CLAUDE.md`" not in docs_index
+    assert not any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
     assert not any("already exists" in line for line in emitted)
+
+
+def test_lab_setup_refreshes_claude_guidance_for_claude_agent(
+    tmp_path: Path,
+    monkeypatch: Any,
+    fake_lab_asset_downloads: list[str],
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=False, agents=("claude",)),
+        workspace=tmp_path,
+    )
+
+    assert result.exit_code == 0
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8").startswith("downloaded from ")
+    docs_index = (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(encoding="utf-8")
+    assert "- `CLAUDE.md`" in docs_index
+    assert any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
 
 
 def test_lab_sync_refreshes_existing_workspace_guidance(
     tmp_path: Path,
     monkeypatch: Any,
+    fake_lab_asset_downloads: list[str],
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
@@ -276,8 +305,13 @@ def test_lab_sync_refreshes_existing_workspace_guidance(
     )
 
     assert result.exit_code == 0
-    for path in existing_files:
+    for path in (
+        tmp_path / "AGENTS.md",
+        tmp_path / "environments" / "AGENTS.md",
+    ):
         assert path.read_text(encoding="utf-8").startswith("downloaded from ")
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == "stale guidance\n"
+    assert not any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
     assert not any("already exists" in line for line in emitted)
 
 

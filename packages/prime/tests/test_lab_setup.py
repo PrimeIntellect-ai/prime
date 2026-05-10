@@ -315,6 +315,39 @@ def test_lab_sync_refreshes_existing_workspace_guidance(
     assert not any("already exists" in line for line in emitted)
 
 
+def test_lab_sync_without_configured_agent_refreshes_shared_assets(
+    tmp_path: Path,
+    monkeypatch: Any,
+    fake_lab_asset_downloads: list[str],
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    emitted: list[str] = []
+
+    result = run_lab_sync_service(
+        LabSyncOptions(skip_docs=False),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    assert result.exit_code == 0
+    assert (tmp_path / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
+    assert (tmp_path / "AGENTS.md").read_text(encoding="utf-8").startswith("downloaded from ")
+    assert (
+        (tmp_path / "environments" / "AGENTS.md")
+        .read_text(encoding="utf-8")
+        .startswith("downloaded from ")
+    )
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert "- `CLAUDE.md`" not in (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(
+        encoding="utf-8"
+    )
+    assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
+    assert not (tmp_path / ".agents" / "skills").exists()
+    assert not any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
+    assert any("no configured agent; pass --agent to configure one" in line for line in emitted)
+
+
 def test_lab_sync_no_agent_keeps_stored_claude_guidance(
     tmp_path: Path,
     monkeypatch: Any,

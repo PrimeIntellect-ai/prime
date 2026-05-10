@@ -412,7 +412,12 @@ def _run_lab_sync_steps(
         _prepare_agent_native_surfaces(workspace, agents, emit)
         _sync_lab_metadata(workspace, agents, setup_source="prime lab sync")
     else:
-        emit("Skipped coding-agent skill roots (--no-agent)\n")
+        reason = (
+            "--no-agent"
+            if options.no_agent
+            else "no configured agent; pass --agent to configure one"
+        )
+        emit(f"Skipped coding-agent skill roots ({reason})\n")
     _sync_config_templates(workspace, emit)
 
     if not options.skip_docs:
@@ -1439,7 +1444,7 @@ def _resolve_sync_agents(
     stored_agents = _workspace_agents_from_metadata(workspace)
     if stored_agents:
         return stored_agents
-    raise RuntimeError("No configured coding agent found. Run prime lab setup or pass --agent.")
+    return ()
 
 
 def _download_file(url: str, dest: Path, emit: Emit, *, force: bool = False) -> None:

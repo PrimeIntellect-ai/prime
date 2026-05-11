@@ -408,3 +408,98 @@ class TestSyncGatewayPostRetry:
             read_error_on_post()
 
         assert call_count == 1  # no retry
+
+
+class DummySandboxAuthCache:
+    """Minimal auth cache for read_file unit tests."""
+
+    def get_or_refresh(self, sandbox_id: str):
+        return {
+            "gateway_url": "https://gateway.example",
+            "user_ns": "test-ns",
+            "job_id": sandbox_id,
+            "token": "test-token",
+        }
+
+
+class TestReadFileRetry:
+    """Tests for read_file-specific retry behavior."""
+
+    @pytest.mark.parametrize(
+        "exc_cls",
+        [httpx.ReadTimeout, httpx.ConnectTimeout, httpx.PoolTimeout],
+    )
+    def test_read_file_retry_on_timeout_types(self, exc_cls):
+        """read_file retries transient timeout classes before succeeding."""
+        from prime_sandboxes.sandbox import _read_file_retry
+
+        call_count = 0
+        request = httpx.Request("GET", "https://gateway.example/read-file")
+
+        @_read_file_retry
+        def timeout_then_succeed():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise exc_cls("temporary timeout", request=request)
+            return "success"
+
+        result = timeout_then_succeed()
+
+        assert result == "success"
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_read_file_retry_works_for_async_functions(self):
+        """The shared decorator retries async read_file helpers too."""
+        from prime_sandboxes.sandbox import _read_file_retry
+
+        call_count = 0
+        request = httpx.Request("GET", "https://gateway.example/read-file")
+
+        @_read_file_retry
+        async def timeout_then_succeed():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise httpx.ReadTimeout("temporary timeout", request=request)
+            return "success"
+
+        result = await timeout_then_succeed()
+
+        assert result == "success"
+        assert call_count == 2
+
+    @pytest.mark.parametrize(
+        "exc_cls, expected_name",
+        [
+            (httpx.ReadTimeout, "ReadTimeout"),
+            (httpx.ConnectTimeout, "ConnectTimeout"),
+            (httpx.PoolTimeout, "PoolTimeout"),
+        ],
+    )
+    def test_read_file_timeout_error_names_timeout_type(self, monkeypatch, exc_cls, expected_name):
+        """Final read_file timeout errors include the concrete timeout class."""
+        from prime_sandboxes.sandbox import SandboxClient
+
+        request = httpx.Request("GET", "https://gateway.example/read-file")
+
+        def raise_timeout(url, headers, params, timeout):
+            raise exc_cls("temporary timeout", request=request)
+
+        monkeypatch.setattr(
+            SandboxClient,
+            "_gateway_read_file_get",
+            staticmethod(raise_timeout),
+        )
+
+        client = SandboxClient.__new__(SandboxClient)
+        client._auth_cache = DummySandboxAuthCache()
+
+        with pytest.raises(APIError) as exc_info:
+            client.read_file("sandbox-123", "/tmp/job.exit", timeout=12)
+
+        message = str(exc_info.value)
+        assert "Read file timed out after 12s" in message
+        assert f"({expected_name})" in message
+        assert "/tmp/job.exit" in message

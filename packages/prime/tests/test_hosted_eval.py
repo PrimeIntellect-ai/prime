@@ -1169,6 +1169,22 @@ env_id = "gsm8k"
     }
 
 
+def test_hosted_eval_config_accepts_id_alias(tmp_path):
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "openai/gpt-4.1-mini"
+
+[[eval]]
+id = "gsm8k"
+""".strip()
+    )
+
+    loaded = _load_hosted_eval_configs(str(config_path))[0]
+
+    assert loaded["env_id"] == "gsm8k"
+
+
 def test_eval_run_hosted_endpoint_id_uses_default_endpoints_path_from_cwd(monkeypatch, tmp_path):
     config_dir = tmp_path / "configs"
     config_dir.mkdir()

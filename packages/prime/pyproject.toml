@@ -20,7 +20,7 @@ dependencies = [
     "textual>=6.1.0",
     "textual-plot>=0.10.1",
     "cryptography>=41.0.0",
-    "verifiers>=0.1.12.dev6",
+    "verifiers>=0.1.14",
     "build>=1.0.0",
     "gitignore-parser>=0.1.13",
     "pyyaml>=6.0.0",
@@ -64,7 +64,7 @@ dev = [
 prime-sandboxes = { workspace = true }
 prime-evals = { workspace = true }
 prime-tunnel = { workspace = true }
-verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.1.12.dev6" }
+verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.1.14" }
 
 [build-system]
 requires = ["hatchling"]

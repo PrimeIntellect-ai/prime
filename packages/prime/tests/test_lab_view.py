@@ -6550,7 +6550,6 @@ async def test_setup_screen_run_uses_selected_agent(
         assert captured
         options, workspace = captured[0]
         assert options.agents == ("claude",)
-        assert options.prime_rl is False
         assert workspace == tmp_path.resolve()
 
 

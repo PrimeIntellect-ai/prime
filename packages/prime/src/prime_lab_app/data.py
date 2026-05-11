@@ -945,35 +945,30 @@ def discover_local_eval_runs(
 ) -> list[dict[str, Any]]:
     roots: list[Path] = []
     env_root = (workspace / env_dir).resolve()
-    if env_root.is_dir():
-        for env_path in sorted(env_root.iterdir(), key=lambda path: path.name):
+    if _safe_is_dir(env_root):
+        for env_path in _safe_sorted_children(env_root):
             candidate = env_path / "outputs" / "evals"
-            if candidate.is_dir():
+            if _safe_is_dir(candidate):
                 roots.append(candidate)
 
     global_root = (workspace / outputs_dir / "evals").resolve()
-    if global_root.is_dir():
+    if _safe_is_dir(global_root):
         roots.append(global_root)
 
     runs: list[dict[str, Any]] = []
     for root in roots:
-        for env_model_dir in sorted(root.iterdir(), key=lambda path: path.name):
-            if not env_model_dir.is_dir() or "--" not in env_model_dir.name:
+        for env_model_dir in _safe_sorted_children(root):
+            if not _safe_is_dir(env_model_dir) or "--" not in env_model_dir.name:
                 continue
             env_id, model_part = env_model_dir.name.split("--", 1)
             model = model_part.replace("--", "/")
-            run_dirs = sorted(
-                env_model_dir.iterdir(),
-                key=lambda path: path.name,
-                reverse=True,
-            )
-            for run_dir in run_dirs:
+            for run_dir in _safe_sorted_children(env_model_dir, reverse=True):
                 metadata_path = run_dir / "metadata.json"
                 results_path = run_dir / "results.jsonl"
                 if (
-                    not run_dir.is_dir()
-                    or not metadata_path.is_file()
-                    or not results_path.is_file()
+                    not _safe_is_dir(run_dir)
+                    or not _safe_is_file(metadata_path)
+                    or not _safe_is_file(results_path)
                 ):
                     continue
                 metadata = _read_json_file(metadata_path)
@@ -989,6 +984,27 @@ def discover_local_eval_runs(
                 if len(runs) >= limit:
                     return runs
     return runs
+
+
+def _safe_sorted_children(path: Path, *, reverse: bool = False) -> list[Path]:
+    try:
+        return sorted(path.iterdir(), key=lambda child: child.name, reverse=reverse)
+    except OSError:
+        return []
+
+
+def _safe_is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _safe_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
 
 
 def _local_eval_items(options: LabLoadOptions, *, section: str) -> list[LabItem]:
@@ -1441,7 +1457,7 @@ def _lab_workspace_search_roots(active_workspace: Path) -> list[Path]:
             root = candidate.resolve()
         except OSError:
             continue
-        if not root.is_dir() or root in seen:
+        if not _safe_is_dir(root) or root in seen:
             continue
         roots.append(root)
         seen.add(root)
@@ -1469,9 +1485,9 @@ def _iter_lab_workspace_markers(root: Path) -> list[Path]:
             depth = len(current_path.relative_to(root).parts)
         except ValueError:
             depth = 0
-        if (current_path / ".prime" / "lab.json").is_file() or (
+        if _safe_is_file(current_path / ".prime" / "lab.json") or _safe_is_file(
             current_path / ".prime" / "lab_setup.json"
-        ).is_file():
+        ):
             workspaces.append(current_path)
         if depth >= max_depth:
             dirs[:] = []
@@ -1488,7 +1504,7 @@ def _read_lab_workspace_metadata(workspace: Path) -> dict[str, Any] | None:
     metadata: dict[str, Any] = {}
     for filename in ("lab_setup.json", "lab.json"):
         path = workspace / ".prime" / filename
-        if not path.is_file():
+        if not _safe_is_file(path):
             continue
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))

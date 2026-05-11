@@ -37,6 +37,27 @@ def mock_env_inspect_api(monkeypatch: pytest.MonkeyPatch) -> None:
                     }
                 }
 
+            if params and params.get("path") == "LONG.md":
+                return {
+                    "data": {
+                        "kind": "file",
+                        "path": "LONG.md",
+                        "version_id": "version-123",
+                        "entry": {
+                            "name": "LONG.md",
+                            "path": "LONG.md",
+                            "is_directory": False,
+                            "size": 512,
+                            "modified_at": None,
+                            "content_hash": "hash-long",
+                        },
+                        "content": "long content " * 80,
+                        "encoding": "utf-8",
+                        "truncated": False,
+                        "total_bytes": 512,
+                    }
+                }
+
             return {
                 "data": {
                     "kind": "directory",
@@ -142,6 +163,18 @@ class TestEnvInspect:
         payload = json.loads(result.output)
         assert payload["kind"] == "directory"
         assert payload["entries"][0]["path"] == "src"
+
+    def test_json_file_output_preserves_long_content(self, mock_env_inspect_api: None) -> None:
+        result = runner.invoke(
+            app,
+            ["env", "inspect", "testuser/test-env", "LONG.md", "--output", "json"],
+            env={"COLUMNS": "40", "LINES": "50"},
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["kind"] == "file"
+        assert payload["content"] == "long content " * 80
 
     def test_env_id_version_overrides_flag(self, mock_env_inspect_api: None) -> None:
         result = runner.invoke(

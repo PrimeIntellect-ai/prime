@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -12,6 +11,7 @@ from prime_cli.lab_setup import (
     LabSetupOptions,
     LabSetupResult,
     LabSyncOptions,
+    LabSyncProgressEvent,
     LabSyncResult,
     run_lab_doctor_service,
     run_lab_setup_service,
@@ -34,6 +34,16 @@ from .palette import STATUS_ERROR, STATUS_SUCCESS, STATUS_WARNING
 from .shell import lab_header
 
 SetupCompleteAction = Callable[[], None]
+_SYNC_PROGRESS_TEXT = {
+    "started": "Syncing Lab assets",
+    "lab_assets_prepared": "Prepared local Lab assets",
+    "agent_assets_prepared": "Prepared agent surfaces",
+    "agent_assets_skipped": "Skipped agent surfaces",
+    "templates_refreshed": "Refreshed Lab templates",
+    "guidance_refreshed": "Updated local guidance",
+    "completed": "Lab sync completed",
+    "failed": "Lab sync failed",
+}
 
 
 class SetupScreen(Screen[None]):
@@ -259,15 +269,18 @@ class AgentSyncScreen(Screen[None]):
         result = run_lab_sync_service(
             LabSyncOptions(agents=(agent,)),
             workspace=workspace,
-            emit=lambda text: self.app.call_from_thread(self._append_sync_output, text),
+            emit_progress=lambda event: self.app.call_from_thread(
+                self._append_sync_progress,
+                event,
+            ),
         )
         self.app.call_from_thread(self._finish_sync, result)
 
-    def _append_sync_output(self, text: str) -> None:
-        visible_text = _user_visible_sync_output(text)
-        if not visible_text:
+    def _append_sync_progress(self, event: LabSyncProgressEvent) -> None:
+        visible_text = _sync_progress_text(event)
+        if not visible_text or self._output.splitlines()[-1:] == [visible_text]:
             return
-        self._output = (self._output + visible_text)[-50000:]
+        self._output = (self._output + visible_text + "\n")[-50000:]
         self.query_one("#sync-output", Static).update(Text(self._output))
 
     def _finish_sync(self, result: LabSyncResult) -> None:
@@ -473,59 +486,12 @@ def _doctor_result_table(result: LabDoctorResult) -> Table:
         }.get(check.status, "dim")
         table.add_row(
             Text(check.status, style=status_style),
-            _user_visible_lab_asset_text(check.name),
-            _user_visible_lab_asset_text(check.message),
-            _user_visible_lab_asset_text(check.remediation),
+            check.name,
+            check.message,
+            check.remediation,
         )
     return table
 
 
-def _user_visible_sync_output(text: str) -> str:
-    lines: list[str] = []
-    previous_visible_line = ""
-    for raw_line in text.splitlines(keepends=True):
-        line = raw_line.rstrip("\r\n")
-        ending = raw_line[len(line) :]
-        visible_line = _user_visible_sync_line(line)
-        if visible_line and visible_line != previous_visible_line:
-            lines.append(f"{visible_line}{ending}")
-            previous_visible_line = visible_line
-    return "".join(lines)
-
-
-def _user_visible_sync_line(line: str) -> str:
-    normalized = line.strip().lower()
-    if "skill" not in normalized:
-        return line
-    if normalized.startswith("prepared "):
-        return "Prepared local Lab assets"
-    if normalized.startswith("skipped coding-agent"):
-        return "Skipped coding-agent local assets (--no-agent)"
-    if normalized.startswith("skipped ") and "user-owned" in normalized:
-        return "Skipped user-owned local Lab asset"
-    if normalized.startswith("warning: removed stale managed"):
-        return "Warning: removed stale managed Lab asset"
-    if normalized.startswith("sync failed:"):
-        return "Sync failed: Lab asset refresh failed"
-    return ""
-
-
-def _user_visible_lab_asset_text(text: str) -> str:
-    rendered = str(text)
-    rendered = re.sub(
-        r"Missing .*/\.prime/skills/\.prime-managed\.json",
-        "Missing local Lab asset cache",
-        rendered,
-    )
-    replacements = {
-        "Global Lab skill cache": "Global Lab asset cache",
-        "Workspace Lab skills": "Workspace Lab assets",
-        "managed skill(s)": "managed asset(s)",
-        "managed skill link(s)": "managed asset link(s)",
-        "No managed Lab skills are installed.": "No managed Lab assets are installed.",
-        " skills": " assets",
-        " skill": " asset",
-    }
-    for old, new in replacements.items():
-        rendered = rendered.replace(old, new)
-    return rendered
+def _sync_progress_text(event: LabSyncProgressEvent) -> str:
+    return _SYNC_PROGRESS_TEXT[event.kind]

@@ -31,6 +31,8 @@ from prime_cli.lab_setup import (
     LabSetupOptions,
     LabSetupResult,
     LabSyncOptions,
+    LabSyncProgressEvent,
+    LabSyncProgressKind,
     parse_lab_doctor_args,
     parse_lab_setup_args,
     parse_lab_sync_args,
@@ -167,7 +169,7 @@ from prime_lab_app.setup_screens import (
     _agent_sync_body,
     _doctor_result_table,
     _setup_body,
-    _user_visible_sync_output,
+    _sync_progress_text,
 )
 from prime_lab_app.shell import (
     compact_path,
@@ -2147,6 +2149,7 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
         lambda command: "/bin/pi" if command == "pi" else None,
     )
     emitted: list[str] = []
+    progress: list[LabSyncProgressEvent] = []
 
     assert parse_lab_sync_args(["--agent", "pi"]).agents == ("pi",)
     assert parse_lab_sync_args([]).agents == ()
@@ -2155,9 +2158,18 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
         LabSyncOptions(agents=("pi",)),
         workspace=tmp_path,
         emit=emitted.append,
+        emit_progress=progress.append,
     )
 
     assert result.exit_code == 0
+    assert [event.kind for event in progress] == [
+        "started",
+        "lab_assets_prepared",
+        "agent_assets_prepared",
+        "templates_refreshed",
+        "guidance_refreshed",
+        "completed",
+    ]
     assert (tmp_path / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
     assert (tmp_path / ".pi" / "skills" / "create-environments").exists()
     assert not any("pi-acp" in line for line in emitted)
@@ -2167,7 +2179,7 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
     assert downloads
 
 
-def test_agent_sync_screen_keeps_skill_details_internal(tmp_path: Path) -> None:
+def test_agent_sync_screen_renders_asset_copy(tmp_path: Path) -> None:
     item = LabItem(
         key="workspace:sync",
         section="workspace",
@@ -2190,47 +2202,44 @@ def test_agent_sync_screen_keeps_skill_details_internal(tmp_path: Path) -> None:
     assert "Lab assets" in rendered
 
 
-def test_agent_sync_output_keeps_skill_paths_internal(tmp_path: Path) -> None:
-    visible = _user_visible_sync_output(
-        "\n".join(
-            [
-                f"Prepared {tmp_path / '.prime' / 'skills'}",
-                f"Prepared {tmp_path / '.agents' / 'skills'}",
-                (
-                    f"Skipped {tmp_path / '.agents' / 'skills' / 'create-environments'} "
-                    "because a user-owned skill already exists"
-                ),
-                f"Warning: removed stale managed skill {tmp_path / '.prime' / 'skills' / 'old'}",
-                "Lab sync completed",
-            ]
-        )
-        + "\n"
+def test_agent_sync_progress_renders_typed_events(tmp_path: Path) -> None:
+    kinds: tuple[LabSyncProgressKind, ...] = (
+        "started",
+        "lab_assets_prepared",
+        "agent_assets_prepared",
+        "templates_refreshed",
+        "guidance_refreshed",
+        "completed",
     )
+    rendered = [
+        _sync_progress_text(LabSyncProgressEvent(kind=kind, workspace=tmp_path)) for kind in kinds
+    ]
 
-    assert "skill" not in visible.lower()
-    assert str(tmp_path) not in visible
-    assert visible.count("Prepared local Lab assets") == 1
-    assert "Prepared local Lab assets" in visible
-    assert "Skipped user-owned local Lab asset" in visible
-    assert "Warning: removed stale managed Lab asset" in visible
-    assert "Lab sync completed" in visible
+    assert rendered == [
+        "Syncing Lab assets",
+        "Prepared local Lab assets",
+        "Prepared agent surfaces",
+        "Refreshed Lab templates",
+        "Updated local guidance",
+        "Lab sync completed",
+    ]
 
 
-def test_doctor_screen_keeps_skill_details_internal(tmp_path: Path) -> None:
+def test_doctor_screen_renders_source_check_copy(tmp_path: Path) -> None:
     result = LabDoctorResult(
         exit_code=1,
         workspace=tmp_path,
         checks=(
             LabDoctorCheck(
-                name="Global Lab skill cache",
+                name="Global Lab asset cache",
                 status="WARN",
-                message=f"Missing {tmp_path / '.prime' / 'skills' / '.prime-managed.json'}",
+                message="Missing local Lab asset cache.",
                 remediation="Run prime lab sync.",
             ),
             LabDoctorCheck(
-                name="Codex skills",
+                name="Codex assets",
                 status="PASS",
-                message="1 managed skill link(s) are present.",
+                message="1 managed asset link(s) are present.",
             ),
         ),
     )
@@ -2671,42 +2680,27 @@ def test_agent_runtime_filters_wrapped_lab_widget_tool_results() -> None:
     assert _is_lab_widget_tool_result_text(wrapped) is True
 
 
-def test_agent_runtime_suppresses_empty_lab_tool_update_after_widget() -> None:
-    messages: tuple[Any, ...] = ()
+def test_agent_runtime_ignores_empty_acp_tool_event() -> None:
+    runtime = AgentRuntime()
 
-    def on_messages(value: Any) -> None:
-        nonlocal messages
-        messages = value
+    runtime._record_acp_tool_event("Lab choose", "mcp", "completed", "")
 
-    runtime = AgentRuntime(on_messages=on_messages)
-    runtime._messages = [
-        AgentChatMessage(
-            "system",
-            "Lab tool diagnostic",
-            "widget",
-            {"tool": "choose", "kind": "choice_picker"},
-        )
-    ]
+    assert runtime.messages() == ()
 
-    runtime._record_acp_tool_event("prime_lab_choose", "completed", "")
 
-    assert len(messages) == 0
+def test_agent_runtime_records_text_acp_tool_event() -> None:
+    runtime = AgentRuntime()
+
+    runtime._record_acp_tool_event("Read config", "read", "completed", "ok")
+
     assert runtime.messages() == (
         AgentChatMessage(
             "system",
-            "Lab tool diagnostic",
-            "widget",
-            {"tool": "choose", "kind": "choice_picker"},
+            "Read config\nok",
+            "tool",
+            {"title": "Read config", "tool_kind": "read", "tool_status": "completed"},
         ),
     )
-
-
-def test_agent_runtime_suppresses_internal_skill_tool_events() -> None:
-    runtime = AgentRuntime()
-
-    runtime._record_acp_tool_event("Using skill create-environments", "running", "")
-
-    assert runtime.messages() == ()
 
 
 def test_agent_widget_choice_body_does_not_repeat_heading(tmp_path: Path) -> None:
@@ -4188,7 +4182,7 @@ def test_agent_stream_delta_ignores_lab_widget_ack_payload() -> None:
     assert text == ""
 
 
-def test_agent_stream_delta_ignores_internal_skill_disclosures() -> None:
+def test_agent_stream_delta_preserves_assistant_content() -> None:
     text = _extract_stream_delta(
         {
             "type": "assistant",
@@ -4200,7 +4194,7 @@ def test_agent_stream_delta_ignores_internal_skill_disclosures() -> None:
         {},
     )
 
-    assert text == "Ready."
+    assert text == "Using skill create-environments for local setup.\nReady."
 
 
 def test_agent_stream_delta_ignores_final_snapshot_after_streamed_chunks() -> None:

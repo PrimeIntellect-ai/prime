@@ -28,22 +28,6 @@ AgentRole = Literal["user", "assistant", "system"]
 _ASSISTANT_STREAM_KEY = "__assistant_stream__"
 _ASSISTANT_CHUNK_SEEN_KEY = "__assistant_chunk_seen__"
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_INTERNAL_SKILL_LINE_PREFIXES = (
-    "using ",
-    "loading ",
-    "loaded ",
-    "applying ",
-    "activated ",
-    "selected ",
-    "running ",
-    "i'm using ",
-    "i'm loading ",
-    "i'll use ",
-    "i will use ",
-    "i\u2019m using ",
-    "i\u2019m loading ",
-    "i\u2019ll use ",
-)
 
 
 @dataclass(frozen=True)
@@ -742,31 +726,27 @@ class AgentRuntime:
             self._append_streaming_assistant_text(event.text)
             return
         if event.kind in {"tool_call", "tool_update"}:
-            self._record_acp_tool_event(event.title, event.status, event.text)
+            self._record_acp_tool_event(event.title, event.tool_kind, event.status, event.text)
             return
 
-    def _record_acp_tool_event(self, title: str, status: str, text: str) -> None:
+    def _record_acp_tool_event(
+        self,
+        title: str,
+        tool_kind: str,
+        status: str,
+        text: str,
+    ) -> None:
         title = title.strip()
+        tool_kind = tool_kind.strip()
         status = status.strip()
         text = _clean_agent_output_text(text.strip())
-        if _is_internal_skill_disclosure_line(title):
-            if not text:
-                return
-            title = "Agent update"
-        if not title and not text:
+        if not text:
             return
         if text and _is_lab_widget_tool_result_text(text):
             return
         label = title or "Tool"
-        content = label if not text else f"{label}\n{text}"
+        content = f"{label}\n{text}"
         with self._lock:
-            if (
-                not text
-                and _is_lab_widget_tool_event_title(label)
-                and self._messages
-                and self._messages[-1].status == "widget"
-            ):
-                return
             if (
                 self._messages
                 and self._messages[-1].role == "system"
@@ -777,7 +757,7 @@ class AgentRuntime:
                     "system",
                     content,
                     "tool",
-                    {"title": label, "tool_status": status},
+                    {"title": label, "tool_kind": tool_kind, "tool_status": status},
                 )
             else:
                 self._messages.append(
@@ -785,7 +765,7 @@ class AgentRuntime:
                         "system",
                         content,
                         "tool",
-                        {"title": label, "tool_status": status},
+                        {"title": label, "tool_kind": tool_kind, "tool_status": status},
                     )
                 )
             self._emit_messages_locked()
@@ -1214,27 +1194,7 @@ def _is_chunk_message(value: Any) -> bool:
 def _clean_agent_output_text(text: str) -> str:
     if not text:
         return ""
-    cleaned = _ANSI_RE.sub("", text)
-    cleaned = _strip_internal_skill_disclosures(cleaned)
-    if cleaned != text and not cleaned.strip():
-        return ""
-    return cleaned
-
-
-def _strip_internal_skill_disclosures(text: str) -> str:
-    lines = text.splitlines(keepends=True)
-    if not lines:
-        return "" if _is_internal_skill_disclosure_line(text) else text
-    return "".join(
-        raw_line for raw_line in lines if not _is_internal_skill_disclosure_line(raw_line)
-    )
-
-
-def _is_internal_skill_disclosure_line(line: str) -> bool:
-    normalized = " ".join(line.strip().lower().split())
-    if "skill" not in normalized:
-        return False
-    return normalized.startswith(_INTERNAL_SKILL_LINE_PREFIXES)
+    return _ANSI_RE.sub("", text)
 
 
 def _dynamic_tool_chat_content(
@@ -1254,16 +1214,8 @@ def _dynamic_tool_chat_content(
                 payload_title = str(payload.get("title") or "").strip()
                 if payload_title:
                     return payload_title
-        return _first_nonempty_line(content) or "Action ready"
+        return "Action ready"
     return content
-
-
-def _first_nonempty_line(text: str) -> str:
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped:
-            return stripped
-    return ""
 
 
 def _is_lab_widget_tool_result_text(text: str) -> bool:
@@ -1300,11 +1252,6 @@ def _contains_lab_widget_tool_result(value: Any) -> bool:
             except json.JSONDecodeError:
                 continue
     return False
-
-
-def _is_lab_widget_tool_event_title(value: str) -> bool:
-    normalized = value.strip().lower().replace("-", "_")
-    return normalized.startswith(("prime_lab_", "mcp_prime_lab_"))
 
 
 def _merge_stream_text(existing: str, delta: str) -> str:

@@ -368,11 +368,11 @@ def _run_lab_setup_steps(
     _sync_lab_metadata(workspace, options.agents, setup_source="prime lab setup")
 
     if not options.skip_agents_md:
-        _sync_workspace_guidance(workspace, emit, force=True)
+        _sync_workspace_guidance(workspace, options.agents, emit, force=True)
 
     _sync_config_templates(workspace, emit)
     _copy_setup_configs(workspace, emit)
-    _write_lab_docs_index(workspace)
+    _write_lab_docs_index(workspace, options.agents)
     emit("Lab setup completed\n")
 
 
@@ -387,6 +387,9 @@ def _run_lab_sync_steps(
     (workspace / "environments").mkdir(exist_ok=True)
     emit(f"Syncing Lab assets in {workspace}\n")
     agents = _resolve_sync_agents(workspace, options.agents, no_agent=options.no_agent)
+    guidance_agents = agents
+    if not guidance_agents and options.no_agent:
+        guidance_agents = _workspace_agents_from_metadata(workspace)
 
     managed_skill_names = _sync_prime_skills(emit)
     _prepare_workspace_skill_dir(workspace, managed_skill_names, emit)
@@ -396,20 +399,32 @@ def _run_lab_sync_steps(
         _prepare_agent_native_surfaces(workspace, agents, emit)
         _sync_lab_metadata(workspace, agents, setup_source="prime lab sync")
     else:
-        emit("Skipped coding-agent skill roots (--no-agent)\n")
+        reason = (
+            "--no-agent"
+            if options.no_agent
+            else "no configured agent; pass --agent to configure one"
+        )
+        emit(f"Skipped coding-agent skill roots ({reason})\n")
     _sync_config_templates(workspace, emit)
 
     if not options.skip_docs:
-        _sync_workspace_guidance(workspace, emit, force=True)
-        _write_lab_docs_index(workspace)
+        _sync_workspace_guidance(workspace, guidance_agents, emit, force=True)
+        _write_lab_docs_index(workspace, guidance_agents)
 
     emit("Lab sync completed\n")
 
 
-def _sync_workspace_guidance(workspace: Path, emit: Emit, *, force: bool = False) -> None:
+def _sync_workspace_guidance(
+    workspace: Path,
+    agents: tuple[str, ...],
+    emit: Emit,
+    *,
+    force: bool = False,
+) -> None:
     download_emit = _download_status_emit(emit, verbose=False)
     _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", download_emit, force=force)
-    _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", download_emit, force=force)
+    if "claude" in agents:
+        _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", download_emit, force=force)
     _download_file(
         ENVS_AGENTS_MD_SRC,
         workspace / "environments" / "AGENTS.md",
@@ -1285,9 +1300,15 @@ def _ensure_uv_project(workspace: Path, emit: Emit, runner: Runner) -> None:
     _check_command(["uv", "add", "verifiers"], workspace, emit, runner)
 
 
-def _write_lab_docs_index(workspace: Path) -> None:
+def _write_lab_docs_index(workspace: Path, agents: tuple[str, ...]) -> None:
     docs_dir = workspace / ".prime" / "lab" / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
+    guidance_files = [
+        "- `AGENTS.md`",
+        "- `environments/AGENTS.md`",
+    ]
+    if "claude" in agents:
+        guidance_files.insert(1, "- `CLAUDE.md`")
     index = docs_dir / "index.md"
     index.write_text(
         "\n".join(
@@ -1298,9 +1319,7 @@ def _write_lab_docs_index(workspace: Path) -> None:
                 "",
                 "## Local workspace guidance",
                 "",
-                "- `AGENTS.md`",
-                "- `CLAUDE.md`",
-                "- `environments/AGENTS.md`",
+                *guidance_files,
                 "- `~/.prime/skills/*/SKILL.md`",
                 "- `.prime/lab/templates/configs/**`",
                 "",
@@ -1369,7 +1388,7 @@ def _resolve_sync_agents(
     stored_agents = _workspace_agents_from_metadata(workspace)
     if stored_agents:
         return stored_agents
-    raise RuntimeError("No configured coding agent found. Run prime lab setup or pass --agent.")
+    return ()
 
 
 def _download_file(url: str, dest: Path, emit: Emit, *, force: bool = False) -> None:

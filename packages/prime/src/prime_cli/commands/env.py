@@ -1719,7 +1719,7 @@ def pull(
             console.print(f"[red]Failed to get environment details: {e}[/red]")
             raise typer.Exit(1)
 
-        download_url = details.get("package_url")
+        download_url = _environment_package_download_url(details)
         if not download_url:
             console.print("[red]Error: No downloadable package found[/red]")
             raise typer.Exit(1)
@@ -1757,7 +1757,11 @@ def pull(
                         if client.api_key:
                             headers["Authorization"] = f"Bearer {client.api_key}"
                         with httpx.stream(
-                            "GET", download_url, headers=headers, timeout=60.0
+                            "GET",
+                            download_url,
+                            headers=headers,
+                            timeout=60.0,
+                            follow_redirects=True,
                         ) as resp:
                             resp.raise_for_status()
                             with open(tmp.name, "wb") as f:
@@ -1896,6 +1900,14 @@ def is_valid_url(url: str) -> bool:
         return all([result.scheme in ("http", "https"), result.netloc])
     except Exception:
         return False
+
+
+def _environment_package_download_url(details: Dict[str, Any]) -> Optional[str]:
+    for key in ("tracked_package_url", "trackedPackageUrl", "package_url", "packageUrl"):
+        url = details.get(key)
+        if isinstance(url, str) and is_valid_url(url):
+            return url
+    return None
 
 
 def normalize_package_name(name: str) -> str:
@@ -3026,7 +3038,7 @@ def _pull_and_build_private_env(
     _validate_path_component(name, "name")
     _validate_path_component(version, "version")
 
-    download_url = details.get("package_url")
+    download_url = _environment_package_download_url(details)
     if not download_url:
         raise ValueError("No downloadable package found for private environment")
 
@@ -3057,7 +3069,9 @@ def _pull_and_build_private_env(
             if client.api_key:
                 headers["Authorization"] = f"Bearer {client.api_key}"
 
-            with httpx.stream("GET", download_url, headers=headers, timeout=60.0) as resp:
+            with httpx.stream(
+                "GET", download_url, headers=headers, timeout=60.0, follow_redirects=True
+            ) as resp:
                 resp.raise_for_status()
                 with open(tmp.name, "wb") as f:
                     for chunk in resp.iter_bytes(chunk_size=8192):

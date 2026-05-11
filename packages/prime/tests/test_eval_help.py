@@ -26,6 +26,7 @@ def test_lab_setup_help_flags_use_prime_owned_help():
         assert result.exit_code == 0, result.output
         assert "Set up a Lab workspace." in result.output
         assert "--skip-install" in result.output
+        assert "--prime-rl" not in result.output
 
 
 def test_sanitize_help_removes_vf_eval_aliases():

@@ -159,15 +159,21 @@ def _local_environment_records(
     limit: int,
 ) -> list[LocalEnvironmentRecord]:
     env_root = _workspace_path(workspace, env_dir)
-    if not env_root.is_dir():
+    try:
+        if not env_root.is_dir():
+            return []
+    except OSError:
         return []
 
     records: list[LocalEnvironmentRecord] = []
-    for path in sorted(child for child in env_root.iterdir() if child.is_dir()):
+    for path in _safe_environment_dirs(env_root):
         if path.name.startswith("."):
             continue
         project = _read_pyproject(path)
-        hub_metadata = get_environment_metadata(path) or {}
+        try:
+            hub_metadata = get_environment_metadata(path) or {}
+        except OSError:
+            hub_metadata = {}
         readme_path, readme_preview = _read_readme_preview(path)
         records.append(
             LocalEnvironmentRecord(
@@ -185,6 +191,21 @@ def _local_environment_records(
         if len(records) >= limit:
             break
     return records
+
+
+def _safe_environment_dirs(env_root: Path) -> list[Path]:
+    try:
+        children = sorted(env_root.iterdir(), key=lambda child: child.name)
+    except OSError:
+        return []
+    dirs: list[Path] = []
+    for child in children:
+        try:
+            if child.is_dir():
+                dirs.append(child)
+        except OSError:
+            continue
+    return dirs
 
 
 def _environment_item_from_record(
@@ -315,9 +336,9 @@ def _platform_slug(env: dict[str, Any]) -> str:
 
 def _read_pyproject(path: Path) -> dict[str, Any]:
     pyproject_path = path / "pyproject.toml"
-    if not pyproject_path.is_file():
-        return {}
     try:
+        if not pyproject_path.is_file():
+            return {}
         parsed = toml.loads(pyproject_path.read_text(encoding="utf-8"))
     except (OSError, toml.TomlDecodeError):
         return {}
@@ -335,12 +356,12 @@ def _local_content_hash(path: Path) -> str:
 def _read_readme_preview(path: Path) -> tuple[str | None, str]:
     for name in ("README.md", "README.rst", "README.txt", "README"):
         readme = path / name
-        if not readme.is_file():
-            continue
         try:
+            if not readme.is_file():
+                continue
             text = readme.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return str(readme), ""
+            continue
         preview = " ".join(text.strip().split())
         return str(readme), preview[:500]
     return None, ""
@@ -362,11 +383,18 @@ def _relative_path(path: Path, root: Path) -> str:
 
 def _interesting_child_files(path: Path) -> list[str]:
     names = []
-    for child in sorted(path.iterdir()):
+    try:
+        children = sorted(path.iterdir())
+    except OSError:
+        return names
+    for child in children:
         if child.name.startswith("."):
             continue
-        if child.is_file() and child.suffix in {".py", ".toml", ".md", ".json"}:
-            names.append(child.name)
+        try:
+            if child.is_file() and child.suffix in {".py", ".toml", ".md", ".json"}:
+                names.append(child.name)
+        except OSError:
+            continue
     return names[:12]
 
 

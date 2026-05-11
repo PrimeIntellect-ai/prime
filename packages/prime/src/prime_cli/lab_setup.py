@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -32,13 +31,12 @@ from .lab_agents import (
     write_agent_native_surface,
 )
 
-PRIME_RL_REPO = "primeintellect-ai/prime-rl"
 VERIFIERS_REPO = "primeintellect-ai/verifiers"
 VERIFIERS_REF = "7d8a522df67308327cb9b8931ce6a5873a99834a"
 VERIFIERS_CONFIG_REF = "main"
-PRIME_RL_REF = "38b524925d09ce917b51e54bd99446b822f0a87f"
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
+LAB_CONFIG_FOLDERS = ("rl", "gepa", "eval", "sft", "opd", "fft")
 
 SUPPORTED_AGENTS = known_agent_names()
 LAB_GITIGNORE_PATTERNS = (
@@ -85,7 +83,6 @@ class SkillSource:
 class LabSetupOptions:
     """Options for initializing a Lab workspace."""
 
-    prime_rl: bool = False
     skip_agents_md: bool = False
     skip_install: bool = False
     agents: tuple[str, ...] = ()
@@ -218,11 +215,6 @@ def parse_lab_setup_args(args: list[str]) -> LabSetupOptions:
         description="Set up a Lab workspace.",
     )
     parser.add_argument(
-        "--prime-rl",
-        action="store_true",
-        help="Install prime-rl.",
-    )
-    parser.add_argument(
         "--skip-agents-md",
         action="store_true",
         help="Skip AGENTS.md, CLAUDE.md, and environments/AGENTS.md.",
@@ -245,7 +237,6 @@ def parse_lab_setup_args(args: list[str]) -> LabSetupOptions:
     )
     namespace = parser.parse_args(args)
     return LabSetupOptions(
-        prime_rl=bool(namespace.prime_rl),
         skip_agents_md=bool(namespace.skip_agents_md),
         skip_install=bool(namespace.skip_install),
         agents=_resolve_setup_agents(
@@ -378,10 +369,6 @@ def _run_lab_setup_steps(
 
     if not options.skip_agents_md:
         _sync_workspace_guidance(workspace, options.agents, emit, force=True)
-
-    if options.prime_rl:
-        _install_prime_rl(workspace, emit, runner)
-        _install_environments_to_prime_rl(workspace, emit, runner)
 
     _copy_setup_configs(workspace, emit)
     _sync_config_templates(workspace, emit)
@@ -518,6 +505,7 @@ def _download_repo_directory(
     emit: Emit,
     *,
     force: bool = True,
+    missing_ok: bool = False,
 ) -> None:
     normalized_source_path = _normalize_repo_path(source_path)
     tree_entries = _repo_tree_entries(repo, ref)
@@ -531,6 +519,8 @@ def _download_repo_directory(
         if entry_type == "blob" and path.startswith(prefix)
     ]
     if not source_exists and not file_entries:
+        if missing_ok:
+            return
         raise RuntimeError(f"Expected a directory listing for {repo}/{source_path}.")
     for entry_path, relative_path in sorted(file_entries):
         _download_file(
@@ -602,14 +592,20 @@ def _read_prime_skills_manifest(skills_dir: Path) -> dict[str, Any]:
 
 
 def _copy_setup_configs(workspace: Path, emit: Emit) -> None:
-    _download_repo_directory(
-        VERIFIERS_REPO,
-        VERIFIERS_CONFIG_REF,
-        "configs",
-        workspace / "configs",
-        emit,
-        force=False,
-    )
+    _download_lab_config_folders(workspace / "configs", emit, force=False)
+
+
+def _download_lab_config_folders(dest: Path, emit: Emit, *, force: bool = True) -> None:
+    for folder in LAB_CONFIG_FOLDERS:
+        _download_repo_directory(
+            VERIFIERS_REPO,
+            VERIFIERS_CONFIG_REF,
+            f"configs/{folder}",
+            dest / folder,
+            emit,
+            force=force,
+            missing_ok=True,
+        )
 
 
 def _sync_config_templates(workspace: Path, emit: Emit) -> None:
@@ -620,13 +616,7 @@ def _sync_config_templates(workspace: Path, emit: Emit) -> None:
         dir=str(global_template_root.parent),
     ) as staging_dir:
         staging_template_root = Path(staging_dir) / "templates"
-        _download_repo_directory(
-            VERIFIERS_REPO,
-            VERIFIERS_CONFIG_REF,
-            "configs",
-            staging_template_root / "configs",
-            emit,
-        )
+        _download_lab_config_folders(staging_template_root / "configs", emit)
         _remove_path(global_template_root)
         shutil.move(str(staging_template_root), str(global_template_root))
     emit(f"Refreshed {global_template_root}\n")
@@ -1284,76 +1274,6 @@ def _ensure_uv_project(workspace: Path, emit: Emit, runner: Runner) -> None:
 
     emit("Adding verifiers dependency\n")
     _check_command(["uv", "add", "verifiers"], workspace, emit, runner)
-
-
-def _install_prime_rl(workspace: Path, emit: Emit, runner: Runner) -> None:
-    _ensure_prime_rl_supported_platform()
-    prime_rl_dir = workspace / "prime-rl"
-    if prime_rl_dir.is_dir():
-        emit("prime-rl already exists\n")
-    else:
-        emit(f"Cloning prime-rl at {PRIME_RL_REF}\n")
-        _check_command(
-            [
-                "git",
-                "clone",
-                "--no-checkout",
-                f"https://github.com/{PRIME_RL_REPO}.git",
-                "prime-rl",
-            ],
-            workspace,
-            emit,
-            runner,
-        )
-
-    _check_command(["git", "checkout", PRIME_RL_REF], prime_rl_dir, emit, runner)
-    if (prime_rl_dir / ".venv").is_dir():
-        _check_command(["uv", "sync"], prime_rl_dir, emit, runner)
-        _check_command(["uv", "sync", "--all-extras"], prime_rl_dir, emit, runner)
-    else:
-        _check_command(
-            ["env", "SKIP_CLONE=1", "bash", "scripts/install.sh"],
-            prime_rl_dir,
-            emit,
-            runner,
-        )
-
-
-def _ensure_prime_rl_supported_platform() -> None:
-    host_platform, machine = _prime_rl_platform()
-    supported_machine = machine in {"x86_64", "amd64", "aarch64", "arm64"}
-    if host_platform.startswith("linux") and supported_machine:
-        return
-    raise RuntimeError(
-        f"prime-rl only supports Linux x86_64/aarch64 hosts; detected {host_platform}/{machine}."
-    )
-
-
-def _prime_rl_platform() -> tuple[str, str]:
-    return sys.platform, platform.machine().lower()
-
-
-def _install_environments_to_prime_rl(workspace: Path, emit: Emit, runner: Runner) -> None:
-    envs_dir = workspace / "environments"
-    prime_rl_python = workspace / "prime-rl" / ".venv" / "bin" / "python"
-    if not envs_dir.is_dir() or not prime_rl_python.exists():
-        return
-    env_paths = [
-        str(Path("environments") / path.name)
-        for path in sorted(envs_dir.iterdir())
-        if path.is_dir() and (path / "pyproject.toml").is_file()
-    ]
-    if not env_paths:
-        return
-    emit(f"Installing {len(env_paths)} local environments into prime-rl\n")
-    editable_args = [arg for env_path in env_paths for arg in ("-e", env_path)]
-    code = runner(
-        ["uv", "pip", "install", "--python", str(prime_rl_python), *editable_args],
-        workspace,
-        emit,
-    )
-    if code != 0:
-        emit("Local environment install into prime-rl failed; continuing\n")
 
 
 def _write_lab_docs_index(workspace: Path, agents: tuple[str, ...]) -> None:

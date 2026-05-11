@@ -64,7 +64,7 @@ RL_LIST_JSON_HELP = json_output_help(
 )
 
 RL_METRICS_JSON_HELP = json_help(
-    ".metrics[] = metric record from the RL API",
+    ".metrics[] = metric record from the Hosted Training API",
 )
 
 RL_ROLLOUTS_JSON_HELP = json_help(
@@ -87,6 +87,10 @@ RL_CHECKPOINTS_JSON_HELP = json_output_help(
 
 # Progress bar pattern (tqdm-style progress bars)
 PROGRESS_BAR = re.compile(r".*\|[█▏▎▍▌▋▊▉ ]{10,}\|.*")
+
+HOSTED_TRAINING_LOG_STARTUP_POLL_SECONDS = 10
+HOSTED_TRAINING_LOG_STARTUP_POLLS = 18
+HOSTED_TRAINING_LOG_FOLLOW_POLL_SECONDS = 5
 
 # Log level colors for rich console
 LEVEL_STYLES = {
@@ -227,7 +231,7 @@ rollouts_per_example = 8
 max_tokens = 2048
 # temperature = 0.7
 
-# Optional: hosted RL reasoning controls (mutually exclusive)
+# Optional: Hosted Training reasoning controls (mutually exclusive)
 # enable_thinking = false    # supported models: Qwen3.5, Nemotron
 # reasoning_effort = "high"  # supported models: GPT-OSS ("low" | "medium" | "high")
 
@@ -1150,7 +1154,9 @@ def list_models(
 
         if not models:
             console.print("[yellow]No models available for Hosted Training.[/yellow]")
-            console.print("[dim]This could mean no healthy RL clusters are running.[/dim]")
+            console.print(
+                "[dim]This could mean no healthy Hosted Training clusters are running.[/dim]"
+            )
             return
 
         table = Table(
@@ -1667,6 +1673,43 @@ def _print_new_lines(last_lines: list[str], current_lines: list[str]) -> None:
         console.print(line)
 
 
+def _is_log_startup_error(error: APIError) -> bool:
+    message = str(error).lower()
+    startup_markers = (
+        "queued",
+        "pending",
+        "starting",
+        "initializing",
+        "not started",
+        "not available yet",
+        "logs are not available",
+        "logs not available",
+    )
+    return "404" in message and any(marker in message for marker in startup_markers)
+
+
+def _fetch_logs_with_startup_poll(fetch_fn: Any, tail: int, label: str) -> str:
+    for poll in range(HOSTED_TRAINING_LOG_STARTUP_POLLS + 1):
+        try:
+            return fetch_fn(tail)
+        except APIError as e:
+            if not _is_log_startup_error(e):
+                raise
+            if poll == 0:
+                console.print(
+                    f"[yellow]Hosted Training run is starting; waiting for {label} logs...[/yellow]"
+                )
+            if poll == HOSTED_TRAINING_LOG_STARTUP_POLLS:
+                console.print(
+                    "[yellow]Hosted Training run has not started yet. "
+                    "Logs will be available once it is running.[/yellow]"
+                )
+                raise typer.Exit(0)
+            time.sleep(HOSTED_TRAINING_LOG_STARTUP_POLL_SECONDS)
+
+    raise AssertionError("unreachable")
+
+
 def _stream_logs(
     fetch_fn: Any,
     tail: int,
@@ -1691,10 +1734,11 @@ def _stream_logs(
                 raw_logs = fetch_fn(tail)
                 consecutive_errors = 0
             except APIError as e:
-                err_str = str(e).lower()
-                if "404" in str(e) and ("queued" in err_str or "pending" in err_str):
-                    console.print("[yellow]Run is queued, waiting for it to start...[/yellow]")
-                    time.sleep(10)
+                if _is_log_startup_error(e):
+                    console.print(
+                        "[yellow]Hosted Training run is starting; waiting for logs...[/yellow]"
+                    )
+                    time.sleep(HOSTED_TRAINING_LOG_STARTUP_POLL_SECONDS)
                     continue
                 consecutive_errors += 1
                 if "429" in str(e):
@@ -1709,9 +1753,9 @@ def _stream_logs(
             current_lines = render(raw_logs)
             _print_new_lines(last_lines, current_lines)
             last_lines = current_lines
-            time.sleep(5)
+            time.sleep(HOSTED_TRAINING_LOG_FOLLOW_POLL_SECONDS)
     else:
-        raw_logs = fetch_fn(tail)
+        raw_logs = _fetch_logs_with_startup_poll(fetch_fn, tail, label)
         rendered = render(raw_logs)
         if rendered:
             for line in rendered:
@@ -1721,9 +1765,8 @@ def _stream_logs(
 
 
 def _handle_logs_api_error(e: APIError) -> None:
-    err_str = str(e).lower()
-    if "404" in str(e) and ("queued" in err_str or "pending" in err_str):
-        msg = "Run has not started yet. Logs will be available once running."
+    if _is_log_startup_error(e):
+        msg = "Hosted Training run has not started yet. Logs will be available once running."
         console.print(f"[yellow]{msg}[/yellow]")
         raise typer.Exit(0)
     console.print(f"[red]Error:[/red] {e}")

@@ -15,7 +15,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
@@ -67,6 +67,17 @@ DEPRECATED_CONFIG_FIELDS: tuple[DeprecatedConfigField, ...] = (
 _REPO_TREE_CACHE: dict[tuple[str, str, int], tuple[RepoTreeEntry, ...]] = {}
 
 Emit = Callable[[str], None]
+LabSyncProgressKind = Literal[
+    "started",
+    "lab_assets_prepared",
+    "agent_assets_prepared",
+    "agent_assets_skipped",
+    "templates_refreshed",
+    "guidance_refreshed",
+    "completed",
+    "failed",
+]
+LabSyncProgressEmit = Callable[["LabSyncProgressEvent"], None]
 Runner = Callable[[Sequence[str], Path, Emit], int]
 
 
@@ -110,6 +121,14 @@ class LabSyncResult:
     """Result from a Lab asset sync."""
 
     exit_code: int
+    workspace: Path
+
+
+@dataclass(frozen=True)
+class LabSyncProgressEvent:
+    """One typed Lab sync progress milestone for renderers."""
+
+    kind: LabSyncProgressKind
     workspace: Path
 
 
@@ -316,14 +335,21 @@ def run_lab_sync_service(
     *,
     workspace: Path,
     emit: Emit | None = None,
+    emit_progress: LabSyncProgressEmit | None = None,
 ) -> LabSyncResult:
     """Refresh Lab skills and local agent guidance."""
 
     workspace = workspace.expanduser().resolve()
     emit = emit or (lambda _text: None)
     try:
-        _run_lab_sync_steps(options, workspace=workspace, emit=emit)
+        _run_lab_sync_steps(
+            options,
+            workspace=workspace,
+            emit=emit,
+            emit_progress=emit_progress,
+        )
     except Exception as exc:
+        _emit_sync_progress(emit_progress, "failed", workspace)
         emit(f"Sync failed: {exc}\n")
         return LabSyncResult(exit_code=1, workspace=workspace)
     return LabSyncResult(exit_code=0, workspace=workspace)
@@ -381,11 +407,13 @@ def _run_lab_sync_steps(
     *,
     workspace: Path,
     emit: Emit,
+    emit_progress: LabSyncProgressEmit | None = None,
 ) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "configs").mkdir(exist_ok=True)
     (workspace / "environments").mkdir(exist_ok=True)
     emit(f"Syncing Lab assets in {workspace}\n")
+    _emit_sync_progress(emit_progress, "started", workspace)
     agents = _resolve_sync_agents(workspace, options.agents, no_agent=options.no_agent)
     guidance_agents = agents
     if not guidance_agents and options.no_agent:
@@ -393,11 +421,13 @@ def _run_lab_sync_steps(
 
     managed_skill_names = _sync_prime_skills(emit)
     _prepare_workspace_skill_dir(workspace, managed_skill_names, emit)
+    _emit_sync_progress(emit_progress, "lab_assets_prepared", workspace)
     if agents:
         _prepare_agent_skill_dirs(workspace, agents, managed_skill_names, emit)
         _report_missing_agent_requirements(agents, emit)
         _prepare_agent_native_surfaces(workspace, agents, emit)
         _sync_lab_metadata(workspace, agents, setup_source="prime lab sync")
+        _emit_sync_progress(emit_progress, "agent_assets_prepared", workspace)
     else:
         reason = (
             "--no-agent"
@@ -405,13 +435,26 @@ def _run_lab_sync_steps(
             else "no configured agent; pass --agent to configure one"
         )
         emit(f"Skipped coding-agent skill roots ({reason})\n")
+        _emit_sync_progress(emit_progress, "agent_assets_skipped", workspace)
     _sync_config_templates(workspace, emit)
+    _emit_sync_progress(emit_progress, "templates_refreshed", workspace)
 
     if not options.skip_docs:
         _sync_workspace_guidance(workspace, guidance_agents, emit, force=True)
         _write_lab_docs_index(workspace, guidance_agents)
+        _emit_sync_progress(emit_progress, "guidance_refreshed", workspace)
 
     emit("Lab sync completed\n")
+    _emit_sync_progress(emit_progress, "completed", workspace)
+
+
+def _emit_sync_progress(
+    emit_progress: LabSyncProgressEmit | None,
+    kind: LabSyncProgressKind,
+    workspace: Path,
+) -> None:
+    if emit_progress is not None:
+        emit_progress(LabSyncProgressEvent(kind=kind, workspace=workspace))
 
 
 def _sync_workspace_guidance(
@@ -854,14 +897,14 @@ def _managed_skill_manifest_check() -> LabDoctorCheck:
     skills = manifest.get("skills")
     if isinstance(skills, dict) and skills:
         return LabDoctorCheck(
-            name="Global Lab skill cache",
+            name="Global Lab asset cache",
             status="PASS",
-            message=f"{len(skills)} managed skill(s) installed.",
+            message=f"{len(skills)} managed asset(s) installed.",
         )
     return LabDoctorCheck(
-        name="Global Lab skill cache",
+        name="Global Lab asset cache",
         status="WARN",
-        message=f"Missing {_global_prime_skills_dir() / PRIME_SKILLS_MANIFEST}",
+        message="Missing local Lab asset cache.",
         remediation="Run prime lab sync.",
     )
 
@@ -886,9 +929,9 @@ def _workspace_managed_skills_check(workspace: Path) -> LabDoctorCheck:
     skill_names = _managed_skill_names_from_manifest()
     if not skill_names:
         return LabDoctorCheck(
-            name="Workspace Lab skills",
+            name="Workspace Lab assets",
             status="WARN",
-            message="No managed Lab skills are installed.",
+            message="No managed Lab assets are installed.",
             remediation="Run prime lab sync.",
         )
     skills_dir = workspace / WORKSPACE_SKILLS_DIR
@@ -899,14 +942,14 @@ def _workspace_managed_skills_check(workspace: Path) -> LabDoctorCheck:
     ]
     if not missing:
         return LabDoctorCheck(
-            name="Workspace Lab skills",
+            name="Workspace Lab assets",
             status="PASS",
-            message=f"{len(skill_names)} managed skill link(s) are present.",
+            message=f"{len(skill_names)} managed asset link(s) are present.",
         )
     return LabDoctorCheck(
-        name="Workspace Lab skills",
+        name="Workspace Lab assets",
         status="WARN",
-        message="Missing " + ", ".join(missing[:5]),
+        message="Missing managed Lab assets: " + ", ".join(missing[:5]),
         remediation="Run prime lab sync.",
     )
 
@@ -915,9 +958,9 @@ def _agent_managed_skills_check(label: str, agent_skill_dir: Path, agent: str) -
     skill_names = _managed_skill_names_from_manifest()
     if not skill_names:
         return LabDoctorCheck(
-            name=f"{label} skills",
+            name=f"{label} assets",
             status="WARN",
-            message="No managed Lab skills are installed.",
+            message="No managed Lab assets are installed.",
             remediation="Run prime lab sync.",
         )
     missing = [
@@ -928,14 +971,14 @@ def _agent_managed_skills_check(label: str, agent_skill_dir: Path, agent: str) -
     ]
     if not missing:
         return LabDoctorCheck(
-            name=f"{label} skills",
+            name=f"{label} assets",
             status="PASS",
-            message=f"{len(skill_names)} managed skill link(s) are present.",
+            message=f"{len(skill_names)} managed asset link(s) are present.",
         )
     return LabDoctorCheck(
-        name=f"{label} skills",
+        name=f"{label} assets",
         status="WARN",
-        message="Missing " + ", ".join(missing[:5]),
+        message="Missing managed Lab assets: " + ", ".join(missing[:5]),
         remediation=f"Run prime lab sync --agent {agent}.",
     )
 
@@ -1692,6 +1735,8 @@ __all__ = [
     "LabSetupOptions",
     "LabSetupResult",
     "LabSyncOptions",
+    "LabSyncProgressEvent",
+    "LabSyncProgressKind",
     "LabSyncResult",
     "SUPPORTED_AGENTS",
     "parse_lab_doctor_args",

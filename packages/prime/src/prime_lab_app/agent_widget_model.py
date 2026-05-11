@@ -327,6 +327,9 @@ def _widget_field_specs(context: dict[str, Any] | None) -> tuple[AgentWidgetFiel
                 value = str(model_options[0][1])
             widget = "select"
             options = model_options
+        if config_kind == "eval" and name == "envs" and value:
+            widget = "select"
+            options = ((value, value),)
         fields.append(
             AgentWidgetFieldSpec(
                 name=name,

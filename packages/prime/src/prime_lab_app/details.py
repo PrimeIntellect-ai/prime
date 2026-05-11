@@ -331,7 +331,7 @@ def _workspace_detail_chunks(item: LabItem) -> list[Any]:
             [
                 Text(""),
                 Text("Lab Asset Sync", style="bold dim"),
-                Text("Open this row to refresh templates, skills, docs, and agent guidance."),
+                Text("Open this row to refresh Lab assets and local guidance."),
             ]
         )
         return chunks

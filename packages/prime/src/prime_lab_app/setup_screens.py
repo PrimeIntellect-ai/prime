@@ -11,6 +11,7 @@ from prime_cli.lab_setup import (
     LabSetupOptions,
     LabSetupResult,
     LabSyncOptions,
+    LabSyncProgressEvent,
     LabSyncResult,
     run_lab_doctor_service,
     run_lab_setup_service,
@@ -33,6 +34,16 @@ from .palette import STATUS_ERROR, STATUS_SUCCESS, STATUS_WARNING
 from .shell import lab_header
 
 SetupCompleteAction = Callable[[], None]
+_SYNC_PROGRESS_TEXT = {
+    "started": "Syncing Lab assets",
+    "lab_assets_prepared": "Prepared local Lab assets",
+    "agent_assets_prepared": "Prepared agent surfaces",
+    "agent_assets_skipped": "Skipped agent surfaces",
+    "templates_refreshed": "Refreshed Lab templates",
+    "guidance_refreshed": "Updated local guidance",
+    "completed": "Lab sync completed",
+    "failed": "Lab sync failed",
+}
 
 
 class SetupScreen(Screen[None]):
@@ -185,7 +196,7 @@ class SetupScreen(Screen[None]):
 
 
 class AgentSyncScreen(Screen[None]):
-    """Refresh Lab templates, skills, docs, and local agent guidance."""
+    """Refresh Lab assets and local agent guidance."""
 
     BINDINGS = [
         Binding("escape", "back", "Back", key_display="Esc"),
@@ -258,12 +269,18 @@ class AgentSyncScreen(Screen[None]):
         result = run_lab_sync_service(
             LabSyncOptions(agents=(agent,)),
             workspace=workspace,
-            emit=lambda text: self.app.call_from_thread(self._append_sync_output, text),
+            emit_progress=lambda event: self.app.call_from_thread(
+                self._append_sync_progress,
+                event,
+            ),
         )
         self.app.call_from_thread(self._finish_sync, result)
 
-    def _append_sync_output(self, text: str) -> None:
-        self._output = (self._output + text)[-50000:]
+    def _append_sync_progress(self, event: LabSyncProgressEvent) -> None:
+        visible_text = _sync_progress_text(event)
+        if not visible_text or self._output.splitlines()[-1:] == [visible_text]:
+            return
+        self._output = (self._output + visible_text + "\n")[-50000:]
         self.query_one("#sync-output", Static).update(Text(self._output))
 
     def _finish_sync(self, result: LabSyncResult) -> None:
@@ -435,7 +452,7 @@ def _agent_sync_body(item: LabItem) -> Group:
     table.add_row("Agent", str(item.raw.get("agent") or "codex"))
     table.add_row("Command", str(item.raw.get("command") or "prime lab sync"))
     note = Text(
-        "Refresh Prime-owned templates, skills, docs, and agent guidance for this workspace.",
+        "Refresh Prime-owned Lab assets and local guidance for this workspace.",
         style="dim",
     )
     return Group(Text("Lab asset sync", style="bold"), table, Text(""), note)
@@ -474,3 +491,7 @@ def _doctor_result_table(result: LabDoctorResult) -> Table:
             check.remediation,
         )
     return table
+
+
+def _sync_progress_text(event: LabSyncProgressEvent) -> str:
+    return _SYNC_PROGRESS_TEXT[event.kind]

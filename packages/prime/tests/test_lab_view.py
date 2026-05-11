@@ -25,10 +25,14 @@ from prime_cli.commands.lab import app as lab_cli_app
 from prime_cli.commands.rl import RLConfig as HostedRLConfig
 from prime_cli.lab_mcp import _serve_lab_mcp_stdio, lab_mcp_tool_definitions
 from prime_cli.lab_setup import (
+    LabDoctorCheck,
     LabDoctorOptions,
+    LabDoctorResult,
     LabSetupOptions,
     LabSetupResult,
     LabSyncOptions,
+    LabSyncProgressEvent,
+    LabSyncProgressKind,
     parse_lab_doctor_args,
     parse_lab_setup_args,
     parse_lab_sync_args,
@@ -164,7 +168,15 @@ from prime_lab_app.platform_preview import preview_lab_config
 from prime_lab_app.readme import readme_links as _readme_links
 from prime_lab_app.readme import readme_markdown as _readme_markdown
 from prime_lab_app.rows import item_badges_text
-from prime_lab_app.setup_screens import AgentSyncScreen, DoctorScreen, SetupScreen, _setup_body
+from prime_lab_app.setup_screens import (
+    AgentSyncScreen,
+    DoctorScreen,
+    SetupScreen,
+    _agent_sync_body,
+    _doctor_result_table,
+    _setup_body,
+    _sync_progress_text,
+)
 from prime_lab_app.shell import (
     compact_path,
     configured_workspace_agent,
@@ -2186,6 +2198,7 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
         lambda command: "/bin/pi" if command == "pi" else None,
     )
     emitted: list[str] = []
+    progress: list[LabSyncProgressEvent] = []
 
     assert parse_lab_sync_args(["--agent", "pi"]).agents == ("pi",)
     assert parse_lab_sync_args([]).agents == ()
@@ -2194,9 +2207,18 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
         LabSyncOptions(agents=("pi",)),
         workspace=tmp_path,
         emit=emitted.append,
+        emit_progress=progress.append,
     )
 
     assert result.exit_code == 0
+    assert [event.kind for event in progress] == [
+        "started",
+        "lab_assets_prepared",
+        "agent_assets_prepared",
+        "templates_refreshed",
+        "guidance_refreshed",
+        "completed",
+    ]
     assert (tmp_path / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
     assert (tmp_path / ".pi" / "skills" / "create-environments").exists()
     assert not any("pi-acp" in line for line in emitted)
@@ -2204,6 +2226,79 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
     assert (tmp_path / ".prime" / "lab" / "docs" / "index.md").is_file()
     assert (tmp_path / "AGENTS.md").is_file()
     assert downloads
+
+
+def test_agent_sync_screen_renders_asset_copy(tmp_path: Path) -> None:
+    item = LabItem(
+        key="workspace:sync",
+        section="workspace",
+        title="Sync Lab assets",
+        subtitle="codex",
+        status="sync",
+        status_style="",
+        metadata=(),
+        raw={
+            "type": "agent_sync",
+            "workspace": str(tmp_path),
+            "agent": "codex",
+            "command": "prime lab sync --agent codex",
+        },
+    )
+
+    rendered = _render_renderable(_agent_sync_body(item))
+
+    assert "skill" not in rendered.lower()
+    assert "Lab assets" in rendered
+
+
+def test_agent_sync_progress_renders_typed_events(tmp_path: Path) -> None:
+    kinds: tuple[LabSyncProgressKind, ...] = (
+        "started",
+        "lab_assets_prepared",
+        "agent_assets_prepared",
+        "templates_refreshed",
+        "guidance_refreshed",
+        "completed",
+    )
+    rendered = [
+        _sync_progress_text(LabSyncProgressEvent(kind=kind, workspace=tmp_path)) for kind in kinds
+    ]
+
+    assert rendered == [
+        "Syncing Lab assets",
+        "Prepared local Lab assets",
+        "Prepared agent surfaces",
+        "Refreshed Lab templates",
+        "Updated local guidance",
+        "Lab sync completed",
+    ]
+
+
+def test_doctor_screen_renders_source_check_copy(tmp_path: Path) -> None:
+    result = LabDoctorResult(
+        exit_code=1,
+        workspace=tmp_path,
+        checks=(
+            LabDoctorCheck(
+                name="Global Lab asset cache",
+                status="WARN",
+                message="Missing local Lab asset cache.",
+                remediation="Run prime lab sync.",
+            ),
+            LabDoctorCheck(
+                name="Codex assets",
+                status="PASS",
+                message="1 managed asset link(s) are present.",
+            ),
+        ),
+    )
+
+    rendered = _render_renderable(_doctor_result_table(result))
+
+    assert "skill" not in rendered.lower()
+    assert "Global Lab asset cache" in rendered
+    assert "Missing local Lab asset cache" in rendered
+    assert "Codex assets" in rendered
 
 
 def test_prime_lab_sync_service_preserves_workspace_agent(
@@ -2634,32 +2729,25 @@ def test_agent_runtime_filters_wrapped_lab_widget_tool_results() -> None:
     assert _is_lab_widget_tool_result_text(wrapped) is True
 
 
-def test_agent_runtime_suppresses_empty_lab_tool_update_after_widget() -> None:
-    messages: tuple[Any, ...] = ()
+def test_agent_runtime_ignores_empty_acp_tool_event() -> None:
+    runtime = AgentRuntime()
 
-    def on_messages(value: Any) -> None:
-        nonlocal messages
-        messages = value
+    runtime._record_acp_tool_event("Lab choose", "mcp", "completed", "")
 
-    runtime = AgentRuntime(on_messages=on_messages)
-    runtime._messages = [
-        AgentChatMessage(
-            "system",
-            "Lab tool diagnostic",
-            "widget",
-            {"tool": "choose", "kind": "choice_picker"},
-        )
-    ]
+    assert runtime.messages() == ()
 
-    runtime._record_acp_tool_event("prime_lab_choose", "completed", "")
 
-    assert len(messages) == 0
+def test_agent_runtime_records_text_acp_tool_event() -> None:
+    runtime = AgentRuntime()
+
+    runtime._record_acp_tool_event("Read config", "read", "completed", "ok")
+
     assert runtime.messages() == (
         AgentChatMessage(
             "system",
-            "Lab tool diagnostic",
-            "widget",
-            {"tool": "choose", "kind": "choice_picker"},
+            "Read config\nok",
+            "tool",
+            {"title": "Read config", "tool_kind": "read", "tool_status": "completed"},
         ),
     )
 
@@ -3884,12 +3972,22 @@ def test_agent_runtime_exposes_codex_lab_widget_tools(tmp_path: Path) -> None:
     assert tool_responses[-1]["success"] is True
     assert _wait_for(lambda: messages and messages[-1].status == "widget")
     latest_message = _last_message(messages)
-    assert "Pick a config" in latest_message.content
+    assert latest_message.content == "Pick a config"
+    assert "widget-1" not in latest_message.content
+    assert "Candidates" not in latest_message.content
     assert actions[-1]["type"] == "widget_requested"
     assert actions[-1]["tool"] == "choose"
     assert actions[-1]["kind"] == "choice_picker"
     assert actions[-1]["title"] == "Pick a config"
     runtime.stop()
+
+
+def test_agent_runtime_hides_codex_non_widget_tool_chatter() -> None:
+    runtime = AgentRuntime()
+
+    runtime._record_dynamic_tool_call("tool", "Environment search\n2 result(s)")
+
+    assert runtime.messages() == ()
 
 
 def test_agent_chat_transcript_renders_assistant_markdown() -> None:
@@ -3952,7 +4050,9 @@ def test_agent_chat_transcript_renders_lab_widget_card() -> None:
     assert "alphabet-sort" in rendered
     assert "Eval: alphabet-sort" not in rendered
     assert "Run launcher" not in rendered
-    assert "configs/eval/alphabet-sort.toml" in rendered
+    assert "configs/eval/alphabet-sort.toml" not in rendered
+    assert "Pickers" in rendered
+    assert "Environment, model" in rendered
 
 
 def test_agent_chat_parts_parse_lab_references() -> None:
@@ -4129,6 +4229,21 @@ def test_agent_stream_delta_ignores_lab_widget_ack_payload() -> None:
     )
 
     assert text == ""
+
+
+def test_agent_stream_delta_preserves_assistant_content() -> None:
+    text = _extract_stream_delta(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": "Using skill create-environments for local setup.\nReady.",
+            },
+        },
+        {},
+    )
+
+    assert text == "Using skill create-environments for local setup.\nReady."
 
 
 def test_agent_stream_delta_ignores_final_snapshot_after_streamed_chunks() -> None:
@@ -5032,13 +5147,13 @@ async def test_prime_lab_app_chat_mounts_lab_widget_cards(tmp_path: Path) -> Non
         input_values = {
             input_widget.name: input_widget.value for input_widget in cards[0].query(ClearableInput)
         }
-        assert input_values["envs"] == "primeintellect/alphabet-sort"
+        select_values = {select.name: select.value for select in cards[0].query(Select)}
+        assert select_values["envs"] == "primeintellect/alphabet-sort"
         assert input_values["num_examples"] == "50"
         assert input_values["rollouts_per_example"] == "3"
         assert "max_concurrent" in input_values
         assert input_values["max_concurrent"] == "auto"
         assert input_values["model"] == ""
-        assert not list(cards[0].query(Select))
         button_labels = {str(button.label) for button in app.screen.query(Button)}
         assert "Launch" in button_labels
         assert "Stop" in button_labels
@@ -5806,8 +5921,8 @@ async def test_prime_lab_app_chat_widget_prefills_local_env_and_endpoint_model(
             input_widget.name: input_widget.value for input_widget in card.query(ClearableInput)
         }
         selects = {select.name: select.value for select in card.query(Select)}
-        assert fields["envs"] == "reverse-text"
-        assert "envs" not in selects
+        assert "envs" not in fields
+        assert selects["envs"] == "reverse-text"
         assert selects["model"] == "local/reverse-model"
 
 
@@ -5875,13 +5990,13 @@ async def test_prime_lab_app_chat_widget_prefills_existing_eval_config(
         fields = {
             input_widget.name: input_widget.value for input_widget in card.query(ClearableInput)
         }
-        model_select = card.query_one(Select)
-        assert fields["envs"] == "reverse-text"
+        selects = {select.name: select.value for select in card.query(Select)}
+        assert selects["envs"] == "reverse-text"
         assert fields["num_examples"] == "12"
         assert fields["rollouts_per_example"] == "5"
         assert fields["max_tokens"] == "2048"
         assert fields["max_concurrent"] == "3"
-        assert model_select.value == "existing/model"
+        assert selects["model"] == "existing/model"
 
 
 @pytest.mark.asyncio

@@ -726,27 +726,27 @@ class AgentRuntime:
             self._append_streaming_assistant_text(event.text)
             return
         if event.kind in {"tool_call", "tool_update"}:
-            self._record_acp_tool_event(event.title, event.status, event.text)
+            self._record_acp_tool_event(event.title, event.tool_kind, event.status, event.text)
             return
 
-    def _record_acp_tool_event(self, title: str, status: str, text: str) -> None:
+    def _record_acp_tool_event(
+        self,
+        title: str,
+        tool_kind: str,
+        status: str,
+        text: str,
+    ) -> None:
         title = title.strip()
+        tool_kind = tool_kind.strip()
         status = status.strip()
-        text = text.strip()
-        if not title and not text:
+        text = _clean_agent_output_text(text.strip())
+        if not text:
             return
         if text and _is_lab_widget_tool_result_text(text):
             return
         label = title or "Tool"
-        content = label if not text else f"{label}\n{text}"
+        content = f"{label}\n{text}"
         with self._lock:
-            if (
-                not text
-                and _is_lab_widget_tool_event_title(label)
-                and self._messages
-                and self._messages[-1].status == "widget"
-            ):
-                return
             if (
                 self._messages
                 and self._messages[-1].role == "system"
@@ -757,7 +757,7 @@ class AgentRuntime:
                     "system",
                     content,
                     "tool",
-                    {"title": label, "tool_status": status},
+                    {"title": label, "tool_kind": tool_kind, "tool_status": status},
                 )
             else:
                 self._messages.append(
@@ -765,7 +765,7 @@ class AgentRuntime:
                         "system",
                         content,
                         "tool",
-                        {"title": label, "tool_status": status},
+                        {"title": label, "tool_kind": tool_kind, "tool_status": status},
                     )
                 )
             self._emit_messages_locked()
@@ -813,9 +813,12 @@ class AgentRuntime:
         content: str,
         action: dict[str, Any] | None = None,
     ) -> None:
+        display_content = _dynamic_tool_chat_content(status, content, action)
+        if display_content is None:
+            return
         with self._lock:
             self._finish_latest_streaming_assistant_locked(fallback="")
-            self._messages.append(AgentChatMessage("system", content, status, action or {}))
+            self._messages.append(AgentChatMessage("system", display_content, status, action or {}))
             self._emit_messages_locked()
 
     def _record_codex_turn(self, result: dict[str, Any]) -> None:
@@ -1191,10 +1194,28 @@ def _is_chunk_message(value: Any) -> bool:
 def _clean_agent_output_text(text: str) -> str:
     if not text:
         return ""
-    cleaned = _ANSI_RE.sub("", text)
-    if cleaned != text and not cleaned.strip():
-        return ""
-    return cleaned
+    return _ANSI_RE.sub("", text)
+
+
+def _dynamic_tool_chat_content(
+    status: str,
+    content: str,
+    action: dict[str, Any] | None,
+) -> str | None:
+    if status == "tool":
+        return None
+    if status == "widget":
+        if isinstance(action, dict):
+            title = str(action.get("title") or "").strip()
+            if title:
+                return title
+            payload = action.get("payload")
+            if isinstance(payload, dict):
+                payload_title = str(payload.get("title") or "").strip()
+                if payload_title:
+                    return payload_title
+        return "Action ready"
+    return content
 
 
 def _is_lab_widget_tool_result_text(text: str) -> bool:
@@ -1231,11 +1252,6 @@ def _contains_lab_widget_tool_result(value: Any) -> bool:
             except json.JSONDecodeError:
                 continue
     return False
-
-
-def _is_lab_widget_tool_event_title(value: str) -> bool:
-    normalized = value.strip().lower().replace("-", "_")
-    return normalized.startswith(("prime_lab_", "mcp_prime_lab_"))
 
 
 def _merge_stream_text(existing: str, delta: str) -> str:

@@ -1308,7 +1308,7 @@ def _workspace_agent_sync_item(workspace: Path, lab_metadata: dict[str, Any]) ->
         key=f"workspace:agent-sync:{_workspace_cache_key(workspace)}",
         section="workspace",
         title="Sync Lab assets",
-        subtitle=f"{agent} · refresh templates, skills, docs, and local guidance",
+        subtitle=f"{agent} · refresh Lab assets and local guidance",
         status="sync",
         status_style=STATUS_INFO,
         metadata=(

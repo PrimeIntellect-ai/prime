@@ -38,16 +38,10 @@ def test_environment_package_download_url_prefers_tracked_url():
     assert _environment_package_download_url(details) == "https://example.test/tracked"
 
 
-def test_environment_package_download_url_falls_back_to_package_url():
-    assert (
-        _environment_package_download_url(
-            {
-                "tracked_package_url": "not-a-url",
-                "package_url": "https://example.test/direct",
-            }
-        )
-        == "https://example.test/direct"
-    )
+def test_environment_package_download_url_falls_back_to_package_url_when_untracked():
+    details = {"package_url": "https://example.test/direct"}
+
+    assert _environment_package_download_url(details) == "https://example.test/direct"
 
 
 def test_pull_prefers_tracked_url_and_follows_redirects(tmp_path, monkeypatch):

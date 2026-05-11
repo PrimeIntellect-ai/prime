@@ -1903,9 +1903,10 @@ def is_valid_url(url: str) -> bool:
 
 
 def _environment_package_download_url(details: Dict[str, Any]) -> Optional[str]:
-    for key in ("tracked_package_url", "trackedPackageUrl", "package_url", "packageUrl"):
+    """Return the platform package URL, preferring tracked public downloads."""
+    for key in ("tracked_package_url", "package_url"):
         url = details.get(key)
-        if isinstance(url, str) and is_valid_url(url):
+        if isinstance(url, str) and url:
             return url
     return None
 

@@ -20,8 +20,18 @@ def validate_output_format(output: str, console: Console) -> None:
 
 
 def output_data_as_json(data: Any, console: Console) -> None:
-    """Output data as formatted JSON."""
-    console.out(json.dumps(data, indent=2, default=str))
+    """Output data as formatted JSON.
+
+    `soft_wrap=True` disables Rich's terminal-width wrapping so long string
+    values don't get a literal newline injected in the middle and break
+    parsers (e.g. `prime train usage` run names regularly exceed 80 chars).
+    """
+    console.print(
+        json.dumps(data, indent=2, default=str),
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
 
 
 def build_table(title: str, columns: List[Tuple[str, str]], show_lines: bool = True) -> Table:

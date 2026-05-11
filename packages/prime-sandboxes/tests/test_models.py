@@ -26,7 +26,20 @@ def test_create_sandbox_request_defaults():
     assert request.gpu_type is None
     assert request.vm is False
     assert request.timeout_minutes == 60
+    assert request.region is None
     assert request.labels == []
+
+
+def test_create_sandbox_request_accepts_region():
+    """Test region is accepted for multi-cluster sandbox creation"""
+    request = CreateSandboxRequest(
+        name="regional-sandbox",
+        docker_image="python:3.11-slim",
+        region="eu-west",
+    )
+
+    assert request.region == "eu-west"
+    assert request.model_dump(exclude_none=True)["region"] == "eu-west"
 
 
 def test_create_sandbox_request_requires_gpu_type_for_gpu_count():
@@ -117,6 +130,7 @@ def test_sandbox_model_with_alias():
         "labels": ["test"],
         "createdAt": "2024-01-01T00:00:00Z",
         "updatedAt": "2024-01-01T00:00:00Z",
+        "region": "eu-west",
     }
 
     sandbox = Sandbox.model_validate(data)
@@ -128,3 +142,4 @@ def test_sandbox_model_with_alias():
     assert sandbox.status == "RUNNING"
     assert sandbox.gpu_type == "H100_80GB"
     assert sandbox.vm is True
+    assert sandbox.region == "eu-west"

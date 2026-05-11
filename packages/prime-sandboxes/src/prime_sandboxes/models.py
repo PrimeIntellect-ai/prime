@@ -58,6 +58,7 @@ class Sandbox(BaseModel):
     user_id: Optional[str] = Field(None, alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
     kubernetes_job_id: Optional[str] = Field(None, alias="kubernetesJobId")
+    region: Optional[str] = None
     registry_credentials_id: Optional[str] = Field(default=None, alias="registryCredentialsId")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -93,8 +94,10 @@ class CreateSandboxRequest(BaseModel):
     secrets: Optional[Dict[str, str]] = None
     labels: List[str] = Field(default_factory=list)
     team_id: Optional[str] = None
+    region: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
     registry_credentials_id: Optional[str] = None
+    guaranteed: bool = False
 
     @model_validator(mode="after")
     def validate_gpu_fields(self) -> "CreateSandboxRequest":
@@ -104,6 +107,12 @@ class CreateSandboxRequest(BaseModel):
             raise ValueError("gpu_count is only supported when vm is true")
         if self.gpu_count == 0 and self.gpu_type is not None:
             raise ValueError("gpu_type requires gpu_count greater than 0")
+        return self
+
+    @model_validator(mode="after")
+    def validate_guaranteed(self) -> "CreateSandboxRequest":
+        if self.guaranteed and self.vm:
+            raise ValueError("guaranteed is not supported for VM sandboxes")
         return self
 
 
@@ -168,6 +177,9 @@ class BulkDeleteSandboxRequest(BaseModel):
 
     sandbox_ids: Optional[List[str]] = None
     labels: Optional[List[str]] = None
+    team_id: Optional[str] = None
+    user_id: Optional[str] = None
+    all_users: bool = False
 
 
 class BulkDeleteSandboxResponse(BaseModel):

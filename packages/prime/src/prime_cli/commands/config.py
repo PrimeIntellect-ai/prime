@@ -328,6 +328,19 @@ def _list_environments() -> None:
     console.print(table)
 
 
+def _delete_environment(
+    name: str,
+) -> None:
+    """Delete a named saved environment."""
+    try:
+        config = Config()
+        config.delete_environment(name)
+        console.print(f"[green]Deleted environment '{name}'![/green]")
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
 @app.command(no_args_is_help=True)
 def set_share_resources_with_team(
     enabled: str = typer.Argument(
@@ -390,6 +403,12 @@ def use_environment(
 def save_env(name: str = typer.Argument(..., help="Name for the environment")) -> None:
     """Save current config as environment (including API key)"""
     _save_environment(name)
+
+
+@app.command(name="delete", no_args_is_help=True)
+def delete_env(name: str = typer.Argument(..., help="Name of the saved environment")) -> None:
+    """Delete a saved environment"""
+    _delete_environment(name)
 
 
 @app.command(name="envs")

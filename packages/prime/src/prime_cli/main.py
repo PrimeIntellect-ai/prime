@@ -10,6 +10,9 @@ from .commands.deployments import app as deployments_app
 from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
+from .commands.feedback import app as feedback_app
+from .commands.fork import FORK_JSON_HELP
+from .commands.fork import fork as fork_command
 from .commands.gepa import app as gepa_app
 from .commands.images import app as images_app
 from .commands.inference import app as inference_app
@@ -17,13 +20,14 @@ from .commands.lab import app as lab_app
 from .commands.login import app as login_app
 from .commands.pods import app as pods_app
 from .commands.registry import app as registry_app
-from .commands.rl import app as rl_app
+from .commands.rl import app as train_app
 from .commands.sandbox import app as sandbox_app
 from .commands.secrets import app as secret_app
 from .commands.switch import app as switch_app
 from .commands.teams import app as teams_app
 from .commands.tunnel import app as tunnel_app
 from .commands.upgrade import app as upgrade_app
+from .commands.wallet import WALLET_JSON_HELP, wallet_command
 from .commands.whoami import app as whoami_app
 from .core import Config
 from .utils import PlainTyper, get_console
@@ -39,9 +43,17 @@ app = PlainTyper(
 # Lab commands
 app.add_typer(lab_app, name="lab", rich_help_panel="Lab")
 app.add_typer(env_app, name="env", rich_help_panel="Lab")
+app.command("fork", rich_help_panel="Lab", epilog=FORK_JSON_HELP)(fork_command)
 app.add_typer(evals_app, name="eval", rich_help_panel="Lab")
 app.add_typer(gepa_app, name="gepa", rich_help_panel="Lab")
-app.add_typer(rl_app, name="rl", rich_help_panel="Lab")
+app.add_typer(train_app, name="train", rich_help_panel="Lab")
+app.add_typer(
+    train_app,
+    name="rl",
+    help="Deprecated alias for `prime train`.",
+    hidden=True,
+    rich_help_panel="Lab",
+)
 app.add_typer(deployments_app, name="deployments", rich_help_panel="Lab")
 
 # Compute commands
@@ -61,7 +73,10 @@ app.add_typer(switch_app, name="switch", rich_help_panel="Account")
 app.add_typer(config_app, name="config", rich_help_panel="Account")
 app.add_typer(teams_app, name="teams", rich_help_panel="Account")
 app.add_typer(secret_app, name="secret", rich_help_panel="Account")
+app.command("wallet", rich_help_panel="Account", epilog=WALLET_JSON_HELP)(wallet_command)
 app.add_typer(upgrade_app, name="upgrade", rich_help_panel="Account")
+app.add_typer(upgrade_app, name="update", rich_help_panel="Account", hidden=True)
+app.add_typer(feedback_app, name="feedback", rich_help_panel="Account")
 
 
 @app.callback(invoke_without_command=True)

@@ -39,13 +39,22 @@ class HostedEvalConfig:
     inference_model: str
     num_examples: int
     rollouts_per_example: int
-    env_args: Optional[dict[str, str]] = None
+    env_args: Optional[dict[str, Any]] = None
     name: Optional[str] = None
     timeout_minutes: Optional[int] = None
     allow_sandbox_access: bool = False
     allow_instances_access: bool = False
+    allow_tunnel_access: bool = False
     custom_secrets: Optional[dict[str, str]] = None
     sampling_args: Optional[dict[str, Any]] = None
+    max_concurrent: Optional[int] = None
+    max_retries: Optional[int] = None
+    state_columns: Optional[list[str]] = None
+    independent_scoring: bool = False
+    verbose: bool = False
+    headers: Optional[list[str]] = None
+    extra_env_kwargs: Optional[dict[str, Any]] = None
+    api_client_type: Optional[str] = None
     api_base_url: Optional[str] = None
     api_key_var: Optional[str] = None
 

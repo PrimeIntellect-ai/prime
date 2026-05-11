@@ -45,6 +45,57 @@ def format_price(value: float) -> str:
     return f"${value:.2f}"
 
 
+def format_usd(value: float) -> str:
+    """Format a USD amount with sub-cent precision when the value is tiny.
+
+    Used by `prime train usage` and `prime wallet` for table cells. Zero
+    renders as `$0.00` (a real value, not "missing"); values below a cent
+    render with extra decimals so they don't collapse to `$0.00`.
+    """
+    if value == 0:
+        return "$0.00"
+    if abs(value) < 0.01:
+        return f"${value:.4f}"
+    return f"${value:.2f}"
+
+
+def format_price_per_mtok(value: Any) -> str:
+    """Format USD per 1M tokens for display, trimming trailing zeros."""
+    if value is None:
+        return ""
+    try:
+        f = float(value)
+        return f"${f:.6f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def format_promo_price(original: Any, effective: Any) -> str:
+    """Format a price cell, showing ``original → effective`` when discounted.
+
+    Returns rich-markup text that the table renderer auto-parses. When
+    no discount applies, falls back to ``format_price_per_mtok``.
+    """
+    if effective is None:
+        return format_price_per_mtok(original)
+
+    try:
+        original_f = float(original) if original is not None else None
+        effective_f = float(effective)
+    except (TypeError, ValueError):
+        return format_price_per_mtok(original)
+
+    if original_f is None or original_f <= 0 or effective_f >= original_f:
+        return format_price_per_mtok(original)
+
+    original_str = format_price_per_mtok(original_f)
+    if effective_f == 0:
+        new_str = "[bold green]FREE[/bold green]"
+    else:
+        new_str = f"[bold green]{format_price_per_mtok(effective_f)}[/bold green]"
+    return f"[strike dim]{original_str}[/strike dim] → {new_str}"
+
+
 def format_resources(cpu_cores: float, memory_gb: float, gpu_count: int = 0) -> str:
     """Format resource specifications as compact string."""
     resources = f"{cpu_cores:g}CPU/{memory_gb:g}GB"

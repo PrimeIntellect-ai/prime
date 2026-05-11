@@ -65,9 +65,7 @@ def test_train_init_defaults_to_rl_toml() -> None:
         assert Path("rl.toml").exists()
 
 
-def test_train_sft_config_forwards_teacher_payload_and_summary(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_train_sft_config_forwards_teacher_payload_and_summary(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "sft.toml"
     config_path.write_text(
         'model = "openai/gpt-oss-20b"\n'
@@ -78,6 +76,7 @@ def test_train_sft_config_forwards_teacher_payload_and_summary(
         "save = false\n"
         "[teacher.sampling]\n"
         "max_tokens = 2048\n"
+        "enable_thinking = false\n"
         'reasoning_effort = "medium"\n'
         "[[env]]\n"
         'id = "primeintellect/wordle"\n'
@@ -124,12 +123,18 @@ def test_train_sft_config_forwards_teacher_payload_and_summary(
         "save": False,
         "sampling": {
             "max_tokens": 2048,
-            "reasoning_effort": "medium",
+            "extra_body": {
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                    "reasoning_effort": "medium",
+                }
+            },
         },
     }
     assert "Loss:                sft" in result.output
     assert "Teacher" in result.output
     assert "Model:            openai/gpt-oss-120b" in result.output
+    assert "Enable Thinking:  False" in result.output
     assert "Reasoning Effort: medium" in result.output
     assert "Run Config" in result.output
     assert "Values: {'note': 'cursor'}" in result.output

@@ -35,6 +35,7 @@ from ..utils.formatters import (
     strip_ansi,
 )
 from ..utils.prompt import confirm_or_skip
+from ..utils.sampling import SamplingArgsConfig
 from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
 console = get_console()
@@ -207,6 +208,7 @@ rollouts_per_example = 8
 #
 # [teacher.sampling]
 # max_tokens = 2048
+# enable_thinking = false
 # reasoning_effort = "medium"
 
 [sampling]
@@ -216,9 +218,9 @@ max_tokens = 2048
 # min_tokens = 0
 # seed = 42
 
-# Optional: hosted RL reasoning controls (mutually exclusive)
-# enable_thinking = false    # supported models: Qwen3.5, Nemotron
-# reasoning_effort = "high"  # supported models: GPT-OSS ("low" | "medium" | "high")
+# Optional: chat template kwargs forwarded through extra_body.chat_template_kwargs
+# enable_thinking = false
+# reasoning_effort = "high"
 
 # Optional: temperature scheduling (use instead of temperature)
 # [sampling.temp_scheduler]
@@ -361,24 +363,10 @@ class TemperatureSchedulerConfig(BaseModel):
     total_steps: int | None = None
 
 
-class SamplingConfig(BaseModel):
+class SamplingConfig(SamplingArgsConfig):
     model_config = ConfigDict(extra="forbid")
 
-    max_tokens: int | None = None
-    temperature: float | None = None
-    repetition_penalty: float | None = None
-    min_tokens: int | None = None
-    seed: int | None = None
     temp_scheduler: TemperatureSchedulerConfig | None = None
-    extra_body: Dict[str, Any] | None = None
-    enable_thinking: bool | None = None
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
-
-    @model_validator(mode="after")
-    def _reasoning_controls_mutually_exclusive(self) -> "SamplingConfig":
-        if self.enable_thinking is not None and self.reasoning_effort is not None:
-            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
-        return self
 
 
 class EvalConfig(BaseModel):
@@ -580,29 +568,14 @@ class InfrastructureConfig(BaseModel):
         return d if d else None
 
 
-class TeacherSamplingConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    max_tokens: int | None = None
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
-
-    def to_api_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {}
-        if self.max_tokens is not None:
-            result["max_tokens"] = self.max_tokens
-        if self.reasoning_effort is not None:
-            result["reasoning_effort"] = self.reasoning_effort
-        return result
-
-
 class TeacherConfig(BaseModel):
     """Teacher model for SFT distillation."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     model: str
     save: bool = False
-    sampling: TeacherSamplingConfig = Field(default_factory=TeacherSamplingConfig)
+    sampling: SamplingArgsConfig = Field(default_factory=SamplingArgsConfig)
 
     @model_validator(mode="after")
     def reject_teacher_save(self) -> "TeacherConfig":
@@ -611,11 +584,9 @@ class TeacherConfig(BaseModel):
         return self
 
     def to_api_dict(self) -> Dict[str, Any]:
-        return {
-            "model": self.model,
-            "save": self.save,
-            "sampling": self.sampling.to_api_dict(),
-        }
+        result = self.model_dump(exclude_none=True)
+        result["sampling"] = self.sampling.to_api_dict()
+        return result
 
 
 class RLConfig(BaseModel):
@@ -959,12 +930,21 @@ def create_run(
             console.print(f"  Model:            {cfg.teacher.model}")
             console.print(f"  Save:             {cfg.teacher.save}")
             teacher_sampling = cfg.teacher.sampling
-            if teacher_sampling.max_tokens is not None or teacher_sampling.reasoning_effort:
+            if (
+                teacher_sampling.max_tokens is not None
+                or teacher_sampling.enable_thinking is not None
+                or teacher_sampling.reasoning_effort
+                or teacher_sampling.extra_body is not None
+            ):
                 console.print("  Sampling:")
                 if teacher_sampling.max_tokens is not None:
                     console.print(f"    Max Tokens:       {teacher_sampling.max_tokens}")
+                if teacher_sampling.enable_thinking is not None:
+                    console.print(f"    Enable Thinking:  {teacher_sampling.enable_thinking}")
                 if teacher_sampling.reasoning_effort:
                     console.print(f"    Reasoning Effort: {teacher_sampling.reasoning_effort}")
+                if teacher_sampling.extra_body is not None:
+                    console.print(f"    Extra Body:       {teacher_sampling.extra_body}")
 
         # Run config
         if cfg.run_config:
@@ -1143,7 +1123,7 @@ def create_run(
             temp_scheduler=cfg.sampling.temp_scheduler.model_dump(exclude_none=True)
             if cfg.sampling.temp_scheduler
             else None,
-            extra_body=cfg.sampling.extra_body,
+            extra_body=cfg.sampling.extra_body_to_api_dict(),
             batch_size=cfg.batch_size,
             name=cfg.name,
             wandb_entity=cfg.wandb.entity,
@@ -1164,8 +1144,6 @@ def create_run(
             cluster_name=cfg.cluster_name,
             infrastructure_config=cfg.infrastructure.to_api_dict(),
             tailscale_config=cfg.tailscale.to_api_dict(),
-            enable_thinking=cfg.sampling.enable_thinking,
-            reasoning_effort=cfg.sampling.reasoning_effort,
             run_config=cfg.run_config if cfg.run_config else None,
             loss=cfg.loss,
             teacher=cfg.teacher.to_api_dict() if cfg.teacher else None,

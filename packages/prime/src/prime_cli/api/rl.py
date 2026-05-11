@@ -203,7 +203,7 @@ class RLClient:
         infrastructure_config: Optional[Dict[str, Any]] = None,
         tailscale_config: Optional[Dict[str, Any]] = None,
         enable_thinking: Optional[bool] = None,
-        reasoning_effort: Optional[Literal["low", "medium", "high"]] = None,
+        reasoning_effort: Optional[str] = None,
         run_config: Optional[Dict[str, Any]] = None,
         loss: Literal["rl", "sft"] = "rl",
         teacher: Optional[Dict[str, Any]] = None,
@@ -260,8 +260,24 @@ class RLClient:
             if temp_scheduler is not None:
                 payload["temp_scheduler"] = temp_scheduler
 
-            if extra_body is not None:
-                payload["extra_body"] = extra_body
+            extra_body_payload = dict(extra_body) if extra_body is not None else None
+            if enable_thinking is not None or reasoning_effort is not None:
+                if extra_body_payload is None:
+                    extra_body_payload = {}
+                chat_template_kwargs = extra_body_payload.get("chat_template_kwargs")
+                if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
+                    raise ValueError("extra_body.chat_template_kwargs must be an object")
+                merged_chat_template_kwargs = (
+                    dict(chat_template_kwargs) if isinstance(chat_template_kwargs, dict) else {}
+                )
+                if enable_thinking is not None:
+                    merged_chat_template_kwargs["enable_thinking"] = enable_thinking
+                if reasoning_effort is not None:
+                    merged_chat_template_kwargs["reasoning_effort"] = reasoning_effort
+                extra_body_payload["chat_template_kwargs"] = merged_chat_template_kwargs
+
+            if extra_body_payload is not None:
+                payload["extra_body"] = extra_body_payload
 
             if eval_config:
                 payload["eval"] = eval_config
@@ -302,12 +318,6 @@ class RLClient:
 
             if tailscale_config:
                 payload["tailscale"] = tailscale_config
-
-            if enable_thinking is not None:
-                payload["enable_thinking"] = enable_thinking
-
-            if reasoning_effort is not None:
-                payload["reasoning_effort"] = reasoning_effort
 
             if run_config:
                 payload["run_config"] = run_config

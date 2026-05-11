@@ -124,6 +124,7 @@ def test_generate_rl_config_template_keeps_checkpoint_id_top_level_with_sft(
         "# save = false": "save = false",
         "# [teacher.sampling]": "[teacher.sampling]",
         "# max_tokens = 2048": "max_tokens = 2048",
+        "# enable_thinking = false": "enable_thinking = false",
         '# reasoning_effort = "medium"': 'reasoning_effort = "medium"',
     }
     for old, new in replacements.items():
@@ -138,6 +139,7 @@ def test_generate_rl_config_template_keeps_checkpoint_id_top_level_with_sft(
     assert cfg.loss == "sft"
     assert cfg.teacher is not None
     assert cfg.teacher.sampling.max_tokens == 2048
+    assert cfg.teacher.sampling.enable_thinking is False
 
 
 def test_flatten_config_schema_expands_optional_nested_models() -> None:
@@ -180,7 +182,7 @@ def test_load_config_accepts_sampling_enable_thinking(tmp_path: Path) -> None:
     assert cfg.sampling.reasoning_effort is None
 
 
-def test_load_config_rejects_both_reasoning_controls(tmp_path: Path) -> None:
+def test_load_config_passes_reasoning_controls_to_chat_template_kwargs(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text(
         'model = "openai/gpt-oss-20b"\n'
@@ -189,8 +191,14 @@ def test_load_config_rejects_both_reasoning_controls(tmp_path: Path) -> None:
         'reasoning_effort = "low"\n'
     )
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.sampling.extra_body_to_api_dict() == {
+        "chat_template_kwargs": {
+            "enable_thinking": False,
+            "reasoning_effort": "low",
+        }
+    }
 
 
 def test_load_config_rejects_top_level_reasoning_effort(tmp_path: Path) -> None:
@@ -211,6 +219,7 @@ def test_load_config_accepts_sft_teacher_config_and_defaults_rollouts(tmp_path: 
         "save = false\n"
         "[teacher.sampling]\n"
         "max_tokens = 2048\n"
+        "enable_thinking = false\n"
         'reasoning_effort = "medium"\n'
         "[[env]]\n"
         'id = "primeintellect/wordle"\n'
@@ -226,7 +235,12 @@ def test_load_config_accepts_sft_teacher_config_and_defaults_rollouts(tmp_path: 
         "save": False,
         "sampling": {
             "max_tokens": 2048,
-            "reasoning_effort": "medium",
+            "extra_body": {
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                    "reasoning_effort": "medium",
+                }
+            },
         },
     }
 
@@ -278,7 +292,7 @@ def test_load_config_rejects_teacher_save_true(tmp_path: Path) -> None:
         load_config(str(config_path))
 
 
-def test_load_config_rejects_private_teacher_endpoint_fields(tmp_path: Path) -> None:
+def test_load_config_accepts_arbitrary_teacher_api_fields(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text(
         'model = "openai/gpt-oss-20b"\n'
@@ -289,8 +303,11 @@ def test_load_config_rejects_private_teacher_endpoint_fields(tmp_path: Path) -> 
         'api_key_var = "OPENAI_API_KEY"\n'
     )
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.teacher is not None
+    assert cfg.teacher.to_api_dict()["base_url"] == ["https://api.openai.com/v1"]
+    assert cfg.teacher.to_api_dict()["api_key_var"] == "OPENAI_API_KEY"
 
 
 def test_rl_client_create_run_forwards_loss_and_teacher_payload() -> None:
@@ -307,7 +324,11 @@ def test_rl_client_create_run_forwards_loss_and_teacher_payload() -> None:
         "save": False,
         "sampling": {
             "max_tokens": 2048,
-            "reasoning_effort": "medium",
+            "extra_body": {
+                "chat_template_kwargs": {
+                    "reasoning_effort": "medium",
+                }
+            },
         },
     }
 
@@ -323,6 +344,33 @@ def test_rl_client_create_run_forwards_loss_and_teacher_payload() -> None:
     assert captured["json"]["loss"] == "sft"
     assert captured["json"]["teacher"] == teacher
     assert "teacher_rollout_model" not in captured["json"]
+
+
+def test_rl_client_create_run_merges_reasoning_controls_into_extra_body() -> None:
+    captured: dict[str, Any] = {}
+
+    class DummyClient:
+        def post(self, endpoint: str, json: dict[str, Any]) -> dict[str, Any]:
+            captured["json"] = json
+            return {"run": _rl_run_payload()}
+
+    RLClient(DummyClient()).create_run(
+        model_name="openai/gpt-oss-20b",
+        environments=[{"id": "primeintellect/wordle"}],
+        extra_body={"provider": {"order": ["azure"]}},
+        enable_thinking=False,
+        reasoning_effort="medium",
+    )
+
+    assert captured["json"]["extra_body"] == {
+        "provider": {"order": ["azure"]},
+        "chat_template_kwargs": {
+            "enable_thinking": False,
+            "reasoning_effort": "medium",
+        },
+    }
+    assert "enable_thinking" not in captured["json"]
+    assert "reasoning_effort" not in captured["json"]
 
 
 def test_tailscale_config_disabled_by_default() -> None:

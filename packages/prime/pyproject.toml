@@ -47,7 +47,7 @@ classifiers = [
 Homepage = "https://github.com/PrimeIntellect-ai/prime-cli"
 Documentation = "https://github.com/PrimeIntellect-ai/prime-cli#readme"
 Repository = "https://github.com/PrimeIntellect-ai/prime-cli.git"
-Changelog = "https://github.com/PrimeIntellect-ai/prime-cli/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/PrimeIntellect-ai/prime/releases"
 
 [project.scripts]
 prime = "prime_cli.main:run"

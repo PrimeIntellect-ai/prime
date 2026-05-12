@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 import httpx
 from tenacity import (
     retry,
+    retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
@@ -13,15 +14,30 @@ from tenacity import (
 
 from .config import Config
 
-# Retry configuration for transient connection errors
-# These errors occur when the server closes idle connections in the pool
-# or when we fail to establish/maintain a connection
-RETRYABLE_EXCEPTIONS = (
+# Retry configuration for transient connection errors. POST only retries errors
+# that happen before the server can process the request; retrying ReadError on a
+# non-idempotent POST can duplicate side effects after a committed response-path
+# failure.
+POST_RETRYABLE_EXCEPTIONS = (
     httpx.RemoteProtocolError,  # Server disconnected unexpectedly
     httpx.ConnectError,  # Connection refused/failed
     httpx.PoolTimeout,  # No connection available in pool
+)
+
+IDEMPOTENT_RETRYABLE_EXCEPTIONS = POST_RETRYABLE_EXCEPTIONS + (
     httpx.ReadError,  # Connection broken while reading response (e.g., TCP reset)
 )
+
+IDEMPOTENT_POST_RETRYABLE_STATUSES = frozenset({502, 503, 504})
+
+
+def _is_idempotent_post_retryable_error(exc: BaseException) -> bool:
+    if isinstance(exc, IDEMPOTENT_RETRYABLE_EXCEPTIONS):
+        return True
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response.status_code in IDEMPOTENT_POST_RETRYABLE_STATUSES
+    )
 
 
 def _default_user_agent() -> str:
@@ -86,12 +102,12 @@ class APIClient:
             )
 
     @retry(
-        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+        retry=retry_if_exception_type(IDEMPOTENT_RETRYABLE_EXCEPTIONS),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
         reraise=True,
     )
-    def _request_with_retry(
+    def _idempotent_request_with_retry(
         self,
         method: str,
         url: str,
@@ -99,8 +115,44 @@ class APIClient:
         json: Optional[Dict[str, Any]] = None,
         timeout: Optional[int] = None,
     ) -> httpx.Response:
-        """Make HTTP request with retry on transient connection errors."""
+        """Make idempotent HTTP request with retry on transient connection errors."""
         return self.client.request(method, url, params=params, json=json, timeout=timeout)
+
+    @retry(
+        retry=retry_if_exception_type(POST_RETRYABLE_EXCEPTIONS),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
+        reraise=True,
+    )
+    def _post_request_with_retry(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        json: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+    ) -> httpx.Response:
+        """Make non-idempotent POST with only pre-processing safe retries."""
+        return self.client.request(method, url, params=params, json=json, timeout=timeout)
+
+    @retry(
+        retry=retry_if_exception(_is_idempotent_post_retryable_error),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
+        reraise=True,
+    )
+    def _idempotent_post_request_with_retry(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        json: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+    ) -> httpx.Response:
+        """Make idempotency-keyed POST with retries for ambiguous transient failures."""
+        response = self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response.raise_for_status()
+        return response
 
     def request(
         self,
@@ -109,6 +161,7 @@ class APIClient:
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
         timeout: Optional[int] = None,
+        idempotent_post: bool = False,
     ) -> Dict[str, Any]:
         """Make a request to the API"""
         self._check_auth_required()
@@ -121,10 +174,18 @@ class APIClient:
         url = f"{self.base_url}{endpoint}"
 
         try:
-            response = self._request_with_retry(
-                method, url, params=params, json=json, timeout=timeout
-            )
-            response.raise_for_status()
+            is_idempotent_post = method.upper() == "POST" and idempotent_post
+            if method.upper() == "POST":
+                request_fn = (
+                    self._idempotent_post_request_with_retry
+                    if is_idempotent_post
+                    else self._post_request_with_retry
+                )
+            else:
+                request_fn = self._idempotent_request_with_retry
+            response = request_fn(method, url, params=params, json=json, timeout=timeout)
+            if not is_idempotent_post:
+                response.raise_for_status()
 
             result = response.json()
             if not isinstance(result, dict):
@@ -197,12 +258,12 @@ class AsyncAPIClient:
             )
 
     @retry(
-        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+        retry=retry_if_exception_type(IDEMPOTENT_RETRYABLE_EXCEPTIONS),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
         reraise=True,
     )
-    async def _request_with_retry(
+    async def _idempotent_request_with_retry(
         self,
         method: str,
         url: str,
@@ -210,8 +271,44 @@ class AsyncAPIClient:
         json: Optional[Dict[str, Any]] = None,
         timeout: Optional[int] = None,
     ) -> httpx.Response:
-        """Make async HTTP request with retry on transient connection errors."""
+        """Make async idempotent HTTP request with retry on transient connection errors."""
         return await self.client.request(method, url, params=params, json=json, timeout=timeout)
+
+    @retry(
+        retry=retry_if_exception_type(POST_RETRYABLE_EXCEPTIONS),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
+        reraise=True,
+    )
+    async def _post_request_with_retry(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        json: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+    ) -> httpx.Response:
+        """Make async non-idempotent POST with only pre-processing safe retries."""
+        return await self.client.request(method, url, params=params, json=json, timeout=timeout)
+
+    @retry(
+        retry=retry_if_exception(_is_idempotent_post_retryable_error),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.1, min=0.1, max=2),
+        reraise=True,
+    )
+    async def _idempotent_post_request_with_retry(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        json: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+    ) -> httpx.Response:
+        """Make async idempotency-keyed POST with retries for ambiguous transient failures."""
+        response = await self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response.raise_for_status()
+        return response
 
     async def request(
         self,
@@ -220,6 +317,7 @@ class AsyncAPIClient:
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
         timeout: Optional[int] = None,
+        idempotent_post: bool = False,
     ) -> Dict[str, Any]:
         """Make an async request to the API"""
         self._check_auth_required()
@@ -232,10 +330,18 @@ class AsyncAPIClient:
         url = f"{self.base_url}{endpoint}"
 
         try:
-            response = await self._request_with_retry(
-                method, url, params=params, json=json, timeout=timeout
-            )
-            response.raise_for_status()
+            is_idempotent_post = method.upper() == "POST" and idempotent_post
+            if method.upper() == "POST":
+                request_fn = (
+                    self._idempotent_post_request_with_retry
+                    if is_idempotent_post
+                    else self._post_request_with_retry
+                )
+            else:
+                request_fn = self._idempotent_request_with_retry
+            response = await request_fn(method, url, params=params, json=json, timeout=timeout)
+            if not is_idempotent_post:
+                response.raise_for_status()
 
             result = response.json()
             if not isinstance(result, dict):

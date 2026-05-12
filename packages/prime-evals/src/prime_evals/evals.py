@@ -212,7 +212,7 @@ class EvalsClient:
         self,
         evaluation_id: str,
         samples: List[Dict[str, Any]],
-        max_payload_bytes: int = 2 * 1024 * 1024,
+        max_payload_bytes: int = 25 * 1024 * 1024,
         max_workers: int = 4,
     ) -> Dict[str, Any]:
         """Push evaluation samples in adaptive batches with concurrent uploads."""
@@ -258,7 +258,7 @@ class EvalsClient:
             reraise=True,
         )
         def do_upload() -> int:
-            response = httpx.post(url, json={"samples": batch}, headers=headers, timeout=30.0)
+            response = httpx.post(url, json={"samples": batch}, headers=headers, timeout=300.0)
             response.raise_for_status()
             return len(batch)
 
@@ -562,7 +562,7 @@ class AsyncEvalsClient:
         self,
         evaluation_id: str,
         samples: List[Dict[str, Any]],
-        max_payload_bytes: int = 2 * 1024 * 1024,
+        max_payload_bytes: int = 25 * 1024 * 1024,
         max_concurrent: int = 4,
     ) -> Dict[str, Any]:
         """Push evaluation samples in adaptive batches with concurrent uploads."""
@@ -593,7 +593,7 @@ class AsyncEvalsClient:
                 reraise=True,
             )
             async def do_upload() -> int:
-                async with httpx.AsyncClient(timeout=30.0) as client:
+                async with httpx.AsyncClient(timeout=300.0) as client:
                     response = await client.post(url, json={"samples": batch}, headers=headers)
                     response.raise_for_status()
                     return len(batch)

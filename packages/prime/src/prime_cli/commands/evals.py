@@ -1014,10 +1014,9 @@ def _require_published_environment_for_eval_push(env_name: str, eval_path: Path)
         f"[yellow]Push '{env_name}' before uploading this evaluation:[/yellow] "
         f"prime env push {env_name}"
     )
-    console.print(
-        "[dim]Then retry with an owner-qualified environment, e.g. "
-        f"`prime eval push {eval_path} --env <owner>/{env_name}`.[/dim]"
-    )
+    console.print("[dim]Then retry with an owner-qualified environment:[/dim]")
+    console.print(f"[dim]  --env <owner>/{env_name}[/dim]")
+    console.print(f"[dim]Example: prime eval push {eval_path} --env <owner>/{env_name}[/dim]")
     raise typer.Exit(1)
 
 

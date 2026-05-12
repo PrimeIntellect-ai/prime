@@ -32,6 +32,7 @@ _AGENT_PROJECT_SKILL_ROOTS = {
     "codex": (".agents/skills",),
     "cursor": (".cursor/skills",),
     "droid": (".factory/skills",),
+    "letta": (".agents/skills",),
     "opencode": (".opencode/skills",),
     "pi": (".pi/skills",),
 }

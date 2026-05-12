@@ -21,6 +21,7 @@ AgentNativeSurface = Literal[
     "acp_mcp",
     "droid_mcp_config",
     "pi_extension",
+    "letta_external_tools",
     "none",
 ]
 
@@ -142,6 +143,18 @@ _CAPABILITIES: dict[str, AgentCapability] = {
         requirements=(AgentInstallRequirement("hermes", description="Hermes Agent CLI"),),
         expected_surface_paths=("{hermes_config}",),
     ),
+    "letta": AgentCapability(
+        name="letta",
+        label="Letta Code",
+        native_surface="letta_external_tools",
+        requirements=(
+            AgentInstallRequirement(
+                "letta",
+                install_command=("npm", "install", "-g", "@letta-ai/letta-code"),
+                description="Letta Code CLI",
+            ),
+        ),
+    ),
     "opencode": AgentCapability(
         name="opencode",
         label="OpenCode",
@@ -164,6 +177,7 @@ _ALIASES = {
     "factory": "droid",
     "factory-droid": "droid",
     "hermes-agent": "hermes",
+    "letta-code": "letta",
 }
 AGENT_DISPLAY_ORDER = (
     "amp",
@@ -172,6 +186,7 @@ AGENT_DISPLAY_ORDER = (
     "cursor",
     "droid",
     "hermes",
+    "letta",
     "opencode",
     "pi",
 )

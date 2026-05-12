@@ -20,8 +20,11 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 import toml
-from rich.console import Console
+from rich import box
+from rich.console import Console, Group, RenderableType
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from .lab_agents import (
     agent_capability,
@@ -66,7 +69,7 @@ DEPRECATED_CONFIG_FIELDS: tuple[DeprecatedConfigField, ...] = (
 )
 _REPO_TREE_CACHE: dict[tuple[str, str, int], tuple[RepoTreeEntry, ...]] = {}
 
-Emit = Callable[[str], None]
+Emit = Callable[[str | RenderableType], None]
 Runner = Callable[[Sequence[str], Path, Emit], int]
 
 
@@ -167,7 +170,7 @@ def run_lab_setup(passthrough_args: list[str], *, console: Console | None = None
     result = run_lab_setup_service(
         options,
         workspace=Path.cwd(),
-        emit=lambda text: console.print(text.rstrip("\n"), markup=False),
+        emit=lambda item: _emit_to_console(console, item),
     )
     return result.exit_code
 
@@ -187,7 +190,7 @@ def run_lab_sync(passthrough_args: list[str], *, console: Console | None = None)
     result = run_lab_sync_service(
         options,
         workspace=Path.cwd(),
-        emit=lambda text: console.print(text.rstrip("\n"), markup=False),
+        emit=lambda item: _emit_to_console(console, item),
     )
     return result.exit_code
 
@@ -228,7 +231,10 @@ def parse_lab_setup_args(args: list[str]) -> LabSetupOptions:
         "--agents",
         "--agent",
         dest="agents",
-        help="Comma-separated coding agents to scaffold, or 'all' for diagnostics.",
+        help=(
+            "Comma-separated coding agents to scaffold, or 'all' for diagnostics. "
+            f"Supported: {', '.join((*SUPPORTED_AGENTS, 'all'))}."
+        ),
     )
     parser.add_argument(
         "--no-interactive",
@@ -255,7 +261,10 @@ def parse_lab_sync_args(args: list[str]) -> LabSyncOptions:
         "--agents",
         "--agent",
         dest="agents",
-        help="Comma-separated coding agents to refresh, or 'all' for diagnostics.",
+        help=(
+            "Comma-separated coding agents to refresh, or 'all' for diagnostics. "
+            f"Supported: {', '.join((*SUPPORTED_AGENTS, 'all'))}."
+        ),
     )
     parser.add_argument(
         "--skip-docs",
@@ -373,7 +382,8 @@ def _run_lab_setup_steps(
     _copy_setup_configs(workspace, emit)
     _sync_config_templates(workspace, emit)
     _write_lab_docs_index(workspace, options.agents)
-    emit("Lab setup completed\n")
+    emit("\n")
+    emit(_post_setup_call_to_action(options))
 
 
 def _run_lab_sync_steps(
@@ -981,6 +991,12 @@ def _agent_native_surface_check(agent: str, workspace: Path) -> LabDoctorCheck:
                 f"{capability.label} receives native Lab tools through {capability.native_surface}."
             ),
         )
+    if capability.native_surface == "letta_external_tools":
+        return LabDoctorCheck(
+            name=name,
+            status="PASS",
+            message=f"{capability.label} receives native Lab tools through external tools.",
+        )
     if capability.native_surface == "none":
         return LabDoctorCheck(
             name=name,
@@ -1274,6 +1290,72 @@ def _ensure_uv_project(workspace: Path, emit: Emit, runner: Runner) -> None:
 
     emit("Adding verifiers dependency\n")
     _check_command(["uv", "add", "verifiers"], workspace, emit, runner)
+
+
+def _post_setup_call_to_action(options: LabSetupOptions) -> Panel:
+    primary_agent = options.agents[0] if options.agents else "your coding agent"
+    prompt_heading = f"ask {primary_agent}"
+    prompt_body = (
+        "I want to train a model for <my task domain>. Propose an initial environment "
+        "scaffold including relevant tools, and come up with a good method to generate "
+        "a small sample synthetic dataset. Run a quick eval baseline, inspect the "
+        "results, and then decide how we should iterate on refining the implementation."
+    )
+    prompt_text = Text(
+        prompt_body,
+        style="italic",
+    )
+
+    command_table = Table.grid(padding=(0, 1))
+    command_table.add_row("[bold green]$[/bold green]", "prime env init my-env")
+    command_table.add_row(
+        "[bold green]$[/bold green]", "prime eval run my-env -m openai/gpt-5.4-nano -n 5"
+    )
+    command_table.add_row("[bold green]$[/bold green]", "prime eval tui")
+    command_table.add_row("[bold green]$[/bold green]", "prime rl run configs/rl/qwen-3-5.toml")
+    command_table.add_row(
+        "[bold green]$[/bold green]", "prime gepa run my-env -m openai/gpt-5.4-nano"
+    )
+
+    header_text = Text.assemble(
+        ("idea -> environment -> eval -> training", "dim"),
+    )
+
+    content = Group(
+        header_text,
+        Panel(
+            prompt_text,
+            title=prompt_heading,
+            border_style="magenta",
+            box=box.ROUNDED,
+            padding=(1, 2),
+            expand=False,
+        ),
+        Panel(
+            command_table,
+            title="quick commands",
+            border_style="green",
+            box=box.ROUNDED,
+            padding=(0, 1),
+            expand=False,
+        ),
+    )
+
+    return Panel(
+        content,
+        title="[bold white]get started[/bold white]",
+        border_style="bright_blue",
+        box=box.DOUBLE,
+        padding=(1, 2),
+        expand=False,
+    )
+
+
+def _emit_to_console(console: Console, item: str | RenderableType) -> None:
+    if isinstance(item, str):
+        console.print(item.rstrip("\n"), markup=False)
+    else:
+        console.print(item)
 
 
 def _write_lab_docs_index(workspace: Path, agents: tuple[str, ...]) -> None:

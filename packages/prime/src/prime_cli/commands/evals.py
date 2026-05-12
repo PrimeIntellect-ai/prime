@@ -1008,6 +1008,19 @@ def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, An
     return get_eval_viewer_url(evaluation_id)
 
 
+def _require_published_environment_for_eval_push(env_name: str, eval_path: Path) -> None:
+    console.print("[red]Error:[/red] Evaluation uploads require a pushed environment.")
+    console.print(
+        f"[yellow]Push '{env_name}' before uploading this evaluation:[/yellow] "
+        f"prime env push {env_name}"
+    )
+    console.print(
+        "[dim]Then retry with an owner-qualified environment, e.g. "
+        f"`prime eval push {eval_path} --env <owner>/{env_name}`.[/dim]"
+    )
+    raise typer.Exit(1)
+
+
 def _push_single_eval(
     config_path: str,
     env_slug: Optional[str],
@@ -1027,14 +1040,9 @@ def _push_single_eval(
 
     environments = None
     if env_slug and not run_id and not eval_id:
-        # Determine if env_slug is a slug (owner/name) or a name
-        # Use appropriate key so _resolve_environments can properly resolve it
-        if "/" in env_slug:
-            # It's a slug (owner/name format)
-            environments = [{"slug": env_slug}]
-        else:
-            # It's a name (will be resolved by _resolve_environments)
-            environments = [{"name": env_slug}]
+        if "/" not in env_slug:
+            _require_published_environment_for_eval_push(env_slug, path)
+        environments = [{"slug": env_slug}]
 
     console.print()
 
@@ -1137,7 +1145,10 @@ def push_eval(
         "--env",
         "--env-id",
         "-e",
-        help="Environment name (e.g., 'gsm8k' or 'owner/gsm8k')",
+        help=(
+            "Published environment slug (owner/name). "
+            "Push local environments with `prime env push` first."
+        ),
     ),
     run_id: Optional[str] = typer.Option(
         None,
@@ -1171,7 +1182,7 @@ def push_eval(
     Examples:
         prime eval push                                    # Push current dir or auto-discover
         prime eval push outputs/evals/gsm8k--gpt-4/abc123  # Push specific directory
-        prime eval push --env gsm8k                        # Push with environment override
+        prime eval push --env owner/gsm8k                  # Push with environment override
         prime eval push --name "gsm8k smoke test"         # Override evaluation display name
         prime eval push --public                           # Create a public evaluation
         prime eval push --eval xyz789 --name "rerun"      # Update an existing evaluation name
@@ -1264,8 +1275,8 @@ def push_eval(
         console.print("[yellow]Tip:[/yellow] You must provide one of:")
         console.print("  --eval <eval_id>     (to update an existing evaluation)")
         console.print("  --run-id <run_id>    (to link to an existing training run)")
-        console.print("  --env <env>          (environment name, e.g., 'gsm8k' or 'owner/gsm8k')")
-        console.print("  [or ensure 'env' or 'env_id' is set in metadata.json]")
+        console.print("  --env <env>          (published environment slug, e.g., 'owner/gsm8k')")
+        console.print("  [or ensure owner/name 'env' or 'env_id' is set in metadata.json]")
         raise typer.Exit(1)
     except KeyError as e:
         console.print(f"[red]Error:[/red] Missing required field: {e}")

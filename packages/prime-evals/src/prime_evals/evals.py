@@ -212,7 +212,7 @@ class EvalsClient:
         self,
         evaluation_id: str,
         samples: List[Dict[str, Any]],
-        max_payload_bytes: int = 2 * 1024 * 1024,
+        max_payload_bytes: int = 25 * 1024 * 1024,
         max_workers: int = 4,
     ) -> Dict[str, Any]:
         """Push evaluation samples in adaptive batches with concurrent uploads."""
@@ -562,7 +562,7 @@ class AsyncEvalsClient:
         self,
         evaluation_id: str,
         samples: List[Dict[str, Any]],
-        max_payload_bytes: int = 2 * 1024 * 1024,
+        max_payload_bytes: int = 25 * 1024 * 1024,
         max_concurrent: int = 4,
     ) -> Dict[str, Any]:
         """Push evaluation samples in adaptive batches with concurrent uploads."""

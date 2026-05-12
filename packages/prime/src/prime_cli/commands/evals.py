@@ -85,13 +85,17 @@ EVAL_TABLE_MAX_TEXT_WIDTH = 30
 EVAL_RUN_EXAMPLE_COMMAND = "prime eval run gsm8k -n 10"
 EVAL_HOSTED_LABEL = "HOSTED"
 EVAL_LOCAL_LABEL = "LOCAL"
+# Legacy verifiers config fields/flags are accepted through the parser only so
+# Prime can reject them with the hosted-specific unsupported-option message.
 HOSTED_EVAL_CONFIG_EXTRA_FIELDS = {
+    "debug",
     "timeout_minutes",
     "allow_sandbox_access",
     "allow_instances_access",
     "allow_tunnel_access",
     "eval_name",
 }
+HOSTED_LEGACY_UNSUPPORTED_FLAGS = {"--debug", "--tui", "-u"}
 HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
     "env_dir_path": (str, "a non-empty string"),
     "num_examples": (int, "an integer"),
@@ -303,6 +307,23 @@ def _reject_unsupported_hosted_verifiers_args(
         for dest, option_name in option_names_by_dest.items()
         if dest in provided_dests and dest not in HOSTED_SUPPORTED_VERIFIERS_FIELDS
     ]
+    if not unsupported_flags:
+        return
+
+    console.print(
+        "[red]Error:[/red] hosted eval CLI does not support: "
+        + ", ".join(f"`{flag}`" for flag in unsupported_flags)
+    )
+    raise typer.Exit(1)
+
+
+def _reject_legacy_unsupported_hosted_flags(passthrough_args: list[str]) -> None:
+    unsupported_flags = []
+    for arg in passthrough_args:
+        flag = arg.split("=", 1)[0]
+        if flag in HOSTED_LEGACY_UNSUPPORTED_FLAGS and flag not in unsupported_flags:
+            unsupported_flags.append(flag)
+
     if not unsupported_flags:
         return
 
@@ -1436,6 +1457,7 @@ def run_eval_cmd(
             raise typer.Exit(1)
 
     if hosted:
+        _reject_legacy_unsupported_hosted_flags(passthrough_args)
         parsed_verifiers_args, cli_overrides, option_names_by_dest = (
             _parse_verifiers_eval_namespace(
                 environment,

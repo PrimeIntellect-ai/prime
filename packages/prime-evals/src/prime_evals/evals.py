@@ -258,7 +258,7 @@ class EvalsClient:
             reraise=True,
         )
         def do_upload() -> int:
-            response = httpx.post(url, json={"samples": batch}, headers=headers, timeout=30.0)
+            response = httpx.post(url, json={"samples": batch}, headers=headers, timeout=300.0)
             response.raise_for_status()
             return len(batch)
 
@@ -593,7 +593,7 @@ class AsyncEvalsClient:
                 reraise=True,
             )
             async def do_upload() -> int:
-                async with httpx.AsyncClient(timeout=30.0) as client:
+                async with httpx.AsyncClient(timeout=300.0) as client:
                     response = await client.post(url, json={"samples": batch}, headers=headers)
                     response.raise_for_status()
                     return len(batch)

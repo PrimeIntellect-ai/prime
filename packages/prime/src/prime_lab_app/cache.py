@@ -12,12 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import httpx
-from prime_cli.commands.env import (
-    _environment_package_download_url,
-    _safe_tar_extract,
-    compute_content_hash,
-    is_valid_url,
-)
+from prime_cli.commands.env import _safe_tar_extract, compute_content_hash, is_valid_url
 
 from .models import LabItem, LabSection
 
@@ -330,7 +325,11 @@ def ensure_environment_source(raw: dict[str, Any]) -> CachedEnvironmentSource | 
     owner, name = slug.split("/", 1)
 
     detail = _platform_detail(raw)
-    package_url = _environment_package_download_url(detail)
+    package_url = (
+        detail.get("tracked_package_url")
+        or detail.get("package_url")
+        or detail.get("packageUrl")
+    )
     version = (
         detail.get("semanticVersion")
         or detail.get("semantic_version")

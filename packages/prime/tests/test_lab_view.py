@@ -842,6 +842,35 @@ def test_lab_environment_cache_downloads_source_and_writes_manifest(
     )
 
 
+def test_lab_environment_cache_downloads_legacy_camel_package_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    captured: dict[str, str] = {}
+
+    def fake_download(url: str, dest: Path) -> None:
+        captured["url"] = url
+        dest.mkdir(parents=True)
+        (dest / "README.md").write_text("# Cached Env\n", encoding="utf-8")
+
+    monkeypatch.setattr("prime_lab_app.cache._download_source_archive", fake_download)
+
+    cached = ensure_environment_source(
+        {
+            "slug": "research/camel-env",
+            "platform": {
+                "packageUrl": "https://example.test/camel-env.tar.gz",
+                "semanticVersion": "0.2.0",
+            },
+        }
+    )
+
+    assert cached is not None
+    assert captured["url"] == "https://example.test/camel-env.tar.gz"
+    assert (cached.root / "README.md").read_text(encoding="utf-8") == "# Cached Env\n"
+
+
 def test_lab_environment_cache_finds_existing_source_without_package_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

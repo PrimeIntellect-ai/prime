@@ -2175,7 +2175,14 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
     monkeypatch.setenv("HOME", str(tmp_path))
     downloads: list[Path] = []
 
-    def fake_download(_url: str, dest: Path, _emit: Any, *, force: bool = False) -> None:
+    def fake_download(
+        _url: str,
+        dest: Path,
+        _emit: Any,
+        *,
+        force: bool = False,
+        quiet: bool = False,
+    ) -> None:
         downloads.append(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"{dest.name}\n", encoding="utf-8")
@@ -2218,7 +2225,14 @@ def test_prime_lab_sync_service_preserves_workspace_agent(
         encoding="utf-8",
     )
 
-    def fake_download(_url: str, dest: Path, _emit: Any, *, force: bool = False) -> None:
+    def fake_download(
+        _url: str,
+        dest: Path,
+        _emit: Any,
+        *,
+        force: bool = False,
+        quiet: bool = False,
+    ) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"{dest.name}\n", encoding="utf-8")
 
@@ -2240,7 +2254,14 @@ def test_prime_lab_setup_service_supports_pi_agent(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    def fake_download(url: str, dest: Path, emit: Any, *, force: bool = False) -> None:
+    def fake_download(
+        url: str,
+        dest: Path,
+        emit: Any,
+        *,
+        force: bool = False,
+        quiet: bool = False,
+    ) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
 
@@ -2277,7 +2298,14 @@ def test_prime_lab_setup_service_supports_claude_code_agent(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    def fake_download(url: str, dest: Path, emit: Any, *, force: bool = False) -> None:
+    def fake_download(
+        url: str,
+        dest: Path,
+        emit: Any,
+        *,
+        force: bool = False,
+        quiet: bool = False,
+    ) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
 
@@ -2308,7 +2336,14 @@ def test_prime_lab_setup_service_supports_hermes_agent(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    def fake_download(url: str, dest: Path, emit: Any, *, force: bool = False) -> None:
+    def fake_download(
+        url: str,
+        dest: Path,
+        emit: Any,
+        *,
+        force: bool = False,
+        quiet: bool = False,
+    ) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
 
@@ -3485,7 +3520,7 @@ def test_agent_runtime_supports_letta_external_tool_widgets(tmp_path: Path) -> N
         "stream-json",
         "--include-partial-messages",
     ]
-    assert any(tool["name"] == "choose" for tool in registered_tools)
+    assert _wait_for(lambda: any(tool["name"] == "choose" for tool in registered_tools))
     choose_tool = next(tool for tool in registered_tools if tool["name"] == "choose")
     assert choose_tool["parameters"]["required"] == ["title", "candidates"]
 
@@ -6381,10 +6416,17 @@ async def test_prime_lab_app_can_load_more_platform_rows(tmp_path: Path) -> None
     )
 
     async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.pause()
+        for _ in range(50):
+            if loaded_limits and loaded_limits[-1] == 100:
+                break
+            await pilot.pause()
+        assert loaded_limits and loaded_limits[-1] == 100
+
         app.action_load_more_rows()
-        await pilot.pause()
+        for _ in range(50):
+            if loaded_limits and loaded_limits[-1] == 200:
+                break
+            await pilot.pause()
 
     assert loaded_limits[-1] == 200
 

@@ -21,6 +21,7 @@ from prime_cli.lab_setup import (
 )
 
 AGENT_WHICH = "prime_lab_app.agent_capabilities.shutil.which"
+REAL_DOWNLOAD_FILE = lab_setup._download_file
 
 
 @pytest.fixture(autouse=True)
@@ -72,17 +73,20 @@ def fake_lab_asset_downloads(monkeypatch: Any) -> list[str]:
         emit: Any,
         *,
         force: bool = False,
+        quiet: bool = False,
     ) -> None:
-        urls.append(url)
         if dest.exists() and not force:
-            emit(f"{dest.name} already exists\n")
+            if not quiet:
+                emit(f"{dest.name} already exists\n")
             return
+        urls.append(url)
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.suffix == ".toml":
             dest.write_text('model = "openai/gpt-4.1-mini"\n', encoding="utf-8")
         else:
             dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
-        emit(f"Downloaded {dest}\n")
+        if not quiet:
+            emit(f"Downloaded {dest}\n")
 
     def fake_download_json(url: str) -> Any:
         if "/git/trees/" in url:
@@ -478,6 +482,79 @@ def test_lab_config_downloader_targets_known_config_folders(
         ("configs/opd", tmp_path / "configs" / "opd", False),
         ("configs/fft", tmp_path / "configs" / "fft", False),
     ]
+
+
+def test_copy_setup_configs_downloads_missing_cached_template_folders(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    template_configs = home / ".prime" / "lab" / "templates" / "configs"
+    (template_configs / "rl").mkdir(parents=True)
+    (template_configs / "rl" / "gsm8k.toml").write_text("cached\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    calls: list[tuple[Path, bool, tuple[str, ...]]] = []
+
+    def fake_repo_tree_entries(_repo: str, _ref: str) -> tuple[tuple[str, str], ...]:
+        return (
+            ("configs/rl/gsm8k.toml", "blob"),
+            ("configs/gepa/base.toml", "blob"),
+            ("configs/eval/debug.toml", "blob"),
+        )
+
+    def fake_download_lab_config_folders(
+        dest: Path,
+        _emit: Any,
+        *,
+        force: bool,
+        folders: tuple[str, ...] = lab_setup.LAB_CONFIG_FOLDERS,
+    ) -> None:
+        calls.append((dest, force, folders))
+        for folder in folders:
+            (dest / folder).mkdir(parents=True, exist_ok=True)
+            (dest / folder / "downloaded.toml").write_text("downloaded\n", encoding="utf-8")
+
+    monkeypatch.setattr(lab_setup, "_repo_tree_entries", fake_repo_tree_entries)
+    monkeypatch.setattr(lab_setup, "_download_lab_config_folders", fake_download_lab_config_folders)
+
+    lab_setup._copy_setup_configs(workspace, emit=lambda _text: None)
+
+    assert (workspace / "configs" / "rl" / "gsm8k.toml").read_text(encoding="utf-8") == "cached\n"
+    assert (workspace / "configs" / "gepa" / "downloaded.toml").is_file()
+    assert (workspace / "configs" / "eval" / "downloaded.toml").is_file()
+    assert calls == [(template_configs, False, ("gepa", "eval"))]
+
+
+def test_download_file_quiet_suppresses_per_file_status(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    emitted: list[str] = []
+
+    def fake_read_url(_url: str, *, emit: Any | None = None) -> bytes:
+        if emit is not None:
+            emit("retry detail\n")
+        return b"ok"
+
+    monkeypatch.setattr(lab_setup, "_download_file", REAL_DOWNLOAD_FILE)
+    monkeypatch.setattr(lab_setup, "_read_url", fake_read_url)
+
+    lab_setup._download_file(
+        "https://example.test/file",
+        tmp_path / "file",
+        emitted.append,
+        quiet=True,
+    )
+    lab_setup._download_file(
+        "https://example.test/file",
+        tmp_path / "file",
+        emitted.append,
+        quiet=True,
+    )
+
+    assert (tmp_path / "file").read_bytes() == b"ok"
+    assert emitted == ["retry detail\n"]
 
 
 def test_lab_setup_downloads_retry_transient_failures(monkeypatch: Any) -> None:

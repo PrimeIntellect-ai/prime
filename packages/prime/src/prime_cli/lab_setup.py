@@ -421,15 +421,15 @@ def _sync_workspace_guidance(
     *,
     force: bool = False,
 ) -> None:
-    download_emit = _download_status_emit(emit, verbose=False)
-    _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", download_emit, force=force)
+    _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", emit, force=force, quiet=True)
     if "claude" in agents:
-        _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", download_emit, force=force)
+        _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=force, quiet=True)
     _download_file(
         ENVS_AGENTS_MD_SRC,
         workspace / "environments" / "AGENTS.md",
-        download_emit,
+        emit,
         force=force,
+        quiet=True,
     )
     emit("Refreshed workspace guidance\n")
 
@@ -509,7 +509,6 @@ def _download_repo_directory(
     *,
     force: bool = True,
     missing_ok: bool = False,
-    emit_files: bool = False,
 ) -> None:
     normalized_source_path = _normalize_repo_path(source_path)
     tree_entries = _repo_tree_entries(repo, ref)
@@ -526,13 +525,13 @@ def _download_repo_directory(
         if missing_ok:
             return
         raise RuntimeError(f"Expected a directory listing for {repo}/{source_path}.")
-    download_emit = _download_status_emit(emit, verbose=emit_files)
     for entry_path, relative_path in sorted(file_entries):
         _download_file(
             _repo_raw_url(repo, ref, entry_path),
             dest / relative_path,
-            download_emit,
+            emit,
             force=force,
+            quiet=True,
         )
 
 
@@ -598,11 +597,21 @@ def _read_prime_skills_manifest(skills_dir: Path) -> dict[str, Any]:
 
 def _copy_setup_configs(workspace: Path, emit: Emit) -> None:
     template_configs = _global_lab_templates_dir() / "configs"
+    workspace_configs = workspace / "configs"
     if template_configs.is_dir():
-        _copy_lab_config_folders(template_configs, workspace / "configs")
+        _copy_lab_config_folders(template_configs, workspace_configs)
+        missing_folders = _missing_cached_lab_config_folders(template_configs)
+        if missing_folders:
+            _download_lab_config_folders(
+                template_configs,
+                emit,
+                force=False,
+                folders=missing_folders,
+            )
+            _copy_lab_config_folders(template_configs, workspace_configs)
     else:
-        _download_lab_config_folders(workspace / "configs", emit, force=False)
-    emit(f"Prepared {workspace / 'configs'}\n")
+        _download_lab_config_folders(workspace_configs, emit, force=False)
+    emit(f"Prepared {workspace_configs}\n")
 
 
 def _sync_config_templates(workspace: Path, emit: Emit) -> None:
@@ -627,8 +636,14 @@ def _sync_config_templates(workspace: Path, emit: Emit) -> None:
     emit(f"Refreshed {template_root}\n")
 
 
-def _download_lab_config_folders(dest: Path, emit: Emit, *, force: bool) -> None:
-    for folder in LAB_CONFIG_FOLDERS:
+def _download_lab_config_folders(
+    dest: Path,
+    emit: Emit,
+    *,
+    force: bool,
+    folders: Sequence[str] = LAB_CONFIG_FOLDERS,
+) -> None:
+    for folder in folders:
         _download_repo_directory(
             VERIFIERS_REPO,
             VERIFIERS_CONFIG_REF,
@@ -652,6 +667,26 @@ def _copy_lab_config_folders(source_configs: Path, dest_configs: Path) -> None:
                 continue
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, dest_path)
+
+
+def _missing_cached_lab_config_folders(source_configs: Path) -> tuple[str, ...]:
+    return tuple(
+        folder
+        for folder in LAB_CONFIG_FOLDERS
+        if not _cached_lab_config_folder_complete(source_configs, folder)
+    )
+
+
+def _cached_lab_config_folder_complete(source_configs: Path, folder: str) -> bool:
+    source_path = f"configs/{folder}"
+    expected_files = tuple(
+        path.removeprefix("configs/")
+        for path, entry_type in _repo_tree_entries(VERIFIERS_REPO, VERIFIERS_CONFIG_REF)
+        if entry_type == "blob" and path.startswith(f"{source_path}/")
+    )
+    if not expected_files:
+        return True
+    return all((source_configs / relative_path).is_file() for relative_path in expected_files)
 
 
 def _global_lab_templates_dir() -> Path:
@@ -1391,25 +1426,23 @@ def _resolve_sync_agents(
     return ()
 
 
-def _download_file(url: str, dest: Path, emit: Emit, *, force: bool = False) -> None:
+def _download_file(
+    url: str,
+    dest: Path,
+    emit: Emit,
+    *,
+    force: bool = False,
+    quiet: bool = False,
+) -> None:
     if dest.exists() and not force:
-        emit(f"{dest.name} already exists\n")
+        if not quiet:
+            emit(f"{dest.name} already exists\n")
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
     content = _read_url(url, emit=emit)
     dest.write_bytes(content)
-    emit(f"Downloaded {dest}\n")
-
-
-def _download_status_emit(emit: Emit, *, verbose: bool) -> Emit:
-    if verbose:
-        return emit
-
-    def filtered(text: str) -> None:
-        if text.startswith("Download failed"):
-            emit(text)
-
-    return filtered
+    if not quiet:
+        emit(f"Downloaded {dest}\n")
 
 
 def _download_json(url: str) -> Any:

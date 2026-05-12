@@ -115,13 +115,12 @@ def _is_retryable_read_file_error(exc: BaseException) -> bool:
     """Check if an exception is retryable for read-file gateway requests."""
     if isinstance(exc, READ_FILE_RETRYABLE_EXCEPTIONS):
         return True
-    if (
-        isinstance(exc, httpx.HTTPStatusError)
-        and exc.response.status_code in RETRYABLE_5XX_STATUSES
-    ):
-        if _is_gateway_sandbox_not_found(exc.response):
-            return False
-        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status == 408 or status in RETRYABLE_5XX_STATUSES:
+            if _is_gateway_sandbox_not_found(exc.response):
+                return False
+            return True
     return False
 
 
@@ -551,7 +550,7 @@ class SandboxClient:
         """Make a read-file GET request to the gateway with read-timeout retries."""
         with httpx.Client(timeout=timeout) as client:
             response = client.get(url, params=params, headers=headers)
-        if response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code == 408 or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 
@@ -1461,7 +1460,7 @@ class AsyncSandboxClient:
         """Make a read-file GET request to the gateway with read-timeout retries."""
         gateway_client = self._get_gateway_client()
         response = await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
-        if response.status_code in RETRYABLE_5XX_STATUSES:
+        if response.status_code == 408 or response.status_code in RETRYABLE_5XX_STATUSES:
             response.raise_for_status()
         return response
 

@@ -3205,6 +3205,10 @@ def _build_install_command(
             if url_dependencies:
                 cmd.extend(url_dependencies)
             cmd.extend(["--extra-index-url", simple_index_url])
+            # Hub simple index doesn't emit PEP 700 upload-time metadata, so any
+            # exclude-newer cutoff on the consumer side filters hub wheels
+            # regardless of how permissive the cutoff is. Disable per-package.
+            cmd.extend(["--exclude-newer-package", f"{normalized_name}=false"])
             if prerelease:
                 cmd.append("--prerelease=allow")
             return cmd

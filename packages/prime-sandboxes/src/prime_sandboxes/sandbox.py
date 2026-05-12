@@ -332,7 +332,11 @@ class SandboxAuthCache:
                 continue
 
             try:
-                response = self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+                response = self.client.request(
+                    "POST",
+                    f"/sandbox/{sandbox_id}/auth",
+                    idempotent_post=True,
+                )
                 with self._lock:
                     self._auth_cache[sandbox_id] = response
                     self._save_cache()
@@ -433,7 +437,11 @@ class AsyncSandboxAuthCache:
                 continue
 
             try:
-                response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+                response = await self.client.request(
+                    "POST",
+                    f"/sandbox/{sandbox_id}/auth",
+                    idempotent_post=True,
+                )
                 async with self._lock:
                     self._auth_cache[sandbox_id] = response
                     await self._save_cache()

@@ -29,6 +29,7 @@ IDEMPOTENT_RETRYABLE_EXCEPTIONS = POST_RETRYABLE_EXCEPTIONS + (
 )
 
 IDEMPOTENT_RETRYABLE_STATUSES = frozenset({502, 503, 504})
+IDEMPOTENT_HTTP_METHODS = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS"})
 
 
 def _is_idempotent_request_retryable_error(exc: BaseException) -> bool:
@@ -126,7 +127,7 @@ class APIClient:
         wait=wait_random_exponential(multiplier=0.1, max=2),
         reraise=True,
     )
-    def _post_request_with_retry(
+    def _non_idempotent_request_with_retry(
         self,
         method: str,
         url: str,
@@ -134,7 +135,7 @@ class APIClient:
         json: Optional[Dict[str, Any]] = None,
         timeout: Optional[int] = None,
     ) -> httpx.Response:
-        """Make non-idempotent POST with only pre-processing safe retries."""
+        """Make non-idempotent request with only pre-processing safe retries."""
         return self.client.request(method, url, params=params, json=json, timeout=timeout)
 
     @retry(
@@ -176,15 +177,18 @@ class APIClient:
         url = f"{self.base_url}{endpoint}"
 
         try:
-            is_idempotent_post = method.upper() == "POST" and idempotent_post
-            if method.upper() == "POST":
+            method_upper = method.upper()
+            is_idempotent_post = method_upper == "POST" and idempotent_post
+            if method_upper == "POST":
                 request_fn = (
                     self._idempotent_post_request_with_retry
                     if is_idempotent_post
-                    else self._post_request_with_retry
+                    else self._non_idempotent_request_with_retry
                 )
-            else:
+            elif method_upper in IDEMPOTENT_HTTP_METHODS:
                 request_fn = self._idempotent_request_with_retry
+            else:
+                request_fn = self._non_idempotent_request_with_retry
             response = request_fn(method, url, params=params, json=json, timeout=timeout)
             if not is_idempotent_post:
                 response.raise_for_status()
@@ -284,7 +288,7 @@ class AsyncAPIClient:
         wait=wait_random_exponential(multiplier=0.1, max=2),
         reraise=True,
     )
-    async def _post_request_with_retry(
+    async def _non_idempotent_request_with_retry(
         self,
         method: str,
         url: str,
@@ -292,7 +296,7 @@ class AsyncAPIClient:
         json: Optional[Dict[str, Any]] = None,
         timeout: Optional[int] = None,
     ) -> httpx.Response:
-        """Make async non-idempotent POST with only pre-processing safe retries."""
+        """Make async non-idempotent request with only pre-processing safe retries."""
         return await self.client.request(method, url, params=params, json=json, timeout=timeout)
 
     @retry(
@@ -334,15 +338,18 @@ class AsyncAPIClient:
         url = f"{self.base_url}{endpoint}"
 
         try:
-            is_idempotent_post = method.upper() == "POST" and idempotent_post
-            if method.upper() == "POST":
+            method_upper = method.upper()
+            is_idempotent_post = method_upper == "POST" and idempotent_post
+            if method_upper == "POST":
                 request_fn = (
                     self._idempotent_post_request_with_retry
                     if is_idempotent_post
-                    else self._post_request_with_retry
+                    else self._non_idempotent_request_with_retry
                 )
-            else:
+            elif method_upper in IDEMPOTENT_HTTP_METHODS:
                 request_fn = self._idempotent_request_with_retry
+            else:
+                request_fn = self._non_idempotent_request_with_retry
             response = await request_fn(method, url, params=params, json=json, timeout=timeout)
             if not is_idempotent_post:
                 response.raise_for_status()

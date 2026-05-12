@@ -222,6 +222,29 @@ class TestSyncAPIClientRetry:
         assert result == {"success": True}
         assert transport.call_count == 2
 
+    def test_patch_does_not_retry_read_error(self):
+        """PATCH does not retry ReadError because the server may have committed."""
+        transport = ReadErrorThenSucceedTransport()
+        client = APIClient(api_key="test-key")
+        client.client = httpx.Client(transport=transport)
+
+        with pytest.raises(APIError, match="ReadError"):
+            client.request("PATCH", "test", json={"name": "sandbox"})
+
+        assert transport.call_count == 1
+
+    @pytest.mark.parametrize("status_code", [502, 503, 504])
+    def test_patch_does_not_retry_transient_gateway_statuses(self, status_code):
+        """PATCH does not retry transient gateway statuses without explicit idempotency."""
+        transport = StatusThenSucceedTransport(status_code)
+        client = APIClient(api_key="test-key")
+        client.client = httpx.Client(transport=transport)
+
+        with pytest.raises(APIError, match=f"HTTP {status_code}"):
+            client.request("PATCH", "test", json={"name": "sandbox"})
+
+        assert transport.call_count == 1
+
     def test_post_does_not_retry_read_error(self):
         """POST does not retry ReadError because the server may have committed."""
         transport = ReadErrorThenSucceedTransport()
@@ -328,6 +351,31 @@ class TestAsyncAPIClientRetry:
 
         assert result == {"success": True}
         assert transport.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_patch_does_not_retry_read_error(self):
+        """Async PATCH does not retry ReadError because the server may have committed."""
+        transport = AsyncReadErrorThenSucceedTransport()
+        client = AsyncAPIClient(api_key="test-key")
+        client.client = httpx.AsyncClient(transport=transport)
+
+        with pytest.raises(APIError, match="ReadError"):
+            await client.request("PATCH", "test", json={"name": "sandbox"})
+
+        assert transport.call_count == 1
+
+    @pytest.mark.parametrize("status_code", [502, 503, 504])
+    @pytest.mark.asyncio
+    async def test_patch_does_not_retry_transient_gateway_statuses(self, status_code):
+        """Async PATCH does not retry transient gateway statuses without explicit idempotency."""
+        transport = AsyncStatusThenSucceedTransport(status_code)
+        client = AsyncAPIClient(api_key="test-key")
+        client.client = httpx.AsyncClient(transport=transport)
+
+        with pytest.raises(APIError, match=f"HTTP {status_code}"):
+            await client.request("PATCH", "test", json={"name": "sandbox"})
+
+        assert transport.call_count == 1
 
     @pytest.mark.asyncio
     async def test_idempotent_post_retries_read_error(self):

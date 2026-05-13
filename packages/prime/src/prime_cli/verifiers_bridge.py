@@ -243,11 +243,20 @@ def _has_flag(args: list[str], long_flag: str, short_flag: str) -> bool:
 def _resolve_endpoint_alias(args: list[str], model: str) -> Optional[EndpointResolution]:
     endpoints_path = _parse_value_option(args, "--endpoints-path", "-e") or DEFAULT_ENDPOINTS_PATH
     try:
-        from verifiers.utils.eval_utils import load_endpoints
+        from verifiers.utils.eval_utils import load_endpoints, resolve_endpoints_file
     except ImportError:
         return None
 
-    endpoint_group = load_endpoints(endpoints_path).get(model)
+    endpoints_file = resolve_endpoints_file(endpoints_path)
+    if endpoints_file is None or not endpoints_file.exists():
+        return None
+
+    try:
+        endpoints = load_endpoints(str(endpoints_file))
+    except (ImportError, AttributeError, OSError, ValueError):
+        return None
+
+    endpoint_group = endpoints.get(model)
     if not endpoint_group:
         return None
 

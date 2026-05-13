@@ -275,6 +275,10 @@ def _provider_base_url(provider: Optional[str]) -> Optional[str]:
     return url.rstrip("/")
 
 
+def _env_dir_path_arg(args: list[str]) -> str:
+    return _parse_value_option(args, "--env-dir-path", "") or DEFAULT_ENV_DIR_PATH
+
+
 def _is_config_target(raw: str) -> bool:
     if raw.endswith(".toml"):
         return True
@@ -941,7 +945,7 @@ def run_eval_passthrough(
     _validate_model(model, base_url, configured_base_url)
     _preflight_inference_billing(model, base_url, configured_base_url)
 
-    env_dir_path = _parse_value_option(args, "--env-dir-path", "-p") or DEFAULT_ENV_DIR_PATH
+    env_dir_path = _env_dir_path_arg(args)
     run_target = environment
     upstream_slug: Optional[str] = None
     env_name_for_upload: Optional[str] = None
@@ -1045,7 +1049,7 @@ def run_gepa_passthrough(environment_or_config: str, passthrough_args: list[str]
         raise typer.Exit(1)
 
     args, env, _model, _base_url = _add_default_inference_and_key_args(passthrough_args, config)
-    env_dir_path = _parse_value_option(args, "--env-dir-path", "-p") or DEFAULT_ENV_DIR_PATH
+    env_dir_path = _env_dir_path_arg(args)
 
     run_target = environment_or_config
     if _is_config_target(environment_or_config):

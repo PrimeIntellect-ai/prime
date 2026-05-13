@@ -29,6 +29,7 @@ console = get_console()
 
 DEFAULT_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_ENV_DIR_PATH = "./environments"
+DEFAULT_ENDPOINTS_PATH = "./configs/endpoints.toml"
 PRIME_SLUG = "primeintellect"
 INTERNAL_ENV_DISPLAY_HEADER = "X-Prime-Eval-Env-Display"
 EVAL_PREFLIGHT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=60.0)
@@ -56,6 +57,12 @@ class ResolvedEnvironment:
     recommend_push: bool = False
     push_reason: Optional[str] = None
     local_env_path: Optional[Path] = None
+
+
+@dataclass(frozen=True)
+class EndpointResolution:
+    model: str
+    base_url: str
 
 
 def is_help_request(primary_arg: str, passthrough_args: list[str]) -> bool:
@@ -231,6 +238,41 @@ def _has_flag(args: list[str], long_flag: str, short_flag: str) -> bool:
         if arg.startswith(f"{long_flag}="):
             return True
     return False
+
+
+def _resolve_endpoint_alias(args: list[str], model: str) -> Optional[EndpointResolution]:
+    endpoints_path = _parse_value_option(args, "--endpoints-path", "-e") or DEFAULT_ENDPOINTS_PATH
+    try:
+        from verifiers.utils.eval_utils import load_endpoints
+    except ImportError:
+        return None
+
+    endpoint_group = load_endpoints(endpoints_path).get(model)
+    if not endpoint_group:
+        return None
+
+    endpoint = endpoint_group[0]
+    return EndpointResolution(
+        model=str(endpoint.get("model") or model),
+        base_url=str(endpoint.get("url") or "").rstrip("/"),
+    )
+
+
+def _provider_base_url(provider: Optional[str]) -> Optional[str]:
+    if not provider:
+        return None
+    try:
+        from verifiers.scripts.eval import PROVIDER_CONFIGS
+    except ImportError:
+        return None
+
+    provider_config = PROVIDER_CONFIGS.get(provider)
+    if not provider_config:
+        return None
+    url = provider_config.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+    return url.rstrip("/")
 
 
 def _is_config_target(raw: str) -> bool:
@@ -765,8 +807,17 @@ def _add_default_inference_and_key_args(
     model = _parse_value_option(args, "--model", "-m") or DEFAULT_MODEL
     configured_base = (config.inference_url or "").strip().rstrip("/")
     base = _parse_value_option(args, "--api-base-url", "-b")
+    provider = _parse_value_option(args, "--provider", "-p")
+    api_key_var = _parse_value_option(args, "--api-key-var", "-k")
+    if api_key_var is None:
+        env["PRIME_API_KEY"] = config.api_key
+
     if base:
         base = base.rstrip("/")
+    elif provider is not None:
+        base = _provider_base_url(provider) or ""
+    elif endpoint := _resolve_endpoint_alias(args, model):
+        return args, env, endpoint.model, endpoint.base_url
     elif configured_base:
         base = configured_base
         args.extend(["-b", base])
@@ -776,9 +827,7 @@ def _add_default_inference_and_key_args(
         )
         raise typer.Exit(1)
 
-    api_key_var = _parse_value_option(args, "--api-key-var", "-k")
-    if api_key_var is None:
-        env["PRIME_API_KEY"] = config.api_key
+    if api_key_var is None and provider is None:
         args.extend(["-k", "PRIME_API_KEY"])
 
     return args, env, model, base

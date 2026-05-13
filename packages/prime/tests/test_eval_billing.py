@@ -6,7 +6,7 @@ from prime_cli.api.inference import (
     InferenceClient,
     InferencePaymentRequiredError,
 )
-from prime_cli.verifiers_bridge import run_eval_passthrough
+from prime_cli.verifiers_bridge import ResolvedEnvironment, run_eval_passthrough
 from typing_extensions import cast
 
 
@@ -139,6 +139,65 @@ def test_eval_preflight_omits_max_tokens(monkeypatch):
     ]
     assert len(seen_timeouts) == 2
     assert all(timeout.read == 300.0 for timeout in seen_timeouts)
+
+
+def test_eval_run_model_alias_uses_local_endpoint_registry(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    (config_dir / "endpoints.toml").write_text(
+        "\n".join(
+            [
+                "[[endpoint]]",
+                'endpoint_id = "gpt-4.1-mini"',
+                'model = "gpt-4.1-mini"',
+                'url = "https://api.openai.com/v1"',
+                'key = "OPENAI_API_KEY"',
+                'type = "openai_chat_completions"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+    )
+    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
+
+    class ExplodingInferenceClient:
+        def __init__(self, timeout=None):
+            raise AssertionError("endpoint registry aliases should skip Prime Inference preflight")
+
+    captured = {}
+    monkeypatch.setattr("prime_cli.verifiers_bridge.InferenceClient", ExplodingInferenceClient)
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._prepare_single_environment",
+        lambda *_args, **_kwargs: ResolvedEnvironment(
+            original="goblin-questions",
+            env_name="goblin-questions",
+            install_mode="local",
+        ),
+    )
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._run_command",
+        lambda command, env=None: captured.update({"command": command, "env": env}),
+    )
+
+    run_eval_passthrough(
+        environment="goblin-questions",
+        passthrough_args=["-m", "gpt-4.1-mini", "-n", "1"],
+        skip_upload=True,
+        env_path=None,
+    )
+
+    command = captured["command"]
+    assert command[:3] == ["verifiers.cli.commands.eval", "goblin-questions", "-m"]
+    assert "gpt-4.1-mini" in command
+    assert "-b" not in command
+    assert "--api-base-url" not in command
+    assert "-k" not in command
+    assert "--api-key-var" not in command
+    assert captured["env"]["PRIME_API_KEY"] == "test-api-key"
 
 
 def test_eval_run_continues_when_model_validation_times_out(monkeypatch):

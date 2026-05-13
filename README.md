@@ -279,6 +279,12 @@ Tagging and publishing to PyPI is handled automatically by CI.
 
 When releasing `prime`, consider whether `prime-sandboxes` should also be bumped, as `prime` depends on `prime-sandboxes`. The packages can be released independently or together depending on what changed.
 
+#### Release e2e checks:
+
+Before merging a `release/*` PR, run the **Prime release e2e** workflow. It uses a Prime sandbox to install the candidate CLI from source, push a temporary Environment Hub environment, verify `prime env info/install`, run `prime eval run`, push eval results, and submit hosted evals from CLI/TOML configs.
+
+For the fastest release gate, use the default `hosted_mode=submit` to submit hosted evals, verify they are visible via the API, then cancel them. Use `hosted_mode=wait` when you want hosted evals to run to completion before merging.
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

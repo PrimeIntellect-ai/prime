@@ -1,0 +1,106 @@
+name: Prime release e2e
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "packages/prime/**"
+      - "packages/prime-evals/**"
+      - "packages/prime-sandboxes/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/prime-release-e2e.yml"
+  workflow_dispatch:
+    inputs:
+      hosted_mode:
+        description: "Hosted eval coverage: skip, submit-and-cancel, or wait for completion"
+        required: true
+        default: "submit"
+        type: choice
+        options:
+          - skip
+          - submit
+          - wait
+      model:
+        description: "Prime Inference model for one-example eval smoke tests"
+        required: true
+        default: "deepseek/deepseek-chat"
+        type: string
+      sandbox_region:
+        description: "Optional Prime sandbox region"
+        required: false
+        type: string
+      keep_sandbox:
+        description: "Leave sandbox running for debugging"
+        required: false
+        default: false
+        type: boolean
+      cleanup_remote_env:
+        description: "Delete the temporary Environment Hub environment after the run"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: prime-release-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-e2e:
+    name: Sandbox-backed release e2e
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      PRIME_API_KEY: ${{ secrets.PRIME_E2E_API_KEY || secrets.PRIME_API_KEY }}
+      PRIME_TEAM_ID: ${{ secrets.PRIME_E2E_TEAM_ID || secrets.PRIME_TEAM_ID }}
+      PRIME_API_BASE_URL: ${{ vars.PRIME_API_BASE_URL }}
+      PRIME_FRONTEND_URL: ${{ vars.PRIME_FRONTEND_URL }}
+      PRIME_INFERENCE_URL: ${{ vars.PRIME_INFERENCE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install sandbox SDK from this checkout
+        run: python -m pip install --upgrade pip && python -m pip install -e packages/prime-sandboxes
+
+      - name: Validate release e2e credentials
+        run: |
+          if [ -z "$PRIME_API_KEY" ]; then
+            echo "PRIME_E2E_API_KEY or PRIME_API_KEY secret is required" >&2
+            exit 1
+          fi
+
+      - name: Run release e2e in a Prime sandbox
+        run: |
+          set -euo pipefail
+
+          HOSTED_MODE="${{ inputs.hosted_mode || 'submit' }}"
+          MODEL="${{ inputs.model || 'deepseek/deepseek-chat' }}"
+          REGION="${{ inputs.sandbox_region || '' }}"
+          KEEP_SANDBOX="${{ github.event_name == 'workflow_dispatch' && inputs.keep_sandbox || false }}"
+          CLEANUP_REMOTE_ENV="${{ github.event_name != 'workflow_dispatch' || inputs.cleanup_remote_env }}"
+
+          args=(
+            --hosted-mode "$HOSTED_MODE"
+            --model "$MODEL"
+          )
+
+          if [ -n "$REGION" ]; then
+            args+=(--sandbox-region "$REGION")
+          fi
+          if [ "$KEEP_SANDBOX" = "true" ]; then
+            args+=(--keep-sandbox)
+          fi
+          if [ "$CLEANUP_REMOTE_ENV" != "true" ]; then
+            args+=(--no-cleanup-remote-env)
+          fi
+
+          python packages/prime/scripts/release_e2e.py "${args[@]}"

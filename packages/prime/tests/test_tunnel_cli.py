@@ -189,8 +189,10 @@ def test_tunnel_stop_all_paginates_before_bulk_delete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
-    monkeypatch.setattr("prime_cli.commands.tunnel.STOP_ALL_PAGE_SIZE", 2)
     captured: dict[str, Any] = {"pages": []}
+
+    page_1 = [SimpleNamespace(tunnel_id=f"t-{i}", user_id="user-1") for i in range(1, 1001)]
+    page_2 = [SimpleNamespace(tunnel_id="t-1001", user_id="user-1")]
 
     class FakeTunnelClient:
         config = SimpleNamespace(user_id="user-1", team_id=None)
@@ -198,12 +200,9 @@ def test_tunnel_stop_all_paginates_before_bulk_delete(
         async def list_tunnels(self, **kwargs: Any) -> list[Any]:
             captured["pages"].append(kwargs["page"])
             if kwargs["page"] == 1:
-                return [
-                    SimpleNamespace(tunnel_id="t-1", user_id="user-1"),
-                    SimpleNamespace(tunnel_id="t-2", user_id="user-1"),
-                ]
+                return page_1
             if kwargs["page"] == 2:
-                return [SimpleNamespace(tunnel_id="t-3", user_id="user-1")]
+                return page_2
             return []
 
         async def bulk_delete_tunnels(self, tunnel_ids: list[str]) -> dict[str, Any]:
@@ -219,7 +218,7 @@ def test_tunnel_stop_all_paginates_before_bulk_delete(
 
     assert result.exit_code == 0, result.output
     assert captured["pages"] == [1, 2]
-    assert captured["tunnel_ids"] == ["t-1", "t-2", "t-3"]
+    assert captured["tunnel_ids"] == [f"t-{i}" for i in range(1, 1002)]
 
 
 def test_tunnel_stop_all_noops_when_no_active_tunnels(

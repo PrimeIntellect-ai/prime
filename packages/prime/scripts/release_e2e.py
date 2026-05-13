@@ -23,6 +23,7 @@ from pathlib import Path
 from prime_sandboxes import APIClient, CreateSandboxRequest, SandboxClient
 
 DEFAULT_MODEL = "deepseek/deepseek-chat"
+DEFAULT_HOSTED_TIMEOUT_MINUTES = "120"
 DEFAULT_SANDBOX_IMAGE = "python:3.11-bookworm"
 
 ARCHIVE_SKIP_DIRS = {
@@ -61,6 +62,10 @@ class RemoteConfig:
     run_suffix: str
 
 
+def env_int(name: str, default: str) -> int:
+    return int(os.environ.get(name) or default)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -86,19 +91,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hosted-timeout-minutes",
         type=int,
-        default=int(os.environ.get("PRIME_E2E_HOSTED_TIMEOUT_MINUTES", "30")),
+        default=env_int("PRIME_E2E_HOSTED_TIMEOUT_MINUTES", DEFAULT_HOSTED_TIMEOUT_MINUTES),
         help="Timeout passed to hosted evals and used while waiting for completion.",
     )
     parser.add_argument(
         "--sandbox-timeout-minutes",
         type=int,
-        default=int(os.environ.get("PRIME_E2E_SANDBOX_TIMEOUT_MINUTES", "120")),
+        default=env_int("PRIME_E2E_SANDBOX_TIMEOUT_MINUTES", "120"),
         help="Sandbox lifetime in minutes.",
     )
     parser.add_argument(
         "--command-timeout-seconds",
         type=int,
-        default=int(os.environ.get("PRIME_E2E_COMMAND_TIMEOUT_SECONDS", "7200")),
+        default=env_int("PRIME_E2E_COMMAND_TIMEOUT_SECONDS", "7200"),
         help="Maximum time for the in-sandbox e2e command.",
     )
     parser.add_argument(
@@ -394,7 +399,7 @@ def remote_script(config: RemoteConfig) -> str:
             ids: list[str] = []
             for line in output.splitlines():
                 if "Evaluation ID:" in line or "Evaluation IDs:" in line:
-                    _, value = line.split(":", 1)
+                    value = line.rsplit(":", 1)[-1]
                     ids.extend(part.strip() for part in value.split(",") if part.strip())
             return [eval_id for eval_id in ids if re.fullmatch(r"[A-Za-z0-9_-]+", eval_id)]
 
@@ -442,9 +447,15 @@ def remote_script(config: RemoteConfig) -> str:
                 time.sleep(20)
 
 
-        def cancel_hosted_evals() -> None:
+        def best_effort_cancel_hosted_evals() -> None:
             for eval_id in HOSTED_EVAL_IDS:
-                run(["prime", "eval", "stop", eval_id], check=False, timeout=120)
+                try:
+                    run(["prime", "eval", "stop", eval_id], check=False, timeout=120)
+                except Exception as exc:
+                    print(
+                        f"Warning: failed to cancel hosted eval {eval_id}: {exc}",
+                        file=sys.stderr,
+                    )
 
 
         def hosted_eval_checks() -> None:
@@ -537,7 +548,7 @@ def remote_script(config: RemoteConfig) -> str:
                 wait_for_hosted_evals()
                 HOSTED_EVAL_IDS.clear()
             else:
-                cancel_hosted_evals()
+                best_effort_cancel_hosted_evals()
                 HOSTED_EVAL_IDS.clear()
 
 
@@ -621,13 +632,20 @@ def remote_script(config: RemoteConfig) -> str:
                 return 0
             finally:
                 if HOSTED_EVAL_IDS:
-                    cancel_hosted_evals()
+                    best_effort_cancel_hosted_evals()
                 if REMOTE_ENV_SLUG and CONFIG["cleanup_remote_env"]:
-                    run(
-                        ["prime", "env", "delete", REMOTE_ENV_SLUG, "--force"],
-                        check=False,
-                        timeout=180,
-                    )
+                    try:
+                        run(
+                            ["prime", "env", "delete", REMOTE_ENV_SLUG, "--force"],
+                            check=False,
+                            timeout=180,
+                        )
+                    except Exception as exc:
+                        print(
+                            f"Warning: failed to delete temporary environment "
+                            f"{REMOTE_ENV_SLUG}: {exc}",
+                            file=sys.stderr,
+                        )
 
 
         if __name__ == "__main__":

@@ -1,4 +1,4 @@
-name: Prime release e2e
+name: Release E2E Tests
 
 permissions:
   contents: read
@@ -10,9 +10,10 @@ on:
       - "packages/prime/**"
       - "packages/prime-evals/**"
       - "packages/prime-sandboxes/**"
+      - "packages/prime-tunnel/**"
       - "pyproject.toml"
       - "uv.lock"
-      - ".github/workflows/prime-release-e2e.yml"
+      - ".github/workflows/release-e2e.yml"
   workflow_dispatch:
     inputs:
       hosted_mode:
@@ -45,12 +46,12 @@ on:
         type: boolean
 
 concurrency:
-  group: prime-release-e2e-${{ github.ref }}
+  group: release-e2e-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   release-e2e:
-    name: Sandbox-backed release e2e
+    name: Sandbox-backed Release E2E
     if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/')
     runs-on: ubuntu-latest
     timeout-minutes: 150
@@ -79,14 +80,14 @@ jobs:
           fi
 
       - name: Run release e2e in a Prime sandbox
+        env:
+          HOSTED_MODE: ${{ inputs.hosted_mode || 'submit' }}
+          MODEL: ${{ inputs.model || 'deepseek/deepseek-chat' }}
+          REGION: ${{ inputs.sandbox_region || '' }}
+          KEEP_SANDBOX: ${{ github.event_name == 'workflow_dispatch' && inputs.keep_sandbox || false }}
+          CLEANUP_REMOTE_ENV: ${{ github.event_name != 'workflow_dispatch' || inputs.cleanup_remote_env }}
         run: |
           set -euo pipefail
-
-          HOSTED_MODE="${{ inputs.hosted_mode || 'submit' }}"
-          MODEL="${{ inputs.model || 'deepseek/deepseek-chat' }}"
-          REGION="${{ inputs.sandbox_region || '' }}"
-          KEEP_SANDBOX="${{ github.event_name == 'workflow_dispatch' && inputs.keep_sandbox || false }}"
-          CLEANUP_REMOTE_ENV="${{ github.event_name != 'workflow_dispatch' || inputs.cleanup_remote_env }}"
 
           args=(
             --hosted-mode "$HOSTED_MODE"

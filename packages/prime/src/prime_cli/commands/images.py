@@ -564,6 +564,8 @@ def list_images(
     all_images: bool = typer.Option(
         False, "--all", "-a", help="[Deprecated] Show all accessible images (personal + team)"
     ),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
+    num: int = typer.Option(50, "--num", "-n", help="Items per page (max 250)"),
 ):
     """
     List all images you've pushed to Prime Intellect registry.
@@ -573,9 +575,18 @@ def list_images(
     \b
     Examples:
         prime images list
+        prime images list --num 100
+        prime images list --page 2
         prime images list --output json
     """
     validate_output_format(output, console)
+
+    if num < 1 or page < 1:
+        console.print("[red]Error:[/red] --num and --page must be at least 1")
+        raise typer.Exit(1)
+    if num > 250:
+        console.print("[red]Error:[/red] --num cannot exceed 250")
+        raise typer.Exit(1)
 
     if all_images and output != "json":
         console.print(
@@ -586,21 +597,37 @@ def list_images(
     try:
         client = APIClient()
 
+        offset = (page - 1) * num
+
         # Build query params
-        params: dict[str, str] = {}
+        params: dict[str, str] = {"limit": str(num), "offset": str(offset)}
         if config.team_id:
             params["teamId"] = config.team_id
 
-        response = client.request("GET", "/images", params=params if params else None)
+        response = client.request("GET", "/images", params=params)
         images: list[ImageRow] = response.get("data", [])
-
-        if not images:
-            console.print("[yellow]No images or builds found.[/yellow]")
-            console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
-            return
+        has_total_count: bool = "totalCount" in response
+        total_count: int = int(response.get("totalCount", offset + len(images)))
 
         if output == "json":
             console.print(json.dumps(response, indent=2))
+            return
+
+        if not images:
+            if has_total_count and total_count == 0:
+                console.print("[yellow]No images or builds found.[/yellow]")
+                console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
+            elif has_total_count:
+                console.print(
+                    f"[yellow]No images on page {page}. Total: {total_count} image(s).[/yellow]"
+                )
+                console.print("Try [bold]--page 1[/bold] to start from the beginning.")
+            elif page > 1:
+                console.print(f"[yellow]No images on page {page}.[/yellow]")
+                console.print("Try [bold]--page 1[/bold] to start from the beginning.")
+            else:
+                console.print("[yellow]No images or builds found.[/yellow]")
+                console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
             return
 
         # Table output
@@ -678,7 +705,26 @@ def list_images(
         console.print()
         console.print(table)
         console.print()
-        console.print(f"[dim]Total: {len(grouped)} image(s)[/dim]")
+        shown_groups = len(grouped)
+        if has_total_count:
+            has_next = offset + shown_groups < total_count
+        else:
+            has_next = shown_groups >= num
+        if has_next or page > 1:
+            start = offset + 1
+            end = offset + shown_groups
+            if has_total_count:
+                console.print(
+                    f"[dim]Page {page} • showing {start}-{end} of {total_count} image(s)[/dim]"
+                )
+            else:
+                console.print(f"[dim]Page {page} • showing {start}-{end}[/dim]")
+            if has_next:
+                console.print(f"[dim]Use --page {page + 1} to see more.[/dim]")
+        elif has_total_count:
+            console.print(f"[dim]Total: {total_count} image(s)[/dim]")
+        else:
+            console.print(f"[dim]Total: {shown_groups} image(s)[/dim]")
         console.print()
 
     except UnauthorizedError:

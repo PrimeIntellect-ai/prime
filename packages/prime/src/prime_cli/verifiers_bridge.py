@@ -218,7 +218,9 @@ def run_eval_tui(env_dir: Optional[str], outputs_dir: Optional[str]) -> None:
     _run_command(command, env=env)
 
 
-def _parse_value_option(args: list[str], long_flag: str, short_flag: str) -> Optional[str]:
+def _parse_value_option(
+    args: list[str], long_flag: str, short_flag: Optional[str]
+) -> Optional[str]:
     for idx, arg in enumerate(args):
         if arg == long_flag or arg == short_flag:
             if idx + 1 < len(args):
@@ -770,7 +772,7 @@ def _collect_eval_config_envs(config_path: Path, fallback_env_dir: str) -> list[
     for entry in eval_entries:
         if not isinstance(entry, dict):
             continue
-        env_id = entry.get("env_id")
+        env_id = entry.get("env_id") or entry.get("id")
         if not isinstance(env_id, str) or not env_id:
             continue
         env_dir_path = entry.get("env_dir_path")
@@ -782,6 +784,11 @@ def _collect_eval_config_envs(config_path: Path, fallback_env_dir: str) -> list[
         seen.add(key)
         resolved.append(key)
     return resolved
+
+
+def _env_name_from_reference(env_reference: str) -> str:
+    base_ref, _version = _split_version(env_reference)
+    return base_ref.rsplit("/", 1)[-1]
 
 
 def _collect_gepa_config_env(config_path: Path, fallback_env_dir: str) -> Optional[tuple[str, str]]:
@@ -959,9 +966,11 @@ def run_eval_passthrough(
     upstream_slug: Optional[str] = None
     env_name_for_upload: Optional[str] = None
     resolved_env: Optional[ResolvedEnvironment] = None
+    config_envs: list[tuple[str, str]] = []
 
     if _is_config_target(environment):
-        for env_ref, ref_env_dir in _collect_eval_config_envs(Path(environment), env_dir_path):
+        config_envs = _collect_eval_config_envs(Path(environment), env_dir_path)
+        for env_ref, ref_env_dir in config_envs:
             _prepare_single_environment(plugin, env_ref, ref_env_dir)
     else:
         resolved_env = _prepare_single_environment(plugin, environment, env_dir_path)
@@ -976,7 +985,11 @@ def run_eval_passthrough(
     if not skip_upload and not _has_flag(args, "--save-results", "-s"):
         args.append("-s")
 
-    job_target = env_name_for_upload or Path(environment).stem
+    job_target = env_name_for_upload
+    if job_target is None and config_envs:
+        job_target = _env_name_from_reference(config_envs[0][0])
+    if job_target is None:
+        job_target = Path(environment).stem
     job_id = _build_job_id(job_target, model)
     args.extend(["--header", f"X-PI-Job-Id: {job_id}"])
 

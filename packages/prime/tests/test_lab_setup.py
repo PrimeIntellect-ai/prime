@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
@@ -19,8 +20,10 @@ from prime_cli.lab_setup import (
     run_lab_setup_service,
     run_lab_sync_service,
 )
+from rich.console import Console
 
 AGENT_WHICH = "prime_lab_app.agent_capabilities.shutil.which"
+REAL_DOWNLOAD_FILE = lab_setup._download_file
 
 
 @pytest.fixture(autouse=True)
@@ -72,17 +75,20 @@ def fake_lab_asset_downloads(monkeypatch: Any) -> list[str]:
         emit: Any,
         *,
         force: bool = False,
+        quiet: bool = False,
     ) -> None:
-        urls.append(url)
         if dest.exists() and not force:
-            emit(f"{dest.name} already exists\n")
+            if not quiet:
+                emit(f"{dest.name} already exists\n")
             return
+        urls.append(url)
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.suffix == ".toml":
             dest.write_text('model = "openai/gpt-4.1-mini"\n', encoding="utf-8")
         else:
             dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
-        emit(f"Downloaded {dest}\n")
+        if not quiet:
+            emit(f"Downloaded {dest}\n")
 
     def fake_download_json(url: str) -> Any:
         if "/git/trees/" in url:
@@ -118,11 +124,18 @@ def _is_pinned_ref(ref: str) -> bool:
     return len(ref) == 40 and all(char in "0123456789abcdef" for char in ref)
 
 
+def _render_emitted(items: list[Any]) -> str:
+    console = Console(file=StringIO(), record=True, width=120)
+    for item in items:
+        lab_setup._emit_to_console(console, item)
+    return console.export_text()
+
+
 def test_lab_setup_parses_selected_agents_and_all() -> None:
-    selected = parse_lab_setup_args(["--agent", "factory-droid,amp-code,claude-code"])
+    selected = parse_lab_setup_args(["--agent", "factory-droid,amp-code,claude-code,letta-code"])
     all_agents = parse_lab_sync_args(["--agents", "all"])
 
-    assert selected.agents == ("droid", "amp", "claude")
+    assert selected.agents == ("droid", "amp", "claude", "letta")
     assert all_agents.agents == known_agent_names()
 
 
@@ -130,6 +143,24 @@ def test_lab_setup_no_interactive_uses_codex_default() -> None:
     options = parse_lab_setup_args(["--no-interactive"])
 
     assert options.agents == ("codex",)
+
+
+def test_lab_setup_help_lists_supported_agents(capsys: Any) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        parse_lab_setup_args(["--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "Supported:" in output
+    for agent in (*known_agent_names(), "all"):
+        assert agent in output
+
+
+def test_lab_setup_rejects_prime_rl_flag() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        parse_lab_setup_args(["--prime-rl", "--no-interactive"])
+
+    assert exc_info.value.code == 2
 
 
 def test_lab_setup_prompts_for_agent_when_interactive(monkeypatch: Any) -> None:
@@ -188,7 +219,7 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(AGENT_WHICH, lambda _command: None)
     commands: list[list[str]] = []
-    emitted: list[str] = []
+    emitted: list[Any] = []
 
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("pi",)),
@@ -215,19 +246,52 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     assert not (home / ".pi" / "agent" / "skills").exists()
     assert (tmp_path / "configs" / "rl" / "gsm8k.toml").is_file()
     assert (tmp_path / "configs" / "eval" / "debug.toml").is_file()
-    assert (tmp_path / "configs" / "zero3.yaml").is_file()
+    assert not (tmp_path / "configs" / "zero3.yaml").exists()
+    assert not (tmp_path / "configs" / "endpoints.toml").exists()
+    assert not (tmp_path / "configs" / "local").exists()
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
     assert (tmp_path / ".prime" / "lab" / "docs" / "index.md").is_file()
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert "/outputs/" in gitignore.splitlines()
     assert (tmp_path / ".pi" / "extensions" / "prime-lab" / "index.ts").is_file()
-    assert not any("pi-acp" in line for line in emitted)
-    assert any("Pi Coding Agent requires pi" in line for line in emitted)
+    output = _render_emitted(emitted)
+    assert "pi-acp" not in output
+    assert "Pi Coding Agent requires pi" in output
+    assert "Downloaded " not in output
+    assert ".skills-staging-" not in output
+    assert ".templates-staging-" not in output
+
+
+def test_lab_setup_service_emits_post_setup_call_to_action(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    emitted: list[Any] = []
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    output = _render_emitted(emitted)
+    assert result.exit_code == 0
+    assert "get started" in output
+    assert "idea -> environment -> eval -> training" in output
+    assert "ask codex" in output
+    assert "I want to train a model for <my task domain>" in output
+    assert "prime env init my-env" in output
+    assert "prime eval run my-env -m openai/gpt-5.4-nano -n 5" in output
+    assert "prime rl run configs/rl/qwen-3-5.toml" in output
+    assert "prime gepa run my-env -m openai/gpt-5.4-nano" in output
 
 
 def test_lab_setup_refreshes_existing_workspace_guidance(
     tmp_path: Path,
     monkeypatch: Any,
+    fake_lab_asset_downloads: list[str],
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
@@ -239,7 +303,7 @@ def test_lab_setup_refreshes_existing_workspace_guidance(
     for path, text in existing_files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-    emitted: list[str] = []
+    emitted: list[Any] = []
 
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=False, agents=("codex",)),
@@ -248,14 +312,42 @@ def test_lab_setup_refreshes_existing_workspace_guidance(
     )
 
     assert result.exit_code == 0
-    for path in existing_files:
+    for path in (
+        tmp_path / "AGENTS.md",
+        tmp_path / "environments" / "AGENTS.md",
+    ):
         assert path.read_text(encoding="utf-8").startswith("downloaded from ")
-    assert not any("already exists" in line for line in emitted)
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == "workspace claude\n"
+    docs_index = (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(encoding="utf-8")
+    assert "- `CLAUDE.md`" not in docs_index
+    assert not any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
+    assert "already exists" not in _render_emitted(emitted)
+
+
+def test_lab_setup_refreshes_claude_guidance_for_claude_agent(
+    tmp_path: Path,
+    monkeypatch: Any,
+    fake_lab_asset_downloads: list[str],
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=False, agents=("claude",)),
+        workspace=tmp_path,
+    )
+
+    assert result.exit_code == 0
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8").startswith("downloaded from ")
+    docs_index = (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(encoding="utf-8")
+    assert "- `CLAUDE.md`" in docs_index
+    assert any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
 
 
 def test_lab_sync_refreshes_existing_workspace_guidance(
     tmp_path: Path,
     monkeypatch: Any,
+    fake_lab_asset_downloads: list[str],
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
@@ -276,9 +368,83 @@ def test_lab_sync_refreshes_existing_workspace_guidance(
     )
 
     assert result.exit_code == 0
-    for path in existing_files:
+    for path in (
+        tmp_path / "AGENTS.md",
+        tmp_path / "environments" / "AGENTS.md",
+    ):
         assert path.read_text(encoding="utf-8").startswith("downloaded from ")
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == "stale guidance\n"
+    assert not any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
     assert not any("already exists" in line for line in emitted)
+
+
+def test_lab_sync_without_configured_agent_refreshes_shared_assets(
+    tmp_path: Path,
+    monkeypatch: Any,
+    fake_lab_asset_downloads: list[str],
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    emitted: list[str] = []
+
+    result = run_lab_sync_service(
+        LabSyncOptions(skip_docs=False),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    assert result.exit_code == 0
+    assert (tmp_path / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
+    assert (tmp_path / "AGENTS.md").read_text(encoding="utf-8").startswith("downloaded from ")
+    assert (
+        (tmp_path / "environments" / "AGENTS.md")
+        .read_text(encoding="utf-8")
+        .startswith("downloaded from ")
+    )
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert "- `CLAUDE.md`" not in (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(
+        encoding="utf-8"
+    )
+    assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
+    assert not (tmp_path / ".agents" / "skills").exists()
+    assert not any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
+    assert any("no configured agent; pass --agent to configure one" in line for line in emitted)
+
+
+def test_lab_sync_no_agent_keeps_stored_claude_guidance(
+    tmp_path: Path,
+    monkeypatch: Any,
+    fake_lab_asset_downloads: list[str],
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        json.dumps({"choices": {"agents": ["claude"], "primary_agent": "claude"}}),
+        encoding="utf-8",
+    )
+    for path in (
+        tmp_path / "AGENTS.md",
+        tmp_path / "CLAUDE.md",
+        tmp_path / "environments" / "AGENTS.md",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("stale guidance\n", encoding="utf-8")
+    emitted: list[str] = []
+
+    result = run_lab_sync_service(
+        LabSyncOptions(skip_docs=False, no_agent=True),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    assert result.exit_code == 0
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8").startswith("downloaded from ")
+    docs_index = (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(encoding="utf-8")
+    assert "- `CLAUDE.md`" in docs_index
+    assert any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
+    assert not (tmp_path / ".claude" / "skills").exists()
+    assert any("Skipped coding-agent skill roots (--no-agent)" in line for line in emitted)
 
 
 def test_lab_setup_uses_existing_verifiers_sources(
@@ -298,7 +464,6 @@ def test_lab_setup_uses_existing_verifiers_sources(
     assert result.exit_code == 0
     assert _is_pinned_ref(lab_setup.VERIFIERS_REF)
     assert lab_setup.VERIFIERS_CONFIG_REF == "main"
-    assert _is_pinned_ref(lab_setup.PRIME_RL_REF)
     assert any(
         url.endswith(
             f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_REF}/skills/create-environments/SKILL.md"
@@ -311,10 +476,133 @@ def test_lab_setup_uses_existing_verifiers_sources(
         )
         for url in fake_lab_asset_downloads
     )
+    assert (
+        sum(
+            url.endswith(
+                f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_CONFIG_REF}"
+                "/configs/rl/gsm8k.toml"
+            )
+            for url in fake_lab_asset_downloads
+        )
+        == 1
+    )
     assert any(
         url.endswith(f"/primeintellect-ai/verifiers/{lab_setup.VERIFIERS_REF}/assets/lab/AGENTS.md")
         for url in fake_lab_asset_downloads
     )
+    assert not any("/configs/endpoints.toml" in url for url in fake_lab_asset_downloads)
+    assert not any("/configs/local/" in url for url in fake_lab_asset_downloads)
+    assert not any("/configs/zero3.yaml" in url for url in fake_lab_asset_downloads)
+
+
+def test_lab_config_downloader_targets_known_config_folders(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    calls: list[tuple[str, Path, bool]] = []
+
+    def fake_download_repo_directory(
+        _repo: str,
+        _ref: str,
+        source_path: str,
+        dest: Path,
+        _emit: Any,
+        *,
+        force: bool = True,
+        missing_ok: bool = False,
+    ) -> None:
+        assert missing_ok is True
+        calls.append((source_path, dest, force))
+
+    monkeypatch.setattr(lab_setup, "_download_repo_directory", fake_download_repo_directory)
+
+    lab_setup._download_lab_config_folders(
+        tmp_path / "configs",
+        emit=lambda _text: None,
+        force=False,
+    )
+
+    assert calls == [
+        ("configs/rl", tmp_path / "configs" / "rl", False),
+        ("configs/gepa", tmp_path / "configs" / "gepa", False),
+        ("configs/eval", tmp_path / "configs" / "eval", False),
+        ("configs/sft", tmp_path / "configs" / "sft", False),
+        ("configs/opd", tmp_path / "configs" / "opd", False),
+        ("configs/fft", tmp_path / "configs" / "fft", False),
+    ]
+
+
+def test_copy_setup_configs_downloads_missing_cached_template_folders(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    template_configs = home / ".prime" / "lab" / "templates" / "configs"
+    (template_configs / "rl").mkdir(parents=True)
+    (template_configs / "rl" / "gsm8k.toml").write_text("cached\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    calls: list[tuple[Path, bool, tuple[str, ...]]] = []
+
+    def fake_repo_tree_entries(_repo: str, _ref: str) -> tuple[tuple[str, str], ...]:
+        return (
+            ("configs/rl/gsm8k.toml", "blob"),
+            ("configs/gepa/base.toml", "blob"),
+            ("configs/eval/debug.toml", "blob"),
+        )
+
+    def fake_download_lab_config_folders(
+        dest: Path,
+        _emit: Any,
+        *,
+        force: bool,
+        folders: tuple[str, ...] = lab_setup.LAB_CONFIG_FOLDERS,
+    ) -> None:
+        calls.append((dest, force, folders))
+        for folder in folders:
+            (dest / folder).mkdir(parents=True, exist_ok=True)
+            (dest / folder / "downloaded.toml").write_text("downloaded\n", encoding="utf-8")
+
+    monkeypatch.setattr(lab_setup, "_repo_tree_entries", fake_repo_tree_entries)
+    monkeypatch.setattr(lab_setup, "_download_lab_config_folders", fake_download_lab_config_folders)
+
+    lab_setup._copy_setup_configs(workspace, emit=lambda _text: None)
+
+    assert (workspace / "configs" / "rl" / "gsm8k.toml").read_text(encoding="utf-8") == "cached\n"
+    assert (workspace / "configs" / "gepa" / "downloaded.toml").is_file()
+    assert (workspace / "configs" / "eval" / "downloaded.toml").is_file()
+    assert calls == [(template_configs, False, ("gepa", "eval"))]
+
+
+def test_download_file_quiet_suppresses_per_file_status(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    emitted: list[str] = []
+
+    def fake_read_url(_url: str, *, emit: Any | None = None) -> bytes:
+        if emit is not None:
+            emit("retry detail\n")
+        return b"ok"
+
+    monkeypatch.setattr(lab_setup, "_download_file", REAL_DOWNLOAD_FILE)
+    monkeypatch.setattr(lab_setup, "_read_url", fake_read_url)
+
+    lab_setup._download_file(
+        "https://example.test/file",
+        tmp_path / "file",
+        emitted.append,
+        quiet=True,
+    )
+    lab_setup._download_file(
+        "https://example.test/file",
+        tmp_path / "file",
+        emitted.append,
+        quiet=True,
+    )
+
+    assert (tmp_path / "file").read_bytes() == b"ok"
+    assert emitted == ["retry detail\n"]
 
 
 def test_lab_setup_downloads_retry_transient_failures(monkeypatch: Any) -> None:
@@ -346,62 +634,6 @@ def test_lab_setup_downloads_retry_transient_failures(monkeypatch: Any) -> None:
     assert calls == ["https://example.test/file", "https://example.test/file"]
     assert sleeps == [lab_setup.DOWNLOAD_RETRY_DELAY_SECONDS]
     assert emitted == ["Download failed for https://example.test/file; retrying (2/3)\n"]
-
-
-def test_lab_setup_installs_prime_rl_from_pinned_checkout(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
-    monkeypatch.setattr(lab_setup, "_ensure_prime_rl_supported_platform", lambda: None)
-    commands: list[tuple[list[str], Path]] = []
-
-    def runner(command: Any, cwd: Path, _emit: Any) -> int:
-        command_list = list(command)
-        commands.append((command_list, cwd))
-        if command_list[:3] == ["git", "clone", "--no-checkout"]:
-            (tmp_path / "prime-rl" / "scripts").mkdir(parents=True)
-            (tmp_path / "prime-rl" / "scripts" / "install.sh").write_text(
-                "#!/usr/bin/env bash\n",
-                encoding="utf-8",
-            )
-        return 0
-
-    lab_setup._install_prime_rl(tmp_path, emit=lambda _text: None, runner=runner)
-
-    assert commands == [
-        (
-            [
-                "git",
-                "clone",
-                "--no-checkout",
-                "https://github.com/primeintellect-ai/prime-rl.git",
-                "prime-rl",
-            ],
-            tmp_path,
-        ),
-        (["git", "checkout", lab_setup.PRIME_RL_REF], tmp_path / "prime-rl"),
-        (
-            ["env", "SKIP_CLONE=1", "bash", "scripts/install.sh"],
-            tmp_path / "prime-rl",
-        ),
-    ]
-
-
-def test_lab_setup_prime_rl_fails_early_on_unsupported_platform(
-    tmp_path: Path,
-    monkeypatch: Any,
-) -> None:
-    commands: list[list[str]] = []
-    monkeypatch.setattr(lab_setup, "_prime_rl_platform", lambda: ("darwin", "arm64"))
-
-    with pytest.raises(RuntimeError, match="prime-rl only supports Linux"):
-        lab_setup._install_prime_rl(
-            tmp_path,
-            emit=lambda _text: None,
-            runner=lambda command, _cwd, _emit: commands.append(list(command)) or 0,
-        )
-
-    assert commands == []
 
 
 def test_lab_setup_manifest_tracks_skill_source(
@@ -509,7 +741,9 @@ def test_lab_sync_fully_refreshes_global_and_workspace_config_templates(
         assert not (root / "configs" / "old.toml").exists()
         assert (root / "configs" / "eval" / "debug.toml").is_file()
         assert (root / "configs" / "eval" / "wordle.toml").is_file()
-        assert (root / "configs" / "zero3.yaml").is_file()
+        assert not (root / "configs" / "zero3.yaml").exists()
+        assert not (root / "configs" / "endpoints.toml").exists()
+        assert not (root / "configs" / "local").exists()
 
 
 def test_lab_doctor_reports_missing_selected_agent_guidance(
@@ -642,35 +876,6 @@ def test_lab_doctor_warns_on_deprecated_config_fields(tmp_path: Path) -> None:
     assert "configs/rl/old.toml:max_off_policy_steps" in checks["Config deprecated fields"].message
 
 
-def test_lab_setup_installs_prime_rl_envs_with_split_editable_args(tmp_path: Path) -> None:
-    (tmp_path / "prime-rl" / ".venv" / "bin").mkdir(parents=True)
-    (tmp_path / "prime-rl" / ".venv" / "bin" / "python").write_text("", encoding="utf-8")
-    (tmp_path / "environments" / "foo").mkdir(parents=True)
-    (tmp_path / "environments" / "foo" / "pyproject.toml").write_text(
-        "[project]\nname = 'foo'\n",
-        encoding="utf-8",
-    )
-    commands: list[list[str]] = []
-
-    lab_setup._install_environments_to_prime_rl(
-        tmp_path,
-        emit=lambda _text: None,
-        runner=lambda command, _cwd, _emit: commands.append(list(command)) or 0,
-    )
-
-    assert commands == [
-        [
-            "uv",
-            "pip",
-            "install",
-            "--python",
-            str(tmp_path / "prime-rl" / ".venv" / "bin" / "python"),
-            "-e",
-            "environments/foo",
-        ]
-    ]
-
-
 def test_workspace_agents_from_metadata_ignores_non_string_values(tmp_path: Path) -> None:
     (tmp_path / ".prime").mkdir()
     (tmp_path / ".prime" / "lab.json").write_text(
@@ -768,3 +973,19 @@ def test_lab_setup_accepts_amp_and_factory_aliases(tmp_path: Path, monkeypatch: 
     assert metadata["choices"]["agents"] == ["droid", "amp"]
     assert (tmp_path / ".factory" / "skills" / "create-environments").exists()
     assert (tmp_path / ".agents" / "skills" / "create-environments").exists()
+
+
+def test_lab_setup_supports_letta_project_skills(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/letta")
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("letta",)),
+        workspace=tmp_path,
+        emit=lambda _text: None,
+    )
+
+    metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
+    assert result.exit_code == 0
+    assert metadata["choices"]["agents"] == ["letta"]
+    assert (tmp_path / ".agents" / "skills" / "create-environments" / "SKILL.md").is_file()

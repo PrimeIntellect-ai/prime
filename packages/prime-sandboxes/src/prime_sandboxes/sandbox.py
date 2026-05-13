@@ -84,6 +84,11 @@ GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS = GATEWAY_CONNECTION_RETRYABLE_EXCEPTION
     httpx.ReadError,  # TCP connection broken while reading response
 )
 
+READ_FILE_RETRYABLE_EXCEPTIONS = GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS + (
+    httpx.ConnectTimeout,  # Timed out before the request reached the gateway
+    httpx.ReadTimeout,  # Timed out waiting for an idempotent read response
+)
+
 # Retryable HTTP 5xx status codes (e.g. Cloudflare 524 timeout, server errors)
 RETRYABLE_5XX_STATUSES = frozenset({500, 502, 503, 504, 524})
 
@@ -106,6 +111,19 @@ def _is_retryable_gateway_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_retryable_read_file_error(exc: BaseException) -> bool:
+    """Check if an exception is retryable for read-file gateway requests."""
+    if isinstance(exc, READ_FILE_RETRYABLE_EXCEPTIONS):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status == 408 or status in RETRYABLE_5XX_STATUSES:
+            if _is_gateway_sandbox_not_found(exc.response):
+                return False
+            return True
+    return False
+
+
 # Retry decorator for idempotent gateway requests (connection errors, ReadError,
 # and 5xx responses). Safe for GET/HEAD/PUT/DELETE since duplicate requests are no-ops.
 _gateway_retry = retry(
@@ -120,6 +138,16 @@ _gateway_retry = retry(
 # retrying POSTs on those risks duplicate side effects).
 _gateway_post_retry = retry(
     retry=retry_if_exception_type(GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=1, max=30),
+    reraise=True,
+)
+
+# Retry decorator for read-file requests. read_file is idempotent and often used
+# as a polling primitive, so transient read/connect/pool timeouts should not fail
+# the operation on the first missed gateway response.
+_read_file_retry = retry(
+    retry=retry_if_exception(_is_retryable_read_file_error),
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=1, min=1, max=30),
     reraise=True,
@@ -304,7 +332,11 @@ class SandboxAuthCache:
                 continue
 
             try:
-                response = self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+                response = self.client.request(
+                    "POST",
+                    f"/sandbox/{sandbox_id}/auth",
+                    idempotent_post=True,
+                )
                 with self._lock:
                     self._auth_cache[sandbox_id] = response
                     self._save_cache()
@@ -405,7 +437,11 @@ class AsyncSandboxAuthCache:
                 continue
 
             try:
-                response = await self.client.request("POST", f"/sandbox/{sandbox_id}/auth")
+                response = await self.client.request(
+                    "POST",
+                    f"/sandbox/{sandbox_id}/auth",
+                    idempotent_post=True,
+                )
                 async with self._lock:
                     self._auth_cache[sandbox_id] = response
                     await self._save_cache()
@@ -511,6 +547,21 @@ class SandboxClient:
             response.raise_for_status()
         return response
 
+    @staticmethod
+    @_read_file_retry
+    def _gateway_read_file_get(
+        url: str,
+        headers: Dict[str, str],
+        params: Dict[str, Any],
+        timeout: float,
+    ) -> httpx.Response:
+        """Make a read-file GET request to the gateway with read-timeout retries."""
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(url, params=params, headers=headers)
+        if response.status_code == 408 or response.status_code in RETRYABLE_5XX_STATUSES:
+            response.raise_for_status()
+        return response
+
     def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
         """Test if a sandbox is reachable by executing a simple echo command"""
         try:
@@ -579,14 +630,17 @@ class SandboxClient:
 
     def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
+        payload = request.model_dump(by_alias=False, exclude_none=True)
         # Auto-populate team_id from config if not specified
-        if request.team_id is None:
-            request.team_id = self.client.config.team_id
+        if request.team_id is None and self.client.config.team_id is not None:
+            payload["team_id"] = self.client.config.team_id
+        payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
 
         response = self.client.request(
             "POST",
             "/sandbox",
-            json=request.model_dump(by_alias=False, exclude_none=True),
+            json=payload,
+            idempotent_post=True,
         )
         return Sandbox.model_validate(response)
 
@@ -891,7 +945,7 @@ class SandboxClient:
 
         # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
         bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        self.execute_command(sandbox_id, bg_cmd, timeout=10)
+        self.execute_command(sandbox_id, bg_cmd, timeout=30)
 
         return BackgroundJob(
             job_id=job_id,
@@ -1242,14 +1296,15 @@ class SandboxClient:
 
         for attempt in range(MAX_409_RETRIES):
             try:
-                response = self._gateway_get(
+                response = self._gateway_read_file_get(
                     url, headers=headers, params=params, timeout=effective_timeout
                 )
                 response.raise_for_status()
                 return ReadFileResponse.model_validate(response.json())
             except httpx.TimeoutException as e:
                 raise APIError(
-                    f"Read file timed out after {effective_timeout}s: {file_path}"
+                    f"Read file timed out after {effective_timeout}s "
+                    f"({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
@@ -1405,6 +1460,21 @@ class AsyncSandboxClient:
             response.raise_for_status()
         return response
 
+    @_read_file_retry
+    async def _gateway_read_file_get(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        params: Dict[str, Any],
+        timeout: float,
+    ) -> httpx.Response:
+        """Make a read-file GET request to the gateway with read-timeout retries."""
+        gateway_client = self._get_gateway_client()
+        response = await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
+        if response.status_code == 408 or response.status_code in RETRYABLE_5XX_STATUSES:
+            response.raise_for_status()
+        return response
+
     async def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
         """Test if a sandbox is reachable by executing a simple echo command"""
         try:
@@ -1473,13 +1543,16 @@ class AsyncSandboxClient:
 
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
         """Create a new sandbox"""
-        if request.team_id is None:
-            request.team_id = self.client.config.team_id
+        payload = request.model_dump(by_alias=False, exclude_none=True)
+        if request.team_id is None and self.client.config.team_id is not None:
+            payload["team_id"] = self.client.config.team_id
+        payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
 
         response = await self.client.request(
             "POST",
             "/sandbox",
-            json=request.model_dump(by_alias=False, exclude_none=True),
+            json=payload,
+            idempotent_post=True,
         )
         return Sandbox.model_validate(response)
 
@@ -1783,7 +1856,7 @@ class AsyncSandboxClient:
 
         # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
         bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        await self.execute_command(sandbox_id, bg_cmd, timeout=10)
+        await self.execute_command(sandbox_id, bg_cmd, timeout=30)
 
         return BackgroundJob(
             job_id=job_id,
@@ -2150,14 +2223,15 @@ class AsyncSandboxClient:
 
         for attempt in range(MAX_409_RETRIES):
             try:
-                response = await self._gateway_get(
+                response = await self._gateway_read_file_get(
                     url, headers=headers, params=params, timeout=effective_timeout
                 )
                 response.raise_for_status()
                 return ReadFileResponse.model_validate(response.json())
             except httpx.TimeoutException as e:
                 raise APIError(
-                    f"Read file timed out after {effective_timeout}s: {file_path}"
+                    f"Read file timed out after {effective_timeout}s "
+                    f"({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:

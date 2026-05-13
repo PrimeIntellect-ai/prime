@@ -17,6 +17,8 @@ from .agent_acp import acp_session_params, acp_session_support, acp_update_event
 from .agent_adapters import AgentAdapter, AgentServerSpec, write_agent_native_surface
 from .agent_capabilities import AgentCapability, agent_capability
 from .agent_widgets import (
+    LAB_WIDGET_NAMESPACE,
+    LAB_WIDGET_TOOLS,
     handle_lab_widget_tool_call,
     lab_dynamic_tools,
     lab_widget_action_from_tool_call,
@@ -95,6 +97,7 @@ class AgentRuntime:
         self._initializing_thread: threading.Thread | None = None
         self._intentional_stop = False
         self._active_turn_id = ""
+        self._stream_seen_messages: dict[str, str] = {}
 
     @property
     def state(self) -> AgentConnectionState:
@@ -189,7 +192,7 @@ class AgentRuntime:
                     )
                 )
                 return
-        if spec.transport == "resumable-cli":
+        if spec.transport in {"resumable-cli", "letta-bidirectional"}:
             try:
                 write_agent_native_surface(workspace, adapter.name)
             except OSError as exc:
@@ -205,8 +208,9 @@ class AgentRuntime:
                     )
                 )
                 return
-            self._set_connected(message="CLI ready", session_id=session_id)
-            return
+            if spec.transport == "resumable-cli":
+                self._set_connected(message="CLI ready", session_id=session_id)
+                return
 
         if adapter.session_dir_flag is not None:
             (workspace / ".prime" / "lab" / "agent-sessions" / adapter.name).mkdir(
@@ -263,6 +267,13 @@ class AgentRuntime:
         elif spec.transport == "codex-app-stdio":
             self._initializing_thread = threading.Thread(
                 target=self._initialize_codex_app_stdio,
+                name=f"lab-agent-{adapter.name}-init",
+                daemon=True,
+            )
+            self._initializing_thread.start()
+        elif spec.transport == "letta-bidirectional":
+            self._initializing_thread = threading.Thread(
+                target=self._initialize_letta_bidirectional,
                 name=f"lab-agent-{adapter.name}-init",
                 daemon=True,
             )
@@ -333,6 +344,14 @@ class AgentRuntime:
                 )
                 transport = self._spec.transport
                 session_id = state.session_id
+            elif self._spec.transport == "letta-bidirectional":
+                self._append_message_locked(
+                    AgentChatMessage("user", prompt),
+                    AgentChatMessage("assistant", "", "streaming"),
+                )
+                self._stream_seen_messages = {}
+                transport = self._spec.transport
+                session_id = state.session_id
             else:
                 self._append_message_locked(
                     AgentChatMessage("user", prompt),
@@ -361,6 +380,9 @@ class AgentRuntime:
                         name=f"lab-agent-{self._agent}-cli",
                         daemon=True,
                     ).start()
+                    return
+                if transport == "letta-bidirectional":
+                    self._write_letta_user_message(_agent_prompt_with_lab_context(prompt))
                     return
                 prompt_text = (
                     _agent_prompt_with_lab_context(prompt) if transport == "acp-stdio" else prompt
@@ -396,7 +418,7 @@ class AgentRuntime:
         """Handle a native MCP Lab tool call forwarded by `prime lab mcp`."""
 
         params = {
-            "namespace": "lab",
+            "namespace": LAB_WIDGET_NAMESPACE,
             "tool": tool,
             "callId": str(uuid.uuid4()),
             "arguments": arguments,
@@ -407,6 +429,45 @@ class AgentRuntime:
         if status == "widget":
             self._emit_action(action or {})
         return response
+
+    def _write_letta_user_message(self, prompt: str) -> None:
+        self._write_json(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": prompt,
+                },
+            }
+        )
+
+    def _write_letta_control_request(
+        self,
+        subtype: str,
+        request: dict[str, Any] | None = None,
+    ) -> str:
+        request_id = f"prime-lab-{subtype}-{uuid.uuid4().hex}"
+        self._write_json(
+            {
+                "type": "control_request",
+                "request_id": request_id,
+                "request": {
+                    "subtype": subtype,
+                    **(request or {}),
+                },
+            }
+        )
+        return request_id
+
+    def _write_letta_control_response(self, response: dict[str, Any]) -> None:
+        self._write_json(
+            {
+                "type": "control_response",
+                "session_id": self._state.session_id,
+                "uuid": str(uuid.uuid4()),
+                "response": response,
+            }
+        )
 
     def _run_resumable_cli_prompt(self, prompt: str, session_id: str) -> None:
         workspace = self._workspace
@@ -419,11 +480,8 @@ class AgentRuntime:
                 self._emit_messages_locked()
             return
 
-        command = adapter.stream_command(
-            _agent_prompt_with_lab_context(prompt),
-            session_id,
-            workspace=workspace,
-        )
+        prompt_text = _agent_prompt_with_lab_context(prompt)
+        command = adapter.stream_command(prompt_text, session_id, workspace=workspace)
         try:
             process = self._popen_factory(
                 command,
@@ -481,6 +539,27 @@ class AgentRuntime:
             if failure_lines:
                 self._append_streaming_assistant_text("\n".join(failure_lines).strip())
         self._finish_streaming_process(code, failure_label=f"{adapter.label} request failed")
+
+    def _initialize_letta_bidirectional(self) -> None:
+        try:
+            self._write_letta_control_request("initialize")
+            self._write_letta_control_request(
+                "register_external_tools",
+                {"tools": _letta_external_tools()},
+            )
+        except Exception as exc:
+            self._set_state(
+                AgentConnectionState(
+                    agent=self._agent,
+                    label=self._label,
+                    status="error",
+                    transport=self._spec.transport if self._spec else "",
+                    workspace=self._workspace,
+                    message=str(exc),
+                )
+            )
+            return
+        self._set_connected(message="Connected")
 
     def _initialize_acp_stdio(self) -> None:
         workspace = self._workspace
@@ -617,7 +696,12 @@ class AgentRuntime:
                     message = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                self._handle_jsonrpc_message(message)
+                with self._lock:
+                    transport = self._spec.transport if self._spec is not None else ""
+                if transport == "letta-bidirectional":
+                    self._handle_letta_wire_message(message)
+                else:
+                    self._handle_jsonrpc_message(message)
         finally:
             code = process.poll()
             if code is None:
@@ -643,6 +727,105 @@ class AgentRuntime:
             return
         for _line in process.stderr:
             pass
+
+    def _handle_letta_wire_message(self, message: Any) -> None:
+        if not isinstance(message, dict):
+            return
+        message_type = _field(message, "type")
+        if message_type == "system":
+            next_session_id = _extract_agent_session_id(message)
+            if next_session_id:
+                self._set_connected(message="Connected", session_id=next_session_id)
+            return
+        if message_type == "control_request":
+            self._handle_letta_control_request(message)
+            return
+        if message_type == "control_response":
+            return
+        if message_type == "error":
+            error_message = _content_text(_field(message, "message")) or "Letta Code request failed"
+            with self._lock:
+                self._replace_last_streaming_locked(
+                    AgentChatMessage("system", error_message, "error")
+                )
+                self._emit_messages_locked()
+            return
+
+        text = _extract_stream_delta(message, self._stream_seen_messages)
+        if text:
+            self._append_streaming_assistant_text(text)
+
+        if message_type == "result":
+            result_text = _extract_result_text(message)
+            if result_text and not self._stream_seen_messages.get(_ASSISTANT_STREAM_KEY):
+                self._append_streaming_assistant_text(result_text)
+            with self._lock:
+                self._finish_latest_streaming_assistant_locked()
+                self._emit_messages_locked()
+
+    def _handle_letta_control_request(self, message: dict[str, Any]) -> None:
+        request_id = str(message.get("request_id") or "")
+        request = message.get("request")
+        if not isinstance(request, dict):
+            self._write_letta_control_response(
+                {
+                    "subtype": "error",
+                    "request_id": request_id,
+                    "error": "Invalid Letta control request.",
+                }
+            )
+            return
+        subtype = request.get("subtype")
+        if subtype == "can_use_tool":
+            self._write_letta_control_response(
+                {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": {"behavior": "allow"},
+                }
+            )
+            return
+        if subtype == "execute_external_tool":
+            self._handle_letta_external_tool_request(request_id, request)
+            return
+        self._write_letta_control_response(
+            {
+                "subtype": "error",
+                "request_id": request_id,
+                "error": f"Unsupported Letta control request: {subtype or '<empty>'}.",
+            }
+        )
+
+    def _handle_letta_external_tool_request(
+        self,
+        request_id: str,
+        request: dict[str, Any],
+    ) -> None:
+        tool_name = str(request.get("tool_name") or request.get("tool") or "")
+        tool_call_id = str(request.get("tool_call_id") or request.get("call_id") or request_id)
+        arguments = request.get("input")
+        if not isinstance(arguments, dict):
+            arguments = {}
+        params = {
+            "namespace": LAB_WIDGET_NAMESPACE,
+            "tool": tool_name,
+            "callId": tool_call_id,
+            "arguments": arguments,
+        }
+        status, content, response = self._handle_lab_tool_call(params)
+        action = lab_widget_action_from_tool_call(params) if status == "widget" else None
+        self._record_dynamic_tool_call(status, content, action)
+        if status == "widget":
+            self._emit_action(action or {})
+        self._write_letta_control_response(
+            {
+                "subtype": "external_tool_result",
+                "request_id": request_id,
+                "tool_call_id": tool_call_id,
+                "content": [{"type": "text", "text": json.dumps(response, sort_keys=True)}],
+                "is_error": status == "error" or response.get("success") is False,
+            }
+        )
 
     def _handle_jsonrpc_message(self, message: Any) -> None:
         if not isinstance(message, dict):
@@ -1009,8 +1192,37 @@ def _collect_stream_lines(stream: Any, lines: list[str]) -> None:
             lines.append(text)
 
 
+def _letta_external_tools() -> list[dict[str, Any]]:
+    tools: list[dict[str, Any]] = []
+    for tool in LAB_WIDGET_TOOLS:
+        properties = dict(tool.properties)
+        if tool.common:
+            properties = {
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                **properties,
+            }
+        tools.append(
+            {
+                "name": tool.name,
+                "label": f"Lab {tool.name.replace('_', ' ')}",
+                "description": tool.description,
+                "parameters": {
+                    "type": "object",
+                    "required": list(tool.required),
+                    "properties": properties,
+                    "additionalProperties": False,
+                },
+            }
+        )
+    return tools
+
+
 def _unsupported_agent_message(capability: AgentCapability) -> str:
-    supported = "Amp, Codex, Claude, Claude Code, Cursor, Factory Droid, OpenCode, Hermes, or Pi"
+    supported = (
+        "Amp, Codex, Claude, Claude Code, Cursor, Factory Droid, Letta Code, OpenCode, "
+        "Hermes, or Pi"
+    )
     reason = f" {capability.unsupported_reason}" if capability.unsupported_reason else ""
     return (
         f"{capability.label} is not yet supported for Lab-native chat actions.{reason} "
@@ -1167,6 +1379,11 @@ def _explicit_stream_delta(value: Any) -> str:
         event_type = _field(event, "type")
         if event_type in {"content_block_delta", "text_delta", "message_delta"}:
             return _explicit_stream_delta(event)
+        event_message_type = _field(event, "message_type")
+        if event_message_type == "assistant_message":
+            text = _content_text(_field(event, "content"))
+            if text:
+                return _clean_agent_output_text(text)
 
     return ""
 

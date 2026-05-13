@@ -132,7 +132,13 @@ from prime_lab_app.config_screen import (
     build_config_from_fields,
     launch_command_for_config,
 )
-from prime_lab_app.data import LabDataSource, LabLoadOptions, discover_local_eval_runs
+from prime_lab_app.data import (
+    LabDataSource,
+    LabLoadOptions,
+    _iter_lab_workspace_markers,
+    discover_local_eval_runs,
+)
+from prime_lab_app.environment_records import local_environment_items
 from prime_lab_app.environment_screen import (
     AddWorkspaceScreen,
     EnvironmentAction,
@@ -202,6 +208,7 @@ from prime_lab_app.widgets import (
     ScopeToggle,
 )
 from rich.console import Console
+from rich.panel import Panel
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Button, Label, OptionList, Select, Static, Tree
 from typer.testing import CliRunner
@@ -1693,6 +1700,49 @@ def test_discover_local_eval_runs(tmp_path: Path) -> None:
     ]
 
 
+def test_discover_local_eval_runs_skips_unreadable_output_dirs(tmp_path: Path) -> None:
+    blocked = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4"
+    blocked.mkdir(parents=True)
+    blocked.chmod(0)
+    try:
+        if os.access(blocked, os.R_OK | os.X_OK):
+            pytest.skip("filesystem permissions do not block the current test user")
+        assert discover_local_eval_runs(tmp_path) == []
+    finally:
+        blocked.chmod(0o700)
+
+
+def test_iter_lab_workspace_markers_skips_unreadable_siblings(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / ".prime").mkdir(parents=True)
+    (workspace / ".prime" / "lab.json").write_text("{}", encoding="utf-8")
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    blocked.chmod(0)
+    try:
+        if os.access(blocked, os.R_OK | os.X_OK):
+            pytest.skip("filesystem permissions do not block the current test user")
+        assert _iter_lab_workspace_markers(tmp_path) == [workspace]
+    finally:
+        blocked.chmod(0o700)
+
+
+def test_local_environment_items_tolerates_unreadable_environment_dirs(tmp_path: Path) -> None:
+    blocked = tmp_path / "environments" / "blocked-env"
+    blocked.mkdir(parents=True)
+    blocked.chmod(0)
+    try:
+        if os.access(blocked, os.R_OK | os.X_OK):
+            pytest.skip("filesystem permissions do not block the current test user")
+        items = local_environment_items(tmp_path, "./environments", 10, section="environments")
+    finally:
+        blocked.chmod(0o700)
+
+    assert len(items) == 1
+    assert items[0].title == "blocked-env"
+    assert items[0].raw["local"]["files"] == []
+
+
 def test_local_eval_lazy_records_and_overview_stats(tmp_path: Path) -> None:
     run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
     run_dir.mkdir(parents=True)
@@ -2125,7 +2175,14 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
     monkeypatch.setenv("HOME", str(tmp_path))
     downloads: list[Path] = []
 
-    def fake_download(_url: str, dest: Path, _emit: Any, *, force: bool = False) -> None:
+    def fake_download(
+        _url: str,
+        dest: Path,
+        _emit: Any,
+        *,
+        force: bool = False,
+        quiet: bool = False,
+    ) -> None:
         downloads.append(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"{dest.name}\n", encoding="utf-8")
@@ -2150,7 +2207,7 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
     assert result.exit_code == 0
     assert (tmp_path / ".prime" / "skills" / "create-environments" / "SKILL.md").is_file()
     assert (tmp_path / ".pi" / "skills" / "create-environments").exists()
-    assert not any("pi-acp" in line for line in emitted)
+    assert not any(isinstance(line, str) and "pi-acp" in line for line in emitted)
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
     assert (tmp_path / ".prime" / "lab" / "docs" / "index.md").is_file()
     assert (tmp_path / "AGENTS.md").is_file()
@@ -2168,7 +2225,14 @@ def test_prime_lab_sync_service_preserves_workspace_agent(
         encoding="utf-8",
     )
 
-    def fake_download(_url: str, dest: Path, _emit: Any, *, force: bool = False) -> None:
+    def fake_download(
+        _url: str,
+        dest: Path,
+        _emit: Any,
+        *,
+        force: bool = False,
+        quiet: bool = False,
+    ) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"{dest.name}\n", encoding="utf-8")
 
@@ -2190,7 +2254,14 @@ def test_prime_lab_setup_service_supports_pi_agent(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    def fake_download(url: str, dest: Path, emit: Any, *, force: bool = False) -> None:
+    def fake_download(
+        url: str,
+        dest: Path,
+        emit: Any,
+        *,
+        force: bool = False,
+        quiet: bool = False,
+    ) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
 
@@ -2218,7 +2289,7 @@ def test_prime_lab_setup_service_supports_pi_agent(
     extension_source = pi_lab_extension_path(tmp_path).read_text(encoding="utf-8")
     assert "process.env.PRIME_LAB_RUNTIME_DIR || os.tmpdir()" in extension_source
     assert 'process.env.PRIME_LAB_RUNTIME_DIR || "/tmp"' not in extension_source
-    assert not any("pi-acp" in line for line in emitted)
+    assert not any(isinstance(line, str) and "pi-acp" in line for line in emitted)
 
 
 def test_prime_lab_setup_service_supports_claude_code_agent(
@@ -2227,7 +2298,14 @@ def test_prime_lab_setup_service_supports_claude_code_agent(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    def fake_download(url: str, dest: Path, emit: Any, *, force: bool = False) -> None:
+    def fake_download(
+        url: str,
+        dest: Path,
+        emit: Any,
+        *,
+        force: bool = False,
+        quiet: bool = False,
+    ) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
 
@@ -2258,7 +2336,14 @@ def test_prime_lab_setup_service_supports_hermes_agent(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    def fake_download(url: str, dest: Path, emit: Any, *, force: bool = False) -> None:
+    def fake_download(
+        url: str,
+        dest: Path,
+        emit: Any,
+        *,
+        force: bool = False,
+        quiet: bool = False,
+    ) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
 
@@ -2294,6 +2379,7 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
     assert agent_adapter("opencode").lab_widget_contract == "mcp-stdio-tools"
     assert agent_adapter("pi").lab_widget_contract == "pi-extension-tools"
     assert agent_adapter("hermes-agent").lab_widget_contract == "mcp-stdio-tools"
+    assert agent_adapter("letta-code").lab_widget_contract == "letta-external-tools"
     workspace = Path("/workspace")
     allowed_lab_tools = ",".join(
         (
@@ -2384,6 +2470,35 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
     assert pi_server.command == ()
     assert pi_server.transport == "resumable-cli"
     assert agent_adapter("hermes").name == "hermes"
+    assert agent_adapter("letta").prompt_command("hello") == [
+        "letta",
+        "-p",
+        "--skills",
+        ".agents/skills",
+        "hello",
+    ]
+    assert agent_adapter("letta-code").server_spec(workspace).command == (
+        "letta",
+        "-p",
+        "--skills",
+        ".agents/skills",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages",
+    )
+    assert agent_adapter("letta-code").server_spec(workspace).transport == "letta-bidirectional"
+    assert agent_adapter("letta-code").stream_command("hello", workspace=workspace) == [
+        "letta",
+        "-p",
+        "--skills",
+        ".agents/skills",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages",
+        "hello",
+    ]
     assert agent_adapter("codex").server_spec(Path("/workspace")).command == (
         "codex",
         "app-server",
@@ -2410,6 +2525,7 @@ def test_lab_agent_capabilities_centralize_supported_agents(
         "cursor",
         "droid",
         "hermes",
+        "letta",
         "opencode",
         "pi",
     )
@@ -2431,6 +2547,16 @@ def test_lab_agent_capabilities_centralize_supported_agents(
     assert agent_capability("codex").native_surface == "codex_app_server"
     assert agent_capability("claude-code").name == "claude"
     assert agent_capability("claude").native_surface == "mcp_config"
+    letta = agent_capability("letta-code")
+    assert letta.name == "letta"
+    assert letta.label == "Letta Code"
+    assert letta.native_surface == "letta_external_tools"
+    assert letta.missing_requirements()[0].install_command == (
+        "npm",
+        "install",
+        "-g",
+        "@letta-ai/letta-code",
+    )
     assert agent_capability("custom-agent").status == "not_supported"
     assert agent_capability("cursor").resolved_surface_paths(tmp_path) == (
         tmp_path.resolve() / ".cursor" / "mcp.json",
@@ -3283,6 +3409,132 @@ def test_agent_runtime_supports_cursor_with_workspace_mcp_config(tmp_path: Path)
     assert "Native Lab tools are available" in commands[-1][-1]
     assert messages
     assert messages[-1].content == "cursor ready"
+
+
+def test_agent_runtime_supports_letta_external_tool_widgets(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    stdin_messages: list[dict[str, Any]] = []
+    registered_tools: list[dict[str, Any]] = []
+    tool_responses: list[dict[str, Any]] = []
+    messages: tuple[Any, ...] = ()
+    actions: list[dict[str, Any]] = []
+
+    def handler(process: _FakeJsonRpcProcess, message: dict[str, Any]) -> None:
+        stdin_messages.append(message)
+        if message.get("type") == "control_request":
+            request = message.get("request")
+            request_id = str(message.get("request_id") or "")
+            assert isinstance(request, dict)
+            if request.get("subtype") == "initialize":
+                process.emit(
+                    {
+                        "type": "system",
+                        "subtype": "init",
+                        "session_id": "letta-session",
+                        "uuid": "init-1",
+                    }
+                )
+            elif request.get("subtype") == "register_external_tools":
+                tools = request.get("tools")
+                assert isinstance(tools, list)
+                registered_tools.extend(tools)
+                process.emit(
+                    {
+                        "type": "control_response",
+                        "response": {"subtype": "success", "request_id": request_id},
+                    }
+                )
+        elif message.get("type") == "user":
+            prompt = str(message.get("message", {}).get("content") or "")
+            assert "Native Lab tools are available" in prompt
+            process.emit(
+                {
+                    "type": "stream_event",
+                    "event": {
+                        "message_type": "assistant_message",
+                        "content": "Preparing.",
+                    },
+                }
+            )
+            process.emit(
+                {
+                    "type": "control_request",
+                    "request_id": "tool-req-1",
+                    "request": {
+                        "subtype": "execute_external_tool",
+                        "tool_call_id": "tool-call-1",
+                        "tool_name": "choose",
+                        "input": {
+                            "title": "Pick env",
+                            "candidates": [{"id": "wordle", "label": "Wordle"}],
+                        },
+                    },
+                }
+            )
+        elif message.get("type") == "control_response":
+            response = message.get("response")
+            assert isinstance(response, dict)
+            if response.get("subtype") == "external_tool_result":
+                tool_responses.append(response)
+                process.emit(
+                    {
+                        "type": "stream_event",
+                        "event": {
+                            "message_type": "assistant_message",
+                            "content": "Done.",
+                        },
+                    }
+                )
+                process.emit(
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "result": "Done.",
+                    }
+                )
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> _FakeJsonRpcProcess:
+        commands.append(command)
+        return _FakeJsonRpcProcess(handler)
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    runtime = AgentRuntime(
+        on_messages=on_messages,
+        on_action=actions.append,
+        popen_factory=fake_popen,
+    )
+    runtime.start(tmp_path, "letta-code")
+
+    assert _wait_for(lambda: runtime.state.status == "connected")
+    assert commands[-1] == [
+        "letta",
+        "-p",
+        "--skills",
+        ".agents/skills",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages",
+    ]
+    assert _wait_for(lambda: any(tool["name"] == "choose" for tool in registered_tools))
+    choose_tool = next(tool for tool in registered_tools if tool["name"] == "choose")
+    assert choose_tool["parameters"]["required"] == ["title", "candidates"]
+
+    runtime.send_prompt("hello")
+
+    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
+    assert any(message.status == "widget" for message in messages)
+    assert actions[-1]["tool"] == "choose"
+    assert actions[-1]["title"] == "Pick env"
+    assert tool_responses[-1]["tool_call_id"] == "tool-call-1"
+    assert tool_responses[-1]["is_error"] is False
+    assert '"success": true' in tool_responses[-1]["content"][0]["text"]
+    assert messages[-1].content == "Done."
+    runtime.stop()
 
 
 def test_agent_runtime_supports_opencode_with_workspace_mcp_config(tmp_path: Path) -> None:
@@ -6164,10 +6416,17 @@ async def test_prime_lab_app_can_load_more_platform_rows(tmp_path: Path) -> None
     )
 
     async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.pause()
+        for _ in range(50):
+            if loaded_limits and loaded_limits[-1] == 100:
+                break
+            await pilot.pause()
+        assert loaded_limits and loaded_limits[-1] == 100
+
         app.action_load_more_rows()
-        await pilot.pause()
+        for _ in range(50):
+            if loaded_limits and loaded_limits[-1] == 200:
+                break
+            await pilot.pause()
 
     assert loaded_limits[-1] == 200
 
@@ -6464,9 +6723,10 @@ async def test_setup_screen_run_uses_selected_agent(
         options: LabSetupOptions,
         *,
         workspace: Path,
-        emit: Callable[[str], None],
+        emit: Callable[[Any], None],
     ) -> LabSetupResult:
-        _ = emit
+        emit("setup log\n")
+        emit(Panel("same rich panel", title="get started"))
         captured.append((options, workspace))
         return LabSetupResult(exit_code=0, workspace=workspace)
 
@@ -6501,8 +6761,9 @@ async def test_setup_screen_run_uses_selected_agent(
         assert captured
         options, workspace = captured[0]
         assert options.agents == ("claude",)
-        assert options.prime_rl is False
         assert workspace == tmp_path.resolve()
+        assert "setup log" in screen._output
+        assert screen._output_renderables
 
 
 @pytest.mark.asyncio

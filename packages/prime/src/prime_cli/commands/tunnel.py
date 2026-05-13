@@ -311,6 +311,67 @@ def stop_tunnel(
             console.print("[red]Error:[/red] No valid tunnel IDs provided")
             raise typer.Exit(1)
 
+    if all:
+
+        async def fetch_tunnel_ids() -> List[str]:
+            client = TunnelClient()
+            try:
+                scoped_team_id = team_id
+                if scoped_team_id is None:
+                    scoped_team_id = client.config.team_id
+                scoped_user_id = client.config.user_id if only_mine else None
+                if only_mine and not scoped_user_id:
+                    raise ValueError(
+                        "Cannot resolve current user ID for scoped bulk delete. "
+                        "Run `prime login`, set PRIME_USER_ID, or delete explicit tunnel IDs."
+                    )
+                if not only_mine and not scoped_team_id:
+                    raise ValueError("all_users requires a team ID")
+
+                # TODO: remove this migration compatibility path after
+                # old tunnel registrations have aged out past their
+                # 7-day TTL.
+                # When removing this block, restore the commented --all branch
+                # in delete_tunnels().
+                ids: List[str] = []
+                seen_ids: set[str] = set()
+                page = 1
+                while True:
+                    tunnels = await client.list_tunnels(
+                        team_id=scoped_team_id,
+                        page=page,
+                        per_page=1000,
+                    )
+                    for tunnel in tunnels:
+                        if only_mine and tunnel.user_id != scoped_user_id:
+                            continue
+                        if tunnel.tunnel_id not in seen_ids:
+                            ids.append(tunnel.tunnel_id)
+                            seen_ids.add(tunnel.tunnel_id)
+
+                    if len(tunnels) < 1000:
+                        break
+                    page += 1
+
+                return ids
+            finally:
+                await client.close()
+
+        try:
+            parsed_ids = asyncio.run(fetch_tunnel_ids())
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}", style="bold")
+            raise typer.Exit(1)
+
+        if not parsed_ids:
+            console.print("[yellow]No active tunnels to stop[/yellow]")
+            if only_mine:
+                console.print(
+                    "\n[dim]Note: --all only deletes your own tunnels by default. "
+                    "Use --all-users to delete tunnels from all team members.[/dim]"
+                )
+            return
+
     if labels:
         confirmation_msg = (
             f"Are you sure you want to stop tunnels matching label(s): {', '.join(labels)}? "
@@ -350,10 +411,10 @@ def stop_tunnel(
         failed: List[dict] = []
         try:
             scoped_team_id = team_id
-            if (all or labels) and scoped_team_id is None:
+            if labels and scoped_team_id is None:
                 scoped_team_id = client.config.team_id
             scoped_user_id = client.config.user_id if only_mine else None
-            if (all or labels) and only_mine and not scoped_user_id:
+            if labels and only_mine and not scoped_user_id:
                 raise ValueError(
                     "Cannot resolve current user ID for scoped bulk delete. "
                     "Run `prime login`, set PRIME_USER_ID, or delete explicit tunnel IDs."
@@ -365,12 +426,17 @@ def stop_tunnel(
                     user_id=scoped_user_id,
                     all_users=not only_mine,
                 )
-            elif all:
-                result = await client.bulk_delete_tunnels(
-                    team_id=scoped_team_id,
-                    user_id=scoped_user_id,
-                    all_users=not only_mine,
-                )
+            # TODO: uncomment this branch after Redis-backed tunnel
+            # registrations have aged out and the --all pre-listing fallback
+            # above is removed.
+            # elif all:
+            #     if scoped_team_id is None:
+            #         scoped_team_id = client.config.team_id
+            #     result = await client.bulk_delete_tunnels(
+            #         team_id=scoped_team_id,
+            #         user_id=scoped_user_id,
+            #         all_users=not only_mine,
+            #     )
             else:
                 result = await client.bulk_delete_tunnels(parsed_ids)
             succeeded = result.get("succeeded", [])

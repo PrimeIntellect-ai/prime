@@ -1,9 +1,12 @@
 """Lightweight configuration for MCP server."""
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class Config:
@@ -21,7 +24,12 @@ class Config:
             try:
                 config_data = json.loads(self.config_file.read_text())
                 self.config = config_data
-            except (json.JSONDecodeError, IOError):
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(
+                    "Failed to parse config file %s: %s. Using empty config.",
+                    self.config_file,
+                    e,
+                )
                 self.config = {}
         else:
             self.config = {}

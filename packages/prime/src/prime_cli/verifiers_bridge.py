@@ -287,7 +287,7 @@ def _provider_base_url(provider: Optional[str]) -> Optional[str]:
 
 
 def _env_dir_path_arg(args: list[str]) -> str:
-    return _parse_value_option(args, "--env-dir-path", "") or DEFAULT_ENV_DIR_PATH
+    return _parse_value_option(args, "--env-dir-path", None) or DEFAULT_ENV_DIR_PATH
 
 
 def _is_config_target(raw: str) -> bool:

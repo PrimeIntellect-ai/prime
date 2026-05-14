@@ -288,6 +288,39 @@ def test_eval_run_provider_short_flag_does_not_override_env_dir_path(monkeypatch
     }
 
 
+def test_eval_run_empty_passthrough_arg_does_not_override_env_dir_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+    )
+    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
+    captured = {}
+    envs_path = str(tmp_path / "envs")
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._prepare_single_environment",
+        lambda _plugin, environment, env_dir_path: captured.update(
+            {"environment": environment, "env_dir_path": env_dir_path}
+        )
+        or ResolvedEnvironment(
+            original=environment,
+            env_name=environment,
+            install_mode="local",
+        ),
+    )
+    monkeypatch.setattr("prime_cli.verifiers_bridge._run_command", lambda command, env=None: None)
+
+    run_eval_passthrough(
+        environment="single_turn_math",
+        passthrough_args=["-p", "openai", "", envs_path, "-m", "gpt-4.1-mini"],
+        skip_upload=True,
+        env_path=None,
+    )
+
+    assert captured == {
+        "environment": "single_turn_math",
+        "env_dir_path": "./environments",
+    }
+
+
 def test_eval_run_uses_long_env_dir_path_without_treating_it_as_provider(
     monkeypatch,
     tmp_path,

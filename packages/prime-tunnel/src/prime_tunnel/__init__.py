@@ -1,6 +1,6 @@
 """Prime Tunnel SDK - Expose local services via secure tunnels."""
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 from prime_tunnel.core import Config, TunnelClient
 from prime_tunnel.exceptions import (

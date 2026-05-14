@@ -1773,6 +1773,36 @@ def _handle_logs_api_error(e: APIError) -> None:
     raise typer.Exit(1)
 
 
+_SINCE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86_400}
+
+
+def _parse_since(since: Optional[str]) -> Optional[int]:
+    """Convert a ``--since`` flag to a seconds value the backend accepts.
+
+    Accepts forms like ``15m``, ``1h``, ``6h``, ``24h``, ``900``. Returns
+    None when the flag isn't set (backend default applies)."""
+    if since is None:
+        return None
+    raw = since.strip().lower()
+    if not raw:
+        return None
+    if raw[-1] in _SINCE_UNIT_SECONDS and raw[:-1].isdigit():
+        seconds = int(raw[:-1]) * _SINCE_UNIT_SECONDS[raw[-1]]
+    elif raw.isdigit():
+        seconds = int(raw)
+    else:
+        raise typer.BadParameter(
+            f"Invalid --since value '{since}'. Use e.g. '15m', '1h', '6h', '24h', or seconds.",
+            param_hint="--since",
+        )
+    if seconds < 60 or seconds > 86_400:
+        raise typer.BadParameter(
+            "--since must be between 60s and 24h (86400s).",
+            param_hint="--since",
+        )
+    return seconds
+
+
 def _parse_env_qualifier(env: str) -> tuple[str, int]:
     """Parse 'name' or 'name/<int>' into (env_name, env_index).
 
@@ -1810,6 +1840,33 @@ def get_logs(
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
     raw: bool = typer.Option(False, "--raw", "-r", help="Show raw logs without formatting"),
+    search: Optional[str] = typer.Option(
+        None,
+        "--search",
+        help=(
+            "Filter to lines containing this text. "
+            "Combine with --regex to use a regular expression instead of a substring."
+        ),
+    ),
+    regex: bool = typer.Option(
+        False,
+        "--regex",
+        help="Treat --search as a regex (RE2 syntax).",
+    ),
+    level: Optional[str] = typer.Option(
+        None,
+        "--level",
+        help="Filter to one log level: ERROR | WARNING | SUCCESS | INFO | DEBUG.",
+    ),
+    since: Optional[str] = typer.Option(
+        None,
+        "--since",
+        help=(
+            "Time window for filtered queries. Accepts e.g. '15m', '1h', '6h', "
+            "'24h', or a raw integer seconds value. Default 15m. "
+            "Applies when --search or --level is set."
+        ),
+    ),
 ) -> None:
     """Get logs for a run.
 
@@ -1824,6 +1881,9 @@ def get_logs(
 
         prime train logs <run_id>
         prime train logs <run_id> -f
+        prime train logs <run_id> --search Backpressure
+        prime train logs <run_id> --level ERROR --since 1h
+        prime train logs <run_id> --search 'Step \\d+' --regex
         prime train logs <run_id> --env reverse-text
         prime train logs <run_id> --env reverse-text/1 -f
     """
@@ -1846,6 +1906,23 @@ def get_logs(
             param_hint="--env",
         )
 
+    normalized_level: Optional[str] = None
+    if level:
+        normalized_level = level.upper()
+        if normalized_level not in {"ERROR", "WARNING", "SUCCESS", "INFO", "DEBUG"}:
+            raise typer.BadParameter(
+                f"Invalid level '{level}'. Use ERROR, WARNING, SUCCESS, INFO, or DEBUG.",
+                param_hint="--level",
+            )
+
+    if regex and not search:
+        raise typer.BadParameter(
+            "--regex has no effect without --search. Pass --search <pattern> too.",
+            param_hint="--regex",
+        )
+
+    since_seconds = _parse_since(since)
+
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
@@ -1853,7 +1930,14 @@ def get_logs(
         if component == "orchestrator":
 
             def fetch(t: int) -> str:
-                return rl_client.get_logs(run_id, tail_lines=t)
+                return rl_client.get_logs(
+                    run_id,
+                    tail_lines=t,
+                    search=search,
+                    regex=regex,
+                    level=normalized_level,
+                    since_seconds=since_seconds,
+                )
 
             label = "orchestrator"
         else:
@@ -1866,6 +1950,10 @@ def get_logs(
                     env_name=env_name,
                     env_index=env_index,
                     tail_lines=t,
+                    search=search,
+                    regex=regex,
+                    level=normalized_level,
+                    since_seconds=since_seconds,
                 )
 
             label = f"env-server {env}"

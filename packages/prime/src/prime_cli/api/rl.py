@@ -390,12 +390,35 @@ class RLClient:
                 raise APIError(f"Failed to get Hosted Training run: {e.response.text}")
             raise APIError(f"Failed to get Hosted Training run: {str(e)}")
 
-    def get_logs(self, run_id: str, tail_lines: int = 1000) -> str:
-        """Get orchestrator logs for a Hosted Training run."""
+    def get_logs(
+        self,
+        run_id: str,
+        tail_lines: int = 1000,
+        *,
+        search: Optional[str] = None,
+        regex: bool = False,
+        level: Optional[str] = None,
+        since_seconds: Optional[int] = None,
+    ) -> str:
+        """Get orchestrator logs for a Hosted Training run.
+
+        Optional filters narrow the result via the platform's log search
+        backend:
+          - search: substring (or regex if regex=True) line filter
+          - level:  one of ERROR/WARNING/SUCCESS/INFO/DEBUG
+          - since_seconds: how far back to look (60–86400)
+        """
+        params: Dict[str, object] = {"tail_lines": tail_lines}
+        if search:
+            params["search"] = search
+        if regex:
+            params["regex"] = True
+        if level:
+            params["level"] = level
+        if since_seconds is not None:
+            params["since_seconds"] = since_seconds
         try:
-            response = self.client.get(
-                f"/rft/runs/{run_id}/logs", params={"tail_lines": tail_lines}
-            )
+            response = self.client.get(f"/rft/runs/{run_id}/logs", params=params)
             return response.get("logs", "")
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
@@ -418,16 +441,30 @@ class RLClient:
         env_name: str,
         env_index: int = 0,
         tail_lines: int = 1000,
+        *,
+        search: Optional[str] = None,
+        regex: bool = False,
+        level: Optional[str] = None,
+        since_seconds: Optional[int] = None,
     ) -> str:
         """Get logs for a specific env-server pod of a Hosted Training run."""
+        params: Dict[str, object] = {
+            "env_name": env_name,
+            "env_index": env_index,
+            "tail_lines": tail_lines,
+        }
+        if search:
+            params["search"] = search
+        if regex:
+            params["regex"] = True
+        if level:
+            params["level"] = level
+        if since_seconds is not None:
+            params["since_seconds"] = since_seconds
         try:
             response = self.client.get(
                 f"/rft/runs/{run_id}/env-server-logs",
-                params={
-                    "env_name": env_name,
-                    "env_index": env_index,
-                    "tail_lines": tail_lines,
-                },
+                params=params,
             )
             return response.get("logs", "")
         except Exception as e:

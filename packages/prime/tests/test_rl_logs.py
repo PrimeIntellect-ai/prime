@@ -306,6 +306,7 @@ def test_logs_env_server_follow_dedupes(monkeypatch: pytest.MonkeyPatch) -> None
         env_name: str,
         env_index: int = 0,
         tail_lines: int = 1000,
+        **_kwargs: Any,
     ) -> str:
         call_count["n"] += 1
         if call_count["n"] == 1:

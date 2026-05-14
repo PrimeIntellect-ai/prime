@@ -19,6 +19,7 @@ jobs:
     permissions:
       contents: write
       packages: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,11 +61,6 @@ jobs:
         run: |
           uv build --out-dir dist
 
-          # Install twine for publishing
-          uv venv
-          source .venv/bin/activate
-          uv pip install twine
-
       - name: Create tag
         if: steps.check_tag.outputs.exists != 'true'
         run: |
@@ -76,10 +72,6 @@ jobs:
 
       - name: Publish to PyPI
         if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
-        working-directory: packages/prime-tunnel
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: |
-          source .venv/bin/activate
-          twine upload dist/*
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: packages/prime-tunnel/dist

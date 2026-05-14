@@ -20,7 +20,6 @@ pythonpath = [
     "packages/prime/src",
     "packages/prime-sandboxes/src",
     "packages/prime-evals/src",
-    "packages/prime-mcp-server/src",
 ]
 testpaths = [
     "packages/*/tests",

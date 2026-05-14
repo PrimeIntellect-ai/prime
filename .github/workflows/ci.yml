@@ -39,7 +39,6 @@ jobs:
           "packages/prime/src/prime_cli/__init__.py"
           "packages/prime-sandboxes/src/prime_sandboxes/__init__.py"
           "packages/prime-evals/src/prime_evals/__init__.py"
-          "packages/prime-mcp-server/src/prime_mcp/__init__.py"
         )
 
         BUMPED_FILES=""

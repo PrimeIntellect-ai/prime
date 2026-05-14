@@ -16,6 +16,7 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    environment: pypi-prod
     permissions:
       contents: write
       packages: write

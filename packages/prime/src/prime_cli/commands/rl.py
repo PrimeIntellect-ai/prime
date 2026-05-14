@@ -1915,6 +1915,12 @@ def get_logs(
                 param_hint="--level",
             )
 
+    if regex and not search:
+        raise typer.BadParameter(
+            "--regex has no effect without --search. Pass --search <pattern> too.",
+            param_hint="--regex",
+        )
+
     since_seconds = _parse_since(since)
 
     try:

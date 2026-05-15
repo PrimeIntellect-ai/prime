@@ -429,13 +429,17 @@ def _diagnostics_from_result(result: Any) -> list[Any]:
         diagnostics = result.get("diagnostics")
         if diagnostics is None:
             diagnostics = result.get("checks")
+        if isinstance(diagnostics, Mapping):
+            return list(diagnostics.values())
         if isinstance(diagnostics, Iterable) and not isinstance(diagnostics, (str, bytes)):
             return list(diagnostics)
         return [result]
     diagnostics = getattr(result, "diagnostics", None)
     if diagnostics is not None:
+        if isinstance(diagnostics, Mapping):
+            return list(diagnostics.values())
         return list(diagnostics)
-    if isinstance(result, Iterable) and not isinstance(result, (str, bytes)):
+    if isinstance(result, Iterable) and not isinstance(result, (str, bytes, Mapping)):
         return list(result)
     return [result]
 
@@ -652,7 +656,12 @@ def run_env_doctor(
                     EnvDoctorCheck("Config surface renders", "fail", str(exc), "verifiers")
                 )
 
-            checks.extend(_run_verifiers_doctor(api, resolved, env_config, pyproject_path))
+            try:
+                checks.extend(_run_verifiers_doctor(api, resolved, env_config, pyproject_path))
+            except Exception as exc:
+                checks.append(
+                    EnvDoctorCheck("Verifiers diagnostics", "fail", str(exc), "verifiers")
+                )
 
     if pyproject_path is None:
         checks.append(EnvDoctorCheck("pyproject config", "warn", "No local pyproject.toml found."))

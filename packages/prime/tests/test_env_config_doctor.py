@@ -92,8 +92,8 @@ def _resolved(env_name: str, env_path: Path | None = None) -> ResolvedEnvironmen
 def _install_fake_introspection(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    diagnostics: list[Any] | None = None,
-    pyproject_diagnostics: list[Any] | None = None,
+    diagnostics: Any | None = None,
+    pyproject_diagnostics: Any | None = None,
 ) -> None:
     diagnostics = diagnostics or []
     pyproject_diagnostics = pyproject_diagnostics or []
@@ -194,8 +194,8 @@ def _install_doctor_stubs(
     env_name: str,
     env_path: Path,
     *,
-    diagnostics: list[Any] | None = None,
-    pyproject_diagnostics: list[Any] | None = None,
+    diagnostics: Any | None = None,
+    pyproject_diagnostics: Any | None = None,
 ) -> None:
     _install_fake_introspection(
         monkeypatch,
@@ -324,6 +324,61 @@ def test_env_doctor_reports_missing_required_key(
     assert result.exit_code == 1
     assert "missing-key" in result.output
     assert "env.taskset.dataset: Required key dataset is missing" in result.output
+
+
+def test_env_doctor_reads_mapping_diagnostic_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env_path = _write_env_package(
+        tmp_path,
+        "mapping-diagnostic",
+        "def load_environment(config):\n    return object()\n",
+    )
+    _install_doctor_stubs(
+        monkeypatch,
+        tmp_path,
+        "mapping-diagnostic",
+        env_path,
+        diagnostics={
+            "missing-key": FakeDiagnostic(
+                "missing-key",
+                "Required key dataset is missing",
+                path="env.taskset.dataset",
+            )
+        },
+    )
+    monkeypatch.setattr(env_config, "_load_environment_with_typed_config", lambda *args: object())
+
+    result = runner.invoke(app, ["--plain", "env", "doctor", "mapping-diagnostic"])
+
+    assert result.exit_code == 1
+    assert "missing-key" in result.output
+    assert "env.taskset.dataset: Required key dataset is missing" in result.output
+
+
+def test_env_doctor_reports_verifiers_diagnostic_hook_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env_path = _write_env_package(
+        tmp_path,
+        "doctor-error",
+        "def load_environment(config):\n    return object()\n",
+    )
+    _install_doctor_stubs(monkeypatch, tmp_path, "doctor-error", env_path)
+    monkeypatch.setattr(env_config, "_load_environment_with_typed_config", lambda *args: object())
+
+    def raise_diagnostic_error(*_args: object) -> list[env_config.EnvDoctorCheck]:
+        raise RuntimeError("diagnostic hook failed")
+
+    monkeypatch.setattr(env_config, "_run_verifiers_doctor", raise_diagnostic_error)
+
+    result = runner.invoke(app, ["--plain", "env", "doctor", "doctor-error"])
+
+    assert result.exit_code == 1
+    assert "Verifiers diagnostics" in result.output
+    assert "diagnostic hook failed" in result.output
 
 
 def test_env_doctor_smoke_runs_small_eval_path(

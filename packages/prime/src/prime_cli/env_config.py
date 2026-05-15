@@ -542,10 +542,10 @@ def _load_environment_with_typed_config(env_name: str, env_config: Any) -> Any:
     return load_environment(env_name, config=env_config)
 
 
-def _run_smoke_eval(env_name: str) -> None:
+def _run_smoke_eval(env_name: str, env_dir_path: str) -> None:
     run_eval_passthrough(
         env_name,
-        ["-n", "1", "-r", "1", "--disable-tui"],
+        ["-n", "1", "-r", "1", "--disable-tui", "--env-dir-path", env_dir_path],
         skip_upload=True,
         env_path=None,
     )
@@ -661,7 +661,7 @@ def run_env_doctor(
 
     if smoke:
         try:
-            _run_smoke_eval(resolved.env_name)
+            _run_smoke_eval(resolved.env_name, env_dir_path)
             checks.append(EnvDoctorCheck("Smoke eval", "pass", "1 example x 1 rollout."))
         except Exception as exc:
             checks.append(EnvDoctorCheck("Smoke eval", "fail", str(exc)))

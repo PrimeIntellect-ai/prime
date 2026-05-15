@@ -337,11 +337,27 @@ def test_env_doctor_smoke_runs_small_eval_path(
     )
     _install_doctor_stubs(monkeypatch, tmp_path, "smoke-env", env_path)
     monkeypatch.setattr(env_config, "_load_environment_with_typed_config", lambda *args: object())
-    calls: list[str] = []
-    monkeypatch.setattr(env_config, "_run_smoke_eval", lambda env_name: calls.append(env_name))
+    custom_env_dir = tmp_path / "custom-envs"
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        env_config,
+        "_run_smoke_eval",
+        lambda env_name, env_dir_path: calls.append((env_name, env_dir_path)),
+    )
 
-    result = runner.invoke(app, ["--plain", "env", "doctor", "smoke-env", "--smoke"])
+    result = runner.invoke(
+        app,
+        [
+            "--plain",
+            "env",
+            "doctor",
+            "smoke-env",
+            "--smoke",
+            "--env-dir-path",
+            str(custom_env_dir),
+        ],
+    )
 
     assert result.exit_code == 0, result.output
-    assert calls == ["smoke-env"]
+    assert calls == [("smoke-env", str(custom_env_dir))]
     assert "Smoke eval" in result.output

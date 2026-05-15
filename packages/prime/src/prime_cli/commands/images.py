@@ -777,8 +777,9 @@ def list_images(
 def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Optional[str]]:
     """Parse refs accepted by mutating image commands.
 
-    Returns ``(image_name, image_tag, team_id)``. Personal image refs use
-    ``name:tag`` and team image refs may use ``team-{teamId}/name:tag``.
+    Returns ``(image_name, image_tag, team_id)``. Personal image refs may use
+    either ``name:tag`` or ``{userId}/name:tag``. Team image refs may use
+    ``team-{teamId}/name:tag``.
     """
     team_id: Optional[str] = config.team_id
     if "/" in image_reference:
@@ -794,12 +795,7 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
             team_id = extracted_team_id
             image_reference = rest
         else:
-            console.print(
-                f"[red]Error: Unrecognized image namespace '{namespace}'. "
-                "Use 'imagename:tag' for personal images or "
-                "'team-{{teamId}}/imagename:tag' for team images.[/red]"
-            )
-            raise typer.Exit(1)
+            team_id = None
 
     if ":" not in image_reference:
         console.print("[red]Error: Image reference must include a tag (e.g., myapp:latest)[/red]")
@@ -830,7 +826,9 @@ def publish_image(
     image_reference: str = typer.Argument(
         ...,
         help=(
-            "Image reference to make public (e.g., 'myapp:v1.0.0' or 'team-{teamId}/myapp:v1.0.0')"
+            "Image reference to make public "
+            "(e.g., 'myapp:v1.0.0', '<userId>/myapp:v1.0.0', "
+            "or 'team-{teamId}/myapp:v1.0.0')"
         ),
     ),
 ):
@@ -840,6 +838,7 @@ def publish_image(
     \b
     Examples:
         prime images publish myapp:v1.0.0
+        prime images publish cmk123/myapp:v1.0.0
         prime images publish team-abc123/myapp:v1.0.0
     """
     try:
@@ -857,7 +856,9 @@ def unpublish_image(
     image_reference: str = typer.Argument(
         ...,
         help=(
-            "Image reference to make private (e.g., 'myapp:v1.0.0' or 'team-{teamId}/myapp:v1.0.0')"
+            "Image reference to make private "
+            "(e.g., 'myapp:v1.0.0', '<userId>/myapp:v1.0.0', "
+            "or 'team-{teamId}/myapp:v1.0.0')"
         ),
     ),
 ):
@@ -867,6 +868,7 @@ def unpublish_image(
     \b
     Examples:
         prime images unpublish myapp:v1.0.0
+        prime images unpublish cmk123/myapp:v1.0.0
         prime images unpublish team-abc123/myapp:v1.0.0
     """
     try:

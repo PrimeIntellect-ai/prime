@@ -143,6 +143,31 @@ def test_publish_image_calls_visibility_endpoint(monkeypatch):
     assert captured["json"] == {"visibility": "PUBLIC", "teamId": "abc123"}
 
 
+def test_publish_image_accepts_owner_prefixed_personal_ref(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = json
+            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "publish", "cmk123/rehl:latest"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "PATCH"
+    assert captured["path"] == "/images/cmk123/rehl/latest/visibility"
+    assert captured["json"] == {"visibility": "PUBLIC"}
+
+
 def test_push_image_accepts_dockerfile_outside_context(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))

@@ -164,7 +164,7 @@ def test_publish_image_accepts_owner_prefixed_personal_ref(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/cmk123/rehl/latest/visibility"
+    assert captured["path"] == "/images/rehl/latest/visibility"
     assert captured["json"] == {"visibility": "PUBLIC"}
 
 

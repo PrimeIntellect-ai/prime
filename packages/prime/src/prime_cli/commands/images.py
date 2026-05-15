@@ -796,6 +796,7 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
             image_reference = rest
         else:
             team_id = None
+            image_reference = rest
 
     if ":" not in image_reference:
         console.print("[red]Error: Image reference must include a tag (e.g., myapp:latest)[/red]")

@@ -291,6 +291,7 @@ class EnvConfig(BaseModel):
     id: str
     name: str | None = None
     args: Dict[str, Any] = Field(default_factory=dict)
+    max_retries: int | None = Field(default=None, ge=0)
     version: str | None = None
 
     @model_validator(mode="after")
@@ -309,6 +310,8 @@ class EnvConfig(BaseModel):
             result["name"] = self.name
         if self.args:
             result["args"] = self.args
+        if self.max_retries is not None:
+            result["max_retries"] = self.max_retries
         if self.version is not None:
             result["version"] = self.version
         return result
@@ -322,6 +325,7 @@ class EvalEnvConfig(BaseModel):
     args: Dict[str, Any] = Field(default_factory=dict)
     num_examples: int | None = None
     rollouts_per_example: int | None = None
+    max_retries: int | None = Field(default=None, ge=0)
     version: str | None = None
 
     @model_validator(mode="after")
@@ -344,6 +348,8 @@ class EvalEnvConfig(BaseModel):
             result["num_examples"] = self.num_examples
         if self.rollouts_per_example is not None:
             result["rollouts_per_example"] = self.rollouts_per_example
+        if self.max_retries is not None:
+            result["max_retries"] = self.max_retries
         if self.version is not None:
             result["version"] = self.version
         return result

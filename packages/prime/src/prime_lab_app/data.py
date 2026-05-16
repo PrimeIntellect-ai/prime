@@ -156,6 +156,63 @@ class LabDataSource:
             sections=tuple(sections),
         )
 
+    def load_evaluations(self, options: LabLoadOptions) -> LabSnapshot:
+        """Load only the Evaluations section for the standalone eval TUI."""
+        warnings: list[str] = []
+        config = self._config_factory()
+        authenticated = bool(config.api_key)
+        team = config.team_name or config.team_id
+        cache_key = _row_cache_key(options, config, team)
+        detail_cache_key = _account_cache_key(config, team)
+        cached_sections = load_cached_lab_sections(cache_key, limit=options.limit)
+
+        sections = [
+            self._evaluation_section(options, config, authenticated, warnings),
+        ]
+        sections = _hydrate_platform_sections(detail_cache_key, sections, cached_sections)
+        sections = _mark_live_sections(sections, refreshed_at=_utc_now_iso())
+
+        return LabSnapshot(
+            workspace=options.workspace.resolve(),
+            base_url=config.base_url,
+            frontend_url=config.frontend_url,
+            authenticated=authenticated,
+            team=team,
+            sections=tuple(sections),
+            warnings=tuple(warnings),
+        )
+
+    def load_evaluations_initial(self, options: LabLoadOptions) -> LabSnapshot:
+        """Load local/cached evaluation rows while the live eval request runs."""
+        config = self._config_factory()
+        authenticated = bool(config.api_key)
+        team = config.team_name or config.team_id
+        cache_key = _row_cache_key(options, config, team)
+        detail_cache_key = _account_cache_key(config, team)
+        cached_sections = load_cached_lab_sections(cache_key, limit=options.limit)
+        local_eval_items = tuple(_local_eval_items(options, section="evaluations"))
+
+        sections = [
+            _cached_or_loading_section(
+                "evaluations",
+                "Evaluations",
+                "Local and platform evaluation runs.",
+                authenticated=authenticated,
+                local_items=local_eval_items,
+                cached_section=cached_sections.get("evaluations"),
+            ),
+        ]
+        sections = _hydrate_platform_sections(detail_cache_key, sections, cached_sections)
+
+        return LabSnapshot(
+            workspace=options.workspace.resolve(),
+            base_url=config.base_url,
+            frontend_url=config.frontend_url,
+            authenticated=authenticated,
+            team=team,
+            sections=tuple(sections),
+        )
+
     def load_item_detail(
         self,
         item: LabItem,

@@ -209,13 +209,15 @@ def print_lab_setup_help() -> None:
     _write_help(help_text)
 
 
-def run_eval_tui(env_dir: Optional[str], outputs_dir: Optional[str]) -> None:
-    plugin = load_verifiers_prime_plugin(console=console)
-    env = os.environ.copy()
-    env["VF_ENV_DIR"] = env_dir or "./environments"
-    env["VF_OUTPUTS_DIR"] = outputs_dir or "./outputs"
-    command = plugin.build_module_command(plugin.tui_module)
-    _run_command(command, env=env)
+def run_eval_tui(env_dir: Optional[str], outputs_dir: Optional[str], limit: int = 50) -> None:
+    from prime_lab_app import run_eval_tui as run_prime_eval_tui
+
+    run_prime_eval_tui(
+        limit=limit,
+        env_dir=env_dir or "./environments",
+        outputs_dir=outputs_dir or "./outputs",
+        workspace=Path.cwd(),
+    )
 
 
 def _parse_value_option(

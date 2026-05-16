@@ -148,7 +148,13 @@ from prime_lab_app.environment_screen import (
 from prime_lab_app.eval_markdown import MathMarkdown, make_math_parser
 from prime_lab_app.eval_records import LazyRunResults, LocalEvalRun
 from prime_lab_app.eval_render import compute_run_overview_stats, history_groups
-from prime_lab_app.eval_screen import LocalEvalRunScreen, RolloutCopyScreen, RolloutViewer
+from prime_lab_app.eval_screen import (
+    HostedEvalSamplesScreen,
+    LocalEvalRunScreen,
+    RolloutCopyScreen,
+    RolloutViewer,
+)
+from prime_lab_app.eval_tui import build_eval_tui_app
 from prime_lab_app.evaluation_browser import (
     evaluation_index,
     evaluation_model_selection_details,
@@ -599,6 +605,37 @@ def test_lab_view_evaluation_rows_mark_source_and_keep_status_consistent(tmp_pat
     assert local.status == "COMPLETED"
     assert local.metadata[2] == ("Type", "local")
     assert [badge["label"] for badge in local.raw["badges"]] == ["LOCAL", "COMPLETED"]
+
+
+@pytest.mark.asyncio
+async def test_eval_tui_starts_on_evaluations_and_includes_hosted_runs(tmp_path: Path) -> None:
+    run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        '{"avg_reward": 0.75, "num_examples": 1}',
+        encoding="utf-8",
+    )
+    (run_dir / "results.jsonl").write_text('{"reward": 0.75}\n', encoding="utf-8")
+
+    app = build_eval_tui_app(limit=10, workspace=tmp_path, data_source=make_source())
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+
+        assert app._launch_screen is None
+        assert app._active_section_key == "evaluations"
+        assert [section.key for section in app._snapshot.sections] == ["evaluations"]
+        titles = [item.title for item in app._visible_items]
+        assert "eval-1" in titles
+        assert "run-a" in titles
+
+        local_index = titles.index("run-a")
+        app.query_one("#item-list", OptionList).highlighted = local_index
+        app._show_item(app._visible_items[local_index])
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, LocalEvalRunScreen)
 
 
 def test_lab_view_merges_local_and_platform_environments(tmp_path: Path) -> None:
@@ -1325,6 +1362,47 @@ def test_training_data_tab_uses_rollout_viewer() -> None:
     widgets = _training_run_widgets(item, include_logs=False, active_tab="data")
 
     assert any(isinstance(widget, RolloutViewer) for widget in widgets)
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_opens_hosted_eval_samples_screen(tmp_path: Path) -> None:
+    source = make_source()
+    snapshot = source.load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(
+        lambda: snapshot,
+        lambda item, include_logs, log_tail_lines, metrics_limit, metrics_min_step: (
+            source.load_item_detail(
+                item,
+                include_logs=include_logs,
+                log_tail_lines=log_tail_lines,
+                metrics_limit=metrics_limit,
+                metrics_min_step=metrics_min_step,
+            )
+        ),
+    )
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        app._active_section_key = "evaluations"
+        app._render_active_section()
+        await pilot.pause()
+
+        hosted_item = next(
+            item for item in app._visible_items if item.raw.get("source") == "hosted"
+        )
+        app._show_item(hosted_item)
+        app.action_load_detail()
+
+        for _ in range(20):
+            await pilot.pause()
+            if isinstance(app.screen, HostedEvalSamplesScreen) and app.screen.query(RolloutViewer):
+                break
+
+        assert isinstance(app.screen, HostedEvalSamplesScreen)
+        viewer = app.screen.query_one(RolloutViewer)
+        assert viewer.records[0]["reward"] == 1.0
 
 
 def test_training_progress_counts_step_zero_as_completed() -> None:

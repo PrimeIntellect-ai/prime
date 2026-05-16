@@ -1118,6 +1118,7 @@ def _push_single_eval(
 
 @subcommands_app.command("tui")
 def tui_cmd(
+    limit: int = typer.Option(50, "--limit", "-n", help="Max evaluation rows to load"),
     env_dir: Optional[str] = typer.Option(
         None, "--env-dir", "-e", help="Path to environments directory"
     ),
@@ -1126,7 +1127,10 @@ def tui_cmd(
     ),
 ) -> None:
     """Launch TUI for viewing eval results."""
-    run_eval_tui(env_dir=env_dir, outputs_dir=outputs_dir)
+    if limit < 1:
+        console.print("[red]Error:[/red] --limit must be at least 1")
+        raise typer.Exit(1)
+    run_eval_tui(env_dir=env_dir, outputs_dir=outputs_dir, limit=limit)
 
 
 @subcommands_app.command("push", epilog=PUSH_EVAL_JSON_HELP)

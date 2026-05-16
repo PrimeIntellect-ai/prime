@@ -52,7 +52,7 @@ from .eval_render import (
     numeric_reward,
     reward_style,
 )
-from .eval_screen import LocalEvalRunScreen
+from .eval_screen import HostedEvalSamplesScreen, LocalEvalRunScreen
 from .evaluation_browser import (
     EVALUATION_VIEWS,
     evaluation_env_tree_label,
@@ -366,6 +366,9 @@ class PrimeLabView(App[None]):
         ladder_loader: Callable[[int], LabSnapshot] | None = None,
         ladder_limits: tuple[int, ...] = (),
         workspace_switcher: WorkspaceSwitcher | None = None,
+        initial_section_key: str = "workspace",
+        show_launch_screen: bool = True,
+        sync_agent_runtime: bool = True,
     ):
         super().__init__()
         self._loader = loader
@@ -374,10 +377,12 @@ class PrimeLabView(App[None]):
         self._ladder_loader = ladder_loader
         self._ladder_limits = ladder_limits
         self._workspace_switcher = workspace_switcher
+        self._show_launch_screen = show_launch_screen
+        self._sync_agent_runtime_enabled = sync_agent_runtime
         self._loaded_section_limit = 0
         self._requested_section_limit = max(ladder_limits, default=0)
         self._snapshot: LabSnapshot | None = None
-        self._active_section_key = "workspace"
+        self._active_section_key = initial_section_key
         self._filter = ""
         self._visible_items: list[LabItem] = []
         self._items_by_key: dict[str, LabItem] = {}
@@ -449,7 +454,8 @@ class PrimeLabView(App[None]):
         evaluation_tree.show_root = False
         evaluation_tree.auto_expand = False
         evaluation_tree.guide_depth = 2
-        self._open_launch_screen()
+        if self._show_launch_screen:
+            self._open_launch_screen()
         self._show_initial_snapshot()
         self._reload()
 
@@ -496,6 +502,7 @@ class PrimeLabView(App[None]):
             | AgentChatScreen
             | TrainingRunScreen
             | FilterScreen
+            | HostedEvalSamplesScreen
             | LocalEvalRunScreen,
         ) and action in {
             "refresh",
@@ -517,7 +524,8 @@ class PrimeLabView(App[None]):
         }:
             return False
         if action in {"search", "load_more_rows"} and isinstance(
-            self.screen, TrainingRunScreen | FilterScreen | LocalEvalRunScreen
+            self.screen,
+            TrainingRunScreen | FilterScreen | HostedEvalSamplesScreen | LocalEvalRunScreen,
         ):
             return False
         if action == "load_detail":
@@ -885,7 +893,8 @@ class PrimeLabView(App[None]):
         self._render_tree()
         self._render_active_section()
         self._sync_launch_screen()
-        self._sync_agent_runtime(snapshot)
+        if self._sync_agent_runtime_enabled:
+            self._sync_agent_runtime(snapshot)
 
     @work(thread=True, exclusive=True, group="detail-load")
     def _load_detail_worker(self, item: LabItem, include_logs: bool) -> None:
@@ -1735,6 +1744,9 @@ class PrimeLabView(App[None]):
         if item.section == "evaluations" and item.raw.get("type") == "local_eval":
             self.push_screen(LocalEvalRunScreen(LocalEvalRun.from_item(item)))
             return
+        if item.section == "evaluations":
+            self.push_screen(HostedEvalSamplesScreen(item, self._detail_loader))
+            return
         if self._detail_loader is None:
             return
         if item.section == "training":
@@ -2021,6 +2033,7 @@ def _is_lab_child_screen(screen: object) -> bool:
         | AgentChatScreen
         | TrainingRunScreen
         | FilterScreen
+        | HostedEvalSamplesScreen
         | LocalEvalRunScreen,
     )
 

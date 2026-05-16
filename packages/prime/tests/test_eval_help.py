@@ -46,3 +46,34 @@ def test_append_eval_options_mentions_tunnel_access():
     help_text = _append_eval_options("Usage: prime eval run [-h] environment\n")
 
     assert "--allow-tunnel-access" in help_text
+
+
+def test_eval_tui_uses_prime_viewer(monkeypatch):
+    calls = {}
+
+    def fake_run_eval_tui(**kwargs):
+        calls.update(kwargs)
+
+    monkeypatch.setattr("prime_lab_app.run_eval_tui", fake_run_eval_tui)
+
+    result = runner.invoke(
+        app,
+        ["eval", "tui", "--limit", "25", "--env-dir", "envs", "--outputs-dir", "outs"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["limit"] == 25
+    assert calls["env_dir"] == "envs"
+    assert calls["outputs_dir"] == "outs"
+
+
+def test_eval_tui_rejects_non_positive_limit():
+    result = runner.invoke(
+        app,
+        ["eval", "tui", "--limit", "0"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert "--limit must be at least 1" in result.output

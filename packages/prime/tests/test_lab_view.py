@@ -1015,6 +1015,27 @@ def test_lab_view_initial_snapshot_hydrates_cached_platform_rows(
     assert training.refreshed_at
 
 
+def test_eval_tui_initial_snapshot_hydrates_cached_platform_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = make_source()
+
+    source.load_evaluations(LabLoadOptions(limit=10, workspace=workspace))
+    snapshot = source.load_evaluations_initial(LabLoadOptions(limit=10, workspace=workspace))
+
+    assert [section.key for section in snapshot.sections] == ["evaluations"]
+    evaluations = snapshot.section("evaluations")
+    assert evaluations is not None
+    assert evaluations.items[0].title == "eval-1"
+    assert evaluations.status == "1 cached"
+    assert evaluations.row_data_origin == "disk"
+    assert evaluations.refreshed_at
+
+
 def test_lab_view_row_cache_never_shrinks_on_smaller_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

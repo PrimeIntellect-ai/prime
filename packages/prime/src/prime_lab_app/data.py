@@ -172,7 +172,7 @@ class LabDataSource:
         sections = _hydrate_platform_sections(detail_cache_key, sections, cached_sections)
         sections = _mark_live_sections(sections, refreshed_at=_utc_now_iso())
 
-        return LabSnapshot(
+        snapshot = LabSnapshot(
             workspace=options.workspace.resolve(),
             base_url=config.base_url,
             frontend_url=config.frontend_url,
@@ -181,6 +181,8 @@ class LabDataSource:
             sections=tuple(sections),
             warnings=tuple(warnings),
         )
+        write_cached_lab_sections(cache_key, snapshot.sections)
+        return snapshot
 
     def load_evaluations_initial(self, options: LabLoadOptions) -> LabSnapshot:
         """Load local/cached evaluation rows while the live eval request runs."""

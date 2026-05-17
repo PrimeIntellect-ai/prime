@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import time
 import webbrowser
-from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -21,6 +20,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Footer, Static, Tab, Tabs
 
 from .config_screen import ConfigRunScreen
+from .detail_loader import DetailLoader
 from .filters import FilterChoice, FilterScreen
 from .logs import visible_system_renderable as _visible_system_renderable
 from .models import LabItem
@@ -82,7 +82,6 @@ from .values import int_value as _int_value
 from .values import list_value as _list_value
 from .widgets import LoadingChart, LoadingMessage
 
-DetailLoader = Callable[[LabItem, bool, int, int, int | None], LabItem]
 _RUN_METRIC_PREVIEW_LIMIT = 10
 _RUN_METRIC_FULL_LIMIT = 500
 _METRIC_REVEAL_INTERVAL_SECONDS = 0.04

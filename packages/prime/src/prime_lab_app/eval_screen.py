@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from rich.markup import escape
 from rich.text import Text
-from textual import events, on
+from textual import events, on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
@@ -31,6 +31,7 @@ from textual.widgets import (
 from textual.widgets._option_list import Option
 from textual.widgets._tabbed_content import ContentTabs
 
+from .detail_loader import DetailLoader
 from .eval_markdown import MathMarkdown
 from .eval_records import (
     HistorySectionData,
@@ -73,6 +74,7 @@ from .eval_render import (
     tool_group_preview,
     tool_output_preview,
 )
+from .models import LabItem
 from .palette import ROLLOUT_SUCCESS, ROLLOUT_WARNING, STATUS_ERROR, TOOL_CALL
 from .widgets import ClearableInput
 
@@ -1608,6 +1610,143 @@ class RolloutViewer(Container):
         if raw_text:
             items.append(RolloutCopyItem(key="raw", label="Raw JSON", body=raw_text))
         return items
+
+
+class HostedEvalSamplesScreen(Screen[None]):
+    """Full-page hosted eval sample viewer."""
+
+    BINDINGS = [
+        Binding("escape", "back", "Back", key_display="Esc"),
+        Binding("b", "back", "Back", key_display="B"),
+    ]
+
+    CSS = """
+    HostedEvalSamplesScreen {
+        background: $background;
+        color: $foreground;
+        layout: vertical;
+    }
+
+    #hosted-eval-samples-container {
+        height: 100%;
+        layout: vertical;
+        padding: 0 1;
+    }
+
+    #hosted-eval-samples-summary {
+        height: auto;
+        min-height: 3;
+        max-height: 5;
+        padding: 0 1;
+        border-bottom: solid $primary;
+    }
+
+    #hosted-eval-samples-body {
+        height: 1fr;
+    }
+    """
+
+    def __init__(
+        self,
+        item: LabItem,
+        detail_loader: DetailLoader | None = None,
+    ) -> None:
+        super().__init__()
+        self.item = item
+        self._detail_loader = detail_loader
+        self._load_error = ""
+
+    def compose(self) -> ComposeResult:
+        with Container(id="hosted-eval-samples-container"):
+            yield Static("", id="hosted-eval-samples-summary", markup=False)
+            with Container(id="hosted-eval-samples-body"):
+                yield Static(Text("Loading samples ...", style="dim"), markup=False)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        if self._sample_records():
+            self._render_samples()
+            return
+        if self._detail_loader is None:
+            self._render_samples()
+            return
+        self._load_detail_worker()
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+    @work(thread=True, exclusive=True)
+    def _load_detail_worker(self) -> None:
+        if self._detail_loader is None:
+            return
+        try:
+            item = self._detail_loader(self.item, False, 50, 10, None)
+        except Exception as exc:
+            self.app.call_from_thread(self._set_load_error, str(exc))
+            return
+        self.app.call_from_thread(self._set_loaded_item, item)
+
+    def _set_loaded_item(self, item: LabItem) -> None:
+        self.item = item
+        self._render_samples()
+
+    def _set_load_error(self, message: str) -> None:
+        self._load_error = message
+        self._render_samples()
+
+    def _sample_payload(self) -> dict[str, Any]:
+        payload = self.item.raw.get("samples_preview")
+        return payload if isinstance(payload, dict) else {}
+
+    def _sample_records(self) -> list[dict[str, Any]]:
+        samples = self._sample_payload().get("samples")
+        if not isinstance(samples, list):
+            return []
+        return [sample for sample in samples if isinstance(sample, dict)]
+
+    def _render_samples(self) -> None:
+        self.query_one("#hosted-eval-samples-summary", Static).update(self._summary_text())
+        body = self.query_one("#hosted-eval-samples-body", Container)
+        body.remove_children()
+
+        records = self._sample_records()
+        if records:
+            body.mount(
+                RolloutViewer(
+                    records,
+                    metadata=self.item.raw.get("metadata")
+                    if isinstance(self.item.raw.get("metadata"), dict)
+                    else {},
+                    title="Samples",
+                    id="hosted-eval-rollout-viewer",
+                )
+            )
+            self.call_after_refresh(lambda: self.query_one(RolloutViewer)._focus_primary_content())
+            return
+
+        error = self._load_error or str(self._sample_payload().get("error") or "")
+        message = f"Failed to load samples: {error}" if error else "No samples found."
+        body.mount(Static(Text(message, style=STATUS_ERROR if error else "dim"), markup=False))
+
+    def _summary_text(self) -> Text:
+        payload = self._sample_payload()
+        total = payload.get("total")
+        page = payload.get("page")
+        limit = payload.get("limit")
+
+        text = Text()
+        text.append("Evaluation Samples\n", style="bold")
+        text.append(self.item.title, style="bold")
+        if self.item.subtitle:
+            text.append("  ")
+            text.append(self.item.subtitle, style="dim")
+        text.append("\n")
+        text.append(f"loaded {len(self._sample_records())}", style="dim")
+        if total is not None:
+            text.append(f" / {total}", style="dim")
+        if page is not None and limit is not None:
+            text.append(f"  page {page}  limit {limit}", style="dim")
+        return text
 
 
 class LocalEvalRunScreen(Screen[None]):

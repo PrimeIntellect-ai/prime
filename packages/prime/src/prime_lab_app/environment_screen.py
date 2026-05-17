@@ -24,6 +24,7 @@ from textual.widgets._option_list import Option
 from .cache import CachedEnvironmentSource, cached_environment_source, ensure_environment_source
 from .config_factory import evaluation_config, format_lab_config, rl_config
 from .config_screen import ConfigLaunchScreen, ConfigRunScreen
+from .detail_loader import DetailLoader
 from .environment_records import environment_platform_url
 from .models import LabItem
 from .palette import BUTTON_CSS, PRIMARY, STATUS_ERROR
@@ -33,7 +34,6 @@ from .shell import lab_header
 from .source_browser import SourceEntry, format_size, readme_path, source_entries, source_preview
 from .widgets import ClearableInput, LoadingChart
 
-DetailLoader = Callable[[LabItem, bool, int, int, int | None], LabItem]
 WorkspaceSwitcher = Callable[[Path], None]
 WorkspaceMemoryAction = Callable[[Path], None]
 SetupCompleteAction = Callable[[], None]

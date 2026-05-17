@@ -38,8 +38,8 @@ def _print_inference_usage(base_model: str, adapter_id: str) -> None:
     console.print("\n[bold]Once deployed, you can run inference with:[/bold]")
     console.print(f'[dim]prime inference chat "{model_id}" "Hello" --max-tokens 100[/dim]')
     console.print(
-        "[dim]The CLI uses credentials saved by 'prime login'. For raw HTTP clients, "
-        f"create an API key at {API_KEYS_DOCS_URL}, export it, then run cURL:[/dim]"
+        "[dim]For scripts or API clients, create a Platform API key at "
+        f"{API_KEYS_DOCS_URL}, export it, then run cURL:[/dim]"
     )
     console.print(
         f"""

@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 
-def test_deployments_create_prints_login_aware_chat_command(monkeypatch) -> None:
+def test_deployments_create_prints_chat_and_api_key_commands(monkeypatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
     monkeypatch.setenv("COLUMNS", "200")
@@ -51,7 +51,8 @@ def test_deployments_create_prints_login_aware_chat_command(monkeypatch) -> None
     assert "prime inference chat" in output
     assert '"meta-llama/Llama-3.1-8B-Instruct:adapter-123"' in output
     assert '"Hello" --max-tokens 100' in output
-    assert "prime login" in output
+    assert "For scripts or API clients" in output
+    assert "prime login" not in output
     assert "https://docs.primeintellect.ai/api-reference/api-keys" in output
     assert "export PRIME_API_KEY=<insert_key_here>" in output
     assert "PRIME_API_KEY" in output

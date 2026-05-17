@@ -30,18 +30,29 @@ LIST_DEPLOYMENTS_JSON_HELP = json_output_help(
     ".per_page = number",
 )
 
-
-def _adapter_inference_model_id(base_model: str, adapter_id: str) -> str:
-    return f"{base_model}:{adapter_id}"
+API_KEYS_DOCS_URL = "https://docs.primeintellect.ai/api-reference/api-keys"
 
 
 def _print_inference_usage(base_model: str, adapter_id: str) -> None:
-    model_id = _adapter_inference_model_id(base_model, adapter_id)
+    model_id = f"{base_model}:{adapter_id}"
     console.print("\n[bold]Once deployed, you can run inference with:[/bold]")
     console.print(f'[dim]prime inference chat "{model_id}" "Hello" --max-tokens 100[/dim]')
     console.print(
-        "[dim]The CLI uses credentials saved by 'prime login'. "
-        "For raw HTTP clients, export PRIME_API_KEY to a Platform API key first.[/dim]"
+        "[dim]The CLI uses credentials saved by 'prime login'. For raw HTTP clients, "
+        f"create an API key at {API_KEYS_DOCS_URL}, export it, then run cURL:[/dim]"
+    )
+    console.print(
+        f"""
+[dim]export PRIME_API_KEY=<insert_key_here>
+
+curl -X POST https://api.pinference.ai/api/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $PRIME_API_KEY" \\
+  -d '{{
+    "model": "{model_id}",
+    "messages": [{{"role": "user", "content": "Hello"}}],
+    "max_tokens": 100
+  }}'[/dim]"""
     )
 
 

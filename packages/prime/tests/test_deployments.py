@@ -52,5 +52,7 @@ def test_deployments_create_prints_login_aware_chat_command(monkeypatch) -> None
     assert '"meta-llama/Llama-3.1-8B-Instruct:adapter-123"' in output
     assert '"Hello" --max-tokens 100' in output
     assert "prime login" in output
+    assert "https://docs.primeintellect.ai/api-reference/api-keys" in output
+    assert "export PRIME_API_KEY=<insert_key_here>" in output
     assert "PRIME_API_KEY" in output
-    assert "curl -X POST" not in output
+    assert "curl -X POST" in output

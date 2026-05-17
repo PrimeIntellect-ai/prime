@@ -1682,9 +1682,9 @@ class HostedEvalSamplesScreen(Screen[None]):
         try:
             item = self._detail_loader(self.item, False, 50, 10, None)
         except Exception as exc:
-            self.call_from_thread(self._set_load_error, str(exc))
+            self.app.call_from_thread(self._set_load_error, str(exc))
             return
-        self.call_from_thread(self._set_loaded_item, item)
+        self.app.call_from_thread(self._set_loaded_item, item)
 
     def _set_loaded_item(self, item: LabItem) -> None:
         self.item = item

@@ -154,7 +154,7 @@ from prime_lab_app.eval_screen import (
     RolloutCopyScreen,
     RolloutViewer,
 )
-from prime_lab_app.eval_tui import build_eval_tui_app
+from prime_lab_app.eval_view import build_eval_view_app
 from prime_lab_app.evaluation_browser import (
     evaluation_index,
     evaluation_model_selection_details,
@@ -608,7 +608,7 @@ def test_lab_view_evaluation_rows_mark_source_and_keep_status_consistent(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_eval_tui_starts_on_evaluations_and_includes_hosted_runs(tmp_path: Path) -> None:
+async def test_eval_view_starts_on_evaluations_and_includes_hosted_runs(tmp_path: Path) -> None:
     run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
     run_dir.mkdir(parents=True)
     (run_dir / "metadata.json").write_text(
@@ -617,7 +617,7 @@ async def test_eval_tui_starts_on_evaluations_and_includes_hosted_runs(tmp_path:
     )
     (run_dir / "results.jsonl").write_text('{"reward": 0.75}\n', encoding="utf-8")
 
-    app = build_eval_tui_app(limit=10, workspace=tmp_path, data_source=make_source())
+    app = build_eval_view_app(limit=10, workspace=tmp_path, data_source=make_source())
 
     async with app.run_test(size=(140, 44)) as pilot:
         await pilot.pause()
@@ -1015,7 +1015,7 @@ def test_lab_view_initial_snapshot_hydrates_cached_platform_rows(
     assert training.refreshed_at
 
 
-def test_eval_tui_initial_snapshot_hydrates_cached_platform_rows(
+def test_eval_view_initial_snapshot_hydrates_cached_platform_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

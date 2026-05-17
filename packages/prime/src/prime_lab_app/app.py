@@ -34,6 +34,7 @@ from .agent_sessions import (
 from .agent_widgets import handle_lab_widget_tool_call
 from .config_screen import ConfigLaunchScreen, ConfigRunScreen
 from .data import LabLoadOptions
+from .detail_loader import DetailLoader
 from .details import (
     evaluation_detail_chunks as _evaluation_detail_chunks,
 )
@@ -108,7 +109,6 @@ from .snapshots import merge_snapshot_rows
 from .training_screen import (
     _LOG_TAIL_STEPS,
     _RUN_METRIC_PREVIEW_LIMIT,
-    DetailLoader,
     TrainingRunScreen,
     _has_training_detail,
     _merge_training_detail,

@@ -48,17 +48,17 @@ def test_append_eval_options_mentions_tunnel_access():
     assert "--allow-tunnel-access" in help_text
 
 
-def test_eval_tui_uses_prime_viewer(monkeypatch):
+def test_eval_view_uses_prime_viewer(monkeypatch):
     calls = {}
 
-    def fake_run_eval_tui(**kwargs):
+    def fake_run_eval_view(**kwargs):
         calls.update(kwargs)
 
-    monkeypatch.setattr("prime_lab_app.run_eval_tui", fake_run_eval_tui)
+    monkeypatch.setattr("prime_lab_app.run_eval_view", fake_run_eval_view)
 
     result = runner.invoke(
         app,
-        ["eval", "tui", "--limit", "25", "--env-dir", "envs", "--outputs-dir", "outs"],
+        ["eval", "view", "--limit", "25", "--env-dir", "envs", "--outputs-dir", "outs"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
@@ -68,12 +68,24 @@ def test_eval_tui_uses_prime_viewer(monkeypatch):
     assert calls["outputs_dir"] == "outs"
 
 
-def test_eval_tui_rejects_non_positive_limit():
+def test_eval_view_rejects_non_positive_limit():
     result = runner.invoke(
         app,
-        ["eval", "tui", "--limit", "0"],
+        ["eval", "view", "--limit", "0"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
     assert result.exit_code == 1
     assert "--limit must be at least 1" in result.output
+
+
+def test_eval_tui_points_to_eval_view():
+    result = runner.invoke(
+        app,
+        ["eval", "tui", "--limit", "0", "--env-dir", "envs", "--outputs-dir", "outs"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Deprecated" in result.output
+    assert "prime eval view" in result.output

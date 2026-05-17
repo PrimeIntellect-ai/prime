@@ -1,4 +1,4 @@
-"""Standalone evaluation viewer for `prime eval tui`."""
+"""Standalone evaluation viewer for `prime eval view`."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from pathlib import Path
 from .app import PrimeLabView
 from .data import LabDataSource, LabLoadOptions
 
-DEFAULT_EVAL_TUI_LIMIT = 50
+DEFAULT_EVAL_VIEW_LIMIT = 50
 
 
-def build_eval_tui_app(
+def build_eval_view_app(
     *,
-    limit: int = DEFAULT_EVAL_TUI_LIMIT,
+    limit: int = DEFAULT_EVAL_VIEW_LIMIT,
     env_dir: str = "./environments",
     outputs_dir: str = "./outputs",
     workspace: Path | None = None,
@@ -50,14 +50,14 @@ def build_eval_tui_app(
     )
 
 
-def run_eval_tui(
+def run_eval_view(
     *,
-    limit: int = DEFAULT_EVAL_TUI_LIMIT,
+    limit: int = DEFAULT_EVAL_VIEW_LIMIT,
     env_dir: str = "./environments",
     outputs_dir: str = "./outputs",
     workspace: Path | None = None,
 ) -> None:
-    build_eval_tui_app(
+    build_eval_view_app(
         limit=limit,
         env_dir=env_dir,
         outputs_dir=outputs_dir,

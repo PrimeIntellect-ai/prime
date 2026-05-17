@@ -31,6 +31,7 @@ from textual.widgets import (
 from textual.widgets._option_list import Option
 from textual.widgets._tabbed_content import ContentTabs
 
+from .detail_loader import DetailLoader
 from .eval_markdown import MathMarkdown
 from .eval_records import (
     HistorySectionData,
@@ -1611,9 +1612,6 @@ class RolloutViewer(Container):
         return items
 
 
-EvaluationDetailLoader = Callable[[LabItem, bool, int, int, int | None], LabItem]
-
-
 class HostedEvalSamplesScreen(Screen[None]):
     """Full-page hosted eval sample viewer."""
 
@@ -1651,7 +1649,7 @@ class HostedEvalSamplesScreen(Screen[None]):
     def __init__(
         self,
         item: LabItem,
-        detail_loader: EvaluationDetailLoader | None = None,
+        detail_loader: DetailLoader | None = None,
     ) -> None:
         super().__init__()
         self.item = item

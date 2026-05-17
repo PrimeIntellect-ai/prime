@@ -1147,6 +1147,7 @@ def tui_cmd(
 ) -> None:
     """Deprecated alias for the evaluation viewer."""
     console.print("[yellow]Deprecated:[/yellow] `prime eval tui` has moved. Use `prime eval view`.")
+    raise typer.Exit(1)
 
 
 @subcommands_app.command("push", epilog=PUSH_EVAL_JSON_HELP)

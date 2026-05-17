@@ -86,6 +86,6 @@ def test_eval_tui_points_to_eval_view():
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1
     assert "Deprecated" in result.output
     assert "prime eval view" in result.output

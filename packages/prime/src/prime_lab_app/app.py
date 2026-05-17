@@ -1744,8 +1744,10 @@ class PrimeLabView(App[None]):
         if item.section == "evaluations" and item.raw.get("type") == "local_eval":
             self.push_screen(LocalEvalRunScreen(LocalEvalRun.from_item(item)))
             return
-        if item.section == "evaluations":
+        if item.section == "evaluations" and item.raw.get("source") == "hosted":
             self.push_screen(HostedEvalSamplesScreen(item, self._detail_loader))
+            return
+        if item.section == "evaluations":
             return
         if self._detail_loader is None:
             return

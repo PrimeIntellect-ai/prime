@@ -1426,6 +1426,49 @@ async def test_prime_lab_app_opens_hosted_eval_samples_screen(tmp_path: Path) ->
         assert viewer.records[0]["reward"] == 1.0
 
 
+@pytest.mark.asyncio
+async def test_prime_lab_app_ignores_evaluation_placeholders(tmp_path: Path) -> None:
+    placeholder = LabItem(
+        key="evaluations:error",
+        section="evaluations",
+        title="Unavailable",
+        raw={"error": "boom"},
+    )
+    snapshot = LabSnapshot(
+        workspace=tmp_path,
+        base_url="https://api.test",
+        frontend_url="https://app.test",
+        authenticated=True,
+        team="team",
+        sections=(
+            LabSection(
+                key="evaluations",
+                title="Evaluations",
+                description="Evaluation runs.",
+                items=(placeholder,),
+            ),
+        ),
+    )
+    detail_calls = []
+    app = PrimeLabView(
+        lambda: snapshot,
+        lambda item, include_logs, log_tail_lines, metrics_limit, metrics_min_step: (
+            detail_calls.append(item) or item
+        ),
+        initial_section_key="evaluations",
+        show_launch_screen=False,
+    )
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        await pilot.pause()
+        app._show_item(placeholder)
+        app._load_selected_detail(include_logs=False)
+        await pilot.pause()
+
+        assert not isinstance(app.screen, HostedEvalSamplesScreen)
+        assert detail_calls == []
+
+
 def test_training_progress_counts_step_zero_as_completed() -> None:
     summary = training_progress_summary(
         {"max_steps": 10, "status": "RUNNING"},

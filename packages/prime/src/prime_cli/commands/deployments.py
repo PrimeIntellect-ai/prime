@@ -31,6 +31,20 @@ LIST_DEPLOYMENTS_JSON_HELP = json_output_help(
 )
 
 
+def _adapter_inference_model_id(base_model: str, adapter_id: str) -> str:
+    return f"{base_model}:{adapter_id}"
+
+
+def _print_inference_usage(base_model: str, adapter_id: str) -> None:
+    model_id = _adapter_inference_model_id(base_model, adapter_id)
+    console.print("\n[bold]Once deployed, you can run inference with:[/bold]")
+    console.print(f'[dim]prime inference chat "{model_id}" "Hello" --max-tokens 100[/dim]')
+    console.print(
+        "[dim]The CLI uses credentials saved by 'prime login'. "
+        "For raw HTTP clients, export PRIME_API_KEY to a Platform API key first.[/dim]"
+    )
+
+
 @app.command(name="list", epilog=LIST_DEPLOYMENTS_JSON_HELP)
 def list_deployments(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
@@ -222,18 +236,7 @@ def create_deployment(
         console.print("\n[dim]The model is being deployed. This may take a few minutes.[/dim]")
         console.print("[dim]Use 'prime deployments list' to check deployment status.[/dim]")
 
-        console.print("\n[bold]Once deployed, you can run inference with:[/bold]")
-        console.print(
-            f"""
-[dim]curl -X POST https://api.pinference.ai/api/v1/chat/completions \\
-  -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer $PRIME_API_KEY" \\
-  -d '{{
-    "model": "{model.base_model}:{model.id}",
-    "messages": [{{"role": "user", "content": "Hello"}}],
-    "max_tokens": 100
-  }}'[/dim]"""
-        )
+        _print_inference_usage(model.base_model, model.id)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

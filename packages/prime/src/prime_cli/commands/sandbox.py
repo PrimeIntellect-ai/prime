@@ -733,6 +733,15 @@ def delete(
             )
             raise typer.Exit(1)
 
+        if target_user_id and not (all or labels):
+            console.print(
+                "[red]Error:[/red] --user only applies to --all or --label deletes."
+                " To delete specific sandbox IDs owned by a teammate, pass the"
+                " IDs directly (team admins can already delete any sandbox in"
+                " their team by ID)."
+            )
+            raise typer.Exit(1)
+
         if all or labels:
             team_id = config.team_id
 

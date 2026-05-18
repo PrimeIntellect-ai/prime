@@ -615,20 +615,12 @@ class RLConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_max_inflight_rollouts(self) -> "RLConfig":
+        if self.max_inflight_rollouts is not None and self.oversampling_factor is not None:
+            raise ValueError("Only one of max_inflight_rollouts and oversampling_factor can be set")
         if self.max_inflight_rollouts is None:
             return self
         if self.max_inflight_rollouts < self.rollouts_per_example:
             raise ValueError("max_inflight_rollouts must be at least rollouts_per_example")
-        if self.oversampling_factor is None:
-            return self
-        expected = max(
-            self.rollouts_per_example,
-            int(self.batch_size * self.oversampling_factor),
-        )
-        if self.max_inflight_rollouts != expected:
-            raise ValueError(
-                "max_inflight_rollouts conflicts with oversampling_factor * batch_size"
-            )
         return self
 
 

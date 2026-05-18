@@ -111,6 +111,69 @@ def test_load_config_accepts_sampling_enable_thinking(tmp_path: Path) -> None:
     assert cfg.sampling.reasoning_effort is None
 
 
+def test_load_config_accepts_max_inflight_rollouts(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\nmax_inflight_rollouts = 96\n')
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.max_inflight_rollouts == 96
+
+
+def test_load_config_accepts_fractional_oversampling_factor(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\noversampling_factor = 0.375\n')
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.oversampling_factor == 0.375
+
+
+def test_load_config_accepts_matching_max_inflight_and_oversampling(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "dummy"\n'
+        "batch_size = 256\n"
+        "rollouts_per_example = 8\n"
+        "oversampling_factor = 0.377\n"
+        "max_inflight_rollouts = 96\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.max_inflight_rollouts == 96
+
+
+def test_load_config_rejects_conflicting_max_inflight_and_oversampling(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "dummy"\n'
+        "batch_size = 256\n"
+        "rollouts_per_example = 8\n"
+        "oversampling_factor = 0.375\n"
+        "max_inflight_rollouts = 95\n"
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_rejects_max_inflight_below_rollouts_per_example(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\nrollouts_per_example = 8\nmax_inflight_rollouts = 4\n')
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_rejects_nonpositive_oversampling_factor(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\noversampling_factor = 0\n')
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
 def test_load_config_rejects_both_reasoning_controls(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text(

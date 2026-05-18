@@ -699,12 +699,23 @@ def delete(
         ),
         show_default=True,
     ),
+    target_user_id: Optional[str] = typer.Option(
+        None,
+        "--user",
+        "-u",
+        help=(
+            "Scope '--all' and '--label' deletes to this teammate's sandboxes."
+            " Requires team admin role and a configured team_id. Cannot be"
+            " combined with --all-users."
+        ),
+    ),
 ) -> None:
     """Delete one or more sandboxes by ID, by label, or all sandboxes with --all
 
     '--all' and '--label' perform a single server-side scoped delete: by
     default it is scoped to your own sandboxes in the configured team.
-    Pass '--all-users' to delete across the whole team (team admin only).
+    Pass '--all-users' to delete across the whole team (team admin only), or
+    '--user <user_id>' to target a single teammate's sandboxes (team admin only).
     """
     try:
         base_client = APIClient()
@@ -722,9 +733,35 @@ def delete(
             )
             raise typer.Exit(1)
 
+        if target_user_id and not (all or labels):
+            console.print(
+                "[red]Error:[/red] --user only applies to --all or --label deletes."
+                " To delete specific sandbox IDs owned by a teammate, pass the"
+                " IDs directly (team admins can already delete any sandbox in"
+                " their team by ID)."
+            )
+            raise typer.Exit(1)
+
         if all or labels:
             team_id = config.team_id
-            if only_mine:
+
+            if target_user_id and not only_mine:
+                console.print(
+                    "[red]Error:[/red] Cannot combine --user with --all-users."
+                    " Use one or the other."
+                )
+                raise typer.Exit(1)
+
+            if target_user_id:
+                if not team_id:
+                    console.print(
+                        "[red]Error:[/red] --user requires a team_id."
+                        " Configure one with 'prime config set-team-id <id>'."
+                    )
+                    raise typer.Exit(1)
+                scope_user_id = target_user_id
+                all_users_flag = False
+            elif only_mine:
                 scope_user_id = config.user_id
                 all_users_flag = False
                 if not scope_user_id:
@@ -748,16 +785,27 @@ def delete(
 
             if total == 0:
                 console.print("[yellow]No sandboxes to delete[/yellow]")
-                if only_mine:
+                if target_user_id:
+                    console.print(
+                        f"\n[dim]Note: no active sandboxes for user"
+                        f" {target_user_id} in this team.[/dim]"
+                    )
+                elif only_mine:
                     console.print(
                         "\n[dim]Note: --all/--label only deletes your own"
                         " sandboxes by default. Use --all-users to delete"
-                        " sandboxes from all team members (requires team"
+                        " sandboxes from all team members, or --user <id> to"
+                        " target a specific teammate (both require team"
                         " admin).[/dim]"
                     )
                 return
 
-            scope_suffix = "" if only_mine else " across ALL users"
+            if target_user_id:
+                scope_suffix = f" for user {target_user_id}"
+            elif only_mine:
+                scope_suffix = ""
+            else:
+                scope_suffix = " across ALL users"
             if labels:
                 labels_str = ", ".join(labels)
                 count_phrase = (

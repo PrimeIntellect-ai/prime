@@ -790,8 +790,8 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
     """Parse refs accepted by mutating image commands.
 
     Returns ``(image_name, image_tag, team_id)``. Personal image refs may use
-    either ``name:tag`` or ``{userId}/name:tag``. Team image refs may use
-    ``team-{teamId}/name:tag``.
+    either ``name:tag`` or ``{currentUserId}/name:tag``. Team image refs may
+    use ``team-{teamId}/name:tag``.
     """
     team_id: Optional[str] = config.team_id
     if "/" in image_reference:
@@ -806,9 +806,17 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
                 raise typer.Exit(1)
             team_id = extracted_team_id
             image_reference = rest
-        else:
+        elif namespace == config.user_id:
             team_id = None
             image_reference = rest
+        else:
+            console.print(
+                f"[red]Error: Unrecognized image namespace '{namespace}'. "
+                "Use 'imagename:tag' for personal images, "
+                "'{userId}/imagename:tag' with your current user ID, or "
+                "'team-{teamId}/imagename:tag' for team images.[/red]"
+            )
+            raise typer.Exit(1)
 
     if ":" not in image_reference:
         console.print("[red]Error: Image reference must include a tag (e.g., myapp:latest)[/red]")
@@ -842,7 +850,7 @@ def publish_image(
         ...,
         help=(
             "Image reference to make public "
-            "(e.g., 'myapp:v1.0.0', '<userId>/myapp:v1.0.0', "
+            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
             "or 'team-{teamId}/myapp:v1.0.0')"
         ),
     ),
@@ -872,7 +880,7 @@ def unpublish_image(
         ...,
         help=(
             "Image reference to make private "
-            "(e.g., 'myapp:v1.0.0', '<userId>/myapp:v1.0.0', "
+            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
             "or 'team-{teamId}/myapp:v1.0.0')"
         ),
     ),
@@ -900,7 +908,11 @@ def unpublish_image(
 def delete_image(
     image_reference: str = typer.Argument(
         ...,
-        help="Image reference to delete (e.g., 'myapp:v1.0.0' or 'team-{teamId}/myapp:v1.0.0')",
+        help=(
+            "Image reference to delete "
+            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
+            "or 'team-{teamId}/myapp:v1.0.0')"
+        ),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ):
@@ -914,44 +926,14 @@ def delete_image(
     Examples:
         prime images delete myapp:v1.0.0
         prime images delete myapp:latest --yes
+        prime images delete cmk123/myapp:v1.0.0
         prime images delete team-abc123/myapp:v1.0.0
     """
     # Store original input for error messages
     original_reference = image_reference
 
     try:
-        # Check for team-prefixed format: team-{teamId}/imagename:tag
-        team_id = config.team_id
-        if "/" in image_reference:
-            namespace, rest = image_reference.split("/", 1)
-            if namespace.startswith("team-"):
-                # Extract team ID from the reference
-                extracted_team_id = namespace[5:]  # Remove "team-" prefix
-                if not extracted_team_id:
-                    console.print(
-                        "[red]Error: Invalid team image reference. "
-                        "Expected format: team-{teamId}/imagename:tag[/red]"
-                    )
-                    raise typer.Exit(1)
-                team_id = extracted_team_id
-                image_reference = rest
-            else:
-                # Unrecognized namespace (not team-prefixed)
-                console.print(
-                    f"[red]Error: Unrecognized image namespace '{namespace}'. "
-                    "Use 'imagename:tag' for personal images or "
-                    "'team-{{teamId}}/imagename:tag' for team images.[/red]"
-                )
-                raise typer.Exit(1)
-
-        # Validate image reference has a tag (after team-prefix parsing)
-        if ":" not in image_reference:
-            console.print(
-                "[red]Error: Image reference must include a tag (e.g., myapp:latest)[/red]"
-            )
-            raise typer.Exit(1)
-
-        image_name, image_tag = image_reference.rsplit(":", 1)
+        image_name, image_tag, team_id = _parse_mutable_image_reference(image_reference)
 
         context = f" (team: {team_id})" if team_id else ""
         if not yes:

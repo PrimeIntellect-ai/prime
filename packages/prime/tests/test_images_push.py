@@ -159,13 +159,57 @@ def test_publish_image_accepts_owner_prefixed_personal_ref(monkeypatch):
     result = runner.invoke(
         app,
         ["images", "publish", "cmk123/rehl:latest"],
-        env=TEST_ENV,
+        env={**TEST_ENV, "PRIME_USER_ID": "cmk123"},
     )
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
     assert captured["path"] == "/images/rehl/latest/visibility"
     assert captured["json"] == {"visibility": "PUBLIC"}
+
+
+def test_publish_image_rejects_other_user_prefixed_personal_ref(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "publish", "other-user/rehl:latest"],
+        env={**TEST_ENV, "PRIME_USER_ID": "cmk123"},
+    )
+
+    assert result.exit_code == 1
+    assert "Unrecognized image namespace 'other-user'" in result.output
+
+
+def test_delete_image_accepts_owner_prefixed_personal_ref(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["params"] = params
+            return {"success": True, "message": "ok"}
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "delete", "cmk123/rehl:latest", "--yes"],
+        env={**TEST_ENV, "PRIME_USER_ID": "cmk123"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "DELETE"
+    assert captured["path"] == "/images/rehl/latest"
+    assert captured["params"] is None
 
 
 def test_push_image_accepts_dockerfile_outside_context(tmp_path, monkeypatch):

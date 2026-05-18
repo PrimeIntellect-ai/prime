@@ -30,6 +30,31 @@ LIST_DEPLOYMENTS_JSON_HELP = json_output_help(
     ".per_page = number",
 )
 
+API_KEYS_DOCS_URL = "https://docs.primeintellect.ai/api-reference/api-keys"
+
+
+def _print_inference_usage(base_model: str, adapter_id: str) -> None:
+    model_id = f"{base_model}:{adapter_id}"
+    console.print("\n[bold]Once deployed, you can run inference with:[/bold]")
+    console.print(f'[dim]prime inference chat "{model_id}" "Hello" --max-tokens 100[/dim]')
+    console.print(
+        "[dim]For scripts or API clients, create a Platform API key at "
+        f"{API_KEYS_DOCS_URL}, export it, then run cURL:[/dim]"
+    )
+    console.print(
+        f"""
+[dim]export PRIME_API_KEY=<insert_key_here>
+
+curl -X POST https://api.pinference.ai/api/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $PRIME_API_KEY" \\
+  -d '{{
+    "model": "{model_id}",
+    "messages": [{{"role": "user", "content": "Hello"}}],
+    "max_tokens": 100
+  }}'[/dim]"""
+    )
+
 
 @app.command(name="list", epilog=LIST_DEPLOYMENTS_JSON_HELP)
 def list_deployments(
@@ -222,18 +247,7 @@ def create_deployment(
         console.print("\n[dim]The model is being deployed. This may take a few minutes.[/dim]")
         console.print("[dim]Use 'prime deployments list' to check deployment status.[/dim]")
 
-        console.print("\n[bold]Once deployed, you can run inference with:[/bold]")
-        console.print(
-            f"""
-[dim]curl -X POST https://api.pinference.ai/api/v1/chat/completions \\
-  -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer $PRIME_API_KEY" \\
-  -d '{{
-    "model": "{model.base_model}:{model.id}",
-    "messages": [{{"role": "user", "content": "Hello"}}],
-    "max_tokens": 100
-  }}'[/dim]"""
-        )
+        _print_inference_usage(model.base_model, model.id)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

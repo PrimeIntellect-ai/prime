@@ -5,6 +5,7 @@ import tarfile
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
@@ -23,6 +24,12 @@ console = get_console()
 PACKAGED_DOCKERFILE_PATH = ".__prime_dockerfile__"
 
 config = Config()
+
+
+class ImageVisibility(str, Enum):
+    PRIVATE = "PRIVATE"
+    PUBLIC = "PUBLIC"
+
 
 LIST_IMAGES_JSON_HELP = json_output_help(
     "Raw API response is printed unchanged.",
@@ -207,8 +214,12 @@ _STATUS_LABELS: dict[str, str] = {
 
 
 def _render_visibility(value: Any) -> str:
-    visibility = str(value or "PRIVATE").upper()
-    if visibility == "PUBLIC":
+    try:
+        visibility = ImageVisibility(str(value or ImageVisibility.PRIVATE.value).upper())
+    except ValueError:
+        visibility = ImageVisibility.PRIVATE
+
+    if visibility == ImageVisibility.PUBLIC:
         return "[green]Public[/green]"
     return "[dim]Private[/dim]"
 
@@ -493,9 +504,9 @@ def push_image(
                 if config.team_id:
                     build_payload["team_id"] = config.team_id
                 if public:
-                    build_payload["visibility"] = "PUBLIC"
+                    build_payload["visibility"] = ImageVisibility.PUBLIC.value
                 elif private:
-                    build_payload["visibility"] = "PRIVATE"
+                    build_payload["visibility"] = ImageVisibility.PRIVATE.value
 
                 build_response = client.request(
                     "POST",
@@ -562,7 +573,8 @@ def push_image(
             console.print(f"[bold]Build ID:[/bold] {build_id}")
             console.print(f"[bold]Image:[/bold] {full_image_path}")
             if public or private:
-                console.print(f"[bold]Visibility:[/bold] {'PUBLIC' if public else 'PRIVATE'}")
+                requested_visibility = ImageVisibility.PUBLIC if public else ImageVisibility.PRIVATE
+                console.print(f"[bold]Visibility:[/bold] {requested_visibility.value}")
             else:
                 console.print(
                     "[bold]Visibility:[/bold] PRIVATE for new images "
@@ -806,9 +818,9 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
     return image_name, image_tag, team_id
 
 
-def _set_image_visibility(image_reference: str, visibility: str) -> None:
+def _set_image_visibility(image_reference: str, visibility: ImageVisibility) -> None:
     image_name, image_tag, team_id = _parse_mutable_image_reference(image_reference)
-    payload: dict[str, str] = {"visibility": visibility}
+    payload: dict[str, str] = {"visibility": visibility.value}
     if team_id:
         payload["teamId"] = team_id
 
@@ -819,7 +831,9 @@ def _set_image_visibility(image_reference: str, visibility: str) -> None:
         json=payload,
     )
     context = f" (team: {team_id})" if team_id else ""
-    console.print(f"[green]✓[/green] Updated {image_name}:{image_tag}{context} to {visibility}")
+    console.print(
+        f"[green]✓[/green] Updated {image_name}:{image_tag}{context} to {visibility.value}"
+    )
 
 
 @app.command("publish")
@@ -843,7 +857,7 @@ def publish_image(
         prime images publish team-abc123/myapp:v1.0.0
     """
     try:
-        _set_image_visibility(image_reference, "PUBLIC")
+        _set_image_visibility(image_reference, ImageVisibility.PUBLIC)
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
         raise typer.Exit(1)
@@ -873,7 +887,7 @@ def unpublish_image(
         prime images unpublish team-abc123/myapp:v1.0.0
     """
     try:
-        _set_image_visibility(image_reference, "PRIVATE")
+        _set_image_visibility(image_reference, ImageVisibility.PRIVATE)
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
         raise typer.Exit(1)

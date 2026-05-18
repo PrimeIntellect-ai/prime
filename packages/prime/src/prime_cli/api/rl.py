@@ -83,6 +83,7 @@ class RLRun(BaseModel):
     buffer_config: Optional[Dict[str, Any]] = Field(None, alias="bufferConfig")
     learning_rate: Optional[float] = Field(None, alias="learningRate")
     lora_alpha: Optional[int] = Field(None, alias="loraAlpha")
+    max_inflight_rollouts: Optional[int] = Field(None, alias="maxInflightRollouts")
     oversampling_factor: Optional[float] = Field(None, alias="oversamplingFactor")
     max_async_level: Optional[int] = Field(None, alias="maxAsyncLevel")
 
@@ -194,6 +195,7 @@ class RLClient:
         buffer_config: Optional[Dict[str, Any]] = None,
         learning_rate: Optional[float] = None,
         lora_alpha: Optional[int] = None,
+        max_inflight_rollouts: Optional[int] = None,
         oversampling_factor: Optional[float] = None,
         max_async_level: Optional[int] = None,
         checkpoints_config: Optional[Dict[str, Any]] = None,
@@ -274,6 +276,9 @@ class RLClient:
 
             if lora_alpha is not None:
                 payload["lora_alpha"] = lora_alpha
+
+            if max_inflight_rollouts is not None:
+                payload["max_inflight_rollouts"] = max_inflight_rollouts
 
             if oversampling_factor is not None:
                 payload["oversampling_factor"] = oversampling_factor

@@ -1718,6 +1718,7 @@ def test_lab_view_training_sidebar_config_filters_nulls() -> None:
             "name": "wiki-search",
             "base_model": "Qwen/Qwen3.5-2B",
             "max_steps": 200,
+            "max_inflight_rollouts": 96,
             "learning_rate": None,
             "environments": [
                 {
@@ -1731,6 +1732,7 @@ def test_lab_view_training_sidebar_config_filters_nulls() -> None:
 
     assert 'model = "Qwen/Qwen3.5-2B"' in config
     assert "max_steps = 200" in config
+    assert "max_inflight_rollouts = 96" in config
     assert "\n[[env]]" in config
     assert "learning_rate" not in config
     assert "args" not in config

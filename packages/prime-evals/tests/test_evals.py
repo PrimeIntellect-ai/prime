@@ -1,5 +1,6 @@
 """Tests for Prime Evals SDK"""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -155,23 +156,23 @@ def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
     client = EvalsClient(api_client)
     progress = []
 
-    result = client.push_samples(
-        "eval-1",
-        [{"x": "a"}, {"x": "b"}],
-        max_payload_bytes=35,
-        max_workers=1,
-        progress_callback=progress.append,
-    )
+    with pytest.warns(UserWarning, match="exceeds maximum payload size"):
+        result = client.push_samples(
+            "eval-1",
+            [{"x": "a"}, {"x": "b" * 50}, {"x": "c"}],
+            max_payload_bytes=35,
+            max_workers=1,
+            progress_callback=progress.append,
+        )
 
-    assert result == {"samples_pushed": 2, "samples_skipped": 0}
-    assert progress == [1, 1]
+    assert result == {"samples_pushed": 2, "samples_skipped": 1}
+    assert progress == [1, 1, 1]
     assert len(posts) == 2
     assert len(created_clients) == 1
     assert posts[0]["headers"]["Authorization"] == "Bearer secret-token"
 
 
-@pytest.mark.asyncio
-async def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
+def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
     posts = []
     created_clients = []
 
@@ -202,12 +203,14 @@ async def test_async_push_samples_reports_progress_and_reuses_http_client(monkey
     )
     progress = []
 
-    result = await client.push_samples(
-        "eval-1",
-        [{"x": "a"}, {"x": "b"}],
-        max_payload_bytes=35,
-        max_concurrent=1,
-        progress_callback=progress.append,
+    result = asyncio.run(
+        client.push_samples(
+            "eval-1",
+            [{"x": "a"}, {"x": "b"}],
+            max_payload_bytes=35,
+            max_concurrent=1,
+            progress_callback=progress.append,
+        )
     )
 
     assert result == {"samples_pushed": 2, "samples_skipped": 0}

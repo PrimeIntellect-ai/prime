@@ -233,6 +233,9 @@ class EvalsClient:
             raise ValueError("max_workers must be at least 1")
 
         batches, skipped_count = self._build_batches(samples, max_payload_bytes)
+        if skipped_count and progress_callback is not None:
+            progress_callback(skipped_count)
+
         total_samples_pushed = 0
         errors = []
         headers = _samples_upload_headers(self.client.api_key)
@@ -588,6 +591,9 @@ class AsyncEvalsClient:
             raise ValueError("max_concurrent must be at least 1")
 
         batches, skipped_count = self._build_batches(samples, max_payload_bytes)
+        if skipped_count and progress_callback is not None:
+            progress_callback(skipped_count)
+
         semaphore = asyncio.Semaphore(max_concurrent)
         errors: List[str] = []
 

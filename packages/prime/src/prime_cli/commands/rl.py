@@ -749,6 +749,15 @@ def _dispatch_full_finetune_run(
 
     name = raw_cfg.get("name")
 
+    # Link the dispatched run to the user's active team (same convention
+    # as the LoRA path at line 1216). Without this, the RFTRun row gets
+    # team_id=None and lands on the caller's personal account even when
+    # the CLI is configured for a team — confusing for billing + access
+    # scoping. Backend's `CreateDedicatedRunRequest.team_id` is Optional,
+    # so omitting it is silently wrong rather than a 400.
+    app_config = Config()
+    team_id = app_config.team_id
+
     # Resolve env files relative to the config dir, same convention as the
     # LoRA path. We don't validate WANDB presence here — the chart wires
     # WANDB_API_KEY via secretKeyRef only if `[wandb]` is configured AND
@@ -785,6 +794,7 @@ def _dispatch_full_finetune_run(
     payload = build_payload_from_toml(
         raw_cfg,
         name=name,
+        team_id=team_id,
         wandb_api_key=secrets.get("WANDB_API_KEY"),
         hf_token=secrets.get("HF_TOKEN"),
     )

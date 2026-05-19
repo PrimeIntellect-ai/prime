@@ -57,6 +57,7 @@ def build_payload_from_toml(
     cfg: Dict[str, Any],
     *,
     name: Optional[str] = None,
+    team_id: Optional[str] = None,
     image_tag: Optional[str] = None,
     wandb_api_key: Optional[str] = None,
     hf_token: Optional[str] = None,
@@ -73,6 +74,7 @@ def build_payload_from_toml(
     What stays out of `config`:
       - secrets (wandb / hf): materialised into a per-run k8s Secret,
       - run name: lives on the platform's RFTRun row, not the TOML,
+      - team_id: links the RFTRun to a team for billing/access scoping,
       - image_tag: chart-level (which prime-rl image to pull).
 
     Cluster targeting is backend-side (auto-pick first uncordoned).
@@ -80,6 +82,8 @@ def build_payload_from_toml(
     payload: Dict[str, Any] = {"config": cfg}
     if name:
         payload["name"] = name
+    if team_id:
+        payload["teamId"] = team_id
     if image_tag:
         payload["imageTag"] = image_tag
     if wandb_api_key:

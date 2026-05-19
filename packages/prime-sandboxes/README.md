@@ -248,7 +248,7 @@ asyncio.run(run_training())
 
 ## Documentation
 
-Full API reference: https://github.com/PrimeIntellect-ai/prime-cli/tree/main/packages/prime-sandboxes
+Full API reference: https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-sandboxes
 
 ## Related Packages
 

@@ -323,7 +323,7 @@ prime pods ssh <pod-id>
 
 ## Support & Resources
 
-- **Documentation**: [github.com/PrimeIntellect-ai/prime-cli](https://github.com/PrimeIntellect-ai/prime-cli)
+- **Documentation**: [github.com/PrimeIntellect-ai/prime](https://github.com/PrimeIntellect-ai/prime)
 - **Dashboard**: [app.primeintellect.ai](https://app.primeintellect.ai)
 - **API Docs**: [api.primeintellect.ai/docs](https://api.primeintellect.ai/docs)
 - **Discord**: [discord.gg/primeintellect](https://discord.gg/primeintellect)
@@ -335,4 +335,4 @@ prime pods ssh <pod-id>
 
 ## License
 
-MIT License - see [LICENSE](https://github.com/PrimeIntellect-ai/prime-cli/blob/main/LICENSE) file for details.
+MIT License - see [LICENSE](https://github.com/PrimeIntellect-ai/prime/blob/main/LICENSE) file for details.

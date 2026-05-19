@@ -44,9 +44,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/PrimeIntellect-ai/prime-cli"
-Documentation = "https://github.com/PrimeIntellect-ai/prime-cli#readme"
-Repository = "https://github.com/PrimeIntellect-ai/prime-cli.git"
+Homepage = "https://github.com/PrimeIntellect-ai/prime"
+Documentation = "https://github.com/PrimeIntellect-ai/prime#readme"
+Repository = "https://github.com/PrimeIntellect-ai/prime.git"
 Changelog = "https://github.com/PrimeIntellect-ai/prime/releases"
 
 [project.scripts]

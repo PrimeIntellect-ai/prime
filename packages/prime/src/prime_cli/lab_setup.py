@@ -1442,7 +1442,7 @@ def _write_lab_docs_index(workspace: Path, agents: tuple[str, ...]) -> None:
                 "",
                 "## Prime docs",
                 "",
-                "- Prime CLI: https://github.com/PrimeIntellect-ai/prime-cli",
+                "- Prime CLI: https://github.com/PrimeIntellect-ai/prime",
                 "- Verifiers: https://github.com/PrimeIntellect-ai/verifiers",
                 "- Environments Hub: https://app.primeintellect.ai/dashboard/environments",
                 "",

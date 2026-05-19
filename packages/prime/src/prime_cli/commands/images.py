@@ -1,6 +1,5 @@
 """Commands for managing Docker images in Prime Intellect registry."""
 
-import json
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -15,7 +14,13 @@ from gitignore_parser import parse_gitignore
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
 from rich.table import Table
 
-from ..utils import PlainTyper, get_console, json_output_help, validate_output_format
+from ..utils import (
+    PlainTyper,
+    get_console,
+    json_output_help,
+    output_data_as_json,
+    validate_output_format,
+)
 
 app = PlainTyper(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = get_console()
@@ -610,7 +615,7 @@ def list_images(
         total_count: int = int(response.get("totalCount", offset + len(images)))
 
         if output == "json":
-            console.print(json.dumps(response, indent=2))
+            output_data_as_json(response, console)
             return
 
         if not images:

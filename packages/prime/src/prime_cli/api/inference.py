@@ -42,31 +42,37 @@ class InferenceClient:
         team_id: Optional[str] = None,
         inference_url: Optional[str] = None,
         timeout: Optional[float | httpx.Timeout] = None,
+        require_auth: bool = True,
     ) -> None:
         # Load config
         self.config = Config()
 
         self.api_key = api_key or self.config.api_key
-        if not self.api_key:
-            raise InferenceAPIError(
-                "No API key. Run `prime config set-api-key` or set PRIME_API_KEY."
-            )
-
         self.team_id = team_id if team_id is not None else self.config.team_id
         self.inference_url = (inference_url or self.config.inference_url).rstrip("/")
 
+        if require_auth:
+            self._require_api_key()
+
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        if self.team_id:
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.api_key and self.team_id:
             headers["X-Prime-Team-ID"] = self.team_id
 
         self._client = httpx.Client(
             headers=headers,
             timeout=timeout or httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=60.0),
         )
+
+    def _require_api_key(self) -> None:
+        if not self.api_key:
+            raise InferenceAPIError(
+                "No API key. Run `prime config set-api-key` or set PRIME_API_KEY."
+            )
 
     def list_models(self) -> Dict[str, Any]:
         url = f"{self.inference_url}/models"

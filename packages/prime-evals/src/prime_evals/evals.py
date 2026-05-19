@@ -3,7 +3,7 @@ import json
 import sys
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
@@ -23,6 +23,16 @@ def _build_user_agent() -> str:
 
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     return f"prime-evals/{__version__} python/{python_version}"
+
+
+def _samples_upload_headers(api_key: Optional[str]) -> Dict[str, str]:
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": _build_user_agent(),
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
 
 
 class EvalsClient:
@@ -214,6 +224,7 @@ class EvalsClient:
         samples: List[Dict[str, Any]],
         max_payload_bytes: int = 25 * 1024 * 1024,
         max_workers: int = 4,
+        progress_callback: Optional[Callable[[int], None]] = None,
     ) -> Dict[str, Any]:
         """Push evaluation samples in adaptive batches with concurrent uploads."""
         if not samples:
@@ -224,32 +235,36 @@ class EvalsClient:
         batches, skipped_count = self._build_batches(samples, max_payload_bytes)
         total_samples_pushed = 0
         errors = []
+        headers = _samples_upload_headers(self.client.api_key)
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(self._upload_batch, evaluation_id, b): i
-                for i, b in enumerate(batches)
-            }
-            for future in as_completed(futures):
-                try:
-                    total_samples_pushed += future.result()
-                except Exception as e:
-                    errors.append(f"Batch {futures[future] + 1}: {e}")
+        with httpx.Client(headers=headers, timeout=300.0) as http_client:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(self._upload_batch, http_client, evaluation_id, b): i
+                    for i, b in enumerate(batches)
+                }
+                for future in as_completed(futures):
+                    try:
+                        uploaded_count = future.result()
+                        total_samples_pushed += uploaded_count
+                        if progress_callback is not None:
+                            progress_callback(uploaded_count)
+                    except Exception as e:
+                        errors.append(f"Batch {futures[future] + 1}: {e}")
 
         if errors:
             raise EvalsAPIError(f"Failed to push samples: {'; '.join(errors)}")
 
         return {"samples_pushed": total_samples_pushed, "samples_skipped": skipped_count}
 
-    def _upload_batch(self, evaluation_id: str, batch: List[Dict[str, Any]]) -> int:
+    def _upload_batch(
+        self,
+        http_client: httpx.Client,
+        evaluation_id: str,
+        batch: List[Dict[str, Any]],
+    ) -> int:
         """Upload a single batch of samples with retry on rate limit."""
         url = f"{self.client.base_url}/api/v1/evaluations/{evaluation_id}/samples"
-        headers: Dict[str, str] = {
-            "Content-Type": "application/json",
-            "User-Agent": _build_user_agent(),
-        }
-        if self.client.api_key:
-            headers["Authorization"] = f"Bearer {self.client.api_key}"
 
         @retry(
             retry=retry_if_exception(_is_retryable),
@@ -258,7 +273,7 @@ class EvalsClient:
             reraise=True,
         )
         def do_upload() -> int:
-            response = httpx.post(url, json={"samples": batch}, headers=headers, timeout=300.0)
+            response = http_client.post(url, json={"samples": batch})
             response.raise_for_status()
             return len(batch)
 
@@ -564,6 +579,7 @@ class AsyncEvalsClient:
         samples: List[Dict[str, Any]],
         max_payload_bytes: int = 25 * 1024 * 1024,
         max_concurrent: int = 4,
+        progress_callback: Optional[Callable[[int], None]] = None,
     ) -> Dict[str, Any]:
         """Push evaluation samples in adaptive batches with concurrent uploads."""
         if not samples:
@@ -576,14 +592,11 @@ class AsyncEvalsClient:
         errors: List[str] = []
 
         base_url = self.client.base_url
-        headers: Dict[str, str] = {
-            "Content-Type": "application/json",
-            "User-Agent": _build_user_agent(),
-        }
-        if self.client.api_key:
-            headers["Authorization"] = f"Bearer {self.client.api_key}"
+        headers = _samples_upload_headers(self.client.api_key)
 
-        async def upload_batch(idx: int, batch: List[Dict[str, Any]]) -> int:
+        async def upload_batch(
+            http_client: httpx.AsyncClient, idx: int, batch: List[Dict[str, Any]]
+        ) -> int:
             url = f"{base_url}/api/v1/evaluations/{evaluation_id}/samples"
 
             @retry(
@@ -593,14 +606,16 @@ class AsyncEvalsClient:
                 reraise=True,
             )
             async def do_upload() -> int:
-                async with httpx.AsyncClient(timeout=300.0) as client:
-                    response = await client.post(url, json={"samples": batch}, headers=headers)
-                    response.raise_for_status()
-                    return len(batch)
+                response = await http_client.post(url, json={"samples": batch})
+                response.raise_for_status()
+                return len(batch)
 
             async with semaphore:
                 try:
-                    return await do_upload()
+                    uploaded_count = await do_upload()
+                    if progress_callback is not None:
+                        progress_callback(uploaded_count)
+                    return uploaded_count
                 except httpx.HTTPStatusError as e:
                     errors.append(f"Batch {idx + 1}: HTTP {e.response.status_code}")
                     return 0
@@ -608,7 +623,10 @@ class AsyncEvalsClient:
                     errors.append(f"Batch {idx + 1}: {e}")
                     return 0
 
-        results = await asyncio.gather(*[upload_batch(i, b) for i, b in enumerate(batches)])
+        async with httpx.AsyncClient(headers=headers, timeout=300.0) as http_client:
+            results = await asyncio.gather(
+                *[upload_batch(http_client, i, b) for i, b in enumerate(batches)]
+            )
 
         if errors:
             raise EvalsAPIError(f"Failed to push samples: {'; '.join(errors)}")

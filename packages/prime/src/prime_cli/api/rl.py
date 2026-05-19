@@ -74,18 +74,18 @@ class RLRun(BaseModel):
     kind: Optional[str] = Field(None, description="Run kind discriminator")
 
     # Training configuration
-    rollouts_per_example: int = Field(..., alias="rolloutsPerExample")
-    seq_len: int = Field(..., alias="seqLen")
-    max_steps: int = Field(..., alias="maxSteps")
+    rollouts_per_example: Optional[int] = Field(None, alias="rolloutsPerExample")
+    seq_len: Optional[int] = Field(None, alias="seqLen")
+    max_steps: Optional[int] = Field(None, alias="maxSteps")
     max_tokens: Optional[int] = Field(None, alias="maxTokens")
-    batch_size: int = Field(..., alias="batchSize")
+    batch_size: Optional[int] = Field(None, alias="batchSize")
     loss: Optional[str] = "rl"
     teacher: Optional[Dict[str, Any]] = Field(
         None,
         validation_alias=AliasChoices("teacher", "teacherConfig"),
         serialization_alias="teacher",
     )
-    base_model: str = Field(..., alias="baseModel")
+    base_model: Optional[str] = Field(None, alias="baseModel")
     environments: List[Dict[str, Any]] = Field(default_factory=list)
     run_config: Optional[Dict[str, Any]] = Field(None, alias="runConfig")
     eval_config: Optional[Dict[str, Any]] = Field(None, alias="evalConfig")
@@ -423,16 +423,25 @@ class RLClient:
         regex: bool = False,
         level: Optional[str] = None,
         since_seconds: Optional[int] = None,
+        component: Optional[str] = None,
+        pod_index: int = 0,
+        env_name: Optional[str] = None,
     ) -> str:
-        """Get orchestrator logs for a Hosted Training run.
+        """Get logs for one component of a Hosted Training run.
+
+        Defaults to the orchestrator pod. Dedicated full-FT runs additionally
+        expose `trainer`, `inference`, and `env-server` components.
+        `pod_index` narrows to a specific replica for multi-node
+        trainer/inference; `env_name` picks among per-env env-server
+        StatefulSets when `component='env-server'`.
 
         Optional filters narrow the result via the platform's log search
         backend:
           - search: substring (or regex if regex=True) line filter
           - level:  one of ERROR/WARNING/SUCCESS/INFO/DEBUG
-          - since_seconds: how far back to look (60–86400)
+          - since_seconds: how far back to look (60-86400)
         """
-        params: Dict[str, object] = {"tail_lines": tail_lines}
+        params: Dict[str, Any] = {"tail_lines": tail_lines}
         if search:
             params["search"] = search
         if regex:
@@ -441,6 +450,12 @@ class RLClient:
             params["level"] = level
         if since_seconds is not None:
             params["since_seconds"] = since_seconds
+        if component:
+            params["component"] = component
+        if pod_index:
+            params["pod_index"] = pod_index
+        if env_name:
+            params["env_name"] = env_name
         try:
             response = self.client.get(f"/rft/runs/{run_id}/logs", params=params)
             return response.get("logs", "")

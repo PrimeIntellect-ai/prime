@@ -916,10 +916,10 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     return {
         "id": run.id,
         "status": run.status,
-        "model": run.base_model,
+        "model": run.base_model or "-",
         "environments": envs_display,
-        "steps": f"{run.max_steps}",
-        "rollouts": str(run.rollouts_per_example),
+        "steps": "-" if run.max_steps is None else f"{run.max_steps}",
+        "rollouts": "-" if run.rollouts_per_example is None else str(run.rollouts_per_example),
         "created_at": created_at,
         "team_id": run.team_id,
     }
@@ -1776,11 +1776,12 @@ def get_run(
         if run.status == "QUEUED" and run.runs_ahead is not None:
             status_text += f" (~{run.runs_ahead} runs ahead)"
         console.print(f"  Status: [{status_color}]{status_text}[/{status_color}]")
-        console.print(f"  Model: [magenta]{run.base_model}[/magenta]")
+        console.print(f"  Model: [magenta]{formatted['model']}[/magenta]")
         console.print(f"  Environments: [green]{formatted['environments']}[/green]")
-        console.print(f"  Max Steps: {run.max_steps}")
-        console.print(f"  Batch Size: {run.batch_size}")
-        console.print(f"  Rollouts per Example: {run.rollouts_per_example}")
+        console.print(f"  Max Steps: {formatted['steps']}")
+        batch_size = "-" if run.batch_size is None else str(run.batch_size)
+        console.print(f"  Batch Size: {batch_size}")
+        console.print(f"  Rollouts per Example: {formatted['rollouts']}")
         if run.max_tokens:
             console.print(f"  Max Tokens: {run.max_tokens}")
         if run.wandb_project:
@@ -1846,12 +1847,9 @@ def delete_run(
     # Try the hosted full-FT delete endpoint first. The backend's kind
     # gate 404s for non-DEDICATED_FULL_FT runs, so a 404 here means
     # "not a hosted run" and we fall back to the LoRA-shared path.
-    # This avoids the prior approach of pre-fetching via rl_client.get_run
-    # for the discriminator — which fails for DEDICATED_FULL_FT runs
-    # whose row doesn't carry the LoRA-required RLRun fields
-    # (rollouts_per_example, seq_len, max_steps, batch_size, base_model).
-    # Pydantic ValidationError on those would mask the actual run kind
-    # and silently route to the wrong endpoint.
+    # This avoids relying on list/get discriminator shape before delete:
+    # the delete endpoint owns the run-kind decision, and the CLI only
+    # falls back when that endpoint says the row is not dedicated full-FT.
     from ..api.training import HostedTrainingClient
 
     rl_client = RLClient(api_client)
@@ -2078,6 +2076,14 @@ def _parse_env_qualifier(env: str) -> tuple[str, int]:
     return env, 0
 
 
+def _parse_env_qualifier_with_index(env: str) -> tuple[str, int, bool]:
+    """Parse an env qualifier and report whether a numeric suffix was present."""
+    name, sep, idx_str = env.rpartition("/")
+    if sep and name and idx_str.isdigit():
+        return name, int(idx_str), True
+    return env, 0, False
+
+
 @app.command("logs", rich_help_panel="Monitoring")
 def get_logs(
     run_id: str = typer.Argument(..., help="Run ID to get logs for"),
@@ -2086,8 +2092,9 @@ def get_logs(
         "--component",
         "-c",
         help=(
-            "Pod to read logs from: 'orchestrator' (default) or 'env-server'. "
-            "Inferred from --env when omitted."
+            "Pod to read logs from: 'orchestrator' (default), 'trainer', "
+            "'inference', or 'env-server'. trainer/inference apply only "
+            "to dedicated full-FT runs. Inferred from --env when omitted."
         ),
     ),
     env: Optional[str] = typer.Option(
@@ -2132,12 +2139,17 @@ def get_logs(
 ) -> None:
     """Get logs for a run.
 
-    Defaults to the orchestrator pod. Pass ``--env <name>`` to read an
-    env-server pod instead — useful when an env-server is crash-looping
-    (e.g. ``ModuleNotFoundError``) and the orchestrator has stalled at
-    "Starting orchestrator step 0".
+    Defaults to the orchestrator pod. Use ``--component`` to pick one of
+    ``trainer`` / ``inference`` / ``env-server`` (dedicated full-FT only).
+    Pass ``--env <name>`` to read an env-server pod by name (shorthand for
+    ``--component=env-server``).
 
     List available pods first with ``prime train components <run_id>``.
+
+    Per-rank narrowing on multi-replica trainer/inference is not yet
+    surfaced here — `--local-ranks-filter=0` in the chart's torchrun
+    invocation already dedupes the in-pod rank fan-out, and per-pod
+    inspection on multi-node runs requires kubectl + the PVC log files.
 
     Examples:
 
@@ -2146,19 +2158,22 @@ def get_logs(
         prime train logs <run_id> --search Backpressure
         prime train logs <run_id> --level ERROR --since 1h
         prime train logs <run_id> --search 'Step \\d+' --regex
+        prime train logs <run_id> -c trainer
+        prime train logs <run_id> -c inference
         prime train logs <run_id> --env reverse-text
         prime train logs <run_id> --env reverse-text/1 -f
     """
+    valid_components = ("orchestrator", "trainer", "inference", "env-server")
     if component is None:
         component = "env-server" if env is not None else "orchestrator"
-    elif component not in ("orchestrator", "env-server"):
+    elif component not in valid_components:
         raise typer.BadParameter(
-            f"Invalid component '{component}'. Use 'orchestrator' or 'env-server'.",
+            f"Invalid component '{component}'. Use one of: {', '.join(valid_components)}.",
             param_hint="--component",
         )
-    if component == "orchestrator" and env is not None:
+    if env is not None and component != "env-server":
         raise typer.BadParameter(
-            "--env applies only to env-server logs. Drop --component=orchestrator or drop --env.",
+            f"--env applies only to env-server logs. Drop --component={component} or drop --env.",
             param_hint="--env",
         )
     if component == "env-server" and env is None:
@@ -2189,7 +2204,33 @@ def get_logs(
         api_client = APIClient()
         rl_client = RLClient(api_client)
 
-        if component == "orchestrator":
+        env_name_q, env_index_q, env_has_index_q = (
+            _parse_env_qualifier_with_index(env) if env is not None else (None, 0, False)
+        )
+
+        if component == "env-server" and env is not None and env_has_index_q:
+            assert env_name_q is not None
+            # Legacy shared-RFT env-server (`name/index` qualifier) — go
+            # through the dedicated env-server endpoint which uses the
+            # cluster_id-backed pod lookup path. Dedicated full-FT
+            # env-servers use the unified /logs route with
+            # component=env-server + env_name (StatefulSets always run
+            # one pod per env, so no index disambiguation needed).
+
+            def fetch(t: int) -> str:
+                return rl_client.get_env_server_logs(
+                    run_id,
+                    env_name=env_name_q,
+                    env_index=env_index_q,
+                    tail_lines=t,
+                    search=search,
+                    regex=regex,
+                    level=normalized_level,
+                    since_seconds=since_seconds,
+                )
+
+            label = f"env-server {env}"
+        elif component == "orchestrator":
 
             def fetch(t: int) -> str:
                 return rl_client.get_logs(
@@ -2203,22 +2244,25 @@ def get_logs(
 
             label = "orchestrator"
         else:
-            assert env is not None  # narrowed by validation above
-            env_name, env_index = _parse_env_qualifier(env)
+            # trainer / inference / dedicated env-server — unified /logs
+            # route. env (no slash) names the dedicated env-server's
+            # StatefulSet.
+            fetch_component = component
+            fetch_env = env if component == "env-server" else None
 
             def fetch(t: int) -> str:
-                return rl_client.get_env_server_logs(
+                return rl_client.get_logs(
                     run_id,
-                    env_name=env_name,
-                    env_index=env_index,
                     tail_lines=t,
                     search=search,
                     regex=regex,
                     level=normalized_level,
                     since_seconds=since_seconds,
+                    component=fetch_component,
+                    env_name=fetch_env,
                 )
 
-            label = f"env-server {env}"
+            label = f"env-server {env}" if component == "env-server" else component
 
         _stream_logs(
             fetch_fn=fetch,

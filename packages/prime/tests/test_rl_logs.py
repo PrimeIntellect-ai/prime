@@ -52,7 +52,10 @@ def _make_mock_get(
         if endpoint == f"/rft/runs/{RUN_ID}":
             return {"run": _run_payload(responses.get("run_status", "RUNNING"))}
         if endpoint == f"/rft/runs/{RUN_ID}/logs":
-            orch_calls.append(params or {})
+            call_params = params or {}
+            orch_calls.append(call_params)
+            if call_params.get("component") == "env-server":
+                return {"logs": responses.get("env_server_logs", "")}
             return {"logs": responses.get("orchestrator_logs", "")}
         if endpoint == f"/rft/runs/{RUN_ID}/env-server-logs":
             env_calls.append(params or {})
@@ -97,10 +100,13 @@ def test_logs_env_flag_alone_infers_env_server(monkeypatch: pytest.MonkeyPatch) 
 
     assert result.exit_code == 0, result.output
     assert "inferred line" in result.output
-    assert orch == []
-    assert len(env) == 1
-    assert env[0]["env_name"] == "reverse-text"
-    assert env[0]["env_index"] == 0
+    assert env == []
+    assert len(orch) == 1
+    assert orch[0] == {
+        "tail_lines": 1000,
+        "component": "env-server",
+        "env_name": "reverse-text",
+    }
 
 
 def test_logs_explicit_orchestrator_with_env_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,12 +153,12 @@ def test_logs_env_server_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "ModuleNotFoundError" in result.output
-    assert orch == []
-    assert len(env) == 1
-    assert env[0] == {
-        "env_name": "reverse-text",
-        "env_index": 0,
+    assert env == []
+    assert len(orch) == 1
+    assert orch[0] == {
         "tail_lines": 50,
+        "component": "env-server",
+        "env_name": "reverse-text",
     }
 
 
@@ -174,6 +180,50 @@ def test_logs_env_server_qualified_name_parses_index(monkeypatch: pytest.MonkeyP
     assert env[0]["env_index"] == 2
 
 
+def test_logs_env_server_qualified_name_forwards_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy qualified env-server logs must preserve backend filters."""
+    orch: List[Dict[str, Any]] = []
+    env: List[Dict[str, Any]] = []
+    lst: List[Dict[str, Any]] = []
+    mock_get = _make_mock_get({"env_server_logs": "line"}, orch, env, lst)
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "rl",
+            "logs",
+            RUN_ID,
+            "-c",
+            "env-server",
+            "--env",
+            "reverse-text/0",
+            "--search",
+            "error",
+            "--regex",
+            "--level",
+            "error",
+            "--since",
+            "1h",
+            "--raw",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert orch == []
+    assert env[0] == {
+        "env_name": "reverse-text",
+        "env_index": 0,
+        "tail_lines": 1000,
+        "search": "error",
+        "regex": True,
+        "level": "ERROR",
+        "since_seconds": 3600,
+    }
+
+
 def test_logs_env_server_owner_name_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
     """`--env primeintellect/reverse-text` is a valid name, not a qualifier.
 
@@ -191,8 +241,12 @@ def test_logs_env_server_owner_name_preserved(monkeypatch: pytest.MonkeyPatch) -
     )
 
     assert result.exit_code == 0, result.output
-    assert env[0]["env_name"] == "primeintellect/reverse-text"
-    assert env[0]["env_index"] == 0
+    assert env == []
+    assert orch[0] == {
+        "tail_lines": 1000,
+        "component": "env-server",
+        "env_name": "primeintellect/reverse-text",
+    }
 
 
 def test_logs_env_server_owner_name_with_index(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -230,7 +284,7 @@ def test_logs_invalid_component(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
 
-    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "-c", "trainer"])
+    result = CliRunner().invoke(app, ["rl", "logs", RUN_ID, "-c", "bogus"])
     assert result.exit_code != 0
 
 
@@ -326,7 +380,7 @@ def test_logs_env_server_follow_dedupes(monkeypatch: pytest.MonkeyPatch) -> None
             "-c",
             "env-server",
             "--env",
-            "reverse-text",
+            "reverse-text/0",
             "--follow",
             "--raw",
         ],

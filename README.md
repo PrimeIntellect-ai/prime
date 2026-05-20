@@ -241,8 +241,8 @@ prime switch <team-slug>
 
 ```bash
 # Clone the repository
-git clone https://github.com/PrimeIntellect-ai/prime-cli
-cd prime-cli
+git clone https://github.com/PrimeIntellect-ai/prime
+cd prime
 
 # Set up workspace (installs all packages in editable mode)
 uv sync

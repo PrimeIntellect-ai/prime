@@ -9,6 +9,7 @@ from typing import Any, Optional
 import typer
 from click.core import ParameterSource
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
+from rich.progress import Progress
 from rich.syntax import Syntax
 from rich.table import Table
 
@@ -1008,6 +1009,22 @@ def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, An
     return get_eval_viewer_url(evaluation_id)
 
 
+def _push_samples_with_progress(
+    client: EvalsClient, evaluation_id: str, samples: list[dict[str, Any]]
+) -> None:
+    if not console.is_terminal:
+        client.push_samples(evaluation_id, samples)
+        return
+
+    with Progress(console=console, transient=True) as progress:
+        task_id = progress.add_task("Uploading samples", total=len(samples))
+        client.push_samples(
+            evaluation_id,
+            samples,
+            progress_callback=lambda uploaded: progress.update(task_id, advance=uploaded),
+        )
+
+
 def _require_published_environment_for_eval_push(env_name: str, eval_path: Path) -> None:
     console.print("[red]Error:[/red] Evaluation uploads require a pushed environment.")
     console.print(
@@ -1095,7 +1112,7 @@ def _push_single_eval(
     results = eval_data.get("results", [])
     if results:
         console.print(f"[blue]Pushing {len(results)} samples...[/blue]")
-        client.push_samples(eval_id, results)
+        _push_samples_with_progress(client, eval_id, results)
         console.print("[green]✓ Samples pushed successfully[/green]")
         console.print()
 

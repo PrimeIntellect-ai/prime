@@ -139,6 +139,14 @@ class RecordingCreateAPIClient:
         return _sandbox_response(f"sandbox-{len(self.calls)}")
 
 
+class FailOnceRecordingCreateAPIClient(RecordingCreateAPIClient):
+    def request(self, method: str, path: str, **kwargs):
+        self.calls.append((method, path, kwargs))
+        if len(self.calls) == 1:
+            raise APIError("temporary create failure")
+        return _sandbox_response(f"sandbox-{len(self.calls)}")
+
+
 class AsyncRecordingCreateAPIClient:
     def __init__(self):
         self.config = SimpleNamespace(team_id="team-1")
@@ -146,6 +154,14 @@ class AsyncRecordingCreateAPIClient:
 
     async def request(self, method: str, path: str, **kwargs):
         self.calls.append((method, path, kwargs))
+        return _sandbox_response(f"sandbox-{len(self.calls)}")
+
+
+class AsyncFailOnceRecordingCreateAPIClient(AsyncRecordingCreateAPIClient):
+    async def request(self, method: str, path: str, **kwargs):
+        self.calls.append((method, path, kwargs))
+        if len(self.calls) == 1:
+            raise APIError("temporary create failure")
         return _sandbox_response(f"sandbox-{len(self.calls)}")
 
 
@@ -442,6 +458,25 @@ class TestCreateSandboxIdempotencyPayload:
         assert request.idempotency_key is None
         assert request.team_id is None
 
+    def test_sync_create_reuses_generated_idempotency_key_after_failure(self):
+        client = SandboxClient(APIClient(api_key="test-key"))
+        recording = FailOnceRecordingCreateAPIClient()
+        client.client = recording
+        request = CreateSandboxRequest(name="sandbox", docker_image="python:3.11-slim")
+
+        with pytest.raises(APIError, match="temporary create failure"):
+            client.create(request)
+        client.create(request)
+        client.create(request)
+
+        first_payload = recording.calls[0][2]["json"]
+        retry_payload = recording.calls[1][2]["json"]
+        next_payload = recording.calls[2][2]["json"]
+        assert first_payload["idempotency_key"] == retry_payload["idempotency_key"]
+        assert retry_payload["idempotency_key"] != next_payload["idempotency_key"]
+        assert request.idempotency_key is None
+        assert request.team_id is None
+
     @pytest.mark.asyncio
     async def test_async_create_does_not_reuse_generated_idempotency_key_on_request_reuse(self):
         client = AsyncSandboxClient(api_key="test-key")
@@ -457,6 +492,26 @@ class TestCreateSandboxIdempotencyPayload:
         assert first_payload["idempotency_key"] != second_payload["idempotency_key"]
         assert first_payload["team_id"] == "team-1"
         assert second_payload["team_id"] == "team-1"
+        assert request.idempotency_key is None
+        assert request.team_id is None
+
+    @pytest.mark.asyncio
+    async def test_async_create_reuses_generated_idempotency_key_after_failure(self):
+        client = AsyncSandboxClient(api_key="test-key")
+        recording = AsyncFailOnceRecordingCreateAPIClient()
+        client.client = recording
+        request = CreateSandboxRequest(name="sandbox", docker_image="python:3.11-slim")
+
+        with pytest.raises(APIError, match="temporary create failure"):
+            await client.create(request)
+        await client.create(request)
+        await client.create(request)
+
+        first_payload = recording.calls[0][2]["json"]
+        retry_payload = recording.calls[1][2]["json"]
+        next_payload = recording.calls[2][2]["json"]
+        assert first_payload["idempotency_key"] == retry_payload["idempotency_key"]
+        assert retry_payload["idempotency_key"] != next_payload["idempotency_key"]
         assert request.idempotency_key is None
         assert request.team_id is None
 

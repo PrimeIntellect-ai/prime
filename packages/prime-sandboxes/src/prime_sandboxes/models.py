@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 
 class SandboxStatus(str, Enum):
@@ -78,6 +78,8 @@ class SandboxListResponse(BaseModel):
 
 class CreateSandboxRequest(BaseModel):
     """Create sandbox request model"""
+
+    _generated_idempotency_key: Optional[str] = PrivateAttr(default=None)
 
     name: str
     docker_image: str

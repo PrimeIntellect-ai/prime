@@ -72,6 +72,21 @@ GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
     httpx.PoolTimeout,  # No connection available in pool
 )
 
+
+def _create_idempotency_key(request: CreateSandboxRequest) -> str:
+    """Return a stable generated key across failed outer create retries."""
+    if request.idempotency_key:
+        return request.idempotency_key
+    if request._generated_idempotency_key is None:
+        request._generated_idempotency_key = uuid.uuid4().hex
+    return request._generated_idempotency_key
+
+
+def _clear_generated_create_idempotency_key(request: CreateSandboxRequest) -> None:
+    if request.idempotency_key is None:
+        request._generated_idempotency_key = None
+
+
 # Response-read failures: the server may have already processed the request
 # (TCP connection dropped mid-response body). Only safe to retry on idempotent
 # methods (GET/HEAD/PUT/DELETE), where a duplicate request is a no-op.
@@ -634,7 +649,7 @@ class SandboxClient:
         # Auto-populate team_id from config if not specified
         if request.team_id is None and self.client.config.team_id is not None:
             payload["team_id"] = self.client.config.team_id
-        payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
+        payload["idempotency_key"] = _create_idempotency_key(request)
 
         response = self.client.request(
             "POST",
@@ -642,7 +657,9 @@ class SandboxClient:
             json=payload,
             idempotent_post=True,
         )
-        return Sandbox.model_validate(response)
+        sandbox = Sandbox.model_validate(response)
+        _clear_generated_create_idempotency_key(request)
+        return sandbox
 
     def list(
         self,
@@ -1546,7 +1563,7 @@ class AsyncSandboxClient:
         payload = request.model_dump(by_alias=False, exclude_none=True)
         if request.team_id is None and self.client.config.team_id is not None:
             payload["team_id"] = self.client.config.team_id
-        payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
+        payload["idempotency_key"] = _create_idempotency_key(request)
 
         response = await self.client.request(
             "POST",
@@ -1554,7 +1571,9 @@ class AsyncSandboxClient:
             json=payload,
             idempotent_post=True,
         )
-        return Sandbox.model_validate(response)
+        sandbox = Sandbox.model_validate(response)
+        _clear_generated_create_idempotency_key(request)
+        return sandbox
 
     async def list(
         self,

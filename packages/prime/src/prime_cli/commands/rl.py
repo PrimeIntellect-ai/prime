@@ -1129,6 +1129,9 @@ def create_run(
         else:
             console.print("[green]✓ Run created successfully![/green]")
 
+        if run.notice:
+            console.print(f"[cyan]{run.notice}[/cyan]")
+
         dashboard_url = f"{app_config.frontend_url}/dashboard/training/{run.id}"
         console.print("\n[cyan]Monitor run at:[/cyan]")
         console.print(f"  [link={dashboard_url}]{dashboard_url}[/link]")

@@ -95,6 +95,7 @@ class RLRun(BaseModel):
     # Queue info
     runs_ahead: Optional[int] = Field(None, alias="runsAhead")
     queue_reason: Optional[str] = Field(None, alias="queueReason")
+    notice: Optional[str] = Field(None, alias="notice")
 
     # Timestamps
     started_at: Optional[datetime] = Field(None, alias="startedAt")

@@ -81,3 +81,56 @@ def test_create_run_sends_max_inflight_rollouts() -> None:
     assert api_client.posts[0][0] == "/rft/runs"
     assert api_client.posts[0][1]["max_inflight_rollouts"] == 96
     assert run.max_inflight_rollouts == 96
+
+
+def test_create_run_sends_sft_loss_and_teacher_config() -> None:
+    api_client = FakeAPIClient()
+    client = RLClient(api_client)  # type: ignore[arg-type]
+
+    client.create_run(
+        model_name="openai/gpt-oss-20b",
+        environments=[{"id": "primeintellect/reverse-text"}],
+        max_tokens=512,
+        loss="sft",
+        teacher={
+            "model": {"name": "openai/gpt-oss-120b"},
+            "sampling": {
+                "max_tokens": 2048,
+                "reasoning_effort": "medium",
+            },
+        },
+    )
+
+    assert api_client.posts[0][0] == "/rft/runs"
+    payload = api_client.posts[0][1]
+    assert payload == {
+        "model": {"name": "openai/gpt-oss-20b"},
+        "environments": [{"id": "primeintellect/reverse-text"}],
+        "rollouts_per_example": 8,
+        "max_steps": 100,
+        "batch_size": 128,
+        "secrets": [],
+        "loss": "sft",
+        "teacher": {
+            "model": {"name": "openai/gpt-oss-120b"},
+            "sampling": {
+                "max_tokens": 2048,
+                "reasoning_effort": "medium",
+            },
+        },
+        "max_tokens": 512,
+    }
+
+
+def test_create_run_omits_default_rl_loss() -> None:
+    api_client = FakeAPIClient()
+    client = RLClient(api_client)  # type: ignore[arg-type]
+
+    client.create_run(
+        model_name="Qwen/Qwen3.5-0.8B",
+        environments=[{"id": "reverse-text"}],
+    )
+
+    assert api_client.posts[0][0] == "/rft/runs"
+    assert "loss" not in api_client.posts[0][1]
+    assert "teacher" not in api_client.posts[0][1]

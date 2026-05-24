@@ -25,3 +25,4 @@ ENV/
 test_env/
 .DS_Store
 .claude/worktrees/
+.codegraph/

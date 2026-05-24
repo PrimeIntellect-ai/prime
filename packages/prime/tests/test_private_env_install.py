@@ -254,6 +254,53 @@ class TestPathComponentValidation:
         _validate_path_component("v2.3.4-beta.1", "version")
 
 
+class TestBuildInstallCommand:
+    """Tests for install command construction."""
+
+    def test_uv_simple_index_skips_false_flag_when_uv_lacks_support(self, monkeypatch):
+        """Old uv versions reject `<package>=false`, so we should omit the flag."""
+        from prime_cli.commands.env import _build_install_command
+
+        monkeypatch.setattr(
+            "prime_cli.commands.env._uv_supports_exclude_newer_package_false",
+            lambda: False,
+        )
+
+        cmd = _build_install_command(
+            name="alphabet-sort",
+            version="latest",
+            simple_index_url="https://hub.primeintellect.ai/will/simple/",
+            wheel_url=None,
+            tool="uv",
+        )
+
+        assert cmd is not None
+        assert "--exclude-newer-package" not in cmd
+        assert "alphabet_sort=false" not in cmd
+
+    def test_uv_simple_index_uses_false_flag_when_uv_supports_it(self, monkeypatch):
+        """New uv versions accept `<package>=false`, so keep the hub compatibility flag."""
+        from prime_cli.commands.env import _build_install_command
+
+        monkeypatch.setattr(
+            "prime_cli.commands.env._uv_supports_exclude_newer_package_false",
+            lambda: True,
+        )
+
+        cmd = _build_install_command(
+            name="alphabet-sort",
+            version="latest",
+            simple_index_url="https://hub.primeintellect.ai/will/simple/",
+            wheel_url=None,
+            tool="uv",
+        )
+
+        assert cmd is not None
+        assert "--exclude-newer-package" in cmd
+        flag_index = cmd.index("--exclude-newer-package")
+        assert cmd[flag_index + 1] == "alphabet_sort=false"
+
+
 class TestSafeTarExtract:
     """Tests for tar extraction security (tar-slip prevention)."""
 

@@ -9,6 +9,7 @@ import tarfile
 import tempfile
 import time
 import zipfile
+from functools import lru_cache
 from datetime import datetime
 
 # Wheel METADATA files use RFC 822 format (PEP 566), same as email headers
@@ -119,6 +120,32 @@ ENV_VAR_DETAIL_JSON_HELP = json_output_help(
 def _uv_pip_command(subcommand: str, *args: str) -> List[str]:
     """Run uv pip against the workspace interpreter."""
     return ["uv", "pip", subcommand, "--python", resolve_workspace_python(), *args]
+
+
+@lru_cache(maxsize=1)
+def _uv_supports_exclude_newer_package_false() -> bool:
+    """Return whether the installed uv accepts `<package>=false` for per-package cutoffs."""
+    try:
+        result = subprocess.run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--dry-run",
+                "--system",
+                "--exclude-newer-package",
+                "typing-extensions=false",
+                "typing-extensions",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return False
+
+    return result.returncode == 0
 
 
 def _parse_environment_slug(environment: str) -> Tuple[str, str]:
@@ -3207,8 +3234,10 @@ def _build_install_command(
             cmd.extend(["--extra-index-url", simple_index_url])
             # Hub simple index doesn't emit PEP 700 upload-time metadata, so any
             # exclude-newer cutoff on the consumer side filters hub wheels
-            # regardless of how permissive the cutoff is. Disable per-package.
-            cmd.extend(["--exclude-newer-package", f"{normalized_name}=false"])
+            # regardless of how permissive the cutoff is. Disable per-package
+            # on uv versions that support the `package=false` escape hatch.
+            if _uv_supports_exclude_newer_package_false():
+                cmd.extend(["--exclude-newer-package", f"{normalized_name}=false"])
             if prerelease:
                 cmd.append("--prerelease=allow")
             return cmd

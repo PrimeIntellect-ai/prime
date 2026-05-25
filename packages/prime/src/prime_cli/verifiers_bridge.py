@@ -7,11 +7,12 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 import toml
@@ -72,6 +73,31 @@ def is_help_request(primary_arg: str, passthrough_args: list[str]) -> bool:
     return any(arg in ("-h", "--help") for arg in passthrough_args)
 
 
+def _normalize_eval_sampling_args_dict(sampling_args: dict[str, Any]) -> bool:
+    if "enable_thinking" not in sampling_args:
+        return False
+
+    extra_body = sampling_args.get("extra_body")
+    if extra_body is not None and not isinstance(extra_body, dict):
+        return False
+
+    chat_template_kwargs = None
+    if isinstance(extra_body, dict):
+        chat_template_kwargs = extra_body.get("chat_template_kwargs")
+        if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
+            return False
+
+    enable_thinking = sampling_args.pop("enable_thinking")
+    extra_body_dict = dict(extra_body) if isinstance(extra_body, dict) else {}
+    chat_template_kwargs_dict = (
+        dict(chat_template_kwargs) if isinstance(chat_template_kwargs, dict) else {}
+    )
+    chat_template_kwargs_dict.setdefault("enable_thinking", enable_thinking)
+    extra_body_dict["chat_template_kwargs"] = chat_template_kwargs_dict
+    sampling_args["extra_body"] = extra_body_dict
+    return True
+
+
 def _normalize_eval_sampling_args(passthrough_args: list[str]) -> list[str]:
     normalized = list(passthrough_args)
 
@@ -87,31 +113,55 @@ def _normalize_eval_sampling_args(passthrough_args: list[str]) -> list[str]:
         if not isinstance(sampling_args, dict):
             return normalized
 
-        if "enable_thinking" not in sampling_args:
+        if not _normalize_eval_sampling_args_dict(sampling_args):
             return normalized
 
-        extra_body = sampling_args.get("extra_body")
-        if extra_body is not None and not isinstance(extra_body, dict):
-            return normalized
-
-        chat_template_kwargs = None
-        if isinstance(extra_body, dict):
-            chat_template_kwargs = extra_body.get("chat_template_kwargs")
-            if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
-                return normalized
-
-        enable_thinking = sampling_args.pop("enable_thinking")
-        extra_body_dict = dict(extra_body) if isinstance(extra_body, dict) else {}
-        chat_template_kwargs_dict = (
-            dict(chat_template_kwargs) if isinstance(chat_template_kwargs, dict) else {}
-        )
-        chat_template_kwargs_dict.setdefault("enable_thinking", enable_thinking)
-        extra_body_dict["chat_template_kwargs"] = chat_template_kwargs_dict
-        sampling_args["extra_body"] = extra_body_dict
         normalized[i + 1] = json.dumps(sampling_args, separators=(",", ":"))
         return normalized
 
     return normalized
+
+
+def _normalize_eval_config_target(environment: str) -> tuple[str, Optional[Path]]:
+    if not _is_config_target(environment):
+        return environment, None
+
+    config_path = Path(environment)
+    try:
+        raw = toml.load(config_path)
+    except Exception:
+        return environment, None
+
+    if not isinstance(raw, dict):
+        return environment, None
+
+    eval_entries = raw.get("eval")
+    if not isinstance(eval_entries, list):
+        return environment, None
+
+    mutated = False
+    for entry in eval_entries:
+        if not isinstance(entry, dict):
+            continue
+        sampling_args = entry.get("sampling_args")
+        if not isinstance(sampling_args, dict):
+            continue
+        if _normalize_eval_sampling_args_dict(sampling_args):
+            mutated = True
+
+    if not mutated:
+        return environment, None
+
+    temp_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=config_path.suffix or ".toml",
+        delete=False,
+    )
+    with temp_file:
+        toml.dump(raw, temp_file)
+
+    return temp_file.name, Path(temp_file.name)
 
 
 def _sanitize_help_text(help_text: str, module_name: str, prime_command: str) -> str:
@@ -993,6 +1043,7 @@ def run_eval_passthrough(
 ) -> None:
     plugin = load_verifiers_prime_plugin(console=console)
     config = Config()
+    temp_config_path: Optional[Path] = None
 
     if not config.api_key:
         console.print(
@@ -1013,6 +1064,7 @@ def run_eval_passthrough(
     env_name_for_upload: Optional[str] = None
     resolved_env: Optional[ResolvedEnvironment] = None
     config_envs: list[tuple[str, str]] = []
+    run_target, temp_config_path = _normalize_eval_config_target(environment)
 
     if _is_config_target(environment):
         config_envs = _collect_eval_config_envs(Path(environment), env_dir_path)
@@ -1044,7 +1096,11 @@ def run_eval_passthrough(
 
     console.print(f"[dim]Eval job_id: {job_id}[/dim]")
     command = plugin.build_module_command(plugin.eval_module, [run_target, *args])
-    _run_command(command, env=env)
+    try:
+        _run_command(command, env=env)
+    finally:
+        if temp_config_path is not None:
+            temp_config_path.unlink(missing_ok=True)
 
     if skip_upload:
         _print_environment_source_footer(resolved_env)

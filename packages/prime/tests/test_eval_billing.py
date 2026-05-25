@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import httpx
 import pytest
 import typer
@@ -603,6 +605,56 @@ def test_eval_run_rewrites_enable_thinking_sampling_arg(monkeypatch):
     assert commands[0][sampling_args_index + 1] == (
         '{"temperature":0.2,"extra_body":{"chat_template_kwargs":{"enable_thinking":false}}}'
     )
+
+
+def test_eval_run_rewrites_enable_thinking_in_config_sampling_args(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+    )
+    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
+    monkeypatch.setattr("prime_cli.verifiers_bridge._validate_model", lambda *args: None)
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._preflight_inference_billing",
+        lambda *args: None,
+    )
+
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "Qwen/Qwen3.5-122B-A10B"
+
+[[eval]]
+env_id = "primeintellect/gsm8k"
+sampling_args = { enable_thinking = false, temperature = 0.2 }
+""".strip(),
+        encoding="utf-8",
+    )
+
+    prepared = []
+    commands = []
+
+    def fake_prepare(_plugin, env_reference, env_dir_path):
+        prepared.append((env_reference, env_dir_path))
+
+    def fake_run_command(command, env=None):
+        commands.append(command)
+
+    monkeypatch.setattr("prime_cli.verifiers_bridge._prepare_single_environment", fake_prepare)
+    monkeypatch.setattr("prime_cli.verifiers_bridge._run_command", fake_run_command)
+
+    run_eval_passthrough(
+        environment=str(config_path),
+        passthrough_args=[],
+        skip_upload=True,
+        env_path=None,
+    )
+
+    assert prepared == [("primeintellect/gsm8k", "./environments")]
+    assert commands
+    assert commands[0][1] != str(config_path)
+
+    rewritten_config = Path(commands[0][1])
+    assert not rewritten_config.exists()
 
 
 def test_inference_client_uses_custom_timeout(monkeypatch):

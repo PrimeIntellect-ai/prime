@@ -131,11 +131,7 @@ def _uv_supports_exclude_newer_package_false() -> bool:
                 "uv",
                 "pip",
                 "install",
-                "--dry-run",
-                "--system",
-                "--exclude-newer-package",
-                "typing-extensions=false",
-                "typing-extensions",
+                "--help",
             ],
             capture_output=True,
             text=True,
@@ -145,7 +141,7 @@ def _uv_supports_exclude_newer_package_false() -> bool:
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
         return False
 
-    return result.returncode == 0
+    return result.returncode == 0 and "--exclude-newer-package" in result.stdout
 
 
 def _parse_environment_slug(environment: str) -> Tuple[str, str]:

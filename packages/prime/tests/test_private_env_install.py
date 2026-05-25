@@ -257,6 +257,29 @@ class TestPathComponentValidation:
 class TestBuildInstallCommand:
     """Tests for install command construction."""
 
+    def test_uv_support_probe_uses_help_output_not_network_resolution(self, monkeypatch):
+        """Capability checks should depend on local CLI help, not dependency resolution."""
+        import subprocess
+
+        from prime_cli.commands.env import _uv_supports_exclude_newer_package_false
+
+        _uv_supports_exclude_newer_package_false.cache_clear()
+        seen = {}
+
+        def fake_run(cmd, capture_output, text, timeout, check):
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="Usage...\n      --exclude-newer-package <EXCLUDE_NEWER_PACKAGE>\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr("prime_cli.commands.env.subprocess.run", fake_run)
+
+        assert _uv_supports_exclude_newer_package_false() is True
+        assert seen["cmd"] == ["uv", "pip", "install", "--help"]
+
     def test_uv_simple_index_skips_false_flag_when_uv_lacks_support(self, monkeypatch):
         """Old uv versions reject `<package>=false`, so we should omit the flag."""
         from prime_cli.commands.env import _build_install_command

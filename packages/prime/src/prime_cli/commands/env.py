@@ -22,6 +22,7 @@ import httpx
 import toml
 import typer
 from gitignore_parser import parse_gitignore
+from packaging.version import InvalidVersion, Version
 from rich.table import Table
 from rich.text import Text
 
@@ -126,6 +127,13 @@ def _uv_pip_command(subcommand: str, *args: str) -> List[str]:
 def _uv_supports_exclude_newer_package_false() -> bool:
     """Return whether the installed uv accepts `<package>=false` for per-package cutoffs."""
     try:
+        version_result = subprocess.run(
+            ["uv", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
         result = subprocess.run(
             [
                 "uv",
@@ -141,7 +149,20 @@ def _uv_supports_exclude_newer_package_false() -> bool:
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
         return False
 
-    return result.returncode == 0 and "--exclude-newer-package" in result.stdout
+    if result.returncode != 0 or "--exclude-newer-package" not in result.stdout:
+        return False
+
+    if version_result.returncode != 0:
+        return False
+
+    version_parts = version_result.stdout.strip().split()
+    if len(version_parts) < 2:
+        return False
+
+    try:
+        return Version(version_parts[1]) >= Version("0.11.3")
+    except InvalidVersion:
+        return False
 
 
 def _parse_environment_slug(environment: str) -> Tuple[str, str]:

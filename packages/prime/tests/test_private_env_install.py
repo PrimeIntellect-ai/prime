@@ -264,10 +264,12 @@ class TestBuildInstallCommand:
         from prime_cli.commands.env import _uv_supports_exclude_newer_package_false
 
         _uv_supports_exclude_newer_package_false.cache_clear()
-        seen = {}
+        seen = []
 
         def fake_run(cmd, capture_output, text, timeout, check):
-            seen["cmd"] = cmd
+            seen.append(cmd)
+            if cmd == ["uv", "--version"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="uv 0.11.7\n", stderr="")
             return subprocess.CompletedProcess(
                 cmd,
                 0,
@@ -278,7 +280,29 @@ class TestBuildInstallCommand:
         monkeypatch.setattr("prime_cli.commands.env.subprocess.run", fake_run)
 
         assert _uv_supports_exclude_newer_package_false() is True
-        assert seen["cmd"] == ["uv", "pip", "install", "--help"]
+        assert seen == [["uv", "--version"], ["uv", "pip", "install", "--help"]]
+
+    def test_uv_support_probe_rejects_old_versions_even_when_flag_exists(self, monkeypatch):
+        """The opt-out syntax landed later than the flag itself."""
+        import subprocess
+
+        from prime_cli.commands.env import _uv_supports_exclude_newer_package_false
+
+        _uv_supports_exclude_newer_package_false.cache_clear()
+
+        def fake_run(cmd, capture_output, text, timeout, check):
+            if cmd == ["uv", "--version"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="uv 0.9.4\n", stderr="")
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="Usage...\n      --exclude-newer-package <EXCLUDE_NEWER_PACKAGE>\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr("prime_cli.commands.env.subprocess.run", fake_run)
+
+        assert _uv_supports_exclude_newer_package_false() is False
 
     def test_uv_simple_index_skips_false_flag_when_uv_lacks_support(self, monkeypatch):
         """Old uv versions reject `<package>=false`, so we should omit the flag."""

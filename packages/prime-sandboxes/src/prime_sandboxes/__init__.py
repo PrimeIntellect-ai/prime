@@ -23,6 +23,7 @@ from .exceptions import (
     SandboxTimeoutError,
     UploadTimeoutError,
 )
+from .images import Image, ImageBuildResult
 from .models import (
     AdvancedConfigs,
     BackgroundJob,
@@ -63,6 +64,8 @@ __all__ = [
     "TemplateClient",
     "AsyncTemplateClient",
     # Models
+    "Image",
+    "ImageBuildResult",
     "Sandbox",
     "SandboxStatus",
     "SandboxListResponse",

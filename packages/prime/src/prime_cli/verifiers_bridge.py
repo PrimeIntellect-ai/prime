@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -69,6 +70,48 @@ def is_help_request(primary_arg: str, passthrough_args: list[str]) -> bool:
     if primary_arg in ("-h", "--help"):
         return True
     return any(arg in ("-h", "--help") for arg in passthrough_args)
+
+
+def _normalize_eval_sampling_args(passthrough_args: list[str]) -> list[str]:
+    normalized = list(passthrough_args)
+
+    for i, arg in enumerate(normalized[:-1]):
+        if arg != "--sampling-args":
+            continue
+
+        try:
+            sampling_args = json.loads(normalized[i + 1])
+        except json.JSONDecodeError:
+            return normalized
+
+        if not isinstance(sampling_args, dict):
+            return normalized
+
+        if "enable_thinking" not in sampling_args:
+            return normalized
+
+        extra_body = sampling_args.get("extra_body")
+        if extra_body is not None and not isinstance(extra_body, dict):
+            return normalized
+
+        chat_template_kwargs = None
+        if isinstance(extra_body, dict):
+            chat_template_kwargs = extra_body.get("chat_template_kwargs")
+            if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
+                return normalized
+
+        enable_thinking = sampling_args.pop("enable_thinking")
+        extra_body_dict = dict(extra_body) if isinstance(extra_body, dict) else {}
+        chat_template_kwargs_dict = (
+            dict(chat_template_kwargs) if isinstance(chat_template_kwargs, dict) else {}
+        )
+        chat_template_kwargs_dict.setdefault("enable_thinking", enable_thinking)
+        extra_body_dict["chat_template_kwargs"] = chat_template_kwargs_dict
+        sampling_args["extra_body"] = extra_body_dict
+        normalized[i + 1] = json.dumps(sampling_args, separators=(",", ":"))
+        return normalized
+
+    return normalized
 
 
 def _sanitize_help_text(help_text: str, module_name: str, prime_command: str) -> str:
@@ -958,6 +1001,7 @@ def run_eval_passthrough(
         )
         raise typer.Exit(1)
 
+    passthrough_args = _normalize_eval_sampling_args(passthrough_args)
     args, env, model, base_url = _add_default_inference_and_key_args(passthrough_args, config)
     configured_base_url = (config.inference_url or "").strip().rstrip("/")
     _validate_model(model, base_url, configured_base_url)

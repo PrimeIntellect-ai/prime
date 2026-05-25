@@ -560,6 +560,51 @@ env_id = "wiki-search"
     assert prepared == [("wiki-search", "./environments")]
 
 
+def test_eval_run_rewrites_enable_thinking_sampling_arg(monkeypatch):
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+    )
+    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
+    monkeypatch.setattr("prime_cli.verifiers_bridge._validate_model", lambda *args: None)
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._preflight_inference_billing",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._prepare_single_environment",
+        lambda *args, **kwargs: ResolvedEnvironment(
+            original="primeintellect/gsm8k",
+            env_name="gsm8k",
+            install_mode="remote",
+        ),
+    )
+
+    commands = []
+
+    def fake_run_command(command, env=None):
+        commands.append(command)
+
+    monkeypatch.setattr("prime_cli.verifiers_bridge._run_command", fake_run_command)
+
+    run_eval_passthrough(
+        environment="primeintellect/gsm8k",
+        passthrough_args=[
+            "-m",
+            "Qwen/Qwen3.5-122B-A10B",
+            "--sampling-args",
+            '{"enable_thinking":false,"temperature":0.2}',
+        ],
+        skip_upload=True,
+        env_path=None,
+    )
+
+    assert commands
+    sampling_args_index = commands[0].index("--sampling-args")
+    assert commands[0][sampling_args_index + 1] == (
+        '{"temperature":0.2,"extra_body":{"chat_template_kwargs":{"enable_thinking":false}}}'
+    )
+
+
 def test_inference_client_uses_custom_timeout(monkeypatch):
     monkeypatch.setattr("prime_cli.api.inference.Config", lambda: DummyConfig())
 

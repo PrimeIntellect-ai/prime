@@ -607,6 +607,56 @@ def test_eval_run_rewrites_enable_thinking_sampling_arg(monkeypatch):
     )
 
 
+def test_eval_run_rewrites_all_enable_thinking_sampling_args(monkeypatch):
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+    )
+    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
+    monkeypatch.setattr("prime_cli.verifiers_bridge._validate_model", lambda *args: None)
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._preflight_inference_billing",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._prepare_single_environment",
+        lambda *args, **kwargs: ResolvedEnvironment(
+            original="primeintellect/gsm8k",
+            env_name="gsm8k",
+            install_mode="remote",
+        ),
+    )
+
+    commands = []
+
+    def fake_run_command(command, env=None):
+        commands.append(command)
+
+    monkeypatch.setattr("prime_cli.verifiers_bridge._run_command", fake_run_command)
+
+    run_eval_passthrough(
+        environment="primeintellect/gsm8k",
+        passthrough_args=[
+            "-m",
+            "Qwen/Qwen3.5-122B-A10B",
+            "--sampling-args",
+            '{"enable_thinking":false,"temperature":0.2}',
+            "--sampling-args",
+            '{"enable_thinking":true,"top_p":0.9}',
+        ],
+        skip_upload=True,
+        env_path=None,
+    )
+
+    assert commands
+    rewritten_sampling_args = [
+        commands[0][i + 1] for i, arg in enumerate(commands[0][:-1]) if arg == "--sampling-args"
+    ]
+    assert rewritten_sampling_args == [
+        '{"temperature":0.2,"extra_body":{"chat_template_kwargs":{"enable_thinking":false}}}',
+        '{"top_p":0.9,"extra_body":{"chat_template_kwargs":{"enable_thinking":true}}}',
+    ]
+
+
 def test_eval_run_rewrites_enable_thinking_in_config_sampling_args(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
@@ -655,6 +705,52 @@ sampling_args = { enable_thinking = false, temperature = 0.2 }
 
     rewritten_config = Path(commands[0][1])
     assert not rewritten_config.exists()
+
+
+def test_eval_run_cleans_temp_config_when_preflight_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
+    )
+    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
+    monkeypatch.setattr("prime_cli.verifiers_bridge._validate_model", lambda *args: None)
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._preflight_inference_billing",
+        lambda *args: None,
+    )
+
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        """
+model = "Qwen/Qwen3.5-122B-A10B"
+
+[[eval]]
+env_id = "primeintellect/gsm8k"
+sampling_args = { enable_thinking = false }
+""".strip(),
+        encoding="utf-8",
+    )
+
+    temp_config_path = tmp_path / "rewritten-eval.toml"
+    temp_config_path.write_text("temporary config", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._normalize_eval_config_target",
+        lambda _environment: (str(temp_config_path), temp_config_path),
+    )
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge._collect_eval_config_envs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("env prep failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="env prep failed"):
+        run_eval_passthrough(
+            environment=str(config_path),
+            passthrough_args=[],
+            skip_upload=True,
+            env_path=None,
+        )
+
+    assert not temp_config_path.exists()
 
 
 def test_inference_client_uses_custom_timeout(monkeypatch):

@@ -55,6 +55,8 @@ def test_generate_rl_config_template_keeps_default_surface_minimal() -> None:
 
     assert 'model = "Qwen/Qwen3.5-0.8B"' in template
     assert "# learning_rate = 3e-5 # optional; default is 1e-4" in template
+    assert "# [val]" not in template
+    assert "validation during training" not in template.lower()
 
     hidden_fields = [
         "oversampling_factor",
@@ -89,6 +91,18 @@ def test_flatten_config_schema_preserves_optional_array_item_types() -> None:
     }
 
     assert rows["buffer.env_ratios"] == "list[number]"
+
+
+def test_load_config_rejects_deprecated_val_section(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "dummy"\n'
+        "[val]\n"
+        "interval = 5\n"
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
 
 
 def test_load_config_accepts_sampling_reasoning_effort(tmp_path: Path) -> None:

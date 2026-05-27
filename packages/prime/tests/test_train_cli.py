@@ -65,6 +65,15 @@ def test_train_init_defaults_to_rl_toml() -> None:
         assert Path("rl.toml").exists()
 
 
+def test_train_configs_omits_deprecated_val_section() -> None:
+    result = runner.invoke(app, ["train", "configs", "--output", "json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)
+    sections = {item["section"] for item in data["configs"]}
+    assert "val" not in sections
+
+
 def test_train_request_submits_model_request(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 

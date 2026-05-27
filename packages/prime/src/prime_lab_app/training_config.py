@@ -46,8 +46,6 @@ def training_config_toml(raw: dict[str, Any]) -> str:
 
     if isinstance(raw.get("eval_config"), dict):
         config["eval"] = _rl_eval_config(raw["eval_config"])
-    if isinstance(raw.get("val_config"), dict):
-        config["val"] = raw["val_config"]
     if isinstance(raw.get("buffer_config"), dict):
         config["buffer"] = raw["buffer_config"]
 
@@ -76,12 +74,7 @@ def normalize_rl_config(config: dict[str, Any]) -> dict[str, Any]:
             updated["eval"] = _rl_eval_config(eval_config)
     else:
         updated.pop("eval_config", None)
-    if "val_config" in updated and "val" not in updated:
-        val_config = updated.pop("val_config")
-        if isinstance(val_config, dict):
-            updated["val"] = val_config
-    else:
-        updated.pop("val_config", None)
+    updated.pop("val_config", None)
     if "buffer_config" in updated and "buffer" not in updated:
         buffer_config = updated.pop("buffer_config")
         if isinstance(buffer_config, dict):

@@ -472,3 +472,67 @@ def test_sandbox_ssh_no_id_no_running_sandboxes(monkeypatch: pytest.MonkeyPatch)
     output = strip_ansi(result.output)
     assert "No running sandboxes available to SSH into." in output
     assert result.exit_code == 0
+
+
+def test_sandbox_ssh_no_id_pages_through_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The picker pages past page 1, even when page 1 holds only VMs.
+
+    Guards against reporting "no running sandboxes" when the only SSH-able
+    container lives on a later page.
+    """
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setattr("prime_cli.commands.sandbox.shutil.which", lambda _: "/usr/bin/ssh")
+
+    captured: dict[str, Any] = {}
+    pages = {
+        1: SimpleNamespace(
+            sandboxes=[
+                SimpleNamespace(
+                    id="sbx-vm",
+                    name="gpu-box",
+                    docker_image="cuda:12",
+                    vm=True,
+                    created_at="2026-05-01T00:00:00Z",
+                )
+            ],
+            total=2,
+            page=1,
+            per_page=100,
+            has_next=True,
+        ),
+        2: SimpleNamespace(
+            sandboxes=[
+                SimpleNamespace(
+                    id="sbx-container",
+                    name="builder",
+                    docker_image="python:3.12",
+                    vm=False,
+                    created_at="2026-05-02T00:00:00Z",
+                )
+            ],
+            total=2,
+            page=2,
+            per_page=100,
+            has_next=False,
+        ),
+    }
+
+    def mock_list(self: Any, **kwargs: Any) -> Any:
+        captured.setdefault("pages_requested", []).append(kwargs["page"])
+        return pages[kwargs["page"]]
+
+    def mock_get(self: Any, sandbox_id: str) -> Any:
+        captured["get_id"] = sandbox_id
+        return SimpleNamespace(id=sandbox_id, vm=False, status="STOPPED")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", mock_get)
+
+    result = runner.invoke(app, ["sandbox", "ssh"], input="1\n")
+
+    output = strip_ansi(result.output)
+    assert captured["pages_requested"] == [1, 2]
+    assert "sbx-container" in output
+    assert captured["get_id"] == "sbx-container"
+    assert result.exit_code == 1

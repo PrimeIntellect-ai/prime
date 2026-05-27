@@ -153,13 +153,22 @@ def _ssh_sandbox_display(item: Dict[str, Any]) -> str:
 
 def _select_sandbox_for_ssh(sandbox_client: SandboxClient) -> str:
     """Let the user pick a running sandbox to SSH into when no ID is given."""
+    # Page through every running sandbox before filtering, so SSH-able containers
+    # on later pages aren't dropped when a user has many running sandboxes.
+    sandboxes: List[Sandbox] = []
     with console.status("[bold blue]Loading sandboxes...", spinner="dots"):
-        sandbox_list = sandbox_client.list(status="RUNNING", per_page=100)
+        page = 1
+        while True:
+            sandbox_list = sandbox_client.list(status="RUNNING", per_page=100, page=page)
+            sandboxes.extend(sandbox_list.sandboxes)
+            if not sandbox_list.has_next:
+                break
+            page += 1
 
     # SSH is only supported for non-VM sandboxes (see _guard_vm_unsupported).
     items = [
         {"id": sb.id, "name": sb.name, "image": sb.docker_image}
-        for sb in sort_by_created(sandbox_list.sandboxes)
+        for sb in sort_by_created(sandboxes)
         if not sb.vm
     ]
 

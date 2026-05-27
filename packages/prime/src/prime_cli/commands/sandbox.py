@@ -178,6 +178,7 @@ def _select_sandbox_for_ssh(sandbox_client: SandboxClient) -> str:
         "No running sandboxes available to SSH into.",
         item_type="sandbox",
         display_fn=_ssh_sandbox_display,
+        page_size=50,
     )
     return str(selected.get("id"))
 

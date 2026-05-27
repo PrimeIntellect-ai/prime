@@ -536,3 +536,44 @@ def test_sandbox_ssh_no_id_pages_through_results(monkeypatch: pytest.MonkeyPatch
     assert "sbx-container" in output
     assert captured["get_id"] == "sbx-container"
     assert result.exit_code == 1
+
+
+def test_sandbox_ssh_no_id_picker_paginates_display(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With >50 SSH-able sandboxes the picker shows 50 per page with next/prev nav."""
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setattr("prime_cli.commands.sandbox.shutil.which", lambda _: "/usr/bin/ssh")
+
+    captured: dict[str, Any] = {}
+
+    def mock_list(self: Any, **kwargs: Any) -> Any:
+        # 60 running containers on a single API page; display pages them 50 at a time.
+        sandboxes = [
+            SimpleNamespace(
+                id=f"sbx-{i:03d}",
+                name=f"box-{i:03d}",
+                docker_image="python:3.12",
+                vm=False,
+                created_at=f"2026-05-01T00:{i:02d}:00Z",
+            )
+            for i in range(60)
+        ]
+        return SimpleNamespace(
+            sandboxes=sandboxes, total=60, page=1, per_page=100, has_next=False
+        )
+
+    def mock_get(self: Any, sandbox_id: str) -> Any:
+        captured["get_id"] = sandbox_id
+        return SimpleNamespace(id=sandbox_id, vm=False, status="STOPPED")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", mock_get)
+
+    # Advance to page 2, then select item 51 (global numbering -> sbx-050).
+    result = runner.invoke(app, ["sandbox", "ssh"], input="n\n51\n")
+
+    output = strip_ansi(result.output)
+    assert "page 1/2" in output
+    assert "page 2/2" in output
+    assert captured["get_id"] == "sbx-050"
+    assert result.exit_code == 1

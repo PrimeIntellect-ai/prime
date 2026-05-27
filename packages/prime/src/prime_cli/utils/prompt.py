@@ -2,6 +2,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional
 
 import typer
+from rich.markup import escape
 
 from .plain import get_console
 
@@ -46,12 +47,15 @@ def require_selection(
     empty_message: str,
     item_type: str = "item",
     display_fn: Optional[Callable[[Dict[str, Any]], str]] = None,
+    page_size: Optional[int] = None,
 ) -> Dict[str, Any]:
     if not items:
         console.print(f"[yellow]{empty_message}[/yellow]")
         raise typer.Exit()
 
-    selected = select_item_interactive(items, action, item_type=item_type, display_fn=display_fn)
+    selected = select_item_interactive(
+        items, action, item_type=item_type, display_fn=display_fn, page_size=page_size
+    )
     if not selected:
         console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit()
@@ -64,6 +68,7 @@ def select_item_interactive(
     action: str = "select",
     item_type: str = "item",
     display_fn: Optional[Callable[[Dict[str, Any]], str]] = None,
+    page_size: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """Display items and let user select one interactively.
 
@@ -73,6 +78,8 @@ def select_item_interactive(
         item_type: Type of item being selected (e.g., "secret", "variable")
         display_fn: Function to format each item for display.
                    Defaults to showing 'name' and 'description' fields.
+        page_size: When set and there are more items than this, show them
+                   page_size at a time with [n]ext / [p]rev navigation.
 
     Returns:
         Selected item or None if cancelled
@@ -81,6 +88,9 @@ def select_item_interactive(
         return None
 
     formatter = display_fn or _default_display_fn
+
+    if page_size is not None and len(items) > page_size:
+        return _select_item_paged(items, action, item_type, formatter, page_size)
 
     console.print(f"\n[bold]Select a {item_type} to {action}:[/bold]\n")
     for i, item in enumerate(items, 1):
@@ -100,6 +110,72 @@ def select_item_interactive(
             console.print("[red]Please enter a valid number[/red]")
         except KeyboardInterrupt:
             return None
+
+
+def _select_item_paged(
+    items: List[Dict[str, Any]],
+    action: str,
+    item_type: str,
+    formatter: Callable[[Dict[str, Any]], str],
+    page_size: int,
+) -> Optional[Dict[str, Any]]:
+    """Paged variant of the interactive selector with next/prev navigation.
+
+    Selection numbers are global (1..len(items)) — the number printed next to an
+    item is what you type, on any page.
+    """
+    total = len(items)
+    total_pages = (total + page_size - 1) // page_size
+    page = 0
+
+    while True:
+        start = page * page_size
+        end = min(start + page_size, total)
+
+        console.print(
+            f"\n[bold]Select a {item_type} to {action} "
+            f"(page {page + 1}/{total_pages}):[/bold]\n"
+        )
+        for i in range(start, end):
+            console.print(f"  {i + 1}. {formatter(items[i])}")
+
+        nav = []
+        if page + 1 < total_pages:
+            nav.append("[n] next page")
+        if page > 0:
+            nav.append("[p] prev page")
+        console.print(f"\n[dim]{escape('  '.join(nav))}[/dim]\n")
+
+        try:
+            choice = typer.prompt("Select (empty to cancel)", default="").strip()
+        except KeyboardInterrupt:
+            return None
+
+        if not choice:
+            return None
+
+        lowered = choice.lower()
+        if lowered == "n":
+            if page + 1 < total_pages:
+                page += 1
+            else:
+                console.print("[red]Already on the last page[/red]")
+            continue
+        if lowered == "p":
+            if page > 0:
+                page -= 1
+            else:
+                console.print("[red]Already on the first page[/red]")
+            continue
+
+        try:
+            selection = int(choice)
+        except ValueError:
+            console.print("[red]Please enter a number, or 'n'/'p' to navigate[/red]")
+            continue
+        if 1 <= selection <= total:
+            return items[selection - 1]
+        console.print(f"[red]Please enter a number between 1 and {total}[/red]")
 
 
 def prompt_for_value(

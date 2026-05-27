@@ -1,12 +1,35 @@
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+def _fake_sandbox(**overrides: Any) -> SimpleNamespace:
+    """A sandbox stand-in with every field the list formatter reads."""
+    now = datetime.now(timezone.utc)
+    base: dict[str, Any] = dict(
+        id="sbx-1",
+        name="box",
+        docker_image="python:3.12",
+        status="RUNNING",
+        cpu_cores=1.0,
+        memory_gb=2.0,
+        gpu_count=0,
+        region="us",
+        labels=[],
+        created_at=now,
+        started_at=now - timedelta(minutes=10),
+        timeout_minutes=60,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
 
 
 def test_sandbox_create_with_gpu_options(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -378,3 +401,111 @@ def test_sandbox_delete_by_label_all_users_passes_admin_scope(
     assert bulk_kwargs["user_id"] is None
 
     assert "Processed 1 sandbox(es)" in output
+
+
+def test_format_sandbox_expiry_running_shows_time_left() -> None:
+    now = datetime.now(timezone.utc)
+    sb = _fake_sandbox(status="RUNNING", started_at=now - timedelta(minutes=10), timeout_minutes=60)
+    result = _format_sandbox_expiry(sb)
+    # ~50 minutes left; assert the shape, not the exact minute (avoids clock flakiness).
+    assert result.endswith("left")
+    assert "timeout" not in result
+
+
+def test_format_sandbox_expiry_not_started_shows_timeout() -> None:
+    # No started_at yet -> the clock hasn't begun, so show the configured budget.
+    pending = _fake_sandbox(status="PENDING", started_at=None, timeout_minutes=60)
+    provisioning = _fake_sandbox(status="PROVISIONING", started_at=None, timeout_minutes=30)
+    assert _format_sandbox_expiry(pending) == "60m timeout"
+    assert _format_sandbox_expiry(provisioning) == "30m timeout"
+
+
+def test_format_sandbox_expiry_past_deadline_is_expiring() -> None:
+    now = datetime.now(timezone.utc)
+    sb = _fake_sandbox(
+        status="RUNNING", started_at=now - timedelta(minutes=120), timeout_minutes=60
+    )
+    assert _format_sandbox_expiry(sb) == "expiring"
+
+
+@pytest.mark.parametrize("status", ["TERMINATED", "TIMEOUT", "ERROR"])
+def test_format_sandbox_expiry_terminal_has_no_time_left(status: str) -> None:
+    assert _format_sandbox_expiry(_fake_sandbox(status=status)) == "-"
+
+
+def test_sandbox_list_table_has_expires_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setenv("COLUMNS", "200")  # keep the wide table from wrapping the header
+
+    now = datetime.now(timezone.utc)
+
+    def mock_list(self: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            sandboxes=[
+                _fake_sandbox(
+                    id="sbx-run",
+                    status="RUNNING",
+                    started_at=now - timedelta(minutes=10),
+                    timeout_minutes=60,
+                ),
+                _fake_sandbox(
+                    id="sbx-pending", status="PENDING", started_at=None, timeout_minutes=45
+                ),
+            ],
+            total=2,
+            page=1,
+            per_page=50,
+            has_next=False,
+        )
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
+
+    result = runner.invoke(app, ["sandbox", "list"])
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, f"Failed: {result.output}"
+    assert "Expires" in output
+    assert "left" in output  # running sandbox shows time remaining
+    assert "45m timeout" in output  # pending sandbox shows its configured budget
+
+
+def test_sandbox_list_json_includes_expiry_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+    now = datetime.now(timezone.utc)
+
+    def mock_list(self: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            sandboxes=[
+                _fake_sandbox(
+                    id="sbx-run",
+                    status="RUNNING",
+                    started_at=now - timedelta(minutes=10),
+                    timeout_minutes=60,
+                ),
+                _fake_sandbox(
+                    id="sbx-pending", status="PENDING", started_at=None, timeout_minutes=45
+                ),
+            ],
+            total=2,
+            page=1,
+            per_page=50,
+            has_next=False,
+        )
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
+
+    result = runner.invoke(app, ["sandbox", "list", "--output", "json"])
+
+    assert result.exit_code == 0, f"Failed: {result.output}"
+    import json as _json
+
+    data = _json.loads(result.output)
+    by_id = {s["id"]: s for s in data["sandboxes"]}
+    # Running sandbox has a concrete deadline; pending one has none yet.
+    assert by_id["sbx-run"]["timeout_minutes"] == 60
+    assert by_id["sbx-run"]["expires_at"] is not None
+    assert by_id["sbx-pending"]["timeout_minutes"] == 45
+    assert by_id["sbx-pending"]["expires_at"] is None

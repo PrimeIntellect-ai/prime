@@ -7,6 +7,7 @@ import string
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -45,6 +46,7 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.display import SANDBOX_STATUS_COLORS
+from ..utils.time_utils import now_utc, to_utc
 
 app = PlainTyper(help="Manage code sandboxes", no_args_is_help=True)
 console = get_console()
@@ -53,7 +55,8 @@ console = get_console()
 config = Config()
 
 LIST_SANDBOXES_JSON_HELP = json_output_help(
-    ".sandboxes[] = {id, name, image, status, resources, labels[], created_at}",
+    ".sandboxes[] = {id, name, image, status, resources, labels[], created_at, "
+    "timeout_minutes, expires_at?}",
     ".total = number",
     ".page = number",
     ".per_page = number",
@@ -81,8 +84,52 @@ LIST_SANDBOX_PORTS_JSON_HELP = json_output_help(
 )
 
 
+# Statuses where a sandbox is finished and has no remaining lifetime.
+_TERMINAL_SANDBOX_STATUSES = {"TERMINATED", "TIMEOUT", "ERROR"}
+
+
+def _short_duration(seconds: int) -> str:
+    """Format a positive duration compactly (e.g. '45m', '1h05m', '2d3h')."""
+    if seconds < 60:
+        return "<1m"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        hours, minutes = divmod(seconds // 60, 60)
+        return f"{hours}h{minutes:02d}m" if minutes else f"{hours}h"
+    days, remainder = divmod(seconds, 86400)
+    hours = remainder // 3600
+    return f"{days}d{hours}h" if hours else f"{days}d"
+
+
+def _sandbox_deadline(sandbox: Sandbox) -> Optional[datetime]:
+    """When the sandbox times out, or None if the clock hasn't started.
+
+    Mirrors the backend rule (scheduler): deadline = started_at + timeout_minutes,
+    and the timeout only counts down once the sandbox is RUNNING.
+    """
+    if sandbox.status == "RUNNING" and sandbox.started_at:
+        return to_utc(sandbox.started_at) + timedelta(minutes=sandbox.timeout_minutes)
+    return None
+
+
+def _format_sandbox_expiry(sandbox: Sandbox) -> str:
+    """Human-readable time left before expiry, or the configured timeout budget."""
+    if sandbox.status in _TERMINAL_SANDBOX_STATUSES:
+        return "-"
+    deadline = _sandbox_deadline(sandbox)
+    if deadline is None:
+        # Not running yet — the timeout hasn't started, so show the budget.
+        return f"{sandbox.timeout_minutes}m timeout"
+    remaining = int((deadline - now_utc()).total_seconds())
+    if remaining <= 0:
+        return "expiring"
+    return f"{_short_duration(remaining)} left"
+
+
 def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
     """Format sandbox data for list display (both table and JSON)"""
+    deadline = _sandbox_deadline(sandbox)
     return {
         "id": sandbox.id,
         "name": sandbox.name,
@@ -94,6 +141,9 @@ def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
         "labels_list": sandbox.labels,  # For JSON output
         "created_at": iso_timestamp(sandbox.created_at),  # For JSON output
         "age": human_age(sandbox.created_at),  # For table output
+        "expires": _format_sandbox_expiry(sandbox),  # For table output
+        "timeout_minutes": sandbox.timeout_minutes,  # For JSON output
+        "expires_at": iso_timestamp(deadline) if deadline else None,  # For JSON output
     }
 
 
@@ -195,6 +245,7 @@ def list_sandboxes_cmd(
                 ("Resources", "magenta"),
                 ("Labels", "white"),
                 ("Age", "blue"),
+                ("Expires", "yellow"),
             ],
         )
 
@@ -216,6 +267,8 @@ def list_sandboxes_cmd(
                     "region": sandbox_data["region"],
                     "labels": sandbox_data["labels_list"],
                     "created_at": sandbox_data["created_at"],
+                    "timeout_minutes": sandbox_data["timeout_minutes"],
+                    "expires_at": sandbox_data["expires_at"],
                 }
                 sandboxes_data.append(json_sandbox)
 
@@ -242,6 +295,7 @@ def list_sandboxes_cmd(
                     sandbox_data["resources"],
                     sandbox_data["labels"],
                     sandbox_data["age"],
+                    sandbox_data["expires"],
                 )
 
             console.print(table)

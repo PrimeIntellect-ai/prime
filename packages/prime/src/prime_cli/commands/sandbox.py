@@ -40,6 +40,7 @@ from ..utils import (
     obfuscate_env_vars,
     obfuscate_secrets,
     output_data_as_json,
+    require_selection,
     sort_by_created,
     status_color,
     validate_output_format,
@@ -143,6 +144,33 @@ def _guard_vm_unsupported(sandbox: Sandbox, feature_name: str) -> None:
     if sandbox.vm:
         console.print(f"[red]Error:[/red] {feature_name} is not yet supported for VM sandboxes.")
         raise typer.Exit(1)
+
+
+def _ssh_sandbox_display(item: Dict[str, Any]) -> str:
+    """Format a sandbox row for the interactive SSH picker."""
+    return f"{item['id']}  {item['name']}  [dim]({item['image']})[/dim]"
+
+
+def _select_sandbox_for_ssh(sandbox_client: SandboxClient) -> str:
+    """Let the user pick a running sandbox to SSH into when no ID is given."""
+    with console.status("[bold blue]Loading sandboxes...", spinner="dots"):
+        sandbox_list = sandbox_client.list(status="RUNNING", per_page=100)
+
+    # SSH is only supported for non-VM sandboxes (see _guard_vm_unsupported).
+    items = [
+        {"id": sb.id, "name": sb.name, "image": sb.docker_image}
+        for sb in sort_by_created(sandbox_list.sandboxes)
+        if not sb.vm
+    ]
+
+    selected = require_selection(
+        items,
+        "SSH into",
+        "No running sandboxes available to SSH into.",
+        item_type="sandbox",
+        display_fn=_ssh_sandbox_display,
+    )
+    return str(selected.get("id"))
 
 
 @app.command("list", epilog=LIST_SANDBOXES_JSON_HELP)
@@ -1389,9 +1417,11 @@ def list_ports(
         raise typer.Exit(1)
 
 
-@app.command("ssh", no_args_is_help=True)
+@app.command("ssh")
 def ssh_connect(
-    sandbox_id: str = typer.Argument(..., help="Sandbox ID to SSH into"),
+    sandbox_id: Optional[str] = typer.Argument(
+        None, help="Sandbox ID to SSH into (interactive selection if not provided)"
+    ),
     ssh_args: Optional[List[str]] = typer.Argument(
         None, help="Additional SSH arguments (e.g., -- -v for verbose)"
     ),
@@ -1405,9 +1435,11 @@ def ssh_connect(
     """Connect to a sandbox via SSH.
 
     This command creates a SSH session with an ephemeral key and cleans up on disconnect.
+    Run without a sandbox ID to pick from your running sandboxes interactively.
 
     \b
     Examples:
+        prime sandbox ssh
         prime sandbox ssh sb_abc123
         prime sandbox ssh sb_abc123 --shell bash
         prime sandbox ssh sb_abc123 -- -L 3000:localhost:3000
@@ -1419,7 +1451,7 @@ def ssh_connect(
 
     def cleanup() -> None:
         """Clean up the SSH session and temporary keys."""
-        if session_id and sandbox_client:
+        if session_id and sandbox_client and sandbox_id:
             try:
                 console.print("\n[bold blue]Cleaning up SSH session...[/bold blue]")
                 sandbox_client.close_ssh_session(sandbox_id, session_id)
@@ -1440,6 +1472,10 @@ def ssh_connect(
 
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
+
+        # Pick a sandbox interactively when no ID was provided
+        if sandbox_id is None:
+            sandbox_id = _select_sandbox_for_ssh(sandbox_client)
 
         # Check if sandbox is running
         with console.status("[bold blue]Checking sandbox status...", spinner="dots"):

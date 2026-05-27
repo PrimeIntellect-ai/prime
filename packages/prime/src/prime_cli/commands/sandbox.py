@@ -47,7 +47,7 @@ from ..utils import (
 )
 from ..utils.display import SANDBOX_STATUS_COLORS
 
-app = PlainTyper(help="Manage code sandboxes", no_args_is_help=True)
+app = PlainTyper(help="Manage sandboxes", no_args_is_help=True)
 console = get_console()
 
 
@@ -223,7 +223,7 @@ def list_sandboxes_cmd(
         )
 
         table = build_table(
-            f"Code Sandboxes (Total: {sandbox_list.total})",
+            f"Sandboxes (Total: {sandbox_list.total})",
             [
                 ("ID", "cyan"),
                 ("Name", "blue"),

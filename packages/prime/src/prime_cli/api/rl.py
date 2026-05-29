@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from prime_cli.core import APIClient, APIError, ValidationError
 
@@ -76,7 +76,11 @@ class RLRun(BaseModel):
     max_tokens: Optional[int] = Field(None, alias="maxTokens")
     batch_size: int = Field(..., alias="batchSize")
     loss: Optional[str] = "rl"
-    teacher_config: Optional[Dict[str, Any]] = Field(None, alias="teacherConfig")
+    teacher: Optional[Dict[str, Any]] = Field(
+        None,
+        validation_alias=AliasChoices("teacher", "teacherConfig"),
+        serialization_alias="teacher",
+    )
     base_model: str = Field(..., alias="baseModel")
     environments: List[Dict[str, Any]] = Field(default_factory=list)
     run_config: Optional[Dict[str, Any]] = Field(None, alias="runConfig")

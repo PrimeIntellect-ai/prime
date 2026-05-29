@@ -17,9 +17,11 @@ on:
 jobs:
   tag-and-release:
     runs-on: ubuntu-latest
+    environment: pypi-prod
     permissions:
       contents: write
       packages: write
+      id-token: write
     outputs:
       version: ${{ steps.version.outputs.version }}
       release_created: ${{ steps.release_status.outputs.created }}
@@ -103,11 +105,6 @@ jobs:
         run: |
           uv build --out-dir dist
 
-          # Install twine for publishing
-          uv venv
-          source .venv/bin/activate
-          uv pip install twine
-
       - name: Upload build artifacts
         if: steps.check_tag.outputs.exists != 'true'
         uses: actions/upload-artifact@v4
@@ -124,16 +121,12 @@ jobs:
           files: packages/prime/dist/*
           generate_release_notes: true
 
-      # Publish to PyPI
+      # Publish to PyPI via Trusted Publishing (OIDC)
       - name: Publish to PyPI
         if: steps.check_tag.outputs.exists != 'true'
-        working-directory: packages/prime
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: |
-          source .venv/bin/activate
-          twine upload dist/*
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: packages/prime/dist
 
       - name: Notify Slack
         if: steps.check_tag.outputs.exists != 'true'

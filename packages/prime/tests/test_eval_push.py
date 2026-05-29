@@ -1,6 +1,7 @@
 import json
 
 import pytest
+import typer
 from prime_cli.commands.evals import (
     _has_eval_files,
     _load_eval_directory,
@@ -9,6 +10,7 @@ from prime_cli.commands.evals import (
 )
 from prime_cli.main import app
 from typer.testing import CliRunner
+from typing_extensions import cast
 
 runner = CliRunner()
 
@@ -185,7 +187,7 @@ def test_push_eval_forwards_name_override(monkeypatch, tmp_path):
 
 class TestPushSingleEval:
     def test_create_evaluation_defaults_to_private(self, tmp_path, monkeypatch):
-        metadata = {"env": "gsm8k", "model": "gpt-4"}
+        metadata = {"env": "owner/gsm8k", "model": "gpt-4"}
         (tmp_path / "metadata.json").write_text(json.dumps(metadata))
         (tmp_path / "results.jsonl").write_text("")
 
@@ -210,9 +212,24 @@ class TestPushSingleEval:
 
         assert eval_id == "eval-123"
         assert captured["is_public"] is False
+        assert captured["environments"] == [{"slug": "owner/gsm8k"}]
+
+    def test_create_evaluation_requires_pushed_environment(self, tmp_path, capsys):
+        metadata = {"env": "gsm8k", "model": "gpt-4"}
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+        (tmp_path / "results.jsonl").write_text("")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            _push_single_eval(str(tmp_path), None, None, None)
+
+        assert cast(typer.Exit, exc_info.value).exit_code == 1
+        output = capsys.readouterr().out
+        assert "Evaluation uploads require a pushed environment" in output
+        assert "prime env push gsm8k" in output
+        assert "--env <owner>/gsm8k" in output
 
     def test_create_evaluation_passes_public_flag(self, tmp_path, monkeypatch):
-        metadata = {"env": "gsm8k", "model": "gpt-4"}
+        metadata = {"env": "owner/gsm8k", "model": "gpt-4"}
         (tmp_path / "metadata.json").write_text(json.dumps(metadata))
         (tmp_path / "results.jsonl").write_text("")
 
@@ -239,7 +256,7 @@ class TestPushSingleEval:
         assert captured["is_public"] is True
 
     def test_create_evaluation_prefers_explicit_name_override(self, tmp_path, monkeypatch):
-        metadata = {"env": "gsm8k", "model": "gpt-4", "eval_name": "metadata name"}
+        metadata = {"env": "owner/gsm8k", "model": "gpt-4", "eval_name": "metadata name"}
         (tmp_path / "metadata.json").write_text(json.dumps(metadata))
         (tmp_path / "results.jsonl").write_text("")
 
@@ -297,7 +314,7 @@ class TestPushSingleEval:
         assert captured["name"] == "explicit override"
 
     def test_push_single_eval_prints_returned_viewer_url(self, tmp_path, monkeypatch, capsys):
-        metadata = {"env": "gsm8k", "model": "gpt-4"}
+        metadata = {"env": "owner/gsm8k", "model": "gpt-4"}
         (tmp_path / "metadata.json").write_text(json.dumps(metadata))
         (tmp_path / "results.jsonl").write_text("")
 
@@ -331,7 +348,7 @@ class TestPushSingleEval:
     def test_push_single_eval_falls_back_to_configured_viewer_url(
         self, tmp_path, monkeypatch, capsys
     ):
-        metadata = {"env": "gsm8k", "model": "gpt-4"}
+        metadata = {"env": "owner/gsm8k", "model": "gpt-4"}
         (tmp_path / "metadata.json").write_text(json.dumps(metadata))
         (tmp_path / "results.jsonl").write_text("")
 

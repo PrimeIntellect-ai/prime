@@ -29,6 +29,7 @@ console = get_console()
 
 DEFAULT_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_ENV_DIR_PATH = "./environments"
+DEFAULT_ENDPOINTS_PATH = "./configs/endpoints.toml"
 PRIME_SLUG = "primeintellect"
 INTERNAL_ENV_DISPLAY_HEADER = "X-Prime-Eval-Env-Display"
 EVAL_PREFLIGHT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=60.0)
@@ -39,7 +40,7 @@ MODULE_TO_PRIME_COMMAND = {
     "verifiers.cli.commands.install": "prime env install",
     "verifiers.cli.commands.build": "prime env build",
     "verifiers.cli.commands.setup": "prime lab setup",
-    "verifiers.cli.tui": "prime eval tui",
+    "verifiers.cli.tui": "prime eval view",
 }
 
 
@@ -56,6 +57,12 @@ class ResolvedEnvironment:
     recommend_push: bool = False
     push_reason: Optional[str] = None
     local_env_path: Optional[Path] = None
+
+
+@dataclass(frozen=True)
+class EndpointResolution:
+    model: str
+    base_url: str
 
 
 def is_help_request(primary_arg: str, passthrough_args: list[str]) -> bool:
@@ -202,16 +209,20 @@ def print_lab_setup_help() -> None:
     _write_help(help_text)
 
 
-def run_eval_tui(env_dir: Optional[str], outputs_dir: Optional[str]) -> None:
-    plugin = load_verifiers_prime_plugin(console=console)
-    env = os.environ.copy()
-    env["VF_ENV_DIR"] = env_dir or "./environments"
-    env["VF_OUTPUTS_DIR"] = outputs_dir or "./outputs"
-    command = plugin.build_module_command(plugin.tui_module)
-    _run_command(command, env=env)
+def run_eval_view(env_dir: Optional[str], outputs_dir: Optional[str], limit: int = 50) -> None:
+    from prime_lab_app import run_eval_view as run_prime_eval_view
+
+    run_prime_eval_view(
+        limit=limit,
+        env_dir=env_dir or "./environments",
+        outputs_dir=outputs_dir or "./outputs",
+        workspace=Path.cwd(),
+    )
 
 
-def _parse_value_option(args: list[str], long_flag: str, short_flag: str) -> Optional[str]:
+def _parse_value_option(
+    args: list[str], long_flag: str, short_flag: Optional[str]
+) -> Optional[str]:
     for idx, arg in enumerate(args):
         if arg == long_flag or arg == short_flag:
             if idx + 1 < len(args):
@@ -231,6 +242,54 @@ def _has_flag(args: list[str], long_flag: str, short_flag: str) -> bool:
         if arg.startswith(f"{long_flag}="):
             return True
     return False
+
+
+def _resolve_endpoint_alias(args: list[str], model: str) -> Optional[EndpointResolution]:
+    endpoints_path = _parse_value_option(args, "--endpoints-path", "-e") or DEFAULT_ENDPOINTS_PATH
+    try:
+        from verifiers.utils.eval_utils import load_endpoints, resolve_endpoints_file
+    except ImportError:
+        return None
+
+    endpoints_file = resolve_endpoints_file(endpoints_path)
+    if endpoints_file is None or not endpoints_file.exists():
+        return None
+
+    try:
+        endpoints = load_endpoints(str(endpoints_file))
+    except (ImportError, AttributeError, OSError, ValueError):
+        return None
+
+    endpoint_group = endpoints.get(model)
+    if not endpoint_group:
+        return None
+
+    endpoint = endpoint_group[0]
+    return EndpointResolution(
+        model=str(endpoint.get("model") or model),
+        base_url=str(endpoint.get("url") or "").rstrip("/"),
+    )
+
+
+def _provider_base_url(provider: Optional[str]) -> Optional[str]:
+    if not provider:
+        return None
+    try:
+        from verifiers.scripts.eval import PROVIDER_CONFIGS
+    except ImportError:
+        return None
+
+    provider_config = PROVIDER_CONFIGS.get(provider)
+    if not provider_config:
+        return None
+    url = provider_config.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+    return url.rstrip("/")
+
+
+def _env_dir_path_arg(args: list[str]) -> str:
+    return _parse_value_option(args, "--env-dir-path", None) or DEFAULT_ENV_DIR_PATH
 
 
 def _is_config_target(raw: str) -> bool:
@@ -715,7 +774,7 @@ def _collect_eval_config_envs(config_path: Path, fallback_env_dir: str) -> list[
     for entry in eval_entries:
         if not isinstance(entry, dict):
             continue
-        env_id = entry.get("env_id")
+        env_id = entry.get("env_id") or entry.get("id")
         if not isinstance(env_id, str) or not env_id:
             continue
         env_dir_path = entry.get("env_dir_path")
@@ -727,6 +786,11 @@ def _collect_eval_config_envs(config_path: Path, fallback_env_dir: str) -> list[
         seen.add(key)
         resolved.append(key)
     return resolved
+
+
+def _env_name_from_reference(env_reference: str) -> str:
+    base_ref, _version = _split_version(env_reference)
+    return base_ref.rsplit("/", 1)[-1]
 
 
 def _collect_gepa_config_env(config_path: Path, fallback_env_dir: str) -> Optional[tuple[str, str]]:
@@ -765,8 +829,17 @@ def _add_default_inference_and_key_args(
     model = _parse_value_option(args, "--model", "-m") or DEFAULT_MODEL
     configured_base = (config.inference_url or "").strip().rstrip("/")
     base = _parse_value_option(args, "--api-base-url", "-b")
+    provider = _parse_value_option(args, "--provider", "-p")
+    api_key_var = _parse_value_option(args, "--api-key-var", "-k")
+    if api_key_var is None:
+        env["PRIME_API_KEY"] = config.api_key
+
     if base:
         base = base.rstrip("/")
+    elif provider is not None:
+        base = _provider_base_url(provider) or ""
+    elif endpoint := _resolve_endpoint_alias(args, model):
+        return args, env, endpoint.model, endpoint.base_url
     elif configured_base:
         base = configured_base
         args.extend(["-b", base])
@@ -776,9 +849,7 @@ def _add_default_inference_and_key_args(
         )
         raise typer.Exit(1)
 
-    api_key_var = _parse_value_option(args, "--api-key-var", "-k")
-    if api_key_var is None:
-        env["PRIME_API_KEY"] = config.api_key
+    if api_key_var is None and provider is None:
         args.extend(["-k", "PRIME_API_KEY"])
 
     return args, env, model, base
@@ -892,14 +963,16 @@ def run_eval_passthrough(
     _validate_model(model, base_url, configured_base_url)
     _preflight_inference_billing(model, base_url, configured_base_url)
 
-    env_dir_path = _parse_value_option(args, "--env-dir-path", "-p") or DEFAULT_ENV_DIR_PATH
+    env_dir_path = _env_dir_path_arg(args)
     run_target = environment
     upstream_slug: Optional[str] = None
     env_name_for_upload: Optional[str] = None
     resolved_env: Optional[ResolvedEnvironment] = None
+    config_envs: list[tuple[str, str]] = []
 
     if _is_config_target(environment):
-        for env_ref, ref_env_dir in _collect_eval_config_envs(Path(environment), env_dir_path):
+        config_envs = _collect_eval_config_envs(Path(environment), env_dir_path)
+        for env_ref, ref_env_dir in config_envs:
             _prepare_single_environment(plugin, env_ref, ref_env_dir)
     else:
         resolved_env = _prepare_single_environment(plugin, environment, env_dir_path)
@@ -914,7 +987,11 @@ def run_eval_passthrough(
     if not skip_upload and not _has_flag(args, "--save-results", "-s"):
         args.append("-s")
 
-    job_target = env_name_for_upload or Path(environment).stem
+    job_target = env_name_for_upload
+    if job_target is None and config_envs:
+        job_target = _env_name_from_reference(config_envs[0][0])
+    if job_target is None:
+        job_target = Path(environment).stem
     job_id = _build_job_id(job_target, model)
     args.extend(["--header", f"X-PI-Job-Id: {job_id}"])
 
@@ -996,7 +1073,7 @@ def run_gepa_passthrough(environment_or_config: str, passthrough_args: list[str]
         raise typer.Exit(1)
 
     args, env, _model, _base_url = _add_default_inference_and_key_args(passthrough_args, config)
-    env_dir_path = _parse_value_option(args, "--env-dir-path", "-p") or DEFAULT_ENV_DIR_PATH
+    env_dir_path = _env_dir_path_arg(args)
 
     run_target = environment_or_config
     if _is_config_target(environment_or_config):

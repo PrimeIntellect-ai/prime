@@ -1,4 +1,4 @@
-"""Hosted RL (Reinforcement Learning) API client."""
+"""Hosted Training API client."""
 
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
@@ -9,7 +9,7 @@ from prime_cli.core import APIClient, APIError, ValidationError
 
 
 class RLModel(BaseModel):
-    """Model available for RL training."""
+    """Model available for Hosted Training."""
 
     name: str = Field(..., description="Model name")
     at_capacity: bool = Field(False, alias="atCapacity")
@@ -19,6 +19,13 @@ class RLModel(BaseModel):
     )
     inference_output_price_per_mtok: Optional[float] = Field(
         None, alias="inferenceOutputPricePerMtok"
+    )
+    list_training_price_per_mtok: Optional[float] = Field(None, alias="listTrainingPricePerMtok")
+    list_inference_input_price_per_mtok: Optional[float] = Field(
+        None, alias="listInferenceInputPricePerMtok"
+    )
+    list_inference_output_price_per_mtok: Optional[float] = Field(
+        None, alias="listInferenceOutputPricePerMtok"
     )
     effective_training_price_per_mtok: Optional[float] = Field(
         None, alias="effectiveTrainingPricePerMtok"
@@ -33,9 +40,27 @@ class RLModel(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    def resolve_prices(self, category: str) -> tuple[Optional[float], Optional[float]]:
+        """Return ``(list_price, effective_price)`` for ``category``.
+
+        Categories: ``training``, ``inference_input``, ``inference_output``.
+
+        Post-swap backends populate ``list_*`` with the un-discounted price and
+        the legacy ``*_price_per_mtok`` with the effective (charged) price.
+        Pre-swap backends omit ``list_*`` and keep ``legacy = list``,
+        ``effective = charged``.
+        """
+        list_attr = f"list_{category}_price_per_mtok"
+        legacy_attr = f"{category}_price_per_mtok"
+        effective_attr = f"effective_{category}_price_per_mtok"
+        list_value = getattr(self, list_attr)
+        if list_value is not None:
+            return list_value, getattr(self, legacy_attr)
+        return getattr(self, legacy_attr), getattr(self, effective_attr)
+
 
 class RLRun(BaseModel):
-    """RL Training Run."""
+    """Hosted Training run."""
 
     id: str = Field(..., description="Run ID")
     name: Optional[str] = Field(None, description="Run name")
@@ -58,6 +83,7 @@ class RLRun(BaseModel):
     buffer_config: Optional[Dict[str, Any]] = Field(None, alias="bufferConfig")
     learning_rate: Optional[float] = Field(None, alias="learningRate")
     lora_alpha: Optional[int] = Field(None, alias="loraAlpha")
+    max_inflight_rollouts: Optional[int] = Field(None, alias="maxInflightRollouts")
     oversampling_factor: Optional[float] = Field(None, alias="oversamplingFactor")
     max_async_level: Optional[int] = Field(None, alias="maxAsyncLevel")
 
@@ -69,6 +95,7 @@ class RLRun(BaseModel):
     # Queue info
     runs_ahead: Optional[int] = Field(None, alias="runsAhead")
     queue_reason: Optional[str] = Field(None, alias="queueReason")
+    notice: Optional[str] = Field(None, alias="notice")
 
     # Timestamps
     started_at: Optional[datetime] = Field(None, alias="startedAt")
@@ -85,7 +112,7 @@ class RLRun(BaseModel):
 
 
 class RLCheckpoint(BaseModel):
-    """Checkpoint from an RL training run."""
+    """Checkpoint from a Hosted Training run."""
 
     id: str = Field(..., description="Checkpoint ID")
     rft_run_id: str = Field(..., alias="rftRunId")
@@ -100,7 +127,7 @@ class RLCheckpoint(BaseModel):
 
 
 class EnvServerInfo(BaseModel):
-    """Env-server pod info for an RL run."""
+    """Env-server pod info for a Hosted Training run."""
 
     env_name: Optional[str] = Field(None, description="Environment name")
     env_index: Optional[int] = Field(None, description="Environment server index")
@@ -111,13 +138,13 @@ class EnvServerInfo(BaseModel):
 
 
 class RLClient:
-    """Client for hosted RL API."""
+    """Client for the Hosted Training API."""
 
     def __init__(self, client: APIClient) -> None:
         self.client = client
 
     def list_models(self, team_id: Optional[str] = None) -> List[RLModel]:
-        """List available models for RL training."""
+        """List available models for Hosted Training."""
         try:
             params = {}
             if team_id:
@@ -127,11 +154,11 @@ class RLClient:
             return [RLModel.model_validate(model) for model in models_data]
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to list RL models: {e.response.text}")
-            raise APIError(f"Failed to list RL models: {str(e)}")
+                raise APIError(f"Failed to list Hosted Training models: {e.response.text}")
+            raise APIError(f"Failed to list Hosted Training models: {str(e)}")
 
     def list_runs(self, team_id: Optional[str] = None) -> List[RLRun]:
-        """List RL training runs for the authenticated user."""
+        """List Hosted Training runs for the authenticated user."""
         try:
             params = {}
             if team_id:
@@ -141,8 +168,8 @@ class RLClient:
             return [RLRun.model_validate(run) for run in runs_data]
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to list RL runs: {e.response.text}")
-            raise APIError(f"Failed to list RL runs: {str(e)}")
+                raise APIError(f"Failed to list Hosted Training runs: {e.response.text}")
+            raise APIError(f"Failed to list Hosted Training runs: {str(e)}")
 
     def create_run(
         self,
@@ -169,6 +196,7 @@ class RLClient:
         buffer_config: Optional[Dict[str, Any]] = None,
         learning_rate: Optional[float] = None,
         lora_alpha: Optional[int] = None,
+        max_inflight_rollouts: Optional[int] = None,
         oversampling_factor: Optional[float] = None,
         max_async_level: Optional[int] = None,
         checkpoints_config: Optional[Dict[str, Any]] = None,
@@ -181,7 +209,7 @@ class RLClient:
         reasoning_effort: Optional[Literal["low", "medium", "high"]] = None,
         run_config: Optional[Dict[str, Any]] = None,
     ) -> RLRun:
-        """Create a new RL training run."""
+        """Create a new Hosted Training run."""
         try:
             secrets_list: List[Dict[str, str]] = []
             if secrets:
@@ -250,6 +278,9 @@ class RLClient:
             if lora_alpha is not None:
                 payload["lora_alpha"] = lora_alpha
 
+            if max_inflight_rollouts is not None:
+                payload["max_inflight_rollouts"] = max_inflight_rollouts
+
             if oversampling_factor is not None:
                 payload["oversampling_factor"] = oversampling_factor
 
@@ -290,30 +321,40 @@ class RLClient:
             raise  # Let ValidationError pass through for proper CLI handling
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to create RL run: {e.response.text}")
-            raise APIError(f"Failed to create RL run: {str(e)}")
+                raise APIError(f"Failed to create Hosted Training run: {e.response.text}")
+            raise APIError(f"Failed to create Hosted Training run: {str(e)}")
+
+    def preview_run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Preview or validate an RL run payload without creating a run."""
+
+        try:
+            return self.client.post("/rft/runs/preview", json=payload)
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to preview RL run: {e.response.text}")
+            raise APIError(f"Failed to preview RL run: {str(e)}")
 
     def stop_run(self, run_id: str) -> RLRun:
-        """Stop a running RL training run."""
+        """Stop a running Hosted Training run."""
         try:
             response = self.client.request("PUT", f"/rft/runs/{run_id}/stop")
             return RLRun.model_validate(response.get("run"))
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to stop RL run: {e.response.text}")
-            raise APIError(f"Failed to stop RL run: {str(e)}")
+                raise APIError(f"Failed to stop Hosted Training run: {e.response.text}")
+            raise APIError(f"Failed to stop Hosted Training run: {str(e)}")
 
     def delete_run(self, run_id: str) -> None:
-        """Delete an RL run."""
+        """Delete a Hosted Training run."""
         try:
             self.client.delete(f"/rft/runs/{run_id}")
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to delete RL run: {e.response.text}")
-            raise APIError(f"Failed to delete RL run: {str(e)}")
+                raise APIError(f"Failed to delete Hosted Training run: {e.response.text}")
+            raise APIError(f"Failed to delete Hosted Training run: {str(e)}")
 
     def restart_run(self, run_id: str) -> RLRun:
-        """Restart a running RL training run from its latest checkpoint.
+        """Restart a running Hosted Training run from its latest checkpoint.
 
         Only RUNNING runs can be restarted (checkpoints still on PVC).
         For STOPPED/FAILED/COMPLETED runs, checkpoints have been cleaned up.
@@ -323,13 +364,13 @@ class RLClient:
             return RLRun.model_validate(response.get("run"))
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to restart RL run: {e.response.text}")
-            raise APIError(f"Failed to restart RL run: {str(e)}")
+                raise APIError(f"Failed to restart Hosted Training run: {e.response.text}")
+            raise APIError(f"Failed to restart Hosted Training run: {str(e)}")
 
     def list_checkpoints(
         self, run_id: str, status_filter: Optional[str] = None
     ) -> List[RLCheckpoint]:
-        """List checkpoints for an RL run."""
+        """List checkpoints for a Hosted Training run."""
         try:
             params: Dict[str, str] = {}
             if status_filter:
@@ -346,29 +387,52 @@ class RLClient:
             raise APIError(f"Failed to list checkpoints: {str(e)}")
 
     def get_run(self, run_id: str) -> RLRun:
-        """Get details of a specific RL run."""
+        """Get details of a specific Hosted Training run."""
         try:
             response = self.client.get(f"/rft/runs/{run_id}")
             return RLRun.model_validate(response.get("run"))
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to get RL run: {e.response.text}")
-            raise APIError(f"Failed to get RL run: {str(e)}")
+                raise APIError(f"Failed to get Hosted Training run: {e.response.text}")
+            raise APIError(f"Failed to get Hosted Training run: {str(e)}")
 
-    def get_logs(self, run_id: str, tail_lines: int = 1000) -> str:
-        """Get orchestrator logs for an RL run."""
+    def get_logs(
+        self,
+        run_id: str,
+        tail_lines: int = 1000,
+        *,
+        search: Optional[str] = None,
+        regex: bool = False,
+        level: Optional[str] = None,
+        since_seconds: Optional[int] = None,
+    ) -> str:
+        """Get orchestrator logs for a Hosted Training run.
+
+        Optional filters narrow the result via the platform's log search
+        backend:
+          - search: substring (or regex if regex=True) line filter
+          - level:  one of ERROR/WARNING/SUCCESS/INFO/DEBUG
+          - since_seconds: how far back to look (60–86400)
+        """
+        params: Dict[str, object] = {"tail_lines": tail_lines}
+        if search:
+            params["search"] = search
+        if regex:
+            params["regex"] = True
+        if level:
+            params["level"] = level
+        if since_seconds is not None:
+            params["since_seconds"] = since_seconds
         try:
-            response = self.client.get(
-                f"/rft/runs/{run_id}/logs", params={"tail_lines": tail_lines}
-            )
+            response = self.client.get(f"/rft/runs/{run_id}/logs", params=params)
             return response.get("logs", "")
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to get RL run logs: {e.response.text}")
-            raise APIError(f"Failed to get RL run logs: {str(e)}")
+                raise APIError(f"Failed to get Hosted Training run logs: {e.response.text}")
+            raise APIError(f"Failed to get Hosted Training run logs: {str(e)}")
 
     def list_env_servers(self, run_id: str) -> List[EnvServerInfo]:
-        """List env-server pods for an RL run."""
+        """List env-server pods for a Hosted Training run."""
         try:
             response = self.client.get(f"/rft/runs/{run_id}/env-servers")
             return [EnvServerInfo.model_validate(p) for p in response.get("env_servers", [])]
@@ -383,16 +447,30 @@ class RLClient:
         env_name: str,
         env_index: int = 0,
         tail_lines: int = 1000,
+        *,
+        search: Optional[str] = None,
+        regex: bool = False,
+        level: Optional[str] = None,
+        since_seconds: Optional[int] = None,
     ) -> str:
-        """Get logs for a specific env-server pod of an RL run."""
+        """Get logs for a specific env-server pod of a Hosted Training run."""
+        params: Dict[str, object] = {
+            "env_name": env_name,
+            "env_index": env_index,
+            "tail_lines": tail_lines,
+        }
+        if search:
+            params["search"] = search
+        if regex:
+            params["regex"] = True
+        if level:
+            params["level"] = level
+        if since_seconds is not None:
+            params["since_seconds"] = since_seconds
         try:
             response = self.client.get(
                 f"/rft/runs/{run_id}/env-server-logs",
-                params={
-                    "env_name": env_name,
-                    "env_index": env_index,
-                    "tail_lines": tail_lines,
-                },
+                params=params,
             )
             return response.get("logs", "")
         except Exception as e:
@@ -407,7 +485,7 @@ class RLClient:
         max_step: Optional[int] = None,
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Get metrics for an RL run."""
+        """Get metrics for a Hosted Training run."""
         try:
             params: Dict[str, Any] = {}
             if min_step is not None:
@@ -423,8 +501,8 @@ class RLClient:
             return response.get("metrics", [])
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to get RL run metrics: {e.response.text}")
-            raise APIError(f"Failed to get RL run metrics: {str(e)}")
+                raise APIError(f"Failed to get Hosted Training run metrics: {e.response.text}")
+            raise APIError(f"Failed to get Hosted Training run metrics: {str(e)}")
 
     def get_rollouts(
         self,
@@ -433,7 +511,7 @@ class RLClient:
         page: int = 1,
         limit: int = 100,
     ) -> Dict[str, Any]:
-        """Get rollout samples for an RL run."""
+        """Get rollout samples for a Hosted Training run."""
         try:
             params: Dict[str, Any] = {
                 "page": page,
@@ -452,11 +530,11 @@ class RLClient:
             }
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to get RL run rollouts: {e.response.text}")
-            raise APIError(f"Failed to get RL run rollouts: {str(e)}")
+                raise APIError(f"Failed to get Hosted Training run rollouts: {e.response.text}")
+            raise APIError(f"Failed to get Hosted Training run rollouts: {str(e)}")
 
     def get_progress(self, run_id: str) -> Dict[str, Any]:
-        """Get progress information for an RL run."""
+        """Get progress information for a Hosted Training run."""
         try:
             response = self.client.get(f"/rft/runs/{run_id}/progress")
             return {
@@ -467,8 +545,8 @@ class RLClient:
             }
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to get RL run progress: {e.response.text}")
-            raise APIError(f"Failed to get RL run progress: {str(e)}")
+                raise APIError(f"Failed to get Hosted Training run progress: {e.response.text}")
+            raise APIError(f"Failed to get Hosted Training run progress: {str(e)}")
 
     def get_distributions(
         self,
@@ -476,7 +554,7 @@ class RLClient:
         distribution_type: Optional[str] = None,
         step: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Get reward/advantage distribution histogram for an RL run."""
+        """Get reward/advantage distribution histogram for a Hosted Training run."""
         try:
             params: Dict[str, Any] = {}
             if distribution_type is not None:
@@ -485,14 +563,20 @@ class RLClient:
                 params["step"] = step
 
             response = self.client.get(f"/rft/runs/{run_id}/distributions", params=params)
+            chart_data = response.get("chartData") or response.get("chart_data")
+            bins = response.get("bins")
+            if bins is None and isinstance(chart_data, dict):
+                bins = chart_data.get("histogramData")
             return {
-                "bins": response.get("bins", []),
+                "bins": bins or [],
                 "step": response.get("step"),
             }
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to get RL run distributions: {e.response.text}")
-            raise APIError(f"Failed to get RL run distributions: {str(e)}")
+                raise APIError(
+                    f"Failed to get Hosted Training run distributions: {e.response.text}"
+                )
+            raise APIError(f"Failed to get Hosted Training run distributions: {str(e)}")
 
     def get_environment_status(self, owner: str, name: str) -> Dict[str, Any]:
         """Get status for an environment including latest version and action info."""

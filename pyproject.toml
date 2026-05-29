@@ -13,14 +13,13 @@ override-dependencies = ["prime-tunnel>=0.1.6"]
 
 [tool.uv.sources]
 prime-tunnel = { workspace = true }
-verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.1.12.dev6" }
+verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.1.14" }
 
 [tool.pytest.ini_options]
 pythonpath = [
     "packages/prime/src",
     "packages/prime-sandboxes/src",
     "packages/prime-evals/src",
-    "packages/prime-mcp-server/src",
 ]
 testpaths = [
     "packages/*/tests",

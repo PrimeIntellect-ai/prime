@@ -27,6 +27,7 @@ from .commands.switch import app as switch_app
 from .commands.teams import app as teams_app
 from .commands.tunnel import app as tunnel_app
 from .commands.upgrade import app as upgrade_app
+from .commands.wallet import WALLET_JSON_HELP, wallet_command
 from .commands.whoami import app as whoami_app
 from .core import Config
 from .utils import PlainTyper, get_console
@@ -72,6 +73,7 @@ app.add_typer(switch_app, name="switch", rich_help_panel="Account")
 app.add_typer(config_app, name="config", rich_help_panel="Account")
 app.add_typer(teams_app, name="teams", rich_help_panel="Account")
 app.add_typer(secret_app, name="secret", rich_help_panel="Account")
+app.command("wallet", rich_help_panel="Account", epilog=WALLET_JSON_HELP)(wallet_command)
 app.add_typer(upgrade_app, name="upgrade", rich_help_panel="Account")
 app.add_typer(upgrade_app, name="update", rich_help_panel="Account", hidden=True)
 app.add_typer(feedback_app, name="feedback", rich_help_panel="Account")

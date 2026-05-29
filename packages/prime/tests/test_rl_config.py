@@ -50,6 +50,27 @@ def test_generate_rl_config_template_uses_broad_buffer_threshold_examples() -> N
     assert "# hard_threshold = 0.0" in template
 
 
+def test_generate_rl_config_template_keeps_default_surface_minimal() -> None:
+    template = generate_rl_config_template()
+
+    assert 'model = "Qwen/Qwen3.5-0.8B"' in template
+    assert "# learning_rate = 3e-5 # optional; default is 1e-4" in template
+
+    hidden_fields = [
+        "oversampling_factor",
+        "max_async_level",
+        "lora_alpha",
+        "repetition_penalty",
+        "min_tokens",
+        "temp_scheduler",
+        "seed",
+        "[wandb]",
+        "[infrastructure]",
+    ]
+    for field in hidden_fields:
+        assert field not in template
+
+
 def test_flatten_config_schema_expands_optional_nested_models() -> None:
     schema = RLConfig.model_json_schema()
     rows = _flatten_config_schema(schema, schema.get("$defs", {}))
@@ -88,6 +109,54 @@ def test_load_config_accepts_sampling_enable_thinking(tmp_path: Path) -> None:
 
     assert cfg.sampling.enable_thinking is False
     assert cfg.sampling.reasoning_effort is None
+
+
+def test_load_config_accepts_max_inflight_rollouts(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\nmax_inflight_rollouts = 96\n')
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.max_inflight_rollouts == 96
+
+
+def test_load_config_accepts_fractional_oversampling_factor(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\noversampling_factor = 0.375\n')
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.oversampling_factor == 0.375
+
+
+def test_load_config_rejects_max_inflight_and_oversampling(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "dummy"\n'
+        "batch_size = 256\n"
+        "rollouts_per_example = 8\n"
+        "oversampling_factor = 0.377\n"
+        "max_inflight_rollouts = 96\n"
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_rejects_max_inflight_below_rollouts_per_example(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\nrollouts_per_example = 8\nmax_inflight_rollouts = 4\n')
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_rejects_nonpositive_oversampling_factor(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "dummy"\noversampling_factor = 0\n')
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
 
 
 def test_load_config_rejects_both_reasoning_controls(tmp_path: Path) -> None:

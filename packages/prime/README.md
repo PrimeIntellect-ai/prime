@@ -20,17 +20,19 @@ Prime Intellect CLI & SDKs
 [![Python versions](https://img.shields.io/pypi/pyversions/prime?cacheSeconds=60)](https://pypi.org/project/prime/)
 [![Downloads](https://img.shields.io/pypi/dm/prime)](https://pypi.org/project/prime/)
 
-Command line interface and SDKs for managing Prime Intellect GPU resources, sandboxes, and environments.
+Command line interface and SDKs for Prime Lab, Hosted Training, GPU resources, sandboxes, and environments.
 
 </div>
 
 ## Overview
 
-Prime is the official CLI and Python SDK for [Prime Intellect](https://primeintellect.ai), providing seamless access to GPU compute infrastructure, remote code execution environments (sandboxes), and AI inference capabilities.
+Prime is the official CLI and Python SDK for [Prime Intellect](https://primeintellect.ai), providing seamless access to Prime Lab workflows, Hosted Training, GPU compute infrastructure, remote code execution environments (sandboxes), and AI inference capabilities.
 
 **What can you do with Prime?**
 
 - Deploy GPU pods with H100, A100, and other high-performance GPUs
+- Set up Lab workspaces for verifiers environments, evals, GEPA, and training
+- Discover and launch Hosted Training runs against verifiers environments
 - Create and manage isolated sandbox environments for running code
 - Access hundreds of pre-configured development environments
 - SSH directly into your compute instances
@@ -82,6 +84,16 @@ Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect
 # Browse environments on the hub
 prime env list
 
+# Set up a Lab workspace
+prime lab setup
+
+# See available Hosted Training models, capacity, and pricing
+prime train models
+
+# Generate and launch a Hosted Training config
+prime train init
+prime train rl.toml
+
 # List available GPUs
 prime availability list
 
@@ -97,6 +109,30 @@ prime sandbox create python:3.11
 
 ## Features
 
+### Lab and Hosted Training
+
+Prime Lab connects verifiers environments to evaluations, GEPA prompt optimization, and Hosted Training. Start with `prime lab setup` to create a local workspace with starter configs, then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
+
+```bash
+# Set up a Lab workspace
+prime lab setup
+
+# List trainable models, capacity, and token pricing
+prime train models
+
+# Generate a Hosted Training config
+prime train init
+
+# Launch the run from the generated config
+prime train rl.toml
+
+# Inspect and manage Hosted Training runs
+prime train list
+prime train logs <run-id> -f
+prime train metrics <run-id>
+prime train checkpoints <run-id>
+```
+
 ### Environments Hub
 
 Access hundreds of RL environments on our community hub with deep integrations with sandboxes, training, and evaluation stack.
@@ -107,6 +143,9 @@ prime env list
 
 # View environment details
 prime env info <environment-name>
+
+# Inspect environment source without downloading the archive
+prime env inspect <environment-name>
 
 # Install an environment locally
 prime env install <environment-name>
@@ -284,7 +323,7 @@ prime pods ssh <pod-id>
 
 ## Support & Resources
 
-- **Documentation**: [github.com/PrimeIntellect-ai/prime-cli](https://github.com/PrimeIntellect-ai/prime-cli)
+- **Documentation**: [github.com/PrimeIntellect-ai/prime](https://github.com/PrimeIntellect-ai/prime)
 - **Dashboard**: [app.primeintellect.ai](https://app.primeintellect.ai)
 - **API Docs**: [api.primeintellect.ai/docs](https://api.primeintellect.ai/docs)
 - **Discord**: [discord.gg/primeintellect](https://discord.gg/primeintellect)
@@ -296,4 +335,4 @@ prime pods ssh <pod-id>
 
 ## License
 
-MIT License - see [LICENSE](https://github.com/PrimeIntellect-ai/prime-cli/blob/main/LICENSE) file for details.
+MIT License - see [LICENSE](https://github.com/PrimeIntellect-ai/prime/blob/main/LICENSE) file for details.

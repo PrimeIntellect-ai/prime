@@ -7,6 +7,7 @@ import string
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -40,20 +41,23 @@ from ..utils import (
     obfuscate_env_vars,
     obfuscate_secrets,
     output_data_as_json,
+    require_selection,
     sort_by_created,
     status_color,
     validate_output_format,
 )
 from ..utils.display import SANDBOX_STATUS_COLORS
+from ..utils.time_utils import now_utc, to_utc
 
-app = PlainTyper(help="Manage code sandboxes", no_args_is_help=True)
+app = PlainTyper(help="Manage sandboxes", no_args_is_help=True)
 console = get_console()
 
 
 config = Config()
 
 LIST_SANDBOXES_JSON_HELP = json_output_help(
-    ".sandboxes[] = {id, name, image, status, resources, labels[], created_at}",
+    ".sandboxes[] = {id, name, image, status, resources, labels[], created_at, "
+    "timeout_minutes, expires_at?}",
     ".total = number",
     ".page = number",
     ".per_page = number",
@@ -81,8 +85,52 @@ LIST_SANDBOX_PORTS_JSON_HELP = json_output_help(
 )
 
 
+# Statuses where a sandbox is finished and has no remaining lifetime.
+_TERMINAL_SANDBOX_STATUSES = {"TERMINATED", "TIMEOUT", "ERROR"}
+
+
+def _short_duration(seconds: int) -> str:
+    """Format a positive duration compactly (e.g. '45m', '1h05m', '2d3h')."""
+    if seconds < 60:
+        return "<1m"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        hours, minutes = divmod(seconds // 60, 60)
+        return f"{hours}h{minutes:02d}m" if minutes else f"{hours}h"
+    days, remainder = divmod(seconds, 86400)
+    hours = remainder // 3600
+    return f"{days}d{hours}h" if hours else f"{days}d"
+
+
+def _sandbox_deadline(sandbox: Sandbox) -> Optional[datetime]:
+    """When the sandbox times out, or None if the clock hasn't started.
+
+    Mirrors the backend rule (scheduler): deadline = started_at + timeout_minutes,
+    and the timeout only counts down once the sandbox is RUNNING.
+    """
+    if sandbox.status == "RUNNING" and sandbox.started_at:
+        return to_utc(sandbox.started_at) + timedelta(minutes=sandbox.timeout_minutes)
+    return None
+
+
+def _format_sandbox_expiry(sandbox: Sandbox) -> str:
+    """Human-readable time left before expiry, or the configured timeout budget."""
+    if sandbox.status in _TERMINAL_SANDBOX_STATUSES:
+        return "-"
+    deadline = _sandbox_deadline(sandbox)
+    if deadline is None:
+        # Not running yet — the timeout hasn't started, so show the budget.
+        return f"{sandbox.timeout_minutes}m timeout"
+    remaining = int((deadline - now_utc()).total_seconds())
+    if remaining <= 0:
+        return "expiring"
+    return f"{_short_duration(remaining)} left"
+
+
 def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
     """Format sandbox data for list display (both table and JSON)"""
+    deadline = _sandbox_deadline(sandbox)
     return {
         "id": sandbox.id,
         "name": sandbox.name,
@@ -94,6 +142,9 @@ def _format_sandbox_for_list(sandbox: Sandbox) -> Dict[str, Any]:
         "labels_list": sandbox.labels,  # For JSON output
         "created_at": iso_timestamp(sandbox.created_at),  # For JSON output
         "age": human_age(sandbox.created_at),  # For table output
+        "expires": _format_sandbox_expiry(sandbox),  # For table output
+        "timeout_minutes": sandbox.timeout_minutes,  # For JSON output
+        "expires_at": iso_timestamp(deadline) if deadline else None,  # For JSON output
     }
 
 
@@ -145,8 +196,44 @@ def _guard_vm_unsupported(sandbox: Sandbox, feature_name: str) -> None:
         raise typer.Exit(1)
 
 
+def _ssh_sandbox_display(item: Dict[str, Any]) -> str:
+    """Format a sandbox row for the interactive SSH picker."""
+    return f"{item['id']}  {item['name']}  [dim]({item['image']})[/dim]"
+
+
+def _select_sandbox_for_ssh(sandbox_client: SandboxClient) -> str:
+    """Let the user pick a running sandbox to SSH into when no ID is given."""
+    # Page through every running sandbox before filtering, so SSH-able containers
+    # on later pages aren't dropped when a user has many running sandboxes.
+    sandboxes: List[Sandbox] = []
+    with console.status("[bold blue]Loading sandboxes...", spinner="dots"):
+        page = 1
+        while True:
+            sandbox_list = sandbox_client.list(status="RUNNING", per_page=100, page=page)
+            sandboxes.extend(sandbox_list.sandboxes)
+            if not sandbox_list.has_next:
+                break
+            page += 1
+
+    # SSH is only supported for non-VM sandboxes (see _guard_vm_unsupported).
+    items = [
+        {"id": sb.id, "name": sb.name, "image": sb.docker_image}
+        for sb in sort_by_created(sandboxes)
+        if not sb.vm
+    ]
+
+    selected = require_selection(
+        items,
+        "SSH into",
+        "No running sandboxes available to SSH into.",
+        item_type="sandbox",
+        display_fn=_ssh_sandbox_display,
+        page_size=50,
+    )
+    return str(selected.get("id"))
+
+
 @app.command("list", epilog=LIST_SANDBOXES_JSON_HELP)
-@app.command("ls", hidden=True)
 def list_sandboxes_cmd(
     team_id: Optional[str] = typer.Option(
         None, help="Filter by team ID (uses config team_id if not specified)"
@@ -187,7 +274,7 @@ def list_sandboxes_cmd(
         )
 
         table = build_table(
-            f"Code Sandboxes (Total: {sandbox_list.total})",
+            f"Sandboxes (Total: {sandbox_list.total})",
             [
                 ("ID", "cyan"),
                 ("Name", "blue"),
@@ -196,6 +283,7 @@ def list_sandboxes_cmd(
                 ("Resources", "magenta"),
                 ("Labels", "white"),
                 ("Age", "blue"),
+                ("Expires", "yellow"),
             ],
         )
 
@@ -217,6 +305,8 @@ def list_sandboxes_cmd(
                     "region": sandbox_data["region"],
                     "labels": sandbox_data["labels_list"],
                     "created_at": sandbox_data["created_at"],
+                    "timeout_minutes": sandbox_data["timeout_minutes"],
+                    "expires_at": sandbox_data["expires_at"],
                 }
                 sandboxes_data.append(json_sandbox)
 
@@ -243,6 +333,7 @@ def list_sandboxes_cmd(
                     sandbox_data["resources"],
                     sandbox_data["labels"],
                     sandbox_data["age"],
+                    sandbox_data["expires"],
                 )
 
             console.print(table)
@@ -430,6 +521,15 @@ def create(
         "-l",
         help="Labels/tags for the sandbox. Can be specified multiple times.",
     ),
+    guaranteed: bool = typer.Option(
+        False,
+        "--guaranteed",
+        help=(
+            "Admin/manager only. Schedule with CPU/memory requests equal to limits "
+            "(Guaranteed QoS), bypassing the default oversubscription. Not supported "
+            "with --vm."
+        ),
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Create a new sandbox"""
@@ -472,6 +572,13 @@ def create(
             console.print(
                 "[red]GPU type provided without GPUs.[/red] "
                 "Set --gpu-count > 0 when using --gpu-type."
+            )
+            raise typer.Exit(1)
+
+        if guaranteed and vm:
+            console.print(
+                "[red]--guaranteed is not supported for VM sandboxes.[/red] "
+                "Drop --vm or drop --guaranteed."
             )
             raise typer.Exit(1)
 
@@ -520,6 +627,7 @@ def create(
             team_id=team_id,
             region=region,
             registry_credentials_id=registry_credentials_id,
+            guaranteed=guaranteed,
         )
 
         # Show configuration summary
@@ -528,6 +636,8 @@ def create(
         console.print(f"Docker Image: {docker_image}")
         console.print(f"Start Command: {start_command or 'N/A'}")
         console.print(f"Resources: {cpu_cores} CPU, {memory_gb}GB RAM, {disk_size_gb}GB disk")
+        if guaranteed:
+            console.print("Scheduling: [green]Guaranteed QoS[/green]")
         console.print(f"VM: {'Enabled' if vm else 'Disabled'}")
         if gpu_count > 0:
             console.print(f"GPUs: {gpu_type} x{gpu_count}")
@@ -681,12 +791,23 @@ def delete(
         ),
         show_default=True,
     ),
+    target_user_id: Optional[str] = typer.Option(
+        None,
+        "--user",
+        "-u",
+        help=(
+            "Scope '--all' and '--label' deletes to this teammate's sandboxes."
+            " Requires team admin role and a configured team_id. Cannot be"
+            " combined with --all-users."
+        ),
+    ),
 ) -> None:
     """Delete one or more sandboxes by ID, by label, or all sandboxes with --all
 
     '--all' and '--label' perform a single server-side scoped delete: by
     default it is scoped to your own sandboxes in the configured team.
-    Pass '--all-users' to delete across the whole team (team admin only).
+    Pass '--all-users' to delete across the whole team (team admin only), or
+    '--user <user_id>' to target a single teammate's sandboxes (team admin only).
     """
     try:
         base_client = APIClient()
@@ -704,9 +825,35 @@ def delete(
             )
             raise typer.Exit(1)
 
+        if target_user_id and not (all or labels):
+            console.print(
+                "[red]Error:[/red] --user only applies to --all or --label deletes."
+                " To delete specific sandbox IDs owned by a teammate, pass the"
+                " IDs directly (team admins can already delete any sandbox in"
+                " their team by ID)."
+            )
+            raise typer.Exit(1)
+
         if all or labels:
             team_id = config.team_id
-            if only_mine:
+
+            if target_user_id and not only_mine:
+                console.print(
+                    "[red]Error:[/red] Cannot combine --user with --all-users."
+                    " Use one or the other."
+                )
+                raise typer.Exit(1)
+
+            if target_user_id:
+                if not team_id:
+                    console.print(
+                        "[red]Error:[/red] --user requires a team_id."
+                        " Configure one with 'prime config set-team-id <id>'."
+                    )
+                    raise typer.Exit(1)
+                scope_user_id = target_user_id
+                all_users_flag = False
+            elif only_mine:
                 scope_user_id = config.user_id
                 all_users_flag = False
                 if not scope_user_id:
@@ -730,16 +877,27 @@ def delete(
 
             if total == 0:
                 console.print("[yellow]No sandboxes to delete[/yellow]")
-                if only_mine:
+                if target_user_id:
+                    console.print(
+                        f"\n[dim]Note: no active sandboxes for user"
+                        f" {target_user_id} in this team.[/dim]"
+                    )
+                elif only_mine:
                     console.print(
                         "\n[dim]Note: --all/--label only deletes your own"
                         " sandboxes by default. Use --all-users to delete"
-                        " sandboxes from all team members (requires team"
+                        " sandboxes from all team members, or --user <id> to"
+                        " target a specific teammate (both require team"
                         " admin).[/dim]"
                     )
                 return
 
-            scope_suffix = "" if only_mine else " across ALL users"
+            if target_user_id:
+                scope_suffix = f" for user {target_user_id}"
+            elif only_mine:
+                scope_suffix = ""
+            else:
+                scope_suffix = " across ALL users"
             if labels:
                 labels_str = ", ".join(labels)
                 count_phrase = (
@@ -1323,9 +1481,11 @@ def list_ports(
         raise typer.Exit(1)
 
 
-@app.command("ssh", no_args_is_help=True)
+@app.command("ssh")
 def ssh_connect(
-    sandbox_id: str = typer.Argument(..., help="Sandbox ID to SSH into"),
+    sandbox_id: Optional[str] = typer.Argument(
+        None, help="Sandbox ID to SSH into (interactive selection if not provided)"
+    ),
     ssh_args: Optional[List[str]] = typer.Argument(
         None, help="Additional SSH arguments (e.g., -- -v for verbose)"
     ),
@@ -1339,9 +1499,11 @@ def ssh_connect(
     """Connect to a sandbox via SSH.
 
     This command creates a SSH session with an ephemeral key and cleans up on disconnect.
+    Run without a sandbox ID to pick from your running sandboxes interactively.
 
     \b
     Examples:
+        prime sandbox ssh
         prime sandbox ssh sb_abc123
         prime sandbox ssh sb_abc123 --shell bash
         prime sandbox ssh sb_abc123 -- -L 3000:localhost:3000
@@ -1353,7 +1515,7 @@ def ssh_connect(
 
     def cleanup() -> None:
         """Clean up the SSH session and temporary keys."""
-        if session_id and sandbox_client:
+        if session_id and sandbox_client and sandbox_id:
             try:
                 console.print("\n[bold blue]Cleaning up SSH session...[/bold blue]")
                 sandbox_client.close_ssh_session(sandbox_id, session_id)
@@ -1374,6 +1536,10 @@ def ssh_connect(
 
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
+
+        # Pick a sandbox interactively when no ID was provided
+        if sandbox_id is None:
+            sandbox_id = _select_sandbox_for_ssh(sandbox_client)
 
         # Check if sandbox is running
         with console.status("[bold blue]Checking sandbox status...", spinner="dots"):

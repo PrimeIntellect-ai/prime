@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,10 @@ class TestPrivateEnvInstall:
     @pytest.mark.skipif(
         not os.environ.get("PRIME_API_KEY"),
         reason="PRIME_API_KEY not set - required for private env access",
+    )
+    @pytest.mark.skipif(
+        sys.version_info >= (3, 14),
+        reason="verifiers private env loading hits a dill serialization issue on Python 3.14.",
     )
     def test_installed_private_env_can_be_loaded(self, temp_home: Path):
         """Test that an installed private env can be loaded by verifiers."""

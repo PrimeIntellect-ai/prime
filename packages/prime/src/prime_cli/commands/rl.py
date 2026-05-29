@@ -4,11 +4,13 @@ import json
 import os
 import re
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 import toml
 import typer
+from click.exceptions import Abort
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic import ValidationError as PydanticValidationError
 from rich.markup import escape as rich_escape
@@ -34,6 +36,9 @@ from ..utils.formatters import (
     format_promo_price,
     strip_ansi,
 )
+from ..utils.prompt import confirm_or_skip
+from .feedback import submit_feedback
+from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
 console = get_console()
 
@@ -59,7 +64,7 @@ RL_LIST_JSON_HELP = json_output_help(
 )
 
 RL_METRICS_JSON_HELP = json_help(
-    ".metrics[] = metric record from the RL API",
+    ".metrics[] = metric record from the Hosted Training API",
 )
 
 RL_ROLLOUTS_JSON_HELP = json_help(
@@ -83,6 +88,10 @@ RL_CHECKPOINTS_JSON_HELP = json_output_help(
 # Progress bar pattern (tqdm-style progress bars)
 PROGRESS_BAR = re.compile(r".*\|[█▏▎▍▌▋▊▉ ]{10,}\|.*")
 
+HOSTED_TRAINING_LOG_STARTUP_POLL_SECONDS = 10
+HOSTED_TRAINING_LOG_STARTUP_POLLS = 18
+HOSTED_TRAINING_LOG_FOLLOW_POLL_SECONDS = 5
+
 # Log level colors for rich console
 LEVEL_STYLES = {
     "DEBUG": "dim",
@@ -97,6 +106,30 @@ LEVEL_STYLES = {
 
 # Sentinel to indicate "this is JSON but should be skipped"
 _SKIP_LINE = "__SKIP__"
+
+_MODEL_PARAM_COUNT_PATTERN = re.compile(
+    r"-(?P<total>\d+(?:\.\d)?)[bB](?:-[aA](?P<active>\d+(?:\.\d)?)[bB])?(?=$|-)"
+)
+
+
+def _model_name_sort_key(name: str) -> tuple[tuple[Any, ...], ...]:
+    """Sort model names lexically, with recognized billion-parameter counts numeric."""
+    segments: list[tuple[Any, ...]] = []
+    start = 0
+
+    for match in _MODEL_PARAM_COUNT_PATTERN.finditer(name):
+        if match.start() > start:
+            segments.append((0, name[start : match.start()]))
+
+        total_params = Decimal(match.group("total"))
+        active_params = Decimal(match.group("active") or match.group("total"))
+        segments.append((1, total_params, active_params))
+        start = match.end()
+
+    if start < len(name):
+        segments.append((0, name[start:]))
+
+    return tuple(segments)
 
 
 def format_json_log_line(line: str) -> str | None:
@@ -181,7 +214,7 @@ def generate_rl_config_template(environment: str | None = None) -> str:
     env_value = environment or "primeintellect/reverse-text"
 
     return f'''\
-model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
+model = "Qwen/Qwen3.5-0.8B"
 max_steps = 100
 
 # env_files = ["secrets.env"] # optional file(s) for secrets
@@ -189,10 +222,8 @@ max_steps = 100
 # Training
 batch_size = 128
 rollouts_per_example = 8
-# learning_rate = 1e-6
-# lora_alpha = 16
-# oversampling_factor = 1.0
-# max_async_level = 4
+# max_inflight_rollouts = 96 # optional hard cap for in-flight rollout capacity
+# learning_rate = 3e-5 # optional; default is 1e-4
 
 # Optional: warm-start from an existing checkpoint
 # checkpoint_id = "..."
@@ -200,20 +231,10 @@ rollouts_per_example = 8
 [sampling]
 max_tokens = 2048
 # temperature = 0.7
-# repetition_penalty = 1.0
-# min_tokens = 0
-# seed = 42
 
-# Optional: hosted RL reasoning controls (mutually exclusive)
+# Optional: Hosted Training reasoning controls (mutually exclusive)
 # enable_thinking = false    # supported models: Qwen3.5, Nemotron
 # reasoning_effort = "high"  # supported models: GPT-OSS ("low" | "medium" | "high")
-
-# Optional: temperature scheduling (use instead of temperature)
-# [sampling.temp_scheduler]
-# type = "linear"               # "linear" or "cosine"
-# start_temperature = 1.5
-# end_temperature = 0.3
-# total_steps = 1000            # defaults to max_steps if not set
 
 [[env]]
 id = "{env_value}"
@@ -221,12 +242,6 @@ id = "{env_value}"
 # [[env]] # add multiple [[env]] sections for multi-env training
 # id = "primeintellect/another-env"
 # args = {{ split = "train", max_examples = 1000 }}
-
-# Optional: W&B logging
-# [wandb]
-# project = "my-project"
-# entity = "my-team"
-# name = "my-run-name"
 
 # Optional: online evaluation
 # [eval]
@@ -258,7 +273,6 @@ id = "{env_value}"
 # online_difficulty_filtering = false
 # env_ratios = [0.5, 0.5]
 # skip_verification = false
-# seed = 42
 
 # Optional: checkpoint configuration
 # [checkpoints]
@@ -269,10 +283,6 @@ id = "{env_value}"
 # [adapters]
 # interval = 0                # Upload adapter every N steps (0 = only at run end)
 # keep_last = 3               # Keep N adapters in cloud (-1 = keep all)
-
-# Optional: infrastructure configuration
-# [infrastructure]
-# compute_size = "M"          # S, M (default), or L
 '''
 
 
@@ -282,6 +292,7 @@ class EnvConfig(BaseModel):
     id: str
     name: str | None = None
     args: Dict[str, Any] = Field(default_factory=dict)
+    max_retries: int | None = Field(default=None, ge=0)
     version: str | None = None
 
     @model_validator(mode="after")
@@ -300,6 +311,8 @@ class EnvConfig(BaseModel):
             result["name"] = self.name
         if self.args:
             result["args"] = self.args
+        if self.max_retries is not None:
+            result["max_retries"] = self.max_retries
         if self.version is not None:
             result["version"] = self.version
         return result
@@ -313,6 +326,7 @@ class EvalEnvConfig(BaseModel):
     args: Dict[str, Any] = Field(default_factory=dict)
     num_examples: int | None = None
     rollouts_per_example: int | None = None
+    max_retries: int | None = Field(default=None, ge=0)
     version: str | None = None
 
     @model_validator(mode="after")
@@ -335,6 +349,8 @@ class EvalEnvConfig(BaseModel):
             result["num_examples"] = self.num_examples
         if self.rollouts_per_example is not None:
             result["rollouts_per_example"] = self.rollouts_per_example
+        if self.max_retries is not None:
+            result["max_retries"] = self.max_retries
         if self.version is not None:
             result["version"] = self.version
         return result
@@ -576,9 +592,10 @@ class RLConfig(BaseModel):
     max_steps: int = 100
     batch_size: int = 128
     rollouts_per_example: int = 8
+    max_inflight_rollouts: int | None = Field(default=None, ge=1)
     learning_rate: float | None = None
     lora_alpha: int | None = None
-    oversampling_factor: float | None = None
+    oversampling_factor: float | None = Field(default=None, gt=0)
     max_async_level: int | None = None
     checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
     cluster_name: str | None = None  # Admin-only: target a specific cluster by name
@@ -595,6 +612,16 @@ class RLConfig(BaseModel):
     run_config: Dict[str, Any] = Field(default_factory=dict)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_max_inflight_rollouts(self) -> "RLConfig":
+        if self.max_inflight_rollouts is not None and self.oversampling_factor is not None:
+            raise ValueError("Only one of max_inflight_rollouts and oversampling_factor can be set")
+        if self.max_inflight_rollouts is None:
+            return self
+        if self.max_inflight_rollouts < self.rollouts_per_example:
+            raise ValueError("max_inflight_rollouts must be at least rollouts_per_example")
+        return self
 
 
 def _format_validation_errors(errors: list[Any]) -> list[str]:
@@ -786,6 +813,7 @@ def create_run(
         "--skip-action-check",
         help="Skip action status check and run even if environment action failed.",
     ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
@@ -840,6 +868,25 @@ def create_run(
         rl_client = RLClient(api_client)
         app_config = Config()
 
+        # Kick off pricing fetch in the background so it overlaps with summary
+        # rendering and the action-status checks below. Daemon thread so a slow
+        # /rft/models can't outlive the command (ThreadPoolExecutor workers are
+        # joined at interpreter exit, which would defeat the timeout cap below).
+        import threading
+
+        pricing_state: Dict[str, Any] = {"models": None, "error": None}
+        pricing_done = threading.Event()
+
+        def _fetch_pricing() -> None:
+            try:
+                pricing_state["models"] = rl_client.list_models(team_id=app_config.team_id)
+            except Exception as exc:
+                pricing_state["error"] = exc
+            finally:
+                pricing_done.set()
+
+        threading.Thread(target=_fetch_pricing, daemon=True).start()
+
         # Show configuration in organized sections
         console.print("[white]Configuration:[/white]\n")
 
@@ -855,6 +902,8 @@ def create_run(
         console.print(f"  Max Steps:           {cfg.max_steps}")
         console.print(f"  Batch Size:          {cfg.batch_size}")
         console.print(f"  Rollouts per Example: {cfg.rollouts_per_example}")
+        if cfg.max_inflight_rollouts is not None:
+            console.print(f"  Max Inflight Rollouts: {cfg.max_inflight_rollouts}")
         if cfg.learning_rate is not None:
             console.print(f"  Learning Rate:       {cfg.learning_rate}")
         if cfg.lora_alpha is not None:
@@ -936,6 +985,38 @@ def create_run(
             console.print("\n[cyan]Secrets[/cyan]")
             console.print(f"  Keys: {', '.join(secrets.keys())}")
 
+        # Pricing (best-effort — skipped silently if /rft/models is unreachable,
+        # times out, or doesn't include the chosen model. 8s cap so a slow
+        # endpoint can't gate the confirmation prompt.)
+        if pricing_done.wait(timeout=8) and pricing_state["error"] is None:
+            available = pricing_state["models"] or []
+        else:
+            available = []
+        priced = next((m for m in available if m.name == cfg.model), None)
+        if priced is not None:
+            list_train, eff_train = priced.resolve_prices("training")
+            list_input, eff_input = priced.resolve_prices("inference_input")
+            list_output, eff_output = priced.resolve_prices("inference_output")
+            console.print(
+                "\n[cyan]Pricing[/cyan] [dim](per 1M tokens, charged on actual usage)[/dim]"
+            )
+
+            def _format(list_p: Any, eff_p: Any) -> str:
+                charged = eff_p if eff_p is not None else list_p
+                if charged is None:
+                    return "-"
+                if float(charged) == 0:
+                    if list_p is not None and float(list_p) > float(charged):
+                        return format_promo_price(list_p, eff_p) or "[bold green]Free[/bold green]"
+                    return "[bold green]Free[/bold green]"
+                return format_promo_price(list_p, eff_p) or "-"
+
+            console.print(f"  Training:         {_format(list_train, eff_train)}")
+            console.print(f"  Inference Input:  {_format(list_input, eff_input)}")
+            console.print(f"  Inference Output: {_format(list_output, eff_output)}")
+            if priced.promo_label:
+                console.print(f"  [bold yellow]{rich_escape(priced.promo_label)}[/bold yellow]")
+
         console.print()
 
         # Check action status for hub environments
@@ -986,6 +1067,10 @@ def create_run(
 
             console.print()
 
+        if not confirm_or_skip("Launch this Hosted Training run?", yes, default=True):
+            console.print("\nRun cancelled")
+            return
+
         console.print("[dim]Creating Hosted Training run...[/dim]\n")
 
         # Create the run
@@ -1015,6 +1100,7 @@ def create_run(
             buffer_config=cfg.buffer.to_api_dict(),
             learning_rate=cfg.learning_rate,
             lora_alpha=cfg.lora_alpha,
+            max_inflight_rollouts=cfg.max_inflight_rollouts,
             oversampling_factor=cfg.oversampling_factor,
             max_async_level=cfg.max_async_level,
             checkpoints_config=cfg.checkpoints.to_api_dict(),
@@ -1042,6 +1128,9 @@ def create_run(
             console.print("[dim]The run will start automatically when capacity is available.[/dim]")
         else:
             console.print("[green]✓ Run created successfully![/green]")
+
+        if run.notice:
+            console.print(f"[cyan]{run.notice}[/cyan]")
 
         dashboard_url = f"{app_config.frontend_url}/dashboard/training/{run.id}"
         console.print("\n[cyan]Monitor run at:[/cyan]")
@@ -1089,12 +1178,13 @@ def list_models(
 
         if not models:
             console.print("[yellow]No models available for Hosted Training.[/yellow]")
-            console.print("[dim]This could mean no healthy RL clusters are running.[/dim]")
+            console.print(
+                "[dim]This could mean no healthy Hosted Training clusters are running.[/dim]"
+            )
             return
 
         table = Table(
             title="Hosted Training - Models",
-            caption="[dim]Prices per 1M tokens[/dim]",
         )
         table.add_column("Model", style="cyan")
         table.add_column("Status")
@@ -1103,41 +1193,93 @@ def list_models(
         table.add_column("Train", style="green", justify="right")
 
         promo_labels: List[str] = []
-        for model in models:
+        for model in sorted(models, key=lambda model: _model_name_sort_key(model.name)):
             if model.at_capacity:
                 status = "[red]At Capacity[/red]"
             else:
                 status = "[green]Available[/green]"
+            list_train, eff_train = model.resolve_prices("training")
+            list_input, eff_input = model.resolve_prices("inference_input")
+            list_output, eff_output = model.resolve_prices("inference_output")
             table.add_row(
                 model.name,
                 status,
-                format_promo_price(
-                    model.inference_input_price_per_mtok,
-                    model.effective_inference_input_price_per_mtok,
-                )
-                or "-",
-                format_promo_price(
-                    model.inference_output_price_per_mtok,
-                    model.effective_inference_output_price_per_mtok,
-                )
-                or "-",
-                format_promo_price(
-                    model.training_price_per_mtok,
-                    model.effective_training_price_per_mtok,
-                )
-                or "-",
+                format_promo_price(list_input, eff_input) or "-",
+                format_promo_price(list_output, eff_output) or "-",
+                format_promo_price(list_train, eff_train) or "-",
             )
             if model.promo_label and model.promo_label not in promo_labels:
                 promo_labels.append(model.promo_label)
 
-        console.print(table)
+        caption = (
+            "[dim]Prices are per 1M tokens. All models support context windows of 64K tokens.[/dim]"
+        )
+        caption_lines = [caption]
         if promo_labels:
             joined = ", ".join(rich_escape(label) for label in promo_labels)
-            console.print(f"[bold yellow]{joined}[/bold yellow]")
+            caption_lines.append(f"[bold yellow]{joined}[/bold yellow]")
+        table.caption = "\n".join(caption_lines)
+        console.print(table)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:
+    console.print(f"\n[bold]{label}[/bold] [dim](required)[/dim]")
+    console.print(f"[dim]{help_text}[/dim]")
+    while True:
+        value = typer.prompt("", prompt_suffix="> ").strip()
+        if value:
+            return value
+        console.print(f"[red]{empty_error}[/red]")
+
+
+def _prompt_optional_text(label: str, help_text: str) -> str | None:
+    console.print(f"\n[bold]{label}[/bold] [dim](optional)[/dim]")
+    console.print(f"[dim]{help_text}[/dim]")
+    value = typer.prompt("", default="", show_default=False, prompt_suffix="> ").strip()
+    return value or None
+
+
+def _format_model_request_feedback(models: str, context: str | None) -> str:
+    message = f"Hosted Training model request\n\nModels:\n{models}"
+    if context:
+        message += f"\n\nContext:\n{context}"
+    return message
+
+
+@app.command("request", rich_help_panel="Commands")
+def request_models() -> None:
+    """Request models for Hosted Training."""
+    console.print("[bold]Hosted Training Model Request[/bold]")
+    console.print("[dim]Tell us which models you want available for training.[/dim]")
+
+    try:
+        models = _prompt_required_text(
+            "Model(s)",
+            "Use provider/model names if you know them; comma-separated is fine.",
+            "At least one model is required.",
+        )
+        context = _prompt_optional_text(
+            "Use case or context",
+            "Share what you want to train or why this model matters.",
+        )
+    except Abort:
+        console.print("\n[yellow]Cancelled[/yellow]")
+        raise typer.Exit(0)
+
+    try:
+        submit_feedback(
+            message=_format_model_request_feedback(models, context),
+            category="feature",
+        )
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    console.print("[green]Request submitted. Thanks![/green]")
 
 
 def _unwrap_single_schema_variant(prop: Dict[str, Any]) -> Dict[str, Any]:
@@ -1284,7 +1426,9 @@ def list_configs(
     )
 
 
-def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> None:
+def _list_runs_impl(
+    team: Optional[str], num: int, page: int, output: str, mine: bool = False
+) -> None:
     """Implementation for listing Hosted Training runs."""
     validate_output_format(output, console)
 
@@ -1300,6 +1444,17 @@ def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> No
         team_id = team or config.team_id
 
         all_runs = rl_client.list_runs(team_id=team_id)
+
+        if mine:
+            current_user_id = config.user_id
+            if not current_user_id:
+                console.print(
+                    "[red]Error:[/red] Cannot filter by user - no user_id configured. "
+                    "Run [bold]prime whoami[/bold] to refresh your config."
+                )
+                raise typer.Exit(1)
+            all_runs = [r for r in all_runs if r.user_id == current_user_id]
+
         total_count = len(all_runs)
 
         # Sort by created_at descending and paginate
@@ -1362,15 +1517,17 @@ def _list_runs_impl(team: Optional[str], num: int, page: int, output: str) -> No
 
 
 @app.command("list", rich_help_panel="Commands", epilog=RL_LIST_JSON_HELP)
-@app.command("ls", rich_help_panel="Commands", hidden=True)
 def list_runs(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
+    mine: bool = typer.Option(
+        False, "--mine", help="Filter to only your own runs (useful for admin accounts)"
+    ),
     num: int = typer.Option(20, "--num", "-n", help="Items per page"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List your runs (alias: ls)."""
-    _list_runs_impl(team, num, page, output)
+    _list_runs_impl(team, num, page, output, mine=mine)
 
 
 @app.command("get", rich_help_panel="Commands", epilog=RL_RUN_JSON_HELP)
@@ -1540,6 +1697,43 @@ def _print_new_lines(last_lines: list[str], current_lines: list[str]) -> None:
         console.print(line)
 
 
+def _is_log_startup_error(error: APIError) -> bool:
+    message = str(error).lower()
+    startup_markers = (
+        "queued",
+        "pending",
+        "starting",
+        "initializing",
+        "not started",
+        "not available yet",
+        "logs are not available",
+        "logs not available",
+    )
+    return "404" in message and any(marker in message for marker in startup_markers)
+
+
+def _fetch_logs_with_startup_poll(fetch_fn: Any, tail: int, label: str) -> str:
+    for poll in range(HOSTED_TRAINING_LOG_STARTUP_POLLS + 1):
+        try:
+            return fetch_fn(tail)
+        except APIError as e:
+            if not _is_log_startup_error(e):
+                raise
+            if poll == 0:
+                console.print(
+                    f"[yellow]Hosted Training run is starting; waiting for {label} logs...[/yellow]"
+                )
+            if poll == HOSTED_TRAINING_LOG_STARTUP_POLLS:
+                console.print(
+                    "[yellow]Hosted Training run has not started yet. "
+                    "Logs will be available once it is running.[/yellow]"
+                )
+                raise typer.Exit(0)
+            time.sleep(HOSTED_TRAINING_LOG_STARTUP_POLL_SECONDS)
+
+    raise AssertionError("unreachable")
+
+
 def _stream_logs(
     fetch_fn: Any,
     tail: int,
@@ -1564,10 +1758,11 @@ def _stream_logs(
                 raw_logs = fetch_fn(tail)
                 consecutive_errors = 0
             except APIError as e:
-                err_str = str(e).lower()
-                if "404" in str(e) and ("queued" in err_str or "pending" in err_str):
-                    console.print("[yellow]Run is queued, waiting for it to start...[/yellow]")
-                    time.sleep(10)
+                if _is_log_startup_error(e):
+                    console.print(
+                        "[yellow]Hosted Training run is starting; waiting for logs...[/yellow]"
+                    )
+                    time.sleep(HOSTED_TRAINING_LOG_STARTUP_POLL_SECONDS)
                     continue
                 consecutive_errors += 1
                 if "429" in str(e):
@@ -1582,9 +1777,9 @@ def _stream_logs(
             current_lines = render(raw_logs)
             _print_new_lines(last_lines, current_lines)
             last_lines = current_lines
-            time.sleep(5)
+            time.sleep(HOSTED_TRAINING_LOG_FOLLOW_POLL_SECONDS)
     else:
-        raw_logs = fetch_fn(tail)
+        raw_logs = _fetch_logs_with_startup_poll(fetch_fn, tail, label)
         rendered = render(raw_logs)
         if rendered:
             for line in rendered:
@@ -1594,13 +1789,42 @@ def _stream_logs(
 
 
 def _handle_logs_api_error(e: APIError) -> None:
-    err_str = str(e).lower()
-    if "404" in str(e) and ("queued" in err_str or "pending" in err_str):
-        msg = "Run has not started yet. Logs will be available once running."
+    if _is_log_startup_error(e):
+        msg = "Hosted Training run has not started yet. Logs will be available once running."
         console.print(f"[yellow]{msg}[/yellow]")
         raise typer.Exit(0)
     console.print(f"[red]Error:[/red] {e}")
     raise typer.Exit(1)
+
+
+_SINCE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86_400}
+
+
+def _parse_since(since: Optional[str]) -> Optional[int]:
+    """Convert a ``--since`` flag to a seconds value the backend accepts.
+
+    Accepts forms like ``15m``, ``1h``, ``6h``, ``24h``, ``900``. Returns
+    None when the flag isn't set (backend default applies)."""
+    if since is None:
+        return None
+    raw = since.strip().lower()
+    if not raw:
+        return None
+    if raw[-1] in _SINCE_UNIT_SECONDS and raw[:-1].isdigit():
+        seconds = int(raw[:-1]) * _SINCE_UNIT_SECONDS[raw[-1]]
+    elif raw.isdigit():
+        seconds = int(raw)
+    else:
+        raise typer.BadParameter(
+            f"Invalid --since value '{since}'. Use e.g. '15m', '1h', '6h', '24h', or seconds.",
+            param_hint="--since",
+        )
+    if seconds < 60 or seconds > 86_400:
+        raise typer.BadParameter(
+            "--since must be between 60s and 24h (86400s).",
+            param_hint="--since",
+        )
+    return seconds
 
 
 def _parse_env_qualifier(env: str) -> tuple[str, int]:
@@ -1640,6 +1864,33 @@ def get_logs(
     tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
     raw: bool = typer.Option(False, "--raw", "-r", help="Show raw logs without formatting"),
+    search: Optional[str] = typer.Option(
+        None,
+        "--search",
+        help=(
+            "Filter to lines containing this text. "
+            "Combine with --regex to use a regular expression instead of a substring."
+        ),
+    ),
+    regex: bool = typer.Option(
+        False,
+        "--regex",
+        help="Treat --search as a regex (RE2 syntax).",
+    ),
+    level: Optional[str] = typer.Option(
+        None,
+        "--level",
+        help="Filter to one log level: ERROR | WARNING | SUCCESS | INFO | DEBUG.",
+    ),
+    since: Optional[str] = typer.Option(
+        None,
+        "--since",
+        help=(
+            "Time window for filtered queries. Accepts e.g. '15m', '1h', '6h', "
+            "'24h', or a raw integer seconds value. Default 15m. "
+            "Applies when --search or --level is set."
+        ),
+    ),
 ) -> None:
     """Get logs for a run.
 
@@ -1654,6 +1905,9 @@ def get_logs(
 
         prime train logs <run_id>
         prime train logs <run_id> -f
+        prime train logs <run_id> --search Backpressure
+        prime train logs <run_id> --level ERROR --since 1h
+        prime train logs <run_id> --search 'Step \\d+' --regex
         prime train logs <run_id> --env reverse-text
         prime train logs <run_id> --env reverse-text/1 -f
     """
@@ -1676,6 +1930,23 @@ def get_logs(
             param_hint="--env",
         )
 
+    normalized_level: Optional[str] = None
+    if level:
+        normalized_level = level.upper()
+        if normalized_level not in {"ERROR", "WARNING", "SUCCESS", "INFO", "DEBUG"}:
+            raise typer.BadParameter(
+                f"Invalid level '{level}'. Use ERROR, WARNING, SUCCESS, INFO, or DEBUG.",
+                param_hint="--level",
+            )
+
+    if regex and not search:
+        raise typer.BadParameter(
+            "--regex has no effect without --search. Pass --search <pattern> too.",
+            param_hint="--regex",
+        )
+
+    since_seconds = _parse_since(since)
+
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
@@ -1683,7 +1954,14 @@ def get_logs(
         if component == "orchestrator":
 
             def fetch(t: int) -> str:
-                return rl_client.get_logs(run_id, tail_lines=t)
+                return rl_client.get_logs(
+                    run_id,
+                    tail_lines=t,
+                    search=search,
+                    regex=regex,
+                    level=normalized_level,
+                    since_seconds=since_seconds,
+                )
 
             label = "orchestrator"
         else:
@@ -1696,6 +1974,10 @@ def get_logs(
                     env_name=env_name,
                     env_index=env_index,
                     tail_lines=t,
+                    search=search,
+                    regex=regex,
+                    level=normalized_level,
+                    since_seconds=since_seconds,
                 )
 
             label = f"env-server {env}"
@@ -1995,3 +2277,9 @@ def list_checkpoints(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+# `prime train usage` — token usage and price for one run; lives next to the
+# other run-scoped monitoring commands. Implemented in commands/usage.py and
+# also re-exposed as the top-level `prime usage` summary command.
+app.command("usage", rich_help_panel="Monitoring", epilog=RUN_USAGE_JSON_HELP)(run_usage_command)

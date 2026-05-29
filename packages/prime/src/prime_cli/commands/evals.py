@@ -9,6 +9,7 @@ from typing import Any, Optional
 import typer
 from click.core import ParameterSource
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
+from rich.progress import Progress
 from rich.syntax import Syntax
 from rich.table import Table
 
@@ -39,7 +40,7 @@ from ..verifiers_bridge import (
     is_help_request,
     print_eval_run_help,
     run_eval_passthrough,
-    run_eval_tui,
+    run_eval_view,
 )
 
 console = get_console()
@@ -85,13 +86,17 @@ EVAL_TABLE_MAX_TEXT_WIDTH = 30
 EVAL_RUN_EXAMPLE_COMMAND = "prime eval run gsm8k -n 10"
 EVAL_HOSTED_LABEL = "HOSTED"
 EVAL_LOCAL_LABEL = "LOCAL"
+# Legacy verifiers config fields/flags are accepted through the parser only so
+# Prime can reject them with the hosted-specific unsupported-option message.
 HOSTED_EVAL_CONFIG_EXTRA_FIELDS = {
+    "debug",
     "timeout_minutes",
     "allow_sandbox_access",
     "allow_instances_access",
     "allow_tunnel_access",
     "eval_name",
 }
+HOSTED_LEGACY_UNSUPPORTED_FLAGS = {"--debug", "--tui", "-u"}
 HOSTED_EVAL_CONFIG_FIELD_TYPES: dict[str, tuple[type[Any], str]] = {
     "env_dir_path": (str, "a non-empty string"),
     "num_examples": (int, "an integer"),
@@ -303,6 +308,23 @@ def _reject_unsupported_hosted_verifiers_args(
         for dest, option_name in option_names_by_dest.items()
         if dest in provided_dests and dest not in HOSTED_SUPPORTED_VERIFIERS_FIELDS
     ]
+    if not unsupported_flags:
+        return
+
+    console.print(
+        "[red]Error:[/red] hosted eval CLI does not support: "
+        + ", ".join(f"`{flag}`" for flag in unsupported_flags)
+    )
+    raise typer.Exit(1)
+
+
+def _reject_legacy_unsupported_hosted_flags(passthrough_args: list[str]) -> None:
+    unsupported_flags = []
+    for arg in passthrough_args:
+        flag = arg.split("=", 1)[0]
+        if flag in HOSTED_LEGACY_UNSUPPORTED_FLAGS and flag not in unsupported_flags:
+            unsupported_flags.append(flag)
+
     if not unsupported_flags:
         return
 
@@ -987,6 +1009,34 @@ def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, An
     return get_eval_viewer_url(evaluation_id)
 
 
+def _push_samples_with_progress(
+    client: EvalsClient, evaluation_id: str, samples: list[dict[str, Any]]
+) -> None:
+    if not console.is_terminal:
+        client.push_samples(evaluation_id, samples)
+        return
+
+    with Progress(console=console, transient=True) as progress:
+        task_id = progress.add_task("Uploading samples", total=len(samples))
+        client.push_samples(
+            evaluation_id,
+            samples,
+            progress_callback=lambda uploaded: progress.update(task_id, advance=uploaded),
+        )
+
+
+def _require_published_environment_for_eval_push(env_name: str, eval_path: Path) -> None:
+    console.print("[red]Error:[/red] Evaluation uploads require a pushed environment.")
+    console.print(
+        f"[yellow]Push '{env_name}' before uploading this evaluation:[/yellow] "
+        f"prime env push {env_name}"
+    )
+    console.print("[dim]Then retry with an owner-qualified environment:[/dim]")
+    console.print(f"[dim]  --env <owner>/{env_name}[/dim]")
+    console.print(f"[dim]Example: prime eval push {eval_path} --env <owner>/{env_name}[/dim]")
+    raise typer.Exit(1)
+
+
 def _push_single_eval(
     config_path: str,
     env_slug: Optional[str],
@@ -1006,14 +1056,9 @@ def _push_single_eval(
 
     environments = None
     if env_slug and not run_id and not eval_id:
-        # Determine if env_slug is a slug (owner/name) or a name
-        # Use appropriate key so _resolve_environments can properly resolve it
-        if "/" in env_slug:
-            # It's a slug (owner/name format)
-            environments = [{"slug": env_slug}]
-        else:
-            # It's a name (will be resolved by _resolve_environments)
-            environments = [{"name": env_slug}]
+        if "/" not in env_slug:
+            _require_published_environment_for_eval_push(env_slug, path)
+        environments = [{"slug": env_slug}]
 
     console.print()
 
@@ -1067,7 +1112,7 @@ def _push_single_eval(
     results = eval_data.get("results", [])
     if results:
         console.print(f"[blue]Pushing {len(results)} samples...[/blue]")
-        client.push_samples(eval_id, results)
+        _push_samples_with_progress(client, eval_id, results)
         console.print("[green]✓ Samples pushed successfully[/green]")
         console.print()
 
@@ -1088,8 +1133,9 @@ def _push_single_eval(
     return eval_id
 
 
-@subcommands_app.command("tui")
-def tui_cmd(
+@subcommands_app.command("view")
+def view_cmd(
+    limit: int = typer.Option(50, "--limit", "-n", help="Max evaluation rows to load"),
     env_dir: Optional[str] = typer.Option(
         None, "--env-dir", "-e", help="Path to environments directory"
     ),
@@ -1097,8 +1143,28 @@ def tui_cmd(
         None, "--outputs-dir", "-o", help="Path to outputs directory"
     ),
 ) -> None:
-    """Launch TUI for viewing eval results."""
-    run_eval_tui(env_dir=env_dir, outputs_dir=outputs_dir)
+    """Launch the interactive evaluation viewer."""
+    if limit < 1:
+        console.print("[red]Error:[/red] --limit must be at least 1")
+        raise typer.Exit(1)
+    run_eval_view(env_dir=env_dir, outputs_dir=outputs_dir, limit=limit)
+
+
+@subcommands_app.command("tui")
+def tui_cmd(
+    _limit: int = typer.Option(
+        50, "--limit", "-n", help="Deprecated; use `prime eval view --limit`."
+    ),
+    _env_dir: Optional[str] = typer.Option(
+        None, "--env-dir", "-e", help="Deprecated; use `prime eval view --env-dir`."
+    ),
+    _outputs_dir: Optional[str] = typer.Option(
+        None, "--outputs-dir", "-o", help="Deprecated; use `prime eval view --outputs-dir`."
+    ),
+) -> None:
+    """Deprecated alias for the evaluation viewer."""
+    console.print("[yellow]Deprecated:[/yellow] `prime eval tui` has moved. Use `prime eval view`.")
+    raise typer.Exit(1)
 
 
 @subcommands_app.command("push", epilog=PUSH_EVAL_JSON_HELP)
@@ -1116,7 +1182,10 @@ def push_eval(
         "--env",
         "--env-id",
         "-e",
-        help="Environment name (e.g., 'gsm8k' or 'owner/gsm8k')",
+        help=(
+            "Published environment slug (owner/name). "
+            "Push local environments with `prime env push` first."
+        ),
     ),
     run_id: Optional[str] = typer.Option(
         None,
@@ -1150,7 +1219,7 @@ def push_eval(
     Examples:
         prime eval push                                    # Push current dir or auto-discover
         prime eval push outputs/evals/gsm8k--gpt-4/abc123  # Push specific directory
-        prime eval push --env gsm8k                        # Push with environment override
+        prime eval push --env owner/gsm8k                  # Push with environment override
         prime eval push --name "gsm8k smoke test"         # Override evaluation display name
         prime eval push --public                           # Create a public evaluation
         prime eval push --eval xyz789 --name "rerun"      # Update an existing evaluation name
@@ -1243,8 +1312,8 @@ def push_eval(
         console.print("[yellow]Tip:[/yellow] You must provide one of:")
         console.print("  --eval <eval_id>     (to update an existing evaluation)")
         console.print("  --run-id <run_id>    (to link to an existing training run)")
-        console.print("  --env <env>          (environment name, e.g., 'gsm8k' or 'owner/gsm8k')")
-        console.print("  [or ensure 'env' or 'env_id' is set in metadata.json]")
+        console.print("  --env <env>          (published environment slug, e.g., 'owner/gsm8k')")
+        console.print("  [or ensure owner/name 'env' or 'env_id' is set in metadata.json]")
         raise typer.Exit(1)
     except KeyError as e:
         console.print(f"[red]Error:[/red] Missing required field: {e}")
@@ -1436,6 +1505,7 @@ def run_eval_cmd(
             raise typer.Exit(1)
 
     if hosted:
+        _reject_legacy_unsupported_hosted_flags(passthrough_args)
         parsed_verifiers_args, cli_overrides, option_names_by_dest = (
             _parse_verifiers_eval_namespace(
                 environment,

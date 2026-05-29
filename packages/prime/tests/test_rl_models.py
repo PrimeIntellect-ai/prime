@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, List
 
 import pytest
+from prime_cli.commands.rl import _model_name_sort_key
 from prime_cli.main import app
 from prime_cli.utils.formatters import strip_ansi
 from typer.testing import CliRunner
@@ -127,6 +128,9 @@ def test_models_table_renders_promo_arrow_and_caption(
     assert "$0.5" in plain
     assert "$1" in plain
     assert "$3" in plain
+    normalized = " ".join(plain.split())
+    expected_footer = "Prices are per 1M tokens. All models support context windows of 64K tokens."
+    assert expected_footer in normalized
     # Promo label rendered once below the table.
     assert plain.count("Free RFT week") == 1
 
@@ -236,6 +240,46 @@ def test_models_promo_label_deduplicated_across_models(
     assert plain.count("shared promo") == 1
 
 
+def test_models_table_renders_promo_with_list_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-swap backend: legacy fields hold effective price, list_* hold list price."""
+    payload = {
+        "models": [
+            {
+                "name": "qwen/qwen3-8b",
+                "atCapacity": False,
+                "trainingPricePerMtok": 0.0,
+                "inferenceInputPricePerMtok": 0.0,
+                "inferenceOutputPricePerMtok": 0.0,
+                "listTrainingPricePerMtok": 0.5,
+                "listInferenceInputPricePerMtok": 1.0,
+                "listInferenceOutputPricePerMtok": 3.0,
+                "effectiveTrainingPricePerMtok": 0.0,
+                "effectiveInferenceInputPricePerMtok": 0.0,
+                "effectiveInferenceOutputPricePerMtok": 0.0,
+                "promoLabel": "Free RFT week",
+            },
+        ]
+    }
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return payload
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+
+    result = CliRunner().invoke(app, ["rl", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "→" in plain
+    assert "FREE" in plain
+    assert "$0.5" in plain
+    assert "$1" in plain
+    assert "$3" in plain
+    assert plain.count("Free RFT week") == 1
+
+
 def test_models_json_includes_effective_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return _promo_payload()
@@ -250,3 +294,57 @@ def test_models_json_includes_effective_fields(monkeypatch: pytest.MonkeyPatch) 
     assert data["models"][0]["effective_inference_input_price_per_mtok"] == 0.0
     assert data["models"][0]["effective_inference_output_price_per_mtok"] == 0.0
     assert data["models"][0]["promo_label"] == "Free RFT week"
+
+
+def test_model_name_sort_key_orders_parameter_counts_numerically() -> None:
+    models = [
+        "Qwen/Qwen3-30B-A3B-Instruct-2507",
+        "Qwen/Qwen3-4B-Instruct-2507",
+        "Qwen/Qwen3-4B-Thinking-2507",
+        "Qwen/Qwen3.5-0.8B",
+        "Qwen/Qwen3.5-122B-A10B",
+        "Qwen/Qwen3.5-2B",
+        "Qwen/Qwen3.5-35B-A3B",
+        "Qwen/Qwen3.5-397B-A17B",
+        "Qwen/Qwen3.5-4B",
+        "Qwen/Qwen3.5-9B",
+        "meta-llama/Llama-3.2-1B-Instruct",
+        "meta-llama/Llama-3.2-3B-Instruct",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+    ]
+
+    assert sorted(models, key=_model_name_sort_key) == [
+        "Qwen/Qwen3-4B-Instruct-2507",
+        "Qwen/Qwen3-4B-Thinking-2507",
+        "Qwen/Qwen3-30B-A3B-Instruct-2507",
+        "Qwen/Qwen3.5-0.8B",
+        "Qwen/Qwen3.5-2B",
+        "Qwen/Qwen3.5-4B",
+        "Qwen/Qwen3.5-9B",
+        "Qwen/Qwen3.5-35B-A3B",
+        "Qwen/Qwen3.5-122B-A10B",
+        "Qwen/Qwen3.5-397B-A17B",
+        "meta-llama/Llama-3.2-1B-Instruct",
+        "meta-llama/Llama-3.2-3B-Instruct",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+        "openai/gpt-oss-20b",
+        "openai/gpt-oss-120b",
+    ]
+
+
+def test_model_name_sort_key_handles_active_params_case_insensitively() -> None:
+    models = [
+        "org/model-30B-A10b",
+        "org/model-30b-a3B",
+        "org/model-30B",
+    ]
+
+    assert sorted(models, key=_model_name_sort_key) == [
+        "org/model-30b-a3B",
+        "org/model-30B-A10b",
+        "org/model-30B",
+    ]

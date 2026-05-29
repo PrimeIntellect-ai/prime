@@ -1,10 +1,10 @@
 """Commands for managing Docker images in Prime Intellect registry."""
 
-import json
 import tarfile
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
@@ -15,7 +15,13 @@ from gitignore_parser import parse_gitignore
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
 from rich.table import Table
 
-from ..utils import PlainTyper, get_console, json_output_help, validate_output_format
+from ..utils import (
+    PlainTyper,
+    get_console,
+    json_output_help,
+    output_data_as_json,
+    validate_output_format,
+)
 
 app = PlainTyper(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = get_console()
@@ -24,10 +30,16 @@ PACKAGED_DOCKERFILE_PATH = ".__prime_dockerfile__"
 
 config = Config()
 
+
+class ImageVisibility(str, Enum):
+    PRIVATE = "PRIVATE"
+    PUBLIC = "PUBLIC"
+
+
 LIST_IMAGES_JSON_HELP = json_output_help(
     "Raw API response is printed unchanged.",
     ".data[] = {displayRef?, fullImagePath?, imageName, imageTag, status, "
-    "artifactType, ownerType, sizeBytes?, createdAt, pushedAt?}",
+    "artifactType, ownerType, visibility, sizeBytes?, createdAt, pushedAt?}",
 )
 
 # ---------------------------------------------------------------------------
@@ -206,6 +218,17 @@ _STATUS_LABELS: dict[str, str] = {
 }
 
 
+def _render_visibility(value: Any) -> str:
+    try:
+        visibility = ImageVisibility(str(value or ImageVisibility.PRIVATE.value).upper())
+    except ValueError:
+        visibility = ImageVisibility.PRIVATE
+
+    if visibility == ImageVisibility.PUBLIC:
+        return "[green]Public[/green]"
+    return "[dim]Private[/dim]"
+
+
 def _render_status_slot(part: Optional[ArtifactPartition]) -> str:
     """Render the raw status of the latest row for this artifact type.
 
@@ -278,6 +301,7 @@ def _image_ref_column_width(console_width: int, is_team_listing: bool) -> int:
 
         Type     ~14 chars ("Container / VM")
         Status   ~20 chars ("Uploading / Uploading")
+        Visibility ~9 chars
         Size     ~10 chars
         Created  ~17 chars ("YYYY-MM-DD HH:MM ")
         Owner    ~10 chars (team listings only)
@@ -287,8 +311,8 @@ def _image_ref_column_width(console_width: int, is_team_listing: bool) -> int:
     so the column is neither absurdly wide on large terminals nor unusable on
     tiny ones.
     """
-    reserved = 14 + 20 + 10 + 17 + (10 if is_team_listing else 0)
-    num_cols = 5 + (1 if is_team_listing else 0)
+    reserved = 14 + 20 + 9 + 10 + 17 + (10 if is_team_listing else 0)
+    num_cols = 6 + (1 if is_team_listing else 0)
     reserved += 3 * num_cols
     budget = console_width - reserved
     return max(30, min(80, budget))
@@ -356,17 +380,35 @@ def push_image(
         click_type=click.Choice(["linux/amd64", "linux/arm64"]),
         help="Target platform (defaults to linux/amd64 for Kubernetes compatibility)",
     ),
+    public: bool = typer.Option(
+        False,
+        "--public",
+        help="Make the image public when the build completes",
+    ),
+    private: bool = typer.Option(
+        False,
+        "--private",
+        help="Make the image private when the build completes",
+    ),
 ):
     """
     Build and push a Docker image to Prime Intellect registry.
+
+    New image tags are private by default. Re-pushing an existing tag keeps
+    its current visibility unless --public or --private is provided.
 
     \b
     Examples:
         prime images push myapp:v1.0.0
         prime images push myapp:latest --context ./app --dockerfile ../docker/Dockerfile.prod
         prime images push myapp:v1 --platform linux/arm64
+        prime images push myapp:v1 --public
     """
     try:
+        if public and private:
+            console.print("[red]Error: --public and --private cannot be used together[/red]")
+            raise typer.Exit(1)
+
         # Parse image reference
         if ":" in image_reference:
             image_name, image_tag = image_reference.rsplit(":", 1)
@@ -466,6 +508,10 @@ def push_image(
                 }
                 if config.team_id:
                     build_payload["team_id"] = config.team_id
+                if public:
+                    build_payload["visibility"] = ImageVisibility.PUBLIC.value
+                elif private:
+                    build_payload["visibility"] = ImageVisibility.PRIVATE.value
 
                 build_response = client.request(
                     "POST",
@@ -531,6 +577,14 @@ def push_image(
             console.print()
             console.print(f"[bold]Build ID:[/bold] {build_id}")
             console.print(f"[bold]Image:[/bold] {full_image_path}")
+            if public or private:
+                requested_visibility = ImageVisibility.PUBLIC if public else ImageVisibility.PRIVATE
+                console.print(f"[bold]Visibility:[/bold] {requested_visibility.value}")
+            else:
+                console.print(
+                    "[bold]Visibility:[/bold] PRIVATE for new images "
+                    "(existing tags keep their current visibility)"
+                )
             console.print()
             console.print("[cyan]Your image is being built.[/cyan]")
             console.print()
@@ -564,6 +618,8 @@ def list_images(
     all_images: bool = typer.Option(
         False, "--all", "-a", help="[Deprecated] Show all accessible images (personal + team)"
     ),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
+    num: int = typer.Option(50, "--num", "-n", help="Items per page (max 250)"),
 ):
     """
     List all images you've pushed to Prime Intellect registry.
@@ -573,9 +629,18 @@ def list_images(
     \b
     Examples:
         prime images list
+        prime images list --num 100
+        prime images list --page 2
         prime images list --output json
     """
     validate_output_format(output, console)
+
+    if num < 1 or page < 1:
+        console.print("[red]Error:[/red] --num and --page must be at least 1")
+        raise typer.Exit(1)
+    if num > 250:
+        console.print("[red]Error:[/red] --num cannot exceed 250")
+        raise typer.Exit(1)
 
     if all_images and output != "json":
         console.print(
@@ -586,21 +651,37 @@ def list_images(
     try:
         client = APIClient()
 
+        offset = (page - 1) * num
+
         # Build query params
-        params: dict[str, str] = {}
+        params: dict[str, str] = {"limit": str(num), "offset": str(offset)}
         if config.team_id:
             params["teamId"] = config.team_id
 
-        response = client.request("GET", "/images", params=params if params else None)
+        response = client.request("GET", "/images", params=params)
         images: list[ImageRow] = response.get("data", [])
-
-        if not images:
-            console.print("[yellow]No images or builds found.[/yellow]")
-            console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
-            return
+        has_total_count: bool = "totalCount" in response
+        total_count: int = int(response.get("totalCount", offset + len(images)))
 
         if output == "json":
-            console.print(json.dumps(response, indent=2))
+            output_data_as_json(response, console)
+            return
+
+        if not images:
+            if has_total_count and total_count == 0:
+                console.print("[yellow]No images or builds found.[/yellow]")
+                console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
+            elif has_total_count:
+                console.print(
+                    f"[yellow]No images on page {page}. Total: {total_count} image(s).[/yellow]"
+                )
+                console.print("Try [bold]--page 1[/bold] to start from the beginning.")
+            elif page > 1:
+                console.print(f"[yellow]No images on page {page}.[/yellow]")
+                console.print("Try [bold]--page 1[/bold] to start from the beginning.")
+            else:
+                console.print("[yellow]No images or builds found.[/yellow]")
+                console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
             return
 
         # Table output
@@ -636,6 +717,7 @@ def list_images(
         # Worst-case label is ``Cancelled / Cancelled`` (21 chars); pin to 21
         # so Rich never wraps the status text across two lines.
         table.add_column("Status", justify="center", no_wrap=True, min_width=21)
+        table.add_column("Visibility", justify="center", no_wrap=True)
         table.add_column("Size", justify="right", no_wrap=True)
         table.add_column("Created", style="dim", no_wrap=True, min_width=16)
 
@@ -660,6 +742,7 @@ def list_images(
             )
             type_display: str = _render_type_column(partition)
             status_display: str = _render_status_column(partition)
+            visibility_display: str = _render_visibility(preferred.get("visibility"))
             size_mb: str = _completed_size_mb(partition)
             date_str: str = _display_created(partition)
 
@@ -672,15 +755,152 @@ def list_images(
                     "[blue]Team[/blue]" if owner_type == "team" else "[dim]Personal[/dim]"
                 )
                 row.append(owner_display)
-            row.extend([status_display, size_mb, date_str])
+            row.extend([status_display, visibility_display, size_mb, date_str])
             table.add_row(*row)
 
         console.print()
         console.print(table)
         console.print()
-        console.print(f"[dim]Total: {len(grouped)} image(s)[/dim]")
+        shown_groups = len(grouped)
+        if has_total_count:
+            has_next = offset + shown_groups < total_count
+        else:
+            has_next = shown_groups >= num
+        if has_next or page > 1:
+            start = offset + 1
+            end = offset + shown_groups
+            if has_total_count:
+                console.print(
+                    f"[dim]Page {page} • showing {start}-{end} of {total_count} image(s)[/dim]"
+                )
+            else:
+                console.print(f"[dim]Page {page} • showing {start}-{end}[/dim]")
+            if has_next:
+                console.print(f"[dim]Use --page {page + 1} to see more.[/dim]")
+        elif has_total_count:
+            console.print(f"[dim]Total: {total_count} image(s)[/dim]")
+        else:
+            console.print(f"[dim]Total: {shown_groups} image(s)[/dim]")
         console.print()
 
+    except UnauthorizedError:
+        console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Optional[str]]:
+    """Parse refs accepted by mutating image commands.
+
+    Returns ``(image_name, image_tag, team_id)``. Personal image refs may use
+    either ``name:tag`` or ``{currentUserId}/name:tag``. Team image refs may
+    use ``team-{teamId}/name:tag``.
+    """
+    team_id: Optional[str] = config.team_id
+    if "/" in image_reference:
+        namespace, rest = image_reference.split("/", 1)
+        if namespace.startswith("team-"):
+            extracted_team_id = namespace[5:]
+            if not extracted_team_id:
+                console.print(
+                    "[red]Error: Invalid team image reference. "
+                    "Expected format: team-{teamId}/imagename:tag[/red]"
+                )
+                raise typer.Exit(1)
+            team_id = extracted_team_id
+            image_reference = rest
+        elif namespace == config.user_id:
+            team_id = None
+            image_reference = rest
+        else:
+            console.print(
+                f"[red]Error: Unrecognized image namespace '{namespace}'. "
+                "Use 'imagename:tag' for personal images, "
+                "'{userId}/imagename:tag' with your current user ID, or "
+                "'team-{teamId}/imagename:tag' for team images.[/red]"
+            )
+            raise typer.Exit(1)
+
+    if ":" not in image_reference:
+        console.print("[red]Error: Image reference must include a tag (e.g., myapp:latest)[/red]")
+        raise typer.Exit(1)
+
+    image_name, image_tag = image_reference.rsplit(":", 1)
+    return image_name, image_tag, team_id
+
+
+def _set_image_visibility(image_reference: str, visibility: ImageVisibility) -> None:
+    image_name, image_tag, team_id = _parse_mutable_image_reference(image_reference)
+    payload: dict[str, str] = {"visibility": visibility.value}
+    if team_id:
+        payload["teamId"] = team_id
+
+    client = APIClient()
+    client.request(
+        "PATCH",
+        f"/images/{image_name}/{image_tag}/visibility",
+        json=payload,
+    )
+    context = f" (team: {team_id})" if team_id else ""
+    console.print(
+        f"[green]✓[/green] Updated {image_name}:{image_tag}{context} to {visibility.value}"
+    )
+
+
+@app.command("publish")
+def publish_image(
+    image_reference: str = typer.Argument(
+        ...,
+        help=(
+            "Image reference to make public "
+            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
+            "or 'team-{teamId}/myapp:v1.0.0')"
+        ),
+    ),
+):
+    """
+    Make an image public so other Prime users can run it.
+
+    \b
+    Examples:
+        prime images publish myapp:v1.0.0
+        prime images publish cmk123/myapp:v1.0.0
+        prime images publish team-abc123/myapp:v1.0.0
+    """
+    try:
+        _set_image_visibility(image_reference, ImageVisibility.PUBLIC)
+    except UnauthorizedError:
+        console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("unpublish")
+def unpublish_image(
+    image_reference: str = typer.Argument(
+        ...,
+        help=(
+            "Image reference to make private "
+            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
+            "or 'team-{teamId}/myapp:v1.0.0')"
+        ),
+    ),
+):
+    """
+    Make a public image private again.
+
+    \b
+    Examples:
+        prime images unpublish myapp:v1.0.0
+        prime images unpublish cmk123/myapp:v1.0.0
+        prime images unpublish team-abc123/myapp:v1.0.0
+    """
+    try:
+        _set_image_visibility(image_reference, ImageVisibility.PRIVATE)
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
         raise typer.Exit(1)
@@ -693,7 +913,11 @@ def list_images(
 def delete_image(
     image_reference: str = typer.Argument(
         ...,
-        help="Image reference to delete (e.g., 'myapp:v1.0.0' or 'team-{teamId}/myapp:v1.0.0')",
+        help=(
+            "Image reference to delete "
+            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
+            "or 'team-{teamId}/myapp:v1.0.0')"
+        ),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ):
@@ -707,44 +931,14 @@ def delete_image(
     Examples:
         prime images delete myapp:v1.0.0
         prime images delete myapp:latest --yes
+        prime images delete cmk123/myapp:v1.0.0
         prime images delete team-abc123/myapp:v1.0.0
     """
     # Store original input for error messages
     original_reference = image_reference
 
     try:
-        # Check for team-prefixed format: team-{teamId}/imagename:tag
-        team_id = config.team_id
-        if "/" in image_reference:
-            namespace, rest = image_reference.split("/", 1)
-            if namespace.startswith("team-"):
-                # Extract team ID from the reference
-                extracted_team_id = namespace[5:]  # Remove "team-" prefix
-                if not extracted_team_id:
-                    console.print(
-                        "[red]Error: Invalid team image reference. "
-                        "Expected format: team-{teamId}/imagename:tag[/red]"
-                    )
-                    raise typer.Exit(1)
-                team_id = extracted_team_id
-                image_reference = rest
-            else:
-                # Unrecognized namespace (not team-prefixed)
-                console.print(
-                    f"[red]Error: Unrecognized image namespace '{namespace}'. "
-                    "Use 'imagename:tag' for personal images or "
-                    "'team-{{teamId}}/imagename:tag' for team images.[/red]"
-                )
-                raise typer.Exit(1)
-
-        # Validate image reference has a tag (after team-prefix parsing)
-        if ":" not in image_reference:
-            console.print(
-                "[red]Error: Image reference must include a tag (e.g., myapp:latest)[/red]"
-            )
-            raise typer.Exit(1)
-
-        image_name, image_tag = image_reference.rsplit(":", 1)
+        image_name, image_tag, team_id = _parse_mutable_image_reference(image_reference)
 
         context = f" (team: {team_id})" if team_id else ""
         if not yes:

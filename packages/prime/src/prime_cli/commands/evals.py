@@ -9,6 +9,7 @@ from typing import Any, Optional
 import typer
 from click.core import ParameterSource
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
+from rich.progress import Progress
 from rich.syntax import Syntax
 from rich.table import Table
 
@@ -39,7 +40,7 @@ from ..verifiers_bridge import (
     is_help_request,
     print_eval_run_help,
     run_eval_passthrough,
-    run_eval_tui,
+    run_eval_view,
 )
 
 console = get_console()
@@ -1008,6 +1009,22 @@ def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, An
     return get_eval_viewer_url(evaluation_id)
 
 
+def _push_samples_with_progress(
+    client: EvalsClient, evaluation_id: str, samples: list[dict[str, Any]]
+) -> None:
+    if not console.is_terminal:
+        client.push_samples(evaluation_id, samples)
+        return
+
+    with Progress(console=console, transient=True) as progress:
+        task_id = progress.add_task("Uploading samples", total=len(samples))
+        client.push_samples(
+            evaluation_id,
+            samples,
+            progress_callback=lambda uploaded: progress.update(task_id, advance=uploaded),
+        )
+
+
 def _require_published_environment_for_eval_push(env_name: str, eval_path: Path) -> None:
     console.print("[red]Error:[/red] Evaluation uploads require a pushed environment.")
     console.print(
@@ -1095,7 +1112,7 @@ def _push_single_eval(
     results = eval_data.get("results", [])
     if results:
         console.print(f"[blue]Pushing {len(results)} samples...[/blue]")
-        client.push_samples(eval_id, results)
+        _push_samples_with_progress(client, eval_id, results)
         console.print("[green]✓ Samples pushed successfully[/green]")
         console.print()
 
@@ -1116,8 +1133,9 @@ def _push_single_eval(
     return eval_id
 
 
-@subcommands_app.command("tui")
-def tui_cmd(
+@subcommands_app.command("view")
+def view_cmd(
+    limit: int = typer.Option(50, "--limit", "-n", help="Max evaluation rows to load"),
     env_dir: Optional[str] = typer.Option(
         None, "--env-dir", "-e", help="Path to environments directory"
     ),
@@ -1125,8 +1143,28 @@ def tui_cmd(
         None, "--outputs-dir", "-o", help="Path to outputs directory"
     ),
 ) -> None:
-    """Launch TUI for viewing eval results."""
-    run_eval_tui(env_dir=env_dir, outputs_dir=outputs_dir)
+    """Launch the interactive evaluation viewer."""
+    if limit < 1:
+        console.print("[red]Error:[/red] --limit must be at least 1")
+        raise typer.Exit(1)
+    run_eval_view(env_dir=env_dir, outputs_dir=outputs_dir, limit=limit)
+
+
+@subcommands_app.command("tui")
+def tui_cmd(
+    _limit: int = typer.Option(
+        50, "--limit", "-n", help="Deprecated; use `prime eval view --limit`."
+    ),
+    _env_dir: Optional[str] = typer.Option(
+        None, "--env-dir", "-e", help="Deprecated; use `prime eval view --env-dir`."
+    ),
+    _outputs_dir: Optional[str] = typer.Option(
+        None, "--outputs-dir", "-o", help="Deprecated; use `prime eval view --outputs-dir`."
+    ),
+) -> None:
+    """Deprecated alias for the evaluation viewer."""
+    console.print("[yellow]Deprecated:[/yellow] `prime eval tui` has moved. Use `prime eval view`.")
+    raise typer.Exit(1)
 
 
 @subcommands_app.command("push", epilog=PUSH_EVAL_JSON_HELP)

@@ -47,7 +47,7 @@ def list_models(
     """List available models from Prime Inference (/v1/models)."""
     validate_output_format(output, console)
     try:
-        client = InferenceClient()
+        client = InferenceClient(require_auth=False)
         data = client.list_models()
 
         # Expect OpenAI-style: {"object":"list","data":[{"id":..., ...}, ...]}

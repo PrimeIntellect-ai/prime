@@ -148,7 +148,13 @@ from prime_lab_app.environment_screen import (
 from prime_lab_app.eval_markdown import MathMarkdown, make_math_parser
 from prime_lab_app.eval_records import LazyRunResults, LocalEvalRun
 from prime_lab_app.eval_render import compute_run_overview_stats, history_groups
-from prime_lab_app.eval_screen import LocalEvalRunScreen, RolloutCopyScreen, RolloutViewer
+from prime_lab_app.eval_screen import (
+    HostedEvalSamplesScreen,
+    LocalEvalRunScreen,
+    RolloutCopyScreen,
+    RolloutViewer,
+)
+from prime_lab_app.eval_view import build_eval_view_app
 from prime_lab_app.evaluation_browser import (
     evaluation_index,
     evaluation_model_selection_details,
@@ -601,6 +607,37 @@ def test_lab_view_evaluation_rows_mark_source_and_keep_status_consistent(tmp_pat
     assert [badge["label"] for badge in local.raw["badges"]] == ["LOCAL", "COMPLETED"]
 
 
+@pytest.mark.asyncio
+async def test_eval_view_starts_on_evaluations_and_includes_hosted_runs(tmp_path: Path) -> None:
+    run_dir = tmp_path / "outputs" / "evals" / "gsm8k--openai--gpt-4" / "run-a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        '{"avg_reward": 0.75, "num_examples": 1}',
+        encoding="utf-8",
+    )
+    (run_dir / "results.jsonl").write_text('{"reward": 0.75}\n', encoding="utf-8")
+
+    app = build_eval_view_app(limit=10, workspace=tmp_path, data_source=make_source())
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+
+        assert app._launch_screen is None
+        assert app._active_section_key == "evaluations"
+        assert [section.key for section in app._snapshot.sections] == ["evaluations"]
+        titles = [item.title for item in app._visible_items]
+        assert "eval-1" in titles
+        assert "run-a" in titles
+
+        local_index = titles.index("run-a")
+        app.query_one("#item-list", OptionList).highlighted = local_index
+        app._show_item(app._visible_items[local_index])
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, LocalEvalRunScreen)
+
+
 def test_lab_view_merges_local_and_platform_environments(tmp_path: Path) -> None:
     env_path = tmp_path / "environments" / "private-env"
     (env_path / ".prime").mkdir(parents=True)
@@ -978,6 +1015,27 @@ def test_lab_view_initial_snapshot_hydrates_cached_platform_rows(
     assert training.refreshed_at
 
 
+def test_eval_view_initial_snapshot_hydrates_cached_platform_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = make_source()
+
+    source.load_evaluations(LabLoadOptions(limit=10, workspace=workspace))
+    snapshot = source.load_evaluations_initial(LabLoadOptions(limit=10, workspace=workspace))
+
+    assert [section.key for section in snapshot.sections] == ["evaluations"]
+    evaluations = snapshot.section("evaluations")
+    assert evaluations is not None
+    assert evaluations.items[0].title == "eval-1"
+    assert evaluations.status == "1 cached"
+    assert evaluations.row_data_origin == "disk"
+    assert evaluations.refreshed_at
+
+
 def test_lab_view_row_cache_never_shrinks_on_smaller_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1327,6 +1385,90 @@ def test_training_data_tab_uses_rollout_viewer() -> None:
     assert any(isinstance(widget, RolloutViewer) for widget in widgets)
 
 
+@pytest.mark.asyncio
+async def test_prime_lab_app_opens_hosted_eval_samples_screen(tmp_path: Path) -> None:
+    source = make_source()
+    snapshot = source.load(LabLoadOptions(limit=10, workspace=tmp_path))
+    app = PrimeLabView(
+        lambda: snapshot,
+        lambda item, include_logs, log_tail_lines, metrics_limit, metrics_min_step: (
+            source.load_item_detail(
+                item,
+                include_logs=include_logs,
+                log_tail_lines=log_tail_lines,
+                metrics_limit=metrics_limit,
+                metrics_min_step=metrics_min_step,
+            )
+        ),
+    )
+
+    async with app.run_test(size=(140, 44)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        app._active_section_key = "evaluations"
+        app._render_active_section()
+        await pilot.pause()
+
+        hosted_item = next(
+            item for item in app._visible_items if item.raw.get("source") == "hosted"
+        )
+        app._show_item(hosted_item)
+        app.action_load_detail()
+
+        for _ in range(20):
+            await pilot.pause()
+            if isinstance(app.screen, HostedEvalSamplesScreen) and app.screen.query(RolloutViewer):
+                break
+
+        assert isinstance(app.screen, HostedEvalSamplesScreen)
+        viewer = app.screen.query_one(RolloutViewer)
+        assert viewer.records[0]["reward"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_prime_lab_app_ignores_evaluation_placeholders(tmp_path: Path) -> None:
+    placeholder = LabItem(
+        key="evaluations:error",
+        section="evaluations",
+        title="Unavailable",
+        raw={"error": "boom"},
+    )
+    snapshot = LabSnapshot(
+        workspace=tmp_path,
+        base_url="https://api.test",
+        frontend_url="https://app.test",
+        authenticated=True,
+        team="team",
+        sections=(
+            LabSection(
+                key="evaluations",
+                title="Evaluations",
+                description="Evaluation runs.",
+                items=(placeholder,),
+            ),
+        ),
+    )
+    detail_calls = []
+    app = PrimeLabView(
+        lambda: snapshot,
+        lambda item, include_logs, log_tail_lines, metrics_limit, metrics_min_step: (
+            detail_calls.append(item) or item
+        ),
+        initial_section_key="evaluations",
+        show_launch_screen=False,
+    )
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        await pilot.pause()
+        app._show_item(placeholder)
+        app._load_selected_detail(include_logs=False)
+        await pilot.pause()
+
+        assert not isinstance(app.screen, HostedEvalSamplesScreen)
+        assert detail_calls == []
+
+
 def test_training_progress_counts_step_zero_as_completed() -> None:
     summary = training_progress_summary(
         {"max_steps": 10, "status": "RUNNING"},
@@ -1576,6 +1718,7 @@ def test_lab_view_training_sidebar_config_filters_nulls() -> None:
             "name": "wiki-search",
             "base_model": "Qwen/Qwen3.5-2B",
             "max_steps": 200,
+            "max_inflight_rollouts": 96,
             "learning_rate": None,
             "environments": [
                 {
@@ -1589,6 +1732,7 @@ def test_lab_view_training_sidebar_config_filters_nulls() -> None:
 
     assert 'model = "Qwen/Qwen3.5-2B"' in config
     assert "max_steps = 200" in config
+    assert "max_inflight_rollouts = 96" in config
     assert "\n[[env]]" in config
     assert "learning_rate" not in config
     assert "args" not in config

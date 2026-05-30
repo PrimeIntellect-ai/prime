@@ -15,7 +15,7 @@ dependencies = [
     "prime-tunnel>=0.1.0",
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
-    "typer>=0.9.0",
+    "typer>=0.9.0,<0.26",
     "rich>=13.3.1",
     "textual>=6.1.0",
     "textual-plot>=0.10.1",
@@ -44,9 +44,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/PrimeIntellect-ai/prime-cli"
-Documentation = "https://github.com/PrimeIntellect-ai/prime-cli#readme"
-Repository = "https://github.com/PrimeIntellect-ai/prime-cli.git"
+Homepage = "https://github.com/PrimeIntellect-ai/prime"
+Documentation = "https://github.com/PrimeIntellect-ai/prime#readme"
+Repository = "https://github.com/PrimeIntellect-ai/prime.git"
 Changelog = "https://github.com/PrimeIntellect-ai/prime/releases"
 
 [project.scripts]

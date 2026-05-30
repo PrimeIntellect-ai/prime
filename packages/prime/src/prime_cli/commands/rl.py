@@ -222,6 +222,7 @@ max_steps = 100
 # Training
 batch_size = 128
 rollouts_per_example = 8
+# max_inflight_rollouts = 96 # optional hard cap for in-flight rollout capacity
 # learning_rate = 3e-5 # optional; default is 1e-4
 
 # Optional: warm-start from an existing checkpoint
@@ -291,6 +292,7 @@ class EnvConfig(BaseModel):
     id: str
     name: str | None = None
     args: Dict[str, Any] = Field(default_factory=dict)
+    max_retries: int | None = Field(default=None, ge=0)
     version: str | None = None
 
     @model_validator(mode="after")
@@ -309,6 +311,8 @@ class EnvConfig(BaseModel):
             result["name"] = self.name
         if self.args:
             result["args"] = self.args
+        if self.max_retries is not None:
+            result["max_retries"] = self.max_retries
         if self.version is not None:
             result["version"] = self.version
         return result
@@ -322,6 +326,7 @@ class EvalEnvConfig(BaseModel):
     args: Dict[str, Any] = Field(default_factory=dict)
     num_examples: int | None = None
     rollouts_per_example: int | None = None
+    max_retries: int | None = Field(default=None, ge=0)
     version: str | None = None
 
     @model_validator(mode="after")
@@ -344,6 +349,8 @@ class EvalEnvConfig(BaseModel):
             result["num_examples"] = self.num_examples
         if self.rollouts_per_example is not None:
             result["rollouts_per_example"] = self.rollouts_per_example
+        if self.max_retries is not None:
+            result["max_retries"] = self.max_retries
         if self.version is not None:
             result["version"] = self.version
         return result
@@ -585,9 +592,10 @@ class RLConfig(BaseModel):
     max_steps: int = 100
     batch_size: int = 128
     rollouts_per_example: int = 8
+    max_inflight_rollouts: int | None = Field(default=None, ge=1)
     learning_rate: float | None = None
     lora_alpha: int | None = None
-    oversampling_factor: float | None = None
+    oversampling_factor: float | None = Field(default=None, gt=0)
     max_async_level: int | None = None
     checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
     cluster_name: str | None = None  # Admin-only: target a specific cluster by name
@@ -604,6 +612,16 @@ class RLConfig(BaseModel):
     run_config: Dict[str, Any] = Field(default_factory=dict)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_max_inflight_rollouts(self) -> "RLConfig":
+        if self.max_inflight_rollouts is not None and self.oversampling_factor is not None:
+            raise ValueError("Only one of max_inflight_rollouts and oversampling_factor can be set")
+        if self.max_inflight_rollouts is None:
+            return self
+        if self.max_inflight_rollouts < self.rollouts_per_example:
+            raise ValueError("max_inflight_rollouts must be at least rollouts_per_example")
+        return self
 
 
 def _format_validation_errors(errors: list[Any]) -> list[str]:
@@ -884,6 +902,8 @@ def create_run(
         console.print(f"  Max Steps:           {cfg.max_steps}")
         console.print(f"  Batch Size:          {cfg.batch_size}")
         console.print(f"  Rollouts per Example: {cfg.rollouts_per_example}")
+        if cfg.max_inflight_rollouts is not None:
+            console.print(f"  Max Inflight Rollouts: {cfg.max_inflight_rollouts}")
         if cfg.learning_rate is not None:
             console.print(f"  Learning Rate:       {cfg.learning_rate}")
         if cfg.lora_alpha is not None:
@@ -1080,6 +1100,7 @@ def create_run(
             buffer_config=cfg.buffer.to_api_dict(),
             learning_rate=cfg.learning_rate,
             lora_alpha=cfg.lora_alpha,
+            max_inflight_rollouts=cfg.max_inflight_rollouts,
             oversampling_factor=cfg.oversampling_factor,
             max_async_level=cfg.max_async_level,
             checkpoints_config=cfg.checkpoints.to_api_dict(),
@@ -1107,6 +1128,9 @@ def create_run(
             console.print("[dim]The run will start automatically when capacity is available.[/dim]")
         else:
             console.print("[green]✓ Run created successfully![/green]")
+
+        if run.notice:
+            console.print(f"[cyan]{run.notice}[/cyan]")
 
         dashboard_url = f"{app_config.frontend_url}/dashboard/training/{run.id}"
         console.print("\n[cyan]Monitor run at:[/cyan]")

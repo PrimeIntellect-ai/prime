@@ -1390,7 +1390,7 @@ def _post_setup_call_to_action(options: LabSetupOptions) -> Panel:
     command_table.add_row(
         "[bold green]$[/bold green]", "prime eval run my-env -m openai/gpt-5.4-nano -n 5"
     )
-    command_table.add_row("[bold green]$[/bold green]", "prime eval tui")
+    command_table.add_row("[bold green]$[/bold green]", "prime eval view")
     command_table.add_row("[bold green]$[/bold green]", "prime rl run configs/rl/qwen-3-5.toml")
     command_table.add_row(
         "[bold green]$[/bold green]", "prime gepa run my-env -m openai/gpt-5.4-nano"
@@ -1462,7 +1462,7 @@ def _write_lab_docs_index(workspace: Path, agents: tuple[str, ...]) -> None:
                 "",
                 "## Prime docs",
                 "",
-                "- Prime CLI: https://github.com/PrimeIntellect-ai/prime-cli",
+                "- Prime CLI: https://github.com/PrimeIntellect-ai/prime",
                 "- Verifiers: https://github.com/PrimeIntellect-ai/verifiers",
                 "- Environments Hub: https://app.primeintellect.ai/dashboard/environments",
                 "",

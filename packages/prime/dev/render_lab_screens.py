@@ -117,7 +117,7 @@ def _settings(console: Console, *, width: int, frame: int) -> None:
             "Settings\nWorkspaces 2   Profiles 1   Local assets 8   Setup 3\n\n"
             "[Set up Lab workspace] [Sync Lab assets] [Check workspace]\n\n"
             "verifiers       active\n~/dev/verifiers\n\n"
-            "prime-cli       inactive\n~/dev/prime-cli"
+            "prime           inactive\n~/dev/prime"
         ),
         _panel_text(
             "verifiers\n~/dev/verifiers\n\nStatus       active\nAuth         authenticated\n"

@@ -40,7 +40,7 @@ prime tunnel status <tunnel_id>
 
 ## Documentation
 
-Full API reference: https://github.com/PrimeIntellect-ai/prime-cli/tree/main/packages/prime-tunnel
+Full API reference: https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-tunnel
 
 ## Related Packages
 

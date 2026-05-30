@@ -25,6 +25,7 @@ from rich.table import Table
 from rich.text import Text
 
 from ..client import APIClient, APIError
+from ..lab_hygiene import LabHygieneOptions, find_lab_workspace, run_lab_hygiene_preflight
 from ..utils import (
     PlainTyper,
     get_console,
@@ -970,6 +971,34 @@ def _resolve_push_environment_path(path: Optional[str], env_id: Optional[str]) -
     return Path(path or ".").resolve()
 
 
+def _emit_lab_hygiene_message(message: str) -> None:
+    console.print(message, markup=False)
+
+
+def _run_env_init_lab_hygiene_preflight() -> None:
+    workspace = find_lab_workspace(Path.cwd())
+    if workspace is None:
+        return
+    run_lab_hygiene_preflight(
+        LabHygieneOptions(fix=True),
+        workspace=workspace,
+        emit=_emit_lab_hygiene_message,
+    )
+
+
+def _run_env_push_lab_hygiene_preflight(env_path: Path) -> None:
+    workspace = find_lab_workspace(env_path) or find_lab_workspace(Path.cwd())
+    if workspace is None:
+        return
+    result = run_lab_hygiene_preflight(
+        LabHygieneOptions(fix=False, fail_on_tracked=True),
+        workspace=workspace,
+        emit=_emit_lab_hygiene_message,
+    )
+    if result.exit_code != 0:
+        raise typer.Exit(result.exit_code)
+
+
 def _resolve_pull_environment_path(target: Optional[str], env_name: str) -> Path:
     """Resolve the local target directory for `prime env pull`."""
     if target:
@@ -1028,6 +1057,7 @@ def push(
 
     try:
         env_path = _resolve_push_environment_path(path, env_id)
+        _run_env_push_lab_hygiene_preflight(env_path)
 
         # Display upstream environment info if metadata exists
         display_upstream_environment_info(env_path)
@@ -1640,6 +1670,7 @@ def init(
     result = subprocess.run(command)
     if result.returncode != 0:
         raise typer.Exit(result.returncode)
+    _run_env_init_lab_hygiene_preflight()
 
 
 @app.command(

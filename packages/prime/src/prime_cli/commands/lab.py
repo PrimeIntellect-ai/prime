@@ -82,6 +82,37 @@ def doctor(ctx: typer.Context) -> None:
         raise typer.Exit(code)
 
 
+@app.command("hygiene")
+def hygiene(
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="Apply safe local remediations such as dirs and gitignore entries.",
+    ),
+) -> None:
+    """Check cheap Lab git hygiene."""
+
+    from ..lab_hygiene import LabHygieneOptions, run_lab_hygiene_preflight
+
+    result = run_lab_hygiene_preflight(
+        LabHygieneOptions(fix=fix, fail_on_tracked=True),
+        workspace=Path.cwd(),
+        emit=lambda message: console.print(message, markup=False),
+    )
+    if result.exit_code != 0:
+        raise typer.Exit(result.exit_code)
+
+
+@app.command("register-github")
+def register_github() -> None:
+    """Write the GitHub workflow for Lab git hygiene."""
+
+    from ..lab_hygiene import write_lab_github_workflow
+
+    path = write_lab_github_workflow(Path.cwd())
+    console.print(f"Wrote {path}", markup=False)
+
+
 @app.command("view")
 def view(
     limit: int = typer.Option(1000, "--limit", "-n", help="Max rows to load per section"),

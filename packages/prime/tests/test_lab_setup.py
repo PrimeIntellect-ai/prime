@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,7 @@ from urllib.error import URLError
 
 import pytest
 from prime_cli import lab_setup
+from prime_cli.commands.lab import app as lab_cli_app
 from prime_cli.lab_agents import AgentCapability, known_agent_names
 from prime_cli.lab_setup import (
     LabDoctorOptions,
@@ -21,9 +23,14 @@ from prime_cli.lab_setup import (
     run_lab_sync_service,
 )
 from rich.console import Console
+from typer.testing import CliRunner
 
 AGENT_WHICH = "prime_lab_app.agent_capabilities.shutil.which"
 REAL_DOWNLOAD_FILE = lab_setup._download_file
+
+
+def _git_init(path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
 
 
 @pytest.fixture(autouse=True)
@@ -163,6 +170,24 @@ def test_lab_setup_rejects_prime_rl_flag() -> None:
     assert exc_info.value.code == 2
 
 
+def test_lab_register_github_writes_hygiene_workflow(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(lab_cli_app, ["register-github"])
+
+    workflow = tmp_path / ".github" / "workflows" / "prime-lab-hygiene.yml"
+    content = workflow.read_text(encoding="utf-8")
+    assert result.exit_code == 0
+    assert "name: Prime Lab Hygiene" in content
+    assert "actions/checkout@v4" in content
+    assert "astral-sh/setup-uv@v5" in content
+    assert "uvx --from prime prime lab hygiene" in content
+    assert "pre-commit" not in content
+
+
 def test_lab_setup_prompts_for_agent_when_interactive(monkeypatch: Any) -> None:
     class FakeStdin:
         def isatty(self) -> bool:
@@ -253,6 +278,8 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     assert (tmp_path / ".prime" / "lab" / "docs" / "index.md").is_file()
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert "/outputs/" in gitignore.splitlines()
+    assert "/AGENTS.md" in gitignore.splitlines()
+    assert "/.prime/" in gitignore.splitlines()
     assert (tmp_path / ".pi" / "extensions" / "prime-lab" / "index.ts").is_file()
     output = _render_emitted(emitted)
     assert "pi-acp" not in output
@@ -260,6 +287,29 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     assert "Downloaded " not in output
     assert ".skills-staging-" not in output
     assert ".templates-staging-" not in output
+
+
+def test_lab_setup_hygiene_preflight_nudges_tracked_guidance(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    (tmp_path / "AGENTS.md").write_text("tracked guidance\n", encoding="utf-8")
+    _git_init(tmp_path)
+    subprocess.run(["git", "add", "AGENTS.md"], cwd=tmp_path, check=True, capture_output=True)
+    emitted: list[Any] = []
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("codex",)),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    output = _render_emitted(emitted)
+    assert result.exit_code == 0
+    assert "Lab hygiene: tracked generated Lab files: AGENTS.md" in output
+    assert "git rm --cached AGENTS.md" in output
 
 
 def test_lab_setup_service_emits_post_setup_call_to_action(
@@ -376,6 +426,30 @@ def test_lab_sync_refreshes_existing_workspace_guidance(
     assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == "stale guidance\n"
     assert not any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
     assert not any("already exists" in line for line in emitted)
+
+
+def test_lab_sync_hygiene_preflight_applies_safe_fixes(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    emitted: list[Any] = []
+
+    result = run_lab_sync_service(
+        LabSyncOptions(no_agent=True, skip_docs=True),
+        workspace=tmp_path,
+        emit=emitted.append,
+    )
+
+    gitignore_lines = set((tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines())
+    output = _render_emitted(emitted)
+    assert result.exit_code == 0
+    assert (tmp_path / "configs").is_dir()
+    assert (tmp_path / "environments").is_dir()
+    assert "/AGENTS.md" in gitignore_lines
+    assert "/.prime/" in gitignore_lines
+    assert "Lab hygiene: added standard .gitignore entries" in output
 
 
 def test_lab_sync_without_configured_agent_refreshes_shared_assets(
@@ -802,11 +876,18 @@ def test_lab_doctor_fix_writes_standard_gitignore_patterns(tmp_path: Path) -> No
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     gitignore_lines = set(gitignore.splitlines())
     assert result.exit_code == 1
+    assert (tmp_path / "configs").is_dir()
+    assert (tmp_path / "environments").is_dir()
     assert "custom.log" in gitignore
     assert ".env.local" in gitignore_lines
     assert ".env" in gitignore_lines
+    assert "/AGENTS.md" in gitignore_lines
+    assert "/CLAUDE.md" in gitignore_lines
+    assert "/.prime/" in gitignore_lines
+    assert "/.agents/skills/" in gitignore_lines
     assert "/outputs/" in gitignore_lines
     assert "/prime-rl/" in gitignore_lines
+    assert "/environments/AGENTS.md" in gitignore_lines
     assert "/environments/*/outputs/" in gitignore_lines
     assert "*.py[cod]" in gitignore_lines
     assert ".pytest_cache/" in gitignore_lines

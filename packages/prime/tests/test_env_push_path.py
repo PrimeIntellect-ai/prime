@@ -1,8 +1,21 @@
+import json
+import subprocess
+from types import SimpleNamespace
+
+import pytest
+import typer
+from prime_cli.commands import env as env_command
 from prime_cli.commands.env import (
     _environment_push_metadata,
     _environment_ref,
     _resolve_push_environment_path,
+    _run_env_push_lab_hygiene_preflight,
 )
+from typer.testing import CliRunner
+
+
+def _git_init(path):
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
 
 
 def test_defaults_to_current_directory_without_env_id(tmp_path, monkeypatch):
@@ -43,6 +56,68 @@ def test_respects_explicit_path_without_env_id(tmp_path):
     resolved = _resolve_push_environment_path(path=str(custom_path), env_id=None)
 
     assert resolved == custom_path.resolve()
+
+
+def test_env_init_runs_lab_hygiene_preflight_inside_lab_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        json.dumps({"choices": {"agents": ["codex"], "primary_agent": "codex"}}),
+        encoding="utf-8",
+    )
+
+    class DummyPlugin:
+        init_module = "verifiers.cli.commands.init"
+
+        def build_module_command(self, module, args):
+            return ["verifiers-init", module, *args]
+
+    monkeypatch.setattr(
+        "prime_cli.commands.env.load_verifiers_prime_plugin",
+        lambda console: DummyPlugin(),
+    )
+
+    def fake_run(command, *args, **kwargs):
+        if command and command[0] == "git":
+            return SimpleNamespace(returncode=1, stdout="")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(
+        "prime_cli.commands.env.subprocess.run",
+        fake_run,
+    )
+
+    result = CliRunner().invoke(env_command.app, ["init", "demo"])
+
+    gitignore_lines = set((tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines())
+    assert result.exit_code == 0
+    assert "/AGENTS.md" in gitignore_lines
+    assert "/.prime/" in gitignore_lines
+
+
+def test_env_push_blocks_tracked_generated_lab_outputs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        json.dumps({"choices": {"agents": ["codex"], "primary_agent": "codex"}}),
+        encoding="utf-8",
+    )
+    env_dir = tmp_path / "environments" / "demo"
+    output = env_dir / "outputs" / "run.jsonl"
+    output.parent.mkdir(parents=True)
+    output.write_text("{}\n", encoding="utf-8")
+    _git_init(tmp_path)
+    subprocess.run(
+        ["git", "add", "environments/demo/outputs/run.jsonl"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(typer.Exit) as exc_info:
+        _run_env_push_lab_hygiene_preflight(env_dir)
+
+    assert exc_info.value.exit_code == 1
 
 
 def test_push_metadata_replaces_existing_version() -> None:

@@ -121,3 +121,31 @@ def test_active_profile_update_uses_persisted_values_not_env_overrides(
     saved = _saved_profile(temp_home, "profile")
     assert saved["api_key"] == "profile-key"
     assert saved["team_id"] == "team-two"
+
+
+def test_set_api_key_syncs_active_saved_profile_after_whoami(
+    temp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeAPIClient:
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+
+        def get(self, endpoint: str) -> dict[str, dict[str, str]]:
+            assert endpoint == "/user/whoami"
+            assert self.api_key == "new-key"
+            return {"data": {"id": "user-new"}}
+
+    monkeypatch.setattr("prime_cli.commands.config.APIClient", FakeAPIClient)
+
+    config = Config()
+    config.set_api_key("old-key")
+    config.set_user_id("user-old")
+    config.save_environment("profile")
+    assert config.load_environment("profile")
+
+    result = runner.invoke(app, ["config", "set-api-key", "new-key"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    saved = _saved_profile(temp_home, "profile")
+    assert saved["api_key"] == "new-key"
+    assert saved["user_id"] == "user-new"

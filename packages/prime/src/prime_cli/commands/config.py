@@ -180,6 +180,7 @@ def set_api_key(
                 user_id = data.get("id")
                 if user_id:
                     config.set_user_id(user_id)
+                    config.update_current_environment_file()
         except (APIError, Exception):
             pass
 

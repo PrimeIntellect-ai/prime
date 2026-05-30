@@ -400,9 +400,6 @@ class TeacherSamplingConfig(BaseModel):
 
     max_tokens: int | None = None
     temperature: float | None = None
-    repetition_penalty: float | None = None
-    min_tokens: int | None = None
-    seed: int | None = None
     extra_body: Dict[str, Any] | None = None
     enable_thinking: bool | None = None
     reasoning_effort: Literal["low", "medium", "high"] | None = None

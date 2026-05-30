@@ -581,9 +581,7 @@ def test_sandbox_ssh_no_id_picker_paginates_display(monkeypatch: pytest.MonkeyPa
             )
             for i in range(60)
         ]
-        return SimpleNamespace(
-            sandboxes=sandboxes, total=60, page=1, per_page=100, has_next=False
-        )
+        return SimpleNamespace(sandboxes=sandboxes, total=60, page=1, per_page=100, has_next=False)
 
     def mock_get(self: Any, sandbox_id: str) -> Any:
         captured["get_id"] = sandbox_id

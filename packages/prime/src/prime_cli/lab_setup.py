@@ -1114,7 +1114,7 @@ def _path_check(
 def _gitignore_check(workspace: Path) -> LabDoctorCheck:
     path = workspace / ".gitignore"
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    missing = _missing_gitignore_patterns(existing)
+    missing = missing_lab_gitignore_patterns(existing)
     if not missing:
         return LabDoctorCheck(
             name="Gitignore outputs",
@@ -1721,10 +1721,6 @@ def _normalize_supported_agent(raw_agent: str, *, allow_all: bool) -> str:
             + ", ".join((*SUPPORTED_AGENTS, "all"))
         )
     return agent
-
-
-def _missing_gitignore_patterns(existing: str) -> list[str]:
-    return missing_lab_gitignore_patterns(existing)
 
 
 def _global_prime_skills_dir() -> Path:

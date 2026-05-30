@@ -2,7 +2,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -28,6 +28,15 @@ class Config:
     DEFAULT_FRONTEND_URL: str = "https://app.primeintellect.ai"
     DEFAULT_INFERENCE_URL: str = "https://api.pinference.ai/api/v1"
     DEFAULT_SSH_KEY_PATH: str = str(Path.home() / ".ssh" / "id_rsa")
+    _context_from_cli_option: ClassVar[bool] = False
+
+    @classmethod
+    def set_context_from_cli_option(cls, value: bool) -> None:
+        cls._context_from_cli_option = value
+
+    @classmethod
+    def context_from_cli_option(cls) -> bool:
+        return cls._context_from_cli_option
 
     def __init__(self) -> None:
         self.config_dir = Path.home() / ".prime"
@@ -355,27 +364,30 @@ class Config:
         return False
 
     def update_current_environment_file(self) -> None:
-        """Update the current environment's saved file with current config"""
-        if self.current_environment != "production":
-            # Only update custom environments, not the built-in production
-            try:
-                sanitized_name = self._sanitize_environment_name(self.current_environment)
-                env_file = self.environments_dir / f"{sanitized_name}.json"
-                if env_file.exists():
-                    env_config = {
-                        "api_key": self.api_key,
-                        "team_id": self.team_id,
-                        "team_name": None if self.team_id_from_env else self.team_name,
-                        "team_role": None if self.team_id_from_env else self.team_role,
-                        "user_id": self.user_id,
-                        "base_url": self.base_url,
-                        "frontend_url": self.frontend_url,
-                        "inference_url": self.inference_url,
-                    }
-                    env_file.write_text(json.dumps(env_config, indent=2))
-            except ValueError:
-                # Skip updating if environment name is invalid
-                pass
+        """Update the active saved environment with the persisted config values."""
+        if self.current_environment == "production":
+            return
+
+        try:
+            sanitized_name = self._sanitize_environment_name(self.current_environment)
+        except ValueError:
+            return
+
+        env_file = self.environments_dir / f"{sanitized_name}.json"
+        if not env_file.exists():
+            return
+
+        env_config = {
+            "api_key": self.config.get("api_key", ""),
+            "team_id": self.config.get("team_id"),
+            "team_name": self.config.get("team_name"),
+            "team_role": self.config.get("team_role"),
+            "user_id": self.config.get("user_id"),
+            "base_url": self.config.get("base_url", self.DEFAULT_BASE_URL),
+            "frontend_url": self.config.get("frontend_url", self.DEFAULT_FRONTEND_URL),
+            "inference_url": self.config.get("inference_url", self.DEFAULT_INFERENCE_URL),
+        }
+        env_file.write_text(json.dumps(env_config, indent=2))
 
     def list_environments(self) -> list[str]:
         """List all saved environment names"""

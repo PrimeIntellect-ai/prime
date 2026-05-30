@@ -107,7 +107,20 @@ def callback(
                 typer.echo(f"  - {env_name}", err=True)
             raise typer.Exit(1)
 
-        # Set environment variable so Config instances in subcommands pick it up
+        previous_context = os.environ.get("PRIME_CONTEXT")
+        previous_context_from_cli_option = Config.context_from_cli_option()
+
+        def restore_context() -> None:
+            if previous_context is None:
+                os.environ.pop("PRIME_CONTEXT", None)
+            else:
+                os.environ["PRIME_CONTEXT"] = previous_context
+            Config.set_context_from_cli_option(previous_context_from_cli_option)
+
+        ctx.call_on_close(restore_context)
+
+        # Set environment variable so Config instances in subcommands pick it up.
+        Config.set_context_from_cli_option(True)
         os.environ["PRIME_CONTEXT"] = context
 
     # Check for updates (only when a subcommand is being executed)

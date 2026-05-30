@@ -1362,7 +1362,7 @@ def _ensure_uv_project(workspace: Path, emit: Emit, runner: Runner) -> None:
         _check_command(["uv", "init"], workspace, emit, runner)
         _remove_if_exists(workspace / "main.py")
         _remove_if_exists(workspace / ".python-version")
-        _append_gitignore(workspace)
+        append_lab_gitignore(workspace)
     else:
         emit("Found pyproject.toml\n")
 
@@ -1721,10 +1721,6 @@ def _normalize_supported_agent(raw_agent: str, *, allow_all: bool) -> str:
             + ", ".join((*SUPPORTED_AGENTS, "all"))
         )
     return agent
-
-
-def _append_gitignore(workspace: Path) -> None:
-    append_lab_gitignore(workspace)
 
 
 def _missing_gitignore_patterns(existing: str) -> list[str]:

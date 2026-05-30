@@ -987,7 +987,7 @@ def _run_env_init_lab_hygiene_preflight() -> None:
 
 
 def _run_env_push_lab_hygiene_preflight(env_path: Path) -> None:
-    workspace = find_lab_workspace(env_path) or find_lab_workspace(Path.cwd())
+    workspace = find_lab_workspace(env_path)
     if workspace is None:
         return
     result = run_lab_hygiene_preflight(

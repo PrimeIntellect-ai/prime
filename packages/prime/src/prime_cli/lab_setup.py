@@ -362,7 +362,6 @@ def _run_lab_setup_steps(
 
     (workspace / "configs").mkdir(exist_ok=True)
     (workspace / "environments").mkdir(exist_ok=True)
-    _append_gitignore(workspace)
     managed_skill_names = _sync_prime_skills(emit)
     _prepare_workspace_skill_dir(workspace, managed_skill_names, emit)
     _prepare_agent_skill_dirs(workspace, options.agents, managed_skill_names, emit)

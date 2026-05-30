@@ -120,6 +120,29 @@ def test_env_push_blocks_tracked_generated_lab_outputs(tmp_path, monkeypatch):
     assert exc_info.value.exit_code == 1
 
 
+def test_env_push_allows_explicit_path_outside_current_lab_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".prime").mkdir()
+    (tmp_path / ".prime" / "lab.json").write_text(
+        json.dumps({"choices": {"agents": ["codex"], "primary_agent": "codex"}}),
+        encoding="utf-8",
+    )
+    output = tmp_path / "environments" / "demo" / "outputs" / "run.jsonl"
+    output.parent.mkdir(parents=True)
+    output.write_text("{}\n", encoding="utf-8")
+    external_env = tmp_path.parent / "outside-env"
+    external_env.mkdir()
+    _git_init(tmp_path)
+    subprocess.run(
+        ["git", "add", "environments/demo/outputs/run.jsonl"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    _run_env_push_lab_hygiene_preflight(external_env)
+
+
 def test_push_metadata_replaces_existing_version() -> None:
     metadata = _environment_push_metadata(
         {

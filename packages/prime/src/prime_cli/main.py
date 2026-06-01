@@ -18,6 +18,7 @@ from .commands.images import app as images_app
 from .commands.inference import app as inference_app
 from .commands.lab import app as lab_app
 from .commands.login import app as login_app
+from .commands.logout import app as logout_app
 from .commands.pods import app as pods_app
 from .commands.registry import app as registry_app
 from .commands.rl import app as train_app
@@ -68,6 +69,7 @@ app.add_typer(inference_app, name="inference", rich_help_panel="Compute")
 
 # Account commands
 app.add_typer(login_app, name="login", rich_help_panel="Account")
+app.add_typer(logout_app, name="logout", rich_help_panel="Account")
 app.add_typer(whoami_app, name="whoami", rich_help_panel="Account")
 app.add_typer(switch_app, name="switch", rich_help_panel="Account")
 app.add_typer(config_app, name="config", rich_help_panel="Account")

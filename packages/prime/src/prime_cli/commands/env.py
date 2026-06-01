@@ -25,6 +25,7 @@ from rich.table import Table
 from rich.text import Text
 
 from ..client import APIClient, APIError
+from ..env_config import print_env_config, run_env_doctor, validate_env_config_format
 from ..utils import (
     PlainTyper,
     get_console,
@@ -42,7 +43,12 @@ from ..utils.prompt import (
     validate_env_var_name,
 )
 from ..utils.time_utils import format_time_ago, iso_timestamp
-from ..verifiers_bridge import is_help_request, print_env_build_help, print_env_init_help
+from ..verifiers_bridge import (
+    DEFAULT_ENV_DIR_PATH,
+    is_help_request,
+    print_env_build_help,
+    print_env_init_help,
+)
 from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
 
 app = PlainTyper(help="Manage verifiers environments", no_args_is_help=True)
@@ -113,6 +119,15 @@ ENV_VAR_LIST_JSON_HELP = json_output_help(
 
 ENV_VAR_DETAIL_JSON_HELP = json_output_help(
     ". = {id, name, value, description?, createdAt, updatedAt?}",
+)
+
+ENV_CONFIG_JSON_HELP = "\n".join(
+    [
+        "JSON output (--format json):",
+        "  . = verifiers-owned environment config surface",
+        "  .env? = {args?, taskset?, harness?}",
+        "  .diagnostics[]? = structured verifiers Diagnostic objects",
+    ]
 )
 
 
@@ -958,6 +973,63 @@ def status_cmd(
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
         raise typer.Exit(1)
+
+
+@app.command("config", no_args_is_help=True, rich_help_panel="Explore", epilog=ENV_CONFIG_JSON_HELP)
+def config_cmd(
+    env: str = typer.Argument(..., help="Environment name/slug"),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        "-f",
+        help="Output format: text, toml, or json",
+    ),
+    resolved: bool = typer.Option(
+        False,
+        "--resolved",
+        help="Render resolved config values instead of the editable template.",
+    ),
+    env_dir_path: str = typer.Option(
+        DEFAULT_ENV_DIR_PATH,
+        "--env-dir-path",
+        help="Path to local environments directory.",
+        hidden=True,
+    ),
+) -> None:
+    """Show the config surface for a verifiers environment."""
+    validate_env_config_format(output_format)
+    try:
+        print_env_config(
+            env,
+            output_format=output_format,
+            resolved_output=resolved,
+            env_dir_path=env_dir_path,
+        )
+    except typer.Exit:
+        raise
+    except Exception as e:
+        error_console = get_console(stderr=output_format == "json")
+        error_console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command("doctor", no_args_is_help=True, rich_help_panel="Explore")
+def doctor_cmd(
+    env: str = typer.Argument(..., help="Environment name/slug"),
+    smoke: bool = typer.Option(
+        False,
+        "--smoke",
+        help="Run a 1 example x 1 rollout eval smoke after static checks.",
+    ),
+    env_dir_path: str = typer.Option(
+        DEFAULT_ENV_DIR_PATH,
+        "--env-dir-path",
+        help="Path to local environments directory.",
+        hidden=True,
+    ),
+) -> None:
+    """Check whether a verifiers environment is loadable and configurable."""
+    raise typer.Exit(run_env_doctor(env, smoke=smoke, env_dir_path=env_dir_path))
 
 
 def _resolve_push_environment_path(path: Optional[str], env_id: Optional[str]) -> Path:

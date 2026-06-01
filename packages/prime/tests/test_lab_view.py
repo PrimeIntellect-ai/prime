@@ -806,10 +806,11 @@ def test_lab_environment_cache_downloads_source_and_writes_manifest(
         def iter_bytes(self, chunk_size: int) -> list[bytes]:
             return [archive[:chunk_size], archive[chunk_size:]]
 
-    def fake_stream(method: str, url: str, timeout: float) -> FakeStream:
+    def fake_stream(method: str, url: str, timeout: float, follow_redirects: bool) -> FakeStream:
         assert method == "GET"
-        assert url == "https://example.test/env.tar.gz"
+        assert url == "https://example.test/tracked-env.tar.gz"
         assert timeout == 60.0
+        assert follow_redirects is True
         return FakeStream()
 
     monkeypatch.setattr("prime_lab_app.cache.httpx.stream", fake_stream)
@@ -818,6 +819,7 @@ def test_lab_environment_cache_downloads_source_and_writes_manifest(
         {
             "slug": "research/cached-env",
             "platform": {
+                "tracked_package_url": "https://example.test/tracked-env.tar.gz",
                 "package_url": "https://example.test/env.tar.gz",
                 "semanticVersion": "0.2.0",
             },

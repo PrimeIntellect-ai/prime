@@ -74,14 +74,14 @@ def test_generate_rl_config_template_keeps_default_surface_minimal() -> None:
 def test_generate_rl_config_template_sft_example_loads(tmp_path: Path) -> None:
     template = generate_rl_config_template()
     template = template.replace(
-        'loss = "rl" # "rl" | "sft"; OPD is not yet supported on hosted runtimes',
-        'loss = "sft" # "rl" | "sft"; OPD is not yet supported on hosted runtimes',
+        'loss = "rl" # "rl" | "sft" | "opd"',
+        'loss = "sft" # "rl" | "sft" | "opd"',
     )
 
     lines: list[str] = []
     in_teacher_example = False
     for line in template.splitlines():
-        if line == "# Optional: SFT distillation teacher":
+        if line == "# Optional: distillation teacher":
             in_teacher_example = True
             lines.append(line)
             continue
@@ -226,14 +226,22 @@ def test_load_config_rejects_sft_without_teacher(tmp_path: Path) -> None:
         load_config(str(config_path))
 
 
-def test_load_config_rejects_opd_until_hosted_scoring_exists(tmp_path: Path) -> None:
+def test_load_config_accepts_opd_teacher(tmp_path: Path) -> None:
     config_path = tmp_path / "opd.toml"
     config_path.write_text(
-        'model = "openai/gpt-oss-20b"\n'
-        'loss = "opd"\n'
-        "[teacher]\n"
-        'model = "openai/gpt-oss-120b"\n'
+        'model = "openai/gpt-oss-20b"\nloss = "opd"\n[teacher]\nmodel = "openai/gpt-oss-120b"\n'
     )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.loss == "opd"
+    assert cfg.teacher is not None
+    assert cfg.teacher.model == "openai/gpt-oss-120b"
+
+
+def test_load_config_rejects_opd_without_teacher(tmp_path: Path) -> None:
+    config_path = tmp_path / "opd.toml"
+    config_path.write_text('model = "openai/gpt-oss-20b"\nloss = "opd"\n')
 
     with pytest.raises(typer.Exit):
         load_config(str(config_path))

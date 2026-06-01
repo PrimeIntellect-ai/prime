@@ -127,6 +127,32 @@ def test_tunnel_stop_by_label_uses_bulk_delete(monkeypatch: pytest.MonkeyPatch) 
     assert captured["all_users"] is False
 
 
+def test_tunnel_stop_by_label_validates_scope_before_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+    class FakeTunnelClient:
+        config = SimpleNamespace(user_id=None, team_id=None)
+
+        async def bulk_delete_tunnels(self, **kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("bulk delete should not be called without user_id")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("prime_cli.commands.tunnel.TunnelClient", FakeTunnelClient)
+
+    # No --yes: if the scope check ran after the prompt we'd see the confirmation
+    # text; instead it must fail fast with a clean error and never prompt.
+    result = runner.invoke(app, ["tunnel", "stop", "--label", "dev"])
+
+    assert result.exit_code == 1
+    assert "Cannot resolve current user ID" in result.output
+    assert "This action cannot be undone" not in result.output
+    assert "Failed to delete" not in result.output
+
+
 def test_tunnel_stop_all_lists_then_bulk_deletes_explicit_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -136,12 +162,15 @@ def test_tunnel_stop_all_lists_then_bulk_deletes_explicit_ids(
     class FakeTunnelClient:
         config = SimpleNamespace(user_id="user-1", team_id=None)
 
-        async def list_tunnels(self, **kwargs: Any) -> list[Any]:
+        async def list_tunnels_page(self, **kwargs: Any) -> Any:
             captured["list_kwargs"] = kwargs
-            return [
-                SimpleNamespace(tunnel_id="t-owned", user_id="user-1"),
-                SimpleNamespace(tunnel_id="t-other", user_id="user-2"),
-            ]
+            return SimpleNamespace(
+                tunnels=[
+                    SimpleNamespace(tunnel_id="t-owned", user_id="user-1"),
+                    SimpleNamespace(tunnel_id="t-other", user_id="user-2"),
+                ],
+                has_next=False,
+            )
 
         async def bulk_delete_tunnels(self, tunnel_ids: list[str]) -> dict[str, Any]:
             captured["tunnel_ids"] = tunnel_ids
@@ -170,12 +199,15 @@ def test_tunnel_stop_all_users_uses_configured_team_scope(
     class FakeTunnelClient:
         config = SimpleNamespace(user_id=None, team_id="team-1")
 
-        async def list_tunnels(self, **kwargs: Any) -> list[Any]:
+        async def list_tunnels_page(self, **kwargs: Any) -> Any:
             captured["list_kwargs"] = kwargs
-            return [
-                SimpleNamespace(tunnel_id="t-owned", user_id="user-1"),
-                SimpleNamespace(tunnel_id="t-other", user_id="user-2"),
-            ]
+            return SimpleNamespace(
+                tunnels=[
+                    SimpleNamespace(tunnel_id="t-owned", user_id="user-1"),
+                    SimpleNamespace(tunnel_id="t-other", user_id="user-2"),
+                ],
+                has_next=False,
+            )
 
         async def bulk_delete_tunnels(self, tunnel_ids: list[str]) -> dict[str, Any]:
             captured["tunnel_ids"] = tunnel_ids
@@ -205,13 +237,13 @@ def test_tunnel_stop_all_paginates_before_bulk_delete(
     class FakeTunnelClient:
         config = SimpleNamespace(user_id="user-1", team_id=None)
 
-        async def list_tunnels(self, **kwargs: Any) -> list[Any]:
+        async def list_tunnels_page(self, **kwargs: Any) -> Any:
             captured["pages"].append(kwargs["page"])
             if kwargs["page"] == 1:
-                return page_1
+                return SimpleNamespace(tunnels=page_1, has_next=True)
             if kwargs["page"] == 2:
-                return page_2
-            return []
+                return SimpleNamespace(tunnels=page_2, has_next=False)
+            return SimpleNamespace(tunnels=[], has_next=False)
 
         async def bulk_delete_tunnels(self, tunnel_ids: list[str]) -> dict[str, Any]:
             captured["tunnel_ids"] = tunnel_ids
@@ -237,8 +269,8 @@ def test_tunnel_stop_all_noops_when_no_active_tunnels(
     class FakeTunnelClient:
         config = SimpleNamespace(user_id="user-1", team_id=None)
 
-        async def list_tunnels(self, **kwargs: Any) -> list[Any]:
-            return []
+        async def list_tunnels_page(self, **kwargs: Any) -> Any:
+            return SimpleNamespace(tunnels=[], has_next=False)
 
         async def bulk_delete_tunnels(self, tunnel_ids: list[str]) -> dict[str, Any]:
             raise AssertionError("bulk delete should not be called for an empty --all result")

@@ -392,6 +392,28 @@ def stop_tunnel(
             return
 
     if labels:
+
+        async def validate_label_scope() -> None:
+            client = TunnelClient()
+            try:
+                scoped_user_id = client.config.user_id if only_mine else None
+                scoped_team_id = team_id if team_id is not None else client.config.team_id
+                if only_mine and not scoped_user_id:
+                    raise ValueError(
+                        "Cannot resolve current user ID for scoped bulk delete. "
+                        "Run `prime login`, set PRIME_USER_ID, or delete explicit tunnel IDs."
+                    )
+                if not only_mine and not scoped_team_id:
+                    raise ValueError("all_users requires a team ID")
+            finally:
+                await client.close()
+
+        try:
+            asyncio.run(validate_label_scope())
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}", style="bold")
+            raise typer.Exit(1)
+
         confirmation_msg = (
             f"Are you sure you want to stop tunnels matching label(s): {', '.join(labels)}? "
             "This action cannot be undone."

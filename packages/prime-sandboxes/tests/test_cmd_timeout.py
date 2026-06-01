@@ -1,3 +1,7 @@
+import os
+
+import pytest
+
 from prime_sandboxes import (
     APIClient,
     CreateSandboxRequest,
@@ -5,11 +9,15 @@ from prime_sandboxes import (
 )
 
 
-def test_command_timeout():
+@pytest.mark.skipif(
+    not os.environ.get("PRIME_API_KEY"), reason="live sandbox tests require PRIME_API_KEY"
+)
+def test_command_timeout(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
     sandbox = None
 
     try:
-        client = APIClient()
+        client = APIClient(api_key=os.environ["PRIME_API_KEY"])
         sandbox_client = SandboxClient(client)
 
         print("\nCreating sandbox...")

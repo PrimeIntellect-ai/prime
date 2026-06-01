@@ -204,7 +204,6 @@ class RLClient:
         lora_alpha: Optional[int] = None,
         max_inflight_rollouts: Optional[int] = None,
         oversampling_factor: Optional[float] = None,
-        max_async_level: Optional[int] = None,
         checkpoints_config: Optional[Dict[str, Any]] = None,
         adapters_config: Optional[Dict[str, Any]] = None,
         checkpoint_id: Optional[str] = None,
@@ -297,9 +296,6 @@ class RLClient:
 
             if oversampling_factor is not None:
                 payload["oversampling_factor"] = oversampling_factor
-
-            if max_async_level is not None:
-                payload["max_async_level"] = max_async_level
 
             if checkpoints_config:
                 payload["checkpoints"] = checkpoints_config

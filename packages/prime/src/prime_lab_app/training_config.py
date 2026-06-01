@@ -25,7 +25,6 @@ def training_config_toml(raw: dict[str, Any]) -> str:
         "lora_alpha",
         "oversampling_factor",
         "max_inflight_rollouts",
-        "max_async_level",
         "checkpoint_id",
         "cluster_name",
     ):

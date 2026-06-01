@@ -637,7 +637,6 @@ class RLConfig(BaseModel):
     learning_rate: float | None = None
     lora_alpha: int | None = None
     oversampling_factor: float | None = Field(default=None, gt=0)
-    max_async_level: int | None = None
     checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
     cluster_name: str | None = None  # Admin-only: target a specific cluster by name
     env: List[EnvConfig] = Field(default_factory=list)
@@ -964,8 +963,6 @@ def create_run(
             console.print(f"  LoRA Alpha:          {cfg.lora_alpha}")
         if cfg.oversampling_factor is not None:
             console.print(f"  Oversampling Factor: {cfg.oversampling_factor}")
-        if cfg.max_async_level is not None:
-            console.print(f"  Max Async Level:     {cfg.max_async_level}")
         if cfg.run_config:
             console.print(f"  Run Config:          {cfg.run_config}")
 
@@ -1156,7 +1153,6 @@ def create_run(
             lora_alpha=cfg.lora_alpha,
             max_inflight_rollouts=cfg.max_inflight_rollouts,
             oversampling_factor=cfg.oversampling_factor,
-            max_async_level=cfg.max_async_level,
             checkpoints_config=cfg.checkpoints.to_api_dict(),
             adapters_config=cfg.adapters.to_api_dict(),
             checkpoint_id=cfg.checkpoint_id,

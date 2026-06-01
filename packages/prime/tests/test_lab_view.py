@@ -2164,9 +2164,7 @@ def test_prime_lab_doctor_service_checks_and_fixes_workspace(tmp_path: Path) -> 
     assert any(
         check.name == "Workspace metadata" and check.status == "FAIL" for check in result.checks
     )
-    assert any(
-        check.name == "Gitignore outputs" and check.status == "WARN" for check in result.checks
-    )
+    assert any(check.name == "Lab gitignore" and check.status == "WARN" for check in result.checks)
 
     fixed = run_lab_doctor_service(LabDoctorOptions(fix=True), workspace=tmp_path)
 
@@ -2175,8 +2173,12 @@ def test_prime_lab_doctor_service_checks_and_fixes_workspace(tmp_path: Path) -> 
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     gitignore_lines = set(gitignore.splitlines())
     assert ".env" in gitignore_lines
+    assert "/AGENTS.md" in gitignore_lines
+    assert "/CLAUDE.md" in gitignore_lines
+    assert "/CLAUDE.local.md" in gitignore_lines
     assert "/outputs/" in gitignore_lines
     assert "/prime-rl/" in gitignore_lines
+    assert "/environments/AGENTS.md" in gitignore_lines
     assert "*.py[cod]" in gitignore_lines
     assert any(
         check.name == "Configs directory" and check.status == "PASS" for check in fixed.checks

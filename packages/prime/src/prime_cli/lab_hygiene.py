@@ -12,6 +12,7 @@ LAB_GITIGNORE_PATTERNS = (
     ".env",
     "/AGENTS.md",
     "/CLAUDE.md",
+    "/CLAUDE.local.md",
     "/.prime/",
     "/.agents/skills/",
     "/.claude/skills/",
@@ -54,6 +55,7 @@ jobs:
 LAB_TRACKED_EXACT_PATHS = {
     "AGENTS.md",
     "CLAUDE.md",
+    "CLAUDE.local.md",
     "environments/AGENTS.md",
 }
 LAB_TRACKED_PREFIXES = (
@@ -127,6 +129,13 @@ def run_lab_hygiene_preflight(
         missing = append_lab_gitignore(workspace)
         if missing:
             fixed.append("added standard .gitignore entries")
+        tracked_paths = tracked_lab_hygiene_paths(workspace)
+        if tracked_paths:
+            untracked_paths = _untrack_lab_hygiene_paths(workspace, tracked_paths)
+            if untracked_paths:
+                fixed.append(
+                    "untracked generated Lab files: " + _tracked_paths_summary(untracked_paths)
+                )
     else:
         if not (workspace / "configs").is_dir():
             warnings.append("missing configs/; run prime lab hygiene --fix")
@@ -259,16 +268,33 @@ def _git_tracked_paths(git_root: Path) -> tuple[Path, ...]:
     return tuple(Path(raw.decode("utf-8")) for raw in raw_paths if raw)
 
 
-def _tracked_paths_warning(tracked_paths: tuple[str, ...]) -> str:
+def _untrack_lab_hygiene_paths(workspace: Path, paths: tuple[str, ...]) -> tuple[str, ...]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workspace), "rm", "--cached", "--force", "--quiet", "--", *paths],
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return ()
+    return paths if result.returncode == 0 else ()
+
+
+def _tracked_paths_summary(tracked_paths: tuple[str, ...]) -> str:
     shown = tracked_paths[:MAX_TRACKED_PATHS_TO_SHOW]
     suffix = (
         "" if len(tracked_paths) <= len(shown) else f" and {len(tracked_paths) - len(shown)} more"
     )
+    return ", ".join(shown) + suffix
+
+
+def _tracked_paths_warning(tracked_paths: tuple[str, ...]) -> str:
+    summary = _tracked_paths_summary(tracked_paths)
+    shown = tracked_paths[:MAX_TRACKED_PATHS_TO_SHOW]
     quoted_paths = " ".join(shlex.quote(path) for path in shown)
     return (
         "tracked generated Lab files: "
-        + ", ".join(shown)
-        + suffix
+        + summary
         + f"; run `git rm --cached {quoted_paths}` to keep them local only"
     )
 

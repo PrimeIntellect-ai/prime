@@ -42,13 +42,23 @@ from .lab_hygiene import (
 )
 
 VERIFIERS_REPO = "primeintellect-ai/verifiers"
-VERIFIERS_REF = "7d8a522df67308327cb9b8931ce6a5873a99834a"
+VERIFIERS_REF = "f43e42c1fabfe2604afc95b9ce62779a8f55d487"
 VERIFIERS_CONFIG_REF = "main"
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
 LAB_CONFIG_FOLDERS = ("rl", "gepa", "eval", "sft", "opd", "fft")
 
 SUPPORTED_AGENTS = known_agent_names()
+LOCAL_CLAUDE_MD = "CLAUDE.local.md"
+LOCAL_CLAUDE_GUIDANCE_TEMPLATE = "\n".join(
+    [
+        "# CLAUDE.local.md",
+        "",
+        "Add personal Claude guidance for this Lab workspace here.",
+        "Prime Lab preserves this file during setup and sync.",
+        "",
+    ]
+)
 PRIME_SKILLS_MANIFEST = ".prime-managed.json"
 WORKSPACE_SKILLS_DIR = Path(".prime") / "skills"
 DeprecatedConfigField = tuple[tuple[str, ...], str]
@@ -214,7 +224,7 @@ def parse_lab_setup_args(args: list[str]) -> LabSetupOptions:
     parser.add_argument(
         "--skip-agents-md",
         action="store_true",
-        help="Skip AGENTS.md, CLAUDE.md, and environments/AGENTS.md.",
+        help="Skip AGENTS.md, CLAUDE.md, CLAUDE.local.md, and environments/AGENTS.md.",
     )
     parser.add_argument(
         "--skip-install",
@@ -263,7 +273,7 @@ def parse_lab_sync_args(args: list[str]) -> LabSyncOptions:
     parser.add_argument(
         "--skip-docs",
         action="store_true",
-        help="Skip AGENTS.md, CLAUDE.md, and environments/AGENTS.md refresh.",
+        help="Skip AGENTS.md, CLAUDE.md, CLAUDE.local.md, and environments/AGENTS.md refresh.",
     )
     parser.add_argument(
         "--no-agent",
@@ -435,8 +445,9 @@ def _sync_workspace_guidance(
     force: bool = False,
 ) -> None:
     _download_file(AGENTS_MD_SRC, workspace / "AGENTS.md", emit, force=force, quiet=True)
+    _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=force, quiet=True)
     if "claude" in agents:
-        _download_file(CLAUDE_MD_SRC, workspace / "CLAUDE.md", emit, force=force, quiet=True)
+        _ensure_claude_local_guidance(workspace)
     _download_file(
         ENVS_AGENTS_MD_SRC,
         workspace / "environments" / "AGENTS.md",
@@ -445,6 +456,13 @@ def _sync_workspace_guidance(
         quiet=True,
     )
     emit("Refreshed workspace guidance\n")
+
+
+def _ensure_claude_local_guidance(workspace: Path) -> None:
+    path = workspace / LOCAL_CLAUDE_MD
+    if path.exists() or path.is_symlink():
+        return
+    path.write_text(LOCAL_CLAUDE_GUIDANCE_TEMPLATE, encoding="utf-8")
 
 
 def _sync_prime_skills(emit: Emit) -> tuple[str, ...]:
@@ -1117,15 +1135,15 @@ def _gitignore_check(workspace: Path) -> LabDoctorCheck:
     missing = missing_lab_gitignore_patterns(existing)
     if not missing:
         return LabDoctorCheck(
-            name="Gitignore outputs",
+            name="Lab gitignore",
             status="PASS",
-            message="Standard output and generated source paths are ignored.",
+            message="Standard Lab generated and local paths are ignored.",
         )
     return LabDoctorCheck(
-        name="Gitignore outputs",
+        name="Lab gitignore",
         status="WARN",
         message="Missing " + ", ".join(missing),
-        remediation="Run prime lab doctor --fix to add standard output ignores.",
+        remediation="Run prime lab doctor --fix to add standard Lab ignores.",
     )
 
 
@@ -1441,10 +1459,11 @@ def _write_lab_docs_index(workspace: Path, agents: tuple[str, ...]) -> None:
     docs_dir.mkdir(parents=True, exist_ok=True)
     guidance_files = [
         "- `AGENTS.md`",
+        "- `CLAUDE.md`",
         "- `environments/AGENTS.md`",
     ]
     if "claude" in agents:
-        guidance_files.insert(1, "- `CLAUDE.md`")
+        guidance_files.insert(2, f"- `{LOCAL_CLAUDE_MD}`")
     index = docs_dir / "index.md"
     index.write_text(
         "\n".join(

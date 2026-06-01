@@ -215,6 +215,7 @@ def generate_rl_config_template(environment: str | None = None) -> str:
 
     return f'''\
 model = "Qwen/Qwen3.5-0.8B"
+loss = "rl" # "rl" | "sft"; OPD is not yet supported on hosted runtimes
 max_steps = 100
 
 # env_files = ["secrets.env"] # optional file(s) for secrets
@@ -227,6 +228,15 @@ rollouts_per_example = 8
 
 # Optional: warm-start from an existing checkpoint
 # checkpoint_id = "..."
+
+# Optional: SFT distillation teacher
+# To use SFT, change the top-level loss to "sft" and uncomment this block.
+# [teacher]
+# model = "openai/gpt-oss-120b"
+#
+# [teacher.sampling]
+# max_tokens = 2048
+# reasoning_effort = "medium"
 
 [sampling]
 max_tokens = 2048
@@ -383,6 +393,35 @@ class SamplingConfig(BaseModel):
         if self.enable_thinking is not None and self.reasoning_effort is not None:
             raise ValueError("enable_thinking and reasoning_effort cannot both be set")
         return self
+
+
+class TeacherSamplingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_tokens: int | None = None
+    temperature: float | None = None
+    extra_body: Dict[str, Any] | None = None
+    enable_thinking: bool | None = None
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+
+    @model_validator(mode="after")
+    def _reasoning_controls_mutually_exclusive(self) -> "TeacherSamplingConfig":
+        if self.enable_thinking is not None and self.reasoning_effort is not None:
+            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
+        return self
+
+
+class TeacherConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str
+    sampling: TeacherSamplingConfig | None = None
+
+    def to_api_dict(self) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"model": {"name": self.model}}
+        if self.sampling is not None:
+            result["sampling"] = self.sampling.model_dump(exclude_none=True)
+        return result
 
 
 class EvalConfig(BaseModel):
@@ -589,6 +628,8 @@ class RLConfig(BaseModel):
 
     name: str | None = None
     model: str
+    loss: Literal["rl", "sft", "opd"] = "rl"
+    teacher: TeacherConfig | None = None
     max_steps: int = 100
     batch_size: int = 128
     rollouts_per_example: int = 8
@@ -596,7 +637,6 @@ class RLConfig(BaseModel):
     learning_rate: float | None = None
     lora_alpha: int | None = None
     oversampling_factor: float | None = Field(default=None, gt=0)
-    max_async_level: int | None = None
     checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
     cluster_name: str | None = None  # Admin-only: target a specific cluster by name
     env: List[EnvConfig] = Field(default_factory=list)
@@ -614,13 +654,23 @@ class RLConfig(BaseModel):
     env_files: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_max_inflight_rollouts(self) -> "RLConfig":
+    def validate_config_consistency(self) -> "RLConfig":
         if self.max_inflight_rollouts is not None and self.oversampling_factor is not None:
             raise ValueError("Only one of max_inflight_rollouts and oversampling_factor can be set")
-        if self.max_inflight_rollouts is None:
-            return self
-        if self.max_inflight_rollouts < self.rollouts_per_example:
+        if (
+            self.max_inflight_rollouts is not None
+            and self.max_inflight_rollouts < self.rollouts_per_example
+        ):
             raise ValueError("max_inflight_rollouts must be at least rollouts_per_example")
+        if self.loss == "rl" and self.teacher is not None:
+            raise ValueError("teacher can only be set when loss is 'sft' or 'opd'")
+        if self.loss == "sft" and self.teacher is None:
+            raise ValueError("teacher is required when loss is 'sft'")
+        if self.loss == "opd":
+            raise ValueError(
+                "loss='opd' is not supported for hosted runs yet; OPD requires "
+                "teacher logprob scoring support in the hosted runtime"
+            )
         return self
 
 
@@ -893,6 +943,9 @@ def create_run(
         # Model & Environment
         console.print("[cyan]Model & Environment[/cyan]")
         console.print(f"  Model:        {cfg.model}")
+        console.print(f"  Loss:         {cfg.loss}")
+        if cfg.teacher is not None:
+            console.print(f"  Teacher:      {cfg.teacher.model}")
         console.print(f"  Environments: {', '.join(e.id for e in cfg.env)}")
         if app_config.team_id:
             console.print(f"  Team:         {app_config.team_id}")
@@ -910,8 +963,6 @@ def create_run(
             console.print(f"  LoRA Alpha:          {cfg.lora_alpha}")
         if cfg.oversampling_factor is not None:
             console.print(f"  Oversampling Factor: {cfg.oversampling_factor}")
-        if cfg.max_async_level is not None:
-            console.print(f"  Max Async Level:     {cfg.max_async_level}")
         if cfg.run_config:
             console.print(f"  Run Config:          {cfg.run_config}")
 
@@ -1102,7 +1153,6 @@ def create_run(
             lora_alpha=cfg.lora_alpha,
             max_inflight_rollouts=cfg.max_inflight_rollouts,
             oversampling_factor=cfg.oversampling_factor,
-            max_async_level=cfg.max_async_level,
             checkpoints_config=cfg.checkpoints.to_api_dict(),
             adapters_config=cfg.adapters.to_api_dict(),
             checkpoint_id=cfg.checkpoint_id,
@@ -1112,6 +1162,8 @@ def create_run(
             enable_thinking=cfg.sampling.enable_thinking,
             reasoning_effort=cfg.sampling.reasoning_effort,
             run_config=cfg.run_config if cfg.run_config else None,
+            loss=cfg.loss,
+            teacher=cfg.teacher.to_api_dict() if cfg.teacher else None,
         )
 
         if output == "json":

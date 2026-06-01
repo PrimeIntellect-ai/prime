@@ -71,6 +71,36 @@ def test_generate_rl_config_template_keeps_default_surface_minimal() -> None:
         assert field not in template
 
 
+def test_generate_rl_config_template_sft_example_loads(tmp_path: Path) -> None:
+    template = generate_rl_config_template()
+    template = template.replace(
+        'loss = "rl" # "rl" | "sft"; OPD is not yet supported on hosted runtimes',
+        'loss = "sft" # "rl" | "sft"; OPD is not yet supported on hosted runtimes',
+    )
+
+    lines: list[str] = []
+    in_teacher_example = False
+    for line in template.splitlines():
+        if line == "# Optional: SFT distillation teacher":
+            in_teacher_example = True
+            lines.append(line)
+            continue
+        if in_teacher_example and line == "":
+            in_teacher_example = False
+        if in_teacher_example and line.startswith("# ") and not line.startswith("# To use"):
+            line = line[2:]
+        lines.append(line)
+
+    config_path = tmp_path / "sft-template.toml"
+    config_path.write_text("\n".join(lines) + "\n")
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.loss == "sft"
+    assert cfg.teacher is not None
+    assert cfg.teacher.model == "openai/gpt-oss-120b"
+
+
 def test_flatten_config_schema_expands_optional_nested_models() -> None:
     schema = RLConfig.model_json_schema()
     rows = _flatten_config_schema(schema, schema.get("$defs", {}))
@@ -137,6 +167,69 @@ def test_load_config_rejects_max_inflight_and_oversampling(tmp_path: Path) -> No
         "rollouts_per_example = 8\n"
         "oversampling_factor = 0.377\n"
         "max_inflight_rollouts = 96\n"
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_accepts_sft_teacher(tmp_path: Path) -> None:
+    config_path = tmp_path / "sft.toml"
+    config_path.write_text(
+        'model = "openai/gpt-oss-20b"\n'
+        'loss = "sft"\n'
+        "[teacher]\n"
+        'model = "openai/gpt-oss-120b"\n'
+        "[teacher.sampling]\n"
+        "max_tokens = 2048\n"
+        'reasoning_effort = "medium"\n'
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.loss == "sft"
+    assert cfg.teacher is not None
+    assert cfg.teacher.model == "openai/gpt-oss-120b"
+    assert cfg.teacher.sampling is not None
+    assert cfg.teacher.sampling.max_tokens == 2048
+    assert cfg.teacher.to_api_dict() == {
+        "model": {"name": "openai/gpt-oss-120b"},
+        "sampling": {
+            "max_tokens": 2048,
+            "reasoning_effort": "medium",
+        },
+    }
+
+
+def test_load_config_rejects_teacher_temp_scheduler(tmp_path: Path) -> None:
+    config_path = tmp_path / "sft.toml"
+    config_path.write_text(
+        'model = "openai/gpt-oss-20b"\n'
+        'loss = "sft"\n'
+        "[teacher]\n"
+        'model = "openai/gpt-oss-120b"\n'
+        "[teacher.sampling.temp_scheduler]\n"
+        'type = "linear"\n'
+        "start_temperature = 1.0\n"
+        "end_temperature = 0.1\n"
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_rejects_sft_without_teacher(tmp_path: Path) -> None:
+    config_path = tmp_path / "sft.toml"
+    config_path.write_text('model = "openai/gpt-oss-20b"\nloss = "sft"\n')
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_rejects_opd_until_hosted_scoring_exists(tmp_path: Path) -> None:
+    config_path = tmp_path / "opd.toml"
+    config_path.write_text(
+        'model = "openai/gpt-oss-20b"\nloss = "opd"\n[teacher]\nmodel = "openai/gpt-oss-120b"\n'
     )
 
     with pytest.raises(typer.Exit):

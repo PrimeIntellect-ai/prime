@@ -806,10 +806,11 @@ def test_lab_environment_cache_downloads_source_and_writes_manifest(
         def iter_bytes(self, chunk_size: int) -> list[bytes]:
             return [archive[:chunk_size], archive[chunk_size:]]
 
-    def fake_stream(method: str, url: str, timeout: float) -> FakeStream:
+    def fake_stream(method: str, url: str, timeout: float, follow_redirects: bool) -> FakeStream:
         assert method == "GET"
-        assert url == "https://example.test/env.tar.gz"
+        assert url == "https://example.test/tracked-env.tar.gz"
         assert timeout == 60.0
+        assert follow_redirects is True
         return FakeStream()
 
     monkeypatch.setattr("prime_lab_app.cache.httpx.stream", fake_stream)
@@ -818,6 +819,7 @@ def test_lab_environment_cache_downloads_source_and_writes_manifest(
         {
             "slug": "research/cached-env",
             "platform": {
+                "tracked_package_url": "https://example.test/tracked-env.tar.gz",
                 "package_url": "https://example.test/env.tar.gz",
                 "semanticVersion": "0.2.0",
             },
@@ -2164,9 +2166,7 @@ def test_prime_lab_doctor_service_checks_and_fixes_workspace(tmp_path: Path) -> 
     assert any(
         check.name == "Workspace metadata" and check.status == "FAIL" for check in result.checks
     )
-    assert any(
-        check.name == "Gitignore outputs" and check.status == "WARN" for check in result.checks
-    )
+    assert any(check.name == "Lab gitignore" and check.status == "WARN" for check in result.checks)
 
     fixed = run_lab_doctor_service(LabDoctorOptions(fix=True), workspace=tmp_path)
 
@@ -2175,8 +2175,12 @@ def test_prime_lab_doctor_service_checks_and_fixes_workspace(tmp_path: Path) -> 
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     gitignore_lines = set(gitignore.splitlines())
     assert ".env" in gitignore_lines
+    assert "/AGENTS.md" in gitignore_lines
+    assert "/CLAUDE.md" in gitignore_lines
+    assert "/CLAUDE.local.md" in gitignore_lines
     assert "/outputs/" in gitignore_lines
     assert "/prime-rl/" in gitignore_lines
+    assert "/environments/AGENTS.md" in gitignore_lines
     assert "*.py[cod]" in gitignore_lines
     assert any(
         check.name == "Configs directory" and check.status == "PASS" for check in fixed.checks

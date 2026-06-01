@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from prime_cli.core import APIClient, APIError, ValidationError
 
@@ -75,6 +75,12 @@ class RLRun(BaseModel):
     max_steps: int = Field(..., alias="maxSteps")
     max_tokens: Optional[int] = Field(None, alias="maxTokens")
     batch_size: int = Field(..., alias="batchSize")
+    loss: Optional[str] = "rl"
+    teacher: Optional[Dict[str, Any]] = Field(
+        None,
+        validation_alias=AliasChoices("teacher", "teacherConfig"),
+        serialization_alias="teacher",
+    )
     base_model: str = Field(..., alias="baseModel")
     environments: List[Dict[str, Any]] = Field(default_factory=list)
     run_config: Optional[Dict[str, Any]] = Field(None, alias="runConfig")
@@ -198,7 +204,6 @@ class RLClient:
         lora_alpha: Optional[int] = None,
         max_inflight_rollouts: Optional[int] = None,
         oversampling_factor: Optional[float] = None,
-        max_async_level: Optional[int] = None,
         checkpoints_config: Optional[Dict[str, Any]] = None,
         adapters_config: Optional[Dict[str, Any]] = None,
         checkpoint_id: Optional[str] = None,
@@ -208,6 +213,8 @@ class RLClient:
         enable_thinking: Optional[bool] = None,
         reasoning_effort: Optional[Literal["low", "medium", "high"]] = None,
         run_config: Optional[Dict[str, Any]] = None,
+        loss: str = "rl",
+        teacher: Optional[Dict[str, Any]] = None,
     ) -> RLRun:
         """Create a new Hosted Training run."""
         try:
@@ -224,6 +231,12 @@ class RLClient:
                 "batch_size": batch_size,
                 "secrets": secrets_list,
             }
+
+            if loss != "rl":
+                payload["loss"] = loss
+
+            if teacher:
+                payload["teacher"] = teacher
 
             if name:
                 payload["name"] = name
@@ -283,9 +296,6 @@ class RLClient:
 
             if oversampling_factor is not None:
                 payload["oversampling_factor"] = oversampling_factor
-
-            if max_async_level is not None:
-                payload["max_async_level"] = max_async_level
 
             if checkpoints_config:
                 payload["checkpoints"] = checkpoints_config

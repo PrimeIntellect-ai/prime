@@ -2,6 +2,17 @@
 members = ["packages/*"]
 
 [tool.uv]
+# Enforce a uv version that supports the friendly-duration form
+# (`"7 days"`) in the static pyproject parser. Older uvs silently parse
+# the value as an RFC 3339 date, emit a TOML parse warning, and proceed
+# *without* the cooldown — bypassing this security policy. With the
+# floor below they fail loudly instead.
+required-version = ">=0.11.1"
+# Supply-chain cooldown: new PyPI uploads must age 7 days before resolution
+# picks them up. Mitigates blast radius of compromised dependencies
+# (typosquatting, account takeovers). Internal packages we publish ourselves
+# are fast-tracked below.
+exclude-newer = "7 days"
 dev-dependencies = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.23.0",
@@ -10,6 +21,23 @@ dev-dependencies = [
     "pre-commit>=3.5.0"
 ]
 override-dependencies = ["prime-tunnel>=0.1.6"]
+
+[tool.uv.exclude-newer-package]
+# Fast-track trusted first-party / partner-published packages past the
+# 7-day cooldown so they can be picked up the day they release. Most
+# entries below are PrimeIntellect-ai OIDC Trusted Publisher packages
+# already in this project's `uv tree` closure. The last two (tasksets,
+# harnesses) are partner/contributor packages anticipated to enter the
+# closure shortly (e.g. via upcoming verifiers releases); they live
+# outside the PrimeIntellect-ai org so listing them here is an explicit
+# trust decision — review when bumping.
+prime           = false
+prime-sandboxes = false
+prime-tunnel    = false
+prime-evals     = false
+verifiers       = false
+tasksets        = false
+harnesses       = false
 
 [tool.uv.sources]
 prime-tunnel = { workspace = true }

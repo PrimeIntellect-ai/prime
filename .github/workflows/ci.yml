@@ -73,6 +73,33 @@ jobs:
     - name: Run Ruff
       uses: chartboost/ruff-action@v1
 
+  lock-check:
+    # Advisory check: warns (does not fail) if uv.lock has drifted from
+    # pyproject.toml or has been hand-edited. Surfaces stale locks early
+    # without blocking merges. Flip the `exit 0` at the bottom to `exit
+    # $STATUS` once the team is ready to enforce.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        version: "latest"
+
+    - name: Check uv.lock drift (advisory)
+      run: |
+        set +e
+        uv lock --check
+        STATUS=$?
+        set -e
+        if [ $STATUS -ne 0 ]; then
+          echo "::warning title=uv.lock drift detected::uv.lock is out of date relative to pyproject.toml, or has been hand-edited. Run \`uv lock\` locally and commit the result. This check is currently advisory and does not block merge."
+        else
+          echo "✓ uv.lock is in sync with pyproject.toml"
+        fi
+        exit 0
+
   test-sandboxes:
     runs-on: ubuntu-latest
     strategy:

@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import httpx
-from prime_cli.commands.env import _safe_tar_extract, compute_content_hash, is_valid_url
+from prime_cli.commands.env import (
+    _environment_package_download_url,
+    _safe_tar_extract,
+    compute_content_hash,
+    is_valid_url,
+)
 
 from .models import LabItem, LabSection
 
@@ -325,7 +330,7 @@ def ensure_environment_source(raw: dict[str, Any]) -> CachedEnvironmentSource | 
     owner, name = slug.split("/", 1)
 
     detail = _platform_detail(raw)
-    package_url = detail.get("package_url") or detail.get("packageUrl")
+    package_url = _environment_package_download_url(detail)
     version = (
         detail.get("semanticVersion")
         or detail.get("semantic_version")
@@ -478,7 +483,7 @@ def _download_source_archive(url: str, dest: Path) -> None:
     try:
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             temp_file_path = Path(tmp.name)
-            with httpx.stream("GET", url, timeout=60.0) as response:
+            with httpx.stream("GET", url, timeout=60.0, follow_redirects=True) as response:
                 response.raise_for_status()
                 for chunk in response.iter_bytes(chunk_size=8192):
                     tmp.write(chunk)

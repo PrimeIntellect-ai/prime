@@ -138,6 +138,16 @@ def _render_emitted(items: list[Any]) -> str:
     return console.export_text()
 
 
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_lab_setup_parses_selected_agents_and_all() -> None:
     selected = parse_lab_setup_args(["--agent", "factory-droid,amp-code,claude-code,letta-code"])
     all_agents = parse_lab_sync_args(["--agents", "all"])
@@ -279,6 +289,8 @@ def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert "/outputs/" in gitignore.splitlines()
     assert "/AGENTS.md" in gitignore.splitlines()
+    assert "/CLAUDE.md" in gitignore.splitlines()
+    assert "/CLAUDE.local.md" in gitignore.splitlines()
     assert "/.prime/" in gitignore.splitlines()
     assert (tmp_path / ".pi" / "extensions" / "prime-lab" / "index.ts").is_file()
     output = _render_emitted(emitted)
@@ -308,8 +320,8 @@ def test_lab_setup_hygiene_preflight_nudges_tracked_guidance(
 
     output = _render_emitted(emitted)
     assert result.exit_code == 0
-    assert "Lab hygiene: tracked generated Lab files: AGENTS.md" in output
-    assert "git rm --cached AGENTS.md" in output
+    assert "untracked generated Lab files: AGENTS.md" in output
+    assert _git(tmp_path, "ls-files", "--", "AGENTS.md").stdout == ""
 
 
 def test_lab_setup_service_emits_post_setup_call_to_action(
@@ -338,6 +350,40 @@ def test_lab_setup_service_emits_post_setup_call_to_action(
     assert "prime gepa run my-env -m openai/gpt-5.4-nano" in output
 
 
+def test_lab_setup_ignores_managed_guidance_and_skips_claude_local_for_codex(
+    tmp_path: Path,
+    monkeypatch: Any,
+    fake_lab_asset_downloads: list[str],
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=False, agents=("codex",)),
+        workspace=tmp_path,
+        emit=lambda _text: None,
+    )
+
+    docs_index = (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(encoding="utf-8")
+    gitignore_lines = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert result.exit_code == 0
+    assert (tmp_path / "AGENTS.md").read_text(encoding="utf-8").startswith("downloaded from ")
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8").startswith("downloaded from ")
+    assert not (tmp_path / "CLAUDE.local.md").exists()
+    assert "- `AGENTS.md`" in docs_index
+    assert "- `CLAUDE.md`" in docs_index
+    assert "- `CLAUDE.local.md`" not in docs_index
+    assert "- `environments/AGENTS.md`" in docs_index
+    for pattern in (
+        "/AGENTS.md",
+        "/CLAUDE.md",
+        "/CLAUDE.local.md",
+        "/environments/AGENTS.md",
+    ):
+        assert pattern in gitignore_lines
+    assert any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
+
+
 def test_lab_setup_refreshes_existing_workspace_guidance(
     tmp_path: Path,
     monkeypatch: Any,
@@ -348,6 +394,7 @@ def test_lab_setup_refreshes_existing_workspace_guidance(
     existing_files = {
         tmp_path / "AGENTS.md": "workspace agents\n",
         tmp_path / "CLAUDE.md": "workspace claude\n",
+        tmp_path / "CLAUDE.local.md": "workspace claude local guidance\n",
         tmp_path / "environments" / "AGENTS.md": "environment agents\n",
     }
     for path, text in existing_files.items():
@@ -364,13 +411,17 @@ def test_lab_setup_refreshes_existing_workspace_guidance(
     assert result.exit_code == 0
     for path in (
         tmp_path / "AGENTS.md",
+        tmp_path / "CLAUDE.md",
         tmp_path / "environments" / "AGENTS.md",
     ):
         assert path.read_text(encoding="utf-8").startswith("downloaded from ")
-    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == "workspace claude\n"
+    assert (tmp_path / "CLAUDE.local.md").read_text(encoding="utf-8") == (
+        "workspace claude local guidance\n"
+    )
     docs_index = (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(encoding="utf-8")
-    assert "- `CLAUDE.md`" not in docs_index
-    assert not any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
+    assert "- `CLAUDE.md`" in docs_index
+    assert "- `CLAUDE.local.md`" not in docs_index
+    assert any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
     assert "already exists" not in _render_emitted(emitted)
 
 
@@ -389,9 +440,29 @@ def test_lab_setup_refreshes_claude_guidance_for_claude_agent(
 
     assert result.exit_code == 0
     assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8").startswith("downloaded from ")
+    claude_local = tmp_path / "CLAUDE.local.md"
+    assert claude_local.read_text(encoding="utf-8") == lab_setup.LOCAL_CLAUDE_GUIDANCE_TEMPLATE
     docs_index = (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(encoding="utf-8")
     assert "- `CLAUDE.md`" in docs_index
+    assert "- `CLAUDE.local.md`" in docs_index
     assert any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
+
+
+def test_lab_setup_preserves_user_owned_claude_local_guidance(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(AGENT_WHICH, lambda _command: "/bin/tool")
+    (tmp_path / "CLAUDE.local.md").write_text("claude local guidance\n", encoding="utf-8")
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=False, agents=("claude",)),
+        workspace=tmp_path,
+    )
+
+    assert result.exit_code == 0
+    assert (tmp_path / "CLAUDE.local.md").read_text(encoding="utf-8") == ("claude local guidance\n")
 
 
 def test_lab_sync_refreshes_existing_workspace_guidance(
@@ -420,11 +491,12 @@ def test_lab_sync_refreshes_existing_workspace_guidance(
     assert result.exit_code == 0
     for path in (
         tmp_path / "AGENTS.md",
+        tmp_path / "CLAUDE.md",
         tmp_path / "environments" / "AGENTS.md",
     ):
         assert path.read_text(encoding="utf-8").startswith("downloaded from ")
-    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == "stale guidance\n"
-    assert not any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
+    assert not (tmp_path / "CLAUDE.local.md").exists()
+    assert any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
     assert not any("already exists" in line for line in emitted)
 
 
@@ -475,13 +547,14 @@ def test_lab_sync_without_configured_agent_refreshes_shared_assets(
         .read_text(encoding="utf-8")
         .startswith("downloaded from ")
     )
-    assert not (tmp_path / "CLAUDE.md").exists()
-    assert "- `CLAUDE.md`" not in (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8").startswith("downloaded from ")
+    assert not (tmp_path / "CLAUDE.local.md").exists()
+    assert "- `CLAUDE.md`" in (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(
         encoding="utf-8"
     )
     assert (tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml").is_file()
     assert not (tmp_path / ".agents" / "skills").exists()
-    assert not any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
+    assert any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
     assert any("no configured agent; pass --agent to configure one" in line for line in emitted)
 
 
@@ -514,8 +587,12 @@ def test_lab_sync_no_agent_keeps_stored_claude_guidance(
 
     assert result.exit_code == 0
     assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8").startswith("downloaded from ")
+    assert (tmp_path / "CLAUDE.local.md").read_text(
+        encoding="utf-8"
+    ) == lab_setup.LOCAL_CLAUDE_GUIDANCE_TEMPLATE
     docs_index = (tmp_path / ".prime" / "lab" / "docs" / "index.md").read_text(encoding="utf-8")
     assert "- `CLAUDE.md`" in docs_index
+    assert "- `CLAUDE.local.md`" in docs_index
     assert any("/assets/lab/CLAUDE.md" in url for url in fake_lab_asset_downloads)
     assert not (tmp_path / ".claude" / "skills").exists()
     assert any("Skipped coding-agent skill roots (--no-agent)" in line for line in emitted)
@@ -883,6 +960,7 @@ def test_lab_doctor_fix_writes_standard_gitignore_patterns(tmp_path: Path) -> No
     assert ".env" in gitignore_lines
     assert "/AGENTS.md" in gitignore_lines
     assert "/CLAUDE.md" in gitignore_lines
+    assert "/CLAUDE.local.md" in gitignore_lines
     assert "/.prime/" in gitignore_lines
     assert "/.agents/skills/" in gitignore_lines
     assert "/outputs/" in gitignore_lines
@@ -892,6 +970,84 @@ def test_lab_doctor_fix_writes_standard_gitignore_patterns(tmp_path: Path) -> No
     assert "*.py[cod]" in gitignore_lines
     assert ".pytest_cache/" in gitignore_lines
     assert ".ruff_cache/" in gitignore_lines
+
+
+def test_lab_doctor_warns_about_tracked_lab_guidance(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    guidance_paths = ("AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", "environments/AGENTS.md")
+    for relative_path in guidance_paths:
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("guidance\n", encoding="utf-8")
+    _git(tmp_path, "add", *guidance_paths)
+
+    result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
+    checks = {check.name: check for check in result.checks}
+
+    check = checks["Tracked Lab git hygiene"]
+    assert check.status == "FAIL"
+    assert "AGENTS.md" in check.message
+    assert "CLAUDE.md" in check.message
+    assert "CLAUDE.local.md" in check.message
+    assert "environments/AGENTS.md" in check.message
+    assert "git rm --cached" in check.remediation
+
+
+def test_lab_doctor_fix_untracks_lab_guidance(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    guidance_paths = ("AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", "environments/AGENTS.md")
+    for relative_path in guidance_paths:
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("guidance\n", encoding="utf-8")
+    _git(tmp_path, "add", *guidance_paths)
+
+    result = run_lab_doctor_service(LabDoctorOptions(fix=True), workspace=tmp_path)
+    checks = {check.name: check for check in result.checks}
+    tracked = _git(tmp_path, "ls-files", "--", *guidance_paths)
+
+    assert checks["Tracked Lab git hygiene"].status == "PASS"
+    assert tracked.stdout == ""
+    assert (tmp_path / "AGENTS.md").is_file()
+    assert (tmp_path / "CLAUDE.md").is_file()
+    assert (tmp_path / "CLAUDE.local.md").is_file()
+    assert (tmp_path / "environments" / "AGENTS.md").is_file()
+    assert result.exit_code == 1
+
+
+def test_lab_doctor_fix_untracks_staged_and_modified_lab_guidance(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    guidance_paths = ("AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", "environments/AGENTS.md")
+    for relative_path in guidance_paths:
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("committed guidance\n", encoding="utf-8")
+    _git(tmp_path, "add", *guidance_paths)
+    _git(
+        tmp_path,
+        "-c",
+        "user.email=lab@example.com",
+        "-c",
+        "user.name=Prime Lab",
+        "commit",
+        "-m",
+        "track guidance",
+    )
+    for relative_path in guidance_paths:
+        (tmp_path / relative_path).write_text("staged guidance\n", encoding="utf-8")
+    _git(tmp_path, "add", *guidance_paths)
+    for relative_path in guidance_paths:
+        (tmp_path / relative_path).write_text("working guidance\n", encoding="utf-8")
+
+    result = run_lab_doctor_service(LabDoctorOptions(fix=True), workspace=tmp_path)
+    checks = {check.name: check for check in result.checks}
+    tracked = _git(tmp_path, "ls-files", "--", *guidance_paths)
+
+    assert checks["Tracked Lab git hygiene"].status == "PASS"
+    assert tracked.stdout == ""
+    for relative_path in guidance_paths:
+        assert (tmp_path / relative_path).read_text(encoding="utf-8") == "working guidance\n"
+    assert result.exit_code == 1
 
 
 def test_lab_doctor_validates_environment_table_refs(tmp_path: Path) -> None:

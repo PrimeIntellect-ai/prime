@@ -38,23 +38,29 @@ def test_tunnel_list_passes_label_filters(monkeypatch: pytest.MonkeyPatch) -> No
     captured: dict[str, Any] = {}
 
     class FakeTunnelClient:
-        async def list_tunnels(self, **kwargs: Any) -> list[Any]:
+        async def list_tunnels_page(self, **kwargs: Any) -> Any:
             captured.update(kwargs)
-            return [
-                SimpleNamespace(
-                    tunnel_id="t-test123",
-                    name="api",
-                    url="https://t-test123.example.com",
-                    hostname="t-test123.example.com",
-                    status="CONNECTED",
-                    labels=["dev"],
-                    local_port=8765,
-                    user_id="user-1",
-                    team_id=None,
-                    created_at=datetime.now(timezone.utc),
-                    expires_at=datetime.now(timezone.utc),
-                )
-            ]
+            return SimpleNamespace(
+                tunnels=[
+                    SimpleNamespace(
+                        tunnel_id="t-test123",
+                        name="api",
+                        url="https://t-test123.example.com",
+                        hostname="t-test123.example.com",
+                        status="CONNECTED",
+                        labels=["dev"],
+                        local_port=8765,
+                        user_id="user-1",
+                        team_id=None,
+                        created_at=datetime.now(timezone.utc),
+                        expires_at=datetime.now(timezone.utc),
+                    )
+                ],
+                total=1,
+                page=1,
+                per_page=50,
+                has_next=False,
+            )
 
         async def close(self) -> None:
             return None
@@ -77,8 +83,8 @@ def test_tunnel_list_json_outputs_empty_envelope(
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
 
     class FakeTunnelClient:
-        async def list_tunnels(self, **kwargs: Any) -> list[Any]:
-            return []
+        async def list_tunnels_page(self, **kwargs: Any) -> Any:
+            return SimpleNamespace(tunnels=[], total=0, page=1, per_page=50, has_next=False)
 
         async def close(self) -> None:
             return None
@@ -90,8 +96,10 @@ def test_tunnel_list_json_outputs_empty_envelope(
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {
         "tunnels": [],
+        "total": 0,
         "page": 1,
         "per_page": 50,
+        "has_next": False,
     }
 
 

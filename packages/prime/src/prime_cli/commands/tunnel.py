@@ -159,7 +159,7 @@ def list_tunnels(
     async def fetch_tunnels():
         client = TunnelClient()
         try:
-            tunnels = await client.list_tunnels(
+            return await client.list_tunnels_page(
                 team_id=team_id,
                 labels=labels,
                 status=status,
@@ -168,26 +168,38 @@ def list_tunnels(
                 sort_by=sort_by,
                 sort_order=sort_order,
             )
-            return tunnels
         finally:
             await client.close()
 
     try:
-        tunnels = asyncio.run(fetch_tunnels())
+        page_result = asyncio.run(fetch_tunnels())
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}", style="bold")
         raise typer.Exit(1)
 
+    tunnels = page_result.tunnels
+    total = page_result.total
+    has_next = page_result.has_next
+
     tunnels_data = [_format_tunnel_for_output(tunnel) for tunnel in tunnels]
     if output == "json":
-        output_data_as_json({"tunnels": tunnels_data, "page": page, "per_page": num}, console)
+        output_data_as_json(
+            {
+                "tunnels": tunnels_data,
+                "total": total,
+                "page": page,
+                "per_page": num,
+                "has_next": has_next,
+            },
+            console,
+        )
         return
 
     if not tunnels:
         console.print("[dim]No active tunnels[/dim]")
         return
 
-    table = Table(title="Active Tunnels")
+    table = Table(title=f"Active Tunnels (Total: {total})")
     table.add_column("Tunnel ID", style="cyan")
     table.add_column("Name", style="blue")
     table.add_column("User ID", style="magenta")
@@ -219,6 +231,12 @@ def list_tunnels(
         )
 
     console.print(table)
+
+    start = (page - 1) * num + 1
+    end = start + len(tunnels) - 1
+    console.print(f"\n[dim]Page {page} • showing {start}-{end} of {total} tunnel(s)[/dim]")
+    if has_next:
+        console.print(f"[dim]Use --page {page + 1} to see more.[/dim]")
 
 
 @app.command("status")

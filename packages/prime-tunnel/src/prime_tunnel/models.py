@@ -28,3 +28,13 @@ class TunnelInfo(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class TunnelListPage(BaseModel):
+    """A page of tunnel results with pagination metadata."""
+
+    tunnels: List[TunnelInfo] = Field(default_factory=list, description="Tunnels on this page")
+    total: int = Field(0, description="Total number of tunnels matching the query")
+    page: int = Field(1, description="Current page number")
+    per_page: int = Field(50, description="Items per page")
+    has_next: bool = Field(False, description="Whether more pages are available")

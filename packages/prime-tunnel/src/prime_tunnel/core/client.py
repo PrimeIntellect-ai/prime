@@ -16,7 +16,7 @@ from prime_tunnel.exceptions import (
     TunnelLimitReachedError,
     TunnelTimeoutError,
 )
-from prime_tunnel.models import TunnelInfo
+from prime_tunnel.models import TunnelInfo, TunnelListPage
 
 # Retry configuration for transient connection errors
 # Note: TimeoutException is NOT included because the request may have been processed
@@ -324,7 +324,7 @@ class TunnelClient:
 
         return await self._handle_response(response, "bulk delete tunnels")
 
-    async def list_tunnels(
+    async def list_tunnels_page(
         self,
         team_id: Optional[str] = None,
         labels: Optional[list[str]] = None,
@@ -333,15 +333,15 @@ class TunnelClient:
         per_page: int = 50,
         sort_by: str = "createdAt",
         sort_order: str = "desc",
-    ) -> list[TunnelInfo]:
+    ) -> TunnelListPage:
         """
-        List all tunnels for the current user.
+        List tunnels for the current user with pagination metadata.
 
         Args:
             team_id: Optional team ID to include team tunnels
 
         Returns:
-            List of TunnelInfo objects
+            TunnelListPage with the tunnels for this page plus total/has_next.
         """
         self._check_auth_required()
 
@@ -394,7 +394,35 @@ class TunnelClient:
                     terminated_at=t.get("terminated_at"),
                 )
             )
-        return tunnels
+        return TunnelListPage(
+            tunnels=tunnels,
+            total=data.get("total", len(tunnels)),
+            page=data.get("page", page),
+            per_page=data.get("per_page", per_page),
+            has_next=data.get("has_next", False),
+        )
+
+    async def list_tunnels(
+        self,
+        team_id: Optional[str] = None,
+        labels: Optional[list[str]] = None,
+        status: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 50,
+        sort_by: str = "createdAt",
+        sort_order: str = "desc",
+    ) -> list[TunnelInfo]:
+        """List all tunnels for the current user."""
+        result = await self.list_tunnels_page(
+            team_id=team_id,
+            labels=labels,
+            status=status,
+            page=page,
+            per_page=per_page,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+        return result.tunnels
 
     async def __aenter__(self) -> "TunnelClient":
         return self

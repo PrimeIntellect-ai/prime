@@ -12,7 +12,6 @@ from prime_tunnel.exceptions import (
     TunnelTimeoutError,
 )
 from prime_tunnel.models import TunnelInfo, TunnelListPage
-from prime_tunnel.tunnel import Tunnel
 
 __all__ = [
     "__version__",
@@ -32,3 +31,11 @@ __all__ = [
     "TunnelConnectionError",
     "TunnelTimeoutError",
 ]
+
+
+def __getattr__(name: str):
+    if name == "Tunnel":
+        from prime_tunnel.tunnel import Tunnel
+
+        return Tunnel
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -185,9 +185,6 @@ class RLClient:
         max_steps: int = 100,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
-        repetition_penalty: Optional[float] = None,
-        min_tokens: Optional[int] = None,
-        seed: Optional[int] = None,
         temp_scheduler: Optional[Dict[str, Any]] = None,
         extra_body: Optional[Dict[str, Any]] = None,
         batch_size: int = 128,
@@ -260,15 +257,6 @@ class RLClient:
 
             if temperature is not None:
                 payload["temperature"] = temperature
-
-            if repetition_penalty is not None:
-                payload["repetition_penalty"] = repetition_penalty
-
-            if min_tokens is not None:
-                payload["min_tokens"] = min_tokens
-
-            if seed is not None:
-                payload["seed"] = seed
 
             if temp_scheduler is not None:
                 payload["temp_scheduler"] = temp_scheduler

@@ -9,6 +9,7 @@ from prime_cli.commands.evals import (
     _validate_eval_path,
 )
 from prime_cli.main import app
+from prime_cli.utils.eval_push import EVAL_SAMPLE_UPLOAD_MAX_PAYLOAD_BYTES, push_eval_samples
 from typer.testing import CliRunner
 from typing_extensions import cast
 
@@ -185,6 +186,34 @@ def test_push_eval_forwards_name_override(monkeypatch, tmp_path):
     }
 
 
+def test_push_eval_samples_uses_large_payload_limit():
+    captured = {}
+
+    class DummyEvalsClient:
+        def push_samples(self, evaluation_id, samples, **kwargs):
+            captured.update({"evaluation_id": evaluation_id, "samples": samples, "kwargs": kwargs})
+            return {"samples_pushed": len(samples), "samples_skipped": 0}
+
+    samples = [{"answer": "ok"}]
+
+    push_eval_samples(DummyEvalsClient(), "eval-123", samples)
+
+    assert captured == {
+        "evaluation_id": "eval-123",
+        "samples": samples,
+        "kwargs": {"max_payload_bytes": EVAL_SAMPLE_UPLOAD_MAX_PAYLOAD_BYTES},
+    }
+
+
+def test_push_eval_samples_errors_when_samples_are_skipped():
+    class DummyEvalsClient:
+        def push_samples(self, _evaluation_id, _samples, **_kwargs):
+            return {"samples_pushed": 0, "samples_skipped": 1}
+
+    with pytest.raises(ValueError, match="exceed the 25 MiB upload payload limit"):
+        push_eval_samples(DummyEvalsClient(), "eval-123", [{"answer": "too large"}])
+
+
 class TestPushSingleEval:
     def test_create_evaluation_defaults_to_private(self, tmp_path, monkeypatch):
         metadata = {"env": "owner/gsm8k", "model": "gpt-4"}
@@ -213,6 +242,40 @@ class TestPushSingleEval:
         assert eval_id == "eval-123"
         assert captured["is_public"] is False
         assert captured["environments"] == [{"slug": "owner/gsm8k"}]
+
+    def test_push_single_eval_uses_large_payload_limit_for_samples(self, tmp_path, monkeypatch):
+        metadata = {"env": "owner/gsm8k", "model": "gpt-4"}
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+        (tmp_path / "results.jsonl").write_text(json.dumps({"id": 1, "reward": 1.0}))
+
+        captured = {}
+
+        class DummyEvalsClient:
+            def __init__(self, _api_client):
+                pass
+
+            def create_evaluation(self, **_kwargs):
+                return {"evaluation_id": "eval-123"}
+
+            def push_samples(self, evaluation_id, samples, **kwargs):
+                captured.update(
+                    {"evaluation_id": evaluation_id, "samples": samples, "kwargs": kwargs}
+                )
+                return {"samples_pushed": len(samples), "samples_skipped": 0}
+
+            def finalize_evaluation(self, evaluation_id, metrics=None):
+                captured["finalized_evaluation_id"] = evaluation_id
+                captured["finalized_metrics"] = metrics
+
+        monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+        monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", DummyEvalsClient)
+
+        eval_id = _push_single_eval(str(tmp_path), None, None, None)
+
+        assert eval_id == "eval-123"
+        assert captured["evaluation_id"] == "eval-123"
+        assert captured["samples"][0]["example_id"] == 1
+        assert captured["kwargs"]["max_payload_bytes"] == EVAL_SAMPLE_UPLOAD_MAX_PAYLOAD_BYTES
 
     def test_create_evaluation_requires_pushed_environment(self, tmp_path, capsys):
         metadata = {"env": "gsm8k", "model": "gpt-4"}

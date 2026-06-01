@@ -24,7 +24,7 @@ from ..utils import (
 )
 from ..utils.display import get_eval_viewer_url
 from ..utils.env_metadata import find_environment_metadata
-from ..utils.eval_push import load_results_jsonl
+from ..utils.eval_push import load_results_jsonl, push_eval_samples
 from ..utils.hosted_eval import (
     EvalStatus,
     HostedEvalConfig,
@@ -1013,12 +1013,13 @@ def _push_samples_with_progress(
     client: EvalsClient, evaluation_id: str, samples: list[dict[str, Any]]
 ) -> None:
     if not console.is_terminal:
-        client.push_samples(evaluation_id, samples)
+        push_eval_samples(client, evaluation_id, samples)
         return
 
     with Progress(console=console, transient=True) as progress:
         task_id = progress.add_task("Uploading samples", total=len(samples))
-        client.push_samples(
+        push_eval_samples(
+            client,
             evaluation_id,
             samples,
             progress_callback=lambda uploaded: progress.update(task_id, advance=uploaded),

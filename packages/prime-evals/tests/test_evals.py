@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from prime_evals import EvalsAPIError
 from prime_evals.evals import AsyncEvalsClient, EvalsClient
 from prime_evals.models import (
     CreateEvaluationRequest,
@@ -163,6 +164,7 @@ def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
             max_payload_bytes=35,
             max_workers=1,
             progress_callback=progress.append,
+            skip_oversized_samples=True,
         )
 
     assert result == {"samples_pushed": 2, "samples_skipped": 1}
@@ -170,6 +172,18 @@ def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
     assert len(posts) == 2
     assert len(created_clients) == 1
     assert posts[0]["headers"]["Authorization"] == "Bearer secret-token"
+
+
+def test_push_samples_rejects_oversized_samples_by_default():
+    client = EvalsClient(SimpleNamespace(base_url="https://api.example", api_key="secret-token"))
+
+    with pytest.raises(EvalsAPIError, match="Sample 1 exceeds maximum payload size"):
+        client.push_samples(
+            "eval-1",
+            [{"x": "a"}, {"x": "b" * 50}],
+            max_payload_bytes=35,
+            max_workers=1,
+        )
 
 
 def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
@@ -218,6 +232,21 @@ def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch)
     assert len(posts) == 2
     assert len(created_clients) == 1
     assert posts[0]["headers"]["Authorization"] == "Bearer secret-token"
+
+
+def test_async_push_samples_rejects_oversized_samples_by_default():
+    client = AsyncEvalsClient.__new__(AsyncEvalsClient)
+    client.client = SimpleNamespace(base_url="https://api.example", api_key="secret-token")
+
+    with pytest.raises(EvalsAPIError, match="Sample 1 exceeds maximum payload size"):
+        asyncio.run(
+            client.push_samples(
+                "eval-1",
+                [{"x": "a"}, {"x": "b" * 50}],
+                max_payload_bytes=35,
+                max_concurrent=1,
+            )
+        )
 
 
 def test_evals_client_context_manager():

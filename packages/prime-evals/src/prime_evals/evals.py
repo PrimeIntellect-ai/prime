@@ -35,6 +35,13 @@ def _samples_upload_headers(api_key: Optional[str]) -> Dict[str, str]:
     return headers
 
 
+def _oversized_sample_message(idx: int, sample_size: int, max_payload_bytes: int) -> str:
+    return (
+        f"Sample {idx} exceeds maximum payload size "
+        f"({sample_size} bytes > {max_payload_bytes - 20} bytes limit)"
+    )
+
+
 class EvalsClient:
     """
     Client for the Prime Evals API
@@ -225,6 +232,7 @@ class EvalsClient:
         max_payload_bytes: int = 25 * 1024 * 1024,
         max_workers: int = 4,
         progress_callback: Optional[Callable[[int], None]] = None,
+        skip_oversized_samples: bool = False,
     ) -> Dict[str, Any]:
         """Push evaluation samples in adaptive batches with concurrent uploads."""
         if not samples:
@@ -232,7 +240,9 @@ class EvalsClient:
         if max_workers < 1:
             raise ValueError("max_workers must be at least 1")
 
-        batches, skipped_count = self._build_batches(samples, max_payload_bytes)
+        batches, skipped_count = self._build_batches(
+            samples, max_payload_bytes, skip_oversized_samples
+        )
         if skipped_count and progress_callback is not None:
             progress_callback(skipped_count)
 
@@ -288,7 +298,10 @@ class EvalsClient:
             raise EvalsAPIError(f"Request failed: {e}") from e
 
     def _build_batches(
-        self, samples: List[Dict[str, Any]], max_payload_bytes: int
+        self,
+        samples: List[Dict[str, Any]],
+        max_payload_bytes: int,
+        skip_oversized_samples: bool,
     ) -> Tuple[List[List[Dict[str, Any]]], int]:
         """Build batches that fit within payload size limit."""
         batches: List[List[Dict[str, Any]]] = []
@@ -300,11 +313,13 @@ class EvalsClient:
             sample_size = len(json.dumps(sample)) + 1
 
             if sample_size + 20 > max_payload_bytes:
-                warnings.warn(
-                    f"Sample {idx} exceeds maximum payload size "
-                    f"({sample_size} bytes > {max_payload_bytes - 20} bytes limit), skipping",
-                    stacklevel=3,
-                )
+                message = _oversized_sample_message(idx, sample_size, max_payload_bytes)
+                if not skip_oversized_samples:
+                    raise EvalsAPIError(
+                        f"{message}. Reduce the sample size before uploading, or pass "
+                        "skip_oversized_samples=True to upload the remaining samples."
+                    )
+                warnings.warn(f"{message}, skipping", stacklevel=3)
                 skipped_count += 1
                 continue
 
@@ -583,6 +598,7 @@ class AsyncEvalsClient:
         max_payload_bytes: int = 25 * 1024 * 1024,
         max_concurrent: int = 4,
         progress_callback: Optional[Callable[[int], None]] = None,
+        skip_oversized_samples: bool = False,
     ) -> Dict[str, Any]:
         """Push evaluation samples in adaptive batches with concurrent uploads."""
         if not samples:
@@ -590,7 +606,9 @@ class AsyncEvalsClient:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be at least 1")
 
-        batches, skipped_count = self._build_batches(samples, max_payload_bytes)
+        batches, skipped_count = self._build_batches(
+            samples, max_payload_bytes, skip_oversized_samples
+        )
         if skipped_count and progress_callback is not None:
             progress_callback(skipped_count)
 
@@ -640,7 +658,10 @@ class AsyncEvalsClient:
         return {"samples_pushed": sum(results), "samples_skipped": skipped_count}
 
     def _build_batches(
-        self, samples: List[Dict[str, Any]], max_payload_bytes: int
+        self,
+        samples: List[Dict[str, Any]],
+        max_payload_bytes: int,
+        skip_oversized_samples: bool,
     ) -> Tuple[List[List[Dict[str, Any]]], int]:
         """Build batches that fit within payload size limit."""
         batches: List[List[Dict[str, Any]]] = []
@@ -652,11 +673,13 @@ class AsyncEvalsClient:
             sample_size = len(json.dumps(sample)) + 1
 
             if sample_size + 20 > max_payload_bytes:
-                warnings.warn(
-                    f"Sample {idx} exceeds maximum payload size "
-                    f"({sample_size} bytes > {max_payload_bytes - 20} bytes limit), skipping",
-                    stacklevel=3,
-                )
+                message = _oversized_sample_message(idx, sample_size, max_payload_bytes)
+                if not skip_oversized_samples:
+                    raise EvalsAPIError(
+                        f"{message}. Reduce the sample size before uploading, or pass "
+                        "skip_oversized_samples=True to upload the remaining samples."
+                    )
+                warnings.warn(f"{message}, skipping", stacklevel=3)
                 skipped_count += 1
                 continue
 

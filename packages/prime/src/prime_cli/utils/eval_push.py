@@ -1,7 +1,8 @@
 import json
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from prime_evals import EvalsAPIError, EvalsClient
 
@@ -12,6 +13,36 @@ from .env_metadata import find_environment_metadata
 from .plain import get_console
 
 console = get_console()
+
+EVAL_SAMPLE_UPLOAD_MAX_PAYLOAD_BYTES = 25 * 1024 * 1024
+
+
+def push_eval_samples(
+    client: EvalsClient,
+    evaluation_id: str,
+    samples: list[dict[str, Any]],
+    progress_callback: Optional[Callable[[int], None]] = None,
+) -> None:
+    if progress_callback is None:
+        result = client.push_samples(
+            evaluation_id,
+            samples,
+            max_payload_bytes=EVAL_SAMPLE_UPLOAD_MAX_PAYLOAD_BYTES,
+        )
+    else:
+        result = client.push_samples(
+            evaluation_id,
+            samples,
+            max_payload_bytes=EVAL_SAMPLE_UPLOAD_MAX_PAYLOAD_BYTES,
+            progress_callback=progress_callback,
+        )
+    skipped_count = int(result.get("samples_skipped") or 0)
+    if skipped_count:
+        limit_mib = EVAL_SAMPLE_UPLOAD_MAX_PAYLOAD_BYTES // (1024 * 1024)
+        raise ValueError(
+            f"{skipped_count} evaluation sample(s) exceed the {limit_mib} MiB upload payload "
+            "limit and were skipped. Reduce saved sample size before uploading."
+        )
 
 
 def load_results_jsonl(path: Path) -> list[dict]:
@@ -209,7 +240,7 @@ def push_eval_results_to_hub(
         raise EvalsAPIError("Failed to get evaluation ID from create_evaluation response")
 
     if converted_results:
-        evals_client.push_samples(eval_id, converted_results)
+        push_eval_samples(evals_client, eval_id, converted_results)
 
     evals_client.finalize_evaluation(eval_id, metrics=metrics)
 

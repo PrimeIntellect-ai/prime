@@ -230,9 +230,14 @@ rollouts_per_example = 8
 # checkpoint_id = "..."
 
 # Optional: SFT distillation teacher
-# To use SFT, change the top-level loss to "sft" and uncomment this block.
+# To use SFT, change loss to "sft" and uncomment this block. [teacher.client] is required — the platform has no default inference endpoint; the example below points at PI inference.
 # [teacher]
 # model = "openai/gpt-oss-120b"
+#
+# [teacher.client]
+# base_url = "https://api.pinference.ai/api/v1"
+# api_key_var = "PRIME_API_KEY"
+# headers_from_env = {{ X-Prime-Team-ID = "PRIME_TEAM_ID" }}
 #
 # [teacher.sampling]
 # max_tokens = 2048
@@ -411,14 +416,27 @@ class TeacherSamplingConfig(BaseModel):
         return self
 
 
+class TeacherClientConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str = Field(..., min_length=1)
+    api_key_var: str = Field(..., min_length=1)
+    headers_from_env: Dict[str, str] | None = None
+    skip_model_check: bool = False
+
+
 class TeacherConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str
+    client: TeacherClientConfig
     sampling: TeacherSamplingConfig | None = None
 
     def to_api_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"model": {"name": self.model}}
+        result: Dict[str, Any] = {
+            "model": {"name": self.model},
+            "client": self.client.model_dump(exclude_none=True),
+        }
         if self.sampling is not None:
             result["sampling"] = self.sampling.model_dump(exclude_none=True)
         return result

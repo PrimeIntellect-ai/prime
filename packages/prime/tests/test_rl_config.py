@@ -180,6 +180,9 @@ def test_load_config_accepts_sft_teacher(tmp_path: Path) -> None:
         'loss = "sft"\n'
         "[teacher]\n"
         'model = "openai/gpt-oss-120b"\n'
+        "[teacher.client]\n"
+        'base_url = "https://api.pinference.ai/api/v1"\n'
+        'api_key_var = "PRIME_API_KEY"\n'
         "[teacher.sampling]\n"
         "max_tokens = 2048\n"
         'reasoning_effort = "medium"\n'
@@ -190,15 +193,80 @@ def test_load_config_accepts_sft_teacher(tmp_path: Path) -> None:
     assert cfg.loss == "sft"
     assert cfg.teacher is not None
     assert cfg.teacher.model == "openai/gpt-oss-120b"
+    assert cfg.teacher.client.base_url == "https://api.pinference.ai/api/v1"
+    assert cfg.teacher.client.api_key_var == "PRIME_API_KEY"
+    assert cfg.teacher.client.skip_model_check is False
     assert cfg.teacher.sampling is not None
     assert cfg.teacher.sampling.max_tokens == 2048
     assert cfg.teacher.to_api_dict() == {
         "model": {"name": "openai/gpt-oss-120b"},
+        "client": {
+            "base_url": "https://api.pinference.ai/api/v1",
+            "api_key_var": "PRIME_API_KEY",
+            "skip_model_check": False,
+        },
         "sampling": {
             "max_tokens": 2048,
             "reasoning_effort": "medium",
         },
     }
+
+
+def test_load_config_accepts_teacher_client(tmp_path: Path) -> None:
+    config_path = tmp_path / "sft.toml"
+    config_path.write_text(
+        'model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\n'
+        'loss = "sft"\n'
+        "[teacher]\n"
+        'model = "qwen/qwen-2.5-7b-instruct"\n'
+        "[teacher.client]\n"
+        'base_url = "https://example.com/inference/api/v1"\n'
+        'api_key_var = "PRIME_API_KEY"\n'
+        "skip_model_check = true\n"
+        "[teacher.client.headers_from_env]\n"
+        'X-Prime-Team-ID = "PRIME_TEAM_ID"\n'
+        "[teacher.sampling]\n"
+        "temperature = 0.7\n"
+        "max_tokens = 256\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.teacher is not None
+    assert cfg.teacher.client is not None
+    assert cfg.teacher.client.base_url == "https://example.com/inference/api/v1"
+    assert cfg.teacher.client.api_key_var == "PRIME_API_KEY"
+    assert cfg.teacher.client.headers_from_env == {"X-Prime-Team-ID": "PRIME_TEAM_ID"}
+    assert cfg.teacher.client.skip_model_check is True
+    assert cfg.teacher.to_api_dict() == {
+        "model": {"name": "qwen/qwen-2.5-7b-instruct"},
+        "client": {
+            "base_url": "https://example.com/inference/api/v1",
+            "api_key_var": "PRIME_API_KEY",
+            "headers_from_env": {"X-Prime-Team-ID": "PRIME_TEAM_ID"},
+            "skip_model_check": True,
+        },
+        "sampling": {
+            "temperature": 0.7,
+            "max_tokens": 256,
+        },
+    }
+
+
+def test_load_config_rejects_unknown_teacher_client_field(tmp_path: Path) -> None:
+    config_path = tmp_path / "sft.toml"
+    config_path.write_text(
+        'model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\n'
+        'loss = "sft"\n'
+        "[teacher]\n"
+        'model = "qwen/qwen-2.5-7b-instruct"\n'
+        "[teacher.client]\n"
+        'base_url = "https://example.com/inference/api/v1"\n'
+        'bogus = "value"\n'
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
 
 
 def test_load_config_rejects_teacher_temp_scheduler(tmp_path: Path) -> None:
@@ -208,10 +276,56 @@ def test_load_config_rejects_teacher_temp_scheduler(tmp_path: Path) -> None:
         'loss = "sft"\n'
         "[teacher]\n"
         'model = "openai/gpt-oss-120b"\n'
+        "[teacher.client]\n"
+        'base_url = "https://api.pinference.ai/api/v1"\n'
+        'api_key_var = "PRIME_API_KEY"\n'
         "[teacher.sampling.temp_scheduler]\n"
         'type = "linear"\n'
         "start_temperature = 1.0\n"
         "end_temperature = 0.1\n"
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_rejects_teacher_without_client(tmp_path: Path) -> None:
+    config_path = tmp_path / "sft.toml"
+    config_path.write_text(
+        'model = "openai/gpt-oss-20b"\n'
+        'loss = "sft"\n'
+        "[teacher]\n"
+        'model = "openai/gpt-oss-120b"\n'
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_rejects_teacher_client_without_base_url(tmp_path: Path) -> None:
+    config_path = tmp_path / "sft.toml"
+    config_path.write_text(
+        'model = "openai/gpt-oss-20b"\n'
+        'loss = "sft"\n'
+        "[teacher]\n"
+        'model = "openai/gpt-oss-120b"\n'
+        "[teacher.client]\n"
+        'api_key_var = "PRIME_API_KEY"\n'
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_load_config_rejects_teacher_client_without_api_key_var(tmp_path: Path) -> None:
+    config_path = tmp_path / "sft.toml"
+    config_path.write_text(
+        'model = "openai/gpt-oss-20b"\n'
+        'loss = "sft"\n'
+        "[teacher]\n"
+        'model = "openai/gpt-oss-120b"\n'
+        "[teacher.client]\n"
+        'base_url = "https://api.pinference.ai/api/v1"\n'
     )
 
     with pytest.raises(typer.Exit):

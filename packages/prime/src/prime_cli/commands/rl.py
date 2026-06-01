@@ -230,7 +230,7 @@ rollouts_per_example = 8
 # checkpoint_id = "..."
 
 # Optional: SFT distillation teacher
-# To use SFT, change loss to "sft" and uncomment this block. [teacher.client] is required — the platform has no default inference endpoint; the example below points at PI inference.
+# To use SFT, change loss to "sft" and uncomment this block ([teacher.client] is required).
 # [teacher]
 # model = "openai/gpt-oss-120b"
 #

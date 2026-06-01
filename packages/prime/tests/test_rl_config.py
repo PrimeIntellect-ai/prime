@@ -262,6 +262,7 @@ def test_load_config_rejects_unknown_teacher_client_field(tmp_path: Path) -> Non
         'model = "qwen/qwen-2.5-7b-instruct"\n'
         "[teacher.client]\n"
         'base_url = "https://example.com/inference/api/v1"\n'
+        'api_key_var = "PRIME_API_KEY"\n'
         'bogus = "value"\n'
     )
 

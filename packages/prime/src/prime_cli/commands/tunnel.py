@@ -354,20 +354,21 @@ def stop_tunnel(
                 ids: List[str] = []
                 seen_ids: set[str] = set()
                 page = 1
-                while True:
-                    tunnels = await client.list_tunnels(
+                max_pages = 1000
+                while page <= max_pages:
+                    result = await client.list_tunnels_page(
                         team_id=scoped_team_id,
                         page=page,
                         per_page=1000,
                     )
-                    for tunnel in tunnels:
+                    for tunnel in result.tunnels:
                         if only_mine and tunnel.user_id != scoped_user_id:
                             continue
                         if tunnel.tunnel_id not in seen_ids:
                             ids.append(tunnel.tunnel_id)
                             seen_ids.add(tunnel.tunnel_id)
 
-                    if len(tunnels) < 1000:
+                    if not result.has_next or not result.tunnels:
                         break
                     page += 1
 

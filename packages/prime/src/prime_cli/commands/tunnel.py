@@ -18,15 +18,11 @@ from prime_cli.utils.prompt import confirm_or_skip
 app = PlainTyper(help="Manage tunnels for exposing local services", no_args_is_help=True)
 console = get_console()
 
-TunnelClient: Any = None
 
+def _create_tunnel_client() -> Any:
+    from prime_tunnel.core.client import TunnelClient
 
-def _tunnel_client_class() -> Any:
-    if TunnelClient is not None:
-        return TunnelClient
-    from prime_tunnel.core.client import TunnelClient as loaded_tunnel_client
-
-    return loaded_tunnel_client
+    return TunnelClient()
 
 
 def _format_tunnel_for_output(tunnel) -> dict:
@@ -133,6 +129,11 @@ def start_tunnel(
         asyncio.run(run_tunnel())
     except KeyboardInterrupt:
         pass
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}", style="bold")
+        raise typer.Exit(1)
 
 
 @app.command("list")
@@ -167,7 +168,7 @@ def list_tunnels(
     validate_output_format(output, console)
 
     async def fetch_tunnels():
-        client = _tunnel_client_class()()
+        client = _create_tunnel_client()
         try:
             return await client.list_tunnels_page(
                 team_id=team_id,
@@ -256,7 +257,7 @@ def tunnel_status(
     """Get status of a specific tunnel."""
 
     async def fetch_status():
-        client = _tunnel_client_class()()
+        client = _create_tunnel_client()
         try:
             return await client.get_tunnel(tunnel_id)
         finally:
@@ -342,7 +343,7 @@ def stop_tunnel(
     if all:
 
         async def fetch_tunnel_ids() -> List[str]:
-            client = _tunnel_client_class()()
+            client = _create_tunnel_client()
             try:
                 scoped_team_id = team_id
                 if scoped_team_id is None:
@@ -404,7 +405,7 @@ def stop_tunnel(
     if labels:
 
         async def validate_label_scope() -> None:
-            client = _tunnel_client_class()()
+            client = _create_tunnel_client()
             try:
                 scoped_user_id = client.config.user_id if only_mine else None
                 scoped_team_id = team_id if team_id is not None else client.config.team_id
@@ -456,7 +457,7 @@ def stop_tunnel(
         return
 
     async def delete_tunnels() -> tuple[List[str], List[dict], List[dict]]:
-        client = _tunnel_client_class()()
+        client = _create_tunnel_client()
         succeeded: List[str] = []
         not_found: List[dict] = []
         failed: List[dict] = []

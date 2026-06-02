@@ -1,4 +1,5 @@
 import json
+import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -33,6 +34,17 @@ def test_format_tunnel_does_not_derive_created_from_expiration() -> None:
     assert tunnel_data["expires_at"] is not None
 
 
+def test_tunnel_start_import_failure_exits_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setitem(sys.modules, "prime_tunnel", None)
+
+    result = runner.invoke(app, ["tunnel", "start"])
+
+    assert result.exit_code == 1
+    assert "Error:" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_tunnel_list_passes_label_filters(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
     captured: dict[str, Any] = {}
@@ -65,7 +77,7 @@ def test_tunnel_list_passes_label_filters(monkeypatch: pytest.MonkeyPatch) -> No
         async def close(self) -> None:
             return None
 
-    monkeypatch.setattr("prime_cli.commands.tunnel.TunnelClient", FakeTunnelClient)
+    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
 
     result = runner.invoke(
         app,
@@ -89,7 +101,7 @@ def test_tunnel_list_json_outputs_empty_envelope(
         async def close(self) -> None:
             return None
 
-    monkeypatch.setattr("prime_cli.commands.tunnel.TunnelClient", FakeTunnelClient)
+    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
 
     result = runner.invoke(app, ["tunnel", "list", "--output", "json"])
 
@@ -117,7 +129,7 @@ def test_tunnel_stop_by_label_uses_bulk_delete(monkeypatch: pytest.MonkeyPatch) 
         async def close(self) -> None:
             return None
 
-    monkeypatch.setattr("prime_cli.commands.tunnel.TunnelClient", FakeTunnelClient)
+    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
 
     result = runner.invoke(app, ["tunnel", "stop", "--label", "dev", "--yes"])
 
@@ -141,7 +153,7 @@ def test_tunnel_stop_by_label_validates_scope_before_prompt(
         async def close(self) -> None:
             return None
 
-    monkeypatch.setattr("prime_cli.commands.tunnel.TunnelClient", FakeTunnelClient)
+    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
 
     # No --yes: if the scope check ran after the prompt we'd see the confirmation
     # text; instead it must fail fast with a clean error and never prompt.
@@ -179,7 +191,7 @@ def test_tunnel_stop_all_lists_then_bulk_deletes_explicit_ids(
         async def close(self) -> None:
             return None
 
-    monkeypatch.setattr("prime_cli.commands.tunnel.TunnelClient", FakeTunnelClient)
+    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
 
     result = runner.invoke(app, ["tunnel", "stop", "--all", "--yes"])
 
@@ -216,7 +228,7 @@ def test_tunnel_stop_all_users_uses_configured_team_scope(
         async def close(self) -> None:
             return None
 
-    monkeypatch.setattr("prime_cli.commands.tunnel.TunnelClient", FakeTunnelClient)
+    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
 
     result = runner.invoke(app, ["tunnel", "stop", "--all", "--all-users", "--yes"])
 
@@ -252,7 +264,7 @@ def test_tunnel_stop_all_paginates_before_bulk_delete(
         async def close(self) -> None:
             return None
 
-    monkeypatch.setattr("prime_cli.commands.tunnel.TunnelClient", FakeTunnelClient)
+    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
 
     result = runner.invoke(app, ["tunnel", "stop", "--all", "--yes"])
 
@@ -278,7 +290,7 @@ def test_tunnel_stop_all_noops_when_no_active_tunnels(
         async def close(self) -> None:
             return None
 
-    monkeypatch.setattr("prime_cli.commands.tunnel.TunnelClient", FakeTunnelClient)
+    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
 
     result = runner.invoke(app, ["tunnel", "stop", "--all", "--yes"])
 
@@ -301,7 +313,7 @@ def test_tunnel_stop_all_requires_current_user_for_only_mine(
         async def close(self) -> None:
             return None
 
-    monkeypatch.setattr("prime_cli.commands.tunnel.TunnelClient", FakeTunnelClient)
+    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
 
     result = runner.invoke(app, ["tunnel", "stop", "--all", "--yes"])
 

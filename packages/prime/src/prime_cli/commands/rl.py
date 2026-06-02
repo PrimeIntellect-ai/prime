@@ -791,8 +791,17 @@ def _dispatch_full_finetune_run(
         raise typer.Exit(1)
     secrets = secrets or {}
 
+    # Strip CLI-only secret-loading keys before shipping the TOML to the
+    # backend. `env_file` / `env_files` only meaningfully exist on the
+    # caller's filesystem — the hosted pod doesn't see them, and prime-rl
+    # has no use for the paths once we've already materialized the secrets
+    # into the per-run k8s Secret above. Leaving them in the config either
+    # confuses prime-rl (unknown field) or silently sends it chasing
+    # phantom paths.
+    config_payload = {k: v for k, v in raw_cfg.items() if k not in ("env_file", "env_files")}
+
     payload = build_payload_from_toml(
-        raw_cfg,
+        config_payload,
         name=name,
         team_id=team_id,
         wandb_api_key=secrets.get("WANDB_API_KEY"),

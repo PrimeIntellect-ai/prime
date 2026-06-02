@@ -1,15 +1,8 @@
 import asyncio
 import signal
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import typer
-from prime_tunnel import Tunnel
-from prime_tunnel.core.client import TunnelClient
-from prime_tunnel.exceptions import (
-    TunnelConnectionError,
-    TunnelLimitReachedError,
-    TunnelTimeoutError,
-)
 from rich.table import Table
 
 from prime_cli.utils import (
@@ -24,6 +17,12 @@ from prime_cli.utils.prompt import confirm_or_skip
 
 app = PlainTyper(help="Manage tunnels for exposing local services", no_args_is_help=True)
 console = get_console()
+
+
+def _create_tunnel_client() -> Any:
+    from prime_tunnel.core.client import TunnelClient
+
+    return TunnelClient()
 
 
 def _format_tunnel_for_output(tunnel) -> dict:
@@ -61,6 +60,13 @@ def start_tunnel(
     """Start a tunnel to expose a local port."""
 
     async def run_tunnel():
+        from prime_tunnel import Tunnel
+        from prime_tunnel.exceptions import (
+            TunnelConnectionError,
+            TunnelLimitReachedError,
+            TunnelTimeoutError,
+        )
+
         tunnel = Tunnel(local_port=port, name=name, team_id=team_id, labels=labels)
 
         shutdown_event = asyncio.Event()
@@ -123,6 +129,11 @@ def start_tunnel(
         asyncio.run(run_tunnel())
     except KeyboardInterrupt:
         pass
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}", style="bold")
+        raise typer.Exit(1)
 
 
 @app.command("list")
@@ -157,7 +168,7 @@ def list_tunnels(
     validate_output_format(output, console)
 
     async def fetch_tunnels():
-        client = TunnelClient()
+        client = _create_tunnel_client()
         try:
             return await client.list_tunnels_page(
                 team_id=team_id,
@@ -246,7 +257,7 @@ def tunnel_status(
     """Get status of a specific tunnel."""
 
     async def fetch_status():
-        client = TunnelClient()
+        client = _create_tunnel_client()
         try:
             return await client.get_tunnel(tunnel_id)
         finally:
@@ -332,7 +343,7 @@ def stop_tunnel(
     if all:
 
         async def fetch_tunnel_ids() -> List[str]:
-            client = TunnelClient()
+            client = _create_tunnel_client()
             try:
                 scoped_team_id = team_id
                 if scoped_team_id is None:
@@ -394,7 +405,7 @@ def stop_tunnel(
     if labels:
 
         async def validate_label_scope() -> None:
-            client = TunnelClient()
+            client = _create_tunnel_client()
             try:
                 scoped_user_id = client.config.user_id if only_mine else None
                 scoped_team_id = team_id if team_id is not None else client.config.team_id
@@ -446,7 +457,7 @@ def stop_tunnel(
         return
 
     async def delete_tunnels() -> tuple[List[str], List[dict], List[dict]]:
-        client = TunnelClient()
+        client = _create_tunnel_client()
         succeeded: List[str] = []
         not_found: List[dict] = []
         failed: List[dict] = []

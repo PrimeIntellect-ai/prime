@@ -133,8 +133,7 @@ def _select_item_paged(
         end = min(start + page_size, total)
 
         console.print(
-            f"\n[bold]Select a {item_type} to {action} "
-            f"(page {page + 1}/{total_pages}):[/bold]\n"
+            f"\n[bold]Select a {item_type} to {action} (page {page + 1}/{total_pages}):[/bold]\n"
         )
         for i in range(start, end):
             console.print(f"  {i + 1}. {formatter(items[i])}")

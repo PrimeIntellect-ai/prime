@@ -75,7 +75,7 @@ def test_remote_script_compiles_and_keeps_cleanup_best_effort(tmp_path):
     py_compile.compile(str(remote_path), doraise=True)
     assert "def best_effort_cancel_hosted_evals" in script
     assert "Warning: failed to delete temporary environment" in script
-    assert "line.rsplit(\":\", 1)[-1]" in script
+    assert 'line.rsplit(":", 1)[-1]' in script
 
 
 def test_release_e2e_workflow_uses_standard_name_and_safe_inputs():
@@ -85,8 +85,8 @@ def test_release_e2e_workflow_uses_standard_name_and_safe_inputs():
     assert workflow.startswith("name: Release E2E Tests")
     assert '"packages/prime-tunnel/**"' in workflow
     assert '".github/workflows/release-e2e.yml"' in workflow
-    assert 'HOSTED_MODE: ${{ inputs.hosted_mode || \'submit\' }}' in workflow
-    assert 'MODEL: ${{ inputs.model || \'deepseek/deepseek-chat\' }}' in workflow
+    assert "HOSTED_MODE: ${{ inputs.hosted_mode || 'submit' }}" in workflow
+    assert "MODEL: ${{ inputs.model || 'deepseek/deepseek-chat' }}" in workflow
     assert 'HOSTED_MODE="${{ inputs.hosted_mode' not in workflow
     assert 'MODEL="${{ inputs.model' not in workflow
     assert 'REGION="${{ inputs.sandbox_region' not in workflow

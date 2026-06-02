@@ -33,6 +33,13 @@ from .lab_agents import (
     known_agent_names,
     write_agent_native_surface,
 )
+from .lab_hygiene import (
+    LabHygieneOptions,
+    append_lab_gitignore,
+    missing_lab_gitignore_patterns,
+    run_lab_hygiene_preflight,
+    tracked_lab_hygiene_paths,
+)
 
 VERIFIERS_REPO = "primeintellect-ai/verifiers"
 VERIFIERS_REF = "f43e42c1fabfe2604afc95b9ce62779a8f55d487"
@@ -42,25 +49,7 @@ DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
 LAB_CONFIG_FOLDERS = ("rl", "gepa", "eval", "sft", "opd", "fft")
 
 SUPPORTED_AGENTS = known_agent_names()
-LAB_GITIGNORE_PATTERNS = (
-    ".env",
-    "/AGENTS.md",
-    "/CLAUDE.md",
-    "/CLAUDE.local.md",
-    "/outputs/",
-    "/prime-rl/",
-    "/environments/AGENTS.md",
-    "/environments/*/outputs/",
-    "/environments/*/dist/",
-    "/environments/*/*.egg-info/",
-    "/environments/*/__pycache__/",
-    "__pycache__/",
-    "*.py[cod]",
-    ".pytest_cache/",
-    ".ruff_cache/",
-)
 LOCAL_CLAUDE_MD = "CLAUDE.local.md"
-LAB_GUIDANCE_GITIGNORE_PATHS = ("AGENTS.md", "CLAUDE.md", LOCAL_CLAUDE_MD, "environments/AGENTS.md")
 LOCAL_CLAUDE_GUIDANCE_TEMPLATE = "\n".join(
     [
         "# CLAUDE.local.md",
@@ -383,7 +372,6 @@ def _run_lab_setup_steps(
 
     (workspace / "configs").mkdir(exist_ok=True)
     (workspace / "environments").mkdir(exist_ok=True)
-    _append_gitignore(workspace)
     managed_skill_names = _sync_prime_skills(emit)
     _prepare_workspace_skill_dir(workspace, managed_skill_names, emit)
     _prepare_agent_skill_dirs(workspace, options.agents, managed_skill_names, emit)
@@ -399,6 +387,11 @@ def _run_lab_setup_steps(
     _write_lab_docs_index(workspace, options.agents)
     emit("\n")
     emit(_post_setup_call_to_action(options))
+    run_lab_hygiene_preflight(
+        LabHygieneOptions(fix=True),
+        workspace=workspace,
+        emit=emit,
+    )
 
 
 def _run_lab_sync_steps(
@@ -410,7 +403,6 @@ def _run_lab_sync_steps(
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "configs").mkdir(exist_ok=True)
     (workspace / "environments").mkdir(exist_ok=True)
-    _append_gitignore(workspace)
     emit(f"Syncing Lab assets in {workspace}\n")
     agents = _resolve_sync_agents(workspace, options.agents, no_agent=options.no_agent)
     guidance_agents = agents
@@ -437,6 +429,11 @@ def _run_lab_sync_steps(
         _sync_workspace_guidance(workspace, guidance_agents, emit, force=True)
         _write_lab_docs_index(workspace, guidance_agents)
 
+    run_lab_hygiene_preflight(
+        LabHygieneOptions(fix=True),
+        workspace=workspace,
+        emit=emit,
+    )
     emit("Lab sync completed\n")
 
 
@@ -865,10 +862,7 @@ def _prepare_agent_native_surfaces(workspace: Path, agents: tuple[str, ...], emi
 
 def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDoctorCheck]:
     if options.fix:
-        workspace.mkdir(parents=True, exist_ok=True)
-        (workspace / "configs").mkdir(parents=True, exist_ok=True)
-        (workspace / "environments").mkdir(parents=True, exist_ok=True)
-        _append_gitignore(workspace)
+        run_lab_hygiene_preflight(LabHygieneOptions(fix=True), workspace=workspace)
 
     metadata_path = workspace / ".prime" / "lab.json"
     metadata = _read_lab_metadata(workspace)
@@ -888,7 +882,7 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
             "Run prime lab doctor --fix.",
         ),
         _gitignore_check(workspace),
-        _lab_guidance_tracking_check(workspace, fix=options.fix),
+        _tracked_lab_git_hygiene_check(workspace),
         _config_validity_check(workspace),
         _config_deprecated_fields_check(workspace),
         _config_environment_reference_check(workspace),
@@ -1138,7 +1132,7 @@ def _path_check(
 def _gitignore_check(workspace: Path) -> LabDoctorCheck:
     path = workspace / ".gitignore"
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    missing = _missing_gitignore_patterns(existing)
+    missing = missing_lab_gitignore_patterns(existing)
     if not missing:
         return LabDoctorCheck(
             name="Lab gitignore",
@@ -1153,49 +1147,21 @@ def _gitignore_check(workspace: Path) -> LabDoctorCheck:
     )
 
 
-def _lab_guidance_tracking_check(workspace: Path, *, fix: bool) -> LabDoctorCheck:
-    tracked = _tracked_git_paths(workspace, LAB_GUIDANCE_GITIGNORE_PATHS)
-    if tracked and fix:
-        _untrack_git_paths(workspace, tracked)
-        tracked = _tracked_git_paths(workspace, LAB_GUIDANCE_GITIGNORE_PATHS)
-    if not tracked:
+def _tracked_lab_git_hygiene_check(workspace: Path) -> LabDoctorCheck:
+    tracked_paths = tracked_lab_hygiene_paths(workspace)
+    if not tracked_paths:
         return LabDoctorCheck(
-            name="Lab guidance tracking",
+            name="Tracked Lab git hygiene",
             status="PASS",
-            message="Lab generated and local guidance files are untracked.",
+            message="No generated Lab guidance or outputs are tracked.",
         )
-    paths = " ".join(tracked)
+    shown = ", ".join(tracked_paths[:5])
+    suffix = "" if len(tracked_paths) <= 5 else f" and {len(tracked_paths) - 5} more"
     return LabDoctorCheck(
-        name="Lab guidance tracking",
-        status="WARN",
-        message="Tracked Lab generated/local guidance files: " + ", ".join(tracked),
-        remediation=f"Run git rm --cached {paths} && prime lab sync.",
-    )
-
-
-def _tracked_git_paths(workspace: Path, paths: tuple[str, ...]) -> tuple[str, ...]:
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "--", *paths],
-            cwd=workspace,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        return ()
-    if result.returncode != 0:
-        return ()
-    return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
-
-
-def _untrack_git_paths(workspace: Path, paths: tuple[str, ...]) -> None:
-    subprocess.run(
-        ["git", "rm", "--cached", "--force", "--quiet", "--", *paths],
-        cwd=workspace,
-        check=False,
-        capture_output=True,
-        text=True,
+        name="Tracked Lab git hygiene",
+        status="FAIL",
+        message="Tracked generated Lab files: " + shown + suffix,
+        remediation="Run git rm --cached on the generated Lab files and keep them local only.",
     )
 
 
@@ -1414,7 +1380,7 @@ def _ensure_uv_project(workspace: Path, emit: Emit, runner: Runner) -> None:
         _check_command(["uv", "init"], workspace, emit, runner)
         _remove_if_exists(workspace / "main.py")
         _remove_if_exists(workspace / ".python-version")
-        _append_gitignore(workspace)
+        append_lab_gitignore(workspace)
     else:
         emit("Found pyproject.toml\n")
 
@@ -1774,24 +1740,6 @@ def _normalize_supported_agent(raw_agent: str, *, allow_all: bool) -> str:
             + ", ".join((*SUPPORTED_AGENTS, "all"))
         )
     return agent
-
-
-def _append_gitignore(workspace: Path) -> None:
-    path = workspace / ".gitignore"
-    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    missing = _missing_gitignore_patterns(existing)
-    if missing:
-        section = "\n# Lab generated artifacts\n" + "\n".join(missing) + "\n"
-        path.write_text(existing.rstrip() + section + "\n", encoding="utf-8")
-
-
-def _missing_gitignore_patterns(existing: str) -> list[str]:
-    existing_patterns = {
-        line.strip()
-        for line in existing.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-    return [pattern for pattern in LAB_GITIGNORE_PATTERNS if pattern not in existing_patterns]
 
 
 def _global_prime_skills_dir() -> Path:

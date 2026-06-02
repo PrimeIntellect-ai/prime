@@ -231,8 +231,8 @@ rollouts_per_example = 8
 
 # Optional: SFT distillation teacher
 # To use SFT, change loss to "sft" and uncomment this block.
-# [teacher.client] defaults to Prime Inference; include it only to point at a custom
-# OAI-compatible endpoint (OpenAI, OpenRouter, self-hosted vLLM).
+# To use the default Prime Inference endpoint, leave [teacher.client] commented.
+# To use a custom OAI-compatible endpoint (OpenAI, OpenRouter, vLLM), uncomment [teacher.client].
 # [teacher]
 # model = "openai/gpt-oss-120b"
 #

@@ -890,11 +890,10 @@ def _lab_doctor_checks(options: LabDoctorOptions, workspace: Path) -> list[LabDo
         _managed_skill_manifest_check(),
         _global_lab_templates_check(),
         _workspace_managed_skills_check(workspace),
-        _path_check(
+        _lab_template_configs_check(
             "Lab templates",
-            workspace / ".prime" / "lab" / "templates" / "configs" / "rl" / "gsm8k.toml",
+            workspace / ".prime" / "lab" / "templates" / "configs",
             "Run prime lab sync.",
-            warning=True,
         ),
         _path_check(
             "Lab docs index",
@@ -955,18 +954,21 @@ def _managed_skill_manifest_check() -> LabDoctorCheck:
 
 
 def _global_lab_templates_check() -> LabDoctorCheck:
-    path = _global_lab_templates_dir() / "configs" / "rl" / "gsm8k.toml"
-    if path.is_file():
-        return LabDoctorCheck(
-            name="Global Lab template cache",
-            status="PASS",
-            message=f"Installed at {_global_lab_templates_dir()}.",
-        )
+    return _lab_template_configs_check(
+        "Global Lab template cache",
+        _global_lab_templates_dir() / "configs",
+        "Run prime lab sync.",
+    )
+
+
+def _lab_template_configs_check(name: str, configs_dir: Path, remediation: str) -> LabDoctorCheck:
+    if configs_dir.is_dir() and any(configs_dir.rglob("*.toml")):
+        return LabDoctorCheck(name=name, status="PASS", message=str(configs_dir.parent))
     return LabDoctorCheck(
-        name="Global Lab template cache",
+        name=name,
         status="WARN",
-        message=f"Missing {_global_lab_templates_dir()}",
-        remediation="Run prime lab sync.",
+        message=f"Missing {configs_dir.parent}",
+        remediation=remediation,
     )
 
 

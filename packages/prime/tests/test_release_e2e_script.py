@@ -3,6 +3,7 @@ import py_compile
 import sys
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT_PATH = REPO_ROOT / "packages" / "prime" / "scripts" / "release_e2e.py"
@@ -32,26 +33,35 @@ def test_env_int_treats_empty_environment_value_as_unset(monkeypatch):
     assert release_e2e.env_int("PRIME_E2E_TEST_INT", "120") == 240
 
 
-def test_source_archive_excludes_generated_secret_and_symlink_paths(tmp_path):
+def test_secret_file_detection_keeps_python_secret_command_modules():
+    release_e2e = load_release_e2e_module()
+
+    assert not release_e2e.is_secret_file(Path("secrets.py"))
+    assert release_e2e.is_secret_file(Path("secrets.ini"))
+    assert release_e2e.is_secret_file(Path("secrets.local"))
+    assert release_e2e.is_secret_file(Path("secrets.toml"))
+    assert release_e2e.is_secret_file(Path("service-account-prod.json"))
+
+
+def test_source_archive_excludes_generated_secret_and_symlink_paths(tmp_path, monkeypatch):
     release_e2e = load_release_e2e_module()
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     (repo_root / "safe.py").write_text("print('ok')\n")
-    (repo_root / ".env").write_text("SECRET=1\n")
-    (repo_root / "service-account-prod.json").write_text("{}\n")
+    (repo_root / "blocked.txt").write_text("skip\n")
     (repo_root / "build").mkdir()
     (repo_root / "build" / "artifact.py").write_text("print('skip')\n")
     (repo_root / ".venv").mkdir()
     (repo_root / ".venv" / "installed.py").write_text("print('skip')\n")
     (repo_root / "safe-link.py").symlink_to(repo_root / "safe.py")
+    monkeypatch.setattr(release_e2e, "is_secret_file", lambda path: path.name == "blocked.txt")
 
     archive = release_e2e.create_source_archive(repo_root)
     with tarfile.open(archive) as tar:
         names = set(tar.getnames())
 
     assert "prime/safe.py" in names
-    assert "prime/.env" not in names
-    assert "prime/service-account-prod.json" not in names
+    assert "prime/blocked.txt" not in names
     assert "prime/build/artifact.py" not in names
     assert "prime/.venv/installed.py" not in names
     assert "prime/safe-link.py" not in names
@@ -76,6 +86,52 @@ def test_remote_script_compiles_and_keeps_cleanup_best_effort(tmp_path):
     assert "def best_effort_cancel_hosted_evals" in script
     assert "Warning: failed to delete temporary environment" in script
     assert 'line.rsplit(":", 1)[-1]' in script
+    assert script.index('"--save-results"') < script.index('"--skip-upload"')
+    assert 'ENV_DIR / "outputs"' in script
+
+
+def test_run_in_sandbox_uses_background_job_for_long_timeout(tmp_path, capsys):
+    release_e2e = load_release_e2e_module()
+    archive = tmp_path / "prime-src.tar.gz"
+    archive.write_bytes(b"archive")
+    config = release_e2e.RemoteConfig(
+        model="deepseek/deepseek-chat",
+        hosted_mode="submit",
+        env_prefix="prime-e2e",
+        hosted_timeout_minutes=120,
+        cleanup_remote_env=True,
+        run_suffix="test",
+    )
+
+    class FakeClient:
+        def __init__(self):
+            self.uploads = []
+            self.background_call = None
+
+        def upload_file(self, sandbox_id, remote_path, local_path, timeout):
+            self.uploads.append((sandbox_id, remote_path, local_path, timeout))
+
+        def upload_bytes(self, sandbox_id, path, data, filename, timeout):
+            self.uploads.append((sandbox_id, path, filename, timeout, data))
+
+        def run_background_job(self, sandbox_id, command, timeout, poll_interval):
+            self.background_call = (sandbox_id, command, timeout, poll_interval)
+            return SimpleNamespace(exit_code=7, stdout="remote stdout\n", stderr="remote stderr\n")
+
+    client = FakeClient()
+
+    exit_code = release_e2e.run_in_sandbox(client, "sandbox-1", archive, config, 7200)
+    captured = capsys.readouterr()
+
+    assert exit_code == 7
+    assert client.background_call == (
+        "sandbox-1",
+        "python /workspace/release_e2e_remote.py",
+        7200,
+        5,
+    )
+    assert "remote stdout" in captured.out
+    assert "remote stderr" in captured.err
 
 
 def test_release_e2e_workflow_uses_standard_name_and_safe_inputs():

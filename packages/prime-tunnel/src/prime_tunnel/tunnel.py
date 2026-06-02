@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import fcntl
 import os
 import re
@@ -205,6 +206,8 @@ class Tunnel:
 
         self._started = True
 
+        atexit.register(self.sync_stop)
+
         return self.url
 
     async def stop(self) -> None:
@@ -219,6 +222,8 @@ class Tunnel:
         """Stop the tunnel synchronously. Safe for signal handlers and atexit."""
         if not self._started:
             return
+
+        atexit.unregister(self.sync_stop)
 
         if self._process is not None:
             try:
@@ -258,6 +263,8 @@ class Tunnel:
 
     async def _cleanup(self) -> None:
         """Clean up tunnel resources."""
+        atexit.unregister(self.sync_stop)
+
         # Stop frpc process (this will cause drain threads to exit via EOF)
         if self._process is not None:
             try:

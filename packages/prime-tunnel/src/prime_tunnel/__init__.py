@@ -11,7 +11,7 @@ from prime_tunnel.exceptions import (
     TunnelLimitReachedError,
     TunnelTimeoutError,
 )
-from prime_tunnel.models import TunnelInfo
+from prime_tunnel.models import TunnelInfo, TunnelListPage
 from prime_tunnel.tunnel import Tunnel
 
 __all__ = [
@@ -23,6 +23,7 @@ __all__ = [
     "Tunnel",
     # Models
     "TunnelInfo",
+    "TunnelListPage",
     # Exceptions
     "BinaryDownloadError",
     "TunnelAuthError",

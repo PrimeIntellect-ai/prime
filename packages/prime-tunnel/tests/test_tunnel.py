@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from prime_tunnel import Config, Tunnel, TunnelClient
-from prime_tunnel.exceptions import TunnelTimeoutError
+from prime_tunnel.exceptions import TunnelError, TunnelTimeoutError
 from prime_tunnel.models import TunnelInfo
 
 
@@ -22,6 +22,29 @@ def test_tunnel_init_with_name():
     tunnel = Tunnel(local_port=9000, name="my-tunnel")
     assert tunnel.local_port == 9000
     assert tunnel.name == "my-tunnel"
+
+
+def test_tunnel_init_with_labels():
+    """Test Tunnel initialization with labels."""
+    tunnel = Tunnel(local_port=9000, labels=["dev", "api"])
+    assert tunnel.labels == ["dev", "api"]
+
+
+def test_tunnel_info_accepts_labels():
+    """Test TunnelInfo carries labels and status metadata."""
+    tunnel_info = TunnelInfo(
+        tunnel_id="t-test123",
+        hostname="t-test123.tunnel.example.com",
+        url="https://t-test123.tunnel.example.com",
+        frp_token="tok",
+        server_host="frp.example.com",
+        server_port=7000,
+        expires_at=datetime.now(timezone.utc),
+        labels=["dev"],
+        status="CONNECTED",
+    )
+    assert tunnel_info.labels == ["dev"]
+    assert tunnel_info.status == "CONNECTED"
 
 
 def test_config_default_base_url():
@@ -58,8 +81,11 @@ def test_config_bin_dir():
     assert ".prime" in str(config.bin_dir)
 
 
-def test_tunnel_client_init():
+def test_tunnel_client_init(monkeypatch, tmp_path):
     """Test TunnelClient initialization."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("PRIME_API_BASE_URL", raising=False)
+    monkeypatch.delenv("PRIME_BASE_URL", raising=False)
     client = TunnelClient(api_key="test-key")
     assert client.api_key == "test-key"
     assert client.base_url == Config.DEFAULT_BASE_URL
@@ -162,3 +188,119 @@ async def test_check_registered_propagates_api_errors():
     tunnel._client.get_tunnel.side_effect = TunnelTimeoutError("timeout")
     with pytest.raises(TunnelTimeoutError):
         await tunnel.check_registered()
+
+
+@pytest.mark.asyncio
+async def test_client_create_tunnel_sends_labels(monkeypatch):
+    client = TunnelClient(api_key="test-key")
+    captured = {}
+
+    async def fake_request(method, url, json=None, params=None):
+        captured["method"] = method
+        captured["url"] = url
+        captured["json"] = json
+        captured["params"] = params
+        return MagicMock(status_code=201)
+
+    async def fake_handle_response(response, operation):
+        return {
+            "tunnel_id": "t-test123",
+            "hostname": "t-test123.tunnel.example.com",
+            "url": "https://t-test123.tunnel.example.com",
+            "frp_token": "tok",
+            "binding_secret": "secret",
+            "server_host": "frp.example.com",
+            "server_port": 7000,
+            "expires_at": datetime.now(timezone.utc).isoformat(),
+            "labels": ["dev"],
+        }
+
+    monkeypatch.setattr(client, "_request_with_retry", fake_request)
+    monkeypatch.setattr(client, "_handle_response", fake_handle_response)
+
+    tunnel_info = await client.create_tunnel(local_port=8765, labels=["dev"])
+
+    assert captured["json"]["labels"] == ["dev"]
+    assert tunnel_info.labels == ["dev"]
+
+
+@pytest.mark.asyncio
+async def test_client_list_tunnels_uses_plural_labels_param(monkeypatch):
+    client = TunnelClient(api_key="test-key")
+    captured = {}
+
+    async def fake_request(method, url, json=None, params=None):
+        captured["method"] = method
+        captured["params"] = params
+        return MagicMock(status_code=200)
+
+    async def fake_handle_response(response, operation):
+        return {"tunnels": []}
+
+    monkeypatch.setattr(client, "_idempotent_request_with_retry", fake_request)
+    monkeypatch.setattr(client, "_handle_response", fake_handle_response)
+
+    tunnels = await client.list_tunnels(labels=["dev"])
+
+    assert tunnels == []
+    assert captured["params"]["labels"] == ["dev"]
+    assert "label" not in captured["params"]
+
+
+@pytest.mark.asyncio
+async def test_client_bulk_delete_by_labels(monkeypatch):
+    client = TunnelClient(api_key="test-key")
+    captured = {}
+
+    async def fake_request(method, url, json=None, params=None):
+        captured["method"] = method
+        captured["json"] = json
+        return MagicMock(status_code=200)
+
+    async def fake_handle_response(response, operation):
+        return {"succeeded": ["t-test123"], "failed": [], "message": "ok"}
+
+    monkeypatch.setattr(client, "_idempotent_request_with_retry", fake_request)
+    monkeypatch.setattr(client, "_handle_response", fake_handle_response)
+
+    result = await client.bulk_delete_tunnels(labels=["dev"], team_id="team-1")
+
+    assert captured["json"]["labels"] == ["dev"]
+    assert captured["json"]["teamId"] == "team-1"
+    assert "team_id" not in captured["json"]
+    assert result["succeeded"] == ["t-test123"]
+
+
+@pytest.mark.asyncio
+async def test_client_bulk_delete_ids_does_not_default_configured_team(monkeypatch):
+    client = TunnelClient(api_key="test-key")
+    captured = {}
+    client.config.config["team_id"] = "team-from-config"
+
+    async def fake_request(method, url, json=None, params=None):
+        captured["method"] = method
+        captured["json"] = json
+        return MagicMock(status_code=200)
+
+    async def fake_handle_response(response, operation):
+        return {"succeeded": ["t-test123"], "failed": [], "message": "ok"}
+
+    monkeypatch.setattr(client, "_idempotent_request_with_retry", fake_request)
+    monkeypatch.setattr(client, "_handle_response", fake_handle_response)
+
+    result = await client.bulk_delete_tunnels(tunnel_ids=["t-personal"])
+
+    assert "teamId" not in captured["json"]
+    assert "team_id" not in captured["json"]
+    assert captured["json"]["tunnel_ids"] == ["t-personal"]
+    assert result["succeeded"] == ["t-test123"]
+
+
+@pytest.mark.asyncio
+async def test_client_bulk_delete_all_users_requires_team_id(monkeypatch):
+    client = TunnelClient(api_key="test-key")
+    client.config.config.pop("team_id", None)
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
+
+    with pytest.raises(TunnelError, match="all_users requires a team ID"):
+        await client.bulk_delete_tunnels(labels=["dev"], all_users=True)

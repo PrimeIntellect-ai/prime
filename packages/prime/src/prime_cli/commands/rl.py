@@ -718,14 +718,30 @@ def _is_full_finetune(cfg: Dict[str, Any]) -> bool:
     """A config is full-FT iff it carries one of:
 
     - top-level `type = "full_finetune"` (mirrors prime-rl's discriminator)
-    - a `[deployment]` table with `num_train_gpus` / `num_infer_gpus`
-      (matches the prime-rl `qwen30b_math/rl.toml` shape exactly)
+    - a `[deployment]` table with a sizing field — either single-node
+      (`num_train_gpus` / `num_infer_gpus`) or multi-node
+      (`num_train_nodes` / `num_infer_nodes`) — or an explicit
+      `[deployment].type` of `single_node` / `multi_node`.
+
+    Previously only the single-node sizing fields triggered detection, so
+    canonical multi-node prime-rl shapes (e.g. `qwen30b_math/rl.toml`,
+    which uses `num_train_nodes` / `num_infer_nodes`) silently fell
+    through to the LoRA dispatch path.
     """
     if cfg.get("type") == "full_finetune":
         return True
     deploy = cfg.get("deployment")
-    if isinstance(deploy, dict) and ("num_train_gpus" in deploy or "num_infer_gpus" in deploy):
-        return True
+    if isinstance(deploy, dict):
+        if deploy.get("type") in ("single_node", "multi_node"):
+            return True
+        sizing_keys = (
+            "num_train_gpus",
+            "num_infer_gpus",
+            "num_train_nodes",
+            "num_infer_nodes",
+        )
+        if any(k in deploy for k in sizing_keys):
+            return True
     return False
 
 

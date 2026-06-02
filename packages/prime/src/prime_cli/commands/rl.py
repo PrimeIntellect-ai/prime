@@ -2063,19 +2063,6 @@ def _parse_since(since: Optional[str]) -> Optional[int]:
     return seconds
 
 
-def _parse_env_qualifier(env: str) -> tuple[str, int]:
-    """Parse 'name' or 'name/<int>' into (env_name, env_index).
-
-    Only a trailing ``/<int>`` is treated as a replica index. Any other slashes
-    are part of the env name itself (e.g. owner/name IDs like
-    ``primeintellect/reverse-text``).
-    """
-    name, sep, idx_str = env.rpartition("/")
-    if sep and name and idx_str.isdigit():
-        return name, int(idx_str)
-    return env, 0
-
-
 def _parse_env_qualifier_with_index(env: str) -> tuple[str, int, bool]:
     """Parse an env qualifier and report whether a numeric suffix was present."""
     name, sep, idx_str = env.rpartition("/")

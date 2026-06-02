@@ -424,7 +424,7 @@ class RLClient:
         level: Optional[str] = None,
         since_seconds: Optional[int] = None,
         component: Optional[str] = None,
-        pod_index: int = 0,
+        pod_index: Optional[int] = None,
         env_name: Optional[str] = None,
     ) -> str:
         """Get logs for one component of a Hosted Training run.
@@ -452,7 +452,7 @@ class RLClient:
             params["since_seconds"] = since_seconds
         if component:
             params["component"] = component
-        if pod_index:
+        if pod_index is not None:
             params["pod_index"] = pod_index
         if env_name:
             params["env_name"] = env_name

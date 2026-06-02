@@ -6,6 +6,7 @@ import re
 import subprocess
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +30,22 @@ _LOG_RE = re.compile(
     r"(.+)"
 )
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+# Started-but-not-stopped tunnels, so an atexit backstop can delete their backend
+# registrations if the caller never stops them (forgotten cleanup, unhandled
+# exception)
+_active_tunnels: "weakref.WeakSet[Tunnel]" = weakref.WeakSet()
+
+
+def _stop_active_tunnels() -> None:
+    for tunnel in list(_active_tunnels):
+        try:
+            tunnel.sync_stop()
+        except Exception:
+            pass
+
+
+atexit.register(_stop_active_tunnels)
 
 
 def _parse_frpc_error(
@@ -206,7 +223,7 @@ class Tunnel:
 
         self._started = True
 
-        atexit.register(self.sync_stop)
+        _active_tunnels.add(self)
 
         return self.url
 
@@ -223,7 +240,7 @@ class Tunnel:
         if not self._started:
             return
 
-        atexit.unregister(self.sync_stop)
+        _active_tunnels.discard(self)
 
         if self._process is not None:
             try:
@@ -263,7 +280,7 @@ class Tunnel:
 
     async def _cleanup(self) -> None:
         """Clean up tunnel resources."""
-        atexit.unregister(self.sync_stop)
+        _active_tunnels.discard(self)
 
         # Stop frpc process (this will cause drain threads to exit via EOF)
         if self._process is not None:

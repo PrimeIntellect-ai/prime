@@ -6,7 +6,6 @@ import re
 import subprocess
 import threading
 import time
-import weakref
 from pathlib import Path
 from typing import Optional
 
@@ -34,7 +33,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # Started-but-not-stopped tunnels, so an atexit backstop can delete their backend
 # registrations if the caller never stops them (forgotten cleanup, unhandled
 # exception)
-_active_tunnels: "weakref.WeakSet[Tunnel]" = weakref.WeakSet()
+_active_tunnels: "set[Tunnel]" = set()
 
 
 def _stop_active_tunnels() -> None:

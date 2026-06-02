@@ -152,9 +152,9 @@ def write_hermes_mcp_config(workspace: Path, path: Path | None = None) -> Path:
 
 
 def write_grok_mcp_config(workspace: Path, path: Path | None = None) -> Path:
-    """Write the workspace Grok config that exposes Prime Lab MCP tools."""
+    """Write the Grok user config that exposes Prime Lab MCP tools."""
 
-    path = path or workspace / ".grok" / "config.toml"
+    path = path or Path.home() / ".grok" / "config.toml"
     payload = _read_toml_object(path)
     servers = payload.get("mcp_servers")
     if not isinstance(servers, dict):

@@ -76,7 +76,7 @@ class AgentCapability:
                 paths.append(workspace / ".factory" / "mcp.json")
                 continue
             if raw_path == "{grok_config}":
-                paths.append(workspace / ".grok" / "config.toml")
+                paths.append(Path.home() / ".grok" / "config.toml")
                 continue
             if raw_path == "{opencode_config}":
                 paths.append(workspace / "opencode.json")

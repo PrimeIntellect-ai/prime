@@ -2517,7 +2517,7 @@ def test_prime_lab_setup_service_supports_grok_build_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     def fake_download(
         url: str,
@@ -2546,7 +2546,9 @@ def test_prime_lab_setup_service_supports_grok_build_agent(
     )
 
     metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
-    grok_config = toml.loads((tmp_path / ".grok" / "config.toml").read_text(encoding="utf-8"))
+    grok_config = toml.loads(
+        (tmp_path / "home" / ".grok" / "config.toml").read_text(encoding="utf-8")
+    )
     assert result.exit_code == 0
     assert metadata["choices"]["primary_agent"] == "grok"
     assert (tmp_path / ".grok" / "skills" / "create-environments").exists()
@@ -2630,7 +2632,12 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
         "-p",
         "hello",
     ]
-    assert agent_adapter("grok").server_spec(workspace).command == ("grok", "agent", "stdio")
+    assert agent_adapter("grok").server_spec(workspace).command == (
+        "grok",
+        "--no-auto-update",
+        "agent",
+        "stdio",
+    )
     assert agent_adapter("grok").server_spec(workspace).transport == "acp-stdio"
     assert agent_adapter("grok").stream_command("hello", "session-1", workspace=workspace) == [
         "grok",
@@ -2719,6 +2726,7 @@ def test_lab_agent_capabilities_centralize_supported_agents(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(
         "prime_lab_app.agent_capabilities.shutil.which",
         lambda command: "/bin/tool" if command in {"pi", "codex"} else None,
@@ -2755,7 +2763,7 @@ def test_lab_agent_capabilities_centralize_supported_agents(
     assert grok.name == "grok"
     assert grok.label == "Grok Build"
     assert grok.native_surface == "acp_mcp"
-    assert grok.resolved_surface_paths(tmp_path) == (tmp_path.resolve() / ".grok" / "config.toml",)
+    assert grok.resolved_surface_paths(tmp_path) == (Path.home() / ".grok" / "config.toml",)
     assert agent_capability("codex").native_surface == "codex_app_server"
     assert agent_capability("claude-code").name == "claude"
     assert agent_capability("claude").native_surface == "mcp_config"
@@ -4088,7 +4096,11 @@ def test_agent_runtime_supports_hermes_with_mcp_config(
     runtime.stop()
 
 
-def test_agent_runtime_supports_grok_build_with_mcp_config(tmp_path: Path) -> None:
+def test_agent_runtime_supports_grok_build_with_mcp_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     commands: list[list[str]] = []
     messages: tuple[Any, ...] = ()
     session_new_params: list[dict[str, Any]] = []
@@ -4141,9 +4153,11 @@ def test_agent_runtime_supports_grok_build_with_mcp_config(tmp_path: Path) -> No
     runtime.start(tmp_path, "grok")
 
     assert _wait_for(lambda: runtime.state.status == "connected")
-    grok_config = toml.loads((tmp_path / ".grok" / "config.toml").read_text(encoding="utf-8"))
+    grok_config = toml.loads(
+        (tmp_path / "home" / ".grok" / "config.toml").read_text(encoding="utf-8")
+    )
     assert grok_config["mcp_servers"]["prime_lab"]["enabled"] is True
-    assert commands[0] == ["grok", "agent", "stdio"]
+    assert commands[0] == ["grok", "--no-auto-update", "agent", "stdio"]
     assert session_new_params[0]["mcpServers"][0]["name"] == "prime_lab"
 
     runtime.send_prompt("hello")

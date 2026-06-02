@@ -897,6 +897,26 @@ def test_lab_sync_fully_refreshes_global_and_workspace_config_templates(
         assert not (root / "configs" / "local").exists()
 
 
+def test_lab_doctor_accepts_current_template_config_names(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    global_configs = home / ".prime" / "lab" / "templates" / "configs" / "rl"
+    workspace_configs = tmp_path / ".prime" / "lab" / "templates" / "configs" / "rl"
+    global_configs.mkdir(parents=True)
+    workspace_configs.mkdir(parents=True)
+    (global_configs / "qwen.toml").write_text('model = "qwen"\n', encoding="utf-8")
+    (workspace_configs / "qwen.toml").write_text('model = "qwen"\n', encoding="utf-8")
+
+    result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
+    checks = {check.name: check for check in result.checks}
+
+    assert checks["Global Lab template cache"].status == "PASS"
+    assert checks["Lab templates"].status == "PASS"
+
+
 def test_lab_doctor_reports_missing_selected_agent_guidance(
     tmp_path: Path,
     monkeypatch: Any,

@@ -47,8 +47,8 @@ SECRET_FILE_PATTERNS = (
     ".pypirc",
     "credentials.json",
     "service-account",
-    "secrets.",
 )
+SECRET_SOURCE_MODULE_NAMES = ("secrets.py",)
 SECRET_FILE_SUFFIXES = (".key", ".pem")
 
 
@@ -159,8 +159,12 @@ def default_run_suffix() -> str:
 
 def is_secret_file(path: Path) -> bool:
     name = path.name.lower()
-    return name.endswith(SECRET_FILE_SUFFIXES) or any(
-        name == pattern or name.startswith(pattern) for pattern in SECRET_FILE_PATTERNS
+    if name in SECRET_SOURCE_MODULE_NAMES:
+        return False
+    return (
+        name.startswith("secrets.")
+        or name.endswith(SECRET_FILE_SUFFIXES)
+        or any(name == pattern or name.startswith(pattern) for pattern in SECRET_FILE_PATTERNS)
     )
 
 
@@ -386,12 +390,18 @@ def remote_script(config: RemoteConfig) -> str:
 
 
         def latest_eval_dir() -> Path:
+            output_roots = (LAB_ROOT / "outputs", ENV_DIR / "outputs")
             candidates = sorted(
-                (path.parent for path in LAB_ROOT.glob("outputs/evals/**/results.jsonl")),
+                (
+                    path.parent
+                    for output_root in output_roots
+                    for path in output_root.glob("evals/**/results.jsonl")
+                ),
                 key=lambda path: path.stat().st_mtime,
             )
             if not candidates:
-                raise RuntimeError("No eval output directory found under outputs/evals")
+                searched = ", ".join(str(path) for path in output_roots)
+                raise RuntimeError(f"No eval output directory found under: {searched}")
             return candidates[-1]
 
 
@@ -585,6 +595,7 @@ def remote_script(config: RemoteConfig) -> str:
                         "1",
                         "--env-path",
                         str(ENV_DIR),
+                        "--save-results",
                         "--skip-upload",
                     ],
                     cwd=LAB_ROOT,
@@ -707,10 +718,11 @@ def run_in_sandbox(
 ) -> int:
     client.upload_file(sandbox_id, "/workspace/prime-src.tar.gz", str(archive_path), timeout=600)
     upload_bytes(client, sandbox_id, "/workspace/release_e2e_remote.py", remote_script(config))
-    response = client.execute_command(
+    response = client.run_background_job(
         sandbox_id,
         "python /workspace/release_e2e_remote.py",
         timeout=timeout_seconds,
+        poll_interval=5,
     )
     if response.stdout:
         print(response.stdout, end="" if response.stdout.endswith("\n") else "\n")

@@ -173,16 +173,14 @@ def test_load_config_rejects_max_inflight_and_oversampling(tmp_path: Path) -> No
         load_config(str(config_path))
 
 
-def test_load_config_accepts_sft_teacher(tmp_path: Path) -> None:
+def test_load_config_accepts_sft_teacher_without_client(tmp_path: Path) -> None:
+    """Omitting [teacher.client] is allowed; the API defaults it to PI Inference."""
     config_path = tmp_path / "sft.toml"
     config_path.write_text(
         'model = "openai/gpt-oss-20b"\n'
         'loss = "sft"\n'
         "[teacher]\n"
         'model = "openai/gpt-oss-120b"\n'
-        "[teacher.client]\n"
-        'base_url = "https://api.pinference.ai/api/v1"\n'
-        'api_key_var = "PRIME_API_KEY"\n'
         "[teacher.sampling]\n"
         "max_tokens = 2048\n"
         'reasoning_effort = "medium"\n'
@@ -193,18 +191,9 @@ def test_load_config_accepts_sft_teacher(tmp_path: Path) -> None:
     assert cfg.loss == "sft"
     assert cfg.teacher is not None
     assert cfg.teacher.model == "openai/gpt-oss-120b"
-    assert cfg.teacher.client.base_url == "https://api.pinference.ai/api/v1"
-    assert cfg.teacher.client.api_key_var == "PRIME_API_KEY"
-    assert cfg.teacher.client.skip_model_check is False
-    assert cfg.teacher.sampling is not None
-    assert cfg.teacher.sampling.max_tokens == 2048
+    assert cfg.teacher.client is None
     assert cfg.teacher.to_api_dict() == {
         "model": {"name": "openai/gpt-oss-120b"},
-        "client": {
-            "base_url": "https://api.pinference.ai/api/v1",
-            "api_key_var": "PRIME_API_KEY",
-            "skip_model_check": False,
-        },
         "sampling": {
             "max_tokens": 2048,
             "reasoning_effort": "medium",
@@ -290,7 +279,10 @@ def test_load_config_rejects_teacher_temp_scheduler(tmp_path: Path) -> None:
         load_config(str(config_path))
 
 
-def test_load_config_rejects_teacher_without_client(tmp_path: Path) -> None:
+def test_to_api_dict_omits_client_when_unspecified(tmp_path: Path) -> None:
+    """CLI must not duplicate the platform default — when the user omits
+    [teacher.client], the API payload also omits ``client`` so the server's
+    default kicks in without policy drift."""
     config_path = tmp_path / "sft.toml"
     config_path.write_text(
         'model = "openai/gpt-oss-20b"\n'
@@ -299,8 +291,10 @@ def test_load_config_rejects_teacher_without_client(tmp_path: Path) -> None:
         'model = "openai/gpt-oss-120b"\n'
     )
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.teacher is not None
+    assert "client" not in cfg.teacher.to_api_dict()
 
 
 def test_load_config_rejects_teacher_client_without_base_url(tmp_path: Path) -> None:

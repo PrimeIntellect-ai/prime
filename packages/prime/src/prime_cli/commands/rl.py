@@ -230,14 +230,13 @@ rollouts_per_example = 8
 # checkpoint_id = "..."
 
 # Optional: SFT distillation teacher
-# To use SFT, change loss to "sft" and uncomment this block ([teacher.client] is required).
+# To use SFT, change loss to "sft" and uncomment this block. [teacher.client] defaults to Prime Inference; include it only to point at a custom OAI-compatible endpoint (OpenAI, OpenRouter, self-hosted vLLM).
 # [teacher]
 # model = "openai/gpt-oss-120b"
 #
-# [teacher.client]
-# base_url = "https://api.pinference.ai/api/v1"
-# api_key_var = "PRIME_API_KEY"
-# headers_from_env = {{ X-Prime-Team-ID = "PRIME_TEAM_ID" }}
+# [teacher.client] # optional override; remove this section to use Prime Inference defaults
+# base_url = "https://api.openai.com/v1"
+# api_key_var = "OPENAI_API_KEY"
 #
 # [teacher.sampling]
 # max_tokens = 2048
@@ -429,14 +428,13 @@ class TeacherConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str
-    client: TeacherClientConfig
+    client: TeacherClientConfig | None = None
     sampling: TeacherSamplingConfig | None = None
 
     def to_api_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
-            "model": {"name": self.model},
-            "client": self.client.model_dump(exclude_none=True),
-        }
+        result: Dict[str, Any] = {"model": {"name": self.model}}
+        if self.client is not None:
+            result["client"] = self.client.model_dump(exclude_none=True)
         if self.sampling is not None:
             result["sampling"] = self.sampling.model_dump(exclude_none=True)
         return result

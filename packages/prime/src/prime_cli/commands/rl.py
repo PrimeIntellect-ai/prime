@@ -380,9 +380,6 @@ class SamplingConfig(BaseModel):
 
     max_tokens: int | None = None
     temperature: float | None = None
-    repetition_penalty: float | None = None
-    min_tokens: int | None = None
-    seed: int | None = None
     temp_scheduler: TemperatureSchedulerConfig | None = None
     extra_body: Dict[str, Any] | None = None
     enable_thinking: bool | None = None
@@ -970,9 +967,6 @@ def create_run(
         has_sampling = (
             cfg.sampling.max_tokens
             or cfg.sampling.temperature is not None
-            or cfg.sampling.repetition_penalty is not None
-            or cfg.sampling.min_tokens is not None
-            or cfg.sampling.seed is not None
             or cfg.sampling.temp_scheduler is not None
             or cfg.sampling.extra_body is not None
             or cfg.sampling.enable_thinking is not None
@@ -984,12 +978,6 @@ def create_run(
                 console.print(f"  Max Tokens:          {cfg.sampling.max_tokens}")
             if cfg.sampling.temperature is not None:
                 console.print(f"  Temperature:         {cfg.sampling.temperature}")
-            if cfg.sampling.repetition_penalty is not None:
-                console.print(f"  Repetition Penalty:  {cfg.sampling.repetition_penalty}")
-            if cfg.sampling.min_tokens is not None:
-                console.print(f"  Min Tokens:          {cfg.sampling.min_tokens}")
-            if cfg.sampling.seed is not None:
-                console.print(f"  Seed:                {cfg.sampling.seed}")
             if cfg.sampling.temp_scheduler is not None:
                 ts = cfg.sampling.temp_scheduler
                 sched = f"{ts.type} ({ts.start_temperature} → {ts.end_temperature})"
@@ -1132,9 +1120,6 @@ def create_run(
             max_steps=cfg.max_steps,
             max_tokens=cfg.sampling.max_tokens,
             temperature=cfg.sampling.temperature,
-            repetition_penalty=cfg.sampling.repetition_penalty,
-            min_tokens=cfg.sampling.min_tokens,
-            seed=cfg.sampling.seed,
             temp_scheduler=cfg.sampling.temp_scheduler.model_dump(exclude_none=True)
             if cfg.sampling.temp_scheduler
             else None,

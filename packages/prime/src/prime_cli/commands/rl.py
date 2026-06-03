@@ -423,7 +423,7 @@ class TeacherClientConfig(BaseModel):
     base_url: str = Field(..., min_length=1)
     api_key_var: str = Field(..., min_length=1)
     headers_from_env: Dict[str, str] | None = None
-    skip_model_check: bool = False
+    skip_model_check: bool | None = None
 
 
 class TeacherConfig(BaseModel):

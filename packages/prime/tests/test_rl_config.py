@@ -285,10 +285,7 @@ def test_to_api_dict_omits_client_when_unspecified(tmp_path: Path) -> None:
     default kicks in without policy drift."""
     config_path = tmp_path / "sft.toml"
     config_path.write_text(
-        'model = "openai/gpt-oss-20b"\n'
-        'loss = "sft"\n'
-        "[teacher]\n"
-        'model = "openai/gpt-oss-120b"\n'
+        'model = "openai/gpt-oss-20b"\nloss = "sft"\n[teacher]\nmodel = "openai/gpt-oss-120b"\n'
     )
 
     cfg = load_config(str(config_path))
@@ -338,10 +335,7 @@ def test_load_config_rejects_sft_without_teacher(tmp_path: Path) -> None:
 def test_load_config_rejects_opd_until_hosted_scoring_exists(tmp_path: Path) -> None:
     config_path = tmp_path / "opd.toml"
     config_path.write_text(
-        'model = "openai/gpt-oss-20b"\n'
-        'loss = "opd"\n'
-        "[teacher]\n"
-        'model = "openai/gpt-oss-120b"\n'
+        'model = "openai/gpt-oss-20b"\nloss = "opd"\n[teacher]\nmodel = "openai/gpt-oss-120b"\n'
     )
 
     with pytest.raises(typer.Exit):

@@ -42,9 +42,9 @@ class HostedEvalConfig:
     env_args: Optional[dict[str, Any]] = None
     name: Optional[str] = None
     timeout_minutes: Optional[int] = None
-    allow_sandbox_access: bool = False
+    allow_sandbox_access: bool = True
     allow_instances_access: bool = False
-    allow_tunnel_access: bool = False
+    allow_tunnel_access: bool = True
     custom_secrets: Optional[dict[str, str]] = None
     sampling_args: Optional[dict[str, Any]] = None
     max_concurrent: Optional[int] = None

@@ -63,3 +63,12 @@ class Config:
         if env_val:
             return self._strip_api_v1(env_val)
         return self._strip_api_v1(self.config.get("base_url", self.DEFAULT_BASE_URL))
+
+    @property
+    def sandbox_base_url(self) -> Optional[str]:
+        """Get sandbox API base URL with precedence: env > file > None."""
+        env_val = os.getenv("PRIME_SANDBOX_BASE_URL") or os.getenv("PRIME_SANDBOX_INGRESS_URL")
+        value = env_val or self.config.get("sandbox_base_url")
+        if not value:
+            return None
+        return self._strip_api_v1(str(value))

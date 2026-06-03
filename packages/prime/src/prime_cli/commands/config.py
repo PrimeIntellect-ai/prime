@@ -83,6 +83,12 @@ def view() -> None:
         base_label += " (from env var)"
     table.add_row("Base URL", base_label)
 
+    # Show sandbox base URL
+    sandbox_base_label = settings.get("sandbox_base_url") or "Not set"
+    if _env_set("PRIME_SANDBOX_BASE_URL", "PRIME_SANDBOX_INGRESS_URL"):
+        sandbox_base_label += " (from env var)"
+    table.add_row("Sandbox Base URL", sandbox_base_label)
+
     # Show frontend URL
     front_label = settings["frontend_url"]
     if _env_set("PRIME_FRONTEND_URL"):
@@ -225,6 +231,27 @@ def set_base_url(
     config = Config()
     config.set_base_url(url)
     console.print(f"[green]Base URL set to: {url}[/green]")
+
+
+@app.command()
+def set_sandbox_base_url(
+    url: Optional[str] = typer.Argument(
+        None,
+        help="Base URL for the sandbox API. If not provided, you'll be prompted.",
+    ),
+) -> None:
+    """Set the sandbox API base URL (prompts if not provided)"""
+    if not url:
+        config = Config()
+        url = typer.prompt(
+            "Enter the base URL for the sandbox API",
+            default=config.sandbox_base_url or "",
+        )
+
+    config = Config()
+    config.set_sandbox_base_url(url or None)
+    config.update_current_environment_file()
+    console.print(f"[green]Sandbox Base URL set to: {url or 'Not set'}[/green]")
 
 
 @app.command()
@@ -382,6 +409,7 @@ def reset(
         config.set_api_key("")
         config.set_team(None)
         config.set_base_url(Config.DEFAULT_BASE_URL)
+        config.set_sandbox_base_url(None)
         config.set_frontend_url(Config.DEFAULT_FRONTEND_URL)
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
         config.set_current_environment("production")

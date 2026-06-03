@@ -99,6 +99,7 @@ def test_generate_rl_config_template_sft_example_loads(tmp_path: Path) -> None:
     assert cfg.loss == "sft"
     assert cfg.teacher is not None
     assert cfg.teacher.model == "openai/gpt-oss-120b"
+    assert cfg.teacher.client is None
 
 
 def test_flatten_config_schema_expands_optional_nested_models() -> None:

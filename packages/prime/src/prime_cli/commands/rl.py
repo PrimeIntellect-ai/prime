@@ -230,19 +230,19 @@ rollouts_per_example = 8
 # checkpoint_id = "..."
 
 # Optional: SFT distillation teacher
-# To use SFT, change loss to "sft" and uncomment this block.
-# To use the default Prime Inference endpoint, leave [teacher.client] commented.
-# To use a custom OAI-compatible endpoint (OpenAI, OpenRouter, vLLM), uncomment [teacher.client].
+# To use SFT, change loss to "sft" and uncomment this block. Defaults to Prime Inference.
 # [teacher]
 # model = "openai/gpt-oss-120b"
-#
-# [teacher.client] # optional override; remove this section to use Prime Inference defaults
-# base_url = "https://api.openai.com/v1"
-# api_key_var = "OPENAI_API_KEY"
 #
 # [teacher.sampling]
 # max_tokens = 2048
 # reasoning_effort = "medium"
+
+# Optional: override the Prime Inference default with a custom OAI-compatible endpoint.
+# Uncomment this block only when pointing at OpenAI, OpenRouter, self-hosted vLLM, etc.
+# [teacher.client]
+# base_url = "https://api.openai.com/v1"
+# api_key_var = "OPENAI_API_KEY"
 
 [sampling]
 max_tokens = 2048

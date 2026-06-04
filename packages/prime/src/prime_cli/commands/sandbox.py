@@ -165,6 +165,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "gpu_type": getattr(sandbox, "gpu_type", None),
         "vm": sandbox.vm,
         "network_access": sandbox.network_access,
+        "allowed_domains": getattr(sandbox, "allowed_domains", []) or [],
         "timeout_minutes": sandbox.timeout_minutes,
         "labels": sandbox.labels,
         "created_at": iso_timestamp(sandbox.created_at),
@@ -407,6 +408,8 @@ def get(
                 style="green" if sandbox_data["network_access"] else "yellow",
             )
             table.add_row("Network Access", network_display)
+            if sandbox_data.get("allowed_domains"):
+                table.add_row("Allowed Domains", ", ".join(sandbox_data["allowed_domains"]))
             table.add_row("Timeout (minutes)", str(sandbox_data["timeout_minutes"]))
 
             # Show labels
@@ -492,6 +495,15 @@ def create(
         True,
         "--network-access/--no-network-access",
         help="Allow outbound internet access (enabled by default)",
+    ),
+    allowed_domains: Optional[List[str]] = typer.Option(
+        None,
+        "--allowed-domain",
+        help=(
+            "Egress domain allowlist for a restricted sandbox. "
+            "Wildcards like '*.example.com' are allowed. Requires "
+            "--no-network-access. Can be specified multiple times."
+        ),
     ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
     team_id: Optional[str] = typer.Option(
@@ -582,6 +594,17 @@ def create(
             )
             raise typer.Exit(1)
 
+        if allowed_domains:
+            if network_access:
+                console.print(
+                    "[red]--allowed-domain requires --no-network-access.[/red] "
+                    "It is an egress allowlist for restricted sandboxes."
+                )
+                raise typer.Exit(1)
+            if vm:
+                console.print("[red]--allowed-domain is not supported for VM sandboxes.[/red]")
+                raise typer.Exit(1)
+
         if not docker_image:
             console.print(
                 "[red]Docker image is required.[/red] Provide a DOCKER_IMAGE positional argument."
@@ -620,6 +643,7 @@ def create(
             gpu_type=gpu_type,
             vm=vm,
             network_access=network_access,
+            allowed_domains=allowed_domains if allowed_domains else [],
             timeout_minutes=timeout_minutes,
             environment_vars=env_vars if env_vars else None,
             secrets=secrets_vars if secrets_vars else None,
@@ -643,6 +667,8 @@ def create(
             console.print(f"GPUs: {gpu_type} x{gpu_count}")
         network_status = "[green]Enabled[/green]" if network_access else "[yellow]Disabled[/yellow]"
         console.print(f"Network Access: {network_status}")
+        if allowed_domains:
+            console.print(f"Allowed Domains: {', '.join(allowed_domains)}")
         console.print(f"Timeout: {timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
         console.print(f"Region: {region or 'Backend default'}")

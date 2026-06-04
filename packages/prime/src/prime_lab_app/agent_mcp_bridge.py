@@ -14,6 +14,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import toml
+
 LabMcpIpcHandler = Callable[[str, dict[str, Any]], dict[str, Any]]
 
 
@@ -146,6 +148,26 @@ def write_hermes_mcp_config(workspace: Path, path: Path | None = None) -> Path:
     payload["mcp_servers"] = servers
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_dump_yaml_object(payload), encoding="utf-8")
+    return path
+
+
+def write_grok_mcp_config(workspace: Path, path: Path | None = None) -> Path:
+    """Write the Grok user config that exposes Prime Lab MCP tools."""
+
+    path = path or Path.home() / ".grok" / "config.toml"
+    payload = _read_toml_object(path)
+    servers = payload.get("mcp_servers")
+    if not isinstance(servers, dict):
+        servers = {}
+    server = lab_mcp_server_config(workspace)
+    servers["prime_lab"] = {
+        "command": server["command"],
+        "args": server["args"],
+        "enabled": True,
+    }
+    payload["mcp_servers"] = servers
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(toml.dumps(payload), encoding="utf-8")
     return path
 
 
@@ -330,6 +352,14 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     try:
         loaded = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     except (OSError, json.JSONDecodeError):
+        loaded = {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _read_toml_object(path: Path) -> dict[str, Any]:
+    try:
+        loaded = toml.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, toml.TomlDecodeError):
         loaded = {}
     return loaded if isinstance(loaded, dict) else {}
 

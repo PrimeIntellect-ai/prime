@@ -165,7 +165,7 @@ navigation.
 Supported agent paths are adapter-specific:
 
 - Codex uses app-server dynamic tools;
-- Claude, Cursor, Amp, OpenCode, Hermes, and Factory Droid use MCP or ACP
+- Claude, Cursor, Amp, Grok Build, OpenCode, Hermes, and Factory Droid use MCP or ACP
   surfaces where available;
 - Pi uses a project-local extension;
 - Factory Droid live validation can require a logged-in Factory account and

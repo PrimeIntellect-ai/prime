@@ -75,6 +75,9 @@ class AgentCapability:
             if raw_path == "{droid_mcp}":
                 paths.append(workspace / ".factory" / "mcp.json")
                 continue
+            if raw_path == "{grok_config}":
+                paths.append(Path.home() / ".grok" / "config.toml")
+                continue
             if raw_path == "{opencode_config}":
                 paths.append(workspace / "opencode.json")
                 continue
@@ -136,6 +139,19 @@ _CAPABILITIES: dict[str, AgentCapability] = {
         ),
         expected_surface_paths=("{droid_mcp}",),
     ),
+    "grok": AgentCapability(
+        name="grok",
+        label="Grok Build",
+        native_surface="acp_mcp",
+        requirements=(
+            AgentInstallRequirement(
+                "grok",
+                install_command=("curl", "-fsSL", "https://x.ai/cli/install.sh", "|", "bash"),
+                description="Grok Build CLI",
+            ),
+        ),
+        expected_surface_paths=("{grok_config}",),
+    ),
     "hermes": AgentCapability(
         name="hermes",
         label="Hermes Agent",
@@ -185,6 +201,7 @@ AGENT_DISPLAY_ORDER = (
     "codex",
     "cursor",
     "droid",
+    "grok",
     "hermes",
     "letta",
     "opencode",

@@ -45,6 +45,7 @@ from ..utils.prompt import (
 from ..utils.time_utils import format_time_ago, iso_timestamp
 from ..verifiers_bridge import is_help_request, print_env_build_help, print_env_init_help
 from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
+from .config import TEAM_ID_PATTERN
 
 app = PlainTyper(help="Manage verifiers environments", no_args_is_help=True)
 console = get_console()
@@ -999,6 +1000,31 @@ def _run_env_push_lab_hygiene_preflight(env_path: Path) -> None:
         raise typer.Exit(result.exit_code)
 
 
+def _environment_resolve_data(
+    env_name: str,
+    *,
+    visibility: Optional[str],
+    owner: Optional[str],
+    team: Optional[str],
+    configured_team: Optional[str],
+) -> Dict[str, str]:
+    """Build the /environmentshub/resolve payload for `prime env push`."""
+    resolve_data = {"name": env_name}
+    if visibility:
+        resolve_data["visibility"] = visibility
+    if owner:
+        resolve_data["owner_slug"] = owner
+    elif team:
+        resolve_data["team_slug"] = team
+    elif configured_team:
+        configured_team = configured_team.strip()
+        if TEAM_ID_PATTERN.match(configured_team):
+            resolve_data["team_id"] = configured_team
+        else:
+            resolve_data["team_slug"] = configured_team
+    return resolve_data
+
+
 def _resolve_pull_environment_path(target: Optional[str], env_name: str) -> Path:
     """Resolve the local target directory for `prime env pull`."""
     if target:
@@ -1188,16 +1214,13 @@ def push(
             client = APIClient()
 
             console.print("Resolving environment...")
-            resolve_data = {"name": env_name}
-            if visibility:
-                resolve_data["visibility"] = visibility
-            if owner:
-                # Push to a specific owner (user or team) - for collaborators with write access
-                resolve_data["owner_slug"] = owner
-            elif team:
-                resolve_data["team_slug"] = team
-            elif client.config.team_id:
-                resolve_data["team_id"] = client.config.team_id
+            resolve_data = _environment_resolve_data(
+                env_name,
+                visibility=visibility,
+                owner=owner,
+                team=team,
+                configured_team=client.config.team_id,
+            )
 
             try:
                 response = client.post("/environmentshub/resolve", json=resolve_data)

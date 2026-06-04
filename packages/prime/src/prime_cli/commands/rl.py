@@ -879,6 +879,16 @@ def create_run(
         help="Skip action status check and run even if environment action failed.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    cluster: Optional[str] = typer.Option(
+        None,
+        "--cluster",
+        help=(
+            "Pin the dispatch to a specific cluster by name. Overrides the "
+            "TOML's `cluster_name` field. The backend hard-fails with a 400 "
+            "error if the cluster is unknown, not allocated, or out of "
+            "capacity — no silent fallback to another cluster."
+        ),
+    ),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
@@ -890,6 +900,14 @@ def create_run(
 
     console.print(f"[dim]Loading config from {config_path}[/dim]\n")
     cfg = load_config(config_path)
+
+    # `--cluster` overrides the TOML's `cluster_name` so a user can
+    # retarget a single dispatch without editing the config. We don't
+    # validate the name client-side: the backend's picker is the source
+    # of truth for which clusters the caller can hit, and it returns a
+    # clear 400 with the available alternatives when the name is wrong.
+    if cluster is not None:
+        cfg.cluster_name = cluster
 
     # Collect secrets from all sources
     def warn(msg: str) -> None:

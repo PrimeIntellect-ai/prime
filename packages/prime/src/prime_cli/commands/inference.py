@@ -64,10 +64,10 @@ def _sort_models(models: List[Dict[str, Any]], sort: str, order: str) -> List[Di
 def list_models(
     output: str = typer.Option("table", "--output", "-o", help="table|json"),
     search: Optional[str] = typer.Option(
-        None, "--search", "-s", help="Case-insensitive substring match on model id"
+        None, "--search", "-q", help="Case-insensitive substring match on model id"
     ),
-    sort: str = typer.Option("id", "--sort", help="Sort by: id, input, output"),
-    order: str = typer.Option("asc", "--order", help="Sort order: asc, desc"),
+    sort: str = typer.Option("id", "--sort", "-s", help="Sort by: id, input, output"),
+    order: str = typer.Option("asc", "--order", "-d", help="Sort order (direction): asc, desc"),
 ) -> None:
     """List available models from Prime Inference (/v1/models)."""
     validate_output_format(output, console)

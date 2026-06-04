@@ -187,6 +187,23 @@ def test_models_invalid_sort_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--sort must be one of" in result.output
 
 
+def test_models_short_flags_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_models(monkeypatch, _models_fixture())
+
+    result = CliRunner().invoke(
+        app,
+        ["inference", "models", "-q", "/", "-s", "input", "-d", "desc"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    positions = _ids_in_order(
+        result.output, ["alpha/premium", "mid/standard", "zeta/cheap", "no/pricing"]
+    )
+    assert all(p >= 0 for p in positions)
+    assert positions == sorted(positions)
+
+
 def test_models_json_output_applies_search_and_sort(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_models(monkeypatch, _models_fixture())
 

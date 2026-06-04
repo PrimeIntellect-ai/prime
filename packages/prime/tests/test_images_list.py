@@ -635,6 +635,73 @@ def test_list_cli_truncates_owner_prefix_on_narrow_terminal(run_images_list):
     assert f"{USER_ID}/nvidia-basic-dev" not in result.output
 
 
+def _run_list_capturing_params(
+    monkeypatch,
+    args: list[str],
+    *,
+    payload: list[ImageRow] | None = None,
+    team_id: str | None = None,
+):
+    """Invoke ``prime images list`` with extra CLI args, capturing the query
+    params forwarded to the API request."""
+    captured: dict[str, Any] = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            assert method == "GET"
+            assert path == "/images"
+            captured["params"] = dict(params or {})
+            rows = payload or []
+            return {"data": rows, "totalCount": len(rows)}
+
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    monkeypatch.setattr(images_cmd, "config", _StubConfig(team_id=team_id))
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+    result = CliRunner().invoke(app, ["images", "list", *args], env=TEST_ENV)
+    return result, captured
+
+
+def test_list_forwards_search_param(monkeypatch):
+    result, captured = _run_list_capturing_params(
+        monkeypatch,
+        ["--search", "myapp"],
+        payload=[_container(image="myapp:latest", pushed_at="2026-04-16T22:24:07")],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["params"].get("search") == "myapp"
+
+
+def test_list_search_short_flag_q_forwards_param(monkeypatch):
+    result, captured = _run_list_capturing_params(
+        monkeypatch,
+        ["-q", "nvidia"],
+        payload=[_container(pushed_at="2026-04-16T22:24:07")],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["params"].get("search") == "nvidia"
+
+
+def test_list_without_search_omits_param(monkeypatch):
+    result, captured = _run_list_capturing_params(
+        monkeypatch,
+        [],
+        payload=[_container(pushed_at="2026-04-16T22:24:07")],
+    )
+    assert result.exit_code == 0, result.output
+    assert "search" not in captured["params"]
+
+
+def test_list_empty_search_result_shows_search_aware_message(monkeypatch):
+    result, captured = _run_list_capturing_params(
+        monkeypatch,
+        ["--search", "doesnotexist"],
+        payload=[],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["params"].get("search") == "doesnotexist"
+    assert "No images match 'doesnotexist'" in result.output
+
+
 def test_list_cli_newest_group_first(run_images_list):
     result = run_images_list(
         [

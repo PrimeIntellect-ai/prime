@@ -74,11 +74,9 @@ class EvalsClient:
             EvalsAPIError: If the environment does not exist (404)
         """
         try:
-            # Try team_slug first (lookup endpoint supports team_slug)
-            # If owner is not a team, backend will handle it appropriately
-            lookup_data: Dict[str, Any] = {"name": name, "team_slug": owner_slug}
-            response = self.client.post("/environmentshub/lookup", json=lookup_data)
-            return response["data"]["id"]
+            response = self.client.get(f"/environmentshub/{owner_slug}/{name}/@latest")
+            details = response.get("data", response)
+            return details["id"]
         except APIError as e:
             raise EvalsAPIError(
                 f"Environment '{owner_slug}/{name}' does not exist in the hub. "
@@ -426,11 +424,9 @@ class AsyncEvalsClient:
             EvalsAPIError: If the environment does not exist (404)
         """
         try:
-            # Try team_slug first (lookup endpoint supports team_slug)
-            # If owner is not a team, backend will handle it appropriately
-            lookup_data: Dict[str, Any] = {"name": name, "team_slug": owner_slug}
-            response = await self.client.post("/environmentshub/lookup", json=lookup_data)
-            return response["data"]["id"]
+            response = await self.client.get(f"/environmentshub/{owner_slug}/{name}/@latest")
+            details = response.get("data", response)
+            return details["id"]
         except APIError as e:
             raise EvalsAPIError(
                 f"Environment '{owner_slug}/{name}' does not exist in the hub. "

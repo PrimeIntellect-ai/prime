@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime as _dt
 import sys
 from typing import Any, Dict, Iterable, List, Optional, cast
 
@@ -29,29 +28,62 @@ MODELS_JSON_HELP = json_output_help(
     "Compatibility fallback: .models[] may be present instead of .data[]",
 )
 
+_SORT_KEYS = ("id", "input", "output")
+_ORDER_KEYS = ("asc", "desc")
 
-def _fmt_created(val: str) -> str:
-    """Format created timestamp for display"""
+
+def _price(m: Dict[str, Any], key: str) -> Optional[float]:
+    pricing = m.get("pricing") or {}
+    val = pricing.get(key)
+    if val is None:
+        return None
     try:
-        # if epoch seconds
-        ts = int(val)
-        return _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return val or ""
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sort_models(models: List[Dict[str, Any]], sort: str, order: str) -> List[Dict[str, Any]]:
+    reverse = order == "desc"
+    if sort == "id":
+        return sorted(models, key=lambda m: str(m.get("id", "")).lower(), reverse=reverse)
+
+    price_key = "input_usd_per_mtok" if sort == "input" else "output_usd_per_mtok"
+
+    # Null pricing always sorts last regardless of order.
+    def key(m: Dict[str, Any]) -> tuple:
+        p = _price(m, price_key)
+        if p is None:
+            return (1, 0.0)
+        return (0, -p if reverse else p)
+
+    return sorted(models, key=key)
 
 
 @app.command("models", epilog=MODELS_JSON_HELP)
 def list_models(
     output: str = typer.Option("table", "--output", "-o", help="table|json"),
+    search: Optional[str] = typer.Option(
+        None, "--search", "-q", help="Case-insensitive substring match on model id"
+    ),
+    sort: str = typer.Option("id", "--sort", "-s", help="Sort by: id, input, output"),
+    order: str = typer.Option("asc", "--order", "-d", help="Sort order (direction): asc, desc"),
 ) -> None:
     """List available models from Prime Inference (/v1/models)."""
     validate_output_format(output, console)
+    if sort not in _SORT_KEYS:
+        console.print(f"[red]Error:[/red] --sort must be one of: {', '.join(_SORT_KEYS)}")
+        raise typer.Exit(1)
+    if order not in _ORDER_KEYS:
+        console.print(f"[red]Error:[/red] --order must be one of: {', '.join(_ORDER_KEYS)}")
+        raise typer.Exit(1)
+
     try:
         client = InferenceClient(require_auth=False)
         data = client.list_models()
 
         # Expect OpenAI-style: {"object":"list","data":[{"id":..., ...}, ...]}
-        models = []
+        models: List[Dict[str, Any]] = []
         if isinstance(data, dict):
             if "data" in data and isinstance(data["data"], list):
                 models = data["data"]
@@ -60,8 +92,24 @@ def list_models(
         elif isinstance(data, list):
             models = data
 
+        if search:
+            needle = search.lower()
+            models = [m for m in models if needle in str(m.get("id", "")).lower()]
+
+        models = _sort_models(models, sort, order)
+
         if output == "json":
-            output_data_as_json(data, console)
+            if isinstance(data, dict):
+                payload = dict(data)
+                if "data" in payload:
+                    payload["data"] = models
+                elif "models" in payload:
+                    payload["models"] = models
+                else:
+                    payload = {"data": models}
+                output_data_as_json(payload, console)
+            else:
+                output_data_as_json(models, console)
             return
 
         if not models:
@@ -70,20 +118,17 @@ def list_models(
 
         table = Table(title="Prime Inference — Models")
         table.add_column("id", style="cyan")
-        table.add_column("created", style="magenta")
         table.add_column("input $/1M tok", style="green", justify="right")
         table.add_column("output $/1M tok", style="green", justify="right")
 
         for m in models:
             mid = str(m.get("id", ""))
-            created = _fmt_created(str(m.get("created", "")))
             pricing = m.get("pricing") or {}
             pin = pricing.get("input_usd_per_mtok")
             pout = pricing.get("output_usd_per_mtok")
 
             table.add_row(
                 mid,
-                created,
                 format_price_per_mtok(pin),
                 format_price_per_mtok(pout),
             )

@@ -1535,9 +1535,9 @@ def run_eval_cmd(
                     "rollouts_per_example": HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE,
                     "env_args": None,
                     "timeout_minutes": None,
-                    "allow_sandbox_access": False,
+                    "allow_sandbox_access": True,
                     "allow_instances_access": False,
-                    "allow_tunnel_access": False,
+                    "allow_tunnel_access": True,
                     "sampling_args": None,
                     "max_concurrent": None,
                     "max_retries": None,
@@ -1645,7 +1645,7 @@ def run_eval_cmd(
                     "allow_sandbox_access": (
                         allow_sandbox_access
                         if allow_sandbox_access
-                        else target_config.get("allow_sandbox_access", False)
+                        else target_config.get("allow_sandbox_access", True)
                     ),
                     "allow_instances_access": (
                         allow_instances_access
@@ -1655,7 +1655,7 @@ def run_eval_cmd(
                     "allow_tunnel_access": (
                         allow_tunnel_access
                         if allow_tunnel_access
-                        else target_config.get("allow_tunnel_access", False)
+                        else target_config.get("allow_tunnel_access", True)
                     ),
                     "custom_secrets": parsed_custom_secrets,
                     "sampling_args": effective_sampling_args,
@@ -1726,9 +1726,9 @@ def run_eval_cmd(
                 target["rollouts_per_example"],
                 _freeze_json_value(target.get("env_args")),
                 target.get("timeout_minutes"),
-                target.get("allow_sandbox_access", False),
+                target.get("allow_sandbox_access", True),
                 target.get("allow_instances_access", False),
-                target.get("allow_tunnel_access", False),
+                target.get("allow_tunnel_access", True),
                 _freeze_json_value(target.get("sampling_args")),
                 target.get("max_concurrent"),
                 target.get("max_retries"),
@@ -1781,9 +1781,9 @@ def run_eval_cmd(
                     env_args=target.get("env_args"),
                     name=target.get("eval_name"),
                     timeout_minutes=target.get("timeout_minutes"),
-                    allow_sandbox_access=target.get("allow_sandbox_access", False),
+                    allow_sandbox_access=target.get("allow_sandbox_access", True),
                     allow_instances_access=target.get("allow_instances_access", False),
-                    allow_tunnel_access=target.get("allow_tunnel_access", False),
+                    allow_tunnel_access=target.get("allow_tunnel_access", True),
                     custom_secrets=target.get("custom_secrets"),
                     sampling_args=target.get("sampling_args"),
                     max_concurrent=target.get("max_concurrent"),

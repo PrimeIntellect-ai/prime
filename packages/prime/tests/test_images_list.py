@@ -641,9 +641,15 @@ def _run_list_capturing_params(
     *,
     payload: list[ImageRow] | None = None,
     team_id: str | None = None,
+    include_total_count: bool = True,
 ):
     """Invoke ``prime images list`` with extra CLI args, capturing the query
-    params forwarded to the API request."""
+    params forwarded to the API request.
+
+    When ``include_total_count`` is False the stubbed response omits
+    ``totalCount`` entirely, mirroring a backend that does not report it (the
+    CLI keeps defensive branches for that case).
+    """
     captured: dict[str, Any] = {}
 
     class DummyAPIClient:
@@ -652,7 +658,10 @@ def _run_list_capturing_params(
             assert path == "/images"
             captured["params"] = dict(params or {})
             rows = payload or []
-            return {"data": rows, "totalCount": len(rows)}
+            response: dict[str, Any] = {"data": rows}
+            if include_total_count:
+                response["totalCount"] = len(rows)
+            return response
 
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     monkeypatch.setattr(images_cmd, "config", _StubConfig(team_id=team_id))
@@ -700,6 +709,45 @@ def test_list_empty_search_result_shows_search_aware_message(monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["params"].get("search") == "doesnotexist"
     assert "No images match 'doesnotexist'" in result.output
+
+
+def test_list_search_out_of_range_page_without_total_count_shows_page_guidance(monkeypatch):
+    # Empty page > 1 with a search and no totalCount is ambiguous (likely
+    # out-of-range), so the page guidance must win — not a "no matches" claim.
+    result, _ = _run_list_capturing_params(
+        monkeypatch,
+        ["--search", "myapp", "--page", "2"],
+        payload=[],
+        include_total_count=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert "No images on page 2" in result.output
+    assert "No images match" not in result.output
+
+
+def test_list_search_first_page_without_total_count_shows_no_matches(monkeypatch):
+    # First page empty with a search and no totalCount means no matches exist.
+    result, _ = _run_list_capturing_params(
+        monkeypatch,
+        ["--search", "myapp"],
+        payload=[],
+        include_total_count=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert "No images match 'myapp'" in result.output
+
+
+def test_list_out_of_range_page_without_total_count_no_search(monkeypatch):
+    # Regression guard for the original (pre-search) behaviour: empty page > 1,
+    # no totalCount, no search still shows the page guidance.
+    result, _ = _run_list_capturing_params(
+        monkeypatch,
+        ["--page", "3"],
+        payload=[],
+        include_total_count=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert "No images on page 3" in result.output
 
 
 def test_list_cli_newest_group_first(run_images_list):

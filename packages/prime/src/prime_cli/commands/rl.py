@@ -753,6 +753,7 @@ def _dispatch_full_finetune_run(
     env_file: Optional[List[str]],
     output: str,
     yes: bool,
+    image_tag: Optional[str] = None,
 ) -> None:
     """Hand off to /api/v1/training/runs (full-FT prime-rl on a registered
     PrimeCluster). Reuses the shared env-file plumbing for WANDB / HF
@@ -829,19 +830,40 @@ def _dispatch_full_finetune_run(
         )
         raise typer.Exit(1)
 
+    # `image_tag` is chart-level — it picks which prime-rl container build
+    # the run pulls. Two ways to set it: `--image-tag` (CLI flag, useful
+    # for ad-hoc pins / CI overrides) or top-level `image_tag = "..."` in
+    # the TOML (lives with the run config, the form most teams want to
+    # check in). CLI flag wins so an explicit override on the command line
+    # always beats the file. Backend defaults to "main" when neither is
+    # set, so falling through to None is the right "use platform default"
+    # signal.
+    config_image_tag = raw_cfg.get("image_tag")
+    if config_image_tag is not None and not isinstance(config_image_tag, str):
+        console.print(
+            f"[red]Error:[/red] image_tag in {config_path} must be a string, "
+            f"got {type(config_image_tag).__name__}."
+        )
+        raise typer.Exit(1)
+    resolved_image_tag = image_tag or config_image_tag
+
     # Strip CLI-only secret-loading keys before shipping the TOML to the
     # backend. `env_file` / `env_files` only meaningfully exist on the
     # caller's filesystem — the hosted pod doesn't see them, and prime-rl
     # has no use for the paths once we've already materialized the secrets
     # into the per-run k8s Secret above. Leaving them in the config either
     # confuses prime-rl (unknown field) or silently sends it chasing
-    # phantom paths.
-    config_payload = {k: v for k, v in raw_cfg.items() if k not in ("env_file", "env_files")}
+    # phantom paths. `image_tag` is similarly chart-level — the backend
+    # parses it off the request body, not the embedded prime-rl config.
+    config_payload = {
+        k: v for k, v in raw_cfg.items() if k not in ("env_file", "env_files", "image_tag")
+    }
 
     payload = build_payload_from_toml(
         config_payload,
         name=name,
         team_id=team_id,
+        image_tag=resolved_image_tag,
         wandb_api_key=secrets.get("WANDB_API_KEY"),
         hf_token=secrets.get("HF_TOKEN"),
     )
@@ -1050,6 +1072,15 @@ def create_run(
         help="Skip action status check and run even if environment action failed.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    image_tag: Optional[str] = typer.Option(
+        None,
+        "--image-tag",
+        help=(
+            "prime-rl container image tag for the run (full-FT only). "
+            'Falls back to a top-level `image_tag = "..."` in the TOML '
+            "if unset, then to the backend default."
+        ),
+    ),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
@@ -1074,6 +1105,7 @@ def create_run(
             env_file=env_file,
             output=output,
             yes=yes,
+            image_tag=image_tag,
         )
         return
 

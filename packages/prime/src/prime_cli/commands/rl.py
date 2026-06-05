@@ -807,6 +807,28 @@ def _dispatch_full_finetune_run(
         raise typer.Exit(1)
     secrets = secrets or {}
 
+    # The full-FT backend schema only knows about WANDB_API_KEY and
+    # HF_TOKEN (see platform CreateDedicatedRunRequestBase). Silently
+    # dropping anything else here would launch the run without the
+    # credentials the orchestrator's env needs — the LoRA path forwards
+    # the whole map via env-server pods, but full-FT runs the env inline
+    # in the orchestrator and has no comparable surface today. Reject
+    # loudly instead so the user knows up-front rather than discovering
+    # via a runtime auth error inside a $$$ hosted pod.
+    supported_secret_keys = {"WANDB_API_KEY", "HF_TOKEN"}
+    unsupported = sorted(k for k in secrets if k not in supported_secret_keys)
+    if unsupported:
+        console.print(
+            "[red]Error:[/red] full-FT runs only forward "
+            f"{', '.join(sorted(supported_secret_keys))} today; got "
+            f"unsupported secret(s): {', '.join(unsupported)}."
+        )
+        console.print(
+            "[dim]Drop these from --env-var/--env-file, or wait for "
+            "generic secret forwarding on the dedicated training endpoint.[/dim]"
+        )
+        raise typer.Exit(1)
+
     # Strip CLI-only secret-loading keys before shipping the TOML to the
     # backend. `env_file` / `env_files` only meaningfully exist on the
     # caller's filesystem — the hosted pod doesn't see them, and prime-rl
@@ -1869,30 +1891,35 @@ def delete_run(
 
     api_client = APIClient()
 
-    # Try the hosted full-FT delete endpoint first. The backend's kind
-    # gate 404s for non-DEDICATED_FULL_FT runs, so a 404 here means
-    # "not a hosted run" and we fall back to the LoRA-shared path.
-    # This avoids relying on list/get discriminator shape before delete:
-    # the delete endpoint owns the run-kind decision, and the CLI only
-    # falls back when that endpoint says the row is not dedicated full-FT.
+    # Probe the run's kind via the read-side /rft/runs endpoint and
+    # dispatch to the matching delete path. Previously this called the
+    # full-FT delete endpoint first and used 404 as the "not a hosted
+    # run, try LoRA" signal — but that endpoint is admin-gated server-
+    # side, so non-admin users would 403 here before the LoRA fallback
+    # was reached, leaving them unable to delete their own LoRA runs.
+    # Probing kind first keeps the kind decision authoritative without
+    # exposing every caller to the admin gate.
     from ..api.training import HostedTrainingClient
 
     rl_client = RLClient(api_client)
     hosted_client = HostedTrainingClient(api_client)
     try:
-        hosted_client.delete_run(run_id)
-        console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
-        return
+        run = rl_client.get_run(run_id)
     except NotFoundError:
-        # Backend's kind gate told us this isn't a DEDICATED_FULL_FT run
-        # — fall through to the LoRA path. Typed exception (rather than
-        # substring-matching the message) so the fallback can't be
-        # tripped by an unrelated error body that happens to contain
-        # "HTTP 404".
-        pass
+        console.print(f"[red]Error:[/red] Run {run_id} not found")
+        raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+    if run.kind == "DEDICATED_FULL_FT":
+        try:
+            hosted_client.delete_run(run_id)
+            console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
+            return
+        except APIError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(1)
 
     try:
         rl_client.delete_run(run_id)

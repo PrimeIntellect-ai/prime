@@ -409,6 +409,11 @@ class RLClient:
         try:
             response = self.client.get(f"/rft/runs/{run_id}")
             return RLRun.model_validate(response.get("run"))
+        except APIError:
+            # Preserve typed subclasses (NotFoundError, UnauthorizedError, …)
+            # so callers like `prime train delete` can branch on the run-
+            # missing case rather than string-matching a wrapped message.
+            raise
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to get Hosted Training run: {e.response.text}")

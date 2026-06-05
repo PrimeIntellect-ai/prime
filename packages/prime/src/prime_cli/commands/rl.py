@@ -19,7 +19,7 @@ from rich.table import Table
 from prime_cli.core import Config
 
 from ..api.rl import EnvServerInfo, RLClient, RLRun
-from ..client import APIClient, APIError, NotFoundError, ValidationError
+from ..client import APIClient, APIError, ValidationError
 from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
@@ -1891,36 +1891,18 @@ def delete_run(
 
     api_client = APIClient()
 
-    # Probe the run's kind via the read-side /rft/runs endpoint and
-    # dispatch to the matching delete path. Previously this called the
-    # full-FT delete endpoint first and used 404 as the "not a hosted
-    # run, try LoRA" signal — but that endpoint is admin-gated server-
-    # side, so non-admin users would 403 here before the LoRA fallback
-    # was reached, leaving them unable to delete their own LoRA runs.
-    # Probing kind first keeps the kind decision authoritative without
-    # exposing every caller to the admin gate.
-    from ..api.training import HostedTrainingClient
-
+    # Always go through the LoRA-shared endpoint. The backend's
+    # `delete_single_run` kind-routes DEDICATED_FULL_FT rows server-side
+    # to `training_service.delete_dedicated_run` (helm uninstall + ns
+    # delete + token disable + soft-delete), so a single ownership-gated
+    # call handles both kinds correctly. Avoids:
+    #   * the admin-gate on the dedicated `/training/runs` endpoint
+    #     (non-admin owners couldn't delete their own runs via the
+    #     hosted-first probe),
+    #   * an Optional-kind-on-the-wire race where a missing field would
+    #     mis-route to the LoRA cleanup path on the CLI side and leak
+    #     the helm release.
     rl_client = RLClient(api_client)
-    hosted_client = HostedTrainingClient(api_client)
-    try:
-        run = rl_client.get_run(run_id)
-    except NotFoundError:
-        console.print(f"[red]Error:[/red] Run {run_id} not found")
-        raise typer.Exit(1)
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
-
-    if run.kind == "DEDICATED_FULL_FT":
-        try:
-            hosted_client.delete_run(run_id)
-            console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
-            return
-        except APIError as e:
-            console.print(f"[red]Error:[/red] {e}")
-            raise typer.Exit(1)
-
     try:
         rl_client.delete_run(run_id)
         console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
@@ -2246,6 +2228,23 @@ def get_logs(
         env_name_q, env_index_q, env_has_index_q = (
             _parse_env_qualifier_with_index(env) if env is not None else (None, 0, False)
         )
+
+        # Dedicated full-FT env-servers run as 1-replica-per-name
+        # StatefulSets, so a `name/N` qualifier (typed by hand or copied
+        # from a stale source) would incorrectly route through the
+        # legacy `/env-server-logs` endpoint and 404 on a backend that
+        # never registered an indexed pod for this run. Probe the run
+        # kind once and strip the index for full-FT runs so the unified
+        # `/logs` route handles them. Skipped for the no-index path
+        # (already routes correctly) and tolerated on probe failure
+        # (preserves prior behaviour for transient API blips).
+        if component == "env-server" and env is not None and env_has_index_q:
+            try:
+                if rl_client.get_run(run_id).kind == "DEDICATED_FULL_FT":
+                    env = env_name_q
+                    env_has_index_q = False
+            except APIError:
+                pass
 
         if component == "env-server" and env is not None and env_has_index_q:
             assert env_name_q is not None

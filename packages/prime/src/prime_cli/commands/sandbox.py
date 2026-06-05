@@ -166,6 +166,12 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "vm": sandbox.vm,
         "network_access": sandbox.network_access,
         "timeout_minutes": sandbox.timeout_minutes,
+        # Read with getattr so an older installed prime-sandboxes wheel
+        # (without these fields) still renders the details view instead of
+        # raising AttributeError. The SDK floor will be bumped in a follow-up
+        # release PR.
+        "idle_timeout_minutes": getattr(sandbox, "idle_timeout_minutes", None),
+        "termination_reason": getattr(sandbox, "termination_reason", None),
         "labels": sandbox.labels,
         "created_at": iso_timestamp(sandbox.created_at),
         "user_id": sandbox.user_id,
@@ -408,6 +414,10 @@ def get(
             )
             table.add_row("Network Access", network_display)
             table.add_row("Timeout (minutes)", str(sandbox_data["timeout_minutes"]))
+            if sandbox_data.get("idle_timeout_minutes") is not None:
+                table.add_row("Idle Timeout (minutes)", str(sandbox_data["idle_timeout_minutes"]))
+            if sandbox_data.get("termination_reason"):
+                table.add_row("Termination Reason", sandbox_data["termination_reason"])
 
             # Show labels
             labels_display = ", ".join(sandbox_data["labels"]) if sandbox_data["labels"] else "None"
@@ -494,6 +504,14 @@ def create(
         help="Allow outbound internet access (enabled by default)",
     ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
+    idle_timeout_minutes: Optional[int] = typer.Option(
+        None,
+        "--idle-timeout-minutes",
+        help=(
+            "Terminate the sandbox if no /exec, /upload, /download, or "
+            "/read-file request is seen for this many minutes. Disabled by default."
+        ),
+    ),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
     ),
@@ -582,6 +600,17 @@ def create(
             )
             raise typer.Exit(1)
 
+        if idle_timeout_minutes is not None:
+            if idle_timeout_minutes < 1:
+                console.print("[red]--idle-timeout-minutes must be at least 1.[/red]")
+                raise typer.Exit(1)
+            if timeout_minutes > 0 and idle_timeout_minutes > timeout_minutes:
+                console.print(
+                    "[red]--idle-timeout-minutes must be <= --timeout-minutes "
+                    f"(got idle={idle_timeout_minutes}, lifetime={timeout_minutes}).[/red]"
+                )
+                raise typer.Exit(1)
+
         if not docker_image:
             console.print(
                 "[red]Docker image is required.[/red] Provide a DOCKER_IMAGE positional argument."
@@ -609,6 +638,20 @@ def create(
             suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
             name = f"{base_name}-{suffix}"
 
+        # Only forward idle_timeout_minutes if the installed prime-sandboxes
+        # SDK actually defines the field; older wheels would silently drop it
+        # via Pydantic's extra="ignore" default, hiding the misconfiguration
+        # from the user. SDK version floor is bumped in a follow-up release PR.
+        request_kwargs: Dict[str, Any] = {}
+        if idle_timeout_minutes is not None:
+            if "idle_timeout_minutes" in CreateSandboxRequest.model_fields:
+                request_kwargs["idle_timeout_minutes"] = idle_timeout_minutes
+            else:
+                console.print(
+                    "[yellow]Warning:[/yellow] installed prime-sandboxes SDK "
+                    "does not support --idle-timeout-minutes; ignoring."
+                )
+
         request = CreateSandboxRequest(
             name=name,
             docker_image=docker_image,
@@ -627,6 +670,7 @@ def create(
             team_id=team_id,
             region=region,
             registry_credentials_id=registry_credentials_id,
+            **request_kwargs,
             guaranteed=guaranteed,
         )
 
@@ -644,6 +688,10 @@ def create(
         network_status = "[green]Enabled[/green]" if network_access else "[yellow]Disabled[/yellow]"
         console.print(f"Network Access: {network_status}")
         console.print(f"Timeout: {timeout_minutes} minutes")
+        # Only show the idle timeout in the summary when the SDK actually
+        # accepted it; otherwise we'd display a value the backend never sees.
+        if idle_timeout_minutes is not None and "idle_timeout_minutes" in request_kwargs:
+            console.print(f"Idle Timeout: {idle_timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
         console.print(f"Region: {region or 'Backend default'}")
         if registry_credentials_id:

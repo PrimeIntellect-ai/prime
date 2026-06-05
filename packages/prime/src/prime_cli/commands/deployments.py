@@ -172,26 +172,61 @@ def list_deployments(
 def create_deployment(
     ctx: typer.Context,
     model_id: Optional[str] = typer.Argument(None, help="Model ID to deploy"),
+    checkpoint_id: Optional[str] = typer.Option(
+        None,
+        "--checkpoint-id",
+        help="Deploy a Hosted Training checkpoint by checkpoint ID",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Deploy a model for inference.
 
     Makes the trained model available for inference requests.
-    Model must be in READY status.
+    Model must be in READY status. To deploy a checkpoint, pass --checkpoint-id.
 
     Example:
 
         prime deployments create <model_id>
 
         prime deployments create <model_id> --yes
+
+        prime deployments create --checkpoint-id <checkpoint_id>
     """
-    if model_id is None:
+    if model_id and checkpoint_id:
+        console.print("[red]Error:[/red] Use either MODEL_ID or --checkpoint-id, not both.")
+        raise typer.Exit(1)
+
+    if model_id is None and checkpoint_id is None:
         console.print(ctx.get_help())
         raise typer.Exit(0)
 
     try:
         api_client = APIClient()
         deployments_client = DeploymentsClient(api_client)
+
+        if checkpoint_id:
+            console.print("[bold]Deploying checkpoint:[/bold]")
+            console.print(f"  Checkpoint ID: {checkpoint_id}")
+            console.print()
+
+            if not yes:
+                confirm = typer.confirm("Are you sure you want to deploy this checkpoint?")
+                if not confirm:
+                    console.print("Cancelled.")
+                    raise typer.Exit(0)
+
+            adapter = deployments_client.deploy_checkpoint(checkpoint_id)
+
+            console.print("[green]Deployment initiated successfully![/green]")
+            console.print(f"Adapter ID: [cyan]{adapter.id}[/cyan]")
+            console.print(f"Status: [yellow]{adapter.deployment_status}[/yellow]")
+            console.print("\n[dim]The model is being deployed. This may take a few minutes.[/dim]")
+            console.print("[dim]Use 'prime deployments list' to check deployment status.[/dim]")
+
+            _print_inference_usage(adapter.base_model, adapter.id)
+            return
+
+        assert model_id is not None
 
         # Get model to validate status
         model = deployments_client.get_adapter(model_id)

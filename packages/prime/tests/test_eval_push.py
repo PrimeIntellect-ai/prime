@@ -209,6 +209,33 @@ def test_push_samples_with_progress_supports_old_prime_evals_client(monkeypatch)
     assert calls == [("eval-123", samples)]
 
 
+def test_push_samples_with_progress_skips_callback_when_signature_is_uninspectable(monkeypatch):
+    calls = []
+
+    class DummyClient:
+        def push_samples(self, evaluation_id, samples):
+            calls.append((evaluation_id, samples))
+
+    class DummyConsole:
+        is_terminal = True
+
+    class UnexpectedProgress:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("uninspectable clients should skip progress callbacks")
+
+    monkeypatch.setattr("prime_cli.commands.evals.console", DummyConsole())
+    monkeypatch.setattr("prime_cli.commands.evals.Progress", UnexpectedProgress)
+    monkeypatch.setattr(
+        "prime_cli.commands.evals.inspect.signature",
+        lambda _callable: (_ for _ in ()).throw(ValueError("no signature")),
+    )
+
+    samples = [{"example_id": "1"}]
+    _push_samples_with_progress(DummyClient(), "eval-123", samples)
+
+    assert calls == [("eval-123", samples)]
+
+
 class TestPushSingleEval:
     def test_create_evaluation_defaults_to_private(self, tmp_path, monkeypatch):
         metadata = {"env": "owner/gsm8k", "model": "gpt-4"}

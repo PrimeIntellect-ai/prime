@@ -1030,7 +1030,7 @@ def _push_samples_accepts_progress_callback(client: EvalsClient) -> bool:
     try:
         parameters = inspect.signature(client.push_samples).parameters.values()
     except (TypeError, ValueError):
-        return True
+        return False
     return any(
         parameter.name == "progress_callback" or parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in parameters

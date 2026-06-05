@@ -151,6 +151,23 @@ class UpdateSandboxRequest(BaseModel):
     secrets: Optional[Dict[str, str]] = None
     network_access: Optional[bool] = None
 
+    @model_validator(mode="after")
+    def validate_idle_timeout(self) -> "UpdateSandboxRequest":
+        if self.idle_timeout_minutes is None:
+            return self
+        if self.idle_timeout_minutes < 1:
+            raise ValueError("idle_timeout_minutes must be >= 1")
+        if (
+            self.timeout_minutes is not None
+            and self.timeout_minutes > 0
+            and self.idle_timeout_minutes > self.timeout_minutes
+        ):
+            raise ValueError(
+                "idle_timeout_minutes must be <= timeout_minutes "
+                f"(got idle={self.idle_timeout_minutes}, lifetime={self.timeout_minutes})"
+            )
+        return self
+
 
 class CommandRequest(BaseModel):
     """Execute command request model"""

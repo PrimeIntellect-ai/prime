@@ -688,7 +688,9 @@ def create(
         network_status = "[green]Enabled[/green]" if network_access else "[yellow]Disabled[/yellow]"
         console.print(f"Network Access: {network_status}")
         console.print(f"Timeout: {timeout_minutes} minutes")
-        if idle_timeout_minutes is not None:
+        # Only show the idle timeout in the summary when the SDK actually
+        # accepted it; otherwise we'd display a value the backend never sees.
+        if idle_timeout_minutes is not None and "idle_timeout_minutes" in request_kwargs:
             console.print(f"Idle Timeout: {idle_timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
         console.print(f"Region: {region or 'Backend default'}")

@@ -596,6 +596,17 @@ def create(
             )
             raise typer.Exit(1)
 
+        if idle_timeout_minutes is not None:
+            if idle_timeout_minutes < 1:
+                console.print("[red]--idle-timeout-minutes must be at least 1.[/red]")
+                raise typer.Exit(1)
+            if timeout_minutes > 0 and idle_timeout_minutes > timeout_minutes:
+                console.print(
+                    "[red]--idle-timeout-minutes must be <= --timeout-minutes "
+                    f"(got idle={idle_timeout_minutes}, lifetime={timeout_minutes}).[/red]"
+                )
+                raise typer.Exit(1)
+
         if not docker_image:
             console.print(
                 "[red]Docker image is required.[/red] Provide a DOCKER_IMAGE positional argument."

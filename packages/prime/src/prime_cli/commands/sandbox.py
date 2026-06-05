@@ -166,8 +166,12 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "vm": sandbox.vm,
         "network_access": sandbox.network_access,
         "timeout_minutes": sandbox.timeout_minutes,
-        "idle_timeout_minutes": sandbox.idle_timeout_minutes,
-        "termination_reason": sandbox.termination_reason,
+        # Read with getattr so an older installed prime-sandboxes wheel
+        # (without these fields) still renders the details view instead of
+        # raising AttributeError. The SDK floor will be bumped in a follow-up
+        # release PR.
+        "idle_timeout_minutes": getattr(sandbox, "idle_timeout_minutes", None),
+        "termination_reason": getattr(sandbox, "termination_reason", None),
         "labels": sandbox.labels,
         "created_at": iso_timestamp(sandbox.created_at),
         "user_id": sandbox.user_id,
@@ -634,6 +638,20 @@ def create(
             suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
             name = f"{base_name}-{suffix}"
 
+        # Only forward idle_timeout_minutes if the installed prime-sandboxes
+        # SDK actually defines the field; older wheels would silently drop it
+        # via Pydantic's extra="ignore" default, hiding the misconfiguration
+        # from the user. SDK version floor is bumped in a follow-up release PR.
+        request_kwargs: Dict[str, Any] = {}
+        if idle_timeout_minutes is not None:
+            if "idle_timeout_minutes" in CreateSandboxRequest.model_fields:
+                request_kwargs["idle_timeout_minutes"] = idle_timeout_minutes
+            else:
+                console.print(
+                    "[yellow]Warning:[/yellow] installed prime-sandboxes SDK "
+                    "does not support --idle-timeout-minutes; ignoring."
+                )
+
         request = CreateSandboxRequest(
             name=name,
             docker_image=docker_image,
@@ -646,13 +664,13 @@ def create(
             vm=vm,
             network_access=network_access,
             timeout_minutes=timeout_minutes,
-            idle_timeout_minutes=idle_timeout_minutes,
             environment_vars=env_vars if env_vars else None,
             secrets=secrets_vars if secrets_vars else None,
             labels=labels if labels else [],
             team_id=team_id,
             region=region,
             registry_credentials_id=registry_credentials_id,
+            **request_kwargs,
             guaranteed=guaranteed,
         )
 

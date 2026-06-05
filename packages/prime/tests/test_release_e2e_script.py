@@ -84,8 +84,16 @@ def test_remote_script_compiles_and_keeps_cleanup_best_effort(tmp_path):
 
     py_compile.compile(str(remote_path), doraise=True)
     assert "def best_effort_cancel_hosted_evals" in script
+    assert "def installed_runtime_regression_checks" in script
+    assert "prime_tunnel.Tunnel must accept labels" in script
+    assert "old prime-evals push_samples compatibility failed" in script
     assert "Warning: failed to delete temporary environment" in script
     assert 'line.rsplit(":", 1)[-1]' in script
+    assert (
+        "install_candidate_cli()\n"
+        "    installed_runtime_regression_checks()\n"
+        "    write_smoke_environment()" in script
+    )
     assert script.index('"--save-results"') < script.index('"--skip-upload"')
     assert 'ENV_DIR / "outputs"' in script
 

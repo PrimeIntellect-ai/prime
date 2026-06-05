@@ -209,6 +209,53 @@ def test_push_samples_with_progress_supports_old_prime_evals_client(monkeypatch)
     assert calls == [("eval-123", samples)]
 
 
+def test_push_eval_cli_supports_old_prime_evals_client(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class TerminalConsole:
+        is_terminal = True
+
+        def print(self, *_args, **_kwargs):
+            return None
+
+    class OldEvalsClient:
+        def __init__(self, _api_client):
+            return None
+
+        def create_evaluation(self, **kwargs):
+            captured["create"] = kwargs
+            return {"evaluation_id": "eval-123"}
+
+        def push_samples(self, evaluation_id, samples):
+            captured["push"] = (evaluation_id, samples)
+
+        def finalize_evaluation(self, evaluation_id, metrics=None):
+            captured["finalize"] = (evaluation_id, metrics)
+            return {}
+
+    monkeypatch.setattr("prime_cli.commands.evals.console", TerminalConsole())
+    monkeypatch.setattr("prime_cli.commands.evals.APIClient", lambda: object())
+    monkeypatch.setattr("prime_cli.commands.evals.EvalsClient", OldEvalsClient)
+
+    (tmp_path / "metadata.json").write_text(
+        json.dumps({"env": "owner/gsm8k", "model": "gpt-4", "avg_reward": 1.0})
+    )
+    (tmp_path / "results.jsonl").write_text(json.dumps({"id": 1, "reward": 1.0}) + "\n")
+
+    result = runner.invoke(
+        app,
+        ["eval", "push", "."],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["create"]["environments"] == [{"slug": "owner/gsm8k"}]
+    assert captured["push"] == ("eval-123", [{"id": 1, "reward": 1.0, "example_id": 1}])
+    assert captured["finalize"] == ("eval-123", {"reward": 1.0})
+
+
 def test_push_samples_with_progress_skips_callback_when_signature_is_uninspectable(monkeypatch):
     calls = []
 

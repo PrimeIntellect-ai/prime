@@ -8,6 +8,7 @@ from prime_cli.commands import env as env_command
 from prime_cli.commands.env import (
     _environment_push_metadata,
     _environment_ref,
+    _environment_resolve_data,
     _resolve_push_environment_path,
     _run_env_push_lab_hygiene_preflight,
 )
@@ -56,6 +57,61 @@ def test_respects_explicit_path_without_env_id(tmp_path):
     resolved = _resolve_push_environment_path(path=str(custom_path), env_id=None)
 
     assert resolved == custom_path.resolve()
+
+
+def test_environment_resolve_data_uses_configured_team_id() -> None:
+    resolve_data = _environment_resolve_data(
+        "demo-env",
+        visibility=None,
+        owner=None,
+        team=None,
+        configured_team="cmf0ohr9s0026ilerf3w68s6n",
+    )
+
+    assert resolve_data == {
+        "name": "demo-env",
+        "team_id": "cmf0ohr9s0026ilerf3w68s6n",
+    }
+
+
+def test_environment_resolve_data_treats_configured_slug_as_team_slug() -> None:
+    resolve_data = _environment_resolve_data(
+        "demo-env",
+        visibility=None,
+        owner=None,
+        team=None,
+        configured_team=" my-team ",
+    )
+
+    assert resolve_data == {"name": "demo-env", "team_slug": "my-team"}
+
+
+def test_environment_resolve_data_explicit_team_overrides_configured_team() -> None:
+    resolve_data = _environment_resolve_data(
+        "demo-env",
+        visibility="PUBLIC",
+        owner=None,
+        team="research",
+        configured_team="cmf0ohr9s0026ilerf3w68s6n",
+    )
+
+    assert resolve_data == {
+        "name": "demo-env",
+        "visibility": "PUBLIC",
+        "team_slug": "research",
+    }
+
+
+def test_environment_resolve_data_owner_overrides_team_context() -> None:
+    resolve_data = _environment_resolve_data(
+        "demo-env",
+        visibility=None,
+        owner="upstream-owner",
+        team="research",
+        configured_team="cmf0ohr9s0026ilerf3w68s6n",
+    )
+
+    assert resolve_data == {"name": "demo-env", "owner_slug": "upstream-owner"}
 
 
 def test_env_init_runs_lab_hygiene_preflight_inside_lab_workspace(tmp_path, monkeypatch):

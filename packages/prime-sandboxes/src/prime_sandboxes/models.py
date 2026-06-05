@@ -42,6 +42,7 @@ class Sandbox(BaseModel):
     gpu_type: Optional[str] = Field(None, alias="gpuType")
     vm: bool = False
     network_access: bool = Field(True, alias="networkAccess")
+    allowed_domains: List[str] = Field(default_factory=list, alias="allowedDomains")
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
     environment_vars: Optional[Dict[str, Any]] = Field(None, alias="environmentVars")
@@ -89,6 +90,7 @@ class CreateSandboxRequest(BaseModel):
     gpu_type: Optional[str] = None
     vm: bool = False
     network_access: bool = True
+    allowed_domains: List[str] = Field(default_factory=list)
     timeout_minutes: int = 60
     environment_vars: Optional[Dict[str, str]] = None
     secrets: Optional[Dict[str, str]] = None
@@ -114,6 +116,18 @@ class CreateSandboxRequest(BaseModel):
     def validate_guaranteed(self) -> "CreateSandboxRequest":
         if self.guaranteed and self.vm:
             raise ValueError("guaranteed is not supported for VM sandboxes")
+        return self
+
+    @model_validator(mode="after")
+    def validate_allowed_domains(self) -> "CreateSandboxRequest":
+        if self.allowed_domains:
+            if self.network_access:
+                raise ValueError(
+                    "allowed_domains requires network_access=false "
+                    "(it is an egress allowlist for restricted sandboxes)"
+                )
+            if self.vm:
+                raise ValueError("allowed_domains is not supported for VM sandboxes")
         return self
 
 

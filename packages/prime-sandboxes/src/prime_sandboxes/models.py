@@ -44,6 +44,8 @@ class Sandbox(BaseModel):
     network_access: bool = Field(True, alias="networkAccess")
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
+    idle_timeout_minutes: Optional[int] = Field(None, alias="idleTimeoutMinutes")
+    termination_reason: Optional[str] = Field(None, alias="terminationReason")
     environment_vars: Optional[Dict[str, Any]] = Field(None, alias="environmentVars")
     secrets: Optional[Dict[str, Any]] = Field(None, alias="secrets")
     advanced_configs: Optional[AdvancedConfigs] = Field(None, alias="advancedConfigs")
@@ -90,6 +92,7 @@ class CreateSandboxRequest(BaseModel):
     vm: bool = False
     network_access: bool = True
     timeout_minutes: int = 60
+    idle_timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
     secrets: Optional[Dict[str, str]] = None
     labels: List[str] = Field(default_factory=list)
@@ -116,6 +119,19 @@ class CreateSandboxRequest(BaseModel):
             raise ValueError("guaranteed is not supported for VM sandboxes")
         return self
 
+    @model_validator(mode="after")
+    def validate_idle_timeout(self) -> "CreateSandboxRequest":
+        if self.idle_timeout_minutes is None:
+            return self
+        if self.idle_timeout_minutes < 1:
+            raise ValueError("idle_timeout_minutes must be >= 1")
+        if self.timeout_minutes > 0 and self.idle_timeout_minutes > self.timeout_minutes:
+            raise ValueError(
+                "idle_timeout_minutes must be <= timeout_minutes "
+                f"(got idle={self.idle_timeout_minutes}, lifetime={self.timeout_minutes})"
+            )
+        return self
+
 
 class UpdateSandboxRequest(BaseModel):
     """Update sandbox request model"""
@@ -129,6 +145,7 @@ class UpdateSandboxRequest(BaseModel):
     gpu_count: Optional[int] = None
     gpu_type: Optional[str] = None
     timeout_minutes: Optional[int] = None
+    idle_timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
     registry_credentials_id: Optional[str] = None
     secrets: Optional[Dict[str, str]] = None

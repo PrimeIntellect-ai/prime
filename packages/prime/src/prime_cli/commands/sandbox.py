@@ -166,6 +166,8 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "vm": sandbox.vm,
         "network_access": sandbox.network_access,
         "timeout_minutes": sandbox.timeout_minutes,
+        "idle_timeout_minutes": sandbox.idle_timeout_minutes,
+        "termination_reason": sandbox.termination_reason,
         "labels": sandbox.labels,
         "created_at": iso_timestamp(sandbox.created_at),
         "user_id": sandbox.user_id,
@@ -408,6 +410,10 @@ def get(
             )
             table.add_row("Network Access", network_display)
             table.add_row("Timeout (minutes)", str(sandbox_data["timeout_minutes"]))
+            if sandbox_data.get("idle_timeout_minutes") is not None:
+                table.add_row("Idle Timeout (minutes)", str(sandbox_data["idle_timeout_minutes"]))
+            if sandbox_data.get("termination_reason"):
+                table.add_row("Termination Reason", sandbox_data["termination_reason"])
 
             # Show labels
             labels_display = ", ".join(sandbox_data["labels"]) if sandbox_data["labels"] else "None"
@@ -494,6 +500,14 @@ def create(
         help="Allow outbound internet access (enabled by default)",
     ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
+    idle_timeout_minutes: Optional[int] = typer.Option(
+        None,
+        "--idle-timeout-minutes",
+        help=(
+            "Terminate the sandbox if no /exec, /upload, /download, or "
+            "/read-file request is seen for this many minutes. Disabled by default."
+        ),
+    ),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
     ),
@@ -621,6 +635,7 @@ def create(
             vm=vm,
             network_access=network_access,
             timeout_minutes=timeout_minutes,
+            idle_timeout_minutes=idle_timeout_minutes,
             environment_vars=env_vars if env_vars else None,
             secrets=secrets_vars if secrets_vars else None,
             labels=labels if labels else [],
@@ -644,6 +659,8 @@ def create(
         network_status = "[green]Enabled[/green]" if network_access else "[yellow]Disabled[/yellow]"
         console.print(f"Network Access: {network_status}")
         console.print(f"Timeout: {timeout_minutes} minutes")
+        if idle_timeout_minutes is not None:
+            console.print(f"Idle Timeout: {idle_timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
         console.print(f"Region: {region or 'Backend default'}")
         if registry_credentials_id:

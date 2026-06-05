@@ -82,6 +82,16 @@ class DeploymentsClient:
                 raise APIError(f"Failed to deploy adapter: {e.response.text}")
             raise APIError(f"Failed to deploy adapter: {str(e)}")
 
+    def deploy_checkpoint(self, checkpoint_id: str) -> Adapter:
+        """Deploy a checkpoint by preparing it as an adapter for inference."""
+        try:
+            response = self.client.post(f"/rft/checkpoints/{checkpoint_id}/deploy")
+            return Adapter.model_validate(response.get("adapter"))
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to deploy checkpoint: {e.response.text}")
+            raise APIError(f"Failed to deploy checkpoint: {str(e)}")
+
     def unload_adapter(self, adapter_id: str) -> Adapter:
         """Unload an adapter from inference."""
         try:

@@ -142,6 +142,73 @@ def test_load_config_accepts_sampling_enable_thinking(tmp_path: Path) -> None:
     assert cfg.sampling.reasoning_effort is None
 
 
+def test_load_config_accepts_eval_sampling_enable_thinking(tmp_path: Path) -> None:
+    """[eval.sampling] block carries enable_thinking through to the API payload."""
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "Qwen/Qwen3.5-35B-A3B"\n'
+        "[[eval.env]]\n"
+        'id = "primeintellect/vf-math"\n'
+        "[eval.sampling]\n"
+        "enable_thinking = false\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.eval.sampling is not None
+    assert cfg.eval.sampling.enable_thinking is False
+    assert cfg.eval.sampling.reasoning_effort is None
+    assert cfg.eval.to_api_dict() == {
+        "environments": [{"id": "primeintellect/vf-math"}],
+        "sampling": {"enable_thinking": False},
+    }
+
+
+def test_load_config_accepts_eval_sampling_reasoning_effort(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "openai/gpt-oss-20b"\n'
+        "[[eval.env]]\n"
+        'id = "primeintellect/vf-math"\n'
+        "[eval.sampling]\n"
+        'reasoning_effort = "high"\n'
+        "temperature = 0.0\n"
+        "max_tokens = 2048\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.eval.sampling is not None
+    assert cfg.eval.sampling.reasoning_effort == "high"
+    assert cfg.eval.sampling.temperature == 0.0
+    assert cfg.eval.sampling.max_tokens == 2048
+    assert cfg.eval.to_api_dict() == {
+        "environments": [{"id": "primeintellect/vf-math"}],
+        "sampling": {
+            "reasoning_effort": "high",
+            "temperature": 0.0,
+            "max_tokens": 2048,
+        },
+    }
+
+
+def test_load_config_rejects_eval_sampling_with_both_reasoning_controls(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "openai/gpt-oss-20b"\n'
+        "[[eval.env]]\n"
+        'id = "primeintellect/vf-math"\n'
+        "[eval.sampling]\n"
+        "enable_thinking = false\n"
+        'reasoning_effort = "low"\n'
+    )
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
 def test_load_config_accepts_max_inflight_rollouts(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text('model = "dummy"\nmax_inflight_rollouts = 96\n')

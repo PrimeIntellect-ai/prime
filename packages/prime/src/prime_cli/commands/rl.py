@@ -439,6 +439,29 @@ class TeacherConfig(BaseModel):
         return result
 
 
+class EvalSamplingConfig(BaseModel):
+    """Eval-time sampling overrides.
+
+    ``enable_thinking`` / ``reasoning_effort`` are convenience flags the
+     platform merges into ``extra_body.chat_template_kwargs`` for supported models;
+    they cannot both be set on the same block.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_tokens: int | None = None
+    temperature: float | None = None
+    extra_body: Dict[str, Any] | None = None
+    enable_thinking: bool | None = None
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+
+    @model_validator(mode="after")
+    def _reasoning_controls_mutually_exclusive(self) -> "EvalSamplingConfig":
+        if self.enable_thinking is not None and self.reasoning_effort is not None:
+            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
+        return self
+
+
 class EvalConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -447,6 +470,7 @@ class EvalConfig(BaseModel):
     rollouts_per_example: int | None = None
     eval_base_model: bool | None = None
     env: List[EvalEnvConfig] = Field(default_factory=list)
+    sampling: EvalSamplingConfig | None = None
 
     def to_api_dict(self) -> Dict[str, Any] | None:
         if not self.env:
@@ -460,6 +484,10 @@ class EvalConfig(BaseModel):
             result["rollouts_per_example"] = self.rollouts_per_example
         if self.eval_base_model is not None:
             result["eval_base_model"] = self.eval_base_model
+        if self.sampling is not None:
+            sampling_dict = self.sampling.model_dump(exclude_none=True)
+            if sampling_dict:
+                result["sampling"] = sampling_dict
         return result
 
 

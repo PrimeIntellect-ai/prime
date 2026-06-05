@@ -11,7 +11,7 @@ authors = [
 ]
 dependencies = [
     "prime-sandboxes>=0.2.26",
-    "prime-evals>=0.2.1",
+    "prime-evals>=0.2.3",
     "prime-tunnel>=0.1.0",
     "httpx>=0.25.0",
     "pydantic>=2.0.0",

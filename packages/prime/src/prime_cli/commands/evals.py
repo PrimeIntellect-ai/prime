@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import json
 import re
 import time
@@ -1012,7 +1013,7 @@ def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, An
 def _push_samples_with_progress(
     client: EvalsClient, evaluation_id: str, samples: list[dict[str, Any]]
 ) -> None:
-    if not console.is_terminal:
+    if not console.is_terminal or not _push_samples_accepts_progress_callback(client):
         client.push_samples(evaluation_id, samples)
         return
 
@@ -1023,6 +1024,17 @@ def _push_samples_with_progress(
             samples,
             progress_callback=lambda uploaded: progress.update(task_id, advance=uploaded),
         )
+
+
+def _push_samples_accepts_progress_callback(client: EvalsClient) -> bool:
+    try:
+        parameters = inspect.signature(client.push_samples).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "progress_callback" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 def _require_published_environment_for_eval_push(env_name: str, eval_path: Path) -> None:

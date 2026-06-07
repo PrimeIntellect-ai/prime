@@ -1,5 +1,8 @@
 """Commands for managing Docker images in Prime Intellect registry."""
 
+import hashlib
+import json
+import re
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -27,6 +30,16 @@ app = PlainTyper(help="Manage Docker images in Prime Intellect registry", no_arg
 console = get_console()
 # Use a synthetic archive path to avoid collisions with Dockerfiles already in the context.
 PACKAGED_DOCKERFILE_PATH = ".__prime_dockerfile__"
+BATCH_BUILD_ENDPOINT = "/images/build-batches"
+BATCH_BUILD_MANIFEST_VERSION = 1
+HARBOR_COMPOSE_FILENAMES = (
+    "docker-compose.yaml",
+    "docker-compose.yml",
+    "compose.yaml",
+    "compose.yml",
+)
+HARBOR_CONTEXT_EXCLUDES = ("tests", "solution")
+DEFAULT_BATCH_TAG_TEMPLATE = "{index}-{sha12}"
 
 config = Config()
 
@@ -34,6 +47,11 @@ config = Config()
 class ImageVisibility(str, Enum):
     PRIVATE = "PRIVATE"
     PUBLIC = "PUBLIC"
+
+
+class BatchPushMode(str, Enum):
+    DOCKERFILE = "dockerfile"
+    HARBOR = "harbor"
 
 
 LIST_IMAGES_JSON_HELP = json_output_help(
@@ -361,6 +379,530 @@ def _group_sort_key(partition: PartitionMap) -> datetime:
     return ts if ts is not None else datetime.min.replace(tzinfo=timezone.utc)
 
 
+class BatchInputError(ValueError):
+    """Raised when a batch input file or task tree cannot be converted to a manifest."""
+
+
+@dataclass
+class PackagedContext:
+    path: Path
+    size_bytes: int
+
+
+@dataclass
+class BatchBuildItem:
+    source_id: str
+    image_name: str
+    image_tag: str
+    source_type: str
+    dockerfile_text: Optional[str] = None
+    dockerfile_sha256: Optional[str] = None
+    context_path: Optional[Path] = None
+    dockerfile_path: Optional[Path] = None
+    context_sha256: Optional[str] = None
+    context_archive: Optional[PackagedContext] = None
+
+
+_INVALID_TAG_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _validate_image_name(image_name: str) -> None:
+    if not image_name:
+        console.print("[red]Error: --image-name cannot be empty[/red]")
+        raise typer.Exit(1)
+    if "/" in image_name or ":" in image_name:
+        console.print(
+            "[red]Error: --image-name must be a simple image name without '/' or ':'.[/red]"
+        )
+        raise typer.Exit(1)
+
+
+def _requested_visibility(public: bool, private: bool) -> Optional[ImageVisibility]:
+    if public and private:
+        console.print("[red]Error: --public and --private cannot be used together[/red]")
+        raise typer.Exit(1)
+    if public:
+        return ImageVisibility.PUBLIC
+    if private:
+        return ImageVisibility.PRIVATE
+    return None
+
+
+def _resolve_build_paths(context: str, dockerfile: Optional[str]) -> tuple[Path, Path]:
+    context_path = Path(context).resolve()
+    dockerfile_path = Path(dockerfile).resolve() if dockerfile else context_path / "Dockerfile"
+
+    if not context_path.exists():
+        console.print(f"[red]Error: Build context not found at {context_path}[/red]")
+        raise typer.Exit(1)
+
+    if not context_path.is_dir():
+        console.print(f"[red]Error: Build context must be a directory: {context_path}[/red]")
+        raise typer.Exit(1)
+
+    if not dockerfile_path.exists():
+        console.print(f"[red]Error: Dockerfile not found at {dockerfile_path}[/red]")
+        raise typer.Exit(1)
+
+    if not dockerfile_path.is_file():
+        console.print(f"[red]Error: Dockerfile must be a file: {dockerfile_path}[/red]")
+        raise typer.Exit(1)
+
+    return context_path, dockerfile_path
+
+
+def _dockerignore_path(context_path: Path, dockerfile_path: Path) -> Optional[Path]:
+    # BuildKit prefers <Dockerfile>.dockerignore next to the Dockerfile and
+    # falls back to <context>/.dockerignore, so mirror that for uploaded tars.
+    per_dockerfile_ignore = dockerfile_path.with_name(dockerfile_path.name + ".dockerignore")
+    root_dockerignore = context_path / ".dockerignore"
+    if per_dockerfile_ignore.is_file():
+        return per_dockerfile_ignore
+    if root_dockerignore.is_file():
+        return root_dockerignore
+    return None
+
+
+def _context_rel_from_tar_name(name: str) -> Optional[Path]:
+    rel = name[2:] if name.startswith("./") else name
+    if not rel or rel == ".":
+        return None
+    return Path(rel)
+
+
+def _is_excluded_context_rel(rel_path: Path, excluded_dirs: tuple[str, ...]) -> bool:
+    return bool(rel_path.parts and rel_path.parts[0] in excluded_dirs)
+
+
+def _make_context_tar_filter(
+    context_path: Path,
+    dockerfile_path: Path,
+    *,
+    excluded_dirs: tuple[str, ...] = (),
+):
+    dockerignore_path = _dockerignore_path(context_path, dockerfile_path)
+    ignore_matcher = (
+        parse_gitignore(str(dockerignore_path), base_dir=str(context_path))
+        if dockerignore_path is not None
+        else None
+    )
+
+    def tar_filter(tarinfo: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
+        rel_path = _context_rel_from_tar_name(tarinfo.name)
+        if rel_path is None:
+            return tarinfo
+        if _is_excluded_context_rel(rel_path, excluded_dirs):
+            return None
+        if ignore_matcher is not None and ignore_matcher(str(context_path / rel_path)):
+            return None
+        return tarinfo
+
+    return tar_filter
+
+
+def _package_build_context(
+    context_path: Path,
+    dockerfile_path: Path,
+    *,
+    excluded_dirs: tuple[str, ...] = (),
+) -> PackagedContext:
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
+        tar_path = Path(tmp_file.name)
+
+    try:
+        with tarfile.open(tar_path, "w:gz") as tar:
+            tar.add(
+                context_path,
+                arcname=".",
+                filter=_make_context_tar_filter(
+                    context_path,
+                    dockerfile_path,
+                    excluded_dirs=excluded_dirs,
+                ),
+            )
+            tar.add(dockerfile_path, arcname=PACKAGED_DOCKERFILE_PATH)
+    except Exception:
+        try:
+            tar_path.unlink()
+        except Exception:
+            pass
+        raise
+
+    return PackagedContext(path=tar_path, size_bytes=tar_path.stat().st_size)
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _sha256_context(
+    context_path: Path,
+    dockerfile_path: Path,
+    *,
+    excluded_dirs: tuple[str, ...] = (),
+) -> str:
+    dockerignore_path = _dockerignore_path(context_path, dockerfile_path)
+    ignore_matcher = (
+        parse_gitignore(str(dockerignore_path), base_dir=str(context_path))
+        if dockerignore_path is not None
+        else None
+    )
+    digest = hashlib.sha256()
+    for path in sorted(context_path.rglob("*")):
+        if not path.is_file():
+            continue
+        rel_path = path.relative_to(context_path)
+        if _is_excluded_context_rel(rel_path, excluded_dirs):
+            continue
+        if ignore_matcher is not None and ignore_matcher(str(path)):
+            continue
+        digest.update(rel_path.as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _sanitize_image_tag(raw: str) -> str:
+    tag = _INVALID_TAG_CHARS.sub("-", raw.strip())
+    tag = re.sub(r"-{2,}", "-", tag).strip("-")
+    if not tag:
+        raise BatchInputError("Generated image tag is empty")
+    if re.match(r"^[A-Za-z0-9_]", tag) is None:
+        tag = f"t{tag}"
+    return tag[:128]
+
+
+def _format_batch_tag(
+    tag_template: str,
+    *,
+    index: int,
+    total: int,
+    source_id: str,
+    sha12: str,
+) -> str:
+    width = max(4, len(str(max(total, 1))))
+    try:
+        raw = tag_template.format(
+            id=source_id,
+            index=f"{index:0{width}d}",
+            index0=f"{index - 1:0{width}d}",
+            number=index,
+            sha12=sha12,
+        )
+    except KeyError as exc:
+        raise BatchInputError(f"Unknown tag template field: {exc}") from exc
+    except ValueError as exc:
+        raise BatchInputError(f"Invalid tag template: {exc}") from exc
+    return _sanitize_image_tag(raw)
+
+
+def _pick_jsonl_row_id(
+    row: dict[str, Any],
+    *,
+    id_field: Optional[str],
+    line_number: int,
+) -> str:
+    field_names = (id_field,) if id_field else ("id", "task_id")
+    for field_name in field_names:
+        if field_name and row.get(field_name) is not None:
+            source_id = str(row[field_name]).strip()
+            if source_id:
+                return source_id
+    expected = id_field or "id or task_id"
+    raise BatchInputError(f"Line {line_number}: missing non-empty {expected} field")
+
+
+def _read_jsonl_records(path: Path) -> list[tuple[int, dict[str, Any]]]:
+    if not path.exists():
+        raise BatchInputError(f"Input JSONL file not found: {path}")
+    if not path.is_file():
+        raise BatchInputError(f"Input path must be a JSONL file: {path}")
+
+    records: list[tuple[int, dict[str, Any]]] = []
+    with path.open("r", encoding="utf-8") as file:
+        for line_number, line in enumerate(file, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                value = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise BatchInputError(
+                    f"Line {line_number}: invalid JSONL object: {exc.msg}"
+                ) from exc
+            if not isinstance(value, dict):
+                raise BatchInputError(f"Line {line_number}: expected a JSON object")
+            records.append((line_number, value))
+
+    if not records:
+        raise BatchInputError(f"No JSONL rows found in {path}")
+    return records
+
+
+def _build_dockerfile_batch_items(
+    source_path: Path,
+    *,
+    image_name: str,
+    id_field: Optional[str],
+    dockerfile_field: str,
+    tag_template: str,
+) -> list[BatchBuildItem]:
+    raw_rows = _read_jsonl_records(source_path)
+    prepared: list[tuple[str, str]] = []
+    for line_number, row in raw_rows:
+        source_id = _pick_jsonl_row_id(row, id_field=id_field, line_number=line_number)
+        dockerfile_value = row.get(dockerfile_field)
+        if not isinstance(dockerfile_value, str) or not dockerfile_value.strip():
+            raise BatchInputError(f"Line {line_number}: missing non-empty {dockerfile_field} field")
+        prepared.append((source_id, dockerfile_value))
+
+    items: list[BatchBuildItem] = []
+    total = len(prepared)
+    for index, (source_id, dockerfile_text) in enumerate(prepared, start=1):
+        dockerfile_sha256 = _sha256_text(dockerfile_text)
+        image_tag = _format_batch_tag(
+            tag_template,
+            index=index,
+            total=total,
+            source_id=source_id,
+            sha12=dockerfile_sha256[:12],
+        )
+        items.append(
+            BatchBuildItem(
+                source_id=source_id,
+                image_name=image_name,
+                image_tag=image_tag,
+                source_type=BatchPushMode.DOCKERFILE.value,
+                dockerfile_text=dockerfile_text,
+                dockerfile_sha256=dockerfile_sha256,
+            )
+        )
+    return items
+
+
+def _find_harbor_compose_file(environment_path: Path) -> Optional[Path]:
+    for filename in HARBOR_COMPOSE_FILENAMES:
+        path = environment_path / filename
+        if path.is_file():
+            return path
+    return None
+
+
+def _build_harbor_batch_items(
+    source_path: Path,
+    *,
+    image_name: str,
+    tag_template: str,
+    skip_unsupported_compose: bool,
+) -> list[BatchBuildItem]:
+    if not source_path.exists():
+        raise BatchInputError(f"Harbor tasks directory not found: {source_path}")
+    if not source_path.is_dir():
+        raise BatchInputError(f"Harbor source must be a directory: {source_path}")
+
+    task_dirs = sorted(
+        path for path in source_path.iterdir() if path.is_dir() and not path.name.startswith(".")
+    )
+    if not task_dirs:
+        raise BatchInputError(f"No task directories found in {source_path}")
+
+    errors: list[str] = []
+    prepared: list[tuple[str, Path, Path, str, str]] = []
+    for task_dir in task_dirs:
+        missing = [
+            rel
+            for rel in ("task.toml", "instruction.md", "environment/Dockerfile")
+            if not (task_dir / rel).is_file()
+        ]
+        if missing:
+            errors.append(f"{task_dir.name}: missing {', '.join(missing)}")
+            continue
+
+        environment_path = task_dir / "environment"
+        compose_path = _find_harbor_compose_file(environment_path)
+        if compose_path is not None:
+            rel_compose = compose_path.relative_to(task_dir).as_posix()
+            message = (
+                f"{task_dir.name}: docker-compose tasks are not supported yet (found {rel_compose})"
+            )
+            if skip_unsupported_compose:
+                console.print(f"[yellow]Skipping {message}[/yellow]")
+                continue
+            errors.append(message)
+            continue
+
+        dockerfile_path = environment_path / "Dockerfile"
+        context_sha256 = _sha256_context(
+            environment_path,
+            dockerfile_path,
+            excluded_dirs=HARBOR_CONTEXT_EXCLUDES,
+        )
+        prepared.append(
+            (
+                task_dir.name,
+                environment_path,
+                dockerfile_path,
+                context_sha256,
+                dockerfile_path.read_text(encoding="utf-8"),
+            )
+        )
+
+    if errors:
+        message = "\n  - ".join(errors)
+        raise BatchInputError(f"Invalid Harbor task input:\n  - {message}")
+    if not prepared:
+        raise BatchInputError("No supported Harbor task environments found")
+
+    items: list[BatchBuildItem] = []
+    total = len(prepared)
+    for index, (
+        source_id,
+        context_path,
+        dockerfile_path,
+        context_sha256,
+        dockerfile_text,
+    ) in enumerate(prepared, start=1):
+        image_tag = _format_batch_tag(
+            tag_template,
+            index=index,
+            total=total,
+            source_id=source_id,
+            sha12=context_sha256[:12],
+        )
+        items.append(
+            BatchBuildItem(
+                source_id=source_id,
+                image_name=image_name,
+                image_tag=image_tag,
+                source_type=BatchPushMode.HARBOR.value,
+                dockerfile_text=dockerfile_text,
+                dockerfile_sha256=_sha256_text(dockerfile_text),
+                context_path=context_path,
+                dockerfile_path=dockerfile_path,
+                context_sha256=context_sha256,
+            )
+        )
+    return items
+
+
+def _batch_manifest_record(item: BatchBuildItem) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "id": item.source_id,
+        "image_name": item.image_name,
+        "image_tag": item.image_tag,
+        "source_type": item.source_type,
+        "dockerfile_sha256": item.dockerfile_sha256,
+    }
+    if item.context_sha256 is not None:
+        record["context_sha256"] = item.context_sha256
+    if item.context_path is not None:
+        record["context_path"] = str(item.context_path)
+    if item.dockerfile_path is not None:
+        record["dockerfile_path"] = str(item.dockerfile_path)
+    return record
+
+
+def _batch_payload_item(item: BatchBuildItem) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": item.source_id,
+        "image_tag": item.image_tag,
+        "source_type": item.source_type,
+        "dockerfile_sha256": item.dockerfile_sha256,
+    }
+    if item.dockerfile_text is not None:
+        payload["dockerfile"] = item.dockerfile_text
+    if item.context_path is not None:
+        payload["dockerfile_path"] = PACKAGED_DOCKERFILE_PATH
+        payload["context_sha256"] = item.context_sha256
+        payload["context_archive"] = {
+            "content_type": "application/gzip",
+            "size_bytes": (
+                item.context_archive.size_bytes if item.context_archive is not None else None
+            ),
+        }
+    else:
+        payload["dockerfile_path"] = "Dockerfile"
+    return payload
+
+
+def _build_batch_payload(
+    items: list[BatchBuildItem],
+    *,
+    mode: BatchPushMode,
+    image_name: str,
+    platform: str,
+    visibility: Optional[ImageVisibility],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "manifest_version": BATCH_BUILD_MANIFEST_VERSION,
+        "image_name": image_name,
+        "mode": mode.value,
+        "platform": platform,
+        "items": [_batch_payload_item(item) for item in items],
+    }
+    if config.team_id:
+        payload["team_id"] = config.team_id
+    if visibility is not None:
+        payload["visibility"] = visibility.value
+    return payload
+
+
+def _write_batch_manifest(path: Path, items: list[BatchBuildItem]) -> None:
+    with path.open("w", encoding="utf-8") as file:
+        for item in items:
+            file.write(json.dumps(_batch_manifest_record(item), sort_keys=True) + "\n")
+
+
+def _batch_upload_urls(response: dict[str, Any]) -> dict[str, str]:
+    urls: dict[str, str] = {}
+    upload_urls = response.get("upload_urls")
+    if isinstance(upload_urls, dict):
+        for key, value in upload_urls.items():
+            if isinstance(value, str):
+                urls[str(key)] = value
+
+    for key in ("items", "builds"):
+        values = response.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("id") or item.get("source_id") or item.get("task_id")
+            upload_url = item.get("upload_url")
+            if item_id is not None and isinstance(upload_url, str):
+                urls[str(item_id)] = upload_url
+    return urls
+
+
+def _batch_id(response: dict[str, Any]) -> Optional[str]:
+    value = response.get("batch_id") or response.get("batchId") or response.get("id")
+    return str(value) if value else None
+
+
+def _upload_context_archive(upload_url: str, archive_path: Path) -> None:
+    with archive_path.open("rb") as file:
+        upload_response = httpx.put(
+            upload_url,
+            content=file,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=600.0,
+        )
+        upload_response.raise_for_status()
+
+
+def _cleanup_batch_archives(items: list[BatchBuildItem]) -> None:
+    for item in items:
+        archive = item.context_archive
+        if archive is None:
+            continue
+        try:
+            archive.path.unlink()
+        except Exception:
+            pass
+
+
 @app.command("push")
 def push_image(
     image_reference: str = typer.Argument(
@@ -405,9 +947,7 @@ def push_image(
         prime images push myapp:v1 --public
     """
     try:
-        if public and private:
-            console.print("[red]Error: --public and --private cannot be used together[/red]")
-            raise typer.Exit(1)
+        requested_visibility = _requested_visibility(public, private)
 
         # Parse image reference
         if ":" in image_reference:
@@ -434,66 +974,15 @@ def push_image(
         # Initialize API client
         client = APIClient()
 
-        context_path = Path(context).resolve()
-        dockerfile_path = Path(dockerfile).resolve() if dockerfile else context_path / "Dockerfile"
-
-        if not context_path.exists():
-            console.print(f"[red]Error: Build context not found at {context_path}[/red]")
-            raise typer.Exit(1)
-
-        if not context_path.is_dir():
-            console.print(f"[red]Error: Build context must be a directory: {context_path}[/red]")
-            raise typer.Exit(1)
-
-        if not dockerfile_path.exists():
-            console.print(f"[red]Error: Dockerfile not found at {dockerfile_path}[/red]")
-            raise typer.Exit(1)
-
-        if not dockerfile_path.is_file():
-            console.print(f"[red]Error: Dockerfile must be a file: {dockerfile_path}[/red]")
-            raise typer.Exit(1)
+        context_path, dockerfile_path = _resolve_build_paths(context, dockerfile)
 
         # Create tar.gz of build context
         console.print("[cyan]Preparing build context...[/cyan]")
-        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
-            tar_path = tmp_file.name
-
-        # Build a .dockerignore matcher so we don't upload ignored paths
-        # (e.g. local .venv, node_modules) with the context. BuildKit
-        # looks for <Dockerfile>.dockerignore next to the Dockerfile first
-        # and falls back to <context>/.dockerignore, so mirror that.
-        per_dockerfile_ignore = dockerfile_path.with_name(dockerfile_path.name + ".dockerignore")
-        root_dockerignore = context_path / ".dockerignore"
-        if per_dockerfile_ignore.is_file():
-            dockerignore_path: Optional[Path] = per_dockerfile_ignore
-        elif root_dockerignore.is_file():
-            dockerignore_path = root_dockerignore
-        else:
-            dockerignore_path = None
-        ignore_matcher = (
-            parse_gitignore(str(dockerignore_path), base_dir=str(context_path))
-            if dockerignore_path is not None
-            else None
-        )
-
-        def tar_filter(tarinfo: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
-            if ignore_matcher is None:
-                return tarinfo
-            rel = tarinfo.name
-            if rel.startswith("./"):
-                rel = rel[2:]
-            if not rel or rel == ".":
-                return tarinfo
-            if ignore_matcher(str(context_path / rel)):
-                return None
-            return tarinfo
-
+        packaged_context: Optional[PackagedContext] = None
         try:
-            with tarfile.open(tar_path, "w:gz") as tar:
-                tar.add(context_path, arcname=".", filter=tar_filter)
-                tar.add(dockerfile_path, arcname=PACKAGED_DOCKERFILE_PATH)
+            packaged_context = _package_build_context(context_path, dockerfile_path)
 
-            tar_size_mb = Path(tar_path).stat().st_size / (1024 * 1024)
+            tar_size_mb = packaged_context.size_bytes / (1024 * 1024)
             console.print(f"[green]✓[/green] Build context packaged ({tar_size_mb:.2f} MB)")
             console.print()
 
@@ -508,10 +997,8 @@ def push_image(
                 }
                 if config.team_id:
                     build_payload["team_id"] = config.team_id
-                if public:
-                    build_payload["visibility"] = ImageVisibility.PUBLIC.value
-                elif private:
-                    build_payload["visibility"] = ImageVisibility.PRIVATE.value
+                if requested_visibility is not None:
+                    build_payload["visibility"] = requested_visibility.value
 
                 build_response = client.request(
                     "POST",
@@ -543,14 +1030,7 @@ def push_image(
             # Upload build context to GCS
             console.print("[cyan]Uploading build context...[/cyan]")
             try:
-                with open(tar_path, "rb") as f:
-                    upload_response = httpx.put(
-                        upload_url,
-                        content=f,
-                        headers={"Content-Type": "application/octet-stream"},
-                        timeout=600.0,
-                    )
-                    upload_response.raise_for_status()
+                _upload_context_archive(upload_url, packaged_context.path)
             except httpx.HTTPError as e:
                 console.print(f"[red]Upload failed: {e}[/red]")
                 raise typer.Exit(1)
@@ -577,8 +1057,7 @@ def push_image(
             console.print()
             console.print(f"[bold]Build ID:[/bold] {build_id}")
             console.print(f"[bold]Image:[/bold] {full_image_path}")
-            if public or private:
-                requested_visibility = ImageVisibility.PUBLIC if public else ImageVisibility.PRIVATE
+            if requested_visibility is not None:
                 console.print(f"[bold]Visibility:[/bold] {requested_visibility.value}")
             else:
                 console.print(
@@ -602,14 +1081,265 @@ def push_image(
 
         finally:
             # Clean up temporary tar file
-            try:
-                Path(tar_path).unlink()
-            except Exception:
-                pass
+            if packaged_context is not None:
+                try:
+                    packaged_context.path.unlink()
+                except Exception:
+                    pass
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled by user[/yellow]")
         raise typer.Exit(1)
+
+
+@app.command("push-batch")
+def push_image_batch(
+    source: str = typer.Argument(
+        ...,
+        help="JSONL file for dockerfile mode, or Harbor tasks directory for --mode harbor",
+    ),
+    image_name: str = typer.Option(
+        ...,
+        "--image-name",
+        help="Image name to use for every generated tag (e.g. cligym)",
+    ),
+    mode: BatchPushMode = typer.Option(
+        BatchPushMode.DOCKERFILE,
+        "--mode",
+        case_sensitive=False,
+        help="Input mode: dockerfile JSONL (default) or harbor task directory scanner",
+    ),
+    id_field: Optional[str] = typer.Option(
+        None,
+        "--id-field",
+        help="JSONL field to use as the original id. Defaults to id, then task_id.",
+    ),
+    dockerfile_field: str = typer.Option(
+        "dockerfile",
+        "--dockerfile-field",
+        help="JSONL field containing raw Dockerfile text in dockerfile mode",
+    ),
+    tag_template: str = typer.Option(
+        DEFAULT_BATCH_TAG_TEMPLATE,
+        "--tag-template",
+        help=(
+            "Python format string for tags. Available fields: {index}, {index0}, "
+            "{number}, {id}, {sha12}."
+        ),
+    ),
+    platform: str = typer.Option(
+        "linux/amd64",
+        "--platform",
+        click_type=click.Choice(["linux/amd64", "linux/arm64"]),
+        help="Target platform for every image",
+    ),
+    public: bool = typer.Option(
+        False,
+        "--public",
+        help="Make generated image tags public when builds complete",
+    ),
+    private: bool = typer.Option(
+        False,
+        "--private",
+        help="Make generated image tags private when builds complete",
+    ),
+    manifest_output: Optional[str] = typer.Option(
+        None,
+        "--manifest-output",
+        help="Write the generated client-side manifest as JSONL",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate inputs and print the manifest without calling the draft backend endpoint",
+    ),
+    skip_unsupported_compose: bool = typer.Option(
+        False,
+        "--skip-unsupported-compose",
+        help="In Harbor mode, skip docker-compose tasks instead of failing the batch",
+    ),
+):
+    """
+    Build and push many Docker images using a draft future batch backend.
+
+    This command is a CLI-first draft for a proposed backend resource:
+    POST /images/build-batches, followed by optional context uploads and
+    POST /images/build-batches/{batch_id}/start. It may fail against the
+    current backend until platform batch endpoints are implemented.
+
+    Dockerfile mode is the default. It reads JSONL rows with id/task_id and
+    dockerfile fields, where dockerfile is raw Dockerfile text.
+
+    Harbor mode scans immediate task directories, requires task.toml,
+    instruction.md, and environment/Dockerfile, then uses environment/ as the
+    build context. docker-compose tasks are detected and rejected or skipped;
+    compose support is intentionally deferred.
+
+    \b
+    Examples:
+        prime images push-batch rows.jsonl --image-name cligym --public
+        prime images push-batch rows.jsonl --image-name cligym --id-field task_id
+        prime images push-batch ./tasks --mode harbor --image-name cligym --public
+        prime images push-batch ./tasks --mode harbor --image-name cligym --dry-run
+    """
+    items: list[BatchBuildItem] = []
+    try:
+        visibility = _requested_visibility(public, private)
+        _validate_image_name(image_name)
+        source_path = Path(source).resolve()
+
+        try:
+            if mode == BatchPushMode.HARBOR:
+                items = _build_harbor_batch_items(
+                    source_path,
+                    image_name=image_name,
+                    tag_template=tag_template,
+                    skip_unsupported_compose=skip_unsupported_compose,
+                )
+            else:
+                items = _build_dockerfile_batch_items(
+                    source_path,
+                    image_name=image_name,
+                    id_field=id_field,
+                    dockerfile_field=dockerfile_field,
+                    tag_template=tag_template,
+                )
+        except BatchInputError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+            raise typer.Exit(1) from exc
+
+        if manifest_output:
+            manifest_path = Path(manifest_output).resolve()
+            _write_batch_manifest(manifest_path, items)
+            console.print(f"[green]✓[/green] Wrote batch manifest: {manifest_path}")
+
+        console.print(f"[bold blue]Prepared {len(items)} image build(s):[/bold blue] {image_name}")
+        if config.team_id:
+            console.print(f"[dim]Team: {config.team_id}[/dim]")
+        if visibility is not None:
+            console.print(f"[bold]Visibility:[/bold] {visibility.value}")
+        else:
+            console.print(
+                "[bold]Visibility:[/bold] PRIVATE for new images "
+                "(existing tags keep their current visibility)"
+            )
+        console.print(f"[bold]Mode:[/bold] {mode.value}")
+        console.print()
+
+        for item in items:
+            console.print(f"  {item.source_id} -> {item.image_name}:{item.image_tag}")
+        console.print()
+
+        if dry_run:
+            console.print("[yellow]Dry run: no backend request was sent.[/yellow]")
+            console.print(
+                f"[dim]Draft backend target for real runs: POST {BATCH_BUILD_ENDPOINT}[/dim]"
+            )
+            console.print()
+            console.print("[bold]Generated manifest:[/bold]")
+            for item in items:
+                console.print(json.dumps(_batch_manifest_record(item), sort_keys=True))
+            return
+
+        context_items = [item for item in items if item.context_path is not None]
+        if context_items:
+            console.print("[cyan]Preparing Harbor build contexts...[/cyan]")
+            for item in context_items:
+                if item.context_path is None or item.dockerfile_path is None:
+                    console.print(
+                        f"[red]Error: Missing context metadata for {item.source_id}[/red]"
+                    )
+                    raise typer.Exit(1)
+                item.context_archive = _package_build_context(
+                    item.context_path,
+                    item.dockerfile_path,
+                    excluded_dirs=HARBOR_CONTEXT_EXCLUDES,
+                )
+            total_size = sum(item.context_archive.size_bytes for item in context_items)
+            console.print(
+                f"[green]✓[/green] Packaged {len(context_items)} context(s) "
+                f"({total_size / (1024 * 1024):.2f} MB)"
+            )
+            console.print()
+
+        client = APIClient()
+
+        console.print(f"[cyan]Creating image build batch via {BATCH_BUILD_ENDPOINT}...[/cyan]")
+        try:
+            batch_response = client.request(
+                "POST",
+                BATCH_BUILD_ENDPOINT,
+                json=_build_batch_payload(
+                    items,
+                    mode=mode,
+                    image_name=image_name,
+                    platform=platform,
+                    visibility=visibility,
+                ),
+            )
+        except UnauthorizedError:
+            console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+            raise typer.Exit(1)
+        except APIError as exc:
+            console.print(
+                "[red]Error: Failed to create image build batch via proposed "
+                f"backend endpoint {BATCH_BUILD_ENDPOINT}: {exc}[/red]"
+            )
+            console.print(
+                "[yellow]This draft CLI requires platform batch endpoint support.[/yellow]"
+            )
+            raise typer.Exit(1) from exc
+
+        batch_id = _batch_id(batch_response)
+        if batch_id is None:
+            console.print("[red]Error: Invalid response from server (missing batch_id)[/red]")
+            raise typer.Exit(1)
+
+        if context_items:
+            upload_urls = _batch_upload_urls(batch_response)
+            console.print("[cyan]Uploading Harbor build contexts...[/cyan]")
+            for item in context_items:
+                archive = item.context_archive
+                upload_url = upload_urls.get(item.source_id)
+                if archive is None or not upload_url:
+                    console.print(
+                        "[red]Error: Invalid response from server "
+                        f"(missing upload_url for {item.source_id})[/red]"
+                    )
+                    raise typer.Exit(1)
+                try:
+                    _upload_context_archive(upload_url, archive.path)
+                except httpx.HTTPError as exc:
+                    console.print(f"[red]Upload failed for {item.source_id}: {exc}[/red]")
+                    raise typer.Exit(1) from exc
+            console.print("[green]✓[/green] Build contexts uploaded")
+            console.print()
+
+        console.print("[cyan]Starting image build batch...[/cyan]")
+        try:
+            client.request(
+                "POST",
+                f"{BATCH_BUILD_ENDPOINT}/{batch_id}/start",
+                json={"contexts_uploaded": bool(context_items)},
+            )
+        except APIError as exc:
+            console.print(f"[red]Error: Failed to start image build batch: {exc}[/red]")
+            raise typer.Exit(1) from exc
+
+        console.print("[green]✓[/green] Batch build started")
+        console.print()
+        console.print("[bold green]Image build batch initiated successfully![/bold green]")
+        console.print(f"[bold]Batch ID:[/bold] {batch_id}")
+        console.print(f"[bold]Images:[/bold] {len(items)}")
+        console.print("[bold]Check build status:[/bold]")
+        console.print("  prime images list")
+        console.print()
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Operation cancelled by user[/yellow]")
+        raise typer.Exit(1)
+    finally:
+        _cleanup_batch_archives(items)
 
 
 @app.command("list", epilog=LIST_IMAGES_JSON_HELP)

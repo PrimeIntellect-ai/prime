@@ -25,6 +25,7 @@ from .exceptions import (
 )
 from .models import (
     AdvancedConfigs,
+    AuthorizeSSHForVMResponse,
     BackgroundJob,
     BackgroundJobStatus,
     BulkDeleteSandboxRequest,
@@ -84,6 +85,7 @@ __all__ = [
     "ExposedPort",
     "ListExposedPortsResponse",
     "SSHSession",
+    "AuthorizeSSHForVMResponse",
     # Exceptions
     "APIError",
     "UnauthorizedError",

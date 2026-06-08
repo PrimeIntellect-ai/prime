@@ -1544,7 +1544,7 @@ def run_eval_cmd(
         project_id = resolve_project_id(
             project,
             no_project=no_project,
-            use_active_project=True,
+            use_active_project=hosted or not skip_upload,
         )
     except APIError as exc:
         console.print(f"[red]Error:[/red] {exc}")

@@ -26,6 +26,18 @@ class UnauthorizedError(APIError):
     pass
 
 
+class NotFoundError(APIError):
+    """Raised when API returns 404 not found.
+
+    Surfaced as a typed exception so callers can branch on
+    'resource missing' without string-matching the message — used by
+    e.g. `prime train delete` to distinguish 'not a hosted run, try
+    LoRA' from genuine errors.
+    """
+
+    pass
+
+
 class PaymentRequiredError(APIError):
     """Raised when API returns 402 payment required"""
 
@@ -143,15 +155,16 @@ class APIClient:
                 except (ValueError, KeyError):
                     pass
 
+            error_cls = NotFoundError if e.response.status_code == 404 else APIError
             # For other HTTP errors, try to extract the error message from the response
             try:
                 error_response = e.response.json()
                 if isinstance(error_response, dict) and "detail" in error_response:
-                    raise APIError(f"HTTP {e.response.status_code}: {error_response['detail']}")
+                    raise error_cls(f"HTTP {e.response.status_code}: {error_response['detail']}")
             except (ValueError, KeyError):
                 pass
 
-            raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}") from e
+            raise error_cls(f"HTTP {e.response.status_code}: {e.response.text or str(e)}") from e
         except httpx.TimeoutException as e:
             raise APITimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:
@@ -283,15 +296,16 @@ class AsyncAPIClient:
                 except (ValueError, KeyError):
                     pass
 
+            error_cls = NotFoundError if e.response.status_code == 404 else APIError
             # For other HTTP errors, try to extract the error message from the response
             try:
                 error_response = e.response.json()
                 if isinstance(error_response, dict) and "detail" in error_response:
-                    raise APIError(f"HTTP {e.response.status_code}: {error_response['detail']}")
+                    raise error_cls(f"HTTP {e.response.status_code}: {error_response['detail']}")
             except (ValueError, KeyError):
                 pass
 
-            raise APIError(f"HTTP {e.response.status_code}: {e.response.text or str(e)}") from e
+            raise error_cls(f"HTTP {e.response.status_code}: {e.response.text or str(e)}") from e
         except httpx.TimeoutException as e:
             raise APITimeoutError(f"Request timed out: {e}") from e
         except httpx.RequestError as e:

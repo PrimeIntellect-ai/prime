@@ -906,12 +906,12 @@ def create_run(
     project: Optional[str] = typer.Option(
         None,
         "--project",
-        help="Project ID or slug to attach to this run.",
+        help="Project ID or slug. Defaults to the active project for this workspace.",
     ),
     no_project: bool = typer.Option(
         False,
         "--no-project",
-        help="Do not attach this run to a project.",
+        help="Do not attach this run to the active project.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
@@ -970,6 +970,7 @@ def create_run(
         project_id = resolve_project_id(
             project,
             no_project=no_project,
+            use_active_project=True,
             config=app_config,
             client=api_client,
         )

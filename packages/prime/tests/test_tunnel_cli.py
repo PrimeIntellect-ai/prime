@@ -239,7 +239,7 @@ def test_tunnel_stop_by_label_validates_scope_before_prompt(
     assert "Failed to delete" not in result.output
 
 
-def test_tunnel_stop_all_lists_then_bulk_deletes_explicit_ids(
+def test_tunnel_stop_all_uses_scoped_bulk_delete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
@@ -249,18 +249,11 @@ def test_tunnel_stop_all_lists_then_bulk_deletes_explicit_ids(
         config = SimpleNamespace(user_id="user-1", team_id=None)
 
         async def list_tunnels_page(self, **kwargs: Any) -> Any:
-            captured["list_kwargs"] = kwargs
-            return SimpleNamespace(
-                tunnels=[
-                    SimpleNamespace(tunnel_id="t-owned", user_id="user-1"),
-                    SimpleNamespace(tunnel_id="t-other", user_id="user-2"),
-                ],
-                has_next=False,
-            )
+            raise AssertionError("--all should not pre-list tunnels; it must scope the delete")
 
-        async def bulk_delete_tunnels(self, tunnel_ids: list[str]) -> dict[str, Any]:
-            captured["tunnel_ids"] = tunnel_ids
-            return {"succeeded": tunnel_ids, "failed": [], "message": "ok"}
+        async def bulk_delete_tunnels(self, **kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {"succeeded": ["t-owned"], "failed": [], "message": "ok"}
 
         async def close(self) -> None:
             return None
@@ -270,10 +263,10 @@ def test_tunnel_stop_all_lists_then_bulk_deletes_explicit_ids(
     result = runner.invoke(app, ["tunnel", "stop", "--all", "--yes"])
 
     assert result.exit_code == 0, result.output
-    assert captured["list_kwargs"]["team_id"] is None
-    assert captured["list_kwargs"]["page"] == 1
-    assert captured["list_kwargs"]["per_page"] == 1000
-    assert captured["tunnel_ids"] == ["t-owned"]
+    assert "tunnel_ids" not in captured
+    assert captured["user_id"] == "user-1"
+    assert captured["all_users"] is False
+    assert captured.get("team_id") is None
 
 
 def test_tunnel_stop_all_users_uses_configured_team_scope(
@@ -286,18 +279,11 @@ def test_tunnel_stop_all_users_uses_configured_team_scope(
         config = SimpleNamespace(user_id=None, team_id="team-1")
 
         async def list_tunnels_page(self, **kwargs: Any) -> Any:
-            captured["list_kwargs"] = kwargs
-            return SimpleNamespace(
-                tunnels=[
-                    SimpleNamespace(tunnel_id="t-owned", user_id="user-1"),
-                    SimpleNamespace(tunnel_id="t-other", user_id="user-2"),
-                ],
-                has_next=False,
-            )
+            raise AssertionError("--all should not pre-list tunnels; it must scope the delete")
 
-        async def bulk_delete_tunnels(self, tunnel_ids: list[str]) -> dict[str, Any]:
-            captured["tunnel_ids"] = tunnel_ids
-            return {"succeeded": tunnel_ids, "failed": [], "message": "ok"}
+        async def bulk_delete_tunnels(self, **kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {"succeeded": ["t-owned", "t-other"], "failed": [], "message": "ok"}
 
         async def close(self) -> None:
             return None
@@ -307,33 +293,24 @@ def test_tunnel_stop_all_users_uses_configured_team_scope(
     result = runner.invoke(app, ["tunnel", "stop", "--all", "--all-users", "--yes"])
 
     assert result.exit_code == 0, result.output
-    assert captured["list_kwargs"]["team_id"] == "team-1"
-    assert captured["tunnel_ids"] == ["t-owned", "t-other"]
+    assert "tunnel_ids" not in captured
+    assert captured["team_id"] == "team-1"
+    assert captured["all_users"] is True
+    assert captured.get("user_id") is None
 
 
-def test_tunnel_stop_all_paginates_before_bulk_delete(
+def test_tunnel_stop_all_exits_cleanly_when_nothing_matches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
-    captured: dict[str, Any] = {"pages": []}
-
-    page_1 = [SimpleNamespace(tunnel_id=f"t-{i}", user_id="user-1") for i in range(1, 1001)]
-    page_2 = [SimpleNamespace(tunnel_id="t-1001", user_id="user-1")]
+    captured: dict[str, Any] = {}
 
     class FakeTunnelClient:
         config = SimpleNamespace(user_id="user-1", team_id=None)
 
-        async def list_tunnels_page(self, **kwargs: Any) -> Any:
-            captured["pages"].append(kwargs["page"])
-            if kwargs["page"] == 1:
-                return SimpleNamespace(tunnels=page_1, has_next=True)
-            if kwargs["page"] == 2:
-                return SimpleNamespace(tunnels=page_2, has_next=False)
-            return SimpleNamespace(tunnels=[], has_next=False)
-
-        async def bulk_delete_tunnels(self, tunnel_ids: list[str]) -> dict[str, Any]:
-            captured["tunnel_ids"] = tunnel_ids
-            return {"succeeded": tunnel_ids, "failed": [], "message": "ok"}
+        async def bulk_delete_tunnels(self, **kwargs: Any) -> dict[str, Any]:
+            captured["called"] = True
+            return {"succeeded": [], "failed": [], "message": "ok"}
 
         async def close(self) -> None:
             return None
@@ -343,34 +320,8 @@ def test_tunnel_stop_all_paginates_before_bulk_delete(
     result = runner.invoke(app, ["tunnel", "stop", "--all", "--yes"])
 
     assert result.exit_code == 0, result.output
-    assert captured["pages"] == [1, 2]
-    assert captured["tunnel_ids"] == [f"t-{i}" for i in range(1, 1002)]
-
-
-def test_tunnel_stop_all_noops_when_no_active_tunnels(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
-
-    class FakeTunnelClient:
-        config = SimpleNamespace(user_id="user-1", team_id=None)
-
-        async def list_tunnels_page(self, **kwargs: Any) -> Any:
-            return SimpleNamespace(tunnels=[], has_next=False)
-
-        async def bulk_delete_tunnels(self, tunnel_ids: list[str]) -> dict[str, Any]:
-            raise AssertionError("bulk delete should not be called for an empty --all result")
-
-        async def close(self) -> None:
-            return None
-
-    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
-
-    result = runner.invoke(app, ["tunnel", "stop", "--all", "--yes"])
-
-    assert result.exit_code == 0, result.output
-    assert "No active tunnels to stop" in result.output
-    assert "--all-users" in result.output
+    assert captured.get("called") is True
+    assert "Processed 0 tunnel(s)" in result.output
 
 
 def test_tunnel_stop_all_requires_current_user_for_only_mine(

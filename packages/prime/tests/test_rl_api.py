@@ -9,6 +9,7 @@ class FakeAPIClient:
     def __init__(self) -> None:
         self.requests: list[tuple[str, dict[str, Any] | None]] = []
         self.posts: list[tuple[str, dict[str, Any] | None]] = []
+        self.patch_requests: list[tuple[str, str, dict[str, Any] | None]] = []
 
     def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         self.requests.append((endpoint, params))
@@ -40,9 +41,34 @@ class FakeAPIClient:
                 "batchSize": json["batch_size"] if json else 128,
                 "baseModel": json["model"]["name"] if json else "model",
                 "maxInflightRollouts": json.get("max_inflight_rollouts") if json else None,
+                "projectId": json.get("project_id") if json else None,
                 "createdAt": "2026-05-17T00:00:00Z",
                 "updatedAt": "2026-05-17T00:00:00Z",
             }
+        }
+
+    def request(
+        self,
+        method: str,
+        endpoint: str,
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.patch_requests.append((method, endpoint, json))
+        return {
+            "run": {
+                "id": "run-1",
+                "userId": "user-1",
+                "status": "QUEUED",
+                "rolloutsPerExample": 8,
+                "seqLen": 2048,
+                "maxSteps": 100,
+                "batchSize": 128,
+                "baseModel": "model",
+                "projectId": json.get("projectId") if json else None,
+                "createdAt": "2026-05-17T00:00:00Z",
+                "updatedAt": "2026-05-17T00:00:00Z",
+            },
+            "adaptersUpdated": 3,
         }
 
 
@@ -155,3 +181,45 @@ def test_create_run_omits_default_rl_loss() -> None:
     assert api_client.posts[0][0] == "/rft/runs"
     assert "loss" not in api_client.posts[0][1]
     assert "teacher" not in api_client.posts[0][1]
+
+
+def test_create_run_sends_project_id() -> None:
+    api_client = FakeAPIClient()
+    client = RLClient(api_client)  # type: ignore[arg-type]
+
+    run = client.create_run(
+        model_name="Qwen/Qwen3.5-0.8B",
+        environments=[{"id": "reverse-text"}],
+        project_id="project-123",
+    )
+
+    assert api_client.posts[0][0] == "/rft/runs"
+    assert api_client.posts[0][1]["project_id"] == "project-123"
+    assert "projectId" not in api_client.posts[0][1]
+    assert run.project_id == "project-123"
+
+
+def test_update_run_project_sends_backend_payload_shape() -> None:
+    api_client = FakeAPIClient()
+    client = RLClient(api_client)  # type: ignore[arg-type]
+
+    run, adapters_updated = client.update_run_project(
+        "run-123",
+        "project-123",
+        operation="remove",
+        move_adapters=False,
+    )
+
+    assert api_client.patch_requests == [
+        (
+            "PATCH",
+            "/rft/runs/run-123/project",
+            {
+                "projectId": "project-123",
+                "operation": "remove",
+                "moveAdapters": False,
+            },
+        )
+    ]
+    assert run.project_id == "project-123"
+    assert adapters_updated == 3

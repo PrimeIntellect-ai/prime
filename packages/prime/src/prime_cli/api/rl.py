@@ -199,7 +199,6 @@ class RLClient:
         secrets: Optional[Dict[str, str]] = None,
         team_id: Optional[str] = None,
         eval_config: Optional[Dict[str, Any]] = None,
-        val_config: Optional[Dict[str, Any]] = None,
         buffer_config: Optional[Dict[str, Any]] = None,
         learning_rate: Optional[float] = None,
         lora_alpha: Optional[int] = None,
@@ -270,9 +269,6 @@ class RLClient:
 
             if eval_config:
                 payload["eval"] = eval_config
-
-            if val_config:
-                payload["val"] = val_config
 
             if buffer_config:
                 payload["buffer"] = buffer_config

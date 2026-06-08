@@ -1763,6 +1763,37 @@ def test_lab_view_training_config_uses_sampling_for_max_tokens() -> None:
     HostedRLConfig.model_validate(parsed)
 
 
+def test_lab_view_training_config_drops_deprecated_val_config() -> None:
+    config = _training_config_toml(
+        {
+            "base_model": "Qwen/Qwen3.5-2B",
+            "environments": ["primeintellect/alphabet-sort"],
+            "val_config": {"interval": 5},
+        }
+    )
+
+    parsed = toml.loads(config)
+    assert "val" not in parsed
+    HostedRLConfig.model_validate(parsed)
+
+
+def test_config_builder_preserves_deprecated_val_for_schema_error() -> None:
+    config = {
+        "model": "Qwen/Qwen3.5-2B",
+        "env": [{"id": "primeintellect/alphabet-sort"}],
+        "val": {"interval": 5},
+    }
+    values = {
+        "config-model": "Qwen/Qwen3.5-2B",
+        "config-envs": "primeintellect/alphabet-sort",
+    }
+
+    build = build_config_from_fields(config, "rl", lambda field_id: values.get(field_id, ""))
+
+    assert "[val]" in build.toml_text
+    assert build.errors == ("val: Extra inputs are not permitted",)
+
+
 def test_lab_config_factory_renders_shared_eval_and_rl_templates() -> None:
     eval_toml = format_lab_config(
         evaluation_config(env_id="primeintellect/wordle", num_examples=-1, max_tokens=None)

@@ -274,12 +274,6 @@ id = "{env_value}"
 # num_examples = 30
 # rollouts_per_example = 4
 
-# Optional: validation during training
-# [val]
-# num_examples = 64
-# rollouts_per_example = 1
-# interval = 5
-
 # Optional: buffer configuration for difficulty filtering
 # [buffer]
 # easy_threshold = 1.0
@@ -491,24 +485,6 @@ class EvalConfig(BaseModel):
         return result
 
 
-class ValConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    num_examples: int | None = None
-    rollouts_per_example: int | None = None
-    interval: int | None = None
-
-    def to_api_dict(self) -> Dict[str, Any] | None:
-        result: Dict[str, Any] = {}
-        if self.num_examples is not None:
-            result["num_examples"] = self.num_examples
-        if self.rollouts_per_example is not None:
-            result["rollouts_per_example"] = self.rollouts_per_example
-        if self.interval is not None:
-            result["interval"] = self.interval
-        return result if result else None
-
-
 class BufferConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -685,7 +661,6 @@ class RLConfig(BaseModel):
     env: List[EnvConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
-    val: ValConfig = Field(default_factory=ValConfig)
     buffer: BufferConfig = Field(default_factory=BufferConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
@@ -1284,13 +1259,6 @@ def create_run(
             if cfg.eval.interval:
                 console.print(f"  Interval:     {cfg.eval.interval}")
 
-        # Validation
-        if cfg.val.num_examples is not None:
-            console.print("\n[cyan]Validation[/cyan]")
-            console.print(f"  Num Examples: {cfg.val.num_examples}")
-            if cfg.val.interval:
-                console.print(f"  Interval:     {cfg.val.interval}")
-
         # Infrastructure
         if cfg.infrastructure.compute_size:
             console.print("\n[cyan]Infrastructure[/cyan]")
@@ -1413,7 +1381,6 @@ def create_run(
             secrets=secrets if secrets else None,
             team_id=app_config.team_id,
             eval_config=cfg.eval.to_api_dict(),
-            val_config=cfg.val.to_api_dict(),
             buffer_config=cfg.buffer.to_api_dict(),
             learning_rate=cfg.learning_rate,
             lora_alpha=cfg.lora_alpha,

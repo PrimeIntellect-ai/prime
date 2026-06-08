@@ -424,7 +424,7 @@ def test_project_update_requires_field(monkeypatch, tmp_path) -> None:
     assert "Provide --name, --slug, --description, or --clear-description" in result.output
 
 
-def test_project_clear_removes_active_context(monkeypatch, tmp_path) -> None:
+def test_project_clear_marks_active_context_cleared(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
@@ -441,7 +441,10 @@ def test_project_clear_removes_active_context(monkeypatch, tmp_path) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Active project cleared" in result.output
-    assert not context_path.exists()
+    context = json.loads(context_path.read_text())
+    assert context["project_id"] is None
+    assert context[PROJECT_CONTEXT_CLEARED_KEY] is True
+    assert get_active_project_id() is None
 
 
 def test_project_clear_disables_env_project_for_workspace(monkeypatch, tmp_path) -> None:

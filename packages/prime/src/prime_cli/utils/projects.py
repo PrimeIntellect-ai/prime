@@ -133,28 +133,25 @@ def clear_project_context(
 ) -> bool:
     path = _find_project_context_path(workspace)
     env_project_id = _env_project_id()
-    if env_project_id:
-        config = config or Config()
-        path = path or _write_project_context_path(workspace)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "project_id": None,
-                    PROJECT_CONTEXT_CLEARED_KEY: True,
-                    "team_id": config.team_id,
-                    "base_url": config.base_url,
-                },
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        return True
-
-    if path is None:
+    if path is None and not env_project_id:
         return False
-    path.unlink()
+
+    config = config or Config()
+    path = path or _write_project_context_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "project_id": None,
+                PROJECT_CONTEXT_CLEARED_KEY: True,
+                "team_id": config.team_id,
+                "base_url": config.base_url,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return True
 
 

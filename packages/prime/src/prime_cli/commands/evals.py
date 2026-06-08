@@ -1223,12 +1223,12 @@ def push_eval(
     project: Optional[str] = typer.Option(
         None,
         "--project",
-        help="Project ID or slug to attach to this evaluation.",
+        help="Project ID or slug. Defaults to the active project for this workspace.",
     ),
     no_project: bool = typer.Option(
         False,
         "--no-project",
-        help="Do not attach this evaluation to a project.",
+        help="Do not attach this evaluation to the active project.",
     ),
 ) -> None:
     """Push evaluation data to Prime Evals.
@@ -1260,7 +1260,11 @@ def push_eval(
             console.print("  prime eval push outputs/evals/env--model/run-id --eval-id <eval-id>")
             raise typer.Exit(1)
 
-        project_id = resolve_project_id(project, no_project=no_project)
+        project_id = resolve_project_id(
+            project,
+            no_project=no_project,
+            use_active_project=eval_id is None,
+        )
         clear_project = bool(eval_id and no_project)
 
         if config_path is None:
@@ -1510,12 +1514,12 @@ def run_eval_cmd(
     project: Optional[str] = typer.Option(
         None,
         "--project",
-        help="Project ID or slug to attach to this evaluation.",
+        help="Project ID or slug. Defaults to the active project for this workspace.",
     ),
     no_project: bool = typer.Option(
         False,
         "--no-project",
-        help="Do not attach this evaluation to a project.",
+        help="Do not attach this evaluation to the active project.",
     ),
 ) -> None:
     """Run an evaluation with local-first environment resolution."""
@@ -1537,7 +1541,11 @@ def run_eval_cmd(
 
     env_dir_path: Optional[str] = None
     try:
-        project_id = resolve_project_id(project, no_project=no_project)
+        project_id = resolve_project_id(
+            project,
+            no_project=no_project,
+            use_active_project=True,
+        )
     except APIError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc

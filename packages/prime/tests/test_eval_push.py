@@ -352,7 +352,7 @@ def test_push_eval_forwards_resolved_project_id(monkeypatch, tmp_path):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     monkeypatch.setattr(
         "prime_cli.commands.evals.resolve_project_id",
-        lambda project, no_project=False: "project-123",
+        lambda project, no_project=False, use_active_project=False: "project-123",
     )
 
     captured = {}
@@ -403,6 +403,49 @@ def test_push_eval_forwards_resolved_project_id(monkeypatch, tmp_path):
         "project_id": "project-123",
         "clear_project": False,
     }
+
+
+def test_push_eval_id_does_not_resolve_active_project(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    resolve_calls = []
+
+    def fake_resolve_project_id(project, no_project=False, use_active_project=False):
+        resolve_calls.append((project, no_project, use_active_project))
+        return "active-project" if use_active_project else None
+
+    captured = {}
+
+    def fake_push_single_eval(
+        config_path,
+        env_slug,
+        run_id,
+        eval_id,
+        is_public,
+        name,
+        project_id=None,
+        clear_project=False,
+    ):
+        captured["eval_id"] = eval_id
+        captured["project_id"] = project_id
+        captured["clear_project"] = clear_project
+        return "eval-123"
+
+    monkeypatch.setattr("prime_cli.commands.evals.resolve_project_id", fake_resolve_project_id)
+    monkeypatch.setattr("prime_cli.commands.evals._push_single_eval", fake_push_single_eval)
+
+    (tmp_path / "metadata.json").write_text(json.dumps({"env": "gsm8k", "model": "gpt-4"}))
+    (tmp_path / "results.jsonl").write_text("")
+
+    result = runner.invoke(
+        app,
+        ["eval", "push", ".", "--eval-id", "eval-123"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert resolve_calls == [(None, False, False)]
+    assert captured == {"eval_id": "eval-123", "project_id": None, "clear_project": False}
 
 
 class TestPushSingleEval:

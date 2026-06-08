@@ -59,7 +59,7 @@ def push_eval_results_to_hub(
     env_path: Optional[Path] = None,
     upstream_slug: Optional[str] = None,
     project_id: Optional[str] = None,
-    use_active_project: bool = False,
+    use_active_project: bool = True,
 ) -> None:
     """
     Push evaluation results to Prime Evals Hub after `prime eval run` completes.

@@ -141,8 +141,8 @@ def _append_eval_options(help_text: str) -> str:
         "Allow tunnel creation and management for hosted evaluations.",
         "  --custom-secrets JSON       Custom sandbox secrets for hosted evaluations.",
         "  --eval-name TEXT            Custom name for the hosted evaluation.",
-        "  --project TEXT              Project ID or slug to attach to this evaluation.",
-        "  --no-project                Do not attach this evaluation to a project.",
+        "  --project TEXT              Project ID or slug. Defaults to the active project.",
+        "  --no-project                Do not attach this evaluation to the active project.",
     ]
     lines = help_text.rstrip("\n").splitlines()
     for extra_line in extra_lines:
@@ -950,7 +950,7 @@ def run_eval_passthrough(
     skip_upload: bool,
     env_path: Optional[str],
     project_id: Optional[str] = None,
-    use_active_project: bool = False,
+    use_active_project: bool = True,
 ) -> None:
     plugin = load_verifiers_prime_plugin(console=console)
     config = Config()

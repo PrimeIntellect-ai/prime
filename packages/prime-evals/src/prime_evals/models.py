@@ -32,6 +32,7 @@ class Evaluation(BaseModel):
     run_id: Optional[str] = Field(None, alias="runId")
     version_id: Optional[str] = Field(None, alias="versionId")
     tags: List[str] = Field(default_factory=list)
+    project_id: Optional[str] = Field(None, alias="projectId")
     metadata: Optional[Dict[str, Any]] = None
     metrics: Optional[Dict[str, Any]] = None
     total_samples: Optional[int] = Field(None, alias="totalSamples")
@@ -66,6 +67,7 @@ class CreateEvaluationRequest(BaseModel):
     task_type: Optional[str] = None
     description: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
+    project_id: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     metrics: Optional[Dict[str, Any]] = None
 

@@ -68,6 +68,8 @@ class Tunnel:
         log_level: str = "info",
         team_id: Optional[str] = None,
         labels: Optional[list[str]] = None,
+        http_user: Optional[str] = None,
+        http_password: Optional[str] = None,
     ):
         """
         Initialize a tunnel.
@@ -80,6 +82,8 @@ class Tunnel:
             labels: Optional labels for organizing tunnels
             connection_timeout: Timeout for establishing connection (seconds)
             log_level: frpc log level (trace, debug, info, warn, error)
+            http_user: Optional HTTP basic auth username protecting tunnel traffic
+            http_password: Optional HTTP basic auth password protecting tunnel traffic
         """
         self.local_port = local_port
         self.local_addr = local_addr
@@ -88,6 +92,8 @@ class Tunnel:
         self.labels = labels or []
         self.connection_timeout = connection_timeout
         self.log_level = log_level
+        self.http_user = http_user
+        self.http_password = http_password
 
         self._client = TunnelClient()
         self._process: Optional[subprocess.Popen] = None
@@ -157,6 +163,8 @@ class Tunnel:
                 name=self.name,
                 team_id=self.team_id,
                 labels=self.labels,
+                http_user=self.http_user,
+                http_password=self.http_password,
             )
         except BaseException as e:
             await self._cleanup()

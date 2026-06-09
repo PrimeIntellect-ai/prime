@@ -52,6 +52,8 @@ def test_tunnel_start_cli_passes_labels_to_sdk(monkeypatch: pytest.MonkeyPatch) 
             name: str | None,
             team_id: str | None,
             labels: list[str] | None,
+            http_user: str | None,
+            http_password: str | None,
         ) -> None:
             captured.update(
                 {
@@ -59,6 +61,8 @@ def test_tunnel_start_cli_passes_labels_to_sdk(monkeypatch: pytest.MonkeyPatch) 
                     "name": name,
                     "team_id": team_id,
                     "labels": labels,
+                    "http_user": http_user,
+                    "http_password": http_password,
                 }
             )
 
@@ -82,8 +86,67 @@ def test_tunnel_start_cli_passes_labels_to_sdk(monkeypatch: pytest.MonkeyPatch) 
         "name": None,
         "team_id": None,
         "labels": ["dev", "preview"],
+        "http_user": None,
+        "http_password": None,
         "stopped": True,
     }
+
+
+def test_tunnel_start_cli_passes_auth_to_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    captured: dict[str, Any] = {}
+
+    class DoneEvent:
+        def is_set(self) -> bool:
+            return True
+
+        def set(self) -> None:
+            return None
+
+        async def wait(self) -> None:
+            return None
+
+    class FakeTunnel:
+        tunnel_id = "t-test123"
+        is_running = True
+        recent_output: list[str] = []
+
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        async def start(self) -> str:
+            return "https://t-test123.example.com"
+
+        async def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr("prime_cli.commands.tunnel.asyncio.Event", DoneEvent)
+    monkeypatch.setattr("prime_tunnel.Tunnel", FakeTunnel)
+
+    result = runner.invoke(
+        app,
+        ["tunnel", "start", "--port", "8765", "--auth", "alice:s3cret:extra"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["http_user"] == "alice"
+    # Password may itself contain colons; only the first separates the user.
+    assert captured["http_password"] == "s3cret:extra"
+    assert "Basic auth user:" in result.output
+
+
+def test_tunnel_start_cli_rejects_malformed_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+    for bad_auth in ("alice", "alice:", ":s3cret"):
+        result = runner.invoke(
+            app,
+            ["tunnel", "start", "--port", "8765", "--auth", bad_auth],
+        )
+        assert result.exit_code == 1, result.output
+        assert "Invalid --auth value" in result.output
 
 
 def test_format_tunnel_does_not_derive_created_from_expiration() -> None:

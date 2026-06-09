@@ -167,6 +167,8 @@ class TunnelClient:
         name: Optional[str] = None,
         team_id: Optional[str] = None,
         labels: Optional[list[str]] = None,
+        http_user: Optional[str] = None,
+        http_password: Optional[str] = None,
     ) -> TunnelInfo:
         """
         Register a new tunnel with the backend.
@@ -176,6 +178,8 @@ class TunnelClient:
             name: Optional friendly name for the tunnel
             team_id: Optional team ID for team tunnels
             labels: Optional labels for organizing tunnels
+            http_user: Optional HTTP basic auth username for tunnel traffic
+            http_password: Optional HTTP basic auth password for tunnel traffic
 
         Returns:
             TunnelInfo with connection details
@@ -197,6 +201,10 @@ class TunnelClient:
             payload["teamId"] = team_id
         if labels:
             payload["labels"] = labels
+        if http_user:
+            payload["http_user"] = http_user
+        if http_password:
+            payload["http_password"] = http_password
 
         try:
             response = await self._request_with_retry("POST", url, json=payload)
@@ -250,6 +258,7 @@ class TunnelClient:
             name=data.get("name"),
             local_port=data.get("local_port"),
             labels=data.get("labels", []),
+            http_user=data.get("http_user"),
             expires_at=data["expires_at"],
             user_id=data.get("user_id"),
             team_id=data.get("team_id"),
@@ -385,6 +394,7 @@ class TunnelClient:
                     name=t.get("name"),
                     local_port=t.get("local_port"),
                     labels=t.get("labels", []),
+                    http_user=t.get("http_user"),
                     expires_at=t["expires_at"],
                     user_id=t.get("user_id"),
                     team_id=t.get("team_id"),

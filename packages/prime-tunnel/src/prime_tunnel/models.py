@@ -17,6 +17,12 @@ class TunnelInfo(BaseModel):
     server_port: int = Field(7000, description="frps server port")
     local_port: Optional[int] = Field(None, description="Local port forwarded by the tunnel")
     labels: List[str] = Field(default_factory=list, description="Tunnel labels")
+    http_user: Optional[str] = Field(
+        None, description="HTTP basic auth username, if auth is enabled"
+    )
+    http_password: Optional[str] = Field(
+        None, description="HTTP basic auth password, if auth is enabled"
+    )
     expires_at: datetime = Field(..., description="Token expiration time")
     # Optional because create_tunnel response doesn't include user_id
     user_id: Optional[str] = Field(None, description="Owner user ID")

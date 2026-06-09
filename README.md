@@ -103,15 +103,17 @@ See [prime-sandboxes documentation](./packages/prime-sandboxes/) for SDK usage.
 #### API Key Setup
 
 ```bash
-# Interactive mode (recommended - hides input)
+# Interactive login (recommended)
+prime login
+
+# Store a key in the active Prime config
 prime config set-api-key
 
-# Non-interactive mode (for automation)
-prime config set-api-key YOUR_API_KEY
-
-# Environment variable (most secure for scripts)
-export PRIME_API_KEY="your-api-key-here"
+# Process-scoped override for one command
+PRIME_API_KEY="your-api-key-here" python script.py
 ```
+
+Avoid exporting `PRIME_API_KEY` globally unless you want it to override your active Prime config in every project. For project-specific tools that require env vars, prefer a project-scoped `.env`/direnv setup.
 
 #### Other Configuration
 
@@ -123,7 +125,7 @@ prime config set-ssh-key-path
 prime config view
 ```
 
-**Security Note**: When using non-interactive mode, the API key may be visible in your shell history. For enhanced security, use interactive mode or environment variables.
+**Security Note**: Passing API keys as command arguments can leave them in shell history. Prefer `prime login` or the interactive `prime config set-api-key` prompt; use environment variables only as process- or project-scoped overrides.
 
 ### Environments Hub
 
@@ -199,6 +201,30 @@ prime pods create --name my-pod # With custom name
 prime pods status <pod-id>
 prime pods terminate <pod-id>
 prime pods ssh <pod-id>
+```
+
+### Prime Inference from Python
+
+Prime Inference is OpenAI-compatible. Configure the standard OpenAI client from the active Prime context instead of reading `PRIME_API_KEY` directly:
+
+```python
+from openai import OpenAI
+from prime_cli import Config
+
+prime = Config()
+client_kwargs = {
+    "base_url": prime.inference_url,
+    "api_key": prime.api_key,
+}
+if prime.team_id:
+    client_kwargs["default_headers"] = {"X-Prime-Team-ID": prime.team_id}
+
+client = OpenAI(**client_kwargs)
+response = client.chat.completions.create(
+    model="qwen/qwen3-30b-a3b-instruct-2507",
+    messages=[{"role": "user", "content": "Say hi."}],
+)
+print(response.choices[0].message.content)
 ```
 
 ### Evaluations

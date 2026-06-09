@@ -27,8 +27,8 @@ pip install prime-sandboxes
 ```python
 from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest
 
-# Initialize
-client = APIClient(api_key="your-api-key")
+# Initialize from prime login / active config
+client = APIClient()
 sandbox_client = SandboxClient(client)
 
 # Create a sandbox
@@ -60,7 +60,7 @@ import asyncio
 from prime_sandboxes import AsyncSandboxClient, CreateSandboxRequest
 
 async def main():
-    async with AsyncSandboxClient(api_key="your-api-key") as client:
+    async with AsyncSandboxClient() as client:
         # Create sandbox
         sandbox = await client.create(CreateSandboxRequest(
             name="async-sandbox",
@@ -83,8 +83,10 @@ asyncio.run(main())
 The SDK looks for credentials in this order:
 
 1. **Direct parameter**: `APIClient(api_key="sk-...")`
-2. **Environment variable**: `export PRIME_API_KEY="sk-..."`
-3. **Config file**: `~/.prime/config.json` (created by `prime login` CLI command)
+2. **Process environment override**: `PRIME_API_KEY="sk-..." python script.py`
+3. **Config file**: `~/.prime/config.json` (created by `prime login`)
+
+Prefer `prime login` when using the full Prime CLI. If a standalone script needs an env var, scope `PRIME_API_KEY` to that process or project instead of exporting it globally.
 
 ## Advanced Features
 

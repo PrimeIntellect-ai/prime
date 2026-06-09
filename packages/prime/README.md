@@ -69,14 +69,14 @@ pip install prime
 # Interactive login (recommended)
 prime login
 
-# Or set API key directly
+# Or set API key directly in the active Prime config
 prime config set-api-key
 
-# Or use environment variable
-export PRIME_API_KEY="your-api-key-here"
+# For one-off scripts, scope env overrides to that process only
+PRIME_API_KEY="your-api-key-here" python script.py
 ```
 
-Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect.ai).
+Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect.ai). Avoid exporting `PRIME_API_KEY` globally unless you want it to override your active Prime config in every project.
 
 ### Basic Usage
 
@@ -228,20 +228,20 @@ prime pods list
 
 ### API Key
 
-Multiple ways to configure your API key:
+Recommended setup:
 
 ```bash
-# Option 1: Interactive (hides input)
+# Option 1: Interactive login (recommended)
+prime login
+
+# Option 2: Store a key in the active Prime config
 prime config set-api-key
 
-# Option 2: Direct
-prime config set-api-key YOUR_API_KEY
-
-# Option 3: Environment variable
-export PRIME_API_KEY="your-api-key"
+# Option 3: Process-scoped override for one command
+PRIME_API_KEY="your-api-key" python script.py
 ```
 
-Configuration priority: CLI config > Environment variable
+Resolution priority is: explicit SDK/client argument > `PRIME_*` environment override > active Prime config. Because environment variables override the active config, prefer `prime login`, `prime switch`, and project-scoped `.env` files over globally exporting `PRIME_API_KEY`.
 
 ### SSH Key
 
@@ -259,13 +259,39 @@ prime config view
 
 ## Python SDK
 
-Prime also provides a Python SDK for programmatic access:
+Prime also provides a Python SDK for programmatic access. SDK clients use the active Prime config created by `prime login`, so library code should not read `PRIME_API_KEY` directly.
+
+### Prime Inference
+
+Prime Inference is OpenAI-compatible. Configure the standard OpenAI client from the active Prime context instead of reading `PRIME_API_KEY` directly:
+
+```python
+from openai import OpenAI
+from prime_cli import Config
+
+prime = Config()
+client_kwargs = {
+    "base_url": prime.inference_url,
+    "api_key": prime.api_key,
+}
+if prime.team_id:
+    client_kwargs["default_headers"] = {"X-Prime-Team-ID": prime.team_id}
+
+client = OpenAI(**client_kwargs)
+response = client.chat.completions.create(
+    model="qwen/qwen3-30b-a3b-instruct-2507",
+    messages=[{"role": "user", "content": "Say hi."}],
+)
+print(response.choices[0].message.content)
+```
+
+### Sandboxes
 
 ```python
 from prime_sandboxes import APIClient, SandboxClient, CreateSandboxRequest
 
-# Initialize client
-client = APIClient(api_key="your-api-key")
+# Initialize client from prime login / active config
+client = APIClient()
 sandbox_client = SandboxClient(client)
 
 # Create a sandbox
@@ -294,7 +320,7 @@ import asyncio
 from prime_sandboxes import AsyncSandboxClient, CreateSandboxRequest
 
 async def main():
-    async with AsyncSandboxClient(api_key="your-api-key") as client:
+    async with AsyncSandboxClient() as client:
         sandbox = await client.create(CreateSandboxRequest(
             name="async-sandbox",
             docker_image="python:3.11-slim",

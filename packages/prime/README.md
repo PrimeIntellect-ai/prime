@@ -267,17 +267,14 @@ Prime Inference is OpenAI-compatible. Configure the standard OpenAI client from 
 
 ```python
 from openai import OpenAI
-from prime_cli import Config
+from prime import Config
 
 prime = Config()
-client_kwargs = {
-    "base_url": prime.inference_url,
-    "api_key": prime.api_key,
-}
-if prime.team_id:
-    client_kwargs["default_headers"] = {"X-Prime-Team-ID": prime.team_id}
-
-client = OpenAI(**client_kwargs)
+client = OpenAI(
+    base_url=prime.inference_url,
+    api_key=prime.api_key,
+    default_headers=prime.inference_headers,
+)
 response = client.chat.completions.create(
     model="qwen/qwen3-30b-a3b-instruct-2507",
     messages=[{"role": "user", "content": "Say hi."}],

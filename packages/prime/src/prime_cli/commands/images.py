@@ -1151,7 +1151,7 @@ def push_image_batch(
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Validate inputs and print the manifest without calling the draft backend endpoint",
+        help="Validate inputs and print the manifest without calling the backend",
     ),
     skip_unsupported_compose: bool = typer.Option(
         False,
@@ -1160,12 +1160,12 @@ def push_image_batch(
     ),
 ):
     """
-    Build and push many Docker images using a draft future batch backend.
+    Build and push many Docker images in a single batch.
 
-    This command is a CLI-first draft for a proposed backend resource:
-    POST /images/build-batches, followed by optional context uploads and
-    POST /images/build-batches/{batch_id}/start. It may fail against the
-    current backend until platform batch endpoints are implemented.
+    The batch is created with POST /images/build-batches, followed by optional
+    Harbor context uploads and POST /images/build-batches/{batch_id}/start. The
+    platform fans each item out to its own build, capped by a per-batch
+    concurrency limit, and bills each completed image as usual.
 
     Dockerfile mode is the default. It reads JSONL rows with id/task_id and
     dockerfile fields, where dockerfile is raw Dockerfile text.
@@ -1232,9 +1232,7 @@ def push_image_batch(
 
         if dry_run:
             console.print("[yellow]Dry run: no backend request was sent.[/yellow]")
-            console.print(
-                f"[dim]Draft backend target for real runs: POST {BATCH_BUILD_ENDPOINT}[/dim]"
-            )
+            console.print(f"[dim]Real runs submit to: POST {BATCH_BUILD_ENDPOINT}[/dim]")
             console.print()
             console.print("[bold]Generated manifest:[/bold]")
             for item in items:
@@ -1281,13 +1279,7 @@ def push_image_batch(
             console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
             raise typer.Exit(1)
         except APIError as exc:
-            console.print(
-                "[red]Error: Failed to create image build batch via proposed "
-                f"backend endpoint {BATCH_BUILD_ENDPOINT}: {exc}[/red]"
-            )
-            console.print(
-                "[yellow]This draft CLI requires platform batch endpoint support.[/yellow]"
-            )
+            console.print(f"[red]Error: Failed to create image build batch: {exc}[/red]")
             raise typer.Exit(1) from exc
 
         batch_id = _batch_id(batch_response)

@@ -190,6 +190,9 @@ class TunnelClient:
         """
         self._check_auth_required()
 
+        if bool(http_user) != bool(http_password):
+            raise TunnelError("http_user and http_password must be provided together")
+
         if team_id is None:
             team_id = self.config.team_id
 

@@ -269,6 +269,17 @@ async def test_client_create_tunnel_sends_http_auth(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_client_create_tunnel_rejects_partial_http_auth():
+    client = TunnelClient(api_key="test-key")
+
+    with pytest.raises(TunnelError, match="provided together"):
+        await client.create_tunnel(local_port=8765, http_user="alice")
+
+    with pytest.raises(TunnelError, match="provided together"):
+        await client.create_tunnel(local_port=8765, http_password="s3cret")
+
+
+@pytest.mark.asyncio
 async def test_client_list_tunnels_uses_plural_labels_param(monkeypatch):
     client = TunnelClient(api_key="test-key")
     captured = {}

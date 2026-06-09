@@ -10,6 +10,7 @@ from prime_cli import Config as CliConfig
 @pytest.fixture
 def temp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
 
 
 def test_prime_exports_config() -> None:

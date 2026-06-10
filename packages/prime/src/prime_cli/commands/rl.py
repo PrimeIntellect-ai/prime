@@ -876,6 +876,14 @@ def _dispatch_full_finetune_run(
         raise typer.Exit(1)
     resolved_image_tag = image_tag or config_image_tag
 
+    # Same deprecation pass as the LoRA path. In the prime-rl-native shape
+    # the deprecated keys live one level down, under `[orchestrator]` — and
+    # this config ships verbatim to the dedicated training endpoint, where
+    # orch v2 rejects the removed keys as "Extra inputs are not permitted".
+    orch_section = raw_cfg.get("orchestrator")
+    if isinstance(orch_section, dict):
+        _remove_deprecated_config_keys(orch_section)
+
     # Strip CLI-only secret-loading keys before shipping the TOML to the
     # backend. `env_file` / `env_files` only meaningfully exist on the
     # caller's filesystem — the hosted pod doesn't see them, and prime-rl

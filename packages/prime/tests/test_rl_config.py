@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import List
 
 import pytest
 import typer
@@ -9,6 +10,7 @@ from prime_cli.commands.rl import (
     generate_rl_config_template,
     load_config,
 )
+from pydantic import BaseModel
 
 
 def test_load_config_warns_and_ignores_deprecated_trajectory_strategy(
@@ -42,13 +44,6 @@ def test_load_config_still_rejects_other_unknown_keys(tmp_path: Path) -> None:
 
     with pytest.raises(typer.Exit):
         load_config(str(config_path))
-
-
-def test_generate_rl_config_template_uses_broad_buffer_threshold_examples() -> None:
-    template = generate_rl_config_template()
-
-    assert "# easy_threshold = 1.0" in template
-    assert "# hard_threshold = 0.0" in template
 
 
 def test_generate_rl_config_template_keeps_default_surface_minimal() -> None:
@@ -114,13 +109,16 @@ def test_flatten_config_schema_expands_optional_nested_models() -> None:
 
 
 def test_flatten_config_schema_preserves_optional_array_item_types() -> None:
-    schema = RLConfig.model_json_schema()
+    class _OptionalArrayModel(BaseModel):
+        ratios: List[float] | None = None
+
+    schema = _OptionalArrayModel.model_json_schema()
     rows = {
         path: type_str
         for path, type_str, _ in _flatten_config_schema(schema, schema.get("$defs", {}))
     }
 
-    assert rows["buffer.env_ratios"] == "list[number]"
+    assert rows["ratios"] == "list[number]"
 
 
 def test_load_config_accepts_sampling_reasoning_effort(tmp_path: Path) -> None:

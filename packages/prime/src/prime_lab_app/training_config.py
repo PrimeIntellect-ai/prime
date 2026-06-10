@@ -47,8 +47,6 @@ def training_config_toml(raw: dict[str, Any]) -> str:
         config["eval"] = _rl_eval_config(raw["eval_config"])
     if isinstance(raw.get("val_config"), dict):
         config["val"] = raw["val_config"]
-    if isinstance(raw.get("buffer_config"), dict):
-        config["buffer"] = raw["buffer_config"]
 
     filtered = _filter_empty_values(normalize_rl_config(config))
     return format_toml_blocks(toml.dumps(filtered)).rstrip() if filtered else ""
@@ -81,12 +79,10 @@ def normalize_rl_config(config: dict[str, Any]) -> dict[str, Any]:
             updated["val"] = val_config
     else:
         updated.pop("val_config", None)
-    if "buffer_config" in updated and "buffer" not in updated:
-        buffer_config = updated.pop("buffer_config")
-        if isinstance(buffer_config, dict):
-            updated["buffer"] = buffer_config
-    else:
-        updated.pop("buffer_config", None)
+    # The difficulty-filtering buffer was removed in prime-rl orch v2; strip it
+    # from regenerated configs so historical runs don't carry it forward.
+    updated.pop("buffer_config", None)
+    updated.pop("buffer", None)
     updated.pop("run_config", None)
     return updated
 

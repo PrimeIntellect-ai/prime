@@ -201,6 +201,14 @@ def _rl_eval_config(config: dict[str, Any]) -> dict[str, Any]:
         updated["env"] = _rl_env_configs(_list_value(updated["env"]))
     elif isinstance(environments, list) and environments:
         updated["env"] = _rl_env_configs(environments)
+    # Historical runs store the deprecated `eval_base_model`; regenerate
+    # configs with its prime-rl orch v2 replacement (inverted meaning).
+    # `eval_base_model = true` matches the `skip_first_step` default, so it
+    # is simply dropped instead of emitting a redundant `= false`.
+    if "eval_base_model" in updated:
+        legacy = updated.pop("eval_base_model")
+        if legacy is False and "skip_first_step" not in updated:
+            updated["skip_first_step"] = True
     return updated
 
 

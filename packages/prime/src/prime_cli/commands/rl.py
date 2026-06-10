@@ -265,7 +265,7 @@ id = "{env_value}"
 # # optional: default for all environments
 # num_examples = -1
 # rollouts_per_example = 1
-# eval_base_model = true
+# skip_first_step = false # set true to skip the pre-training eval of the base model
 #
 # [[eval.env]]
 # id = "primeintellect/eval-env"
@@ -458,7 +458,11 @@ class EvalConfig(BaseModel):
     interval: int | None = None
     num_examples: int | None = None
     rollouts_per_example: int | None = None
-    eval_base_model: bool | None = None
+    skip_first_step: bool | None = None
+    """Skip the eval of the base model that otherwise runs before training
+    starts. Replaces the deprecated ``eval_base_model`` with inverted meaning
+    (``eval_base_model = false`` ≡ ``skip_first_step = true``), matching the
+    prime-rl orch v2 rename."""
     env: List[EvalEnvConfig] = Field(default_factory=list)
     sampling: EvalSamplingConfig | None = None
 
@@ -472,8 +476,8 @@ class EvalConfig(BaseModel):
             result["num_examples"] = self.num_examples
         if self.rollouts_per_example is not None:
             result["rollouts_per_example"] = self.rollouts_per_example
-        if self.eval_base_model is not None:
-            result["eval_base_model"] = self.eval_base_model
+        if self.skip_first_step is not None:
+            result["skip_first_step"] = self.skip_first_step
         if self.sampling is not None:
             sampling_dict = self.sampling.model_dump(exclude_none=True)
             if sampling_dict:
@@ -703,6 +707,26 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
             "[yellow]Warning:[/yellow] `[buffer]` is deprecated and ignored: "
             "the difficulty-filtering buffer was removed from the trainer."
         )
+
+    eval_section = data.get("eval")
+    if isinstance(eval_section, dict) and "eval_base_model" in eval_section:
+        legacy = eval_section.pop("eval_base_model")
+        if "skip_first_step" in eval_section:
+            console.print(
+                "[yellow]Warning:[/yellow] `eval.eval_base_model` is deprecated and "
+                "ignored because `eval.skip_first_step` is also set. Remove "
+                "`eval_base_model` from your config."
+            )
+        else:
+            translated = (not legacy) if isinstance(legacy, bool) else legacy
+            eval_section["skip_first_step"] = translated
+            console.print(
+                "[yellow]Warning:[/yellow] `eval.eval_base_model` is deprecated: "
+                "prime-rl renamed it to `skip_first_step` with inverted meaning "
+                "(`eval_base_model = false` ≡ `skip_first_step = true`). "
+                f"Translating to `skip_first_step = {str(translated).lower()}` — "
+                "update your config to use `skip_first_step` directly."
+            )
 
 
 def _peek_toml(config_path: str) -> Dict[str, Any]:

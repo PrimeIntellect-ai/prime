@@ -53,7 +53,6 @@ def test_tunnel_start_cli_passes_labels_to_sdk(monkeypatch: pytest.MonkeyPatch) 
             team_id: str | None,
             labels: list[str] | None,
             http_user: str | None,
-            http_password: str | None,
         ) -> None:
             captured.update(
                 {
@@ -62,7 +61,6 @@ def test_tunnel_start_cli_passes_labels_to_sdk(monkeypatch: pytest.MonkeyPatch) 
                     "team_id": team_id,
                     "labels": labels,
                     "http_user": http_user,
-                    "http_password": http_password,
                 }
             )
 
@@ -87,7 +85,6 @@ def test_tunnel_start_cli_passes_labels_to_sdk(monkeypatch: pytest.MonkeyPatch) 
         "team_id": None,
         "labels": ["dev", "preview"],
         "http_user": None,
-        "http_password": None,
         "stopped": True,
     }
 
@@ -110,6 +107,7 @@ def test_tunnel_start_cli_passes_auth_to_sdk(monkeypatch: pytest.MonkeyPatch) ->
         tunnel_id = "t-test123"
         is_running = True
         recent_output: list[str] = []
+        http_password = "generated-by-backend"
 
         def __init__(self, **kwargs) -> None:
             captured.update(kwargs)
@@ -125,28 +123,29 @@ def test_tunnel_start_cli_passes_auth_to_sdk(monkeypatch: pytest.MonkeyPatch) ->
 
     result = runner.invoke(
         app,
-        ["tunnel", "start", "--port", "8765", "--auth", "alice:s3cret:extra"],
+        ["tunnel", "start", "--port", "8765", "--auth", "alice"],
     )
 
     assert result.exit_code == 0, result.output
     assert captured["http_user"] == "alice"
-    # Password may itself contain colons; only the first separates the user.
-    assert captured["http_password"] == "s3cret:extra"
+    assert "http_password" not in captured
     assert "Basic auth user:" in result.output
+    assert "generated-by-backend" in result.output
+    assert "shown only once" in result.output
 
 
-def test_tunnel_start_cli_rejects_malformed_auth(
+def test_tunnel_start_cli_rejects_invalid_auth_username(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
 
-    for bad_auth in ("alice", "alice:", ":s3cret"):
+    for bad_auth in ("alice:s3cret", "alice bob", " "):
         result = runner.invoke(
             app,
             ["tunnel", "start", "--port", "8765", "--auth", bad_auth],
         )
         assert result.exit_code == 1, result.output
-        assert "Invalid --auth value" in result.output
+        assert "Invalid --auth username" in result.output
 
 
 def test_format_tunnel_does_not_derive_created_from_expiration() -> None:

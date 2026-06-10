@@ -21,7 +21,11 @@ class TunnelInfo(BaseModel):
         None, description="HTTP basic auth username, if auth is enabled"
     )
     http_password: Optional[str] = Field(
-        None, description="HTTP basic auth password, if auth is enabled"
+        None,
+        description=(
+            "Auto-generated HTTP basic auth password. Only present in the "
+            "create response; never retrievable afterwards."
+        ),
     )
     expires_at: datetime = Field(..., description="Token expiration time")
     # Optional because create_tunnel response doesn't include user_id

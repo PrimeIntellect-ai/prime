@@ -60,19 +60,20 @@ def start_tunnel(
     auth: Optional[str] = typer.Option(
         None,
         "--auth",
-        help="Protect tunnel traffic with HTTP basic auth, in user:password format",
+        help=(
+            "Protect tunnel traffic with HTTP basic auth. Provide a username; "
+            "a strong password is auto-generated and shown once on start."
+        ),
     ),
 ) -> None:
     """Start a tunnel to expose a local port."""
 
     http_user: Optional[str] = None
-    http_password: Optional[str] = None
     if auth is not None:
-        http_user, sep, http_password = auth.partition(":")
-        if not sep or not http_user or not http_password:
+        http_user = auth.strip()
+        if not http_user or ":" in http_user or " " in http_user:
             console.print(
-                "[red]Invalid --auth value:[/red] expected user:password with a "
-                "non-empty user and password",
+                "[red]Invalid --auth username:[/red] must be non-empty without spaces or ':'",
                 style="bold",
             )
             raise typer.Exit(1)
@@ -91,7 +92,6 @@ def start_tunnel(
             team_id=team_id,
             labels=labels,
             http_user=http_user,
-            http_password=http_password,
         )
 
         shutdown_event = asyncio.Event()
@@ -115,6 +115,11 @@ def start_tunnel(
             console.print(f"[bold]Tunnel ID:[/bold] {tunnel.tunnel_id}")
             if http_user:
                 console.print(f"[bold]Basic auth user:[/bold] {http_user}")
+                console.print(f"[bold]Basic auth password:[/bold] {tunnel.http_password}")
+                console.print(
+                    "[yellow]Save this password - it is shown only once and "
+                    "cannot be retrieved later[/yellow]"
+                )
             console.print(f"\n[dim]Forwarding to localhost:{port}[/dim]")
             console.print("[dim]Press Ctrl+C to stop the tunnel[/dim]\n")
 

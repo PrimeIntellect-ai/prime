@@ -73,6 +73,18 @@ def normalize_rl_config(config: dict[str, Any]) -> dict[str, Any]:
             updated["eval"] = _rl_eval_config(eval_config)
     else:
         updated.pop("eval_config", None)
+    eval_table = updated.get("eval")
+    if isinstance(eval_table, dict) and "eval_base_model" in eval_table:
+        # eval_base_model was removed in prime-rl orch v2; translate to its
+        # replacement (inverted meaning) so saved workspace TOMLs keep
+        # validating against RLConfig. `eval_base_model = true` matches the
+        # `skip_first_step` default, so it is simply dropped instead of
+        # emitting a redundant `= false`.
+        eval_table = dict(eval_table)
+        legacy = eval_table.pop("eval_base_model")
+        if legacy is False and "skip_first_step" not in eval_table:
+            eval_table["skip_first_step"] = True
+        updated["eval"] = eval_table
     if "val_config" in updated and "val" not in updated:
         val_config = updated.pop("val_config")
         if isinstance(val_config, dict):
@@ -201,14 +213,6 @@ def _rl_eval_config(config: dict[str, Any]) -> dict[str, Any]:
         updated["env"] = _rl_env_configs(_list_value(updated["env"]))
     elif isinstance(environments, list) and environments:
         updated["env"] = _rl_env_configs(environments)
-    # Historical runs store the deprecated `eval_base_model`; regenerate
-    # configs with its prime-rl orch v2 replacement (inverted meaning).
-    # `eval_base_model = true` matches the `skip_first_step` default, so it
-    # is simply dropped instead of emitting a redundant `= false`.
-    if "eval_base_model" in updated:
-        legacy = updated.pop("eval_base_model")
-        if legacy is False and "skip_first_step" not in updated:
-            updated["skip_first_step"] = True
     return updated
 
 

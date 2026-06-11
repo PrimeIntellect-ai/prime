@@ -6,6 +6,7 @@ Lightweight Python SDK for managing Prime Intellect sandboxes - secure remote co
 
 - **Synchronous and async clients** - Use with sync or async/await code
 - **Full sandbox lifecycle** - Create, list, execute commands, upload/download files, delete
+- **Declarative images** - Build runtime images from Python and launch sandboxes from them
 - **Type-safe** - Full type hints and Pydantic models
 - **Authentication caching** - Automatic token management
 - **Bulk operations** - Create and manage multiple sandboxes efficiently
@@ -51,6 +52,66 @@ print(result.stdout)
 
 # Clean up
 sandbox_client.delete(sandbox.id)
+```
+
+## Declarative Images
+
+```python
+from prime_sandboxes import (
+    APIClient,
+    CreateSandboxRequest,
+    Image,
+    SandboxClient,
+)
+
+client = APIClient(api_key="your-api-key")
+sandbox_client = SandboxClient(client)
+
+declarative_image = (
+    Image.debian_slim("3.12")
+    .pip_install(["requests", "pytest"])
+    .workdir("/home/prime")
+)
+
+build = sandbox_client.build_image(
+    declarative_image,
+    image_name="runtime-image",
+    timeout_seconds=0,  # wait indefinitely for the image build
+    on_build_log=print,
+)
+
+sandbox = sandbox_client.create(
+    CreateSandboxRequest(
+        name="runtime-image-sandbox",
+        docker_image=build.image_reference,
+        cpu_cores=2,
+        memory_gb=4,
+    )
+)
+```
+
+The SDK renders the image to a Dockerfile, builds it through the Prime images
+API, waits for the registry image to become ready, then creates a normal
+sandbox using that image reference.
+
+For batch workloads, reuse that same image reference across all sandbox requests:
+
+```python
+runtime_image = Image.debian_slim("3.12").pip_install(["requests", "pytest"])
+
+build = sandbox_client.build_image(
+    runtime_image,
+    image_name="batch-runtime",
+    on_build_log=print,
+)
+
+sandboxes = [
+    sandbox_client.create(CreateSandboxRequest(
+        name=f"batch-{i}",
+        docker_image=build.image_reference,
+    ))
+    for i in range(10)
+]
 ```
 
 ## Async Usage

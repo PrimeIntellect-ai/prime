@@ -90,6 +90,7 @@ class RLRun(BaseModel):
     run_config: Optional[Dict[str, Any]] = Field(None, alias="runConfig")
     eval_config: Optional[Dict[str, Any]] = Field(None, alias="evalConfig")
     val_config: Optional[Dict[str, Any]] = Field(None, alias="valConfig")
+    # DEPRECATED: buffer removed in prime-rl orch v2; populated only on historical runs
     buffer_config: Optional[Dict[str, Any]] = Field(None, alias="bufferConfig")
     learning_rate: Optional[float] = Field(None, alias="learningRate")
     lora_alpha: Optional[int] = Field(None, alias="loraAlpha")
@@ -200,7 +201,6 @@ class RLClient:
         team_id: Optional[str] = None,
         eval_config: Optional[Dict[str, Any]] = None,
         val_config: Optional[Dict[str, Any]] = None,
-        buffer_config: Optional[Dict[str, Any]] = None,
         learning_rate: Optional[float] = None,
         lora_alpha: Optional[int] = None,
         max_inflight_rollouts: Optional[int] = None,
@@ -273,9 +273,6 @@ class RLClient:
 
             if val_config:
                 payload["val"] = val_config
-
-            if buffer_config:
-                payload["buffer"] = buffer_config
 
             if learning_rate is not None:
                 payload["learning_rate"] = learning_rate

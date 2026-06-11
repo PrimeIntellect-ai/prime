@@ -265,7 +265,7 @@ id = "{env_value}"
 # # optional: default for all environments
 # num_examples = -1
 # rollouts_per_example = 1
-# eval_base_model = true
+# skip_first_step = false # set true to skip the pre-training eval of the base model
 #
 # [[eval.env]]
 # id = "primeintellect/eval-env"
@@ -279,16 +279,6 @@ id = "{env_value}"
 # num_examples = 64
 # rollouts_per_example = 1
 # interval = 5
-
-# Optional: buffer configuration for difficulty filtering
-# [buffer]
-# easy_threshold = 1.0
-# hard_threshold = 0.0
-# easy_fraction = 0.0
-# hard_fraction = 0.0
-# online_difficulty_filtering = false
-# env_ratios = [0.5, 0.5]
-# skip_verification = false
 
 # Optional: checkpoint configuration
 # [checkpoints]
@@ -468,7 +458,11 @@ class EvalConfig(BaseModel):
     interval: int | None = None
     num_examples: int | None = None
     rollouts_per_example: int | None = None
-    eval_base_model: bool | None = None
+    skip_first_step: bool | None = None
+    """Skip the eval of the base model that otherwise runs before training
+    starts. Replaces the deprecated ``eval_base_model`` with inverted meaning
+    (``eval_base_model = false`` ≡ ``skip_first_step = true``), matching the
+    prime-rl orch v2 rename."""
     env: List[EvalEnvConfig] = Field(default_factory=list)
     sampling: EvalSamplingConfig | None = None
 
@@ -482,8 +476,8 @@ class EvalConfig(BaseModel):
             result["num_examples"] = self.num_examples
         if self.rollouts_per_example is not None:
             result["rollouts_per_example"] = self.rollouts_per_example
-        if self.eval_base_model is not None:
-            result["eval_base_model"] = self.eval_base_model
+        if self.skip_first_step is not None:
+            result["skip_first_step"] = self.skip_first_step
         if self.sampling is not None:
             sampling_dict = self.sampling.model_dump(exclude_none=True)
             if sampling_dict:
@@ -506,39 +500,6 @@ class ValConfig(BaseModel):
             result["rollouts_per_example"] = self.rollouts_per_example
         if self.interval is not None:
             result["interval"] = self.interval
-        return result if result else None
-
-
-class BufferConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    easy_threshold: float | None = None
-    hard_threshold: float | None = None
-    easy_fraction: float | None = None
-    hard_fraction: float | None = None
-    online_difficulty_filtering: bool | None = None
-    env_ratios: List[float] | None = None
-    skip_verification: bool | None = None
-    seed: int | None = None
-
-    def to_api_dict(self) -> Dict[str, Any] | None:
-        result: Dict[str, Any] = {}
-        if self.easy_threshold is not None:
-            result["easy_threshold"] = self.easy_threshold
-        if self.hard_threshold is not None:
-            result["hard_threshold"] = self.hard_threshold
-        if self.easy_fraction is not None:
-            result["easy_fraction"] = self.easy_fraction
-        if self.hard_fraction is not None:
-            result["hard_fraction"] = self.hard_fraction
-        if self.online_difficulty_filtering is not None:
-            result["online_difficulty_filtering"] = self.online_difficulty_filtering
-        if self.env_ratios is not None:
-            result["env_ratios"] = self.env_ratios
-        if self.skip_verification is not None:
-            result["skip_verification"] = self.skip_verification
-        if self.seed is not None:
-            result["seed"] = self.seed
         return result if result else None
 
 
@@ -686,7 +647,6 @@ class RLConfig(BaseModel):
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
     val: ValConfig = Field(default_factory=ValConfig)
-    buffer: BufferConfig = Field(default_factory=BufferConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
@@ -740,6 +700,33 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
 
     if removed:
         console.print("[yellow]Warning:[/yellow] `trajectory_strategy` is deprecated and ignored.")
+
+    if "buffer" in data:
+        data.pop("buffer", None)
+        console.print(
+            "[yellow]Warning:[/yellow] `[buffer]` is deprecated and ignored: "
+            "the difficulty-filtering buffer was removed from the trainer."
+        )
+
+    eval_section = data.get("eval")
+    if isinstance(eval_section, dict) and "eval_base_model" in eval_section:
+        legacy = eval_section.pop("eval_base_model")
+        if "skip_first_step" in eval_section:
+            console.print(
+                "[yellow]Warning:[/yellow] `eval.eval_base_model` is deprecated and "
+                "ignored because `eval.skip_first_step` is also set. Remove "
+                "`eval_base_model` from your config."
+            )
+        else:
+            translated = (not legacy) if isinstance(legacy, bool) else legacy
+            eval_section["skip_first_step"] = translated
+            console.print(
+                "[yellow]Warning:[/yellow] `eval.eval_base_model` is deprecated: "
+                "prime-rl renamed it to `skip_first_step` with inverted meaning "
+                "(`eval_base_model = false` ≡ `skip_first_step = true`). "
+                f"Translating to `skip_first_step = {str(translated).lower()}` — "
+                "update your config to use `skip_first_step` directly."
+            )
 
 
 def _peek_toml(config_path: str) -> Dict[str, Any]:
@@ -888,6 +875,14 @@ def _dispatch_full_finetune_run(
         )
         raise typer.Exit(1)
     resolved_image_tag = image_tag or config_image_tag
+
+    # Same deprecation pass as the LoRA path. In the prime-rl-native shape
+    # the deprecated keys live one level down, under `[orchestrator]` — and
+    # this config ships verbatim to the dedicated training endpoint, where
+    # orch v2 rejects the removed keys as "Extra inputs are not permitted".
+    orch_section = raw_cfg.get("orchestrator")
+    if isinstance(orch_section, dict):
+        _remove_deprecated_config_keys(orch_section)
 
     # Strip CLI-only secret-loading keys before shipping the TOML to the
     # backend. `env_file` / `env_files` only meaningfully exist on the
@@ -1414,7 +1409,6 @@ def create_run(
             team_id=app_config.team_id,
             eval_config=cfg.eval.to_api_dict(),
             val_config=cfg.val.to_api_dict(),
-            buffer_config=cfg.buffer.to_api_dict(),
             learning_rate=cfg.learning_rate,
             lora_alpha=cfg.lora_alpha,
             max_inflight_rollouts=cfg.max_inflight_rollouts,

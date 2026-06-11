@@ -2,9 +2,12 @@
 
 import hashlib
 import json
+import random
 import re
 import tarfile
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -40,6 +43,8 @@ HARBOR_COMPOSE_FILENAMES = (
 )
 HARBOR_CONTEXT_EXCLUDES = ("tests", "solution")
 DEFAULT_BATCH_TAG_TEMPLATE = "{index}-{sha12}"
+BATCH_UPLOAD_PARALLELISM = 8
+BATCH_UPLOAD_ATTEMPTS = 4
 
 config = Config()
 
@@ -882,14 +887,55 @@ def _batch_id(response: dict[str, Any]) -> Optional[str]:
 
 
 def _upload_context_archive(upload_url: str, archive_path: Path) -> None:
-    with archive_path.open("rb") as file:
-        upload_response = httpx.put(
-            upload_url,
-            content=file,
-            headers={"Content-Type": "application/octet-stream"},
-            timeout=600.0,
-        )
-        upload_response.raise_for_status()
+    last_error: Optional[Exception] = None
+    for attempt in range(1, BATCH_UPLOAD_ATTEMPTS + 1):
+        try:
+            with archive_path.open("rb") as file:
+                upload_response = httpx.put(
+                    upload_url,
+                    content=file,
+                    headers={"Content-Type": "application/octet-stream"},
+                    timeout=600.0,
+                )
+            upload_response.raise_for_status()
+            return
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code < 500 and status_code != 429:
+                raise
+            last_error = exc
+        except httpx.HTTPError as exc:
+            last_error = exc
+        if attempt < BATCH_UPLOAD_ATTEMPTS:
+            time.sleep(min(2**attempt, 15) + random.uniform(0, 0.5))
+    assert last_error is not None
+    raise last_error
+
+
+def _upload_batch_contexts(
+    context_items: list[BatchBuildItem], upload_urls: dict[str, str]
+) -> list[tuple[BatchBuildItem, Exception]]:
+    """Upload all packaged contexts with bounded parallelism.
+
+    Collects per-item failures instead of aborting on the first one so a
+    partially failed run reports every item that still needs uploading.
+    """
+    failures: list[tuple[BatchBuildItem, Exception]] = []
+    with ThreadPoolExecutor(max_workers=BATCH_UPLOAD_PARALLELISM) as pool:
+        futures = {}
+        for item in context_items:
+            archive = item.context_archive
+            if archive is None:
+                continue
+            future = pool.submit(_upload_context_archive, upload_urls[item.source_id], archive.path)
+            futures[future] = item
+        for future in as_completed(futures):
+            item = futures[future]
+            try:
+                future.result()
+            except Exception as exc:
+                failures.append((item, exc))
+    return failures
 
 
 def _cleanup_batch_archives(items: list[BatchBuildItem]) -> None:
@@ -1158,6 +1204,14 @@ def push_image_batch(
         "--skip-unsupported-compose",
         help="In Harbor mode, skip docker-compose tasks instead of failing the batch",
     ),
+    resume: Optional[str] = typer.Option(
+        None,
+        "--resume",
+        help=(
+            "Resume a previously created batch id: re-fetch upload URLs, re-upload "
+            "contexts, and start the batch. Run with the same source and options."
+        ),
+    ),
 ):
     """
     Build and push many Docker images in a single batch.
@@ -1181,6 +1235,7 @@ def push_image_batch(
         prime images push-batch rows.jsonl --image-name cligym --id-field task_id
         prime images push-batch ./tasks --mode harbor --image-name cligym --public
         prime images push-batch ./tasks --mode harbor --image-name cligym --dry-run
+        prime images push-batch ./tasks --mode harbor --image-name cligym --resume <batch-id>
     """
     items: list[BatchBuildItem] = []
     try:
@@ -1261,49 +1316,98 @@ def push_image_batch(
             console.print()
 
         client = APIClient()
+        batch_response: dict[str, Any] = {}
 
-        console.print(f"[cyan]Creating image build batch via {BATCH_BUILD_ENDPOINT}...[/cyan]")
-        try:
-            batch_response = client.request(
-                "POST",
-                BATCH_BUILD_ENDPOINT,
-                json=_build_batch_payload(
-                    items,
-                    mode=mode,
-                    image_name=image_name,
-                    platform=platform,
-                    visibility=visibility,
-                ),
-            )
-        except UnauthorizedError:
-            console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
-            raise typer.Exit(1)
-        except APIError as exc:
-            console.print(f"[red]Error: Failed to create image build batch: {exc}[/red]")
-            raise typer.Exit(1) from exc
+        if resume:
+            batch_id = resume.strip()
+            if not batch_id:
+                console.print("[red]Error: --resume requires a batch id[/red]")
+                raise typer.Exit(1)
+            console.print(f"[cyan]Resuming image build batch {batch_id}...[/cyan]")
+            if context_items:
+                # The original URLs may have expired; the backend re-mints
+                # them for any batch that has not started yet.
+                try:
+                    batch_response = client.request(
+                        "POST", f"{BATCH_BUILD_ENDPOINT}/{batch_id}/upload-urls"
+                    )
+                except UnauthorizedError:
+                    console.print(
+                        "[red]Error: Not authenticated. Please run 'prime login' first.[/red]"
+                    )
+                    raise typer.Exit(1)
+                except APIError as exc:
+                    console.print(f"[red]Error: Failed to refresh upload URLs: {exc}[/red]")
+                    raise typer.Exit(1) from exc
+        else:
+            console.print(f"[cyan]Creating image build batch via {BATCH_BUILD_ENDPOINT}...[/cyan]")
+            try:
+                batch_response = client.request(
+                    "POST",
+                    BATCH_BUILD_ENDPOINT,
+                    json=_build_batch_payload(
+                        items,
+                        mode=mode,
+                        image_name=image_name,
+                        platform=platform,
+                        visibility=visibility,
+                    ),
+                )
+            except UnauthorizedError:
+                console.print(
+                    "[red]Error: Not authenticated. Please run 'prime login' first.[/red]"
+                )
+                raise typer.Exit(1)
+            except APIError as exc:
+                console.print(f"[red]Error: Failed to create image build batch: {exc}[/red]")
+                raise typer.Exit(1) from exc
 
-        batch_id = _batch_id(batch_response)
-        if batch_id is None:
-            console.print("[red]Error: Invalid response from server (missing batch_id)[/red]")
-            raise typer.Exit(1)
+            created_batch_id = _batch_id(batch_response)
+            if created_batch_id is None:
+                console.print("[red]Error: Invalid response from server (missing batch_id)[/red]")
+                raise typer.Exit(1)
+            batch_id = created_batch_id
+            # Surface the id before uploads so an interrupted run can be
+            # resumed instead of abandoning the batch.
+            console.print(f"[bold]Batch ID:[/bold] {batch_id}")
+
+        resume_hint = (
+            f"[yellow]Re-run the same command with --resume {batch_id} "
+            "to retry without creating a new batch.[/yellow]"
+        )
 
         if context_items:
             upload_urls = _batch_upload_urls(batch_response)
-            console.print("[cyan]Uploading Harbor build contexts...[/cyan]")
-            for item in context_items:
-                archive = item.context_archive
-                upload_url = upload_urls.get(item.source_id)
-                if archive is None or not upload_url:
+            missing_urls = [
+                item.source_id
+                for item in context_items
+                if item.context_archive is None or not upload_urls.get(item.source_id)
+            ]
+            if missing_urls:
+                console.print(
+                    "[red]Error: Invalid response from server (missing upload_url "
+                    f"for: {', '.join(missing_urls)})[/red]"
+                )
+                if resume:
                     console.print(
-                        "[red]Error: Invalid response from server "
-                        f"(missing upload_url for {item.source_id})[/red]"
+                        "[yellow]Make sure --resume is run with the same source "
+                        "directory and options as the original command.[/yellow]"
                     )
-                    raise typer.Exit(1)
-                try:
-                    _upload_context_archive(upload_url, archive.path)
-                except httpx.HTTPError as exc:
-                    console.print(f"[red]Upload failed for {item.source_id}: {exc}[/red]")
-                    raise typer.Exit(1) from exc
+                raise typer.Exit(1)
+            console.print(
+                f"[cyan]Uploading {len(context_items)} Harbor build context(s) "
+                f"(up to {BATCH_UPLOAD_PARALLELISM} in parallel)...[/cyan]"
+            )
+            failures = _upload_batch_contexts(context_items, upload_urls)
+            if failures:
+                for failed_item, exc in failures:
+                    console.print(f"[red]Upload failed for {failed_item.source_id}: {exc}[/red]")
+                console.print(
+                    f"[red]Error: {len(failures)} of {len(context_items)} "
+                    "context upload(s) failed; the batch was not started.[/red]"
+                )
+                console.print(resume_hint)
+                raise typer.Exit(1)
             console.print("[green]✓[/green] Build contexts uploaded")
             console.print()
 
@@ -1316,6 +1420,7 @@ def push_image_batch(
             )
         except APIError as exc:
             console.print(f"[red]Error: Failed to start image build batch: {exc}[/red]")
+            console.print(resume_hint)
             raise typer.Exit(1) from exc
 
         console.print("[green]✓[/green] Batch build started")

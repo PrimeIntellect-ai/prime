@@ -20,6 +20,11 @@ from prime_cli.core import (
     AsyncAPIClient,
     Config,
 )
+from prime_cli.feature_flags import (
+    FeatureFlagsClient,
+    evaluate_feature_flags,
+    is_feature_enabled,
+)
 
 __version__ = "0.6.14"
 
@@ -34,9 +39,12 @@ __all__ = [
     "CommandTimeoutError",
     "Config",
     "CreateSandboxRequest",
+    "FeatureFlagsClient",
     "Sandbox",
     "SandboxClient",
     "SandboxNotRunningError",
     "SandboxStatus",
     "UpdateSandboxRequest",
+    "evaluate_feature_flags",
+    "is_feature_enabled",
 ]

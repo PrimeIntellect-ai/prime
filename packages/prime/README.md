@@ -117,6 +117,10 @@ Prime Lab connects verifiers environments to evaluations, GEPA prompt optimizati
 # Set up a Lab workspace
 prime lab setup
 
+# Create a Lab project and make it active in this workspace
+prime project create "Alphabet Sort Baselines"
+prime project current
+
 # List trainable models, capacity, and token pricing
 prime train models
 
@@ -125,12 +129,33 @@ prime train init
 
 # Launch the run from the generated config
 prime train rl.toml
+prime train rl.toml --project <project-id>
 
 # Inspect and manage Hosted Training runs
 prime train list
 prime train logs <run-id> -f
 prime train metrics <run-id>
 prime train checkpoints <run-id>
+```
+
+Lab projects group related training runs, evaluations, and adapters. Use
+`prime project use <project-id>` to switch the active workspace project, or
+`prime project clear` to clear it. Existing runs and adapters support project
+add/remove/clear; evaluations support assign/clear.
+
+```bash
+# Manage projects
+prime project list
+prime project show <project-id>
+prime project update <project-id> --description "Baseline alphabet sort runs"
+
+# Attach existing artifacts
+prime project assign run <run-id> <project-id>
+prime project remove run <run-id> <project-id>
+prime project assign adapter <adapter-id> <project-id>
+prime project remove adapter <adapter-id>  # clear all adapter project memberships
+prime project assign eval <eval-id> <project-id>
+prime project remove eval <eval-id>        # clear the evaluation project
 ```
 
 ### Environments Hub

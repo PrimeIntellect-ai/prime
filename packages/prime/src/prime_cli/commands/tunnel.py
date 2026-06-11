@@ -35,6 +35,7 @@ def _format_tunnel_for_output(tunnel) -> dict:
         "status": tunnel.status or "UNKNOWN",
         "labels": tunnel.labels,
         "local_port": tunnel.local_port,
+        "http_user": getattr(tunnel, "http_user", None),
         "user_id": tunnel.user_id,
         "team_id": tunnel.team_id,
         "created_at": iso_timestamp(created_at) if created_at else None,
@@ -56,8 +57,26 @@ def start_tunnel(
     team_id: Optional[str] = typer.Option(
         None, "--team-id", help="Team ID for team tunnels (uses config team_id if not specified)"
     ),
+    auth: Optional[str] = typer.Option(
+        None,
+        "--auth",
+        help=(
+            "Protect tunnel traffic with HTTP basic auth. Provide a username; "
+            "a strong password is auto-generated and shown once on start."
+        ),
+    ),
 ) -> None:
     """Start a tunnel to expose a local port."""
+
+    http_user: Optional[str] = None
+    if auth is not None:
+        http_user = auth.strip()
+        if not http_user or ":" in http_user or " " in http_user:
+            console.print(
+                "[red]Invalid --auth username:[/red] must be non-empty without spaces or ':'",
+                style="bold",
+            )
+            raise typer.Exit(1)
 
     async def run_tunnel():
         from prime_tunnel import Tunnel
@@ -67,7 +86,13 @@ def start_tunnel(
             TunnelTimeoutError,
         )
 
-        tunnel = Tunnel(local_port=port, name=name, team_id=team_id, labels=labels)
+        tunnel = Tunnel(
+            local_port=port,
+            name=name,
+            team_id=team_id,
+            labels=labels,
+            http_user=http_user,
+        )
 
         shutdown_event = asyncio.Event()
 
@@ -88,6 +113,13 @@ def start_tunnel(
             console.print("\n[green]Tunnel started successfully![/green]")
             console.print(f"[bold]URL:[/bold] {url}")
             console.print(f"[bold]Tunnel ID:[/bold] {tunnel.tunnel_id}")
+            if http_user:
+                console.print(f"[bold]Basic auth user:[/bold] {http_user}")
+                console.print(f"[bold]Basic auth password:[/bold] {tunnel.http_password}")
+                console.print(
+                    "[yellow]Save this password - it is shown only once and "
+                    "cannot be retrieved later[/yellow]"
+                )
             console.print(f"\n[dim]Forwarding to localhost:{port}[/dim]")
             console.print("[dim]Press Ctrl+C to stop the tunnel[/dim]\n")
 

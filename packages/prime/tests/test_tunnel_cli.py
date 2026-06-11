@@ -52,6 +52,7 @@ def test_tunnel_start_cli_passes_labels_to_sdk(monkeypatch: pytest.MonkeyPatch) 
             name: str | None,
             team_id: str | None,
             labels: list[str] | None,
+            http_user: str | None,
         ) -> None:
             captured.update(
                 {
@@ -59,6 +60,7 @@ def test_tunnel_start_cli_passes_labels_to_sdk(monkeypatch: pytest.MonkeyPatch) 
                     "name": name,
                     "team_id": team_id,
                     "labels": labels,
+                    "http_user": http_user,
                 }
             )
 
@@ -82,8 +84,68 @@ def test_tunnel_start_cli_passes_labels_to_sdk(monkeypatch: pytest.MonkeyPatch) 
         "name": None,
         "team_id": None,
         "labels": ["dev", "preview"],
+        "http_user": None,
         "stopped": True,
     }
+
+
+def test_tunnel_start_cli_passes_auth_to_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    captured: dict[str, Any] = {}
+
+    class DoneEvent:
+        def is_set(self) -> bool:
+            return True
+
+        def set(self) -> None:
+            return None
+
+        async def wait(self) -> None:
+            return None
+
+    class FakeTunnel:
+        tunnel_id = "t-test123"
+        is_running = True
+        recent_output: list[str] = []
+        http_password = "generated-by-backend"
+
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        async def start(self) -> str:
+            return "https://t-test123.example.com"
+
+        async def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr("prime_cli.commands.tunnel.asyncio.Event", DoneEvent)
+    monkeypatch.setattr("prime_tunnel.Tunnel", FakeTunnel)
+
+    result = runner.invoke(
+        app,
+        ["tunnel", "start", "--port", "8765", "--auth", "alice"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["http_user"] == "alice"
+    assert "http_password" not in captured
+    assert "Basic auth user:" in result.output
+    assert "generated-by-backend" in result.output
+    assert "shown only once" in result.output
+
+
+def test_tunnel_start_cli_rejects_invalid_auth_username(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+    for bad_auth in ("alice:s3cret", "alice bob", " "):
+        result = runner.invoke(
+            app,
+            ["tunnel", "start", "--port", "8765", "--auth", bad_auth],
+        )
+        assert result.exit_code == 1, result.output
+        assert "Invalid --auth username" in result.output
 
 
 def test_format_tunnel_does_not_derive_created_from_expiration() -> None:

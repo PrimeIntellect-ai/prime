@@ -1429,7 +1429,7 @@ def push_image_batch(
         console.print(f"[bold]Batch ID:[/bold] {batch_id}")
         console.print(f"[bold]Images:[/bold] {len(items)}")
         console.print("[bold]Check build status:[/bold]")
-        console.print("  prime images list")
+        console.print(f"  prime images batch-status {batch_id}")
         console.print()
 
     except KeyboardInterrupt:
@@ -1437,6 +1437,132 @@ def push_image_batch(
         raise typer.Exit(1)
     finally:
         _cleanup_batch_archives(items)
+
+
+def _render_batch_status(batch: dict[str, Any]) -> None:
+    """Print a human-readable summary of a build batch and its items."""
+    items = batch.get("items") or []
+    status_counts: dict[str, int] = {}
+    for item in items:
+        key = str(item.get("status", "UNKNOWN"))
+        status_counts[key] = status_counts.get(key, 0) + 1
+
+    console.print(f"[bold]Batch:[/bold] {batch.get('id')}")
+    console.print(f"[bold]Status:[/bold] {batch.get('status')}")
+    console.print(f"[bold]Image:[/bold] {batch.get('imageName')}")
+    if batch.get("errorMessage"):
+        console.print(f"[bold]Message:[/bold] {batch.get('errorMessage')}")
+
+    # Batch-level succeeded/failed counts are only written at finalize, so
+    # derive live progress from the item rows instead.
+    completed = status_counts.get("COMPLETED", 0)
+    failed = status_counts.get("FAILED", 0)
+    cancelled = status_counts.get("CANCELLED", 0)
+    in_flight = status_counts.get("BUILDING", 0) + status_counts.get("UPLOADING", 0)
+    queued = status_counts.get("PENDING", 0)
+    total = batch.get("totalCount") or len(items)
+    console.print(
+        f"[bold]Progress:[/bold] {completed} completed, {failed} failed, "
+        f"{cancelled} cancelled, {in_flight} building, {queued} queued "
+        f"({total} total)"
+    )
+
+    problem_items = [item for item in items if str(item.get("status")) in ("FAILED", "CANCELLED")]
+    if problem_items:
+        console.print()
+        console.print("[bold]Failed/cancelled items:[/bold]")
+        for item in problem_items:
+            error = str(item.get("errorMessage") or "no error message")
+            if len(error) > 120:
+                error = error[:117] + "..."
+            console.print(
+                f"  [red]{item.get('sourceId') or item.get('buildId')}[/red] "
+                f"({item.get('imageTag')}): {error}"
+            )
+        console.print()
+        console.print(f"Re-run them with: prime images batch-retry {batch.get('id')}")
+
+
+def _batch_api_request(method: str, path: str) -> dict[str, Any]:
+    """Issue a build-batch API call with the shared auth/error handling."""
+    client = APIClient()
+    try:
+        return client.request(method, path)
+    except UnauthorizedError:
+        console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
+        raise typer.Exit(1)
+    except APIError as exc:
+        if "404" in str(exc):
+            console.print("[red]Error: Build batch not found[/red]")
+        else:
+            console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+@app.command("batch-status")
+def batch_status(
+    batch_id: str = typer.Argument(..., help="Build batch ID"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format (table or json)"),
+):
+    """
+    Show the status of a bulk image build batch, including per-item results.
+
+    \b
+    Examples:
+        prime images batch-status cmxxxxxxxx
+        prime images batch-status cmxxxxxxxx -o json
+    """
+    validate_output_format(output, console)
+    batch = _batch_api_request("GET", f"{BATCH_BUILD_ENDPOINT}/{batch_id}")
+    if output == "json":
+        output_data_as_json(batch, console)
+        return
+    _render_batch_status(batch)
+
+
+@app.command("batch-cancel")
+def batch_cancel(
+    batch_id: str = typer.Argument(..., help="Build batch ID"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+):
+    """
+    Cancel a bulk image build batch.
+
+    Queued items are cancelled and in-flight builds are aborted. Items that
+    already completed keep their images; cancelled and failed items can be
+    re-run later with batch-retry.
+
+    \b
+    Examples:
+        prime images batch-cancel cmxxxxxxxx
+        prime images batch-cancel cmxxxxxxxx --yes
+    """
+    if not yes:
+        confirm = typer.confirm(f"Are you sure you want to cancel batch {batch_id}?")
+        if not confirm:
+            console.print("[yellow]Cancelled[/yellow]")
+            raise typer.Exit(0)
+    batch = _batch_api_request("POST", f"{BATCH_BUILD_ENDPOINT}/{batch_id}/cancel")
+    console.print("[green]✓[/green] Batch cancelled")
+    console.print()
+    _render_batch_status(batch)
+
+
+@app.command("batch-retry")
+def batch_retry(
+    batch_id: str = typer.Argument(..., help="Build batch ID"),
+):
+    """
+    Re-run the failed and cancelled items of a finished build batch.
+
+    \b
+    Examples:
+        prime images batch-retry cmxxxxxxxx
+    """
+    batch = _batch_api_request("POST", f"{BATCH_BUILD_ENDPOINT}/{batch_id}/retry")
+    console.print("[green]✓[/green] Retry started")
+    console.print()
+    _render_batch_status(batch)
 
 
 @app.command("list", epilog=LIST_IMAGES_JSON_HELP)

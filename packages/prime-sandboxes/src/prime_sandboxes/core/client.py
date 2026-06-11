@@ -102,6 +102,15 @@ class APIClient:
                 "No API key configured. Set PRIME_API_KEY environment variable.",
             )
 
+    def _base_url_for_endpoint(self, endpoint: str) -> str:
+        normalized_endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+        is_sandbox_endpoint = normalized_endpoint == "/sandbox" or normalized_endpoint.startswith(
+            "/sandbox/"
+        )
+        if is_sandbox_endpoint and self.config.sandbox_base_url:
+            return self.config.sandbox_base_url
+        return self.base_url
+
     @retry(
         retry=retry_if_exception(_is_idempotent_request_retryable_error),
         stop=stop_after_attempt(3),
@@ -169,12 +178,13 @@ class APIClient:
         """Make a request to the API"""
         self._check_auth_required()
 
+        base_url = self._base_url_for_endpoint(endpoint)
         if not endpoint.startswith("/"):
             endpoint = f"/api/v1/{endpoint}"
         else:
             endpoint = f"/api/v1{endpoint}"
 
-        url = f"{self.base_url}{endpoint}"
+        url = f"{base_url}{endpoint}"
 
         try:
             method_upper = method.upper()
@@ -263,6 +273,15 @@ class AsyncAPIClient:
                 "No API key configured. Set PRIME_API_KEY environment variable.",
             )
 
+    def _base_url_for_endpoint(self, endpoint: str) -> str:
+        normalized_endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+        is_sandbox_endpoint = normalized_endpoint == "/sandbox" or normalized_endpoint.startswith(
+            "/sandbox/"
+        )
+        if is_sandbox_endpoint and self.config.sandbox_base_url:
+            return self.config.sandbox_base_url
+        return self.base_url
+
     @retry(
         retry=retry_if_exception(_is_idempotent_request_retryable_error),
         stop=stop_after_attempt(3),
@@ -330,12 +349,13 @@ class AsyncAPIClient:
         """Make an async request to the API"""
         self._check_auth_required()
 
+        base_url = self._base_url_for_endpoint(endpoint)
         if not endpoint.startswith("/"):
             endpoint = f"/api/v1/{endpoint}"
         else:
             endpoint = f"/api/v1{endpoint}"
 
-        url = f"{self.base_url}{endpoint}"
+        url = f"{base_url}{endpoint}"
 
         try:
             method_upper = method.upper()

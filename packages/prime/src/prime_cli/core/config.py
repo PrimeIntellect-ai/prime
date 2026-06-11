@@ -14,6 +14,7 @@ class ConfigModel(BaseModel):
     team_role: str | None = None
     user_id: str | None = None
     base_url: str = "https://api.primeintellect.ai"
+    sandbox_base_url: str | None = None
     frontend_url: str = "https://app.primeintellect.ai"
     inference_url: str = "https://api.pinference.ai/api/v1"
     ssh_key_path: str = str(Path.home() / ".ssh" / "id_rsa")
@@ -57,6 +58,7 @@ class Config:
                     team_id=None,
                     user_id=None,
                     base_url=self.DEFAULT_BASE_URL,
+                    sandbox_base_url=None,
                     frontend_url=self.DEFAULT_FRONTEND_URL,
                     inference_url=self.DEFAULT_INFERENCE_URL,
                     ssh_key_path=self.DEFAULT_SSH_KEY_PATH,
@@ -150,6 +152,20 @@ class Config:
         self._save_config(self.config)
 
     @property
+    def sandbox_base_url(self) -> Optional[str]:
+        """Get sandbox API base URL with precedence: env > file > None."""
+        env_val = os.getenv("PRIME_SANDBOX_BASE_URL") or os.getenv("PRIME_SANDBOX_INGRESS_URL")
+        value = env_val or self.config.get("sandbox_base_url")
+        if not value:
+            return None
+        return self._strip_api_v1(str(value))
+
+    def set_sandbox_base_url(self, value: str | None) -> None:
+        """Set sandbox API base URL in config file."""
+        self.config["sandbox_base_url"] = self._strip_api_v1(value) if value else None
+        self._save_config(self.config)
+
+    @property
     def frontend_url(self) -> str:
         """Get frontend URL with precedence: env > file > default."""
         env_val = os.getenv("PRIME_FRONTEND_URL")
@@ -234,6 +250,7 @@ class Config:
             "team_role": self.team_role,
             "user_id": self.user_id,
             "base_url": self.base_url,
+            "sandbox_base_url": self.sandbox_base_url,
             "frontend_url": self.frontend_url,
             "inference_url": self.inference_url,
             "ssh_key_path": self.ssh_key_path,
@@ -255,6 +272,7 @@ class Config:
             "team_role": None if self.team_id_from_env else self.team_role,
             "user_id": self.user_id,
             "base_url": self.base_url,
+            "sandbox_base_url": self.sandbox_base_url,
             "frontend_url": self.frontend_url,
             "inference_url": self.inference_url,
         }
@@ -292,12 +310,14 @@ class Config:
             # Built-in production environment
             if persist:
                 self.set_base_url(self.DEFAULT_BASE_URL)
+                self.set_sandbox_base_url(None)
                 self.set_frontend_url(self.DEFAULT_FRONTEND_URL)
                 self.set_inference_url(self.DEFAULT_INFERENCE_URL)
                 self.set_team(None)  # Production defaults to personal account
                 self.set_current_environment("production")
             else:
                 self.config["base_url"] = self.DEFAULT_BASE_URL
+                self.config["sandbox_base_url"] = None
                 self.config["frontend_url"] = self.DEFAULT_FRONTEND_URL
                 self.config["inference_url"] = self.DEFAULT_INFERENCE_URL
                 self.config["team_id"] = None
@@ -327,6 +347,7 @@ class Config:
                     # Set user_id from environment
                     self.set_user_id(env_config.get("user_id", None))
                     self.set_base_url(env_config.get("base_url", self.DEFAULT_BASE_URL))
+                    self.set_sandbox_base_url(env_config.get("sandbox_base_url", None))
                     self.set_frontend_url(env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL))
                     self.set_inference_url(
                         env_config.get("inference_url", self.DEFAULT_INFERENCE_URL)
@@ -343,6 +364,10 @@ class Config:
                     # Normalize URLs the same way set_* methods do
                     base_url = env_config.get("base_url", self.DEFAULT_BASE_URL)
                     self.config["base_url"] = self._strip_api_v1(base_url)
+                    sandbox_base_url = env_config.get("sandbox_base_url", None)
+                    self.config["sandbox_base_url"] = (
+                        self._strip_api_v1(sandbox_base_url) if sandbox_base_url else None
+                    )
                     frontend_url = env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL)
                     self.config["frontend_url"] = frontend_url.rstrip("/")
                     inference_url = env_config.get("inference_url", self.DEFAULT_INFERENCE_URL)
@@ -369,6 +394,7 @@ class Config:
                         "team_role": None if self.team_id_from_env else self.team_role,
                         "user_id": self.user_id,
                         "base_url": self.base_url,
+                        "sandbox_base_url": self.sandbox_base_url,
                         "frontend_url": self.frontend_url,
                         "inference_url": self.inference_url,
                     }

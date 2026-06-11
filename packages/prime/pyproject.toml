@@ -77,7 +77,7 @@ allow-direct-references = true
 path = "src/prime_cli/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/prime_cli", "src/prime_lab_app"]
+packages = ["src/prime", "src/prime_cli", "src/prime_lab_app"]
 
 [tool.ruff]
 src = ["."]

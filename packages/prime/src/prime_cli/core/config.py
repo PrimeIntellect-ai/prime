@@ -178,6 +178,14 @@ class Config:
         self._save_config(self.config)
 
     @property
+    def inference_headers(self) -> dict[str, str]:
+        """Headers for OpenAI-compatible Prime Inference clients."""
+        team_id = self.team_id
+        if team_id:
+            return {"X-Prime-Team-ID": team_id}
+        return {}
+
+    @property
     def ssh_key_path(self) -> str:
         """Get SSH private key path with precedence: env > file > default."""
         env_val = os.getenv("PRIME_SSH_KEY_PATH")

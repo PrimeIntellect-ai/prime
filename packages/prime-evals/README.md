@@ -27,8 +27,8 @@ pip install prime-evals
 ```python
 from prime_evals import APIClient, EvalsClient
 
-# Initialize client
-api_client = APIClient(api_key="your-api-key")
+# Initialize client from prime login / active config
+api_client = APIClient()
 client = EvalsClient(api_client)
 
 # Create an evaluation
@@ -79,7 +79,7 @@ import asyncio
 from prime_evals import AsyncEvalsClient
 
 async def main():
-    async with AsyncEvalsClient(api_key="your-api-key") as client:
+    async with AsyncEvalsClient() as client:
         # Create evaluation
         eval_response = client.create_evaluation(
             name="my-evaluation",
@@ -105,16 +105,18 @@ asyncio.run(main())
 The SDK looks for credentials in this order:
 
 1. **Direct parameter**: `APIClient(api_key="sk-...")`
-2. **Environment variable**: `export PRIME_API_KEY="sk-..."`
-3. **Config file**: `~/.prime/config.json` (created by `prime login` CLI command)
+2. **Process environment override**: `PRIME_API_KEY="sk-..." python script.py`
+3. **Config file**: `~/.prime/config.json` (created by `prime login`)
+
+Prefer `prime login` when using the full Prime CLI. If a standalone script needs an env var, scope `PRIME_API_KEY` to that process or project instead of exporting it globally.
 
 ## Complete Example
 
 ```python
 from prime_evals import APIClient, EvalsClient
 
-# Initialize
-api_client = APIClient(api_key="your-api-key")
+# Initialize from prime login / active config
+api_client = APIClient()
 client = EvalsClient(api_client)
 
 # Create evaluation with full metadata

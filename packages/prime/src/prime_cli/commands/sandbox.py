@@ -166,6 +166,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
         "vm": sandbox.vm,
         "network_access": sandbox.network_access,
         "allowed_domains": getattr(sandbox, "allowed_domains", []) or [],
+        "blocked_domains": getattr(sandbox, "blocked_domains", []) or [],
         "timeout_minutes": sandbox.timeout_minutes,
         "labels": sandbox.labels,
         "created_at": iso_timestamp(sandbox.created_at),
@@ -410,6 +411,8 @@ def get(
             table.add_row("Network Access", network_display)
             if sandbox_data.get("allowed_domains"):
                 table.add_row("Allowed Domains", ", ".join(sandbox_data["allowed_domains"]))
+            if sandbox_data.get("blocked_domains"):
+                table.add_row("Blocked Domains", ", ".join(sandbox_data["blocked_domains"]))
             table.add_row("Timeout (minutes)", str(sandbox_data["timeout_minutes"]))
 
             # Show labels
@@ -503,6 +506,15 @@ def create(
             "Egress domain allowlist for a restricted sandbox. "
             "Wildcards like '*.example.com' are allowed. Requires "
             "--no-network-access. Can be specified multiple times."
+        ),
+    ),
+    blocked_domains: Optional[List[str]] = typer.Option(
+        None,
+        "--blocked-domain",
+        help=(
+            "Egress domain blocklist for an unrestricted sandbox. "
+            "Wildcards like '*.example.com' are allowed. Requires "
+            "--network-access (the default). Can be specified multiple times."
         ),
     ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
@@ -605,6 +617,17 @@ def create(
                 console.print("[red]--allowed-domain is not supported for VM sandboxes.[/red]")
                 raise typer.Exit(1)
 
+        if blocked_domains:
+            if not network_access:
+                console.print(
+                    "[red]--blocked-domain requires --network-access.[/red] "
+                    "It is an egress blocklist for unrestricted sandboxes."
+                )
+                raise typer.Exit(1)
+            if vm:
+                console.print("[red]--blocked-domain is not supported for VM sandboxes.[/red]")
+                raise typer.Exit(1)
+
         if not docker_image:
             console.print(
                 "[red]Docker image is required.[/red] Provide a DOCKER_IMAGE positional argument."
@@ -644,6 +667,7 @@ def create(
             vm=vm,
             network_access=network_access,
             allowed_domains=allowed_domains if allowed_domains else [],
+            blocked_domains=blocked_domains if blocked_domains else [],
             timeout_minutes=timeout_minutes,
             environment_vars=env_vars if env_vars else None,
             secrets=secrets_vars if secrets_vars else None,
@@ -669,6 +693,8 @@ def create(
         console.print(f"Network Access: {network_status}")
         if allowed_domains:
             console.print(f"Allowed Domains: {', '.join(allowed_domains)}")
+        if blocked_domains:
+            console.print(f"Blocked Domains: {', '.join(blocked_domains)}")
         console.print(f"Timeout: {timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
         console.print(f"Region: {region or 'Backend default'}")

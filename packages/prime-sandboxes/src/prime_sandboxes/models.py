@@ -43,6 +43,7 @@ class Sandbox(BaseModel):
     vm: bool = False
     network_access: bool = Field(True, alias="networkAccess")
     allowed_domains: List[str] = Field(default_factory=list, alias="allowedDomains")
+    blocked_domains: List[str] = Field(default_factory=list, alias="blockedDomains")
     status: str
     timeout_minutes: int = Field(..., alias="timeoutMinutes")
     environment_vars: Optional[Dict[str, Any]] = Field(None, alias="environmentVars")
@@ -91,6 +92,7 @@ class CreateSandboxRequest(BaseModel):
     vm: bool = False
     network_access: bool = True
     allowed_domains: List[str] = Field(default_factory=list)
+    blocked_domains: List[str] = Field(default_factory=list)
     timeout_minutes: int = 60
     environment_vars: Optional[Dict[str, str]] = None
     secrets: Optional[Dict[str, str]] = None
@@ -128,6 +130,18 @@ class CreateSandboxRequest(BaseModel):
                 )
             if self.vm:
                 raise ValueError("allowed_domains is not supported for VM sandboxes")
+        return self
+
+    @model_validator(mode="after")
+    def validate_blocked_domains(self) -> "CreateSandboxRequest":
+        if self.blocked_domains:
+            if not self.network_access:
+                raise ValueError(
+                    "blocked_domains requires network_access=true "
+                    "(it is an egress blocklist for unrestricted sandboxes)"
+                )
+            if self.vm:
+                raise ValueError("blocked_domains is not supported for VM sandboxes")
         return self
 
 

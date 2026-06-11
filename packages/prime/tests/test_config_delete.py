@@ -18,6 +18,17 @@ TEST_ENV = {
 def temp_home(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    for name in (
+        "PRIME_API_KEY",
+        "PRIME_TEAM_ID",
+        "PRIME_USER_ID",
+        "PRIME_API_BASE_URL",
+        "PRIME_BASE_URL",
+        "PRIME_FRONTEND_URL",
+        "PRIME_INFERENCE_URL",
+        "PRIME_CONTEXT",
+    ):
+        monkeypatch.delenv(name, raising=False)
     return tmp_path
 
 

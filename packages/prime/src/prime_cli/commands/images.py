@@ -4,8 +4,10 @@ import hashlib
 import json
 import random
 import re
+import string
 import tarfile
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -45,6 +47,9 @@ HARBOR_CONTEXT_EXCLUDES = ("tests", "solution")
 DEFAULT_BATCH_TAG_TEMPLATE = "{index}-{sha12}"
 BATCH_UPLOAD_PARALLELISM = 8
 BATCH_UPLOAD_ATTEMPTS = 4
+# Batch create/start payloads and server-side work scale with item count, so the
+# client default (30s) is far too tight for large batches.
+BATCH_REQUEST_TIMEOUT_SECONDS = 600
 
 config = Config()
 
@@ -578,6 +583,26 @@ def _sanitize_image_tag(raw: str) -> str:
     return tag[:128]
 
 
+_ALLOWED_TAG_TEMPLATE_FIELDS = frozenset({"id", "index", "index0", "number", "sha12"})
+
+
+def _validate_tag_template(tag_template: str) -> None:
+    """Reject templates whose fields would crash or format non-deterministically."""
+    try:
+        parsed = list(string.Formatter().parse(tag_template))
+    except ValueError as exc:
+        raise BatchInputError(f"Invalid tag template: {exc}") from exc
+    for _, field_name, _, _ in parsed:
+        if field_name is None:
+            continue
+        if field_name not in _ALLOWED_TAG_TEMPLATE_FIELDS:
+            shown = field_name if field_name else "<positional>"
+            raise BatchInputError(
+                f"Unknown tag template field {{{shown}}}; allowed fields: "
+                + ", ".join(sorted(_ALLOWED_TAG_TEMPLATE_FIELDS))
+            )
+
+
 def _format_batch_tag(
     tag_template: str,
     *,
@@ -586,6 +611,7 @@ def _format_batch_tag(
     source_id: str,
     sha12: str,
 ) -> str:
+    _validate_tag_template(tag_template)
     width = max(4, len(str(max(total, 1))))
     try:
         raw = tag_template.format(
@@ -597,9 +623,21 @@ def _format_batch_tag(
         )
     except KeyError as exc:
         raise BatchInputError(f"Unknown tag template field: {exc}") from exc
-    except ValueError as exc:
+    except (IndexError, ValueError) as exc:
         raise BatchInputError(f"Invalid tag template: {exc}") from exc
     return _sanitize_image_tag(raw)
+
+
+def _ensure_unique_batch_tags(items: list[BatchBuildItem]) -> None:
+    seen: dict[str, str] = {}
+    for item in items:
+        first = seen.setdefault(item.image_tag, item.source_id)
+        if first != item.source_id:
+            raise BatchInputError(
+                f"Duplicate image tag '{item.image_tag}' generated for items "
+                f"'{first}' and '{item.source_id}'; later builds would overwrite "
+                "earlier ones. Adjust --tag-template so tags are unique."
+            )
 
 
 def _pick_jsonl_row_id(
@@ -655,8 +693,14 @@ def _build_dockerfile_batch_items(
 ) -> list[BatchBuildItem]:
     raw_rows = _read_jsonl_records(source_path)
     prepared: list[tuple[str, str]] = []
+    seen_ids: dict[str, int] = {}
     for line_number, row in raw_rows:
         source_id = _pick_jsonl_row_id(row, id_field=id_field, line_number=line_number)
+        first_line = seen_ids.setdefault(source_id, line_number)
+        if first_line != line_number:
+            raise BatchInputError(
+                f"Line {line_number}: duplicate id '{source_id}' (first seen on line {first_line})"
+            )
         dockerfile_value = row.get(dockerfile_field)
         if not isinstance(dockerfile_value, str) or not dockerfile_value.strip():
             raise BatchInputError(f"Line {line_number}: missing non-empty {dockerfile_field} field")
@@ -683,6 +727,7 @@ def _build_dockerfile_batch_items(
                 dockerfile_sha256=dockerfile_sha256,
             )
         )
+    _ensure_unique_batch_tags(items)
     return items
 
 
@@ -788,6 +833,7 @@ def _build_harbor_batch_items(
                 context_sha256=context_sha256,
             )
         )
+    _ensure_unique_batch_tags(items)
     return items
 
 
@@ -886,9 +932,19 @@ def _batch_id(response: dict[str, Any]) -> Optional[str]:
     return str(value) if value else None
 
 
-def _upload_context_archive(upload_url: str, archive_path: Path) -> None:
+class BatchUploadCancelled(Exception):
+    """Raised inside upload workers when the user interrupted the batch."""
+
+
+def _upload_context_archive(
+    upload_url: str,
+    archive_path: Path,
+    cancel_event: Optional[threading.Event] = None,
+) -> None:
     last_error: Optional[Exception] = None
     for attempt in range(1, BATCH_UPLOAD_ATTEMPTS + 1):
+        if cancel_event is not None and cancel_event.is_set():
+            raise BatchUploadCancelled(str(archive_path))
         try:
             with archive_path.open("rb") as file:
                 upload_response = httpx.put(
@@ -907,7 +963,12 @@ def _upload_context_archive(upload_url: str, archive_path: Path) -> None:
         except httpx.HTTPError as exc:
             last_error = exc
         if attempt < BATCH_UPLOAD_ATTEMPTS:
-            time.sleep(min(2**attempt, 15) + random.uniform(0, 0.5))
+            delay = min(2**attempt, 15) + random.uniform(0, 0.5)
+            if cancel_event is not None:
+                if cancel_event.wait(delay):
+                    raise BatchUploadCancelled(str(archive_path))
+            else:
+                time.sleep(delay)
     assert last_error is not None
     raise last_error
 
@@ -921,20 +982,33 @@ def _upload_batch_contexts(
     partially failed run reports every item that still needs uploading.
     """
     failures: list[tuple[BatchBuildItem, Exception]] = []
+    cancel_event = threading.Event()
     with ThreadPoolExecutor(max_workers=BATCH_UPLOAD_PARALLELISM) as pool:
         futures = {}
         for item in context_items:
             archive = item.context_archive
             if archive is None:
                 continue
-            future = pool.submit(_upload_context_archive, upload_urls[item.source_id], archive.path)
+            future = pool.submit(
+                _upload_context_archive,
+                upload_urls[item.source_id],
+                archive.path,
+                cancel_event,
+            )
             futures[future] = item
-        for future in as_completed(futures):
-            item = futures[future]
-            try:
-                future.result()
-            except Exception as exc:
-                failures.append((item, exc))
+        try:
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    failures.append((item, exc))
+        except KeyboardInterrupt:
+            # Stop in-flight retries and drop everything still queued so Ctrl-C
+            # exits promptly instead of draining the rest of the batch.
+            cancel_event.set()
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
     return failures
 
 
@@ -1329,7 +1403,9 @@ def push_image_batch(
                 # them for any batch that has not started yet.
                 try:
                     batch_response = client.request(
-                        "POST", f"{BATCH_BUILD_ENDPOINT}/{batch_id}/upload-urls"
+                        "POST",
+                        f"{BATCH_BUILD_ENDPOINT}/{batch_id}/upload-urls",
+                        timeout=BATCH_REQUEST_TIMEOUT_SECONDS,
                     )
                 except UnauthorizedError:
                     console.print(
@@ -1352,6 +1428,7 @@ def push_image_batch(
                         platform=platform,
                         visibility=visibility,
                     ),
+                    timeout=BATCH_REQUEST_TIMEOUT_SECONDS,
                 )
             except UnauthorizedError:
                 console.print(
@@ -1417,6 +1494,7 @@ def push_image_batch(
                 "POST",
                 f"{BATCH_BUILD_ENDPOINT}/{batch_id}/start",
                 json={"contexts_uploaded": bool(context_items)},
+                timeout=BATCH_REQUEST_TIMEOUT_SECONDS,
             )
         except APIError as exc:
             console.print(f"[red]Error: Failed to start image build batch: {exc}[/red]")

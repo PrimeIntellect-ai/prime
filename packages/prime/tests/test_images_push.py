@@ -28,7 +28,7 @@ def test_push_image_defaults_dockerfile_to_context(tmp_path, monkeypatch):
     captured = {}
 
     class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
+        def request(self, method, path, json=None, params=None, timeout=None):
             if method == "POST" and path == "/images/build":
                 captured["build_payload"] = json
                 return {
@@ -85,7 +85,7 @@ def test_push_image_public_sends_visibility(tmp_path, monkeypatch):
     captured = {}
 
     class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
+        def request(self, method, path, json=None, params=None, timeout=None):
             if method == "POST" and path == "/images/build":
                 captured["build_payload"] = json
                 return {
@@ -134,7 +134,7 @@ def test_push_batch_dockerfile_jsonl_sends_future_batch_payload(tmp_path, monkey
     captured = {"requests": []}
 
     class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
+        def request(self, method, path, json=None, params=None, timeout=None):
             captured["requests"].append((method, path, json, params))
             if method == "POST" and path == BATCH_BUILD_ENDPOINT:
                 return {"batch_id": "batch-123"}
@@ -187,7 +187,7 @@ def test_push_batch_dry_run_writes_manifest_without_api_call(tmp_path, monkeypat
     manifest_path = tmp_path / "manifest.jsonl"
 
     class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
+        def request(self, method, path, json=None, params=None, timeout=None):
             raise AssertionError(f"Unexpected request: {method} {path}")
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
@@ -237,7 +237,7 @@ def test_push_batch_harbor_packages_environment_context_only(tmp_path, monkeypat
     uploaded_tar_bytes: list[bytes] = []
 
     class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
+        def request(self, method, path, json=None, params=None, timeout=None):
             captured_requests.append((method, path, json, params))
             if method == "POST" and path == BATCH_BUILD_ENDPOINT:
                 return {
@@ -296,7 +296,7 @@ def test_push_batch_harbor_rejects_compose_tasks(tmp_path, monkeypatch):
     (environment_dir / "docker-compose.yaml").write_text("services: {}\n")
 
     class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
+        def request(self, method, path, json=None, params=None, timeout=None):
             raise AssertionError(f"Unexpected request: {method} {path}")
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
@@ -317,7 +317,7 @@ def test_publish_image_calls_visibility_endpoint(monkeypatch):
     captured = {}
 
     class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
+        def request(self, method, path, json=None, params=None, timeout=None):
             captured["method"] = method
             captured["path"] = path
             captured["json"] = json
@@ -342,7 +342,7 @@ def test_publish_image_accepts_owner_prefixed_personal_ref(monkeypatch):
     captured = {}
 
     class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
+        def request(self, method, path, json=None, params=None, timeout=None):
             captured["method"] = method
             captured["path"] = path
             captured["json"] = json
@@ -366,7 +366,7 @@ def test_publish_image_rejects_other_user_prefixed_personal_ref(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
     class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
+        def request(self, method, path, json=None, params=None, timeout=None):
             raise AssertionError(f"Unexpected request: {method} {path}")
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
@@ -386,7 +386,7 @@ def test_delete_image_accepts_owner_prefixed_personal_ref(monkeypatch):
     captured = {}
 
     class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
+        def request(self, method, path, json=None, params=None, timeout=None):
             captured["method"] = method
             captured["path"] = path
             captured["params"] = params
@@ -421,7 +421,7 @@ def test_push_image_accepts_dockerfile_outside_context(tmp_path, monkeypatch):
     captured = {}
 
     class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
+        def request(self, method, path, json=None, params=None, timeout=None):
             if method == "POST" and path == "/images/build":
                 captured["build_payload"] = json
                 return {

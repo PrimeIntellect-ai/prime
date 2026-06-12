@@ -280,6 +280,12 @@ id = "{env_value}"
 # rollouts_per_example = 1
 # interval = 5
 
+# Optional: rollout filters (replaces the removed difficulty buffer).
+# Setting a slot overrides prime-rl's default filter list for that slot.
+# [[pre_batch_filters]]
+# type = "zero_advantage" # "gibberish" | "repetition" | "zero_advantage"
+# enforce = true          # drop flagged rollouts before they fill a batch slot
+
 # Optional: checkpoint configuration
 # [checkpoints]
 # interval = 100              # Save checkpoint every N steps
@@ -503,6 +509,22 @@ class ValConfig(BaseModel):
         return result if result else None
 
 
+class BatchFilterConfig(BaseModel):
+    """A single prime-rl rollout filter (one ``[[pre_batch_filters]]`` /
+    ``[[post_batch_filters]]`` table).
+
+    Extra keys pass through verbatim so type-specific knobs (e.g.
+    repetition's ``window``) reach the trainer without a CLI release.
+    Enforcing ``zero_advantage`` pre-batch is the orch v2 replacement for
+    the removed ``buffer.online_difficulty_filtering``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+    enforce: bool | None = None
+
+
 class WandbConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -647,6 +669,8 @@ class RLConfig(BaseModel):
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
     val: ValConfig = Field(default_factory=ValConfig)
+    pre_batch_filters: List[BatchFilterConfig] | None = None
+    post_batch_filters: List[BatchFilterConfig] | None = None
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
@@ -1409,6 +1433,15 @@ def create_run(
             team_id=app_config.team_id,
             eval_config=cfg.eval.to_api_dict(),
             val_config=cfg.val.to_api_dict(),
+            # `is not None` rather than truthiness: an explicit `= []` means
+            # "replace prime-rl's default filter list with no filters" and
+            # must reach the API as an empty list, not be omitted.
+            pre_batch_filters=[f.model_dump(exclude_none=True) for f in cfg.pre_batch_filters]
+            if cfg.pre_batch_filters is not None
+            else None,
+            post_batch_filters=[f.model_dump(exclude_none=True) for f in cfg.post_batch_filters]
+            if cfg.post_batch_filters is not None
+            else None,
             learning_rate=cfg.learning_rate,
             lora_alpha=cfg.lora_alpha,
             max_inflight_rollouts=cfg.max_inflight_rollouts,

@@ -201,6 +201,8 @@ class RLClient:
         team_id: Optional[str] = None,
         eval_config: Optional[Dict[str, Any]] = None,
         val_config: Optional[Dict[str, Any]] = None,
+        pre_batch_filters: Optional[List[Dict[str, Any]]] = None,
+        post_batch_filters: Optional[List[Dict[str, Any]]] = None,
         learning_rate: Optional[float] = None,
         lora_alpha: Optional[int] = None,
         max_inflight_rollouts: Optional[int] = None,
@@ -273,6 +275,14 @@ class RLClient:
 
             if val_config:
                 payload["val"] = val_config
+
+            # `is not None` rather than truthiness: an explicit empty list
+            # overrides prime-rl's default filters and must be sent.
+            if pre_batch_filters is not None:
+                payload["pre_batch_filters"] = pre_batch_filters
+
+            if post_batch_filters is not None:
+                payload["post_batch_filters"] = post_batch_filters
 
             if learning_rate is not None:
                 payload["learning_rate"] = learning_rate

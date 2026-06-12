@@ -1433,11 +1433,14 @@ def create_run(
             team_id=app_config.team_id,
             eval_config=cfg.eval.to_api_dict(),
             val_config=cfg.val.to_api_dict(),
+            # `is not None` rather than truthiness: an explicit `= []` means
+            # "replace prime-rl's default filter list with no filters" and
+            # must reach the API as an empty list, not be omitted.
             pre_batch_filters=[f.model_dump(exclude_none=True) for f in cfg.pre_batch_filters]
-            if cfg.pre_batch_filters
+            if cfg.pre_batch_filters is not None
             else None,
             post_batch_filters=[f.model_dump(exclude_none=True) for f in cfg.post_batch_filters]
-            if cfg.post_batch_filters
+            if cfg.post_batch_filters is not None
             else None,
             learning_rate=cfg.learning_rate,
             lora_alpha=cfg.lora_alpha,

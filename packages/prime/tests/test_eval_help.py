@@ -42,6 +42,13 @@ def test_sanitize_help_removes_vf_eval_aliases():
     assert "env_id_or_config" not in help_text
 
 
+def test_append_eval_options_includes_env_loading_flags() -> None:
+    help_text = _append_eval_options("Usage: prime eval run\n")
+
+    assert "--env-file PATH" in help_text
+    assert "--env-var TEXT" in help_text
+
+
 def test_append_eval_options_mentions_tunnel_access():
     help_text = _append_eval_options("Usage: prime eval run [-h] environment\n")
 

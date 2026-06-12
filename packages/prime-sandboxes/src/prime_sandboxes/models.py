@@ -290,6 +290,18 @@ class SSHSession(BaseModel):
     token: str
 
 
+class AuthorizeSSHForVMResponse(BaseModel):
+    """Result of authorizing an SSH public key for a VM sandbox session."""
+
+    session_id: str
+    sandbox_id: str
+    host: str
+    port: int
+    external_endpoint: str
+    expires_at: datetime
+    ttl_seconds: int
+
+
 class BackgroundJob(BaseModel):
     """Background job handle returned when starting a background job"""
 

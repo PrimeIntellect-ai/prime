@@ -1088,6 +1088,13 @@ def run(
         "--timeout",
         help="Timeout for the command in seconds",
     ),
+    user: Optional[str] = typer.Option(
+        None,
+        "-u",
+        "--user",
+        help="Run the command as this user (username or UID, optionally USER:GROUP), "
+        "like 'docker exec -u'. Container sandboxes only.",
+    ),
 ) -> None:
     """Execute a command in a sandbox.
 
@@ -1128,6 +1135,8 @@ def run(
             console.print(f"[bold blue]Environment:[/bold blue] {obfuscated_env}")
         if timeout is not None:
             console.print(f"[bold blue]Timeout:[/bold blue] {timeout}s")
+        if user:
+            console.print(f"[bold blue]User:[/bold blue] {user}")
 
         start_time = time.perf_counter()
 
@@ -1138,6 +1147,7 @@ def run(
                 working_dir,
                 env_vars if env_vars else None,
                 timeout=timeout,
+                user=user,
             )
 
         # End timing

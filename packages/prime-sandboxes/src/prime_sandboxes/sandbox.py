@@ -523,7 +523,7 @@ class SandboxClient:
     def _gateway_post(
         url: str,
         headers: Dict[str, str],
-        timeout: float,
+        timeout: Optional[float],
         json: Optional[Dict[str, Any]] = None,
         files: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
@@ -538,7 +538,7 @@ class SandboxClient:
         url: str,
         headers: Dict[str, str],
         params: Dict[str, Any],
-        timeout: float,
+        timeout: Optional[float],
     ) -> httpx.Response:
         """Make a GET request to the gateway with retry on transient errors."""
         with httpx.Client(timeout=timeout) as client:
@@ -553,7 +553,7 @@ class SandboxClient:
         url: str,
         headers: Dict[str, str],
         params: Dict[str, Any],
-        timeout: float,
+        timeout: Optional[float],
     ) -> httpx.Response:
         """Make a read-file GET request to the gateway with read-timeout retries."""
         with httpx.Client(timeout=timeout) as client:
@@ -756,7 +756,6 @@ class SandboxClient:
         gateway_url = auth["gateway_url"].rstrip("/")
         base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
         headers = {"Authorization": f"Bearer {auth['token']}"}
-        effective_timeout = timeout if timeout is not None else 300
         request = build_command_session_start_request(command, working_dir, env)
         stdout_parts: List[str] = []
         stderr_parts: List[str] = []
@@ -768,7 +767,7 @@ class SandboxClient:
                 request=request,
                 method=COMMAND_SESSION_START_RPC_METHOD,
                 headers=headers,
-                timeout_ms=effective_timeout * 1000,
+                timeout_ms=timeout * 1000 if timeout is not None else None,
             )
             for event in stream:
                 event_exit_code = collect_command_session_start_event(
@@ -792,7 +791,7 @@ class SandboxClient:
                 ctx = self._get_sandbox_error_context(sandbox_id)
                 if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                     _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+                raise CommandTimeoutError(sandbox_id, command, timeout) from e
 
             if e.code == Code.NOT_FOUND:
                 ctx = self._get_sandbox_error_context(sandbox_id)
@@ -826,21 +825,22 @@ class SandboxClient:
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
         headers = {"Authorization": f"Bearer {auth['token']}"}
-        effective_timeout = timeout if timeout is not None else 300
-
-        payload = {
+        payload: Dict[str, Any] = {
             "command": command,
             "working_dir": working_dir,
             "env": env or {},
             "sandbox_id": sandbox_id,
-            "timeout": effective_timeout,
         }
+        # Omit timeout entirely when unset so the gateway imposes no command timeout.
+        if timeout is not None:
+            payload["timeout"] = timeout
 
         for attempt in range(MAX_409_RETRIES):
             try:
                 # The + 5 accounts for connection creation and closing. Prevents any command
-                # running close to its `effective_timeout` from being killed prematurely
-                client_timeout = effective_timeout + 5
+                # running close to its `timeout` from being killed prematurely. When timeout
+                # is None the client waits indefinitely, matching the gateway.
+                client_timeout = timeout + 5 if timeout is not None else None
                 response = self._gateway_post(
                     url, headers=headers, timeout=client_timeout, json=payload
                 )
@@ -850,7 +850,7 @@ class SandboxClient:
                 ctx = self._get_sandbox_error_context(sandbox_id)
                 if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                     _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+                raise CommandTimeoutError(sandbox_id, command, timeout) from e
             except httpx.HTTPStatusError as e:
                 resp = getattr(e, "response", None)
                 status = getattr(resp, "status_code", "?")
@@ -875,7 +875,7 @@ class SandboxClient:
                     ctx = self._get_sandbox_error_context(sandbox_id)
                     if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                         _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                    raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+                    raise CommandTimeoutError(sandbox_id, command, timeout) from e
 
                 req = getattr(e, "request", None)
                 method = getattr(req, "method", "?")
@@ -945,7 +945,7 @@ class SandboxClient:
 
         # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
         bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        self.execute_command(sandbox_id, bg_cmd, timeout=30)
+        self.execute_command(sandbox_id, bg_cmd)
 
         return BackgroundJob(
             job_id=job_id,
@@ -967,8 +967,8 @@ class SandboxClient:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
             timeout: Optional per-call timeout (in seconds) forwarded to the
-                underlying read_file calls. When None, the APIClient default
-                applies.
+                underlying read_file calls. When None (default), no timeout is
+                applied.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
@@ -1001,7 +1001,7 @@ class SandboxClient:
         self,
         sandbox_id: str,
         command: str,
-        timeout: int = 900,
+        timeout: Optional[int] = None,
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         poll_interval: int = 3,
@@ -1015,7 +1015,8 @@ class SandboxClient:
         Args:
             sandbox_id: The sandbox ID
             command: Command to execute
-            timeout: Maximum seconds to wait for completion
+            timeout: Maximum seconds to wait for completion. None (default) waits
+                indefinitely until the job completes.
             working_dir: Working directory for command execution
             env: Environment variables
             poll_interval: Seconds between status polls
@@ -1024,11 +1025,12 @@ class SandboxClient:
             BackgroundJobStatus with exit_code, stdout, stderr
 
         Raises:
-            CommandTimeoutError: If command doesn't complete within timeout
+            CommandTimeoutError: If a timeout is set and the command does not
+                complete within it
         """
         job = self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        while deadline is None or time.monotonic() < deadline:
             status = self.get_background_job(sandbox_id, job)
             if status.completed:
                 return status
@@ -1146,8 +1148,6 @@ class SandboxClient:
         url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
         headers = {"Authorization": f"Bearer {auth['token']}"}
 
-        effective_timeout = timeout if timeout is not None else 300
-
         with open(local_file_path, "rb") as f:
             file_content = f.read()
 
@@ -1156,12 +1156,12 @@ class SandboxClient:
                 files = {"file": (os.path.basename(local_file_path), file_content)}
                 params = {"path": file_path, "sandbox_id": sandbox_id}
                 response = self._gateway_post(
-                    url, headers=headers, timeout=effective_timeout, files=files, params=params
+                    url, headers=headers, timeout=timeout, files=files, params=params
                 )
                 response.raise_for_status()
                 return FileUploadResponse.model_validate(response.json())
             except httpx.TimeoutException as e:
-                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
+                raise UploadTimeoutError(sandbox_id, file_path, timeout) from e
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
@@ -1203,19 +1203,17 @@ class SandboxClient:
         url = f"{auth['gateway_url']}/{auth['user_ns']}/{auth['job_id']}/upload"
         headers = {"Authorization": f"Bearer {auth['token']}"}
 
-        effective_timeout = timeout if timeout is not None else 300
-
         for attempt in range(MAX_409_RETRIES):
             try:
                 files = {"file": (filename, file_bytes)}
                 params = {"path": file_path, "sandbox_id": sandbox_id}
                 response = self._gateway_post(
-                    url, headers=headers, timeout=effective_timeout, files=files, params=params
+                    url, headers=headers, timeout=timeout, files=files, params=params
                 )
                 response.raise_for_status()
                 return FileUploadResponse.model_validate(response.json())
             except httpx.TimeoutException:
-                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
+                raise UploadTimeoutError(sandbox_id, file_path, timeout)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
@@ -1241,13 +1239,9 @@ class SandboxClient:
         headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
-        effective_timeout = timeout if timeout is not None else 300
-
         for attempt in range(MAX_409_RETRIES):
             try:
-                response = self._gateway_get(
-                    url, headers=headers, params=params, timeout=effective_timeout
-                )
+                response = self._gateway_get(url, headers=headers, params=params, timeout=timeout)
                 response.raise_for_status()
 
                 dir_path = os.path.dirname(local_file_path)
@@ -1258,7 +1252,7 @@ class SandboxClient:
                     f.write(response.content)
                 return
             except httpx.TimeoutException as e:
-                raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
+                raise DownloadTimeoutError(sandbox_id, file_path, timeout) from e
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 409:
                     if self._should_retry_409(sandbox_id, e, attempt):
@@ -1292,19 +1286,16 @@ class SandboxClient:
         headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path}
 
-        effective_timeout = timeout if timeout is not None else 30
-
         for attempt in range(MAX_409_RETRIES):
             try:
                 response = self._gateway_read_file_get(
-                    url, headers=headers, params=params, timeout=effective_timeout
+                    url, headers=headers, params=params, timeout=timeout
                 )
                 response.raise_for_status()
                 return ReadFileResponse.model_validate(response.json())
             except httpx.TimeoutException as e:
                 raise APIError(
-                    f"Read file timed out after {effective_timeout}s "
-                    f"({e.__class__.__name__}): {file_path}"
+                    f"Read file timed out after {timeout}s ({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
@@ -1434,7 +1425,7 @@ class AsyncSandboxClient:
         self,
         url: str,
         headers: Dict[str, str],
-        timeout: float,
+        timeout: Optional[float],
         json: Optional[Dict[str, Any]] = None,
         files: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
@@ -1451,7 +1442,7 @@ class AsyncSandboxClient:
         url: str,
         headers: Dict[str, str],
         params: Dict[str, Any],
-        timeout: float,
+        timeout: Optional[float],
     ) -> httpx.Response:
         """Make a GET request to the gateway with retry on transient errors."""
         gateway_client = self._get_gateway_client()
@@ -1466,7 +1457,7 @@ class AsyncSandboxClient:
         url: str,
         headers: Dict[str, str],
         params: Dict[str, Any],
-        timeout: float,
+        timeout: Optional[float],
     ) -> httpx.Response:
         """Make a read-file GET request to the gateway with read-timeout retries."""
         gateway_client = self._get_gateway_client()
@@ -1667,7 +1658,6 @@ class AsyncSandboxClient:
         gateway_url = auth["gateway_url"].rstrip("/")
         base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
         headers = {"Authorization": f"Bearer {auth['token']}"}
-        effective_timeout = timeout if timeout is not None else 300
         request = build_command_session_start_request(command, working_dir, env)
         stdout_parts: List[str] = []
         stderr_parts: List[str] = []
@@ -1679,7 +1669,7 @@ class AsyncSandboxClient:
                 request=request,
                 method=COMMAND_SESSION_START_RPC_METHOD,
                 headers=headers,
-                timeout_ms=effective_timeout * 1000,
+                timeout_ms=timeout * 1000 if timeout is not None else None,
             )
             async for event in stream:
                 event_exit_code = collect_command_session_start_event(
@@ -1703,7 +1693,7 @@ class AsyncSandboxClient:
                 ctx = await self._get_sandbox_error_context(sandbox_id)
                 if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                     _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+                raise CommandTimeoutError(sandbox_id, command, timeout) from e
 
             if e.code == Code.NOT_FOUND:
                 ctx = await self._get_sandbox_error_context(sandbox_id)
@@ -1737,21 +1727,22 @@ class AsyncSandboxClient:
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
         headers = {"Authorization": f"Bearer {auth['token']}"}
-        effective_timeout = timeout if timeout is not None else 300
-
-        payload = {
+        payload: Dict[str, Any] = {
             "command": command,
             "working_dir": working_dir,
             "env": env or {},
             "sandbox_id": sandbox_id,
-            "timeout": effective_timeout,
         }
+        # Omit timeout entirely when unset so the gateway imposes no command timeout.
+        if timeout is not None:
+            payload["timeout"] = timeout
 
         for attempt in range(MAX_409_RETRIES):
             try:
                 # The + 5 accounts for connection creation and closing. Prevents any command
-                # running close to its `effective_timeout` from being killed prematurely
-                client_timeout = effective_timeout + 5
+                # running close to its `timeout` from being killed prematurely. When timeout
+                # is None the client waits indefinitely, matching the gateway.
+                client_timeout = timeout + 5 if timeout is not None else None
                 response = await self._gateway_post(
                     url, headers=headers, timeout=client_timeout, json=payload
                 )
@@ -1761,7 +1752,7 @@ class AsyncSandboxClient:
                 ctx = await self._get_sandbox_error_context(sandbox_id)
                 if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                     _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+                raise CommandTimeoutError(sandbox_id, command, timeout) from e
             except httpx.HTTPStatusError as e:
                 resp = getattr(e, "response", None)
                 status = getattr(resp, "status_code", "?")
@@ -1786,7 +1777,7 @@ class AsyncSandboxClient:
                     ctx = await self._get_sandbox_error_context(sandbox_id)
                     if ctx["status"] in ("TERMINATED", "ERROR", "TIMEOUT"):
                         _raise_not_running_error(sandbox_id, ctx, command=command, cause=e)
-                    raise CommandTimeoutError(sandbox_id, command, effective_timeout) from e
+                    raise CommandTimeoutError(sandbox_id, command, timeout) from e
 
                 req = getattr(e, "request", None)
                 method = getattr(req, "method", "?")
@@ -1856,7 +1847,7 @@ class AsyncSandboxClient:
 
         # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
         bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        await self.execute_command(sandbox_id, bg_cmd, timeout=30)
+        await self.execute_command(sandbox_id, bg_cmd)
 
         return BackgroundJob(
             job_id=job_id,
@@ -1878,8 +1869,8 @@ class AsyncSandboxClient:
             sandbox_id: The sandbox ID
             job: The BackgroundJob handle from start_background_job()
             timeout: Optional per-call timeout (in seconds) forwarded to the
-                underlying read_file calls. When None, the APIClient default
-                applies.
+                underlying read_file calls. When None (default), no timeout is
+                applied.
 
         Returns:
             BackgroundJobStatus with completed flag, and exit_code/stdout if done
@@ -1912,7 +1903,7 @@ class AsyncSandboxClient:
         self,
         sandbox_id: str,
         command: str,
-        timeout: int = 900,
+        timeout: Optional[int] = None,
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         poll_interval: int = 3,
@@ -1926,7 +1917,8 @@ class AsyncSandboxClient:
         Args:
             sandbox_id: The sandbox ID
             command: Command to execute
-            timeout: Maximum seconds to wait for completion
+            timeout: Maximum seconds to wait for completion. None (default) waits
+                indefinitely until the job completes.
             working_dir: Working directory for command execution
             env: Environment variables
             poll_interval: Seconds between status polls
@@ -1935,11 +1927,12 @@ class AsyncSandboxClient:
             BackgroundJobStatus with exit_code, stdout, stderr
 
         Raises:
-            CommandTimeoutError: If command doesn't complete within timeout
+            CommandTimeoutError: If a timeout is set and the command does not
+                complete within it
         """
         job = await self.start_background_job(sandbox_id, command, working_dir=working_dir, env=env)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        while deadline is None or time.monotonic() < deadline:
             status = await self.get_background_job(sandbox_id, job)
             if status.completed:
                 return status
@@ -2069,8 +2062,6 @@ class AsyncSandboxClient:
         headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
-        effective_timeout = timeout if timeout is not None else 300
-
         # Read file asynchronously (non-blocking I/O)
         async with aiofiles.open(local_file_path, "rb") as f:
             file_content = await f.read()
@@ -2079,12 +2070,12 @@ class AsyncSandboxClient:
             try:
                 files = {"file": (os.path.basename(local_file_path), file_content)}
                 response = await self._gateway_post(
-                    url, headers=headers, timeout=effective_timeout, files=files, params=params
+                    url, headers=headers, timeout=timeout, files=files, params=params
                 )
                 response.raise_for_status()
                 return FileUploadResponse.model_validate(response.json())
             except httpx.TimeoutException as e:
-                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
+                raise UploadTimeoutError(sandbox_id, file_path, timeout) from e
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
@@ -2128,18 +2119,16 @@ class AsyncSandboxClient:
         headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
-        effective_timeout = timeout if timeout is not None else 300
-
         for attempt in range(MAX_409_RETRIES):
             try:
                 files = {"file": (filename, file_bytes)}
                 response = await self._gateway_post(
-                    url, headers=headers, timeout=effective_timeout, files=files, params=params
+                    url, headers=headers, timeout=timeout, files=files, params=params
                 )
                 response.raise_for_status()
                 return FileUploadResponse.model_validate(response.json())
             except httpx.TimeoutException:
-                raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
+                raise UploadTimeoutError(sandbox_id, file_path, timeout)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
@@ -2166,12 +2155,10 @@ class AsyncSandboxClient:
         headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path, "sandbox_id": sandbox_id}
 
-        effective_timeout = timeout if timeout is not None else 300
-
         for attempt in range(MAX_409_RETRIES):
             try:
                 response = await self._gateway_get(
-                    url, headers=headers, params=params, timeout=effective_timeout
+                    url, headers=headers, params=params, timeout=timeout
                 )
                 response.raise_for_status()
                 content = response.content
@@ -2185,7 +2172,7 @@ class AsyncSandboxClient:
                     await f.write(content)
                 return
             except httpx.TimeoutException as e:
-                raise DownloadTimeoutError(sandbox_id, file_path, effective_timeout) from e
+                raise DownloadTimeoutError(sandbox_id, file_path, timeout) from e
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 409:
                     if await self._should_retry_409(sandbox_id, e, attempt):
@@ -2219,19 +2206,16 @@ class AsyncSandboxClient:
         headers = {"Authorization": f"Bearer {auth['token']}"}
         params = {"path": file_path}
 
-        effective_timeout = timeout if timeout is not None else 30
-
         for attempt in range(MAX_409_RETRIES):
             try:
                 response = await self._gateway_read_file_get(
-                    url, headers=headers, params=params, timeout=effective_timeout
+                    url, headers=headers, params=params, timeout=timeout
                 )
                 response.raise_for_status()
                 return ReadFileResponse.model_validate(response.json())
             except httpx.TimeoutException as e:
                 raise APIError(
-                    f"Read file timed out after {effective_timeout}s "
-                    f"({e.__class__.__name__}): {file_path}"
+                    f"Read file timed out after {timeout}s ({e.__class__.__name__}): {file_path}"
                 ) from e
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:

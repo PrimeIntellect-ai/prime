@@ -503,7 +503,7 @@ def create(
         "--network-access/--no-network-access",
         help="Allow outbound internet access (enabled by default)",
     ),
-    timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
+    timeout_minutes: int = typer.Option(1440, help="Lifetime in minutes (max 1440 = 24h)"),
     idle_timeout_minutes: Optional[int] = typer.Option(
         None,
         "--idle-timeout-minutes",

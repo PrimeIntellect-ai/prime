@@ -91,7 +91,7 @@ class CreateSandboxRequest(BaseModel):
     gpu_type: Optional[str] = None
     vm: bool = False
     network_access: bool = True
-    timeout_minutes: int = 60
+    timeout_minutes: int = 1440
     idle_timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
     secrets: Optional[Dict[str, str]] = None

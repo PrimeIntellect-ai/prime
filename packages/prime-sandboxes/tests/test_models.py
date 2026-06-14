@@ -25,7 +25,7 @@ def test_create_sandbox_request_defaults():
     assert request.gpu_count == 0
     assert request.gpu_type is None
     assert request.vm is False
-    assert request.timeout_minutes == 60
+    assert request.timeout_minutes == 1440
     assert request.region is None
     assert request.labels == []
 

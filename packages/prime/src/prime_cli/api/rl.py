@@ -59,6 +59,25 @@ class RLModel(BaseModel):
         return getattr(self, legacy_attr), getattr(self, effective_attr)
 
 
+class RLTeacherModelPricing(BaseModel):
+    """Inference pricing for a Hosted Training teacher model."""
+
+    prompt: Optional[float] = None
+    completion: Optional[float] = None
+
+
+class RLTeacherModel(BaseModel):
+    """Generate-capable inference model available as a Hosted Training teacher."""
+
+    id: str = Field(..., description="Inference model ID")
+    name: str = Field(..., description="Display name")
+    description: Optional[str] = None
+    pricing: RLTeacherModelPricing = Field(default_factory=RLTeacherModelPricing)
+    generate_supported: bool = Field(False, alias="generateSupported")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class RLRun(BaseModel):
     """Hosted Training run."""
 
@@ -167,6 +186,20 @@ class RLClient:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to list Hosted Training models: {e.response.text}")
             raise APIError(f"Failed to list Hosted Training models: {str(e)}")
+
+    def list_teacher_models(self, team_id: Optional[str] = None) -> List[RLTeacherModel]:
+        """List generate-capable inference models for Hosted Training teachers."""
+        try:
+            params = {}
+            if team_id:
+                params["team_id"] = team_id
+            response = self.client.get("/rft/teacher-models", params=params if params else None)
+            models_data = response.get("models", [])
+            return [RLTeacherModel.model_validate(model) for model in models_data]
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to list Hosted Training teacher models: {e.response.text}")
+            raise APIError(f"Failed to list Hosted Training teacher models: {str(e)}")
 
     def list_runs(self, team_id: Optional[str] = None) -> List[RLRun]:
         """List Hosted Training runs for the authenticated user."""

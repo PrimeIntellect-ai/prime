@@ -37,11 +37,33 @@ def _models_payload() -> Dict[str, Any]:
     }
 
 
+def _teacher_models_payload() -> Dict[str, Any]:
+    return {
+        "models": [
+            {
+                "id": "prime/generate-model",
+                "name": "Prime Generate Model",
+                "description": "Generate-capable teacher",
+                "pricing": {"prompt": 1.5, "completion": 2.5},
+                "generateSupported": True,
+            },
+            {
+                "id": "prime/cheap-teacher",
+                "name": "Prime Cheap Teacher",
+                "pricing": {"prompt": None, "completion": 0.25},
+                "generateSupported": True,
+            },
+        ]
+    }
+
+
 def _mock_get_factory(calls: List[str]):
     def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
         calls.append(endpoint)
         if endpoint == "/rft/models":
             return _models_payload()
+        if endpoint == "/rft/teacher-models":
+            return _teacher_models_payload()
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
     return mock_get
@@ -74,6 +96,35 @@ def test_models_json_includes_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert data["models"][0]["inference_input_price_per_mtok"] == 1.0
     assert data["models"][0]["inference_output_price_per_mtok"] == 3.0
     assert data["models"][1]["training_price_per_mtok"] is None
+
+
+def test_teacher_models_table_renders_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: List[str] = []
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _mock_get_factory(calls))
+
+    result = CliRunner().invoke(app, ["train", "models", "--teachers"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    assert "prime/generate-model" in result.output
+    assert "$1.5" in result.output
+    assert "$2.5" in result.output
+    assert "prime/cheap-teacher" in result.output
+    assert "$0.25" in result.output
+    assert calls == ["/rft/teacher-models"]
+
+
+def test_teacher_models_json_includes_generate_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _mock_get_factory([]))
+
+    result = CliRunner().invoke(app, ["train", "models", "--teachers", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["models"][0]["id"] == "prime/generate-model"
+    assert data["models"][0]["pricing"]["prompt"] == 1.5
+    assert data["models"][0]["generate_supported"] is True
 
 
 def test_models_handles_backend_without_pricing_fields(

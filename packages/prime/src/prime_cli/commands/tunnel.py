@@ -326,6 +326,14 @@ def stop_tunnel(
         "-l",
         help="Stop tunnels matching labels. Can be specified multiple times.",
     ),
+    status: Optional[str] = typer.Option(
+        None,
+        "--status",
+        help=(
+            "Stop only tunnels currently in this status "
+            "(pending, connected, disconnected). Combines with --label/--all."
+        ),
+    ),
     team_id: Optional[str] = typer.Option(
         None,
         "--team-id",
@@ -345,13 +353,28 @@ def stop_tunnel(
     --only-mine controls whether '--all' will restrict to your tunnels or delete for all users.
     """
 
-    if sum(bool(flag) for flag in (all, tunnel_ids, labels)) > 1:
-        console.print("[red]Error:[/red] Use only one of tunnel IDs, --all, or --label")
+    if tunnel_ids and (all or labels or status):
+        console.print(
+            "[red]Error:[/red] Tunnel IDs cannot be combined with --all, --label, or --status"
+        )
         raise typer.Exit(1)
 
-    if not all and not tunnel_ids and not labels:
-        console.print("[red]Error:[/red] Must specify tunnel IDs, --all, or --label")
+    if all and labels:
+        console.print("[red]Error:[/red] Use only one of --all or --label")
         raise typer.Exit(1)
+
+    if not all and not tunnel_ids and not labels and not status:
+        console.print("[red]Error:[/red] Must specify tunnel IDs, --all, --label, or --status")
+        raise typer.Exit(1)
+
+    if status is not None:
+        status = status.strip().lower()
+        allowed_statuses = {"pending", "connected", "disconnected"}
+        if status not in allowed_statuses:
+            console.print(
+                "[red]Error:[/red] --status must be one of: " + ", ".join(sorted(allowed_statuses))
+            )
+            raise typer.Exit(1)
 
     parsed_ids: List[str] = []
     if tunnel_ids:
@@ -372,9 +395,11 @@ def stop_tunnel(
             console.print("[red]Error:[/red] No valid tunnel IDs provided")
             raise typer.Exit(1)
 
-    if all:
+    is_filter_delete = bool(all or labels or status)
 
-        async def validate_all_scope() -> None:
+    if is_filter_delete:
+
+        async def validate_filter_scope() -> None:
             client = _create_tunnel_client()
             try:
                 scoped_user_id = client.config.user_id if only_mine else None
@@ -390,54 +415,29 @@ def stop_tunnel(
                 await client.close()
 
         try:
-            asyncio.run(validate_all_scope())
+            asyncio.run(validate_filter_scope())
         except Exception as e:
             console.print(f"[red]Error:[/red] {e}", style="bold")
             raise typer.Exit(1)
 
-    if labels:
+        filter_parts: List[str] = []
+        if status:
+            filter_parts.append(f"status '{status}'")
+        if labels:
+            filter_parts.append(f"label(s) {', '.join(labels)}")
+        subject = f"tunnels matching {' and '.join(filter_parts)}" if filter_parts else "tunnels"
 
-        async def validate_label_scope() -> None:
-            client = _create_tunnel_client()
-            try:
-                scoped_user_id = client.config.user_id if only_mine else None
-                scoped_team_id = team_id if team_id is not None else client.config.team_id
-                if only_mine and not scoped_user_id:
-                    raise ValueError(
-                        "Cannot resolve current user ID for scoped bulk delete. "
-                        "Run `prime login`, set PRIME_USER_ID, or delete explicit tunnel IDs."
-                    )
-                if not only_mine and not scoped_team_id:
-                    raise ValueError("all_users requires a team ID")
-            finally:
-                await client.close()
-
-        try:
-            asyncio.run(validate_label_scope())
-        except Exception as e:
-            console.print(f"[red]Error:[/red] {e}", style="bold")
-            raise typer.Exit(1)
-
-        confirmation_msg = (
-            f"Are you sure you want to stop tunnels matching label(s): {', '.join(labels)}? "
-            "This action cannot be undone."
-        )
-        cancel_msg = "Stop by label cancelled"
-    elif all:
-        confirmation_msg = (
-            "Are you sure you want to stop all matching tunnel(s)? This action cannot be undone."
-        )
         if team_id and only_mine:
-            confirmation_msg = (
-                f"Are you sure you want to stop all of your tunnels in team {team_id}? "
-                "This action cannot be undone."
-            )
+            who = f"your {subject} in team {team_id}"
         elif team_id and not only_mine:
-            confirmation_msg = (
-                f"Are you sure you want to stop all tunnels in team {team_id}? "
-                "This action cannot be undone."
-            )
-        cancel_msg = "Stop all cancelled"
+            who = f"all {subject} in team {team_id}"
+        elif not only_mine:
+            who = f"all {subject} (all users)"
+        else:
+            who = f"your {subject}"
+
+        confirmation_msg = f"Are you sure you want to stop {who}? This action cannot be undone."
+        cancel_msg = "Stop cancelled"
     elif len(parsed_ids) == 1:
         confirmation_msg = f"Are you sure you want to stop tunnel {parsed_ids[0]}?"
         cancel_msg = "Stop cancelled"
@@ -455,32 +455,23 @@ def stop_tunnel(
         not_found: List[dict] = []
         failed: List[dict] = []
         try:
-            scoped_team_id = team_id
-            if labels and scoped_team_id is None:
-                scoped_team_id = client.config.team_id
-            scoped_user_id = client.config.user_id if only_mine else None
-            if labels and only_mine and not scoped_user_id:
-                raise ValueError(
-                    "Cannot resolve current user ID for scoped bulk delete. "
-                    "Run `prime login`, set PRIME_USER_ID, or delete explicit tunnel IDs."
-                )
-            if labels:
-                result = await client.bulk_delete_tunnels(
-                    labels=labels,
-                    team_id=scoped_team_id,
-                    user_id=scoped_user_id,
-                    all_users=not only_mine,
-                )
-            elif all:
-                if scoped_team_id is None:
-                    scoped_team_id = client.config.team_id
-                result = await client.bulk_delete_tunnels(
-                    team_id=scoped_team_id,
-                    user_id=scoped_user_id,
-                    all_users=not only_mine,
-                )
-            else:
+            if parsed_ids:
                 result = await client.bulk_delete_tunnels(parsed_ids)
+            else:
+                scoped_team_id = team_id if team_id is not None else client.config.team_id
+                scoped_user_id = client.config.user_id if only_mine else None
+                if only_mine and not scoped_user_id:
+                    raise ValueError(
+                        "Cannot resolve current user ID for scoped bulk delete. "
+                        "Run `prime login`, set PRIME_USER_ID, or delete explicit tunnel IDs."
+                    )
+                result = await client.bulk_delete_tunnels(
+                    labels=labels or None,
+                    status=status,
+                    team_id=scoped_team_id,
+                    user_id=scoped_user_id,
+                    all_users=not only_mine,
+                )
             succeeded = result.get("succeeded", [])
             for failure in result.get("failed", []):
                 tid = failure.get("tunnel_id", "")
@@ -533,7 +524,7 @@ def stop_tunnel(
     if total_failed > 0:
         raise typer.Exit(1)
 
-    if all:
-        console.print("[green]All tunnels deleted successfully[/green]")
-    else:
+    if parsed_ids:
         console.print("[green]All specified tunnels deleted successfully[/green]")
+    else:
+        console.print("[green]All matching tunnels deleted successfully[/green]")

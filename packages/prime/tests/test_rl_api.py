@@ -12,6 +12,17 @@ class FakeAPIClient:
 
     def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         self.requests.append((endpoint, params))
+        if endpoint == "/rft/teacher-models":
+            return {
+                "models": [
+                    {
+                        "id": "prime/generate-model",
+                        "name": "Prime Generate Model",
+                        "pricing": {"prompt": 1.5, "completion": 2.5},
+                        "generateSupported": True,
+                    }
+                ]
+            }
         return {
             "chartData": {
                 "histogramData": [
@@ -102,6 +113,18 @@ def test_create_run_sends_max_inflight_rollouts() -> None:
     assert api_client.posts[0][0] == "/rft/runs"
     assert api_client.posts[0][1]["max_inflight_rollouts"] == 96
     assert run.max_inflight_rollouts == 96
+
+
+def test_list_teacher_models_forwards_team_context() -> None:
+    api_client = FakeAPIClient()
+    client = RLClient(api_client)  # type: ignore[arg-type]
+
+    models = client.list_teacher_models(team_id="team-1")
+
+    assert api_client.requests[-1] == ("/rft/teacher-models", {"team_id": "team-1"})
+    assert models[0].id == "prime/generate-model"
+    assert models[0].pricing.prompt == 1.5
+    assert models[0].generate_supported is True
 
 
 def test_create_run_sends_sft_loss_and_teacher_config() -> None:

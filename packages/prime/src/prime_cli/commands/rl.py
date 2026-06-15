@@ -53,6 +53,8 @@ RL_MODELS_JSON_HELP = json_output_help(
     "effective_training_price_per_mtok?, "
     "effective_inference_input_price_per_mtok?, "
     "effective_inference_output_price_per_mtok?, promo_label?}",
+    "with --teachers: .models[] = {id, name, description?, "
+    "pricing: {prompt?, completion?}, generate_supported}",
 )
 
 RL_LIST_JSON_HELP = json_output_help(
@@ -1502,6 +1504,11 @@ def create_run(
 @app.command("models", rich_help_panel="Commands", epilog=RL_MODELS_JSON_HELP)
 def list_models(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    teachers: bool = typer.Option(
+        False,
+        "--teachers",
+        help="List generate-capable teacher models instead of trainable student models.",
+    ),
 ) -> None:
     """List available models for Hosted Training."""
     validate_output_format(output, console)
@@ -1510,6 +1517,40 @@ def list_models(
         api_client = APIClient()
         rl_client = RLClient(api_client)
         config = Config()
+
+        if teachers:
+            models = rl_client.list_teacher_models(team_id=config.team_id)
+
+            if output == "json":
+                output_data_as_json({"models": [m.model_dump() for m in models]}, console)
+                return
+
+            if not models:
+                console.print("[yellow]No teacher models available for Hosted Training.[/yellow]")
+                console.print(
+                    "[dim]This could mean no tenant-visible inference models "
+                    "support /generate.[/dim]"
+                )
+                return
+
+            table = Table(title="Hosted Training - Teacher Models")
+            table.add_column("Model", style="cyan")
+            table.add_column("Input", style="green", justify="right")
+            table.add_column("Output", style="green", justify="right")
+
+            for model in sorted(models, key=lambda model: _model_name_sort_key(model.id)):
+                table.add_row(
+                    model.id,
+                    format_promo_price(model.pricing.prompt, None) or "-",
+                    format_promo_price(model.pricing.completion, None) or "-",
+                )
+
+            table.caption = (
+                "[dim]Prices are per 1M tokens. All listed models support token-level "
+                "/generate.[/dim]"
+            )
+            console.print(table)
+            return
 
         models = rl_client.list_models(team_id=config.team_id)
 

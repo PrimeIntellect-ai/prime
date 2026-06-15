@@ -348,3 +348,35 @@ async def test_client_bulk_delete_all_users_requires_team_id(monkeypatch):
 
     with pytest.raises(TunnelError, match="all_users requires a team ID"):
         await client.bulk_delete_tunnels(labels=["dev"], all_users=True)
+
+
+@pytest.mark.asyncio
+async def test_client_bulk_delete_by_status(monkeypatch):
+    client = TunnelClient(api_key="test-key")
+    captured = {}
+
+    async def fake_request(method, url, json=None, params=None):
+        captured["method"] = method
+        captured["json"] = json
+        return MagicMock(status_code=200)
+
+    async def fake_handle_response(response, operation):
+        return {"succeeded": ["t-test123"], "failed": [], "message": "ok"}
+
+    monkeypatch.setattr(client, "_idempotent_request_with_retry", fake_request)
+    monkeypatch.setattr(client, "_handle_response", fake_handle_response)
+
+    result = await client.bulk_delete_tunnels(status="disconnected", user_id="user-1")
+
+    assert captured["json"]["status"] == "disconnected"
+    assert captured["json"]["userId"] == "user-1"
+    assert "tunnel_ids" not in captured["json"]
+    assert result["succeeded"] == ["t-test123"]
+
+
+@pytest.mark.asyncio
+async def test_client_bulk_delete_status_rejects_tunnel_ids():
+    client = TunnelClient(api_key="test-key")
+
+    with pytest.raises(TunnelError, match="status cannot be combined with tunnel_ids"):
+        await client.bulk_delete_tunnels(tunnel_ids=["t-1"], status="disconnected")

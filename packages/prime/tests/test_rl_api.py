@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from prime_cli.api.rl import RLClient
+from prime_cli.api.rl import RLClient, RLRun
 
 
 class FakeAPIClient:
@@ -44,6 +44,27 @@ class FakeAPIClient:
                 "updatedAt": "2026-05-17T00:00:00Z",
             }
         }
+
+
+def test_run_model_allows_dedicated_full_ft_without_lora_fields() -> None:
+    run = RLRun.model_validate(
+        {
+            "id": "full-ft-run",
+            "name": "dedicated",
+            "userId": "user-1",
+            "status": "RUNNING",
+            "kind": "DEDICATED_FULL_FT",
+            "createdAt": "2026-05-17T00:00:00Z",
+            "updatedAt": "2026-05-17T00:00:00Z",
+        }
+    )
+
+    assert run.kind == "DEDICATED_FULL_FT"
+    assert run.rollouts_per_example is None
+    assert run.seq_len is None
+    assert run.max_steps is None
+    assert run.batch_size is None
+    assert run.base_model is None
 
 
 def test_get_distributions_preserves_chart_histogram_data() -> None:

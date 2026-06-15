@@ -1220,8 +1220,8 @@ def _letta_external_tools() -> list[dict[str, Any]]:
 
 def _unsupported_agent_message(capability: AgentCapability) -> str:
     supported = (
-        "Amp, Codex, Claude, Claude Code, Cursor, Factory Droid, Letta Code, OpenCode, "
-        "Hermes, or Pi"
+        "Amp, Codex, Claude, Claude Code, Cursor, Factory Droid, Grok Build, Letta Code, "
+        "OpenCode, Hermes, or Pi"
     )
     reason = f" {capability.unsupported_reason}" if capability.unsupported_reason else ""
     return (

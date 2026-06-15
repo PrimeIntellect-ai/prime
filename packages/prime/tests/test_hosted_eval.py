@@ -117,6 +117,9 @@ def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
         captured["inference_model"] = config.inference_model
         captured["num_examples"] = config.num_examples
         captured["rollouts_per_example"] = config.rollouts_per_example
+        captured["allow_sandbox_access"] = config.allow_sandbox_access
+        captured["allow_instances_access"] = config.allow_instances_access
+        captured["allow_tunnel_access"] = config.allow_tunnel_access
         return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr(
@@ -136,6 +139,9 @@ def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
     assert captured["inference_model"] == "openai/gpt-4.1-mini"
     assert captured["num_examples"] == 5
     assert captured["rollouts_per_example"] == 3
+    assert captured["allow_sandbox_access"] is True
+    assert captured["allow_instances_access"] is False
+    assert captured["allow_tunnel_access"] is True
     assert "Hosted evaluation started" in result.output
     assert "prime eval logs eval-123 -f" in result.output
 
@@ -353,6 +359,9 @@ def test_create_hosted_evaluation_adds_team_id_to_payload(monkeypatch):
     assert result["evaluation_id"] == "eval-123"
     assert captured["endpoint"] == "/hosted-evaluations"
     assert captured["json"]["team_id"] == "team-123"
+    assert captured["json"]["eval_config"]["allow_sandbox_access"] is True
+    assert captured["json"]["eval_config"]["allow_instances_access"] is False
+    assert captured["json"]["eval_config"]["allow_tunnel_access"] is True
 
 
 def test_create_hosted_evaluation_includes_sampling_args_in_payload(monkeypatch):

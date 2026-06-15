@@ -149,10 +149,12 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_lab_setup_parses_selected_agents_and_all() -> None:
-    selected = parse_lab_setup_args(["--agent", "factory-droid,amp-code,claude-code,letta-code"])
+    selected = parse_lab_setup_args(
+        ["--agent", "factory-droid,amp-code,claude-code,letta-code,grok"]
+    )
     all_agents = parse_lab_sync_args(["--agents", "all"])
 
-    assert selected.agents == ("droid", "amp", "claude", "letta")
+    assert selected.agents == ("droid", "amp", "claude", "letta", "grok")
     assert all_agents.agents == known_agent_names()
 
 

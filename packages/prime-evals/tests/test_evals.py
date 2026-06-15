@@ -125,6 +125,45 @@ def test_sample_model_with_metadata():
     assert sample.info == {"batch": 1}
 
 
+def test_lookup_environment_by_slug_uses_owner_aware_detail_endpoint():
+    calls = []
+
+    class FakeAPIClient:
+        def get(self, endpoint):
+            calls.append(("get", endpoint))
+            return {"data": {"id": "env-123"}}
+
+        def post(self, *_args, **_kwargs):
+            raise AssertionError("owner/name lookup must not use team_slug lookup")
+
+    client = EvalsClient(FakeAPIClient())
+
+    env_id = client._lookup_environment_by_slug("d42me", "opencode-cp")
+
+    assert env_id == "env-123"
+    assert calls == [("get", "/environmentshub/d42me/opencode-cp/@latest")]
+
+
+def test_async_lookup_environment_by_slug_uses_owner_aware_detail_endpoint():
+    calls = []
+
+    class FakeAsyncAPIClient:
+        async def get(self, endpoint):
+            calls.append(("get", endpoint))
+            return {"data": {"id": "env-123"}}
+
+        async def post(self, *_args, **_kwargs):
+            raise AssertionError("owner/name lookup must not use team_slug lookup")
+
+    client = AsyncEvalsClient.__new__(AsyncEvalsClient)
+    client.client = FakeAsyncAPIClient()
+
+    env_id = asyncio.run(client._lookup_environment_by_slug("d42me", "opencode-cp"))
+
+    assert env_id == "env-123"
+    assert calls == [("get", "/environmentshub/d42me/opencode-cp/@latest")]
+
+
 def test_push_samples_reports_progress_and_reuses_http_client(monkeypatch):
     posts = []
     created_clients = []

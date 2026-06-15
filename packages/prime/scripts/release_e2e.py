@@ -381,6 +381,49 @@ def remote_script(config: RemoteConfig) -> str:
             run(["prime", "--version"], timeout=120)
 
 
+        def installed_runtime_regression_checks() -> None:
+            run(
+                [
+                    str(VENV / "bin" / "python"),
+                    "-c",
+                    textwrap.dedent(
+                        '''
+                        import inspect
+
+                        from prime_cli.commands import evals
+                        from prime_tunnel import Tunnel
+
+                        if "labels" not in inspect.signature(Tunnel).parameters:
+                            raise SystemExit("prime_tunnel.Tunnel must accept labels")
+
+                        calls = []
+
+                        class OldEvalsClient:
+                            def push_samples(self, evaluation_id, samples):
+                                calls.append((evaluation_id, samples))
+
+                        class TerminalConsole:
+                            is_terminal = True
+
+                        original_console = evals.console
+                        evals.console = TerminalConsole()
+                        try:
+                            samples = [{"example_id": "1"}]
+                            evals._push_samples_with_progress(
+                                OldEvalsClient(), "eval-123", samples
+                            )
+                        finally:
+                            evals.console = original_console
+
+                        if calls != [("eval-123", [{"example_id": "1"}])]:
+                            raise SystemExit("old prime-evals push_samples compatibility failed")
+                        '''
+                    ),
+                ],
+                timeout=120,
+            )
+
+
         def read_remote_env_slug() -> str:
             metadata_path = ENV_DIR / ".prime" / ".env-metadata.json"
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -568,6 +611,7 @@ def remote_script(config: RemoteConfig) -> str:
             LAB_ROOT.mkdir(parents=True, exist_ok=True)
             run(["tar", "-xzf", str(WORKSPACE / "prime-src.tar.gz"), "-C", str(WORKSPACE)])
             install_candidate_cli()
+            installed_runtime_regression_checks()
             write_smoke_environment()
 
             try:

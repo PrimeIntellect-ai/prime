@@ -230,13 +230,19 @@ rollouts_per_example = 8
 # checkpoint_id = "..."
 
 # Optional: SFT distillation teacher
-# To use SFT, change the top-level loss to "sft" and uncomment this block.
+# To use SFT, change loss to "sft" and uncomment this block. Defaults to Prime Inference.
 # [teacher]
 # model = "openai/gpt-oss-120b"
 #
 # [teacher.sampling]
 # max_tokens = 2048
 # reasoning_effort = "medium"
+
+# Optional: override the Prime Inference default with a custom OAI-compatible endpoint.
+# Uncomment this block only when pointing at OpenAI, OpenRouter, self-hosted vLLM, etc.
+# [teacher.client]
+# base_url = "https://api.openai.com/v1"
+# api_key_var = "OPENAI_API_KEY"
 
 [sampling]
 max_tokens = 2048
@@ -259,7 +265,7 @@ id = "{env_value}"
 # # optional: default for all environments
 # num_examples = -1
 # rollouts_per_example = 1
-# eval_base_model = true
+# skip_first_step = false # set true to skip the pre-training eval of the base model
 #
 # [[eval.env]]
 # id = "primeintellect/eval-env"
@@ -274,15 +280,11 @@ id = "{env_value}"
 # rollouts_per_example = 1
 # interval = 5
 
-# Optional: buffer configuration for difficulty filtering
-# [buffer]
-# easy_threshold = 1.0
-# hard_threshold = 0.0
-# easy_fraction = 0.0
-# hard_fraction = 0.0
-# online_difficulty_filtering = false
-# env_ratios = [0.5, 0.5]
-# skip_verification = false
+# Optional: rollout filters (replaces the removed difficulty buffer).
+# Setting a slot overrides prime-rl's default filter list for that slot.
+# [[pre_batch_filters]]
+# type = "zero_advantage" # "gibberish" | "repetition" | "zero_advantage"
+# enforce = true          # drop flagged rollouts before they fill a batch slot
 
 # Optional: checkpoint configuration
 # [checkpoints]
@@ -408,17 +410,52 @@ class TeacherSamplingConfig(BaseModel):
         return self
 
 
+class TeacherClientConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str = Field(..., min_length=1)
+    api_key_var: str = Field(..., min_length=1)
+    headers_from_env: Dict[str, str] | None = None
+    skip_model_check: bool | None = None
+
+
 class TeacherConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str
+    client: TeacherClientConfig | None = None
     sampling: TeacherSamplingConfig | None = None
 
     def to_api_dict(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {"model": {"name": self.model}}
+        if self.client is not None:
+            result["client"] = self.client.model_dump(exclude_none=True)
         if self.sampling is not None:
             result["sampling"] = self.sampling.model_dump(exclude_none=True)
         return result
+
+
+class EvalSamplingConfig(BaseModel):
+    """Eval-time sampling overrides.
+
+    ``enable_thinking`` / ``reasoning_effort`` are convenience flags the
+     platform merges into ``extra_body.chat_template_kwargs`` for supported models;
+    they cannot both be set on the same block.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_tokens: int | None = None
+    temperature: float | None = None
+    extra_body: Dict[str, Any] | None = None
+    enable_thinking: bool | None = None
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+
+    @model_validator(mode="after")
+    def _reasoning_controls_mutually_exclusive(self) -> "EvalSamplingConfig":
+        if self.enable_thinking is not None and self.reasoning_effort is not None:
+            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
+        return self
 
 
 class EvalConfig(BaseModel):
@@ -427,8 +464,13 @@ class EvalConfig(BaseModel):
     interval: int | None = None
     num_examples: int | None = None
     rollouts_per_example: int | None = None
-    eval_base_model: bool | None = None
+    skip_first_step: bool | None = None
+    """Skip the eval of the base model that otherwise runs before training
+    starts. Replaces the deprecated ``eval_base_model`` with inverted meaning
+    (``eval_base_model = false`` ≡ ``skip_first_step = true``), matching the
+    prime-rl orch v2 rename."""
     env: List[EvalEnvConfig] = Field(default_factory=list)
+    sampling: EvalSamplingConfig | None = None
 
     def to_api_dict(self) -> Dict[str, Any] | None:
         if not self.env:
@@ -440,8 +482,12 @@ class EvalConfig(BaseModel):
             result["num_examples"] = self.num_examples
         if self.rollouts_per_example is not None:
             result["rollouts_per_example"] = self.rollouts_per_example
-        if self.eval_base_model is not None:
-            result["eval_base_model"] = self.eval_base_model
+        if self.skip_first_step is not None:
+            result["skip_first_step"] = self.skip_first_step
+        if self.sampling is not None:
+            sampling_dict = self.sampling.model_dump(exclude_none=True)
+            if sampling_dict:
+                result["sampling"] = sampling_dict
         return result
 
 
@@ -463,37 +509,20 @@ class ValConfig(BaseModel):
         return result if result else None
 
 
-class BufferConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class BatchFilterConfig(BaseModel):
+    """A single prime-rl rollout filter (one ``[[pre_batch_filters]]`` /
+    ``[[post_batch_filters]]`` table).
 
-    easy_threshold: float | None = None
-    hard_threshold: float | None = None
-    easy_fraction: float | None = None
-    hard_fraction: float | None = None
-    online_difficulty_filtering: bool | None = None
-    env_ratios: List[float] | None = None
-    skip_verification: bool | None = None
-    seed: int | None = None
+    Extra keys pass through verbatim so type-specific knobs (e.g.
+    repetition's ``window``) reach the trainer without a CLI release.
+    Enforcing ``zero_advantage`` pre-batch is the orch v2 replacement for
+    the removed ``buffer.online_difficulty_filtering``.
+    """
 
-    def to_api_dict(self) -> Dict[str, Any] | None:
-        result: Dict[str, Any] = {}
-        if self.easy_threshold is not None:
-            result["easy_threshold"] = self.easy_threshold
-        if self.hard_threshold is not None:
-            result["hard_threshold"] = self.hard_threshold
-        if self.easy_fraction is not None:
-            result["easy_fraction"] = self.easy_fraction
-        if self.hard_fraction is not None:
-            result["hard_fraction"] = self.hard_fraction
-        if self.online_difficulty_filtering is not None:
-            result["online_difficulty_filtering"] = self.online_difficulty_filtering
-        if self.env_ratios is not None:
-            result["env_ratios"] = self.env_ratios
-        if self.skip_verification is not None:
-            result["skip_verification"] = self.skip_verification
-        if self.seed is not None:
-            result["seed"] = self.seed
-        return result if result else None
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+    enforce: bool | None = None
 
 
 class WandbConfig(BaseModel):
@@ -640,7 +669,8 @@ class RLConfig(BaseModel):
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
     val: ValConfig = Field(default_factory=ValConfig)
-    buffer: BufferConfig = Field(default_factory=BufferConfig)
+    pre_batch_filters: List[BatchFilterConfig] | None = None
+    post_batch_filters: List[BatchFilterConfig] | None = None
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     checkpoints: CheckpointsConfig = Field(default_factory=CheckpointsConfig)
     adapters: AdaptersConfig = Field(default_factory=AdaptersConfig)
@@ -694,6 +724,248 @@ def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
 
     if removed:
         console.print("[yellow]Warning:[/yellow] `trajectory_strategy` is deprecated and ignored.")
+
+    if "buffer" in data:
+        data.pop("buffer", None)
+        console.print(
+            "[yellow]Warning:[/yellow] `[buffer]` is deprecated and ignored: "
+            "the difficulty-filtering buffer was removed from the trainer."
+        )
+
+    eval_section = data.get("eval")
+    if isinstance(eval_section, dict) and "eval_base_model" in eval_section:
+        legacy = eval_section.pop("eval_base_model")
+        if "skip_first_step" in eval_section:
+            console.print(
+                "[yellow]Warning:[/yellow] `eval.eval_base_model` is deprecated and "
+                "ignored because `eval.skip_first_step` is also set. Remove "
+                "`eval_base_model` from your config."
+            )
+        else:
+            translated = (not legacy) if isinstance(legacy, bool) else legacy
+            eval_section["skip_first_step"] = translated
+            console.print(
+                "[yellow]Warning:[/yellow] `eval.eval_base_model` is deprecated: "
+                "prime-rl renamed it to `skip_first_step` with inverted meaning "
+                "(`eval_base_model = false` ≡ `skip_first_step = true`). "
+                f"Translating to `skip_first_step = {str(translated).lower()}` — "
+                "update your config to use `skip_first_step` directly."
+            )
+
+
+def _peek_toml(config_path: str) -> Dict[str, Any]:
+    """Parse the TOML once for the dispatch decision. Returns {} on missing
+    or malformed file — the strict load_config call below produces the
+    user-facing error in that case so we don't double-report here."""
+    p = Path(config_path)
+    if not p.exists():
+        return {}
+    try:
+        data = toml.load(p)
+    except toml.TomlDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _is_full_finetune(cfg: Dict[str, Any]) -> bool:
+    """A config is full-FT iff it carries one of:
+
+    - top-level `type = "full_finetune"` (mirrors prime-rl's discriminator)
+    - a `[deployment]` table with a sizing field — either single-node
+      (`num_train_gpus` / `num_infer_gpus`) or multi-node
+      (`num_train_nodes` / `num_infer_nodes`) — or an explicit
+      `[deployment].type` of `single_node` / `multi_node`.
+
+    Previously only the single-node sizing fields triggered detection, so
+    canonical multi-node prime-rl shapes (e.g. `qwen30b_math/rl.toml`,
+    which uses `num_train_nodes` / `num_infer_nodes`) silently fell
+    through to the LoRA dispatch path.
+    """
+    if cfg.get("type") == "full_finetune":
+        return True
+    deploy = cfg.get("deployment")
+    if isinstance(deploy, dict):
+        if deploy.get("type") in ("single_node", "multi_node"):
+            return True
+        sizing_keys = (
+            "num_train_gpus",
+            "num_infer_gpus",
+            "num_train_nodes",
+            "num_infer_nodes",
+        )
+        if any(k in deploy for k in sizing_keys):
+            return True
+    return False
+
+
+def _dispatch_full_finetune_run(
+    *,
+    raw_cfg: Dict[str, Any],
+    config_path: str,
+    env: Optional[List[str]],
+    env_file: Optional[List[str]],
+    output: str,
+    yes: bool,
+    image_tag: Optional[str] = None,
+) -> None:
+    """Hand off to /api/v1/training/runs (full-FT prime-rl on a registered
+    PrimeCluster). Reuses the shared env-file plumbing for WANDB / HF
+    secrets so the user experience matches the LoRA path.
+
+    Backend always auto-picks the first uncordoned PrimeCluster — the
+    CLI never threads a cluster id, so a config that targets the wrong
+    cluster can't be a footgun."""
+    from ..api.training import HostedTrainingClient, build_payload_from_toml
+
+    name = raw_cfg.get("name")
+
+    # Link the dispatched run to the user's active team (same convention
+    # as the LoRA path at line 1216). Without this, the RFTRun row gets
+    # team_id=None and lands on the caller's personal account even when
+    # the CLI is configured for a team — confusing for billing + access
+    # scoping. Backend's `CreateDedicatedRunRequest.team_id` is Optional,
+    # so omitting it is silently wrong rather than a 400.
+    app_config = Config()
+    team_id = app_config.team_id
+
+    # Resolve env files relative to the config dir, same convention as the
+    # LoRA path. We don't validate WANDB presence here — the chart wires
+    # WANDB_API_KEY via secretKeyRef only if `[wandb]` is configured AND
+    # the user passed --wandb-api-key, mirroring the platform's existing
+    # admin-dialog UX.
+    #
+    # `env_file` (deprecated, singular) is loaded first so `env_files`
+    # (canonical, plural) overrides it on key collision. Mirrors the
+    # LoRA path at line 947 ("env_files takes precedence").
+    config_dir = Path(config_path).parent
+    cfg_env_files: List[str] = []
+    for key in ("env_file", "env_files"):
+        val = raw_cfg.get(key)
+        if isinstance(val, list):
+            cfg_env_files.extend(str(config_dir / p) for p in val)
+        elif isinstance(val, str):
+            cfg_env_files.append(str(config_dir / val))
+    all_env_files = cfg_env_files + (env_file or [])
+
+    def _warn(msg: str) -> None:
+        console.print(f"[yellow]Warning:[/yellow] {msg}")
+
+    try:
+        secrets = collect_env_vars(
+            env_args=env,
+            env_files=all_env_files if all_env_files else None,
+            on_warning=_warn,
+        )
+    except EnvParseError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    secrets = secrets or {}
+
+    # The full-FT backend schema only knows about WANDB_API_KEY and
+    # HF_TOKEN (see platform CreateDedicatedRunRequestBase). Silently
+    # dropping anything else here would launch the run without the
+    # credentials the orchestrator's env needs — the LoRA path forwards
+    # the whole map via env-server pods, but full-FT runs the env inline
+    # in the orchestrator and has no comparable surface today. Reject
+    # loudly instead so the user knows up-front rather than discovering
+    # via a runtime auth error inside a $$$ hosted pod.
+    supported_secret_keys = {"WANDB_API_KEY", "HF_TOKEN"}
+    unsupported = sorted(k for k in secrets if k not in supported_secret_keys)
+    if unsupported:
+        console.print(
+            "[red]Error:[/red] full-FT runs only forward "
+            f"{', '.join(sorted(supported_secret_keys))} today; got "
+            f"unsupported secret(s): {', '.join(unsupported)}."
+        )
+        console.print(
+            "[dim]Drop these from --env-var/--env-file, or wait for "
+            "generic secret forwarding on the dedicated training endpoint.[/dim]"
+        )
+        raise typer.Exit(1)
+
+    # `image_tag` is chart-level — it picks which prime-rl container build
+    # the run pulls. Two ways to set it: `--image-tag` (CLI flag, useful
+    # for ad-hoc pins / CI overrides) or top-level `image_tag = "..."` in
+    # the TOML (lives with the run config, the form most teams want to
+    # check in). CLI flag wins so an explicit override on the command line
+    # always beats the file. Backend defaults to "main" when neither is
+    # set, so falling through to None is the right "use platform default"
+    # signal.
+    config_image_tag = raw_cfg.get("image_tag")
+    if config_image_tag is not None and not isinstance(config_image_tag, str):
+        console.print(
+            f"[red]Error:[/red] image_tag in {config_path} must be a string, "
+            f"got {type(config_image_tag).__name__}."
+        )
+        raise typer.Exit(1)
+    resolved_image_tag = image_tag or config_image_tag
+
+    # Same deprecation pass as the LoRA path. In the prime-rl-native shape
+    # the deprecated keys live one level down, under `[orchestrator]` — and
+    # this config ships verbatim to the dedicated training endpoint, where
+    # orch v2 rejects the removed keys as "Extra inputs are not permitted".
+    orch_section = raw_cfg.get("orchestrator")
+    if isinstance(orch_section, dict):
+        _remove_deprecated_config_keys(orch_section)
+
+    # Strip CLI-only secret-loading keys before shipping the TOML to the
+    # backend. `env_file` / `env_files` only meaningfully exist on the
+    # caller's filesystem — the hosted pod doesn't see them, and prime-rl
+    # has no use for the paths once we've already materialized the secrets
+    # into the per-run k8s Secret above. Leaving them in the config either
+    # confuses prime-rl (unknown field) or silently sends it chasing
+    # phantom paths. `image_tag` is similarly chart-level — the backend
+    # parses it off the request body, not the embedded prime-rl config.
+    config_payload = {
+        k: v for k, v in raw_cfg.items() if k not in ("env_file", "env_files", "image_tag")
+    }
+
+    payload = build_payload_from_toml(
+        config_payload,
+        name=name,
+        team_id=team_id,
+        image_tag=resolved_image_tag,
+        wandb_api_key=secrets.get("WANDB_API_KEY"),
+        hf_token=secrets.get("HF_TOKEN"),
+    )
+
+    # `--output json` is a formatting switch: still dispatch the run,
+    # then print the result as JSON. Same contract as the LoRA path
+    # ("create then format"), which automation relies on to parse back
+    # run_id from the response. Confirmation gating is purely on `--yes`
+    # so the JSON output path doesn't accidentally launch an expensive
+    # training job without an explicit ack — matches confirm_or_skip
+    # in the LoRA path.
+    if not yes:
+        if not typer.confirm("Dispatch full_finetune run on auto-picked PrimeCluster?"):
+            raise typer.Exit(0)
+
+    api_client = APIClient()
+    client = HostedTrainingClient(api_client)
+    try:
+        result = client.create_run(payload)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    if output == "json":
+        # Don't expose token_value in JSON output either — the chart
+        # binds it via secretKeyRef and printing it leaks credentials
+        # into automation logs.
+        output_data_as_json(
+            {"run": {"runId": result.run_id, "jobId": result.job_id}},
+            console,
+        )
+        return
+
+    # Don't print result.token_value: the platform wires it into the
+    # per-run k8s Secret automatically (orchestrator's PRIME_API_KEY env
+    # via secretKeyRef). Surfacing it on stdout makes it easy to leak into
+    # shared shell history/CI logs without buying anything for the user.
+    console.print(
+        f"[green]Dispatched[/green] hosted run [bold]{result.run_id}[/bold] "
+        f"(job [dim]{result.job_id}[/dim])"
+    )
 
 
 def load_config(path: str) -> RLConfig:
@@ -774,10 +1046,10 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     return {
         "id": run.id,
         "status": run.status,
-        "model": run.base_model,
+        "model": run.base_model or "-",
         "environments": envs_display,
-        "steps": f"{run.max_steps}",
-        "rollouts": str(run.rollouts_per_example),
+        "steps": "-" if run.max_steps is None else f"{run.max_steps}",
+        "rollouts": "-" if run.rollouts_per_example is None else str(run.rollouts_per_example),
         "created_at": created_at,
         "team_id": run.team_id,
     }
@@ -861,6 +1133,15 @@ def create_run(
         help="Skip action status check and run even if environment action failed.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    image_tag: Optional[str] = typer.Option(
+        None,
+        "--image-tag",
+        help=(
+            "prime-rl container image tag for the run (full-FT only). "
+            'Falls back to a top-level `image_tag = "..."` in the TOML '
+            "if unset, then to the backend default."
+        ),
+    ),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
@@ -869,6 +1150,25 @@ def create_run(
         prime train config.toml
     """
     validate_output_format(output, console)
+
+    # Peek at the raw TOML BEFORE the strict-schema RLConfig parse so a
+    # full-FT config (`type = "full_finetune"` or a `[deployment]` block
+    # with num_train_gpus/num_infer_gpus) can bypass the LoRA-shared
+    # validators and dispatch on the hosted full-FT endpoint instead.
+    # Backwards-compatible: configs without these markers take the LoRA
+    # path exactly as before.
+    raw_cfg = _peek_toml(config_path)
+    if _is_full_finetune(raw_cfg):
+        _dispatch_full_finetune_run(
+            raw_cfg=raw_cfg,
+            config_path=config_path,
+            env=env,
+            env_file=env_file,
+            output=output,
+            yes=yes,
+            image_tag=image_tag,
+        )
+        return
 
     console.print(f"[dim]Loading config from {config_path}[/dim]\n")
     cfg = load_config(config_path)
@@ -1133,7 +1433,15 @@ def create_run(
             team_id=app_config.team_id,
             eval_config=cfg.eval.to_api_dict(),
             val_config=cfg.val.to_api_dict(),
-            buffer_config=cfg.buffer.to_api_dict(),
+            # `is not None` rather than truthiness: an explicit `= []` means
+            # "replace prime-rl's default filter list with no filters" and
+            # must reach the API as an empty list, not be omitted.
+            pre_batch_filters=[f.model_dump(exclude_none=True) for f in cfg.pre_batch_filters]
+            if cfg.pre_batch_filters is not None
+            else None,
+            post_batch_filters=[f.model_dump(exclude_none=True) for f in cfg.post_batch_filters]
+            if cfg.post_batch_filters is not None
+            else None,
             learning_rate=cfg.learning_rate,
             lora_alpha=cfg.lora_alpha,
             max_inflight_rollouts=cfg.max_inflight_rollouts,
@@ -1601,11 +1909,12 @@ def get_run(
         if run.status == "QUEUED" and run.runs_ahead is not None:
             status_text += f" (~{run.runs_ahead} runs ahead)"
         console.print(f"  Status: [{status_color}]{status_text}[/{status_color}]")
-        console.print(f"  Model: [magenta]{run.base_model}[/magenta]")
+        console.print(f"  Model: [magenta]{formatted['model']}[/magenta]")
         console.print(f"  Environments: [green]{formatted['environments']}[/green]")
-        console.print(f"  Max Steps: {run.max_steps}")
-        console.print(f"  Batch Size: {run.batch_size}")
-        console.print(f"  Rollouts per Example: {run.rollouts_per_example}")
+        console.print(f"  Max Steps: {formatted['steps']}")
+        batch_size = "-" if run.batch_size is None else str(run.batch_size)
+        console.print(f"  Batch Size: {batch_size}")
+        console.print(f"  Rollouts per Example: {formatted['rollouts']}")
         if run.max_tokens:
             console.print(f"  Max Tokens: {run.max_tokens}")
         if run.wandb_project:
@@ -1660,19 +1969,29 @@ def delete_run(
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
 ) -> None:
     """Delete a run."""
+    if not force:
+        confirm = typer.confirm(f"Are you sure you want to permanently delete run {run_id}?")
+        if not confirm:
+            console.print("Cancelled.")
+            raise typer.Exit(0)
+
+    api_client = APIClient()
+
+    # Always go through the LoRA-shared endpoint. The backend's
+    # `delete_single_run` kind-routes DEDICATED_FULL_FT rows server-side
+    # to `training_service.delete_dedicated_run` (helm uninstall + ns
+    # delete + token disable + soft-delete), so a single ownership-gated
+    # call handles both kinds correctly. Avoids:
+    #   * the admin-gate on the dedicated `/training/runs` endpoint
+    #     (non-admin owners couldn't delete their own runs via the
+    #     hosted-first probe),
+    #   * an Optional-kind-on-the-wire race where a missing field would
+    #     mis-route to the LoRA cleanup path on the CLI side and leak
+    #     the helm release.
+    rl_client = RLClient(api_client)
     try:
-        if not force:
-            confirm = typer.confirm(f"Are you sure you want to permanently delete run {run_id}?")
-            if not confirm:
-                console.print("Cancelled.")
-                raise typer.Exit(0)
-
-        api_client = APIClient()
-        rl_client = RLClient(api_client)
-
         rl_client.delete_run(run_id)
         console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
-
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
@@ -1864,17 +2183,12 @@ def _parse_since(since: Optional[str]) -> Optional[int]:
     return seconds
 
 
-def _parse_env_qualifier(env: str) -> tuple[str, int]:
-    """Parse 'name' or 'name/<int>' into (env_name, env_index).
-
-    Only a trailing ``/<int>`` is treated as a replica index. Any other slashes
-    are part of the env name itself (e.g. owner/name IDs like
-    ``primeintellect/reverse-text``).
-    """
+def _parse_env_qualifier_with_index(env: str) -> tuple[str, int, bool]:
+    """Parse an env qualifier and report whether a numeric suffix was present."""
     name, sep, idx_str = env.rpartition("/")
     if sep and name and idx_str.isdigit():
-        return name, int(idx_str)
-    return env, 0
+        return name, int(idx_str), True
+    return env, 0, False
 
 
 @app.command("logs", rich_help_panel="Monitoring")
@@ -1885,8 +2199,9 @@ def get_logs(
         "--component",
         "-c",
         help=(
-            "Pod to read logs from: 'orchestrator' (default) or 'env-server'. "
-            "Inferred from --env when omitted."
+            "Pod to read logs from: 'orchestrator' (default), 'trainer', "
+            "'inference', or 'env-server'. trainer/inference apply only "
+            "to dedicated full-FT runs. Inferred from --env when omitted."
         ),
     ),
     env: Optional[str] = typer.Option(
@@ -1931,12 +2246,17 @@ def get_logs(
 ) -> None:
     """Get logs for a run.
 
-    Defaults to the orchestrator pod. Pass ``--env <name>`` to read an
-    env-server pod instead — useful when an env-server is crash-looping
-    (e.g. ``ModuleNotFoundError``) and the orchestrator has stalled at
-    "Starting orchestrator step 0".
+    Defaults to the orchestrator pod. Use ``--component`` to pick one of
+    ``trainer`` / ``inference`` / ``env-server`` (dedicated full-FT only).
+    Pass ``--env <name>`` to read an env-server pod by name (shorthand for
+    ``--component=env-server``).
 
     List available pods first with ``prime train components <run_id>``.
+
+    Per-rank narrowing on multi-replica trainer/inference is not yet
+    surfaced here — `--local-ranks-filter=0` in the chart's torchrun
+    invocation already dedupes the in-pod rank fan-out, and per-pod
+    inspection on multi-node runs requires kubectl + the PVC log files.
 
     Examples:
 
@@ -1945,19 +2265,22 @@ def get_logs(
         prime train logs <run_id> --search Backpressure
         prime train logs <run_id> --level ERROR --since 1h
         prime train logs <run_id> --search 'Step \\d+' --regex
+        prime train logs <run_id> -c trainer
+        prime train logs <run_id> -c inference
         prime train logs <run_id> --env reverse-text
         prime train logs <run_id> --env reverse-text/1 -f
     """
+    valid_components = ("orchestrator", "trainer", "inference", "env-server")
     if component is None:
         component = "env-server" if env is not None else "orchestrator"
-    elif component not in ("orchestrator", "env-server"):
+    elif component not in valid_components:
         raise typer.BadParameter(
-            f"Invalid component '{component}'. Use 'orchestrator' or 'env-server'.",
+            f"Invalid component '{component}'. Use one of: {', '.join(valid_components)}.",
             param_hint="--component",
         )
-    if component == "orchestrator" and env is not None:
+    if env is not None and component != "env-server":
         raise typer.BadParameter(
-            "--env applies only to env-server logs. Drop --component=orchestrator or drop --env.",
+            f"--env applies only to env-server logs. Drop --component={component} or drop --env.",
             param_hint="--env",
         )
     if component == "env-server" and env is None:
@@ -1988,7 +2311,50 @@ def get_logs(
         api_client = APIClient()
         rl_client = RLClient(api_client)
 
-        if component == "orchestrator":
+        env_name_q, env_index_q, env_has_index_q = (
+            _parse_env_qualifier_with_index(env) if env is not None else (None, 0, False)
+        )
+
+        # Dedicated full-FT env-servers run as 1-replica-per-name
+        # StatefulSets, so a `name/N` qualifier (typed by hand or copied
+        # from a stale source) would incorrectly route through the
+        # legacy `/env-server-logs` endpoint and 404 on a backend that
+        # never registered an indexed pod for this run. Probe the run
+        # kind once and strip the index for full-FT runs so the unified
+        # `/logs` route handles them. Skipped for the no-index path
+        # (already routes correctly) and tolerated on probe failure
+        # (preserves prior behaviour for transient API blips).
+        if component == "env-server" and env is not None and env_has_index_q:
+            try:
+                if rl_client.get_run(run_id).kind == "DEDICATED_FULL_FT":
+                    env = env_name_q
+                    env_has_index_q = False
+            except APIError:
+                pass
+
+        if component == "env-server" and env is not None and env_has_index_q:
+            assert env_name_q is not None
+            # Legacy shared-RFT env-server (`name/index` qualifier) — go
+            # through the dedicated env-server endpoint which uses the
+            # cluster_id-backed pod lookup path. Dedicated full-FT
+            # env-servers use the unified /logs route with
+            # component=env-server + env_name (StatefulSets always run
+            # one pod per env, so no index disambiguation needed).
+
+            def fetch(t: int) -> str:
+                return rl_client.get_env_server_logs(
+                    run_id,
+                    env_name=env_name_q,
+                    env_index=env_index_q,
+                    tail_lines=t,
+                    search=search,
+                    regex=regex,
+                    level=normalized_level,
+                    since_seconds=since_seconds,
+                )
+
+            label = f"env-server {env}"
+        elif component == "orchestrator":
 
             def fetch(t: int) -> str:
                 return rl_client.get_logs(
@@ -2002,22 +2368,25 @@ def get_logs(
 
             label = "orchestrator"
         else:
-            assert env is not None  # narrowed by validation above
-            env_name, env_index = _parse_env_qualifier(env)
+            # trainer / inference / dedicated env-server — unified /logs
+            # route. env (no slash) names the dedicated env-server's
+            # StatefulSet.
+            fetch_component = component
+            fetch_env = env if component == "env-server" else None
 
             def fetch(t: int) -> str:
-                return rl_client.get_env_server_logs(
+                return rl_client.get_logs(
                     run_id,
-                    env_name=env_name,
-                    env_index=env_index,
                     tail_lines=t,
                     search=search,
                     regex=regex,
                     level=normalized_level,
                     since_seconds=since_seconds,
+                    component=fetch_component,
+                    env_name=fetch_env,
                 )
 
-            label = f"env-server {env}"
+            label = f"env-server {env}" if component == "env-server" else component
 
         _stream_logs(
             fetch_fn=fetch,

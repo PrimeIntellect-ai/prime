@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import json
 import re
 import time
@@ -1012,7 +1013,7 @@ def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, An
 def _push_samples_with_progress(
     client: EvalsClient, evaluation_id: str, samples: list[dict[str, Any]]
 ) -> None:
-    if not console.is_terminal:
+    if not console.is_terminal or not _push_samples_accepts_progress_callback(client):
         client.push_samples(evaluation_id, samples)
         return
 
@@ -1023,6 +1024,17 @@ def _push_samples_with_progress(
             samples,
             progress_callback=lambda uploaded: progress.update(task_id, advance=uploaded),
         )
+
+
+def _push_samples_accepts_progress_callback(client: EvalsClient) -> bool:
+    try:
+        parameters = inspect.signature(client.push_samples).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "progress_callback" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 def _require_published_environment_for_eval_push(env_name: str, eval_path: Path) -> None:
@@ -1535,9 +1547,9 @@ def run_eval_cmd(
                     "rollouts_per_example": HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE,
                     "env_args": None,
                     "timeout_minutes": None,
-                    "allow_sandbox_access": False,
+                    "allow_sandbox_access": True,
                     "allow_instances_access": False,
-                    "allow_tunnel_access": False,
+                    "allow_tunnel_access": True,
                     "sampling_args": None,
                     "max_concurrent": None,
                     "max_retries": None,
@@ -1645,7 +1657,7 @@ def run_eval_cmd(
                     "allow_sandbox_access": (
                         allow_sandbox_access
                         if allow_sandbox_access
-                        else target_config.get("allow_sandbox_access", False)
+                        else target_config.get("allow_sandbox_access", True)
                     ),
                     "allow_instances_access": (
                         allow_instances_access
@@ -1655,7 +1667,7 @@ def run_eval_cmd(
                     "allow_tunnel_access": (
                         allow_tunnel_access
                         if allow_tunnel_access
-                        else target_config.get("allow_tunnel_access", False)
+                        else target_config.get("allow_tunnel_access", True)
                     ),
                     "custom_secrets": parsed_custom_secrets,
                     "sampling_args": effective_sampling_args,
@@ -1726,9 +1738,9 @@ def run_eval_cmd(
                 target["rollouts_per_example"],
                 _freeze_json_value(target.get("env_args")),
                 target.get("timeout_minutes"),
-                target.get("allow_sandbox_access", False),
+                target.get("allow_sandbox_access", True),
                 target.get("allow_instances_access", False),
-                target.get("allow_tunnel_access", False),
+                target.get("allow_tunnel_access", True),
                 _freeze_json_value(target.get("sampling_args")),
                 target.get("max_concurrent"),
                 target.get("max_retries"),
@@ -1781,9 +1793,9 @@ def run_eval_cmd(
                     env_args=target.get("env_args"),
                     name=target.get("eval_name"),
                     timeout_minutes=target.get("timeout_minutes"),
-                    allow_sandbox_access=target.get("allow_sandbox_access", False),
+                    allow_sandbox_access=target.get("allow_sandbox_access", True),
                     allow_instances_access=target.get("allow_instances_access", False),
-                    allow_tunnel_access=target.get("allow_tunnel_access", False),
+                    allow_tunnel_access=target.get("allow_tunnel_access", True),
                     custom_secrets=target.get("custom_secrets"),
                     sampling_args=target.get("sampling_args"),
                     max_concurrent=target.get("max_concurrent"),

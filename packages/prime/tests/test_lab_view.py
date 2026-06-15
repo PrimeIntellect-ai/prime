@@ -62,6 +62,7 @@ from prime_lab_app.agent_mcp_bridge import (
     lab_mcp_runtime_dir,
     write_amp_mcp_config,
     write_droid_mcp_config,
+    write_grok_mcp_config,
     write_hermes_mcp_config,
     write_opencode_mcp_config,
 )
@@ -2516,6 +2517,48 @@ def test_prime_lab_setup_service_supports_hermes_agent(
     assert (tmp_path / ".hermes" / "skills" / "create-environments").exists()
 
 
+def test_prime_lab_setup_service_supports_grok_build_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    def fake_download(
+        url: str,
+        dest: Path,
+        emit: Any,
+        *,
+        force: bool = False,
+        quiet: bool = False,
+    ) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(f"downloaded from {url}\n", encoding="utf-8")
+
+    def fake_runner(command: Any, cwd: Path, emit: Any) -> int:
+        return 0
+
+    monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
+    monkeypatch.setattr("prime_cli.lab_setup._download_json", _fake_lab_skill_download_json)
+
+    assert parse_lab_setup_args(["--agent", "grok"]).agents == ("grok",)
+
+    result = run_lab_setup_service(
+        LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("grok",)),
+        workspace=tmp_path,
+        emit=lambda _text: None,
+        runner=fake_runner,
+    )
+
+    metadata = json.loads((tmp_path / ".prime" / "lab.json").read_text(encoding="utf-8"))
+    grok_config = toml.loads(
+        (tmp_path / "home" / ".grok" / "config.toml").read_text(encoding="utf-8")
+    )
+    assert result.exit_code == 0
+    assert metadata["choices"]["primary_agent"] == "grok"
+    assert (tmp_path / ".grok" / "skills" / "create-environments").exists()
+    assert grok_config["mcp_servers"]["prime_lab"]["enabled"] is True
+
+
 def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
     assert agent_adapter("codex").prompt_command("hello") == ["codex", "exec", "hello"]
     assert agent_adapter("claude").prompt_command("hello") == ["claude", "-p", "hello"]
@@ -2526,6 +2569,7 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
     assert agent_adapter("cursor").lab_widget_contract == "mcp-stdio-tools"
     assert agent_adapter("opencode").lab_widget_contract == "mcp-stdio-tools"
     assert agent_adapter("pi").lab_widget_contract == "pi-extension-tools"
+    assert agent_adapter("grok").lab_widget_contract == "mcp-stdio-tools"
     assert agent_adapter("hermes-agent").lab_widget_contract == "mcp-stdio-tools"
     assert agent_adapter("letta-code").lab_widget_contract == "letta-external-tools"
     workspace = Path("/workspace")
@@ -2586,6 +2630,31 @@ def test_lab_agent_adapters_map_known_and_custom_commands() -> None:
         "/workspace",
     )
     assert agent_adapter("opencode").server_spec(workspace).transport == "acp-stdio"
+    assert agent_adapter("grok").prompt_command("hello") == [
+        "grok",
+        "--no-auto-update",
+        "-p",
+        "hello",
+    ]
+    assert agent_adapter("grok").server_spec(workspace).command == (
+        "grok",
+        "--no-auto-update",
+        "agent",
+        "stdio",
+    )
+    assert agent_adapter("grok").server_spec(workspace).transport == "acp-stdio"
+    assert agent_adapter("grok").stream_command("hello", "session-1", workspace=workspace) == [
+        "grok",
+        "--no-auto-update",
+        "--output-format",
+        "streaming-json",
+        "--cwd",
+        "/workspace",
+        "--resume",
+        "session-1",
+        "-p",
+        "hello",
+    ]
     assert agent_adapter("pi").prompt_command("hello") == ["pi", "--print", "hello"]
     assert agent_adapter("pi").stream_command("hello", workspace=workspace) == [
         "pi",
@@ -2661,6 +2730,7 @@ def test_lab_agent_capabilities_centralize_supported_agents(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(
         "prime_lab_app.agent_capabilities.shutil.which",
         lambda command: "/bin/tool" if command in {"pi", "codex"} else None,
@@ -2672,6 +2742,7 @@ def test_lab_agent_capabilities_centralize_supported_agents(
         "codex",
         "cursor",
         "droid",
+        "grok",
         "hermes",
         "letta",
         "opencode",
@@ -2692,6 +2763,11 @@ def test_lab_agent_capabilities_centralize_supported_agents(
     assert droid.status == "supported"
     assert droid.native_surface == "droid_mcp_config"
     assert droid.resolved_surface_paths(tmp_path) == (tmp_path.resolve() / ".factory" / "mcp.json",)
+    grok = agent_capability("grok")
+    assert grok.name == "grok"
+    assert grok.label == "Grok Build"
+    assert grok.native_surface == "acp_mcp"
+    assert grok.resolved_surface_paths(tmp_path) == (Path.home() / ".grok" / "config.toml",)
     assert agent_capability("codex").native_surface == "codex_app_server"
     assert agent_capability("claude-code").name == "claude"
     assert agent_capability("claude").native_surface == "mcp_config"
@@ -3334,6 +3410,7 @@ def test_agent_native_surface_writers_create_agent_specific_configs(
 
     opencode_path = write_opencode_mcp_config(tmp_path)
     hermes_path = write_hermes_mcp_config(tmp_path)
+    grok_path = write_grok_mcp_config(tmp_path)
     amp_path = write_amp_mcp_config(tmp_path)
     droid_path = write_droid_mcp_config(tmp_path)
 
@@ -3354,6 +3431,16 @@ def test_agent_native_surface_writers_create_agent_specific_configs(
     assert "mcp_servers" in hermes_config
     assert "prime_lab" in hermes_config
     assert str(tmp_path.resolve()) in hermes_config
+    grok_config = toml.loads(grok_path.read_text(encoding="utf-8"))
+    assert grok_config["mcp_servers"]["prime_lab"]["args"] == [
+        "-c",
+        "from prime_cli.main import run; run()",
+        "lab",
+        "mcp",
+        "--workspace",
+        str(tmp_path.resolve()),
+    ]
+    assert grok_config["mcp_servers"]["prime_lab"]["enabled"] is True
     amp_config = json.loads(amp_path.read_text(encoding="utf-8"))
     assert amp_config["prime_lab"]["args"] == [
         "-c",
@@ -4010,6 +4097,80 @@ def test_agent_runtime_supports_hermes_with_mcp_config(
     assert "Native Lab tools are available" in prompt_params[0]["prompt"][0]["text"]
     assert messages
     assert messages[-1].content == "hermes ready"
+    runtime.stop()
+
+
+def test_agent_runtime_supports_grok_build_with_mcp_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    commands: list[list[str]] = []
+    messages: tuple[Any, ...] = ()
+    session_new_params: list[dict[str, Any]] = []
+    prompt_params: list[dict[str, Any]] = []
+
+    def handler(process: _FakeJsonRpcProcess, message: dict[str, Any]) -> None:
+        request_id = message["id"]
+        method = message["method"]
+        if method == "initialize":
+            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {"authMethods": []}})
+            return
+        if method == "session/new":
+            session_new_params.append(message["params"])
+            process.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {"sessionId": "grok-session"},
+                }
+            )
+            return
+        if method == "session/prompt":
+            prompt_params.append(message["params"])
+            process.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "grok-session",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "grok ready"},
+                        },
+                    },
+                }
+            )
+            process.emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
+            return
+        process.emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> _FakeJsonRpcProcess:
+        commands.append(command)
+        return _FakeJsonRpcProcess(handler)
+
+    def on_messages(value: Any) -> None:
+        nonlocal messages
+        messages = value
+
+    runtime = AgentRuntime(on_messages=on_messages, popen_factory=fake_popen)
+    runtime.start(tmp_path, "grok")
+
+    assert _wait_for(lambda: runtime.state.status == "connected")
+    grok_config = toml.loads(
+        (tmp_path / "home" / ".grok" / "config.toml").read_text(encoding="utf-8")
+    )
+    assert grok_config["mcp_servers"]["prime_lab"]["enabled"] is True
+    assert commands[0] == ["grok", "--no-auto-update", "agent", "stdio"]
+    assert session_new_params[0]["mcpServers"][0]["name"] == "prime_lab"
+
+    runtime.send_prompt("hello")
+
+    assert _wait_for(lambda: messages and messages[-1].status != "streaming")
+    assert prompt_params
+    assert "Native Lab tools are available" in prompt_params[0]["prompt"][0]["text"]
+    assert messages
+    assert messages[-1].content == "grok ready"
     runtime.stop()
 
 

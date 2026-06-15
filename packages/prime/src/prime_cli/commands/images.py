@@ -615,6 +615,12 @@ def push_image(
 @app.command("list", epilog=LIST_IMAGES_JSON_HELP)
 def list_images(
     output: str = typer.Option("table", "--output", "-o", help="Output format (table or json)"),
+    search: Optional[str] = typer.Option(
+        None,
+        "--search",
+        "-q",
+        help="Case-insensitive substring match on image name, tag, or reference",
+    ),
     all_images: bool = typer.Option(
         False, "--all", "-a", help="[Deprecated] Show all accessible images (personal + team)"
     ),
@@ -626,9 +632,14 @@ def list_images(
 
     Shows personal images by default, or team images when a team is configured.
 
+    The --search filter is applied server-side across all your images (not just
+    the current page), and pagination reflects the filtered results.
+
     \b
     Examples:
         prime images list
+        prime images list --search myapp
+        prime images list -q nvidia
         prime images list --num 100
         prime images list --page 2
         prime images list --output json
@@ -657,6 +668,8 @@ def list_images(
         params: dict[str, str] = {"limit": str(num), "offset": str(offset)}
         if config.team_id:
             params["teamId"] = config.team_id
+        if search:
+            params["search"] = search
 
         response = client.request("GET", "/images", params=params)
         images: list[ImageRow] = response.get("data", [])
@@ -669,8 +682,14 @@ def list_images(
 
         if not images:
             if has_total_count and total_count == 0:
-                console.print("[yellow]No images or builds found.[/yellow]")
-                console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
+                if search:
+                    console.print(f"[yellow]No images match '{search}'.[/yellow]")
+                    console.print(
+                        "Try a different search term or run without [bold]--search[/bold]."
+                    )
+                else:
+                    console.print("[yellow]No images or builds found.[/yellow]")
+                    console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")
             elif has_total_count:
                 console.print(
                     f"[yellow]No images on page {page}. Total: {total_count} image(s).[/yellow]"
@@ -679,6 +698,9 @@ def list_images(
             elif page > 1:
                 console.print(f"[yellow]No images on page {page}.[/yellow]")
                 console.print("Try [bold]--page 1[/bold] to start from the beginning.")
+            elif search:
+                console.print(f"[yellow]No images match '{search}'.[/yellow]")
+                console.print("Try a different search term or run without [bold]--search[/bold].")
             else:
                 console.print("[yellow]No images or builds found.[/yellow]")
                 console.print("Push an image with: [bold]prime images push <name>:<tag>[/bold]")

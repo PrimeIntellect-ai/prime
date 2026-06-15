@@ -10,6 +10,7 @@ from typing import Literal
 from .agent_mcp_bridge import (
     write_amp_mcp_config,
     write_droid_mcp_config,
+    write_grok_mcp_config,
     write_hermes_mcp_config,
     write_lab_mcp_config,
     write_opencode_mcp_config,
@@ -201,6 +202,19 @@ KNOWN_AGENT_ADAPTERS = {
         stream_prefix=("pi", "--print", "--mode", "json", "--no-session"),
         lab_widget_contract="pi-extension-tools",
     ),
+    "grok": AgentAdapter(
+        name="grok",
+        label="Grok Build",
+        prompt_prefix=("grok", "--no-auto-update", "-p"),
+        server_prefix=("grok", "--no-auto-update", "agent", "stdio"),
+        server_transport="acp-stdio",
+        server_description="Grok Build Agent Client Protocol stdio transport.",
+        stream_prefix=("grok", "--no-auto-update", "--output-format", "streaming-json"),
+        resume_flag="--resume",
+        workspace_flag="--cwd",
+        prompt_flag="-p",
+        lab_widget_contract="mcp-stdio-tools",
+    ),
     "hermes": AgentAdapter(
         name="hermes",
         label="Hermes Agent",
@@ -310,6 +324,8 @@ def write_agent_native_surface(workspace: Path, agent: str) -> tuple[Path, ...]:
             return (write_opencode_mcp_config(workspace),)
         if adapter.name == "hermes":
             return (write_hermes_mcp_config(workspace),)
+        if adapter.name == "grok":
+            return (write_grok_mcp_config(workspace),)
         return (write_agent_mcp_config(workspace, adapter.name),)
     return ()
 

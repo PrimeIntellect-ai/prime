@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import queue
 import random
 import re
 import string
@@ -10,7 +11,6 @@ import tarfile
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -996,39 +996,51 @@ def _upload_context_archive(
 def _upload_batch_contexts(
     context_items: list[BatchBuildItem], upload_urls: dict[str, str]
 ) -> list[tuple[BatchBuildItem, Exception]]:
-    """Upload all packaged contexts with bounded parallelism.
+    """Upload all packaged contexts with bounded parallelism."""
+    pending = [item for item in context_items if item.context_archive is not None]
+    if not pending:
+        return []
 
-    Collects per-item failures instead of aborting on the first one so a
-    partially failed run reports every item that still needs uploading.
-    """
     failures: list[tuple[BatchBuildItem, Exception]] = []
+    failures_lock = threading.Lock()
     cancel_event = threading.Event()
-    with ThreadPoolExecutor(max_workers=BATCH_UPLOAD_PARALLELISM) as pool:
-        futures = {}
-        for item in context_items:
+    task_queue: "queue.Queue[BatchBuildItem]" = queue.Queue()
+    for item in pending:
+        task_queue.put(item)
+
+    def _worker() -> None:
+        while not cancel_event.is_set():
+            try:
+                item = task_queue.get_nowait()
+            except queue.Empty:
+                return
             archive = item.context_archive
-            if archive is None:
-                continue
-            future = pool.submit(
-                _upload_context_archive,
-                upload_urls[item.source_id],
-                archive.path,
-                cancel_event,
-            )
-            futures[future] = item
-        try:
-            for future in as_completed(futures):
-                item = futures[future]
-                try:
-                    future.result()
-                except Exception as exc:
+            try:
+                if archive is not None:
+                    _upload_context_archive(upload_urls[item.source_id], archive.path, cancel_event)
+            except Exception as exc:  # noqa: BLE001 - reported back to the caller
+                with failures_lock:
                     failures.append((item, exc))
-        except KeyboardInterrupt:
-            # Stop in-flight retries and drop everything still queued so Ctrl-C
-            # exits promptly instead of draining the rest of the batch.
-            cancel_event.set()
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise
+            finally:
+                task_queue.task_done()
+
+    threads = [
+        threading.Thread(target=_worker, name=f"img-batch-upload-{index}", daemon=True)
+        for index in range(min(BATCH_UPLOAD_PARALLELISM, len(pending)))
+    ]
+    for thread in threads:
+        thread.start()
+
+    try:
+        for thread in threads:
+            # Poll-join so a Ctrl-C on the main thread is raised within ~0.2s
+            # instead of being swallowed by an untimed blocking join().
+            while thread.is_alive():
+                thread.join(timeout=0.2)
+    except KeyboardInterrupt:
+        cancel_event.set()
+        raise
+
     return failures
 
 

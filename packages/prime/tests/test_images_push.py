@@ -120,7 +120,7 @@ def test_push_image_public_sends_visibility(tmp_path, monkeypatch):
     assert "Visibility:" in result.output
 
 
-def test_push_batch_dockerfile_jsonl_sends_future_batch_payload(tmp_path, monkeypatch):
+def test_push_batch_dockerfile_jsonl_uploads_contexts_and_starts(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
@@ -132,18 +132,30 @@ def test_push_batch_dockerfile_jsonl_sends_future_batch_payload(tmp_path, monkey
     rows_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
 
     captured = {"requests": []}
+    uploads: dict[str, bytes] = {}
 
     class DummyAPIClient:
         def request(self, method, path, json=None, params=None, timeout=None):
             captured["requests"].append((method, path, json, params))
             if method == "POST" and path == BATCH_BUILD_ENDPOINT:
-                return {"batch_id": "batch-123"}
+                return {
+                    "batch_id": "batch-123",
+                    "upload_urls": {
+                        "task-a": "https://example.test/task-a",
+                        "task-b": "https://example.test/task-b",
+                    },
+                }
             if method == "POST" and path == f"{BATCH_BUILD_ENDPOINT}/batch-123/start":
                 return {}
             raise AssertionError(f"Unexpected request: {method} {path}")
 
-    def fake_put(*args, **kwargs):
-        raise AssertionError("raw Dockerfile batch mode should not upload contexts")
+    class DummyUploadResponse:
+        def raise_for_status(self):
+            return None
+
+    def fake_put(url, content, headers, timeout):
+        uploads[url] = content.read()
+        return DummyUploadResponse()
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
     monkeypatch.setattr("prime_cli.commands.images.httpx.put", fake_put)
@@ -163,15 +175,31 @@ def test_push_batch_dockerfile_jsonl_sends_future_batch_payload(tmp_path, monkey
     assert payload["mode"] == "dockerfile"
     assert payload["visibility"] == "PUBLIC"
     assert payload["items"][0]["id"] == "task-a"
-    assert payload["items"][0]["dockerfile"] == rows[0]["dockerfile"]
     assert payload["items"][0]["image_tag"].startswith("0001-")
     assert payload["items"][1]["id"] == "task-b"
     assert payload["items"][1]["image_tag"].startswith("0002-")
+    # The create request no longer carries Dockerfile bytes; each item uploads
+    # its own one-file context to a presigned URL instead.
+    assert "dockerfile" not in payload["items"][0]
     assert "context_archive" not in payload["items"][0]
+    assert payload["items"][0]["dockerfile_path"] == "Dockerfile"
+
+    # Dockerfile-mode items are uploaded, then the batch starts with the
+    # contexts-uploaded confirmation, exactly like harbor mode.
+    assert set(uploads) == {
+        "https://example.test/task-a",
+        "https://example.test/task-b",
+    }
+    with tarfile.open(
+        fileobj=io.BytesIO(uploads["https://example.test/task-a"]), mode="r:gz"
+    ) as tar:
+        assert tar.getnames() == ["Dockerfile"]
+        extracted = tar.extractfile("Dockerfile").read().decode("utf-8")
+        assert extracted == rows[0]["dockerfile"]
     assert captured["requests"][1] == (
         "POST",
         f"{BATCH_BUILD_ENDPOINT}/batch-123/start",
-        {"contexts_uploaded": False},
+        {"contexts_uploaded": True},
         None,
     )
     assert "task-a -> cligym:" in result.output

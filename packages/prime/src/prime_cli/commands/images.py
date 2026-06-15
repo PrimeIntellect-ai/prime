@@ -1,6 +1,7 @@
 """Commands for managing Docker images in Prime Intellect registry."""
 
 import hashlib
+import io
 import json
 import random
 import re
@@ -541,6 +542,27 @@ def _package_build_context(
     return PackagedContext(path=tar_path, size_bytes=tar_path.stat().st_size)
 
 
+def _package_dockerfile_context(dockerfile_text: Optional[str]) -> PackagedContext:
+    """Pack a one-file context tarball whose only entry is Dockerfile."""
+    data = (dockerfile_text or "").encode("utf-8")
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
+        tar_path = Path(tmp_file.name)
+
+    try:
+        with tarfile.open(tar_path, "w:gz") as tar:
+            info = tarfile.TarInfo(name="Dockerfile")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    except Exception:
+        try:
+            tar_path.unlink()
+        except Exception:
+            pass
+        raise
+
+    return PackagedContext(path=tar_path, size_bytes=tar_path.stat().st_size)
+
+
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -861,8 +883,6 @@ def _batch_payload_item(item: BatchBuildItem) -> dict[str, Any]:
         "source_type": item.source_type,
         "dockerfile_sha256": item.dockerfile_sha256,
     }
-    if item.dockerfile_text is not None:
-        payload["dockerfile"] = item.dockerfile_text
     if item.context_path is not None:
         payload["dockerfile_path"] = PACKAGED_DOCKERFILE_PATH
         payload["context_sha256"] = item.context_sha256
@@ -1368,11 +1388,11 @@ def push_image_batch(
                 console.print(json.dumps(_batch_manifest_record(item), sort_keys=True))
             return
 
-        context_items = [item for item in items if item.context_path is not None]
-        if context_items:
-            console.print("[cyan]Preparing Harbor build contexts...[/cyan]")
-            for item in context_items:
-                if item.context_path is None or item.dockerfile_path is None:
+        context_items = items
+        console.print("[cyan]Preparing build contexts...[/cyan]")
+        for item in context_items:
+            if item.context_path is not None:
+                if item.dockerfile_path is None:
                     console.print(
                         f"[red]Error: Missing context metadata for {item.source_id}[/red]"
                     )
@@ -1382,12 +1402,18 @@ def push_image_batch(
                     item.dockerfile_path,
                     excluded_dirs=HARBOR_CONTEXT_EXCLUDES,
                 )
-            total_size = sum(item.context_archive.size_bytes for item in context_items)
-            console.print(
-                f"[green]✓[/green] Packaged {len(context_items)} context(s) "
-                f"({total_size / (1024 * 1024):.2f} MB)"
-            )
-            console.print()
+            else:
+                item.context_archive = _package_dockerfile_context(item.dockerfile_text)
+        total_size = sum(
+            item.context_archive.size_bytes
+            for item in context_items
+            if item.context_archive is not None
+        )
+        console.print(
+            f"[green]✓[/green] Packaged {len(context_items)} context(s) "
+            f"({total_size / (1024 * 1024):.2f} MB)"
+        )
+        console.print()
 
         client = APIClient()
         batch_response: dict[str, Any] = {}
@@ -1472,7 +1498,7 @@ def push_image_batch(
                     )
                 raise typer.Exit(1)
             console.print(
-                f"[cyan]Uploading {len(context_items)} Harbor build context(s) "
+                f"[cyan]Uploading {len(context_items)} build context(s) "
                 f"(up to {BATCH_UPLOAD_PARALLELISM} in parallel)...[/cyan]"
             )
             failures = _upload_batch_contexts(context_items, upload_urls)

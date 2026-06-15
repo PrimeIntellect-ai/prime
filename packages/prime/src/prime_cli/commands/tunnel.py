@@ -317,40 +317,71 @@ def tunnel_status(
 @app.command("stop")
 def stop_tunnel(
     tunnel_ids: Optional[List[str]] = typer.Argument(
-        None, help="Tunnel ID(s) to stop (space or comma-separated)"
+        None,
+        help=(
+            "Explicit tunnel ID(s) to stop, space- or comma-separated. "
+            "Cannot be combined with --all, --label, or --status (those select "
+            "tunnels by filter instead)."
+        ),
     ),
-    all: bool = typer.Option(False, "--all", "-a", help="Stop all tunnels"),
+    all: bool = typer.Option(
+        False,
+        "--all",
+        "-a",
+        help=(
+            "Stop every tunnel in scope (your own by default; add --all-users "
+            "for all members of a team). Cannot be combined with tunnel IDs or "
+            "--label; may be narrowed with --status."
+        ),
+    ),
     labels: Optional[List[str]] = typer.Option(
         None,
         "--label",
         "-l",
-        help="Stop tunnels matching labels. Can be specified multiple times.",
+        help=(
+            "Stop tunnels carrying ALL of the given labels (AND match, not OR). "
+            "Repeatable, e.g. -l dev -l preview. Cannot be combined with tunnel "
+            "IDs or --all; may be narrowed with --status."
+        ),
     ),
     status: Optional[str] = typer.Option(
         None,
         "--status",
         help=(
-            "Stop only tunnels currently in this status "
-            "(pending, connected, disconnected). Combines with --label/--all."
+            "Stop only tunnels currently in this status: pending, connected, or "
+            "disconnected (case-insensitive). Use alone to stop all tunnels in "
+            "that status, or combine with --all/--label to narrow further. "
+            "Cannot be combined with explicit tunnel IDs."
         ),
     ),
     team_id: Optional[str] = typer.Option(
         None,
         "--team-id",
-        help="Team ID to include team tunnels for --all (uses config team_id if not specified)",
+        help=(
+            "Team whose tunnels to target for --all/--label/--status "
+            "(defaults to your configured team_id). Required when using "
+            "--all-users."
+        ),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
     only_mine: bool = typer.Option(
         True,
         "--only-mine/--all-users",
         "-m/-A",
-        help="Restrict '--all' deletes to only your tunnels",
+        help=(
+            "Scope for filter deletes (--all/--label/--status): --only-mine "
+            "(default) restricts to tunnels you own; --all-users targets every "
+            "team member's tunnels and requires a team."
+        ),
         show_default=True,
     ),
 ) -> None:
     """Stop and delete one or more tunnels.
 
-    --only-mine controls whether '--all' will restrict to your tunnels or delete for all users.
+    Select tunnels in exactly one of two ways: pass explicit tunnel IDs, or use
+    the filter flags --all/--label/--status (which can be combined with each
+    other but not with explicit IDs). --only-mine/--all-users controls whether
+    filter deletes apply to just your tunnels or all members of a team.
     """
 
     if tunnel_ids and (all or labels or status):

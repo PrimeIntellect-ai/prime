@@ -3,6 +3,7 @@ import json
 import tarfile
 from typing import Any
 
+import httpx
 from prime_cli.commands.images import BATCH_BUILD_ENDPOINT, PACKAGED_DOCKERFILE_PATH
 from prime_cli.main import app
 from typer.testing import CliRunner
@@ -153,12 +154,13 @@ def test_push_batch_dockerfile_jsonl_uploads_contexts_and_starts(tmp_path, monke
         def raise_for_status(self):
             return None
 
-    def fake_put(url, content, headers, timeout):
+    def fake_put(self, url, content=None, headers=None, **kwargs):
         uploads[url] = content.read()
         return DummyUploadResponse()
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
-    monkeypatch.setattr("prime_cli.commands.images.httpx.put", fake_put)
+    monkeypatch.setattr("prime_cli.commands.images.httpx.Client.put", fake_put)
+    monkeypatch.setattr("prime_cli.commands.images.config.config_dir", tmp_path)
 
     result = runner.invoke(
         app,
@@ -280,13 +282,14 @@ def test_push_batch_harbor_packages_environment_context_only(tmp_path, monkeypat
         def raise_for_status(self):
             return None
 
-    def fake_put(url, content, headers, timeout):
+    def fake_put(self, url, content=None, headers=None, **kwargs):
         uploaded_urls.append(url)
         uploaded_tar_bytes.append(content.read())
         return DummyUploadResponse()
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
-    monkeypatch.setattr("prime_cli.commands.images.httpx.put", fake_put)
+    monkeypatch.setattr("prime_cli.commands.images.httpx.Client.put", fake_put)
+    monkeypatch.setattr("prime_cli.commands.images.config.config_dir", tmp_path)
 
     result = runner.invoke(
         app,
@@ -503,3 +506,129 @@ def test_push_image_accepts_dockerfile_outside_context(tmp_path, monkeypatch):
         dockerfile_member = tar.extractfile(PACKAGED_DOCKERFILE_PATH)
         assert dockerfile_member is not None
         assert dockerfile_member.read().decode() == dockerfile_path.read_text()
+
+
+def test_push_batch_resume_skips_already_uploaded_contexts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    rows_path = tmp_path / "rows.jsonl"
+    rows = [
+        {"id": "task-a", "dockerfile": "FROM busybox\nRUN echo a\n"},
+        {"id": "task-b", "dockerfile": "FROM busybox\nRUN echo b\n"},
+    ]
+    rows_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+    # Pre-seed the local resume cache: task-a already uploaded on a prior attempt.
+    state_dir = tmp_path / "batch-uploads"
+    state_dir.mkdir(parents=True)
+    (state_dir / "batch-123.json").write_text(json.dumps({"uploaded": ["task-a"]}))
+
+    captured = {"requests": []}
+    uploaded_urls: list[str] = []
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None, timeout=None):
+            captured["requests"].append((method, path))
+            if method == "POST" and path == f"{BATCH_BUILD_ENDPOINT}/batch-123/upload-urls":
+                return {
+                    "batch_id": "batch-123",
+                    "upload_urls": {
+                        "task-a": "https://example.test/task-a",
+                        "task-b": "https://example.test/task-b",
+                    },
+                }
+            if method == "POST" and path == f"{BATCH_BUILD_ENDPOINT}/batch-123/start":
+                return {}
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    class DummyUploadResponse:
+        def raise_for_status(self):
+            return None
+
+    def fake_put(self, url, content=None, headers=None, **kwargs):
+        content.read()
+        uploaded_urls.append(url)
+        return DummyUploadResponse()
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.commands.images.httpx.Client.put", fake_put)
+    monkeypatch.setattr("prime_cli.commands.images.config.config_dir", tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "images",
+            "push-batch",
+            "rows.jsonl",
+            "--image-name",
+            "cligym",
+            "--resume",
+            "batch-123",
+        ],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    # Only the not-yet-uploaded item is re-uploaded; task-a is skipped.
+    assert uploaded_urls == ["https://example.test/task-b"]
+    # Resume re-mints URLs and starts, but never re-creates the batch.
+    assert ("POST", BATCH_BUILD_ENDPOINT) not in captured["requests"]
+    assert ("POST", f"{BATCH_BUILD_ENDPOINT}/batch-123/start") in captured["requests"]
+    # The resume cache is cleared once the batch starts.
+    assert not (state_dir / "batch-123.json").exists()
+
+
+def test_push_batch_reuploads_on_expired_url(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    rows_path = tmp_path / "rows.jsonl"
+    rows_path.write_text(json.dumps({"id": "task-a", "dockerfile": "FROM busybox\n"}) + "\n")
+
+    captured = {"requests": []}
+    put_urls: list[str] = []
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None, timeout=None):
+            captured["requests"].append((method, path))
+            if method == "POST" and path == BATCH_BUILD_ENDPOINT:
+                return {
+                    "batch_id": "batch-123",
+                    "upload_urls": {"task-a": "https://example.test/task-a-v1"},
+                }
+            if method == "POST" and path == f"{BATCH_BUILD_ENDPOINT}/batch-123/upload-urls":
+                # The original URL expired; hand back a freshly-minted one.
+                return {
+                    "batch_id": "batch-123",
+                    "upload_urls": {"task-a": "https://example.test/task-a-v2"},
+                }
+            if method == "POST" and path == f"{BATCH_BUILD_ENDPOINT}/batch-123/start":
+                return {}
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    def fake_put(self, url, content=None, headers=None, **kwargs):
+        content.read()
+        put_urls.append(url)
+        request = httpx.Request("PUT", url)
+        # The first (expired) URL 403s; the re-minted one succeeds.
+        status_code = 403 if url.endswith("task-a-v1") else 200
+        return httpx.Response(status_code, request=request)
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.commands.images.httpx.Client.put", fake_put)
+    monkeypatch.setattr("prime_cli.commands.images.config.config_dir", tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["images", "push-batch", "rows.jsonl", "--image-name", "cligym"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    # The worker hit a 403 on the expired URL, re-minted, and retried the new one.
+    assert put_urls == [
+        "https://example.test/task-a-v1",
+        "https://example.test/task-a-v2",
+    ]
+    assert ("POST", f"{BATCH_BUILD_ENDPOINT}/batch-123/upload-urls") in captured["requests"]

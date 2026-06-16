@@ -22,6 +22,13 @@ import httpx
 import typer
 from gitignore_parser import parse_gitignore
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.table import Table
 
 from ..utils import (
@@ -48,6 +55,9 @@ HARBOR_CONTEXT_EXCLUDES = ("tests", "solution")
 DEFAULT_BATCH_TAG_TEMPLATE = "{index}-{sha12}"
 BATCH_UPLOAD_PARALLELISM = 8
 BATCH_UPLOAD_ATTEMPTS = 4
+# A long batch upload can outlive its presigned-URL TTL; allow a bounded number
+# of mid-flight URL re-mints per item before giving up.
+MAX_URL_REFRESHES = 2
 # Batch create/start payloads and server-side work scale with item count, so the
 # client default (30s) is far too tight for large batches.
 BATCH_REQUEST_TIMEOUT_SECONDS = 600
@@ -993,22 +1003,169 @@ def _upload_context_archive(
     raise last_error
 
 
+def _put_archive_with_retry(
+    http_client: httpx.Client,
+    upload_url: str,
+    archive_path: Path,
+    cancel_event: Optional[threading.Event] = None,
+) -> None:
+    """PUT one archive to a presigned URL over a pooled client."""
+    last_error: Optional[Exception] = None
+    for attempt in range(1, BATCH_UPLOAD_ATTEMPTS + 1):
+        if cancel_event is not None and cancel_event.is_set():
+            raise BatchUploadCancelled(str(archive_path))
+        try:
+            with archive_path.open("rb") as file:
+                upload_response = http_client.put(
+                    upload_url,
+                    content=file,
+                    headers={"Content-Type": "application/octet-stream"},
+                )
+            upload_response.raise_for_status()
+            return
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code < 500 and status_code != 429:
+                raise
+            last_error = exc
+        except httpx.HTTPError as exc:
+            last_error = exc
+        if attempt < BATCH_UPLOAD_ATTEMPTS:
+            delay = min(2**attempt, 15) + random.uniform(0, 0.5)
+            if cancel_event is not None:
+                if cancel_event.wait(delay):
+                    raise BatchUploadCancelled(str(archive_path))
+            else:
+                time.sleep(delay)
+    assert last_error is not None
+    raise last_error
+
+
+class _UploadUrlProvider:
+    """Thread-safe per-item presigned-URL holder that can re-mint mid-flight."""
+
+    def __init__(
+        self,
+        urls: dict[str, str],
+        refresh_fn: Optional[Any] = None,
+    ) -> None:
+        self._urls = dict(urls or {})
+        self._refresh_fn = refresh_fn
+        self._lock = threading.Lock()
+        self._generation = 0
+
+    def current(self, source_id: str) -> tuple[Optional[str], int]:
+        with self._lock:
+            return self._urls.get(source_id), self._generation
+
+    def refresh(self, seen_generation: int) -> dict[str, str]:
+        with self._lock:
+            # Another worker already re-minted since this caller read its URL.
+            if seen_generation != self._generation or self._refresh_fn is None:
+                return dict(self._urls)
+            new_urls = self._refresh_fn()
+            if new_urls:
+                self._urls = dict(new_urls)
+                self._generation += 1
+            return dict(self._urls)
+
+
+def _upload_batch_archive(
+    url_provider: "_UploadUrlProvider",
+    source_id: str,
+    archive_path: Path,
+    http_client: httpx.Client,
+    cancel_event: Optional[threading.Event] = None,
+) -> None:
+    """Upload one batch item, re-minting its URL if it has expired (403/401)."""
+    refreshes_left = MAX_URL_REFRESHES
+    while True:
+        url, generation = url_provider.current(source_id)
+        if not url:
+            url_provider.refresh(generation)
+            url, generation = url_provider.current(source_id)
+            if not url:
+                raise RuntimeError(f"No upload URL available for item {source_id}")
+        try:
+            _put_archive_with_retry(http_client, url, archive_path, cancel_event)
+            return
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403) and refreshes_left > 0:
+                refreshes_left -= 1
+                url_provider.refresh(generation)
+                continue
+            raise
+
+
+def _batch_state_path(batch_id: str) -> Path:
+    """Local cache file tracking which of a batch's contexts already uploaded."""
+    return config.config_dir / "batch-uploads" / f"{batch_id}.json"
+
+
+def _load_uploaded_ids(batch_id: str) -> set[str]:
+    """Source ids whose context upload already succeeded on a previous attempt."""
+    try:
+        data = json.loads(_batch_state_path(batch_id).read_text())
+    except (OSError, ValueError):
+        return set()
+    uploaded = data.get("uploaded") if isinstance(data, dict) else None
+    return {str(item) for item in uploaded} if isinstance(uploaded, list) else set()
+
+
+def _save_uploaded_ids(batch_id: str, ids: set[str]) -> None:
+    path = _batch_state_path(batch_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.tmp")
+        tmp.write_text(json.dumps({"uploaded": sorted(ids)}))
+        tmp.replace(path)
+    except OSError:
+        # Best-effort resume cache; never fail an upload because of it.
+        pass
+
+
+def _clear_batch_state(batch_id: str) -> None:
+    try:
+        _batch_state_path(batch_id).unlink()
+    except OSError:
+        pass
+
+
 def _upload_batch_contexts(
-    context_items: list[BatchBuildItem], upload_urls: dict[str, str]
-) -> list[tuple[BatchBuildItem, Exception]]:
-    """Upload all packaged contexts with bounded parallelism."""
-    pending = [item for item in context_items if item.context_archive is not None]
+    context_items: list[BatchBuildItem],
+    url_provider: "_UploadUrlProvider",
+    *,
+    batch_id: Optional[str] = None,
+    already_uploaded: Optional[set[str]] = None,
+) -> tuple[list[tuple[BatchBuildItem, Exception]], int]:
+    """Upload packaged contexts in parallel over a single pooled HTTP client."""
+    already_uploaded = set(already_uploaded or set())
+    uploadable = [item for item in context_items if item.context_archive is not None]
+    pending = [item for item in uploadable if item.source_id not in already_uploaded]
+    skipped = len(uploadable) - len(pending)
     if not pending:
-        return []
+        return [], skipped
 
     failures: list[tuple[BatchBuildItem, Exception]] = []
     failures_lock = threading.Lock()
+    state_lock = threading.Lock()
     cancel_event = threading.Event()
+    succeeded: set[str] = set(already_uploaded)
+    completed = 0
     task_queue: "queue.Queue[BatchBuildItem]" = queue.Queue()
     for item in pending:
         task_queue.put(item)
 
+    # One connection-pooled client shared across workers amortizes TLS handshakes
+    # instead of paying a fresh handshake per object.
+    limits = httpx.Limits(
+        max_connections=BATCH_UPLOAD_PARALLELISM,
+        max_keepalive_connections=BATCH_UPLOAD_PARALLELISM,
+    )
+    http_client = httpx.Client(timeout=600.0, limits=limits)
+
     def _worker() -> None:
+        nonlocal completed
         while not cancel_event.is_set():
             try:
                 item = task_queue.get_nowait()
@@ -1017,7 +1174,18 @@ def _upload_batch_contexts(
             archive = item.context_archive
             try:
                 if archive is not None:
-                    _upload_context_archive(upload_urls[item.source_id], archive.path, cancel_event)
+                    _upload_batch_archive(
+                        url_provider,
+                        item.source_id,
+                        archive.path,
+                        http_client,
+                        cancel_event,
+                    )
+                    with state_lock:
+                        completed += 1
+                        succeeded.add(item.source_id)
+            except BatchUploadCancelled:
+                return
             except Exception as exc:  # noqa: BLE001 - reported back to the caller
                 with failures_lock:
                     failures.append((item, exc))
@@ -1031,17 +1199,39 @@ def _upload_batch_contexts(
     for thread in threads:
         thread.start()
 
+    progress = Progress(
+        TextColumn("[cyan]Uploading contexts"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    )
     try:
-        for thread in threads:
-            # Poll-join so a Ctrl-C on the main thread is raised within ~0.2s
-            # instead of being swallowed by an untimed blocking join().
-            while thread.is_alive():
-                thread.join(timeout=0.2)
+        with progress:
+            task = progress.add_task("upload", total=len(pending))
+            # Poll so a Ctrl-C on the main thread is raised within ~0.2s instead
+            # of being swallowed by an untimed blocking join().
+            while any(thread.is_alive() for thread in threads):
+                with state_lock:
+                    done = completed
+                progress.update(task, completed=done)
+                time.sleep(0.2)
+            with state_lock:
+                done = completed
+            progress.update(task, completed=done)
     except KeyboardInterrupt:
         cancel_event.set()
+        for thread in threads:
+            thread.join(timeout=2)
         raise
+    finally:
+        http_client.close()
+        if batch_id is not None:
+            with state_lock:
+                _save_uploaded_ids(batch_id, set(succeeded))
 
-    return failures
+    return failures, skipped
 
 
 def _cleanup_batch_archives(items: list[BatchBuildItem]) -> None:
@@ -1492,11 +1682,14 @@ def push_image_batch(
         )
 
         if context_items:
-            upload_urls = _batch_upload_urls(batch_response)
+            initial_urls = _batch_upload_urls(batch_response)
+            # On resume, skip contexts that already uploaded on a prior attempt.
+            already_uploaded = _load_uploaded_ids(batch_id) if resume else set()
             missing_urls = [
                 item.source_id
                 for item in context_items
-                if item.context_archive is None or not upload_urls.get(item.source_id)
+                if item.context_archive is None
+                or (item.source_id not in already_uploaded and not initial_urls.get(item.source_id))
             ]
             if missing_urls:
                 console.print(
@@ -1509,11 +1702,36 @@ def push_image_batch(
                         "directory and options as the original command.[/yellow]"
                     )
                 raise typer.Exit(1)
+
+            def _refresh_upload_urls() -> dict[str, str]:
+                # Re-mint presigned URLs for the still-PENDING batch (the backend
+                # only re-issues them before the batch starts).
+                refreshed = client.request(
+                    "POST",
+                    f"{BATCH_BUILD_ENDPOINT}/{batch_id}/upload-urls",
+                    timeout=BATCH_REQUEST_TIMEOUT_SECONDS,
+                )
+                return _batch_upload_urls(refreshed)
+
+            url_provider = _UploadUrlProvider(initial_urls, _refresh_upload_urls)
+            uploadable = [item for item in context_items if item.context_archive is not None]
+            to_upload = [item for item in uploadable if item.source_id not in already_uploaded]
+            already_skipped = len(uploadable) - len(to_upload)
+            if already_skipped:
+                console.print(
+                    f"[dim]Skipping {already_skipped} context(s) already uploaded "
+                    "on a previous attempt[/dim]"
+                )
             console.print(
-                f"[cyan]Uploading {len(context_items)} build context(s) "
+                f"[cyan]Uploading {len(to_upload)} build context(s) "
                 f"(up to {BATCH_UPLOAD_PARALLELISM} in parallel)...[/cyan]"
             )
-            failures = _upload_batch_contexts(context_items, upload_urls)
+            failures, _skipped = _upload_batch_contexts(
+                context_items,
+                url_provider,
+                batch_id=batch_id,
+                already_uploaded=already_uploaded,
+            )
             if failures:
                 for failed_item, exc in failures:
                     console.print(f"[red]Upload failed for {failed_item.source_id}: {exc}[/red]")
@@ -1538,6 +1756,9 @@ def push_image_batch(
             console.print(f"[red]Error: Failed to start image build batch: {exc}[/red]")
             console.print(resume_hint)
             raise typer.Exit(1) from exc
+
+        # The batch is started; the local resume cache is no longer needed.
+        _clear_batch_state(batch_id)
 
         console.print("[green]✓[/green] Batch build started")
         console.print()

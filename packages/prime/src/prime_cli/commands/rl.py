@@ -6,7 +6,7 @@ import re
 import time
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 import toml
 import typer
@@ -299,7 +299,7 @@ id = "{env_value}"
 
 
 class EnvConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     id: str
     name: str | None = None
@@ -331,7 +331,7 @@ class EnvConfig(BaseModel):
 
 
 class EvalEnvConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     id: str
     name: str | None = None
@@ -369,7 +369,7 @@ class EvalEnvConfig(BaseModel):
 
 
 class TemperatureSchedulerConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     type: str = "linear"  # "linear" or "cosine"
     start_temperature: float
@@ -378,40 +378,28 @@ class TemperatureSchedulerConfig(BaseModel):
 
 
 class SamplingConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     max_tokens: int | None = None
     temperature: float | None = None
     temp_scheduler: TemperatureSchedulerConfig | None = None
     extra_body: Dict[str, Any] | None = None
     enable_thinking: bool | None = None
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
-
-    @model_validator(mode="after")
-    def _reasoning_controls_mutually_exclusive(self) -> "SamplingConfig":
-        if self.enable_thinking is not None and self.reasoning_effort is not None:
-            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
-        return self
+    reasoning_effort: str | None = None
 
 
 class TeacherSamplingConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     max_tokens: int | None = None
     temperature: float | None = None
     extra_body: Dict[str, Any] | None = None
     enable_thinking: bool | None = None
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
-
-    @model_validator(mode="after")
-    def _reasoning_controls_mutually_exclusive(self) -> "TeacherSamplingConfig":
-        if self.enable_thinking is not None and self.reasoning_effort is not None:
-            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
-        return self
+    reasoning_effort: str | None = None
 
 
 class TeacherClientConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     base_url: str = Field(..., min_length=1)
     api_key_var: str = Field(..., min_length=1)
@@ -420,7 +408,7 @@ class TeacherClientConfig(BaseModel):
 
 
 class TeacherConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     model: str
     client: TeacherClientConfig | None = None
@@ -443,23 +431,17 @@ class EvalSamplingConfig(BaseModel):
     they cannot both be set on the same block.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     max_tokens: int | None = None
     temperature: float | None = None
     extra_body: Dict[str, Any] | None = None
     enable_thinking: bool | None = None
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
-
-    @model_validator(mode="after")
-    def _reasoning_controls_mutually_exclusive(self) -> "EvalSamplingConfig":
-        if self.enable_thinking is not None and self.reasoning_effort is not None:
-            raise ValueError("enable_thinking and reasoning_effort cannot both be set")
-        return self
+    reasoning_effort: str | None = None
 
 
 class EvalConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     interval: int | None = None
     num_examples: int | None = None
@@ -492,7 +474,7 @@ class EvalConfig(BaseModel):
 
 
 class ValConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     num_examples: int | None = None
     rollouts_per_example: int | None = None
@@ -526,7 +508,7 @@ class BatchFilterConfig(BaseModel):
 
 
 class WandbConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     entity: str | None = None
     project: str | None = None
@@ -534,7 +516,7 @@ class WandbConfig(BaseModel):
 
 
 class CheckpointsConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     interval: int | None = None  # Save checkpoint every N steps
     keep_cloud: int | None = None  # Keep N checkpoints in cloud (-1 = keep all)
@@ -549,7 +531,7 @@ class CheckpointsConfig(BaseModel):
 
 
 class AdaptersConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     interval: int | None = None  # Upload adapter every N steps (0 = only at run end)
     keep_last: int | None = None  # Keep N adapters in cloud (-1 = keep all)
@@ -564,7 +546,7 @@ class AdaptersConfig(BaseModel):
 
 
 class InfrastructureConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     compute_size: str | None = None
 
@@ -590,7 +572,7 @@ class TailscaleConfig(BaseModel):
     boots the sidecar with a locked-down arg set to keep tenant isolation.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     enabled: bool = False
     auth_key: str | None = None
@@ -650,25 +632,26 @@ class TailscaleConfig(BaseModel):
 
 
 class RLConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     name: str | None = None
     model: str
-    loss: Literal["rl", "sft", "opd"] = "rl"
+    loss: str = "rl"
     teacher: TeacherConfig | None = None
     max_steps: int = 100
     batch_size: int = 128
     rollouts_per_example: int = 8
-    max_inflight_rollouts: int | None = Field(default=None, ge=1)
+    max_inflight_rollouts: int | None = None
     learning_rate: float | None = None
     lora_alpha: int | None = None
-    oversampling_factor: float | None = Field(default=None, gt=0)
+    oversampling_factor: float | None = None
     checkpoint_id: str | None = None  # Warm-start from an existing checkpoint
     cluster_name: str | None = None  # Admin-only: target a specific cluster by name
     env: List[EnvConfig] = Field(default_factory=list)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
     val: ValConfig = Field(default_factory=ValConfig)
+    buffer: Dict[str, Any] = Field(default_factory=dict)
     pre_batch_filters: List[BatchFilterConfig] | None = None
     post_batch_filters: List[BatchFilterConfig] | None = None
     wandb: WandbConfig = Field(default_factory=WandbConfig)
@@ -679,26 +662,6 @@ class RLConfig(BaseModel):
     run_config: Dict[str, Any] = Field(default_factory=dict)
     env_file: List[str] = Field(default_factory=list)  # deprecated, use env_files
     env_files: List[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def validate_config_consistency(self) -> "RLConfig":
-        if self.max_inflight_rollouts is not None and self.oversampling_factor is not None:
-            raise ValueError("Only one of max_inflight_rollouts and oversampling_factor can be set")
-        if (
-            self.max_inflight_rollouts is not None
-            and self.max_inflight_rollouts < self.rollouts_per_example
-        ):
-            raise ValueError("max_inflight_rollouts must be at least rollouts_per_example")
-        if self.loss == "rl" and self.teacher is not None:
-            raise ValueError("teacher can only be set when loss is 'sft' or 'opd'")
-        if self.loss == "sft" and self.teacher is None:
-            raise ValueError("teacher is required when loss is 'sft'")
-        if self.loss == "opd":
-            raise ValueError(
-                "loss='opd' is not supported for hosted runs yet; OPD requires "
-                "teacher logprob scoring support in the hosted runtime"
-            )
-        return self
 
 
 def _format_validation_errors(errors: list[Any]) -> list[str]:
@@ -714,24 +677,8 @@ def _format_validation_errors(errors: list[Any]) -> list[str]:
     return messages
 
 
-def _remove_deprecated_config_keys(data: Dict[str, Any]) -> None:
-    """Remove deprecated config keys while warning users."""
-    removed = False
-    for key in ("trajectory_strategy", "trajectoryStrategy"):
-        if key in data:
-            data.pop(key, None)
-            removed = True
-
-    if removed:
-        console.print("[yellow]Warning:[/yellow] `trajectory_strategy` is deprecated and ignored.")
-
-    if "buffer" in data:
-        data.pop("buffer", None)
-        console.print(
-            "[yellow]Warning:[/yellow] `[buffer]` is deprecated and ignored: "
-            "the difficulty-filtering buffer was removed from the trainer."
-        )
-
+def _normalize_legacy_config_keys(data: Dict[str, Any]) -> None:
+    """Apply compatibility translations needed by the current public API."""
     eval_section = data.get("eval")
     if isinstance(eval_section, dict) and "eval_base_model" in eval_section:
         legacy = eval_section.pop("eval_base_model")
@@ -906,7 +853,7 @@ def _dispatch_full_finetune_run(
     # orch v2 rejects the removed keys as "Extra inputs are not permitted".
     orch_section = raw_cfg.get("orchestrator")
     if isinstance(orch_section, dict):
-        _remove_deprecated_config_keys(orch_section)
+        _normalize_legacy_config_keys(orch_section)
 
     # Strip CLI-only secret-loading keys before shipping the TOML to the
     # backend. `env_file` / `env_files` only meaningfully exist on the
@@ -981,7 +928,7 @@ def load_config(path: str) -> RLConfig:
         raise typer.Exit(1)
 
     if isinstance(data, dict):
-        _remove_deprecated_config_keys(data)
+        _normalize_legacy_config_keys(data)
 
     try:
         return RLConfig.model_validate(data)
@@ -1433,6 +1380,7 @@ def create_run(
             team_id=app_config.team_id,
             eval_config=cfg.eval.to_api_dict(),
             val_config=cfg.val.to_api_dict(),
+            buffer_config=cfg.buffer if cfg.buffer else None,
             # `is not None` rather than truthiness: an explicit `= []` means
             # "replace prime-rl's default filter list with no filters" and
             # must reach the API as an empty list, not be omitted.

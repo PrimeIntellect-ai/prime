@@ -104,6 +104,26 @@ def test_create_run_sends_max_inflight_rollouts() -> None:
     assert run.max_inflight_rollouts == 96
 
 
+def test_create_run_sends_buffer_config_as_buffer() -> None:
+    api_client = FakeAPIClient()
+    client = RLClient(api_client)  # type: ignore[arg-type]
+
+    client.create_run(
+        model_name="Qwen/Qwen3.5-0.8B",
+        environments=[{"id": "reverse-text"}],
+        buffer_config={
+            "online_difficulty_filtering": True,
+            "easy_fraction": 0.25,
+        },
+    )
+
+    assert api_client.posts[0][0] == "/rft/runs"
+    assert api_client.posts[0][1]["buffer"] == {
+        "online_difficulty_filtering": True,
+        "easy_fraction": 0.25,
+    }
+
+
 def test_create_run_sends_sft_loss_and_teacher_config() -> None:
     api_client = FakeAPIClient()
     client = RLClient(api_client)  # type: ignore[arg-type]

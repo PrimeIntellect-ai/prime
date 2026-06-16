@@ -13,7 +13,7 @@ from prime_cli.commands.rl import (
 from pydantic import BaseModel
 
 
-def test_load_config_warns_and_ignores_deprecated_trajectory_strategy(
+def test_load_config_preserves_trajectory_strategy_for_server_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config_path = tmp_path / "rl.toml"
@@ -32,18 +32,47 @@ def test_load_config_warns_and_ignores_deprecated_trajectory_strategy(
     cfg = load_config(str(config_path))
 
     assert cfg.model == "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
-    assert "trajectory_strategy" not in cfg.model_dump()
-    assert any("trajectory_strategy" in line and "deprecated" in line.lower() for line in printed)
+    assert cfg.model_extra == {"trajectory_strategy": "interleaved"}
+    assert not any("trajectory_strategy" in line for line in printed)
 
 
-def test_load_config_still_rejects_other_unknown_keys(tmp_path: Path) -> None:
+def test_load_config_preserves_buffer_for_server_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\n'
+        "[buffer]\n"
+        "online_difficulty_filtering = true\n"
+        "easy_fraction = 0.25\n"
+    )
+
+    printed: list[str] = []
+
+    def capture_print(*args: object, **_: object) -> None:
+        printed.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("prime_cli.commands.rl.console.print", capture_print)
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.buffer == {
+        "online_difficulty_filtering": True,
+        "easy_fraction": 0.25,
+    }
+    assert not any("buffer" in line and "deprecated" in line.lower() for line in printed)
+
+
+def test_load_config_preserves_unknown_keys_for_server_validation(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text(
         'model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\nunknown_field = 123\n'
     )
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.model == "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
+    assert cfg.model_extra == {"unknown_field": 123}
 
 
 def test_generate_rl_config_template_keeps_default_surface_minimal() -> None:
@@ -191,7 +220,7 @@ def test_load_config_accepts_eval_sampling_reasoning_effort(tmp_path: Path) -> N
     }
 
 
-def test_load_config_rejects_eval_sampling_with_both_reasoning_controls(
+def test_load_config_allows_eval_sampling_with_both_reasoning_controls(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / "rl.toml"
@@ -204,8 +233,11 @@ def test_load_config_rejects_eval_sampling_with_both_reasoning_controls(
         'reasoning_effort = "low"\n'
     )
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.eval.sampling is not None
+    assert cfg.eval.sampling.enable_thinking is False
+    assert cfg.eval.sampling.reasoning_effort == "low"
 
 
 def test_load_config_accepts_max_inflight_rollouts(tmp_path: Path) -> None:
@@ -226,7 +258,9 @@ def test_load_config_accepts_fractional_oversampling_factor(tmp_path: Path) -> N
     assert cfg.oversampling_factor == 0.375
 
 
-def test_load_config_rejects_max_inflight_and_oversampling(tmp_path: Path) -> None:
+def test_load_config_allows_max_inflight_and_oversampling_for_server_validation(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text(
         'model = "dummy"\n'
@@ -236,8 +270,10 @@ def test_load_config_rejects_max_inflight_and_oversampling(tmp_path: Path) -> No
         "max_inflight_rollouts = 96\n"
     )
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.oversampling_factor == 0.377
+    assert cfg.max_inflight_rollouts == 96
 
 
 def test_load_config_accepts_sft_teacher_without_client(tmp_path: Path) -> None:
@@ -309,7 +345,7 @@ def test_load_config_accepts_teacher_client(tmp_path: Path) -> None:
     }
 
 
-def test_load_config_rejects_unknown_teacher_client_field(tmp_path: Path) -> None:
+def test_load_config_preserves_unknown_teacher_client_field(tmp_path: Path) -> None:
     config_path = tmp_path / "sft.toml"
     config_path.write_text(
         'model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\n'
@@ -322,11 +358,16 @@ def test_load_config_rejects_unknown_teacher_client_field(tmp_path: Path) -> Non
         'bogus = "value"\n'
     )
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.teacher is not None
+    assert cfg.teacher.client is not None
+    assert cfg.teacher.client.model_extra == {"bogus": "value"}
 
 
-def test_load_config_rejects_teacher_temp_scheduler(tmp_path: Path) -> None:
+def test_load_config_preserves_teacher_temp_scheduler_for_server_validation(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "sft.toml"
     config_path.write_text(
         'model = "openai/gpt-oss-20b"\n'
@@ -342,8 +383,17 @@ def test_load_config_rejects_teacher_temp_scheduler(tmp_path: Path) -> None:
         "end_temperature = 0.1\n"
     )
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.teacher is not None
+    assert cfg.teacher.sampling is not None
+    assert cfg.teacher.sampling.model_extra == {
+        "temp_scheduler": {
+            "type": "linear",
+            "start_temperature": 1.0,
+            "end_temperature": 0.1,
+        }
+    }
 
 
 def test_to_api_dict_omits_client_when_unspecified(tmp_path: Path) -> None:
@@ -391,41 +441,53 @@ def test_load_config_rejects_teacher_client_without_api_key_var(tmp_path: Path) 
         load_config(str(config_path))
 
 
-def test_load_config_rejects_sft_without_teacher(tmp_path: Path) -> None:
+def test_load_config_allows_sft_without_teacher_for_server_validation(tmp_path: Path) -> None:
     config_path = tmp_path / "sft.toml"
     config_path.write_text('model = "openai/gpt-oss-20b"\nloss = "sft"\n')
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.loss == "sft"
+    assert cfg.teacher is None
 
 
-def test_load_config_rejects_opd_until_hosted_scoring_exists(tmp_path: Path) -> None:
+def test_load_config_allows_opd_for_server_validation(tmp_path: Path) -> None:
     config_path = tmp_path / "opd.toml"
     config_path.write_text(
         'model = "openai/gpt-oss-20b"\nloss = "opd"\n[teacher]\nmodel = "openai/gpt-oss-120b"\n'
     )
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.loss == "opd"
+    assert cfg.teacher is not None
 
 
-def test_load_config_rejects_max_inflight_below_rollouts_per_example(tmp_path: Path) -> None:
+def test_load_config_allows_max_inflight_below_rollouts_per_example(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text('model = "dummy"\nrollouts_per_example = 8\nmax_inflight_rollouts = 4\n')
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.max_inflight_rollouts == 4
 
 
-def test_load_config_rejects_nonpositive_oversampling_factor(tmp_path: Path) -> None:
+def test_load_config_allows_nonpositive_oversampling_factor_for_server_validation(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text('model = "dummy"\noversampling_factor = 0\n')
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.oversampling_factor == 0
 
 
-def test_load_config_rejects_both_reasoning_controls(tmp_path: Path) -> None:
+def test_load_config_allows_both_reasoning_controls_for_server_validation(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text(
         'model = "openai/gpt-oss-20b"\n'
@@ -434,16 +496,19 @@ def test_load_config_rejects_both_reasoning_controls(tmp_path: Path) -> None:
         'reasoning_effort = "low"\n'
     )
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.sampling.enable_thinking is False
+    assert cfg.sampling.reasoning_effort == "low"
 
 
-def test_load_config_rejects_top_level_reasoning_effort(tmp_path: Path) -> None:
+def test_load_config_preserves_top_level_reasoning_effort_as_extra(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text('model = "openai/gpt-oss-20b"\nreasoning_effort = "high"\n')
 
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.model_extra == {"reasoning_effort": "high"}
 
 
 def test_tailscale_config_disabled_by_default() -> None:
@@ -470,9 +535,7 @@ def test_tailscale_config_enabled_emits_payload(tmp_path: Path) -> None:
     }
 
 
-def test_tailscale_extra_args_field_rejected(tmp_path: Path) -> None:
-    """extra_args is intentionally not exposed — the platform always boots the
-    sidecar with a locked-down arg set for tenant isolation."""
+def test_tailscale_extra_args_field_preserved_but_not_emitted(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text(
         'model = "dummy"\n'
@@ -481,8 +544,14 @@ def test_tailscale_extra_args_field_rejected(tmp_path: Path) -> None:
         'auth_key = "tskey-auth-abc"\n'
         'extra_args = "--ssh"\n'
     )
-    with pytest.raises(typer.Exit):
-        load_config(str(config_path))
+    cfg = load_config(str(config_path))
+
+    assert cfg.tailscale.model_extra == {"extra_args": "--ssh"}
+    assert cfg.tailscale.to_api_dict() == {
+        "enabled": True,
+        "auth_key": "tskey-auth-abc",
+        "hostname_prefix": "prime-hosted-training",
+    }
 
 
 def test_tailscale_enabled_without_auth_key_rejected(tmp_path: Path) -> None:

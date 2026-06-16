@@ -2,11 +2,14 @@ from pathlib import Path
 from typing import List
 
 import pytest
+import toml
 import typer
 from prime_cli.commands.rl import (
     RLConfig,
     _flatten_config_schema,
     _is_full_finetune,
+    _prime_rl_config_toml_for_platform,
+    _raw_model_name,
     generate_rl_config_template,
     load_config,
 )
@@ -78,7 +81,11 @@ def test_load_config_preserves_unknown_keys_for_server_validation(tmp_path: Path
 def test_generate_rl_config_template_keeps_default_surface_minimal() -> None:
     template = generate_rl_config_template()
 
-    assert 'model = "Qwen/Qwen3.5-0.8B"' in template
+    assert 'training_mode = "rl"' in template
+    assert "[model]" in template
+    assert 'name = "Qwen/Qwen3.5-0.8B"' in template
+    assert "[train.sampling]" in template
+    assert "max_completion_tokens = 2048" in template
     assert "# learning_rate = 3e-5 # optional; default is 1e-4" in template
 
     hidden_fields = [
@@ -91,16 +98,17 @@ def test_generate_rl_config_template_keeps_default_surface_minimal() -> None:
         "seed",
         "[wandb]",
         "[infrastructure]",
+        "loss =",
     ]
     for field in hidden_fields:
         assert field not in template
 
 
-def test_generate_rl_config_template_sft_example_loads(tmp_path: Path) -> None:
+def test_generate_rl_config_template_sft_example_is_native_toml() -> None:
     template = generate_rl_config_template()
     template = template.replace(
-        'loss = "rl" # "rl" | "sft"; OPD is not yet supported on hosted runtimes',
-        'loss = "sft" # "rl" | "sft"; OPD is not yet supported on hosted runtimes',
+        'training_mode = "rl" # "rl" | "sft" | "opd"',
+        'training_mode = "sft" # "rl" | "sft" | "opd"',
     )
 
     lines: list[str] = []
@@ -116,15 +124,44 @@ def test_generate_rl_config_template_sft_example_loads(tmp_path: Path) -> None:
             line = line[2:]
         lines.append(line)
 
-    config_path = tmp_path / "sft-template.toml"
-    config_path.write_text("\n".join(lines) + "\n")
+    parsed = toml.loads("\n".join(lines) + "\n")
 
-    cfg = load_config(str(config_path))
+    assert parsed["training_mode"] == "sft"
+    assert parsed["teacher"]["model"]["name"] == "openai/gpt-oss-120b"
+    assert parsed["model"]["name"] == "Qwen/Qwen3.5-0.8B"
 
-    assert cfg.loss == "sft"
-    assert cfg.teacher is not None
-    assert cfg.teacher.model == "openai/gpt-oss-120b"
-    assert cfg.teacher.client is None
+
+def test_prime_rl_config_toml_for_platform_strips_platform_only_keys() -> None:
+    config_toml = _prime_rl_config_toml_for_platform(
+        {
+            "name": "smoke",
+            "env_files": ["secrets.env"],
+            "cluster_name": "local",
+            "checkpoint_id": "ckpt_123",
+            "model": {"name": "Qwen/Qwen3.5-0.8B"},
+            "max_steps": 5,
+            "env": [{"id": "dev/reverse-text"}],
+            "infrastructure": {"compute_size": "S"},
+            "checkpoints": {"interval": 10},
+            "adapters": {"interval": 0},
+            "tailscale": {"enabled": True, "auth_key": "tskey-auth-abc"},
+            "run_config": {"verifiers_version": "dev261"},
+            "platform": {"team_id": "team_123"},
+        }
+    )
+
+    parsed = toml.loads(config_toml)
+
+    assert parsed == {
+        "model": {"name": "Qwen/Qwen3.5-0.8B"},
+        "max_steps": 5,
+        "env": [{"id": "dev/reverse-text"}],
+        "platform": {"team_id": "team_123"},
+    }
+
+
+def test_raw_model_name_reads_model_table() -> None:
+    assert _raw_model_name({"model": {"name": "Qwen/Qwen3.5-0.8B"}}) == ("Qwen/Qwen3.5-0.8B")
 
 
 def test_flatten_config_schema_expands_optional_nested_models() -> None:

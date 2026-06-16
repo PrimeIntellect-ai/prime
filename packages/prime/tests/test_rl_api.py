@@ -29,17 +29,20 @@ class FakeAPIClient:
 
     def post(self, endpoint: str, json: dict[str, Any] | None = None) -> dict[str, Any]:
         self.posts.append((endpoint, json))
+        payload = json or {}
+        model = payload.get("model")
+        base_model = model.get("name") if isinstance(model, dict) else "model"
         return {
             "run": {
                 "id": "run-1",
                 "userId": "user-1",
                 "status": "QUEUED",
-                "rolloutsPerExample": json["rollouts_per_example"] if json else 8,
+                "rolloutsPerExample": payload.get("rollouts_per_example", 8),
                 "seqLen": 2048,
-                "maxSteps": json["max_steps"] if json else 100,
-                "batchSize": json["batch_size"] if json else 128,
-                "baseModel": json["model"]["name"] if json else "model",
-                "maxInflightRollouts": json.get("max_inflight_rollouts") if json else None,
+                "maxSteps": payload.get("max_steps", 100),
+                "batchSize": payload.get("batch_size", 128),
+                "baseModel": base_model,
+                "maxInflightRollouts": payload.get("max_inflight_rollouts"),
                 "createdAt": "2026-05-17T00:00:00Z",
                 "updatedAt": "2026-05-17T00:00:00Z",
             }
@@ -175,3 +178,36 @@ def test_create_run_omits_default_rl_loss() -> None:
     assert api_client.posts[0][0] == "/rft/runs"
     assert "loss" not in api_client.posts[0][1]
     assert "teacher" not in api_client.posts[0][1]
+
+
+def test_create_run_from_toml_posts_raw_toml_endpoint() -> None:
+    api_client = FakeAPIClient()
+    client = RLClient(api_client)  # type: ignore[arg-type]
+
+    raw_toml = 'max_steps = 5\n[model]\nname = "Qwen/Qwen3.5-0.8B"\n'
+    client.create_run_from_toml(
+        raw_toml,
+        name="smoke",
+        secrets={"WANDB_API_KEY": "secret"},
+        team_id="team_123",
+        infrastructure_config={"compute_size": "S"},
+        checkpoints_config={"interval": 10},
+        adapters_config={"interval": 0},
+        checkpoint_id="ckpt_123",
+        tailscale_config={"enabled": True, "auth_key": "tskey-auth-abc"},
+        run_config={"verifiers_version": "dev"},
+    )
+
+    assert api_client.posts[0][0] == "/rft/runs/from-toml"
+    assert api_client.posts[0][1] == {
+        "configToml": raw_toml,
+        "secrets": [{"key": "WANDB_API_KEY", "value": "secret"}],
+        "name": "smoke",
+        "team_id": "team_123",
+        "compute_size": "S",
+        "checkpoints": {"interval": 10},
+        "adapters": {"interval": 0},
+        "checkpoint_id": "ckpt_123",
+        "tailscale": {"enabled": True, "auth_key": "tskey-auth-abc"},
+        "run_config": {"verifiers_version": "dev"},
+    }

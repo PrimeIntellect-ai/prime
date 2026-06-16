@@ -337,6 +337,64 @@ class RLClient:
                 raise APIError(f"Failed to create Hosted Training run: {e.response.text}")
             raise APIError(f"Failed to create Hosted Training run: {str(e)}")
 
+    def create_run_from_toml(
+        self,
+        config_toml: str,
+        *,
+        name: Optional[str] = None,
+        secrets: Optional[Dict[str, str]] = None,
+        team_id: Optional[str] = None,
+        cluster_name: Optional[str] = None,
+        infrastructure_config: Optional[Dict[str, Any]] = None,
+        checkpoints_config: Optional[Dict[str, Any]] = None,
+        adapters_config: Optional[Dict[str, Any]] = None,
+        checkpoint_id: Optional[str] = None,
+        tailscale_config: Optional[Dict[str, Any]] = None,
+        run_config: Optional[Dict[str, Any]] = None,
+    ) -> RLRun:
+        """Create a Hosted Training run from raw prime-rl TOML.
+
+        The platform forwards the TOML to the target stack's config validator;
+        the CLI only sends platform-owned metadata and secrets alongside it.
+        """
+        try:
+            secrets_list: List[Dict[str, str]] = []
+            if secrets:
+                for key, value in secrets.items():
+                    secrets_list.append({"key": key, "value": value})
+
+            payload: Dict[str, Any] = {
+                "configToml": config_toml,
+                "secrets": secrets_list,
+            }
+            if name:
+                payload["name"] = name
+            if team_id:
+                payload["team_id"] = team_id
+            if cluster_name:
+                payload["cluster_name"] = cluster_name
+            if infrastructure_config and "compute_size" in infrastructure_config:
+                payload["compute_size"] = infrastructure_config["compute_size"]
+            if checkpoints_config:
+                payload["checkpoints"] = checkpoints_config
+            if adapters_config:
+                payload["adapters"] = adapters_config
+            if checkpoint_id:
+                payload["checkpoint_id"] = checkpoint_id
+            if tailscale_config:
+                payload["tailscale"] = tailscale_config
+            if run_config:
+                payload["run_config"] = run_config
+
+            response = self.client.post("/rft/runs/from-toml", json=payload)
+            return RLRun.model_validate(response.get("run"))
+        except ValidationError:
+            raise
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to create Hosted Training run: {e.response.text}")
+            raise APIError(f"Failed to create Hosted Training run: {str(e)}")
+
     def preview_run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Preview or validate an RL run payload without creating a run."""
 

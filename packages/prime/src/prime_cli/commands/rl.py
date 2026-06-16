@@ -1,5 +1,6 @@
 """Hosted Training commands."""
 
+import copy
 import json
 import os
 import re
@@ -214,8 +215,7 @@ def generate_rl_config_template(environment: str | None = None) -> str:
     env_value = environment or "primeintellect/reverse-text"
 
     return f'''\
-model = "Qwen/Qwen3.5-0.8B"
-loss = "rl" # "rl" | "sft"; OPD is not yet supported on hosted runtimes
+training_mode = "rl" # "rl" | "sft" | "opd"
 max_steps = 100
 
 # env_files = ["secrets.env"] # optional file(s) for secrets
@@ -229,10 +229,13 @@ rollouts_per_example = 8
 # Optional: warm-start from an existing checkpoint
 # checkpoint_id = "..."
 
+[model]
+name = "Qwen/Qwen3.5-0.8B"
+
 # Optional: SFT distillation teacher
-# To use SFT, change loss to "sft" and uncomment this block. Defaults to Prime Inference.
-# [teacher]
-# model = "openai/gpt-oss-120b"
+# To use SFT, change training_mode to "sft" and uncomment this block. Defaults to Prime Inference.
+# [teacher.model]
+# name = "openai/gpt-oss-120b"
 #
 # [teacher.sampling]
 # max_tokens = 2048
@@ -244,8 +247,8 @@ rollouts_per_example = 8
 # base_url = "https://api.openai.com/v1"
 # api_key_var = "OPENAI_API_KEY"
 
-[sampling]
-max_tokens = 2048
+[train.sampling]
+max_completion_tokens = 2048
 # temperature = 0.7
 
 # Optional: Hosted Training reasoning controls (mutually exclusive)
@@ -286,13 +289,13 @@ id = "{env_value}"
 # type = "zero_advantage" # "gibberish" | "repetition" | "zero_advantage"
 # enforce = true          # drop flagged rollouts before they fill a batch slot
 
-# Optional: checkpoint configuration
-# [checkpoints]
+# Optional: platform checkpoint upload configuration
+# [platform.checkpoints]
 # interval = 100              # Save checkpoint every N steps
 # keep_cloud = 5              # Keep N checkpoints in cloud (-1 = keep all)
 
-# Optional: adapter upload configuration
-# [adapters]
+# Optional: platform adapter upload configuration
+# [platform.adapters]
 # interval = 0                # Upload adapter every N steps (0 = only at run end)
 # keep_last = 3               # Keep N adapters in cloud (-1 = keep all)
 '''
@@ -714,6 +717,143 @@ def _peek_toml(config_path: str) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _load_raw_toml(config_path: str) -> Dict[str, Any]:
+    """Load TOML for hosted submission without validating prime-rl schema."""
+    p = Path(config_path)
+    if not p.exists():
+        console.print(f"[red]Error:[/red] Config file not found: {config_path}")
+        raise typer.Exit(1)
+    try:
+        data = toml.load(p)
+    except toml.TomlDecodeError as e:
+        console.print(f"[red]Error:[/red] Invalid TOML in {config_path}: {e}")
+        raise typer.Exit(1)
+    if not isinstance(data, dict):
+        console.print(f"[red]Error:[/red] Config file must contain a TOML table: {config_path}")
+        raise typer.Exit(1)
+    return data
+
+
+def _as_table(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _get_path(data: Dict[str, Any], *path: str) -> Any:
+    current: Any = data
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return None
+        current = current[key]
+    return current
+
+
+def _raw_model_name(raw_cfg: Dict[str, Any]) -> str | None:
+    platform = _as_table(raw_cfg.get("platform"))
+    for value in (
+        platform.get("model"),
+        platform.get("base_model"),
+        raw_cfg.get("model"),
+        _get_path(raw_cfg, "model", "name"),
+        _get_path(raw_cfg, "student", "model", "name"),
+    ):
+        if isinstance(value, dict):
+            value = value.get("name")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _raw_training_mode(raw_cfg: Dict[str, Any]) -> str:
+    platform = _as_table(raw_cfg.get("platform"))
+    value = _first_present(
+        platform.get("loss"),
+        platform.get("training_mode"),
+        raw_cfg.get("training_mode"),
+        raw_cfg.get("loss"),
+    )
+    return value if isinstance(value, str) and value else "rl"
+
+
+def _raw_envs(raw_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    platform = _as_table(raw_cfg.get("platform"))
+    envs = _first_present(
+        platform.get("environments"),
+        platform.get("env"),
+        raw_cfg.get("env"),
+        _get_path(raw_cfg, "train", "env"),
+    )
+    if not isinstance(envs, list):
+        return []
+    result: List[Dict[str, Any]] = []
+    for item in envs:
+        if isinstance(item, str):
+            result.append({"id": item})
+        elif isinstance(item, dict):
+            result.append(dict(item))
+    return result
+
+
+def _raw_env_id(env: Dict[str, Any]) -> str | None:
+    env_id = env.get("id")
+    return env_id if isinstance(env_id, str) and env_id else None
+
+
+def _raw_env_files(raw_cfg: Dict[str, Any], config_dir: Path) -> List[str]:
+    env_files: List[str] = []
+    for key in ("env_file", "env_files"):
+        value = raw_cfg.get(key)
+        if isinstance(value, list):
+            env_files.extend(str(config_dir / str(path)) for path in value)
+        elif isinstance(value, str):
+            env_files.append(str(config_dir / value))
+    return env_files
+
+
+_PLATFORM_ONLY_TOML_KEYS = frozenset(
+    {
+        "name",
+        "env_file",
+        "env_files",
+        "cluster_name",
+        "checkpoint_id",
+        "infrastructure",
+        "tailscale",
+        "run_config",
+        "checkpoints",
+        "adapters",
+        "image_tag",
+    }
+)
+
+
+def _prime_rl_config_toml_for_platform(raw_cfg: Dict[str, Any]) -> str:
+    """Return TOML sent to platform's k8s-backed prime-rl validator."""
+    payload = copy.deepcopy(raw_cfg)
+    for key in _PLATFORM_ONLY_TOML_KEYS:
+        payload.pop(key, None)
+    return toml.dumps(payload).rstrip() + "\n"
+
+
+def _platform_table(raw_cfg: Dict[str, Any], key: str) -> Dict[str, Any] | None:
+    value = raw_cfg.get(key)
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _platform_tailscale_config(raw_cfg: Dict[str, Any]) -> Dict[str, Any] | None:
+    value = raw_cfg.get("tailscale")
+    if not isinstance(value, dict):
+        return None
+    cfg = TailscaleConfig.model_validate(value)
+    return cfg.to_api_dict()
+
+
 def _is_full_finetune(cfg: Dict[str, Any]) -> bool:
     """A config is full-FT iff it carries one of:
 
@@ -1118,7 +1258,10 @@ def create_run(
         return
 
     console.print(f"[dim]Loading config from {config_path}[/dim]\n")
-    cfg = load_config(config_path)
+    raw_cfg = _load_raw_toml(config_path)
+    model_name = _raw_model_name(raw_cfg)
+    training_mode = _raw_training_mode(raw_cfg)
+    train_envs = _raw_envs(raw_cfg)
 
     # Collect secrets from all sources
     def warn(msg: str) -> None:
@@ -1126,8 +1269,7 @@ def create_run(
 
     # Resolve config env file paths relative to config file directory
     config_dir = Path(config_path).parent
-    config_env_files = cfg.env_file + cfg.env_files  # support both, env_files takes precedence
-    resolved_config_env_files = [str(config_dir / p) for p in config_env_files]
+    resolved_config_env_files = _raw_env_files(raw_cfg, config_dir)
 
     # Merge config and CLI env files (CLI takes precedence)
     all_env_files = resolved_config_env_files + (env_file or [])
@@ -1143,7 +1285,8 @@ def create_run(
         raise typer.Exit(1)
 
     # Validate WANDB_API_KEY is present when W&B monitoring is configured
-    wandb_configured = cfg.wandb.entity or cfg.wandb.project
+    wandb_section = _as_table(raw_cfg.get("wandb"))
+    wandb_configured = bool(wandb_section.get("entity") or wandb_section.get("project"))
     has_wandb_key = secrets and "WANDB_API_KEY" in secrets
     if wandb_configured and not has_wandb_key:
         console.print("[red]Configuration Error:[/red]")
@@ -1186,85 +1329,107 @@ def create_run(
 
         # Model & Environment
         console.print("[cyan]Model & Environment[/cyan]")
-        console.print(f"  Model:        {cfg.model}")
-        console.print(f"  Loss:         {cfg.loss}")
-        if cfg.teacher is not None:
-            console.print(f"  Teacher:      {cfg.teacher.model}")
-        console.print(f"  Environments: {', '.join(e.id for e in cfg.env)}")
+        console.print(f"  Model:        {model_name or '?'}")
+        console.print(f"  Mode:         {training_mode}")
+        teacher_model = _get_path(raw_cfg, "teacher", "model") or _get_path(
+            raw_cfg, "teacher", "model", "name"
+        )
+        if isinstance(teacher_model, dict):
+            teacher_model = teacher_model.get("name")
+        if teacher_model:
+            console.print(f"  Teacher:      {teacher_model}")
+        env_names = [_raw_env_id(env) or "?" for env in train_envs]
+        console.print(f"  Environments: {', '.join(env_names) if env_names else '?'}")
         if app_config.team_id:
             console.print(f"  Team:         {app_config.team_id}")
 
         # Training
         console.print("\n[cyan]Training[/cyan]")
-        console.print(f"  Max Steps:           {cfg.max_steps}")
-        console.print(f"  Batch Size:          {cfg.batch_size}")
-        console.print(f"  Rollouts per Example: {cfg.rollouts_per_example}")
-        if cfg.max_inflight_rollouts is not None:
-            console.print(f"  Max Inflight Rollouts: {cfg.max_inflight_rollouts}")
-        if cfg.learning_rate is not None:
-            console.print(f"  Learning Rate:       {cfg.learning_rate}")
-        if cfg.lora_alpha is not None:
-            console.print(f"  LoRA Alpha:          {cfg.lora_alpha}")
-        if cfg.oversampling_factor is not None:
-            console.print(f"  Oversampling Factor: {cfg.oversampling_factor}")
-        if cfg.run_config:
-            console.print(f"  Run Config:          {cfg.run_config}")
+        max_steps = raw_cfg.get("max_steps")
+        batch_size = raw_cfg.get("batch_size")
+        rollouts_per_example = _first_present(
+            raw_cfg.get("rollouts_per_example"), raw_cfg.get("group_size")
+        )
+        console.print(f"  Max Steps:           {max_steps if max_steps is not None else '?'}")
+        console.print(f"  Batch Size:          {batch_size if batch_size is not None else '?'}")
+        console.print(
+            "  Rollouts per Example: "
+            f"{rollouts_per_example if rollouts_per_example is not None else '?'}"
+        )
+        for label, key in (
+            ("Max Inflight Rollouts", "max_inflight_rollouts"),
+            ("Learning Rate", "learning_rate"),
+            ("LoRA Alpha", "lora_alpha"),
+            ("Oversampling Factor", "oversampling_factor"),
+        ):
+            if raw_cfg.get(key) is not None:
+                console.print(f"  {label}: {raw_cfg[key]}")
+        if isinstance(raw_cfg.get("run_config"), dict):
+            console.print(f"  Run Config:          {raw_cfg['run_config']}")
 
         # Sampling
-        has_sampling = (
-            cfg.sampling.max_tokens
-            or cfg.sampling.temperature is not None
-            or cfg.sampling.temp_scheduler is not None
-            or cfg.sampling.extra_body is not None
-            or cfg.sampling.enable_thinking is not None
-            or cfg.sampling.reasoning_effort is not None
+        sampling = _as_table(
+            _first_present(
+                _get_path(raw_cfg, "train", "sampling"),
+                raw_cfg.get("sampling"),
+            )
         )
-        if has_sampling:
+        if sampling:
             console.print("\n[cyan]Sampling[/cyan]")
-            if cfg.sampling.max_tokens:
-                console.print(f"  Max Tokens:          {cfg.sampling.max_tokens}")
-            if cfg.sampling.temperature is not None:
-                console.print(f"  Temperature:         {cfg.sampling.temperature}")
-            if cfg.sampling.temp_scheduler is not None:
-                ts = cfg.sampling.temp_scheduler
-                sched = f"{ts.type} ({ts.start_temperature} → {ts.end_temperature})"
-                console.print(f"  Temp Scheduler:      {sched}")
-            if cfg.sampling.extra_body is not None:
-                console.print(f"  Extra Body:          {cfg.sampling.extra_body}")
-            if cfg.sampling.enable_thinking is not None:
-                console.print(f"  Enable Thinking:     {cfg.sampling.enable_thinking}")
-            if cfg.sampling.reasoning_effort is not None:
-                console.print(f"  Reasoning Effort:    {cfg.sampling.reasoning_effort}")
+            max_tokens = _first_present(
+                sampling.get("max_tokens"), sampling.get("max_completion_tokens")
+            )
+            if max_tokens:
+                console.print(f"  Max Tokens:          {max_tokens}")
+            if sampling.get("temperature") is not None:
+                console.print(f"  Temperature:         {sampling['temperature']}")
+            if sampling.get("temp_scheduler") is not None:
+                console.print(f"  Temp Scheduler:      {sampling['temp_scheduler']}")
+            if sampling.get("extra_body") is not None:
+                console.print(f"  Extra Body:          {sampling['extra_body']}")
+            if sampling.get("enable_thinking") is not None:
+                console.print(f"  Enable Thinking:     {sampling['enable_thinking']}")
+            if sampling.get("reasoning_effort") is not None:
+                console.print(f"  Reasoning Effort:    {sampling['reasoning_effort']}")
 
         # W&B
-        if cfg.wandb.entity or cfg.wandb.project:
+        if wandb_section.get("entity") or wandb_section.get("project"):
             console.print("\n[cyan]Weights & Biases[/cyan]")
-            console.print(f"  Project: {cfg.wandb.entity or '?'}/{cfg.wandb.project or '?'}")
-            if cfg.wandb.name:
-                console.print(f"  Run Name: {cfg.wandb.name}")
+            console.print(
+                f"  Project: {wandb_section.get('entity') or '?'}/"
+                f"{wandb_section.get('project') or '?'}"
+            )
+            if wandb_section.get("name"):
+                console.print(f"  Run Name: {wandb_section['name']}")
 
         # Eval
-        if cfg.eval.env:
+        eval_envs = _get_path(raw_cfg, "eval", "env")
+        if isinstance(eval_envs, list) and eval_envs:
             console.print("\n[cyan]Evaluation[/cyan]")
-            console.print(f"  Environments: {', '.join(e.id for e in cfg.eval.env)}")
-            if cfg.eval.interval:
-                console.print(f"  Interval:     {cfg.eval.interval}")
+            names = [env.get("id", "?") if isinstance(env, dict) else str(env) for env in eval_envs]
+            console.print(f"  Environments: {', '.join(names)}")
+            interval = _get_path(raw_cfg, "eval", "interval")
+            if interval:
+                console.print(f"  Interval:     {interval}")
 
         # Validation
-        if cfg.val.num_examples is not None:
+        val_section = _as_table(raw_cfg.get("val"))
+        if val_section:
             console.print("\n[cyan]Validation[/cyan]")
-            console.print(f"  Num Examples: {cfg.val.num_examples}")
-            if cfg.val.interval:
-                console.print(f"  Interval:     {cfg.val.interval}")
+            if val_section.get("num_examples") is not None:
+                console.print(f"  Num Examples: {val_section['num_examples']}")
+            if val_section.get("interval"):
+                console.print(f"  Interval:     {val_section['interval']}")
 
         # Infrastructure
-        if cfg.infrastructure.compute_size:
+        infrastructure = _as_table(raw_cfg.get("infrastructure"))
+        if infrastructure.get("compute_size"):
             console.print("\n[cyan]Infrastructure[/cyan]")
-            console.print(f"  Compute Size: {cfg.infrastructure.compute_size}")
+            console.print(f"  Compute Size: {infrastructure['compute_size']}")
 
         # Checkpoint warm-start
-        if cfg.checkpoint_id:
-            console.print(f"\n[cyan]Warm-start from checkpoint:[/cyan] {cfg.checkpoint_id}")
+        if raw_cfg.get("checkpoint_id"):
+            console.print(f"\n[cyan]Warm-start from checkpoint:[/cyan] {raw_cfg['checkpoint_id']}")
 
         # Secrets
         if secrets:
@@ -1278,7 +1443,7 @@ def create_run(
             available = pricing_state["models"] or []
         else:
             available = []
-        priced = next((m for m in available if m.name == cfg.model), None)
+        priced = next((m for m in available if m.name == model_name), None)
         if priced is not None:
             list_train, eff_train = priced.resolve_prices("training")
             list_input, eff_input = priced.resolve_prices("inference_input")
@@ -1306,13 +1471,16 @@ def create_run(
         console.print()
 
         # Check action status for hub environments
-        hub_envs = [e for e in cfg.env if "/" in e.id]
+        hub_envs = [env for env in train_envs if (_raw_env_id(env) or "").find("/") >= 0]
         if hub_envs and not skip_action_check:
             console.print("[dim]Checking Environment Actions...[/dim]")
             failed_envs = []
 
             for env_config in hub_envs:
-                env_id_base = env_config.id.split("@")[0]
+                env_id = _raw_env_id(env_config)
+                if not env_id:
+                    continue
+                env_id_base = env_id.split("@")[0]
                 owner, name = env_id_base.split("/", 1)
                 try:
                     status_resp = rl_client.get_environment_status(owner, name)
@@ -1320,18 +1488,16 @@ def create_run(
                     action_status = action.get("status")
 
                     if action_status == "FAILED":
-                        console.print(f"  [red]✗[/red] {env_config.id} [dim](failed)[/dim]")
-                        failed_envs.append(env_config.id)
+                        console.print(f"  [red]✗[/red] {env_id} [dim](failed)[/dim]")
+                        failed_envs.append(env_id)
                     elif action_status == "SUCCESS":
-                        console.print(f"  [green]✓[/green] {env_config.id} [dim](success)[/dim]")
+                        console.print(f"  [green]✓[/green] {env_id} [dim](success)[/dim]")
                     elif action_status in ("RUNNING", "PENDING"):
-                        console.print(
-                            f"  [yellow]○[/yellow] {env_config.id} [dim](in progress)[/dim]"
-                        )
+                        console.print(f"  [yellow]○[/yellow] {env_id} [dim](in progress)[/dim]")
                     else:
-                        console.print(f"  [dim]-[/dim] {env_config.id} [dim](no action)[/dim]")
+                        console.print(f"  [dim]-[/dim] {env_id} [dim](no action)[/dim]")
                 except APIError:
-                    console.print(f"  [dim]-[/dim] {env_config.id} [dim](could not check)[/dim]")
+                    console.print(f"  [dim]-[/dim] {env_id} [dim](could not check)[/dim]")
 
             if failed_envs:
                 console.print("\n[red]Error: Action failed for environments:[/red]\n")
@@ -1360,51 +1526,22 @@ def create_run(
         console.print("[dim]Creating Hosted Training run...[/dim]\n")
 
         # Create the run
-        run = rl_client.create_run(
-            model_name=cfg.model,
-            environments=[e.to_api_dict() for e in cfg.env],
-            rollouts_per_example=cfg.rollouts_per_example,
-            max_steps=cfg.max_steps,
-            max_tokens=cfg.sampling.max_tokens,
-            temperature=cfg.sampling.temperature,
-            temp_scheduler=cfg.sampling.temp_scheduler.model_dump(exclude_none=True)
-            if cfg.sampling.temp_scheduler
-            else None,
-            extra_body=cfg.sampling.extra_body,
-            batch_size=cfg.batch_size,
-            name=cfg.name,
-            wandb_entity=cfg.wandb.entity,
-            wandb_project=cfg.wandb.project,
-            wandb_run_name=cfg.wandb.name,
+        run = rl_client.create_run_from_toml(
+            config_toml=_prime_rl_config_toml_for_platform(raw_cfg),
+            name=raw_cfg.get("name") if isinstance(raw_cfg.get("name"), str) else None,
             secrets=secrets if secrets else None,
             team_id=app_config.team_id,
-            eval_config=cfg.eval.to_api_dict(),
-            val_config=cfg.val.to_api_dict(),
-            buffer_config=cfg.buffer if cfg.buffer else None,
-            # `is not None` rather than truthiness: an explicit `= []` means
-            # "replace prime-rl's default filter list with no filters" and
-            # must reach the API as an empty list, not be omitted.
-            pre_batch_filters=[f.model_dump(exclude_none=True) for f in cfg.pre_batch_filters]
-            if cfg.pre_batch_filters is not None
+            cluster_name=raw_cfg.get("cluster_name")
+            if isinstance(raw_cfg.get("cluster_name"), str)
             else None,
-            post_batch_filters=[f.model_dump(exclude_none=True) for f in cfg.post_batch_filters]
-            if cfg.post_batch_filters is not None
+            infrastructure_config=_platform_table(raw_cfg, "infrastructure"),
+            checkpoints_config=_platform_table(raw_cfg, "checkpoints"),
+            adapters_config=_platform_table(raw_cfg, "adapters"),
+            checkpoint_id=raw_cfg.get("checkpoint_id")
+            if isinstance(raw_cfg.get("checkpoint_id"), str)
             else None,
-            learning_rate=cfg.learning_rate,
-            lora_alpha=cfg.lora_alpha,
-            max_inflight_rollouts=cfg.max_inflight_rollouts,
-            oversampling_factor=cfg.oversampling_factor,
-            checkpoints_config=cfg.checkpoints.to_api_dict(),
-            adapters_config=cfg.adapters.to_api_dict(),
-            checkpoint_id=cfg.checkpoint_id,
-            cluster_name=cfg.cluster_name,
-            infrastructure_config=cfg.infrastructure.to_api_dict(),
-            tailscale_config=cfg.tailscale.to_api_dict(),
-            enable_thinking=cfg.sampling.enable_thinking,
-            reasoning_effort=cfg.sampling.reasoning_effort,
-            run_config=cfg.run_config if cfg.run_config else None,
-            loss=cfg.loss,
-            teacher=cfg.teacher.to_api_dict() if cfg.teacher else None,
+            tailscale_config=_platform_tailscale_config(raw_cfg),
+            run_config=_platform_table(raw_cfg, "run_config"),
         )
 
         if output == "json":

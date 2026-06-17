@@ -1,5 +1,7 @@
 """Tests for retry logic on transient connection errors."""
 
+import asyncio
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -491,6 +493,37 @@ class TestSandboxAuthRetry:
         assert [request.method for request in transport.requests] == ["POST", "POST"]
         assert str(transport.requests[0].url).endswith("/api/v1/sandbox/sandbox-1/auth")
         await client.client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_async_auth_refresh_batches_cold_start_cache_writes(self, tmp_path):
+        """First-time auth refreshes should not serialize on full-file disk writes."""
+
+        class BurstAuthClient:
+            async def request(self, method: str, path: str, **kwargs):
+                assert method == "POST"
+                assert path.endswith("/auth")
+                assert kwargs == {"idempotent_post": True}
+                await asyncio.sleep(0)
+                return _auth_response()
+
+        cache = AsyncSandboxAuthCache(tmp_path / "auth_cache.json", BurstAuthClient())
+        writes = []
+
+        async def record_write(data: str) -> None:
+            assert not cache._lock.locked()
+            writes.append(json.loads(data))
+
+        cache._write_cache_data = record_write
+
+        sandbox_ids = [f"sandbox-{idx}" for idx in range(10)]
+        results = await asyncio.gather(
+            *(cache.get_or_refresh(sandbox_id) for sandbox_id in sandbox_ids)
+        )
+        await cache.flush()
+
+        assert [result["token"] for result in results] == ["test-token"] * len(sandbox_ids)
+        assert len(writes) == 1
+        assert set(writes[0]) == set(sandbox_ids)
 
 
 class TestSyncGatewayRetry:

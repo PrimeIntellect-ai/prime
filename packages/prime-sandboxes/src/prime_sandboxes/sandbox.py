@@ -386,6 +386,9 @@ class AsyncSandboxAuthCache:
         self._inflight: Dict[str, asyncio.Event] = {}
         self._auth_cache: Dict[str, Any] = {}
         self._loaded = False
+        self._save_pending = False
+        self._save_task: Optional[asyncio.Task[None]] = None
+        self._save_debounce_seconds = 0.01
 
     async def _ensure_loaded(self) -> None:
         if self._loaded:
@@ -393,12 +396,9 @@ class AsyncSandboxAuthCache:
         self._auth_cache, needs_save = await asyncio.to_thread(_load_auth_cache, self._cache_file)
         self._loaded = True
         if needs_save:
-            await self._save_cache()
+            self._schedule_save_locked()
 
-    async def _save_cache(self) -> None:
-        """Write current in-memory cache to disk. Must be called under self._lock."""
-        data = json.dumps(self._auth_cache)
-
+    async def _write_cache_data(self, data: str) -> None:
         def _write() -> None:
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self._cache_file, "w") as f:
@@ -408,6 +408,34 @@ class AsyncSandboxAuthCache:
             await asyncio.to_thread(_write)
         except Exception:
             pass
+
+    def _schedule_save_locked(self) -> None:
+        """Schedule a debounced cache save. Must be called under self._lock."""
+        self._save_pending = True
+        if self._save_task is None or self._save_task.done():
+            self._save_task = asyncio.create_task(self._save_cache_loop())
+
+    async def _save_cache_loop(self) -> None:
+        await asyncio.sleep(self._save_debounce_seconds)
+
+        while True:
+            async with self._lock:
+                if not self._save_pending:
+                    self._save_task = None
+                    return
+                self._save_pending = False
+                data = json.dumps(self._auth_cache)
+
+            await self._write_cache_data(data)
+
+    async def flush(self) -> None:
+        """Wait for any scheduled cache save to finish."""
+        while True:
+            async with self._lock:
+                task = self._save_task
+            if task is None:
+                return
+            await task
 
     async def get_or_refresh(self, sandbox_id: str) -> Dict[str, Any]:
         """Get cached auth or fetch a new token.
@@ -444,7 +472,7 @@ class AsyncSandboxAuthCache:
                 )
                 async with self._lock:
                     self._auth_cache[sandbox_id] = response
-                    await self._save_cache()
+                    self._schedule_save_locked()
                 return dict(response)
             finally:
                 async with self._lock:
@@ -467,7 +495,7 @@ class AsyncSandboxAuthCache:
         async with self._lock:
             if sandbox_id in self._auth_cache:
                 self._auth_cache[sandbox_id]["is_vm"] = is_vm
-                await self._save_cache()
+                self._schedule_save_locked()
 
         return is_vm
 
@@ -475,13 +503,15 @@ class AsyncSandboxAuthCache:
         async with self._lock:
             await self._ensure_loaded()
             self._auth_cache[sandbox_id] = auth_info
-            await self._save_cache()
+            self._schedule_save_locked()
+        await self.flush()
 
     async def clear(self) -> None:
         async with self._lock:
             self._auth_cache = {}
             self._loaded = True
-            await self._save_cache()
+            self._schedule_save_locked()
+        await self.flush()
 
 
 def _check_sandbox_statuses(
@@ -2258,6 +2288,7 @@ class AsyncSandboxClient:
 
     async def aclose(self) -> None:
         """Close the async client and gateway client"""
+        await self._auth_cache.flush()
         if self._gateway_client is not None:
             await self._gateway_client.aclose()
         await self.client.aclose()

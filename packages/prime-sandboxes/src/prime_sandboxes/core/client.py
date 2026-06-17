@@ -31,6 +31,12 @@ IDEMPOTENT_RETRYABLE_EXCEPTIONS = POST_RETRYABLE_EXCEPTIONS + (
 IDEMPOTENT_RETRYABLE_STATUSES = frozenset({502, 503, 504})
 IDEMPOTENT_HTTP_METHODS = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS"})
 
+DEFAULT_CONNECTION_LIMITS = httpx.Limits(
+    max_connections=1000,
+    max_keepalive_connections=100,
+)
+DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
 
 def _is_idempotent_request_retryable_error(exc: BaseException) -> bool:
     if isinstance(exc, IDEMPOTENT_RETRYABLE_EXCEPTIONS):
@@ -93,7 +99,7 @@ class APIClient:
         self.client = httpx.Client(
             headers=headers,
             follow_redirects=True,
-            timeout=httpx.Timeout(30.0, connect=10.0),
+            timeout=DEFAULT_TIMEOUT,
         )
 
     def _check_auth_required(self) -> None:
@@ -255,10 +261,9 @@ class AsyncAPIClient:
         client_kwargs: Dict[str, Any] = {
             "headers": headers,
             "follow_redirects": True,
-            "timeout": httpx.Timeout(30.0, connect=10.0),
+            "limits": limits if limits is not None else DEFAULT_CONNECTION_LIMITS,
+            "timeout": DEFAULT_TIMEOUT,
         }
-        if limits is not None:
-            client_kwargs["limits"] = limits
 
         self.client = httpx.AsyncClient(**client_kwargs)
 

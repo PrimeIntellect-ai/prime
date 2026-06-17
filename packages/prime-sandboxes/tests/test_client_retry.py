@@ -6,7 +6,13 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from prime_sandboxes.core.client import APIClient, APIError, AsyncAPIClient
+from prime_sandboxes.core.client import (
+    DEFAULT_CONNECTION_LIMITS,
+    DEFAULT_TIMEOUT,
+    APIClient,
+    APIError,
+    AsyncAPIClient,
+)
 from prime_sandboxes.models import CreateSandboxRequest
 from prime_sandboxes.sandbox import (
     AsyncSandboxAuthCache,
@@ -172,6 +178,27 @@ class AsyncAlwaysFailTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.call_count += 1
         raise httpx.RemoteProtocolError("Server disconnected")
+
+
+class TestAsyncAPIClientDefaults:
+    @pytest.mark.asyncio
+    async def test_uses_default_connection_limits_and_timeout(self):
+        client = AsyncAPIClient(api_key="test-key")
+        try:
+            backend_pool = client.client._transport._pool
+            timeout = client.client.timeout
+
+            assert backend_pool._max_connections == DEFAULT_CONNECTION_LIMITS.max_connections
+            assert (
+                backend_pool._max_keepalive_connections
+                == DEFAULT_CONNECTION_LIMITS.max_keepalive_connections
+            )
+            assert timeout.connect == DEFAULT_TIMEOUT.connect
+            assert timeout.read == DEFAULT_TIMEOUT.read
+            assert timeout.write == DEFAULT_TIMEOUT.write
+            assert timeout.pool == DEFAULT_TIMEOUT.pool
+        finally:
+            await client.aclose()
 
 
 class TestAsyncSandboxClientConnectionLimits:

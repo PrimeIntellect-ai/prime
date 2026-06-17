@@ -200,6 +200,31 @@ class TestAsyncAPIClientDefaults:
         finally:
             await client.aclose()
 
+    @pytest.mark.asyncio
+    async def test_allows_custom_connection_limits_and_timeout(self):
+        custom_limits = httpx.Limits(max_connections=321, max_keepalive_connections=123)
+        custom_timeout = httpx.Timeout(12.0, connect=4.0)
+        client = AsyncAPIClient(
+            api_key="test-key",
+            limits=custom_limits,
+            timeout=custom_timeout,
+        )
+        try:
+            backend_pool = client.client._transport._pool
+            timeout = client.client.timeout
+
+            assert backend_pool._max_connections == custom_limits.max_connections
+            assert (
+                backend_pool._max_keepalive_connections
+                == custom_limits.max_keepalive_connections
+            )
+            assert timeout.connect == custom_timeout.connect
+            assert timeout.read == custom_timeout.read
+            assert timeout.write == custom_timeout.write
+            assert timeout.pool == custom_timeout.pool
+        finally:
+            await client.aclose()
+
 
 class TestAsyncSandboxClientConnectionLimits:
     @pytest.mark.asyncio

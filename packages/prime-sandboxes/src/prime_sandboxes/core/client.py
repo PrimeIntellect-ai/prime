@@ -85,11 +85,13 @@ class APIClient:
         api_key: Optional[str] = None,
         require_auth: bool = True,
         user_agent: Optional[str] = None,
+        timeout: Optional[httpx.Timeout] = None,
     ):
         self.config = Config()
         self.api_key = api_key or self.config.api_key
         self.require_auth = require_auth
         self.base_url = self.config.base_url
+        timeout = timeout or DEFAULT_TIMEOUT
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -99,7 +101,7 @@ class APIClient:
         self.client = httpx.Client(
             headers=headers,
             follow_redirects=True,
-            timeout=DEFAULT_TIMEOUT,
+            timeout=timeout,
         )
 
     def _check_auth_required(self) -> None:
@@ -247,11 +249,14 @@ class AsyncAPIClient:
         require_auth: bool = True,
         user_agent: Optional[str] = None,
         limits: Optional[httpx.Limits] = None,
+        timeout: Optional[httpx.Timeout] = None,
     ):
         self.config = Config()
         self.api_key = api_key or self.config.api_key
         self.require_auth = require_auth
         self.base_url = self.config.base_url
+        limits = limits or DEFAULT_CONNECTION_LIMITS
+        timeout = timeout or DEFAULT_TIMEOUT
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -261,8 +266,8 @@ class AsyncAPIClient:
         client_kwargs: Dict[str, Any] = {
             "headers": headers,
             "follow_redirects": True,
-            "limits": limits if limits is not None else DEFAULT_CONNECTION_LIMITS,
-            "timeout": DEFAULT_TIMEOUT,
+            "limits": limits,
+            "timeout": timeout,
         }
 
         self.client = httpx.AsyncClient(**client_kwargs)

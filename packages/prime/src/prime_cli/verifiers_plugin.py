@@ -47,7 +47,7 @@ def resolve_workspace_python(cwd: Path | None = None) -> str:
     """Prefer workspace Python only when it can run verifiers command modules."""
     workspace = (cwd or Path.cwd()).resolve()
     workspace_str = str(workspace)
-    module = "verifiers.cli.commands.eval"
+    module = "verifiers.v1.cli.eval"
 
     def _usable(candidate: Path) -> bool:
         return candidate.exists() and _python_can_import_module(

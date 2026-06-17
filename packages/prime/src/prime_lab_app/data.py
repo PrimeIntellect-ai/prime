@@ -16,6 +16,12 @@ from prime_cli.api.rl import RLClient
 from prime_cli.client import APIClient, APIError
 from prime_cli.core import Config
 from prime_cli.utils.time_utils import format_time_ago
+from prime_cli.utils.v1_results import (
+    is_v1_eval_dir,
+    load_config,
+    v1_config_metadata,
+    v1_run_identity,
+)
 from prime_evals import EvalsClient
 
 from .cache import (
@@ -1002,20 +1008,21 @@ def discover_local_eval_runs(
     outputs_dir: str = "./outputs",
     limit: int = 30,
 ) -> list[dict[str, Any]]:
-    roots: list[Path] = []
+    runs: list[dict[str, Any]] = []
     env_root = (workspace / env_dir).resolve()
+
+    # v0 layout: outputs/evals/<env>--<model>/<run>/{metadata.json, results.jsonl}
+    v0_roots: list[Path] = []
     if _safe_is_dir(env_root):
         for env_path in _safe_sorted_children(env_root):
             candidate = env_path / "outputs" / "evals"
             if _safe_is_dir(candidate):
-                roots.append(candidate)
+                v0_roots.append(candidate)
+    global_evals = (workspace / outputs_dir / "evals").resolve()
+    if _safe_is_dir(global_evals):
+        v0_roots.append(global_evals)
 
-    global_root = (workspace / outputs_dir / "evals").resolve()
-    if _safe_is_dir(global_root):
-        roots.append(global_root)
-
-    runs: list[dict[str, Any]] = []
-    for root in roots:
+    for root in v0_roots:
         for env_model_dir in _safe_sorted_children(root):
             if not _safe_is_dir(env_model_dir) or "--" not in env_model_dir.name:
                 continue
@@ -1030,14 +1037,46 @@ def discover_local_eval_runs(
                     or not _safe_is_file(results_path)
                 ):
                     continue
-                metadata = _read_json_file(metadata_path)
                 runs.append(
                     {
                         "env_id": env_id,
                         "model": model,
                         "run_id": run_dir.name,
                         "path": str(run_dir),
-                        "metadata": metadata,
+                        "metadata": _read_json_file(metadata_path),
+                    }
+                )
+                if len(runs) >= limit:
+                    return runs
+
+    # v1 layout: outputs/<taskset>--<model>--<harness>/<run>/{config.toml, results.jsonl}. Run
+    # identity comes from config.toml, not the dir name (the model embeds `--`). `evals/` is v0.
+    v1_roots: list[Path] = []
+    if _safe_is_dir(env_root):
+        for env_path in _safe_sorted_children(env_root):
+            candidate = env_path / "outputs"
+            if _safe_is_dir(candidate):
+                v1_roots.append(candidate)
+    global_outputs = (workspace / outputs_dir).resolve()
+    if _safe_is_dir(global_outputs):
+        v1_roots.append(global_outputs)
+
+    for root in v1_roots:
+        for name_dir in _safe_sorted_children(root):
+            if not _safe_is_dir(name_dir) or name_dir.name == "evals":
+                continue
+            for run_dir in _safe_sorted_children(name_dir, reverse=True):
+                if not _safe_is_dir(run_dir) or not is_v1_eval_dir(run_dir):
+                    continue
+                config = load_config(run_dir)
+                env_id, model, _harness = v1_run_identity(config)
+                runs.append(
+                    {
+                        "env_id": env_id,
+                        "model": model,
+                        "run_id": run_dir.name,
+                        "path": str(run_dir),
+                        "metadata": v1_config_metadata(config),
                     }
                 )
                 if len(runs) >= limit:

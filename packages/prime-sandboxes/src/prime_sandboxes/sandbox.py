@@ -1038,27 +1038,27 @@ class SandboxClient:
     def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1
     ) -> None:
-        """Wait for sandbox to be running and stable.
+        """Wait for sandbox to report RUNNING with at most one reachability probe.
 
         Args:
             sandbox_id: The sandbox ID to wait for
             max_attempts: Maximum polling attempts
-            stability_checks: Number of consecutive successful reachability checks required
+            stability_checks: Number of consecutive RUNNING status checks required before probing
         """
-        consecutive_successes = 0
+        consecutive_running = 0
+        checked_reachability = False
+        required_running_checks = max(stability_checks, 1)
+
         for attempt in range(max_attempts):
             sandbox = self.get(sandbox_id)
             if sandbox.status == "RUNNING":
-                if self._is_sandbox_reachable(sandbox_id):
-                    consecutive_successes += 1
-                    if consecutive_successes >= stability_checks:
+                consecutive_running += 1
+                if consecutive_running >= required_running_checks:
+                    if checked_reachability:
                         return
-                    # Small delay between stability checks
-                    time.sleep(0.5)
-                    continue
-                else:
-                    # Reset counter if check fails
-                    consecutive_successes = 0
+                    checked_reachability = True
+                    if self._is_sandbox_reachable(sandbox_id):
+                        return
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
                 ctx = {
                     "status": sandbox.status,
@@ -1066,6 +1066,9 @@ class SandboxClient:
                     "error_message": sandbox.error_message,
                 }
                 _raise_not_running_error(sandbox.id, ctx)
+            else:
+                consecutive_running = 0
+                checked_reachability = False
 
             # Aggressive polling for first 5 attempts (5 seconds), then back off
             sleep_time = 1 if attempt < 5 else 2
@@ -1949,27 +1952,27 @@ class AsyncSandboxClient:
     async def wait_for_creation(
         self, sandbox_id: str, max_attempts: int = 60, stability_checks: int = 1
     ) -> None:
-        """Wait for sandbox to be running and stable (async version).
+        """Wait for sandbox to report RUNNING with at most one reachability probe.
 
         Args:
             sandbox_id: The sandbox ID to wait for
             max_attempts: Maximum polling attempts
-            stability_checks: Number of consecutive successful reachability checks required
+            stability_checks: Number of consecutive RUNNING status checks required before probing
         """
-        consecutive_successes = 0
+        consecutive_running = 0
+        checked_reachability = False
+        required_running_checks = max(stability_checks, 1)
+
         for attempt in range(max_attempts):
             sandbox = await self.get(sandbox_id)
             if sandbox.status == "RUNNING":
-                if await self._is_sandbox_reachable(sandbox_id):
-                    consecutive_successes += 1
-                    if consecutive_successes >= stability_checks:
+                consecutive_running += 1
+                if consecutive_running >= required_running_checks:
+                    if checked_reachability:
                         return
-                    # Small delay between stability checks
-                    await asyncio.sleep(0.5)
-                    continue
-                else:
-                    # Reset counter if check fails
-                    consecutive_successes = 0
+                    checked_reachability = True
+                    if await self._is_sandbox_reachable(sandbox_id):
+                        return
             elif sandbox.status in ["ERROR", "TERMINATED", "TIMEOUT"]:
                 ctx = {
                     "status": sandbox.status,
@@ -1977,6 +1980,9 @@ class AsyncSandboxClient:
                     "error_message": sandbox.error_message,
                 }
                 _raise_not_running_error(sandbox.id, ctx)
+            else:
+                consecutive_running = 0
+                checked_reachability = False
 
             sleep_time = 1 if attempt < 5 else 2
             await asyncio.sleep(sleep_time)

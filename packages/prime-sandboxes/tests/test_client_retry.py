@@ -1,5 +1,7 @@
 """Tests for retry logic on transient connection errors."""
 
+import asyncio
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -7,7 +9,7 @@ import httpx
 import pytest
 
 from prime_sandboxes.core.client import APIClient, APIError, AsyncAPIClient
-from prime_sandboxes.models import CreateSandboxRequest
+from prime_sandboxes.models import CreateSandboxRequest, Sandbox
 from prime_sandboxes.sandbox import (
     AsyncSandboxAuthCache,
     AsyncSandboxClient,
@@ -101,7 +103,7 @@ class AsyncStatusThenSucceedTransport(httpx.AsyncBaseTransport):
         return httpx.Response(200, request=request, json=self.payload)
 
 
-def _sandbox_response(sandbox_id: str = "sandbox-1"):
+def _sandbox_response(sandbox_id: str = "sandbox-1", status: str = "RUNNING"):
     now = datetime.now(timezone.utc).isoformat()
     return {
         "id": sandbox_id,
@@ -112,7 +114,7 @@ def _sandbox_response(sandbox_id: str = "sandbox-1"):
         "disk_size_gb": 5.0,
         "disk_mount_path": "/workspace",
         "gpu_count": 0,
-        "status": "RUNNING",
+        "status": status,
         "timeout_minutes": 60,
         "created_at": now,
         "updated_at": now,
@@ -459,6 +461,69 @@ class TestCreateSandboxIdempotencyPayload:
         assert second_payload["team_id"] == "team-1"
         assert request.idempotency_key is None
         assert request.team_id is None
+
+
+class TestWaitForCreation:
+    def test_sync_wait_for_creation_checks_reachability_once_per_running_window(
+        self, monkeypatch
+    ):
+        client = SandboxClient(APIClient(api_key="test-key"))
+        statuses = iter(["PENDING", "RUNNING", "RUNNING"])
+        seen_statuses = []
+        reachability_calls = 0
+
+        def fake_get(_sandbox_id: str):
+            status = next(statuses)
+            seen_statuses.append(status)
+            return Sandbox.model_validate(_sandbox_response(status=status))
+
+        def fake_is_reachable(_sandbox_id: str):
+            nonlocal reachability_calls
+            reachability_calls += 1
+            return False
+
+        monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+        client.get = fake_get
+        client._is_sandbox_reachable = fake_is_reachable
+
+        client.wait_for_creation("sandbox-1", max_attempts=3)
+
+        assert seen_statuses == ["PENDING", "RUNNING", "RUNNING"]
+        assert reachability_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_async_wait_for_creation_checks_reachability_once_per_running_window(
+        self, monkeypatch
+    ):
+        client = AsyncSandboxClient(api_key="test-key")
+        statuses = iter(["PENDING", "RUNNING", "RUNNING"])
+        seen_statuses = []
+        reachability_calls = 0
+
+        async def fake_get(_sandbox_id: str):
+            status = next(statuses)
+            seen_statuses.append(status)
+            return Sandbox.model_validate(_sandbox_response(status=status))
+
+        async def fake_is_reachable(_sandbox_id: str):
+            nonlocal reachability_calls
+            reachability_calls += 1
+            return False
+
+        async def fake_sleep(_seconds: float):
+            return None
+
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        client.get = fake_get
+        client._is_sandbox_reachable = fake_is_reachable
+
+        try:
+            await client.wait_for_creation("sandbox-1", max_attempts=3)
+        finally:
+            await client.aclose()
+
+        assert seen_statuses == ["PENDING", "RUNNING", "RUNNING"]
+        assert reachability_calls == 1
 
 
 class TestSandboxAuthRetry:

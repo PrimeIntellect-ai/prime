@@ -174,6 +174,23 @@ class AsyncAlwaysFailTransport(httpx.AsyncBaseTransport):
         raise httpx.RemoteProtocolError("Server disconnected")
 
 
+class TestAsyncSandboxClientConnectionLimits:
+    @pytest.mark.asyncio
+    async def test_threads_connection_limits_to_backend_api_client(self):
+        client = AsyncSandboxClient(
+            api_key="test-key",
+            max_connections=321,
+            max_keepalive_connections=123,
+        )
+        try:
+            backend_pool = client.client.client._transport._pool
+
+            assert backend_pool._max_connections == 321
+            assert backend_pool._max_keepalive_connections == 123
+        finally:
+            await client.aclose()
+
+
 class TestSyncAPIClientRetry:
     """Tests for sync APIClient retry behavior."""
 

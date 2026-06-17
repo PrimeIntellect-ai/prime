@@ -240,6 +240,7 @@ class AsyncAPIClient:
         api_key: Optional[str] = None,
         require_auth: bool = True,
         user_agent: Optional[str] = None,
+        limits: Optional[httpx.Limits] = None,
     ):
         self.config = Config()
         self.api_key = api_key or self.config.api_key
@@ -251,11 +252,15 @@ class AsyncAPIClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
         headers["User-Agent"] = user_agent if user_agent else _default_user_agent()
 
-        self.client = httpx.AsyncClient(
-            headers=headers,
-            follow_redirects=True,
-            timeout=httpx.Timeout(30.0, connect=10.0),
-        )
+        client_kwargs: Dict[str, Any] = {
+            "headers": headers,
+            "follow_redirects": True,
+            "timeout": httpx.Timeout(30.0, connect=10.0),
+        }
+        if limits is not None:
+            client_kwargs["limits"] = limits
+
+        self.client = httpx.AsyncClient(**client_kwargs)
 
     def _check_auth_required(self) -> None:
         if self.require_auth and not self.api_key:

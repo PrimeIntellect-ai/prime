@@ -36,6 +36,14 @@ from .exceptions import (
     SandboxTimeoutError,
     UploadTimeoutError,
 )
+from .images import (
+    DEFAULT_IMAGE_PLATFORM,
+    AsyncImageClient,
+    BuildLogCallback,
+    Image,
+    ImageBuildResult,
+    ImageClient,
+)
 from .models import (
     BackgroundJob,
     BackgroundJobStatus,
@@ -628,8 +636,43 @@ class SandboxClient:
         if self._auth_cache.is_vm(sandbox_id):
             raise APIError(f"{feature_name} is not yet supported for VM sandboxes.")
 
-    def create(self, request: CreateSandboxRequest) -> Sandbox:
-        """Create a new sandbox"""
+    def build_image(
+        self,
+        image: Image,
+        *,
+        image_name: Optional[str] = None,
+        image_tag: Optional[str] = None,
+        platform: str = DEFAULT_IMAGE_PLATFORM,
+        team_id: Optional[str] = None,
+        visibility: Optional[str] = None,
+        force_rebuild: bool = False,
+        timeout_seconds: Optional[float] = 900,
+        poll_interval_seconds: float = 5.0,
+        on_build_log: Optional[BuildLogCallback] = None,
+    ) -> ImageBuildResult:
+        """Build or reuse a declarative image and return its registry reference.
+
+        Use this when many sandboxes should share one runtime image.
+        """
+        image_client = ImageClient(self.client)
+        return image_client.build(
+            image,
+            image_name=image_name,
+            image_tag=image_tag,
+            platform=platform,
+            team_id=team_id,
+            visibility=visibility,
+            force_rebuild=force_rebuild,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            on_build_log=on_build_log,
+        )
+
+    def create(
+        self,
+        request: CreateSandboxRequest,
+    ) -> Sandbox:
+        """Create a new sandbox."""
         payload = request.model_dump(by_alias=False, exclude_none=True)
         # Auto-populate team_id from config if not specified
         if request.team_id is None and self.client.config.team_id is not None:
@@ -1541,8 +1584,43 @@ class AsyncSandboxClient:
         if await self._auth_cache.is_vm(sandbox_id):
             raise APIError(f"{feature_name} is not yet supported for VM sandboxes.")
 
-    async def create(self, request: CreateSandboxRequest) -> Sandbox:
-        """Create a new sandbox"""
+    async def build_image(
+        self,
+        image: Image,
+        *,
+        image_name: Optional[str] = None,
+        image_tag: Optional[str] = None,
+        platform: str = DEFAULT_IMAGE_PLATFORM,
+        team_id: Optional[str] = None,
+        visibility: Optional[str] = None,
+        force_rebuild: bool = False,
+        timeout_seconds: Optional[float] = 900,
+        poll_interval_seconds: float = 5.0,
+        on_build_log: Optional[BuildLogCallback] = None,
+    ) -> ImageBuildResult:
+        """Build or reuse a declarative image and return its registry reference.
+
+        Use this when many sandboxes should share one runtime image.
+        """
+        image_client = AsyncImageClient(self.client)
+        return await image_client.build(
+            image,
+            image_name=image_name,
+            image_tag=image_tag,
+            platform=platform,
+            team_id=team_id,
+            visibility=visibility,
+            force_rebuild=force_rebuild,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            on_build_log=on_build_log,
+        )
+
+    async def create(
+        self,
+        request: CreateSandboxRequest,
+    ) -> Sandbox:
+        """Create a new sandbox."""
         payload = request.model_dump(by_alias=False, exclude_none=True)
         if request.team_id is None and self.client.config.team_id is not None:
             payload["team_id"] = self.client.config.team_id

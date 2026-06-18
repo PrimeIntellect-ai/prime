@@ -361,6 +361,88 @@ def test_tunnel_stop_all_users_uses_configured_team_scope(
     assert captured.get("user_id") is None
 
 
+def test_tunnel_stop_by_status_uses_scoped_bulk_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    captured: dict[str, Any] = {}
+
+    class FakeTunnelClient:
+        config = SimpleNamespace(user_id="user-1", team_id=None)
+
+        async def list_tunnels_page(self, **kwargs: Any) -> Any:
+            raise AssertionError("--status must scope the delete, not pre-list tunnels")
+
+        async def bulk_delete_tunnels(self, **kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {"succeeded": ["t-disc"], "failed": [], "message": "ok"}
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
+
+    # Mixed case is accepted and normalized to the lowercase API enum value.
+    result = runner.invoke(app, ["tunnel", "stop", "--status", "DISCONNECTED", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["status"] == "disconnected"
+    assert captured["user_id"] == "user-1"
+    assert captured["all_users"] is False
+    assert "tunnel_ids" not in captured
+
+
+def test_tunnel_stop_status_combines_with_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    captured: dict[str, Any] = {}
+
+    class FakeTunnelClient:
+        config = SimpleNamespace(user_id="user-1", team_id=None)
+
+        async def bulk_delete_tunnels(self, **kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {"succeeded": ["t-disc"], "failed": [], "message": "ok"}
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
+
+    result = runner.invoke(
+        app,
+        ["tunnel", "stop", "--label", "dev", "--status", "disconnected", "--yes"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["labels"] == ["dev"]
+    assert captured["status"] == "disconnected"
+    assert captured["user_id"] == "user-1"
+
+
+def test_tunnel_stop_invalid_status_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+    result = runner.invoke(app, ["tunnel", "stop", "--status", "expired", "--yes"])
+
+    assert result.exit_code == 1
+    assert "--status must be one of" in result.output
+
+
+def test_tunnel_stop_status_with_ids_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+
+    result = runner.invoke(app, ["tunnel", "stop", "t-123", "--status", "disconnected", "--yes"])
+
+    assert result.exit_code == 1
+    assert "Tunnel IDs cannot be combined with --all, --label, or --status" in result.output
+
+
 def test_tunnel_stop_all_exits_cleanly_when_nothing_matches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

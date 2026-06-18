@@ -28,7 +28,10 @@ IDEMPOTENT_RETRYABLE_EXCEPTIONS = POST_RETRYABLE_EXCEPTIONS + (
     httpx.ReadError,  # Connection broken while reading response (e.g., TCP reset)
 )
 
-IDEMPOTENT_RETRYABLE_STATUSES = frozenset({502, 503, 504})
+# 500 is retried for idempotent methods only: under sandbox-service overload the API emits
+# transient 500s (e.g. on DELETE/GET) that succeed on retry, and retrying is safe because these
+# methods are idempotent. Non-idempotent POST/PATCH never retry on status code.
+IDEMPOTENT_RETRYABLE_STATUSES = frozenset({500, 502, 503, 504})
 IDEMPOTENT_HTTP_METHODS = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS"})
 
 

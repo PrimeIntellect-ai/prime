@@ -210,7 +210,7 @@ class TestSyncAPIClientRetry:
         assert result == {"success": True}
         assert transport.call_count == 2
 
-    @pytest.mark.parametrize("status_code", [502, 503, 504])
+    @pytest.mark.parametrize("status_code", [500, 502, 503, 504])
     def test_get_retries_transient_gateway_statuses(self, status_code):
         """GET retries transient gateway failures from the public API/LB path."""
         transport = StatusThenSucceedTransport(status_code)
@@ -233,7 +233,7 @@ class TestSyncAPIClientRetry:
 
         assert transport.call_count == 1
 
-    @pytest.mark.parametrize("status_code", [502, 503, 504])
+    @pytest.mark.parametrize("status_code", [500, 502, 503, 504])
     def test_patch_does_not_retry_transient_gateway_statuses(self, status_code):
         """PATCH does not retry transient gateway statuses without explicit idempotency."""
         transport = StatusThenSucceedTransport(status_code)
@@ -272,7 +272,7 @@ class TestSyncAPIClientRetry:
         assert result == {"success": True}
         assert transport.call_count == 2
 
-    @pytest.mark.parametrize("status_code", [502, 503, 504])
+    @pytest.mark.parametrize("status_code", [500, 502, 503, 504])
     def test_idempotent_post_retries_transient_gateway_statuses(self, status_code):
         """Idempotency-keyed POST retries transient gateway failures."""
         transport = StatusThenSucceedTransport(status_code)
@@ -339,7 +339,7 @@ class TestAsyncAPIClientRetry:
 
         assert transport.call_count == 3
 
-    @pytest.mark.parametrize("status_code", [502, 503, 504])
+    @pytest.mark.parametrize("status_code", [500, 502, 503, 504])
     @pytest.mark.asyncio
     async def test_get_retries_transient_gateway_statuses(self, status_code):
         """Async GET retries transient gateway failures from the public API/LB path."""
@@ -364,7 +364,7 @@ class TestAsyncAPIClientRetry:
 
         assert transport.call_count == 1
 
-    @pytest.mark.parametrize("status_code", [502, 503, 504])
+    @pytest.mark.parametrize("status_code", [500, 502, 503, 504])
     @pytest.mark.asyncio
     async def test_patch_does_not_retry_transient_gateway_statuses(self, status_code):
         """Async PATCH does not retry transient gateway statuses without explicit idempotency."""

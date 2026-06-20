@@ -721,11 +721,17 @@ class SandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
+        user: Optional[str] = None,
     ) -> CommandResponse:
         """Execute command directly via gateway."""
         auth = self._auth_cache.get_or_refresh(sandbox_id)
 
         if self._auth_cache.is_vm(sandbox_id):
+            if user is not None:
+                raise ValueError(
+                    "The 'user' parameter is only supported for container sandboxes, "
+                    "not VM sandboxes."
+                )
             return self._execute_command_connect_rpc(
                 sandbox_id=sandbox_id,
                 command=command,
@@ -742,6 +748,7 @@ class SandboxClient:
             working_dir=working_dir,
             env=env,
             timeout=timeout,
+            user=user,
         )
 
     def _execute_command_connect_rpc(
@@ -822,6 +829,7 @@ class SandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
+        user: Optional[str] = None,
     ) -> CommandResponse:
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
@@ -835,6 +843,8 @@ class SandboxClient:
             "sandbox_id": sandbox_id,
             "timeout": effective_timeout,
         }
+        if user is not None:
+            payload["user"] = user
 
         for attempt in range(MAX_409_RETRIES):
             try:
@@ -900,6 +910,7 @@ class SandboxClient:
         command: str,
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
+        user: Optional[str] = None,
     ) -> BackgroundJob:
         """Start a long-running command in the background.
 
@@ -911,6 +922,8 @@ class SandboxClient:
             command: Command to execute
             working_dir: Working directory for command execution
             env: Environment variables
+            user: Run the job as this user, like ``docker exec -u`` (username or
+                numeric UID, optionally USER:GROUP). Container sandboxes only.
 
         Returns:
             BackgroundJob with job_id and file paths for polling
@@ -945,7 +958,7 @@ class SandboxClient:
 
         # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
         bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        self.execute_command(sandbox_id, bg_cmd, timeout=30)
+        self.execute_command(sandbox_id, bg_cmd, timeout=30, user=user)
 
         return BackgroundJob(
             job_id=job_id,
@@ -1632,11 +1645,17 @@ class AsyncSandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
+        user: Optional[str] = None,
     ) -> CommandResponse:
         """Execute command directly via gateway (async)."""
         auth = await self._auth_cache.get_or_refresh(sandbox_id)
 
         if await self._auth_cache.is_vm(sandbox_id):
+            if user is not None:
+                raise ValueError(
+                    "The 'user' parameter is only supported for container sandboxes, "
+                    "not VM sandboxes."
+                )
             return await self._execute_command_connect_rpc(
                 sandbox_id=sandbox_id,
                 command=command,
@@ -1653,6 +1672,7 @@ class AsyncSandboxClient:
             working_dir=working_dir,
             env=env,
             timeout=timeout,
+            user=user,
         )
 
     async def _execute_command_connect_rpc(
@@ -1733,6 +1753,7 @@ class AsyncSandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
+        user: Optional[str] = None,
     ) -> CommandResponse:
         gateway_url = auth["gateway_url"].rstrip("/")
         url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/exec"
@@ -1746,6 +1767,8 @@ class AsyncSandboxClient:
             "sandbox_id": sandbox_id,
             "timeout": effective_timeout,
         }
+        if user is not None:
+            payload["user"] = user
 
         for attempt in range(MAX_409_RETRIES):
             try:
@@ -1811,6 +1834,7 @@ class AsyncSandboxClient:
         command: str,
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
+        user: Optional[str] = None,
     ) -> BackgroundJob:
         """Start a long-running command in the background (async).
 
@@ -1822,6 +1846,8 @@ class AsyncSandboxClient:
             command: Command to execute
             working_dir: Working directory for command execution
             env: Environment variables
+            user: Run the job as this user, like ``docker exec -u`` (username or
+                numeric UID, optionally USER:GROUP). Container sandboxes only.
 
         Returns:
             BackgroundJob with job_id and file paths for polling
@@ -1856,7 +1882,7 @@ class AsyncSandboxClient:
 
         # Outer nohup redirects to /dev/null since output goes to log files inside sh -c
         bg_cmd = f"nohup sh -c {quoted_sh_command} < /dev/null > /dev/null 2>&1 &"
-        await self.execute_command(sandbox_id, bg_cmd, timeout=30)
+        await self.execute_command(sandbox_id, bg_cmd, timeout=30, user=user)
 
         return BackgroundJob(
             job_id=job_id,

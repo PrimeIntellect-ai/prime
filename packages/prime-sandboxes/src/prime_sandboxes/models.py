@@ -175,6 +175,7 @@ class CommandRequest(BaseModel):
     command: str
     working_dir: Optional[str] = None
     env: Optional[Dict[str, str]] = None
+    user: Optional[str] = None
 
 
 class CommandResponse(BaseModel):

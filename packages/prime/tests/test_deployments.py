@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from prime_cli.api.deployments import DeploymentsClient
 from prime_cli.client import APIError
@@ -98,7 +98,7 @@ def test_deployments_client_deploy_checkpoint_posts_endpoint() -> None:
             captured["json"] = json
             return _adapter_response()
 
-    adapter = DeploymentsClient(DummyAPIClient()).deploy_checkpoint("ckpt-123")
+    adapter = DeploymentsClient(cast(Any, DummyAPIClient())).deploy_checkpoint("ckpt-123")
 
     assert captured["endpoint"] == "/rft/checkpoints/ckpt-123/deploy"
     assert captured["json"] is None
@@ -143,6 +143,20 @@ def test_deployments_create_checkpoint_prints_adapter_result(monkeypatch) -> Non
     assert "Status: DEPLOYING" in output
     assert '"Qwen/Qwen3.5-0.8B:adapter-456"' in output
     assert "prime deployments list" in output
+
+
+def test_deployments_create_checkpoint_rejects_empty_checkpoint_id(monkeypatch) -> None:
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(
+        app,
+        ["deployments", "create", "--checkpoint-id", "", "--yes"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 1
+    assert "Error: --checkpoint-id cannot be empty." in output
 
 
 def test_deployments_create_checkpoint_surfaces_conflict_errors(monkeypatch) -> None:

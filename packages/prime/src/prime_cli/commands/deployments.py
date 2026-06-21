@@ -192,7 +192,19 @@ def create_deployment(
 
         prime deployments create --checkpoint-id <checkpoint_id>
     """
-    if model_id and checkpoint_id:
+    if model_id is not None:
+        model_id = model_id.strip()
+        if not model_id:
+            console.print("[red]Error:[/red] MODEL_ID cannot be empty.")
+            raise typer.Exit(1)
+
+    if checkpoint_id is not None:
+        checkpoint_id = checkpoint_id.strip()
+        if not checkpoint_id:
+            console.print("[red]Error:[/red] --checkpoint-id cannot be empty.")
+            raise typer.Exit(1)
+
+    if model_id is not None and checkpoint_id is not None:
         console.print("[red]Error:[/red] Use either MODEL_ID or --checkpoint-id, not both.")
         raise typer.Exit(1)
 
@@ -204,7 +216,7 @@ def create_deployment(
         api_client = APIClient()
         deployments_client = DeploymentsClient(api_client)
 
-        if checkpoint_id:
+        if checkpoint_id is not None:
             console.print("[bold]Deploying checkpoint:[/bold]")
             console.print(f"  Checkpoint ID: {checkpoint_id}")
             console.print()

@@ -145,6 +145,44 @@ def test_deployments_create_checkpoint_prints_adapter_result(monkeypatch) -> Non
     assert "prime deployments list" in output
 
 
+def test_deployments_create_checkpoint_reports_already_deployed_status(monkeypatch) -> None:
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    adapter = SimpleNamespace(
+        id="adapter-deployed",
+        base_model="Qwen/Qwen3.5-4B",
+        deployment_status="DEPLOYED",
+    )
+
+    class DummyDeploymentsClient:
+        def __init__(self, api_client: Any) -> None:
+            self.api_client = api_client
+
+        def deploy_checkpoint(self, checkpoint_id: str) -> Any:
+            assert checkpoint_id == "ckpt-deployed"
+            return adapter
+
+    monkeypatch.setattr("prime_cli.commands.deployments.APIClient", lambda: object())
+    monkeypatch.setattr(
+        "prime_cli.commands.deployments.DeploymentsClient",
+        DummyDeploymentsClient,
+    )
+
+    result = runner.invoke(
+        app,
+        ["deployments", "create", "--checkpoint-id", "ckpt-deployed", "--yes"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "Deployment is ready!" in output
+    assert "Deployment initiated successfully!" not in output
+    assert "Status: DEPLOYED" in output
+    assert "The model is deployed and ready for inference." in output
+    assert "The model is being deployed." not in output
+
+
 def test_deployments_create_checkpoint_rejects_empty_checkpoint_id(monkeypatch) -> None:
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 

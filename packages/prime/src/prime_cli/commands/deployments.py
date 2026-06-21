@@ -56,6 +56,24 @@ curl -X POST https://api.pinference.ai/api/v1/chat/completions \\
     )
 
 
+def _print_deployment_followup(deployment_status: str) -> None:
+    console.print()
+    if deployment_status == "DEPLOYED":
+        console.print("[dim]The model is deployed and ready for inference.[/dim]")
+    elif deployment_status == "DEPLOYING":
+        console.print("[dim]The model is being deployed. This may take a few minutes.[/dim]")
+    else:
+        console.print(f"[dim]Deployment status: {deployment_status}[/dim]")
+    console.print("[dim]Use 'prime deployments list' to check deployment status.[/dim]")
+
+
+def _print_deployment_success(deployment_status: str) -> None:
+    if deployment_status == "DEPLOYED":
+        console.print("[green]Deployment is ready![/green]")
+    else:
+        console.print("[green]Deployment initiated successfully![/green]")
+
+
 @app.command(name="list", epilog=LIST_DEPLOYMENTS_JSON_HELP)
 def list_deployments(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
@@ -229,11 +247,10 @@ def create_deployment(
 
             adapter = deployments_client.deploy_checkpoint(checkpoint_id)
 
-            console.print("[green]Deployment initiated successfully![/green]")
+            _print_deployment_success(adapter.deployment_status)
             console.print(f"Adapter ID: [cyan]{adapter.id}[/cyan]")
             console.print(f"Status: [yellow]{adapter.deployment_status}[/yellow]")
-            console.print("\n[dim]The model is being deployed. This may take a few minutes.[/dim]")
-            console.print("[dim]Use 'prime deployments list' to check deployment status.[/dim]")
+            _print_deployment_followup(adapter.deployment_status)
 
             _print_inference_usage(adapter.base_model, adapter.id)
             return
@@ -289,10 +306,9 @@ def create_deployment(
         # Deploy the model
         updated_model = deployments_client.deploy_adapter(model_id)
 
-        console.print("[green]Deployment initiated successfully![/green]")
+        _print_deployment_success(updated_model.deployment_status)
         console.print(f"Status: [yellow]{updated_model.deployment_status}[/yellow]")
-        console.print("\n[dim]The model is being deployed. This may take a few minutes.[/dim]")
-        console.print("[dim]Use 'prime deployments list' to check deployment status.[/dim]")
+        _print_deployment_followup(updated_model.deployment_status)
 
         _print_inference_usage(model.base_model, model.id)
 

@@ -17,7 +17,6 @@ class HostedTrainingRunResponse(BaseModel):
     """Response from POST /v1/training/runs."""
 
     run_id: str = Field(..., alias="runId")
-    job_id: str = Field(..., alias="jobId")
     token_value: str = Field(..., alias="tokenValue")
 
     model_config = ConfigDict(populate_by_name=True)

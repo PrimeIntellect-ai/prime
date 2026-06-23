@@ -51,12 +51,98 @@ def load_results_jsonl(path: Path) -> list[dict]:
     return results
 
 
+def convert_eval_results(samples: list[dict]) -> list[dict]:
+    """Convert v1 traces to the sample schema while preserving legacy results."""
+    trace_type = None
+    trace_fields = {}
+    rollout_counts: dict[int, int] = {}
+    converted = []
+
+    for sample in samples:
+        if not (
+            isinstance(sample.get("nodes"), list)
+            and isinstance(sample.get("task"), dict)
+            and isinstance(sample.get("rewards"), dict)
+        ):
+            legacy_sample = dict(sample)
+            if "id" in legacy_sample and "example_id" not in legacy_sample:
+                legacy_sample["example_id"] = legacy_sample["id"]
+            converted.append(legacy_sample)
+            continue
+
+        if trace_type is None:
+            from verifiers.v1.task import WireTask
+            from verifiers.v1.trace import Trace
+
+            trace_type = Trace[WireTask]
+            trace_fields = trace_type.model_fields
+        trace = trace_type.model_validate(
+            {key: value for key, value in sample.items() if key in trace_fields}
+        )
+        task = trace.task.model_dump(mode="json", exclude_none=True)
+        branches = trace.branches
+        main_messages = (
+            [
+                message.model_dump(mode="json", exclude_none=True)
+                for message in branches[-1].messages
+            ]
+            if branches
+            else []
+        )
+        trajectory = [
+            {
+                "messages": [
+                    message.model_dump(mode="json", exclude_none=True)
+                    for message in branch.messages
+                ],
+                "reward": trace.reward,
+                "num_input_tokens": branch.prompt_len,
+                "num_output_tokens": branch.completion_len,
+            }
+            for branch in branches
+        ]
+        example_id = trace.task.idx
+        rollout_counts[example_id] = rollout_counts.get(example_id, 0) + 1
+        info = dict(trace.info)
+        info.update({key: value for key, value in sample.items() if key not in trace_fields})
+
+        converted.append(
+            {
+                "sample_id": trace.id,
+                "example_id": example_id,
+                "rollout_number": rollout_counts[example_id],
+                "task": task,
+                "prompt": [],
+                "completion": main_messages,
+                "answer": task.get("answer"),
+                "reward": trace.reward,
+                "timing": trace.timing.model_dump(mode="json", exclude_none=True),
+                "is_completed": trace.is_completed,
+                "is_truncated": trace.is_truncated,
+                "metrics": trace.metrics,
+                "error": (
+                    trace.error.model_dump(mode="json", exclude_none=True) if trace.error else None
+                ),
+                "stop_condition": trace.stop_condition,
+                "trajectory": trajectory,
+                "token_usage": (
+                    trace.usage.model_dump(mode="json", exclude_none=True) if trace.usage else None
+                ),
+                "num_steps": trace.num_turns,
+                "info": info or None,
+            }
+        )
+
+    return converted
+
+
 def push_eval_results_to_hub(
     env_name: str,
     model: str,
     job_id: str,
     env_path: Optional[Path] = None,
     upstream_slug: Optional[str] = None,
+    output_dir: Optional[Path] = None,
 ) -> None:
     """
     Push evaluation results to Prime Evals Hub after `prime eval run` completes.
@@ -78,23 +164,21 @@ def push_eval_results_to_hub(
     """
     # Step 1: Find the output directory
     module_name = env_name.replace("-", "_")
-    model_name = model.replace("/", "--")
-    env_model_str = f"{env_name}--{model_name}"
-
-    local_env_dir = Path("./environments") / module_name
-    if local_env_dir.exists():
-        base_evals_dir = local_env_dir / "outputs" / "evals" / env_model_str
-    else:
-        base_evals_dir = Path("./outputs") / "evals" / env_model_str
-
-    if not base_evals_dir.exists():
-        raise FileNotFoundError(f"Evaluation output directory not found: {base_evals_dir}")
-
-    subdirs = [d for d in base_evals_dir.iterdir() if d.is_dir()]
-    if not subdirs:
-        raise FileNotFoundError(f"No evaluation results found in {base_evals_dir}")
-
-    output_dir = max(subdirs, key=lambda d: d.stat().st_mtime)
+    if output_dir is None:
+        model_name = model.replace("/", "--")
+        env_model_str = f"{env_name}--{model_name}"
+        local_env_dir = Path("./environments") / module_name
+        base_evals_dir = (
+            local_env_dir / "outputs" / "evals" / env_model_str
+            if local_env_dir.exists()
+            else Path("./outputs") / "evals" / env_model_str
+        )
+        if not base_evals_dir.exists():
+            raise FileNotFoundError(f"Evaluation output directory not found: {base_evals_dir}")
+        subdirs = [d for d in base_evals_dir.iterdir() if d.is_dir()]
+        if not subdirs:
+            raise FileNotFoundError(f"No evaluation results found in {base_evals_dir}")
+        output_dir = max(subdirs, key=lambda d: d.stat().st_mtime)
 
     metadata_path = output_dir / "metadata.json"
     results_path = output_dir / "results.jsonl"
@@ -179,14 +263,7 @@ def push_eval_results_to_hub(
 
     eval_metadata = {"framework": "verifiers", "job_id": job_id, **metadata}
 
-    converted_results = [
-        {
-            "example_id": sample.get("id", 0),
-            "reward": sample.get("reward", 0.0),
-            **{k: v for k, v in sample.items() if k not in {"id", "reward"}},
-        }
-        for sample in results_samples
-    ]
+    converted_results = convert_eval_results(results_samples)
 
     eval_name = f"{env_name}--{model}--{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 

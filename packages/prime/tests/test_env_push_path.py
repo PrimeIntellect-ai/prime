@@ -123,7 +123,7 @@ def test_env_init_runs_lab_hygiene_preflight_inside_lab_workspace(tmp_path, monk
     )
 
     class DummyPlugin:
-        init_module = "verifiers.cli.commands.init"
+        init_module = "verifiers.v1.cli.init"
 
         def build_module_command(self, module, args):
             return ["verifiers-init", module, *args]

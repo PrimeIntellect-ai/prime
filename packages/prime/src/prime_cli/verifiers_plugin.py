@@ -16,6 +16,12 @@ from rich.console import Console
 from .utils.plain import get_console
 
 EXPECTED_PLUGIN_API_VERSION = 1
+V1_EVAL_MODULE = "verifiers.v1.cli.eval.main"
+V1_INIT_MODULE = "verifiers.v1.cli.init"
+V1_ENTRYPOINTS = {
+    V1_EVAL_MODULE: f"import sys; sys.argv[0] = 'eval'; from {V1_EVAL_MODULE} import main; main()",
+    V1_INIT_MODULE: f"import sys; sys.argv[0] = 'init'; from {V1_INIT_MODULE} import main; main()",
+}
 
 
 def _venv_python(venv_root: Path) -> Path:
@@ -47,7 +53,7 @@ def resolve_workspace_python(cwd: Path | None = None) -> str:
     """Prefer workspace Python only when it can run verifiers command modules."""
     workspace = (cwd or Path.cwd()).resolve()
     workspace_str = str(workspace)
-    module = "verifiers.cli.commands.eval"
+    module = V1_EVAL_MODULE
 
     def _usable(candidate: Path) -> bool:
         return candidate.exists() and _python_can_import_module(
@@ -80,10 +86,10 @@ class PrimeVerifiersPlugin:
     """Local fallback contract used when verifiers plugin loading fails."""
 
     api_version: int = EXPECTED_PLUGIN_API_VERSION
-    eval_module: str = "verifiers.cli.commands.eval"
+    eval_module: str = V1_EVAL_MODULE
     gepa_module: str = "verifiers.cli.commands.gepa"
     install_module: str = "verifiers.cli.commands.install"
-    init_module: str = "verifiers.cli.commands.init"
+    init_module: str = V1_INIT_MODULE
     setup_module: str = "verifiers.cli.commands.setup"
     build_module: str = "verifiers.cli.commands.build"
     tui_module: str = "verifiers.cli.tui"
@@ -91,7 +97,9 @@ class PrimeVerifiersPlugin:
     def build_module_command(
         self, module_name: str, args: Sequence[str] | None = None
     ) -> list[str]:
-        command = [resolve_workspace_python(), "-m", module_name]
+        python = resolve_workspace_python()
+        entrypoint = V1_ENTRYPOINTS.get(module_name)
+        command = [python, "-c", entrypoint] if entrypoint else [python, "-m", module_name]
         if args:
             command.extend(args)
         return command
@@ -136,10 +144,10 @@ def load_verifiers_prime_plugin(console: Console | None = None) -> PrimeVerifier
 
     return PrimeVerifiersPlugin(
         api_version=int(api_version or EXPECTED_PLUGIN_API_VERSION),
-        eval_module=getattr(plugin, "eval_module", "verifiers.cli.commands.eval"),
+        eval_module=V1_EVAL_MODULE,
         gepa_module=getattr(plugin, "gepa_module", "verifiers.cli.commands.gepa"),
         install_module=getattr(plugin, "install_module", "verifiers.cli.commands.install"),
-        init_module=getattr(plugin, "init_module", "verifiers.cli.commands.init"),
+        init_module=V1_INIT_MODULE,
         setup_module=getattr(plugin, "setup_module", "verifiers.cli.commands.setup"),
         build_module=getattr(plugin, "build_module", "verifiers.cli.commands.build"),
         tui_module=getattr(plugin, "tui_module", "verifiers.cli.tui"),

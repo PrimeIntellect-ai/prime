@@ -10,10 +10,68 @@ from prime_cli.commands.evals import (
     _validate_eval_path,
 )
 from prime_cli.main import app
+from prime_cli.utils.eval_push import convert_eval_results
 from typer.testing import CliRunner
 from typing_extensions import cast
 
 runner = CliRunner()
+
+
+def test_convert_eval_results_supports_v1_and_legacy_samples():
+    samples = [
+        {"id": 3, "reward": 0.5, "completion": "legacy"},
+        {
+            "id": "trace-1",
+            "task": {"idx": 7, "prompt": "What is 2 + 2?", "answer": "4"},
+            "nodes": [
+                {
+                    "message": {"role": "user", "content": "What is 2 + 2?"},
+                    "token_ids": [1, 2],
+                    "mask": [False, False],
+                },
+                {
+                    "parent": 0,
+                    "message": {"role": "assistant", "content": "4"},
+                    "sampled": True,
+                    "token_ids": [3, 4],
+                    "mask": [False, True],
+                    "logprobs": [-0.1],
+                },
+            ],
+            "rewards": {"correct": 1.0},
+            "metrics": {"exact_match": 1.0},
+            "info": {"source": "test"},
+            "is_completed": True,
+            "grader_note": "kept as metadata",
+        },
+    ]
+
+    legacy, v1 = convert_eval_results(samples)
+
+    assert legacy == {
+        "id": 3,
+        "example_id": 3,
+        "reward": 0.5,
+        "completion": "legacy",
+    }
+    assert v1["sample_id"] == "trace-1"
+    assert v1["example_id"] == 7
+    assert v1["rollout_number"] == 1
+    assert v1["answer"] == "4"
+    assert v1["reward"] == 1.0
+    assert v1["completion"][-1] == {"role": "assistant", "content": "4"}
+    assert v1["trajectory"] == [
+        {
+            "messages": [
+                {"role": "user", "content": "What is 2 + 2?"},
+                {"role": "assistant", "content": "4"},
+            ],
+            "reward": 1.0,
+            "num_input_tokens": 3,
+            "num_output_tokens": 1,
+        }
+    ]
+    assert v1["info"] == {"source": "test", "grader_note": "kept as metadata"}
 
 
 class TestHasEvalFiles:

@@ -1307,8 +1307,8 @@ def test_eval_run_local_toml_passthrough(monkeypatch, tmp_path):
         """
 model = "openai/gpt-4.1-mini"
 
-[[eval]]
-env_id = "gsm8k"
+[taskset]
+id = "gsm8k-v1"
 """.strip()
     )
 
@@ -1322,7 +1322,7 @@ env_id = "gsm8k"
 
     result = runner.invoke(
         app,
-        ["eval", "run", str(config_path), "--skip-upload"],
+        ["eval", "run", "@", str(config_path), "--skip-upload"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
@@ -1335,7 +1335,34 @@ env_id = "gsm8k"
     }
 
 
-def test_eval_run_local_sampling_args_passthrough(monkeypatch):
+def test_eval_run_resume_passthrough(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
+        captured["environment"] = environment
+        captured["passthrough_args"] = passthrough_args
+        captured["skip_upload"] = skip_upload
+        captured["env_path"] = env_path
+
+    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
+    output_dir = tmp_path / "previous-run"
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "--resume", str(output_dir), "--skip-upload"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "environment": str(output_dir),
+        "passthrough_args": ["--resume", str(output_dir)],
+        "skip_upload": True,
+        "env_path": None,
+    }
+
+
+def test_eval_run_local_v1_sampling_passthrough(monkeypatch):
     captured = {}
 
     def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
@@ -1348,16 +1375,49 @@ def test_eval_run_local_sampling_args_passthrough(monkeypatch):
 
     result = runner.invoke(
         app,
-        ["eval", "run", "gsm8k", "--sampling-args", '{"temperature":0.2}'],
+        ["eval", "run", "gsm8k-v1", "--sampling.temperature", "0.2"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
     assert result.exit_code == 0, result.output
     assert captured == {
-        "environment": "gsm8k",
-        "passthrough_args": ["--sampling-args", '{"temperature":0.2}'],
+        "environment": "gsm8k-v1",
+        "passthrough_args": ["--sampling.temperature", "0.2"],
         "skip_upload": False,
         "env_path": None,
+    }
+
+
+def test_eval_run_legacy_sampling_args_passthrough(monkeypatch):
+    captured = {}
+
+    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
+        captured["environment"] = environment
+        captured["passthrough_args"] = passthrough_args
+
+    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run",
+            "legacy-env",
+            "--save-results",
+            "--sampling-args",
+            '{"temperature":0.2}',
+        ],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "environment": "legacy-env",
+        "passthrough_args": [
+            "--save-results",
+            "--sampling-args",
+            '{"temperature":0.2}',
+        ],
     }
 
 

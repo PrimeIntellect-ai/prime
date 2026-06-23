@@ -120,20 +120,20 @@ jobs:
 
     - name: Install dependencies
       working-directory: packages/prime-sandboxes
-      run: uv sync --all-extras
+      run: uv pip install --system --no-config --exclude-newer "7 days" --editable ".[dev]"
 
     - name: Run tests
       working-directory: packages/prime-sandboxes
       env:
         PRIME_API_KEY: ${{ secrets.PRIME_API_KEY }}
         PRIME_TEAM_ID: ${{ secrets.PRIME_TEAM_ID }}
-      run: uv run pytest tests/ -v -n auto
+      run: python -m pytest tests/ -v -n auto
 
   test-prime:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
     - uses: actions/checkout@v4
 
@@ -149,14 +149,23 @@ jobs:
 
     - name: Install dependencies
       working-directory: packages/prime
-      run: uv sync --all-extras
+      run: |
+        uv sync --all-extras --frozen
+        uv pip install --no-config --no-sources \
+          --exclude-newer "7 days" \
+          --exclude-newer-package "verifiers=0 days" \
+          --exclude-newer-package "prime-pydantic-config=0 days" \
+          --exclude-newer-package "renderers=0 days" \
+          "verifiers==0.1.15.dev371" \
+          "prime-pydantic-config>=0.3.0.dev86" \
+          "renderers>=0.1.8.dev40"
 
     - name: Run tests with pytest
       working-directory: packages/prime
       env:
         PRIME_API_KEY: ${{ secrets.PRIME_API_KEY }}
         PRIME_TEAM_ID: ${{ secrets.PRIME_TEAM_ID }}
-      run: uv run pytest tests/ -v
+      run: uv run --no-sync pytest tests/ -v
 
   type-check:
     runs-on: ubuntu-latest
@@ -175,8 +184,17 @@ jobs:
 
     - name: Install dependencies
       working-directory: packages/prime
-      run: uv sync --all-extras
+      run: |
+        uv sync --all-extras --frozen
+        uv pip install --no-config --no-sources \
+          --exclude-newer "7 days" \
+          --exclude-newer-package "verifiers=0 days" \
+          --exclude-newer-package "prime-pydantic-config=0 days" \
+          --exclude-newer-package "renderers=0 days" \
+          "verifiers==0.1.15.dev371" \
+          "prime-pydantic-config>=0.3.0.dev86" \
+          "renderers>=0.1.8.dev40"
 
     - name: Run ty type checker
       working-directory: packages/prime
-      run: uv run ty check src/
+      run: uv run --no-sync ty check src/

@@ -1018,16 +1018,15 @@ def run_eval_passthrough(
         configured_base_url = (config.inference_url or "").strip().rstrip("/")
         config_client = config_data.get("client") if isinstance(config_data, dict) else None
         config_base_url = config_client.get("base_url") if isinstance(config_client, dict) else None
-        base_url = (
-            _parse_value_option(args, "--client.base-url", None)
-            or config_base_url
-            or configured_base_url
-        )
+        cli_base_url = _parse_value_option(args, "--client.base-url", None)
+        base_url = cli_base_url or config_base_url or configured_base_url
         if not base_url:
             console.print(
                 "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
             )
             raise typer.Exit(1)
+        if cli_base_url is None and not config_base_url:
+            args.extend(["--client.base-url", base_url])
         dry_run_arg = _parse_value_option(args, "--dry-run", None)
         dry_run = config_data.get("dry_run") is True
         if dry_run_arg is not None:

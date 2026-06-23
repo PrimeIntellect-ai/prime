@@ -643,7 +643,10 @@ def test_eval_writes_v1_metadata(monkeypatch, tmp_path, task_ids, expected_rollo
         ),
     )
 
+    captured = {}
+
     def fake_run(command, env=None):
+        captured["command"] = command
         output_dir = Path(command[command.index("--output-dir") + 1])
         output_dir.mkdir(parents=True)
         rewards = [1.0, 0.5, 0.75]
@@ -670,6 +673,8 @@ def test_eval_writes_v1_metadata(monkeypatch, tmp_path, task_ids, expected_rollo
 
     (metadata_path,) = tmp_path.glob("outputs/evals/*/*/metadata.json")
     metadata = json.loads(metadata_path.read_text())
+    base_url_index = captured["command"].index("--client.base-url")
+    assert captured["command"][base_url_index + 1] == DummyConfig.inference_url
     assert metadata["num_examples"] == 2
     assert metadata["avg_reward"] == 0.75
     if expected_rollouts is None:

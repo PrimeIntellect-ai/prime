@@ -1508,7 +1508,7 @@ def run_eval_cmd(
     local_passthrough_args = list(passthrough_args)
 
     if not hosted:
-        legacy_eval = "--save-results" in local_passthrough_args
+        legacy_eval = any(arg in ("--save-results", "-s") for arg in local_passthrough_args)
         if sampling_args is not None and legacy_eval:
             local_passthrough_args.extend(["--sampling-args", sampling_args])
         elif sampling_args is not None:

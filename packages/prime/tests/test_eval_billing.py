@@ -164,9 +164,10 @@ def test_eval_run_uses_v1_client_config(monkeypatch, tmp_path):
     monkeypatch.setattr("prime_cli.verifiers_bridge.InferenceClient", ExplodingInferenceClient)
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._prepare_single_environment",
-        lambda *_args, **_kwargs: ResolvedEnvironment(
-            original="goblin-questions",
-            env_name="goblin-questions",
+        lambda _plugin, env_name, env_dir: captured.update(prepared=(env_name, env_dir))
+        or ResolvedEnvironment(
+            original=env_name,
+            env_name=env_name,
             install_mode="local",
         ),
     )
@@ -184,6 +185,8 @@ def test_eval_run_uses_v1_client_config(monkeypatch, tmp_path):
             "https://api.openai.com/v1",
             "--client.headers",
             '{"X-Test": "yes"}',
+            "--env-dir-path",
+            str(tmp_path / "custom-envs"),
             "-n",
             "1",
         ],
@@ -196,15 +199,18 @@ def test_eval_run_uses_v1_client_config(monkeypatch, tmp_path):
     assert "gpt-4.1-mini" in command
     assert "--api-base-url" not in command
     assert "--api-key-var" not in command
+    assert "--env-dir-path" not in command
     assert command.count("--client.headers") == 1
     header_idx = len(command) - 1 - command[::-1].index("--client.headers")
     headers = json.loads(command[header_idx + 1])
     assert headers["X-Test"] == "yes"
     assert headers["X-PI-Job-Id"].startswith("goblin_questions_gpt_4.1_mini_")
+    assert captured["prepared"] == ("goblin-questions", str(tmp_path / "custom-envs"))
     assert captured["env"]["PRIME_API_KEY"] == "test-api-key"
 
 
-def test_eval_run_legacy_save_results_uses_v0_entrypoint(monkeypatch):
+@pytest.mark.parametrize("save_flag", ["--save-results", "-s"])
+def test_eval_run_legacy_save_results_uses_v0_entrypoint(monkeypatch, save_flag):
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
     )
@@ -228,7 +234,7 @@ def test_eval_run_legacy_save_results_uses_v0_entrypoint(monkeypatch):
     run_eval_passthrough(
         environment="legacy-env",
         passthrough_args=[
-            "--save-results",
+            save_flag,
             "--resume",
             "/tmp/legacy-results.jsonl",
             "--debug",
@@ -242,7 +248,7 @@ def test_eval_run_legacy_save_results_uses_v0_entrypoint(monkeypatch):
     )
 
     assert captured["command"][0] == "verifiers.cli.commands.eval"
-    assert "--save-results" in captured["command"]
+    assert save_flag in captured["command"]
     assert "--resume" in captured["command"]
     assert "--debug" in captured["command"]
     assert "--client.headers" not in captured["command"]

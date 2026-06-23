@@ -1403,7 +1403,7 @@ def test_eval_run_legacy_sampling_args_passthrough(monkeypatch):
             "eval",
             "run",
             "legacy-env",
-            "--save-results",
+            "-s",
             "--sampling-args",
             '{"temperature":0.2}',
         ],
@@ -1414,7 +1414,7 @@ def test_eval_run_legacy_sampling_args_passthrough(monkeypatch):
     assert captured == {
         "environment": "legacy-env",
         "passthrough_args": [
-            "--save-results",
+            "-s",
             "--sampling-args",
             '{"temperature":0.2}',
         ],

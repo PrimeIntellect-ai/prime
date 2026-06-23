@@ -940,7 +940,7 @@ def run_eval_passthrough(
         )
         raise typer.Exit(1)
 
-    legacy_eval = "--save-results" in passthrough_args
+    legacy_eval = _has_flag(passthrough_args, "--save-results", "-s")
     # Hosted-eval sandboxes still emit the v0 CLI surface; v1 always saves results.
     if legacy_eval:
         args, env, model, base_url = _add_default_inference_and_key_args(passthrough_args, config)
@@ -1036,7 +1036,17 @@ def run_eval_passthrough(
             _validate_model(model, base_url, configured_base_url)
             _preflight_inference_billing(model, base_url, configured_base_url)
 
-        env_dir_path = DEFAULT_ENV_DIR_PATH
+        env_dir_path = _env_dir_path_arg(args)
+        if _parse_value_option(args, "--env-dir-path", None) is not None:
+            env_dir_index = next(
+                idx
+                for idx, arg in enumerate(args)
+                if arg == "--env-dir-path" or arg.startswith("--env-dir-path=")
+            )
+            if args[env_dir_index] == "--env-dir-path":
+                del args[env_dir_index : env_dir_index + 2]
+            else:
+                del args[env_dir_index]
         run_target = target
         upstream_slug: Optional[str] = None
         env_name_for_upload: Optional[str] = None

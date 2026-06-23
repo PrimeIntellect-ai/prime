@@ -936,14 +936,15 @@ def _dispatch_full_finetune_run(
     # so the JSON output path doesn't accidentally launch an expensive
     # training job without an explicit ack — matches confirm_or_skip
     # in the LoRA path.
-    if not yes:
-        if not typer.confirm("Dispatch full_finetune run on auto-picked PrimeCluster?"):
-            raise typer.Exit(0)
+    if not confirm_or_skip("Launch this Hosted Training run?", yes, default=True):
+        console.print("\nRun cancelled")
+        raise typer.Exit(0)
 
     api_client = APIClient()
     client = HostedTrainingClient(api_client)
     try:
-        result = client.create_run(payload)
+        with console.status("[bold blue]Creating Hosted Training run...", spinner="dots"):
+            result = client.create_run(payload)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

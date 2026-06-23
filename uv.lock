@@ -13,11 +13,11 @@ exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
 verifiers = false
+prime-pydantic-config = false
 tasksets = false
-prime-pydantic-config = "2099-12-31T23:00:00Z"
 prime-tunnel = false
 prime-sandboxes = false
-renderers = "2099-12-31T23:00:00Z"
+renderers = false
 harnesses = false
 prime-evals = false
 prime = false

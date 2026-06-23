@@ -35,7 +35,9 @@ prime           = false
 prime-sandboxes = false
 prime-tunnel    = false
 prime-evals     = false
+prime-pydantic-config = false
 verifiers       = false
+renderers       = false
 tasksets        = false
 harnesses       = false
 

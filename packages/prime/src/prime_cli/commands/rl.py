@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -942,8 +943,17 @@ def _dispatch_full_finetune_run(
 
     api_client = APIClient()
     client = HostedTrainingClient(api_client)
+    # Skip the spinner for --output json: PrimeConsole.status() falls back
+    # to a plain print in --plain mode, which would emit "Creating Hosted
+    # Training run..." on stdout ahead of the JSON payload and break
+    # automation parsing of run_id.
+    status_ctx = (
+        console.status("[bold blue]Creating Hosted Training run...", spinner="dots")
+        if output != "json"
+        else nullcontext()
+    )
     try:
-        with console.status("[bold blue]Creating Hosted Training run...", spinner="dots"):
+        with status_ctx:
             result = client.create_run(payload)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

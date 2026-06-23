@@ -941,17 +941,6 @@ def run_eval_passthrough(
         raise typer.Exit(1)
 
     legacy_eval = "--save-results" in passthrough_args
-    if not legacy_eval and any(
-        arg == "--resume" or arg.startswith("--resume=") for arg in passthrough_args
-    ):
-        env = os.environ.copy()
-        env["PRIME_API_KEY"] = config.api_key
-        if config.team_id:
-            env["PRIME_TEAM_ID"] = config.team_id
-        command = plugin.build_module_command(plugin.eval_module, passthrough_args)
-        _run_command(command, env=env)
-        return
-
     # Hosted-eval sandboxes still emit the v0 CLI surface; v1 always saves results.
     if legacy_eval:
         args, env, model, base_url = _add_default_inference_and_key_args(passthrough_args, config)
@@ -990,110 +979,132 @@ def run_eval_passthrough(
         _print_environment_source_footer(resolved_env)
         return
 
-    target = environment.removeprefix("@")
-    is_config = _is_config_target(target)
-    args = list(passthrough_args)
-    env = os.environ.copy()
-    env["PRIME_API_KEY"] = config.api_key
-    if config.team_id:
-        env["PRIME_TEAM_ID"] = config.team_id
+    resume_dir = _parse_value_option(passthrough_args, "--resume", None)
+    if resume_dir is not None:
+        env = os.environ.copy()
+        env["PRIME_API_KEY"] = config.api_key
+        if config.team_id:
+            env["PRIME_TEAM_ID"] = config.team_id
+        command = plugin.build_module_command(plugin.eval_module, passthrough_args)
+        _run_command(command, env=env)
 
-    config_data = toml.load(target) if is_config else {}
-    config_model = config_data.get("model") if isinstance(config_data, dict) else None
-    model = _parse_value_option(args, "--model", "-m") or config_model or DEFAULT_MODEL
-    if _parse_value_option(args, "--model", "-m") is None and not config_model:
-        args.extend(["--model", model])
-
-    configured_base_url = (config.inference_url or "").strip().rstrip("/")
-    config_client = config_data.get("client") if isinstance(config_data, dict) else None
-    config_base_url = config_client.get("base_url") if isinstance(config_client, dict) else None
-    base_url = (
-        _parse_value_option(args, "--client.base-url", None)
-        or config_base_url
-        or configured_base_url
-    )
-    if not base_url:
-        console.print(
-            "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
-        )
-        raise typer.Exit(1)
-    dry_run_arg = _parse_value_option(args, "--dry-run", None)
-    dry_run = config_data.get("dry_run") is True
-    if dry_run_arg is not None:
-        dry_run = dry_run_arg.lower() == "true"
-    if not dry_run:
-        _validate_model(model, base_url, configured_base_url)
-        _preflight_inference_billing(model, base_url, configured_base_url)
-
-    env_dir_path = DEFAULT_ENV_DIR_PATH
-    run_target = target
-    upstream_slug: Optional[str] = None
-    env_name_for_upload: Optional[str] = None
-    resolved_env: Optional[ResolvedEnvironment] = None
-    config_envs: list[tuple[str, str]] = []
-
-    if is_config:
-        taskset = config_data.get("taskset", {})
-        if isinstance(taskset, dict) and isinstance(taskset.get("id"), str):
-            config_envs = [(taskset["id"], env_dir_path)]
-        for env_ref, ref_env_dir in config_envs:
-            _prepare_single_environment(plugin, env_ref, ref_env_dir)
-        run_target = f"@{target}"
+        output_dir = Path(resume_dir)
+        saved_config = toml.load(output_dir / "config.toml")
+        model = saved_config["model"]
+        taskset_id = saved_config["taskset"]["id"]
+        job_target = _env_name_from_reference(taskset_id)
+        saved_headers = saved_config.get("client", {}).get("headers", {})
+        job_id = saved_headers.get("X-PI-Job-Id") or _build_job_id(job_target, model)
+        display_id = saved_headers.get(INTERNAL_ENV_DISPLAY_HEADER)
+        upstream_slug = display_id if isinstance(display_id, str) and "/" in display_id else None
+        env_name_for_upload = job_target
+        resolved_env = None
+        is_config = False
     else:
-        resolved_env = _prepare_single_environment(plugin, target, env_dir_path)
-        run_target = resolved_env.env_name
-        upstream_slug = resolved_env.upstream_slug
-        env_name_for_upload = resolved_env.env_name
+        target = environment.removeprefix("@")
+        is_config = _is_config_target(target)
+        args = list(passthrough_args)
+        env = os.environ.copy()
+        env["PRIME_API_KEY"] = config.api_key
+        if config.team_id:
+            env["PRIME_TEAM_ID"] = config.team_id
 
-    job_target = env_name_for_upload
-    if job_target is None and config_envs:
-        job_target = _env_name_from_reference(config_envs[0][0])
-    if job_target is None:
-        job_target = Path(target).stem
-    job_id = _build_job_id(job_target, model)
-    output_dir_arg = _parse_value_option(args, "--output-dir", "-o")
-    config_output_dir = config_data.get("output_dir") if isinstance(config_data, dict) else None
-    configured_output_dir = output_dir_arg or config_output_dir
-    output_dir = (
-        Path(configured_output_dir)
-        if configured_output_dir
-        else Path("outputs", "evals", f"{job_target}--{model.replace('/', '--')}", job_id)
-    )
-    if configured_output_dir is None:
-        args.extend(["--output-dir", str(output_dir)])
+        config_data = toml.load(target) if is_config else {}
+        config_model = config_data.get("model") if isinstance(config_data, dict) else None
+        model = _parse_value_option(args, "--model", "-m") or config_model or DEFAULT_MODEL
+        if _parse_value_option(args, "--model", "-m") is None and not config_model:
+            args.extend(["--model", model])
 
-    headers = config_client.get("headers", {}) if isinstance(config_client, dict) else {}
-    if not isinstance(headers, dict):
-        console.print("[red]Error:[/red] client.headers must be a table")
-        raise typer.Exit(2)
-    cli_headers = _parse_value_option(args, "--client.headers", None)
-    if cli_headers:
-        try:
-            parsed_headers = json.loads(cli_headers)
-        except json.JSONDecodeError as exc:
-            console.print("[red]Error:[/red] --client.headers must be valid JSON")
-            raise typer.Exit(2) from exc
-        if not isinstance(parsed_headers, dict):
-            console.print("[red]Error:[/red] --client.headers must be a JSON object")
-            raise typer.Exit(2)
-        headers = {**headers, **parsed_headers}
-        header_index = next(
-            idx
-            for idx, arg in enumerate(args)
-            if arg == "--client.headers" or arg.startswith("--client.headers=")
+        configured_base_url = (config.inference_url or "").strip().rstrip("/")
+        config_client = config_data.get("client") if isinstance(config_data, dict) else None
+        config_base_url = config_client.get("base_url") if isinstance(config_client, dict) else None
+        base_url = (
+            _parse_value_option(args, "--client.base-url", None)
+            or config_base_url
+            or configured_base_url
         )
-        if args[header_index] == "--client.headers":
-            del args[header_index : header_index + 2]
-        else:
-            del args[header_index]
-    headers["X-PI-Job-Id"] = job_id
-    if resolved_env is not None and resolved_env.env_display_id:
-        headers[INTERNAL_ENV_DISPLAY_HEADER] = resolved_env.env_display_id
-    args.extend(["--client.headers", json.dumps(headers)])
+        if not base_url:
+            console.print(
+                "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
+            )
+            raise typer.Exit(1)
+        dry_run_arg = _parse_value_option(args, "--dry-run", None)
+        dry_run = config_data.get("dry_run") is True
+        if dry_run_arg is not None:
+            dry_run = dry_run_arg.lower() == "true"
+        if not dry_run:
+            _validate_model(model, base_url, configured_base_url)
+            _preflight_inference_billing(model, base_url, configured_base_url)
 
-    console.print(f"[dim]Eval job_id: {job_id}[/dim]")
-    command = plugin.build_module_command(plugin.eval_module, [run_target, *args])
-    _run_command(command, env=env)
+        env_dir_path = DEFAULT_ENV_DIR_PATH
+        run_target = target
+        upstream_slug: Optional[str] = None
+        env_name_for_upload: Optional[str] = None
+        resolved_env: Optional[ResolvedEnvironment] = None
+        config_envs: list[tuple[str, str]] = []
+
+        if is_config:
+            taskset = config_data.get("taskset", {})
+            if isinstance(taskset, dict) and isinstance(taskset.get("id"), str):
+                config_envs = [(taskset["id"], env_dir_path)]
+            for env_ref, ref_env_dir in config_envs:
+                _prepare_single_environment(plugin, env_ref, ref_env_dir)
+            run_target = f"@{target}"
+        else:
+            resolved_env = _prepare_single_environment(plugin, target, env_dir_path)
+            run_target = resolved_env.env_name
+            upstream_slug = resolved_env.upstream_slug
+            env_name_for_upload = resolved_env.env_name
+
+        job_target = env_name_for_upload
+        if job_target is None and config_envs:
+            job_target = _env_name_from_reference(config_envs[0][0])
+        if job_target is None:
+            job_target = Path(target).stem
+        job_id = _build_job_id(job_target, model)
+        output_dir_arg = _parse_value_option(args, "--output-dir", "-o")
+        config_output_dir = config_data.get("output_dir") if isinstance(config_data, dict) else None
+        configured_output_dir = output_dir_arg or config_output_dir
+        output_dir = (
+            Path(configured_output_dir)
+            if configured_output_dir
+            else Path("outputs", "evals", f"{job_target}--{model.replace('/', '--')}", job_id)
+        )
+        if configured_output_dir is None:
+            args.extend(["--output-dir", str(output_dir)])
+
+        headers = config_client.get("headers", {}) if isinstance(config_client, dict) else {}
+        if not isinstance(headers, dict):
+            console.print("[red]Error:[/red] client.headers must be a table")
+            raise typer.Exit(2)
+        cli_headers = _parse_value_option(args, "--client.headers", None)
+        if cli_headers:
+            try:
+                parsed_headers = json.loads(cli_headers)
+            except json.JSONDecodeError as exc:
+                console.print("[red]Error:[/red] --client.headers must be valid JSON")
+                raise typer.Exit(2) from exc
+            if not isinstance(parsed_headers, dict):
+                console.print("[red]Error:[/red] --client.headers must be a JSON object")
+                raise typer.Exit(2)
+            headers = {**headers, **parsed_headers}
+            header_index = next(
+                idx
+                for idx, arg in enumerate(args)
+                if arg == "--client.headers" or arg.startswith("--client.headers=")
+            )
+            if args[header_index] == "--client.headers":
+                del args[header_index : header_index + 2]
+            else:
+                del args[header_index]
+        headers["X-PI-Job-Id"] = job_id
+        if resolved_env is not None and resolved_env.env_display_id:
+            headers[INTERNAL_ENV_DISPLAY_HEADER] = resolved_env.env_display_id
+        args.extend(["--client.headers", json.dumps(headers)])
+
+        console.print(f"[dim]Eval job_id: {job_id}[/dim]")
+        command = plugin.build_module_command(plugin.eval_module, [run_target, *args])
+        _run_command(command, env=env)
 
     results_path = output_dir / "results.jsonl"
     if not results_path.exists():

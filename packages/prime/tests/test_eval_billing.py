@@ -266,12 +266,33 @@ def test_eval_resume_forwards_only_resume_arguments(monkeypatch, tmp_path):
         "prime_cli.verifiers_bridge._run_command",
         lambda command, env=None: captured.update(command=command, env=env),
     )
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.push_eval_results_to_hub",
+        lambda **kwargs: captured.update(upload=kwargs),
+    )
 
     output_dir = tmp_path / "previous-run"
+    output_dir.mkdir()
+    (output_dir / "config.toml").write_text(
+        """model = "openai/gpt-4.1-mini"
+
+[taskset]
+id = "wiki-search"
+
+[client.headers]
+X-PI-Job-Id = "existing-job-id"
+X-Prime-Eval-Env-Display = "primeintellect/wiki-search"
+""",
+        encoding="utf-8",
+    )
+    (output_dir / "results.jsonl").write_text(
+        json.dumps({"id": 0, "reward": 1.0}) + "\n",
+        encoding="utf-8",
+    )
     run_eval_passthrough(
         environment=str(output_dir),
         passthrough_args=["--resume", str(output_dir)],
-        skip_upload=True,
+        skip_upload=False,
         env_path=None,
     )
 
@@ -281,6 +302,17 @@ def test_eval_resume_forwards_only_resume_arguments(monkeypatch, tmp_path):
         str(output_dir),
     ]
     assert captured["env"]["PRIME_API_KEY"] == "test-api-key"
+    assert captured["upload"] == {
+        "env_name": "wiki-search",
+        "model": "openai/gpt-4.1-mini",
+        "job_id": "existing-job-id",
+        "env_path": None,
+        "upstream_slug": "primeintellect/wiki-search",
+        "output_dir": output_dir,
+    }
+    metadata = json.loads((output_dir / "metadata.json").read_text())
+    assert metadata["num_examples"] == 1
+    assert metadata["rollouts_per_example"] == 1
 
 
 def test_eval_run_missing_endpoint_registry_falls_back_to_configured_inference(

@@ -196,6 +196,7 @@ def test_eval_run_uses_v1_client_config(monkeypatch, tmp_path):
     assert "gpt-4.1-mini" in command
     assert "--api-base-url" not in command
     assert "--api-key-var" not in command
+    assert command.count("--client.headers") == 1
     header_idx = len(command) - 1 - command[::-1].index("--client.headers")
     headers = json.loads(command[header_idx + 1])
     assert headers["X-Test"] == "yes"
@@ -228,6 +229,8 @@ def test_eval_run_legacy_save_results_uses_v0_entrypoint(monkeypatch):
         environment="legacy-env",
         passthrough_args=[
             "--save-results",
+            "--resume",
+            "/tmp/legacy-results.jsonl",
             "--debug",
             "--num-examples",
             "1",
@@ -240,6 +243,7 @@ def test_eval_run_legacy_save_results_uses_v0_entrypoint(monkeypatch):
 
     assert captured["command"][0] == "verifiers.cli.commands.eval"
     assert "--save-results" in captured["command"]
+    assert "--resume" in captured["command"]
     assert "--debug" in captured["command"]
     assert "--client.headers" not in captured["command"]
 
@@ -575,7 +579,14 @@ def test_eval_config_preserves_output_dir(monkeypatch, tmp_path):
     assert (output_dir / "metadata.json").exists()
 
 
-def test_eval_writes_v1_metadata(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("task_ids", "expected_rollouts"),
+    [
+        ([0, 1], 1),
+        ([0, 0, 1], None),
+    ],
+)
+def test_eval_writes_v1_metadata(monkeypatch, tmp_path, task_ids, expected_rollouts):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
@@ -597,9 +608,14 @@ def test_eval_writes_v1_metadata(monkeypatch, tmp_path):
     def fake_run(command, env=None):
         output_dir = Path(command[command.index("--output-dir") + 1])
         output_dir.mkdir(parents=True)
+        rewards = [1.0, 0.5, 0.75]
         rows = [
-            {"task": {"idx": 0, "prompt": None}, "nodes": [], "rewards": {"correct": 1.0}},
-            {"task": {"idx": 1, "prompt": None}, "nodes": [], "rewards": {"correct": 0.5}},
+            {
+                "task": {"idx": task_id, "prompt": None},
+                "nodes": [],
+                "rewards": {"correct": rewards[index]},
+            }
+            for index, task_id in enumerate(task_ids)
         ]
         (output_dir / "results.jsonl").write_text(
             "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
@@ -617,8 +633,11 @@ def test_eval_writes_v1_metadata(monkeypatch, tmp_path):
     (metadata_path,) = tmp_path.glob("outputs/evals/*/*/metadata.json")
     metadata = json.loads(metadata_path.read_text())
     assert metadata["num_examples"] == 2
-    assert metadata["rollouts_per_example"] == 1
     assert metadata["avg_reward"] == 0.75
+    if expected_rollouts is None:
+        assert "rollouts_per_example" not in metadata
+    else:
+        assert metadata["rollouts_per_example"] == expected_rollouts
 
 
 def test_inference_client_uses_custom_timeout(monkeypatch):

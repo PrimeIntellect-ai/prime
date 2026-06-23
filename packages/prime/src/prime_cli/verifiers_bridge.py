@@ -940,7 +940,10 @@ def run_eval_passthrough(
         )
         raise typer.Exit(1)
 
-    if any(arg == "--resume" or arg.startswith("--resume=") for arg in passthrough_args):
+    legacy_eval = "--save-results" in passthrough_args
+    if not legacy_eval and any(
+        arg == "--resume" or arg.startswith("--resume=") for arg in passthrough_args
+    ):
         env = os.environ.copy()
         env["PRIME_API_KEY"] = config.api_key
         if config.team_id:
@@ -950,7 +953,7 @@ def run_eval_passthrough(
         return
 
     # Hosted-eval sandboxes still emit the v0 CLI surface; v1 always saves results.
-    if "--save-results" in passthrough_args:
+    if legacy_eval:
         args, env, model, base_url = _add_default_inference_and_key_args(passthrough_args, config)
         configured_base_url = (config.inference_url or "").strip().rstrip("/")
         _validate_model(model, base_url, configured_base_url)
@@ -1074,6 +1077,15 @@ def run_eval_passthrough(
             console.print("[red]Error:[/red] --client.headers must be a JSON object")
             raise typer.Exit(2)
         headers = {**headers, **parsed_headers}
+        header_index = next(
+            idx
+            for idx, arg in enumerate(args)
+            if arg == "--client.headers" or arg.startswith("--client.headers=")
+        )
+        if args[header_index] == "--client.headers":
+            del args[header_index : header_index + 2]
+        else:
+            del args[header_index]
     headers["X-PI-Job-Id"] = job_id
     if resolved_env is not None and resolved_env.env_display_id:
         headers[INTERNAL_ENV_DISPLAY_HEADER] = resolved_env.env_display_id
@@ -1088,15 +1100,21 @@ def run_eval_passthrough(
         console.print("[dim]No rollout results produced.[/dim]")
         return
     results = convert_eval_results(load_results_jsonl(results_path))
-    task_ids = {row["example_id"] for row in results if "example_id" in row}
+    rollout_counts: dict[object, int] = {}
+    for row in results:
+        if "example_id" in row:
+            example_id = row["example_id"]
+            rollout_counts[example_id] = rollout_counts.get(example_id, 0) + 1
     rewards = [row["reward"] for row in results if isinstance(row.get("reward"), (int, float))]
     metadata = {
         "env": job_target,
         "model": model,
-        "num_examples": len(task_ids),
-        "rollouts_per_example": len(results) // len(task_ids) if task_ids else 0,
+        "num_examples": len(rollout_counts),
         "avg_reward": sum(rewards) / len(rewards) if rewards else 0.0,
     }
+    rollout_totals = set(rollout_counts.values())
+    if len(rollout_totals) == 1:
+        metadata["rollouts_per_example"] = rollout_totals.pop()
     (output_dir / "metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
     )

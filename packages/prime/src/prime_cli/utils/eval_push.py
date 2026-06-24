@@ -71,10 +71,9 @@ def convert_eval_results(samples: list[dict]) -> list[dict]:
             continue
 
         if trace_type is None:
-            from verifiers.v1.task import WireTask
-            from verifiers.v1.trace import Trace
+            from verifiers.v1 import WireTrace
 
-            trace_type = Trace[WireTask]
+            trace_type = WireTrace
             trace_fields = trace_type.model_fields
         trace = trace_type.model_validate(
             {key: value for key, value in sample.items() if key in trace_fields}

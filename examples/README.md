@@ -4,34 +4,35 @@ This directory contains example scripts and demos for using the Prime CLI.
 
 ## Evals
 
-Push evaluation results to the Environments Hub. Expects the [verifiers](https://github.com/PrimeIntellect-ai/verifiers) output format, a directory containing `metadata.json` and `results.jsonl`.
+Push native [Verifiers](https://github.com/PrimeIntellect-ai/verifiers) run artifacts or legacy
+V0 directories containing `metadata.json` and `results.jsonl`.
 
 ### Pushing Evals
 
-1. **Push from current directory** (if it contains metadata.json and results.jsonl):
+1. **Push from a run directory**:
    ```bash
-   cd outputs/evals/gsm8k--gpt-4/abc123
+   cd outputs/gsm8k--gpt-4--default/abc123
    prime eval push
    ```
 
-2. **Auto-discover and push all** (from root with outputs/evals/):
+2. **Auto-discover and push all** (from a workspace with `outputs/`):
    ```bash
    prime eval push
    ```
 
-3. **Push specific directory**:
+3. **Push a specific directory**:
    ```bash
-   prime eval push outputs/evals/gsm8k--gpt-4/abc123
+   prime eval push outputs/gsm8k--gpt-4--default/abc123
    ```
 
-4. **Push with environment override**:
+4. **Push with an environment override**:
    ```bash
-   prime eval push outputs/evals/gsm8k--gpt-4/abc123 --env primeintellect/gsm8k
+   prime eval push outputs/gsm8k--gpt-4--default/abc123 --env primeintellect/gsm8k
    ```
 
-5. **Push to existing evaluation**:
+5. **Push to an existing evaluation**:
    ```bash
-   prime eval push outputs/evals/gsm8k--gpt-4/abc123 --eval <eval_id>
+   prime eval push outputs/gsm8k--gpt-4--default/abc123 --eval <eval_id>
    ```
 
 6. **List all evals**:
@@ -39,7 +40,7 @@ Push evaluation results to the Environments Hub. Expects the [verifiers](https:/
    prime eval list
    ```
 
-7. **Get specific eval**:
+7. **Get a specific eval**:
    ```bash
    prime eval get <eval_id>
    ```

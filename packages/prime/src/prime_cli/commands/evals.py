@@ -20,6 +20,7 @@ from ..utils import (
     DefaultCommandGroup,
     PlainTyper,
     get_console,
+    is_plain_mode,
     json_output_help,
     output_data_as_json,
 )
@@ -43,6 +44,7 @@ from ..verifiers_bridge import (
     run_eval_passthrough,
     run_eval_view,
 )
+from ..verifiers_process import ARTIFACTS, exec_eval_process, load_eval_artifact
 
 console = get_console()
 
@@ -890,6 +892,7 @@ def get_eval(
     eval_id: str = typer.Argument(..., help="The ID of the evaluation to retrieve"),
     output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
 ) -> None:
+    """Show evaluation details."""
     _validate_output_format(output, ["json", "pretty"])
 
     api_client = APIClient()
@@ -915,6 +918,33 @@ def get_samples(
 
 
 def _load_eval_directory(directory: Path) -> dict:
+    if (directory / "config.toml").is_file():
+        manifest, config = load_eval_artifact(directory)
+        artifacts = manifest["artifacts"] if manifest else ARTIFACTS
+        results_path = directory / artifacts["results"]
+        taskset = config.get("taskset")
+        env_field = (taskset.get("id") if isinstance(taskset, dict) else None) or config.get("id")
+        model = config.get("model")
+        if not isinstance(env_field, str) or not isinstance(model, str):
+            raise ValueError(f"Missing taskset.id/id or model in {artifacts['config']}")
+
+        results = convert_eval_results(load_results_jsonl(results_path))
+        rewards = [row["reward"] for row in results if isinstance(row.get("reward"), (int, float))]
+        return {
+            "eval_name": f"{env_field}-{model}",
+            "model_name": model,
+            "env": env_field,
+            "metrics": {"reward": sum(rewards) / len(rewards)} if rewards else {},
+            "metadata": {
+                "framework": "verifiers",
+                **(manifest or {"run_id": directory.name}),
+                "num_examples": config.get("num_tasks"),
+                "rollouts_per_example": config.get("num_rollouts"),
+                "resolved_config": config,
+            },
+            "results": results,
+        }
+
     with open(directory / "metadata.json") as f:
         metadata = json.load(f)
 
@@ -946,6 +976,14 @@ def _load_eval_directory(directory: Path) -> dict:
 
 
 def _has_eval_files(directory: Path) -> bool:
+    if (directory / "config.toml").is_file():
+        try:
+            manifest, _ = load_eval_artifact(directory)
+        except ValueError:
+            return False
+        artifacts = manifest["artifacts"] if manifest else ARTIFACTS
+        required = ("config", "results", "log") if manifest else ("config", "results")
+        return all((directory / artifacts[name]).is_file() for name in required)
     return (directory / "metadata.json").exists() and (directory / "results.jsonl").exists()
 
 
@@ -954,22 +992,33 @@ def _validate_eval_path(path_str: str) -> Path:
     path = Path(path_str)
 
     if path.is_file():
-        # Auto-correct: if user passed metadata.json or results.jsonl, use parent directory
-        if path.name in ("metadata.json", "results.jsonl"):
+        # Auto-correct known artifact files to their run directory.
+        if path.name in (
+            "manifest.json",
+            "config.toml",
+            "results.jsonl",
+            "eval.log",
+            "metadata.json",
+        ):
             parent = path.parent
             if _has_eval_files(parent):
                 return parent
+            if (parent / "manifest.json").exists() or (parent / "config.toml").exists():
+                raise ValueError(f"Directory '{parent}' is not a complete Verifiers run artifact")
             raise ValueError(
                 f"Directory '{parent}' must contain both metadata.json and results.jsonl"
             )
         raise ValueError(
             f"Expected a directory path, but got file: {path}\n"
-            f"Pass a directory containing metadata.json and results.jsonl"
+            "Pass a directory containing a native V1 run or metadata.json/results.jsonl"
         )
 
     if path.is_dir():
         if _has_eval_files(path):
             return path
+
+        if (path / "manifest.json").exists() or (path / "config.toml").exists():
+            raise ValueError(f"Directory '{path}' is not a complete Verifiers run artifact")
 
         has_metadata = (path / "metadata.json").exists()
         has_results = (path / "results.jsonl").exists()
@@ -984,19 +1033,16 @@ def _validate_eval_path(path_str: str) -> Path:
 
 
 def _discover_eval_outputs() -> list[Path]:
-    outputs_dir = Path("outputs/evals")
+    outputs_dir = Path("outputs")
     if not outputs_dir.exists():
         return []
 
-    eval_dirs = []
-    for env_dir in outputs_dir.iterdir():
-        if not env_dir.is_dir():
-            continue
-        for run_dir in env_dir.iterdir():
-            if run_dir.is_dir() and _has_eval_files(run_dir):
-                eval_dirs.append(run_dir)
-
-    return sorted(eval_dirs)
+    candidates = {
+        artifact.parent
+        for pattern in ("manifest.json", "config.toml", "metadata.json")
+        for artifact in outputs_dir.rglob(pattern)
+    }
+    return sorted(directory for directory in candidates if _has_eval_files(directory))
 
 
 def _resolve_eval_viewer_url(evaluation_id: str, response: Optional[dict[str, Any]] = None) -> str:
@@ -1181,8 +1227,8 @@ def push_eval(
     config_path: Optional[str] = typer.Argument(
         None,
         help=(
-            "Path to eval directory containing metadata.json and results.jsonl. "
-            "If not provided, auto-discovers from outputs/evals/"
+            "Path to a native V1 run or legacy metadata.json/results.jsonl directory. "
+            "If not provided, auto-discovers below outputs/."
         ),
     ),
     env_id: Optional[str] = typer.Option(
@@ -1219,9 +1265,9 @@ def push_eval(
         help="Make the pushed evaluation public. Evaluations are private by default.",
     ),
 ) -> None:
-    """Push evaluation data to Prime Evals.
+    """Push native or legacy evaluation data to Prime Evals.
 
-    The directory must contain metadata.json and results.jsonl files.
+    Both Verifiers V1 run artifacts and V0 metadata.json/results.jsonl outputs are accepted.
 
     \b
     Examples:
@@ -1340,7 +1386,7 @@ def push_eval(
 app = PlainTyper(
     cls=DefaultGroup,
     help=(
-        "Run evaluations or manage results (list, get, push, samples).\n\n"
+        "Run V1/V0 evaluations or manage results (list, get, push, samples).\n\n"
         "By default, 'prime eval <environment>' runs 'prime eval run <environment>'."
     ),
     no_args_is_help=True,
@@ -1387,7 +1433,7 @@ def stop_cmd(
 
 @app.command(
     "run",
-    help="Run an evaluation with API models (default provider = Prime Inference)",
+    help="Run V1 locally, V0 with --save-results, or submit with --hosted",
     no_args_is_help=True,
     context_settings={
         "allow_extra_args": True,
@@ -1470,6 +1516,7 @@ def run_eval_cmd(
 ) -> None:
     """Run an evaluation with local-first environment resolution."""
     passthrough_args = list(ctx.args)
+    verifiers_args = ([environment] if environment is not None else []) + passthrough_args
     if environment == "@":
         if not passthrough_args:
             console.print("[red]Error:[/red] @ must be followed by a config path.")
@@ -1487,11 +1534,22 @@ def run_eval_cmd(
         environment = resume_dir
         passthrough_args = [f"--resume={resume_dir}", *passthrough_args]
 
+    legacy_eval = any(arg in ("--save-results", "-s") for arg in passthrough_args) or any(
+        ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
+        for name in ("skip_upload", "env_path")
+    )
     if is_help_request(environment or "", passthrough_args):
-        print_eval_run_help()
-        raise typer.Exit(0)
+        if hosted or legacy_eval:
+            print_eval_run_help(compatibility=True)
+            raise typer.Exit(0)
+        if environment in ("-h", "--help") and not passthrough_args:
+            print_eval_run_help()
+            return
+        print_eval_run_help(verifiers_args)
 
     if environment is None:
+        if verifiers_args and not hosted:
+            print_eval_run_help(verifiers_args)
         console.print("[red]Error:[/red] Missing argument 'ENVIRONMENT'.")
         console.print(f"[dim]Example: {EVAL_RUN_EXAMPLE_COMMAND}[/dim]")
         raise typer.Exit(2)
@@ -1508,7 +1566,6 @@ def run_eval_cmd(
     local_passthrough_args = list(passthrough_args)
 
     if not hosted:
-        legacy_eval = any(arg in ("--save-results", "-s") for arg in local_passthrough_args)
         if sampling_args is not None and legacy_eval:
             local_passthrough_args.extend(["--sampling-args", sampling_args])
         elif sampling_args is not None:
@@ -1866,9 +1923,13 @@ def run_eval_cmd(
         console.print("[dim]View logs:[/dim] prime eval logs <evaluation-id> -f")
         return
 
-    run_eval_passthrough(
-        environment=environment,
-        passthrough_args=local_passthrough_args,
-        skip_upload=skip_upload,
-        env_path=env_path,
-    )
+    if legacy_eval:
+        run_eval_passthrough(
+            environment=environment,
+            passthrough_args=local_passthrough_args,
+            skip_upload=skip_upload,
+            env_path=env_path,
+        )
+        return
+
+    exec_eval_process(verifiers_args, plain=is_plain_mode())

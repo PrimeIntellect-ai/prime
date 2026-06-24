@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from prime_cli.utils.eval_push import convert_eval_results
+from prime_cli.verifiers_process import load_eval_artifact
+
 from .models import LabItem
 
 
@@ -34,12 +37,26 @@ class LocalEvalRun:
     def load_metadata(self) -> dict[str, Any]:
         if self.metadata is not None:
             return self.metadata
-        meta_path = self.path / "metadata.json"
+        metadata_path = self.path / "metadata.json"
+        if not (self.path / "config.toml").is_file() and metadata_path.is_file():
+            try:
+                loaded = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                loaded = {}
+            self.metadata = loaded if isinstance(loaded, dict) else {}
+            return self.metadata
         try:
-            loaded = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            manifest, config = load_eval_artifact(self.path)
+            loaded = {
+                **(manifest or {"run_id": self.path.name}),
+                "num_examples": config.get("num_tasks"),
+                "rollouts_per_example": config.get("num_rollouts"),
+                "sampling_args": config.get("sampling", {}),
+                "resolved_config": config,
+            }
+        except ValueError:
             loaded = {}
-        self.metadata = loaded if isinstance(loaded, dict) else {}
+        self.metadata = loaded
         return self.metadata
 
 
@@ -176,6 +193,8 @@ class LazyRunResults:
         finally:
             self._fh.seek(position)
         data = data if isinstance(data, dict) else {}
+        if data:
+            data = {**data, **convert_eval_results([data])[0]}
         self._cache[index] = data
         return data
 

@@ -16,6 +16,7 @@ from prime_cli.api.rl import RLClient
 from prime_cli.client import APIClient, APIError
 from prime_cli.core import Config
 from prime_cli.utils.time_utils import format_time_ago
+from prime_cli.verifiers_process import load_eval_artifact
 from prime_evals import EvalsClient
 
 from .cache import (
@@ -1002,46 +1003,79 @@ def discover_local_eval_runs(
     outputs_dir: str = "./outputs",
     limit: int = 30,
 ) -> list[dict[str, Any]]:
-    roots: list[Path] = []
+    roots = [(workspace / outputs_dir).resolve()]
     env_root = (workspace / env_dir).resolve()
     if _safe_is_dir(env_root):
-        for env_path in _safe_sorted_children(env_root):
-            candidate = env_path / "outputs" / "evals"
-            if _safe_is_dir(candidate):
-                roots.append(candidate)
-
-    global_root = (workspace / outputs_dir / "evals").resolve()
-    if _safe_is_dir(global_root):
-        roots.append(global_root)
+        roots.extend(
+            env_path / "outputs"
+            for env_path in _safe_sorted_children(env_root)
+            if _safe_is_dir(env_path / "outputs")
+        )
 
     runs: list[dict[str, Any]] = []
+    seen: set[Path] = set()
     for root in roots:
-        for env_model_dir in _safe_sorted_children(root):
-            if not _safe_is_dir(env_model_dir) or "--" not in env_model_dir.name:
+        if not _safe_is_dir(root):
+            continue
+        try:
+            artifacts = sorted(
+                [
+                    *root.rglob("manifest.json"),
+                    *root.rglob("config.toml"),
+                    *root.rglob("metadata.json"),
+                ],
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            continue
+        for artifact in artifacts:
+            run_dir = artifact.parent
+            if run_dir in seen or not _safe_is_file(run_dir / "results.jsonl"):
                 continue
-            env_id, model_part = env_model_dir.name.split("--", 1)
-            model = model_part.replace("--", "/")
-            for run_dir in _safe_sorted_children(env_model_dir, reverse=True):
-                metadata_path = run_dir / "metadata.json"
-                results_path = run_dir / "results.jsonl"
-                if (
-                    not _safe_is_dir(run_dir)
-                    or not _safe_is_file(metadata_path)
-                    or not _safe_is_file(results_path)
-                ):
+            if _safe_is_file(run_dir / "config.toml"):
+                try:
+                    manifest, config = load_eval_artifact(run_dir)
+                except ValueError:
                     continue
-                metadata = _read_json_file(metadata_path)
-                runs.append(
-                    {
-                        "env_id": env_id,
-                        "model": model,
-                        "run_id": run_dir.name,
-                        "path": str(run_dir),
-                        "metadata": metadata,
-                    }
+                taskset = config.get("taskset")
+                env_id = (taskset.get("id") if isinstance(taskset, dict) else None) or config.get(
+                    "id"
                 )
-                if len(runs) >= limit:
-                    return runs
+                model = config.get("model")
+                run_id = manifest.get("run_id") if manifest else run_dir.name
+                metadata = {
+                    **(manifest or {"run_id": run_id}),
+                    "num_examples": config.get("num_tasks"),
+                    "rollouts_per_example": config.get("num_rollouts"),
+                    "sampling_args": config.get("sampling", {}),
+                    "resolved_config": config,
+                }
+            else:
+                metadata = _read_json_file(artifact)
+                env_id = metadata.get("env_id") or metadata.get("env")
+                model = metadata.get("model")
+                run_id = run_dir.name
+                if not isinstance(env_id, str) or not isinstance(model, str):
+                    env_model = run_dir.parent.name
+                    if "--" not in env_model:
+                        continue
+                    env_id, model_part = env_model.split("--", 1)
+                    model = model_part.replace("--", "/")
+            if not isinstance(env_id, str) or not isinstance(model, str):
+                continue
+            seen.add(run_dir)
+            runs.append(
+                {
+                    "env_id": env_id,
+                    "model": model,
+                    "run_id": run_id,
+                    "path": str(run_dir),
+                    "metadata": metadata,
+                }
+            )
+            if len(runs) >= limit:
+                return runs
     return runs
 
 
@@ -1218,14 +1252,15 @@ def _local_eval_item(run: dict[str, Any], idx: int, *, section: str = "local-eva
     reward_text = f"{reward:.4g}" if reward_is_numeric else "-"
     run_id = str(run.get("run_id") or idx)
     row_date = _local_path_time_ago(run.get("path"))
+    status = str(metadata.get("status") or "completed").upper()
 
     return LabItem(
         key=f"local-eval:{run_id}:{idx}",
         section=section,
         title=run_id,
         subtitle=f"{run.get('env_id', '-')} · {run.get('model', '-')}",
-        status="COMPLETED",
-        status_style=STATUS_SUCCESS,
+        status=status,
+        status_style=_status_style(status),
         metadata=(
             ("Environment", str(run.get("env_id") or "-")),
             ("Model", str(run.get("model") or "-")),
@@ -1242,7 +1277,7 @@ def _local_eval_item(run: dict[str, Any], idx: int, *, section: str = "local-eva
             "row_date": row_date,
             "badges": [
                 {"label": "LOCAL", "style": STATUS_LOCAL},
-                {"label": "COMPLETED", "style": STATUS_SUCCESS},
+                {"label": status, "style": _status_style(status)},
             ],
         },
     )

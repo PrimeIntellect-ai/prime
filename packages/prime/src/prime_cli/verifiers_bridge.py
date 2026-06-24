@@ -23,8 +23,9 @@ from .api.inference import InferenceAPIError, InferenceClient, InferencePaymentR
 from .client import APIClient, APIError
 from .utils.env_metadata import find_environment_metadata, get_environment_metadata
 from .utils.eval_push import convert_eval_results, load_results_jsonl, push_eval_results_to_hub
-from .utils.plain import get_console
+from .utils.plain import get_console, is_plain_mode
 from .verifiers_plugin import PrimeVerifiersPlugin, load_verifiers_prime_plugin
+from .verifiers_process import exec_eval_process
 
 console = get_console()
 
@@ -171,7 +172,9 @@ def _append_eval_options(help_text: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def print_eval_run_help() -> None:
+def print_eval_run_help(args: Optional[list[str]] = None, *, compatibility: bool = False) -> None:
+    if not compatibility:
+        exec_eval_process(args or ["--help"], plain=is_plain_mode())
     try:
         help_text = _load_help_text(
             load_verifiers_prime_plugin(console=console).eval_module,

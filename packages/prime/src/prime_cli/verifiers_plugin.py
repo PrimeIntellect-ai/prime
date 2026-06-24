@@ -60,21 +60,15 @@ def resolve_workspace_python(cwd: Path | None = None) -> str:
             str(candidate), module, workspace_str
         )
 
-    uv_project_env = os.environ.get("UV_PROJECT_ENVIRONMENT")
-    if uv_project_env:
-        candidate = _venv_python(Path(uv_project_env))
-        if _usable(candidate):
-            return str(candidate)
-
-    virtual_env = os.environ.get("VIRTUAL_ENV")
-    if virtual_env:
-        candidate = _venv_python(Path(virtual_env))
-        if _usable(candidate):
-            return str(candidate)
-
     for directory in [workspace, *workspace.parents]:
         if (directory / "pyproject.toml").is_file():
             candidate = _venv_python(directory / ".venv")
+            if _usable(candidate):
+                return str(candidate)
+
+    for env_var in ("UV_PROJECT_ENVIRONMENT", "VIRTUAL_ENV"):
+        if env_root := os.environ.get(env_var):
+            candidate = _venv_python(Path(env_root))
             if _usable(candidate):
                 return str(candidate)
 

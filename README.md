@@ -203,17 +203,23 @@ prime pods ssh <pod-id>
 
 ### Evaluations
 
-Push and manage evaluation results to the Environments Hub.
+Run Verifiers evaluations and upload their native run artifacts.
 
 ```bash
-# Auto-discover and push evaluations from current directory
+# Run through the workspace's Verifiers process
+prime eval run <taskset-id>
+
+# Run a V0 environment and keep the legacy upload behavior
+prime eval run <environment> --save-results
+
+# Submit through the current hosted-evaluation API
+prime eval run <environment-or-v0-config> --hosted
+
+# Auto-discover and push completed artifacts below outputs/
 prime eval push
 
-# Push specific eval directory (verifiers format)
-prime eval push outputs/evals/gsm8k--gpt-4/abc123
-
-# Push a public evaluation (default is private)
-prime eval push --public
+# Push a specific native run artifact
+prime eval push outputs/gsm8k--gpt-4--default/abc123
 
 # List all evaluations
 prime eval list

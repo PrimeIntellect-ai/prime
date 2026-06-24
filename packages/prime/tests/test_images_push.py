@@ -118,6 +118,86 @@ def test_push_image_public_sends_visibility(tmp_path, monkeypatch):
     assert "Visibility:" in result.output
 
 
+def test_push_image_platform_image_sends_owner_scope(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    context_path = tmp_path / "context"
+    context_path.mkdir()
+    (context_path / "Dockerfile").write_text("FROM busybox\n")
+
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            if method == "POST" and path == "/images/build":
+                captured["build_payload"] = json
+                return {
+                    "build_id": "build-123",
+                    "upload_url": "https://example.test/upload",
+                    "fullImagePath": "ubuntu:22.04",
+                }
+
+            if method == "POST" and path == "/images/build/build-123/start":
+                return {}
+
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    class DummyUploadResponse:
+        def raise_for_status(self):
+            return None
+
+    def fake_put(url, content, headers, timeout):
+        return DummyUploadResponse()
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.commands.images.httpx.put", fake_put)
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "ubuntu:22.04", "--context", "context", "--platform-image"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["build_payload"]["owner_scope"] == "platform"
+    assert captured["build_payload"]["visibility"] == "PUBLIC"
+    assert "team_id" not in captured["build_payload"]
+    assert "PUBLIC (platform image)" in result.output
+
+
+def test_push_image_platform_image_rejects_private(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    context_path = tmp_path / "context"
+    context_path.mkdir()
+    (context_path / "Dockerfile").write_text("FROM busybox\n")
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        [
+            "images",
+            "push",
+            "ubuntu:22.04",
+            "--context",
+            "context",
+            "--platform-image",
+            "--private",
+        ],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "always public" in result.output
+
+
 def test_publish_image_calls_visibility_endpoint(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}

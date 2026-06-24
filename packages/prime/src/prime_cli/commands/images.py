@@ -390,6 +390,12 @@ def push_image(
         "--private",
         help="Make the image private when the build completes",
     ),
+    platform_image: bool = typer.Option(
+        False,
+        "--platform-image",
+        help="Build an org-less platform image usable as just 'name:tag' "
+        "(admins only; always public)",
+    ),
 ):
     """
     Build and push a Docker image to Prime Intellect registry.
@@ -397,16 +403,28 @@ def push_image(
     New image tags are private by default. Re-pushing an existing tag keeps
     its current visibility unless --public or --private is provided.
 
+    Platform images (--platform-image, admins only) are owned by the platform
+    rather than a user or team, are always public, and are referenced as just
+    'name:tag' (e.g. `prime sandbox create ubuntu:22.04 --vm`).
+
     \b
     Examples:
         prime images push myapp:v1.0.0
         prime images push myapp:latest --context ./app --dockerfile ../docker/Dockerfile.prod
         prime images push myapp:v1 --platform linux/arm64
         prime images push myapp:v1 --public
+        prime images push ubuntu:22.04 --platform-image
     """
     try:
         if public and private:
             console.print("[red]Error: --public and --private cannot be used together[/red]")
+            raise typer.Exit(1)
+
+        if platform_image and private:
+            console.print(
+                "[red]Error: platform images are always public; "
+                "--private cannot be used with --platform-image[/red]"
+            )
             raise typer.Exit(1)
 
         # Parse image reference
@@ -427,7 +445,9 @@ def push_image(
         console.print(
             f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
         )
-        if config.team_id:
+        if platform_image:
+            console.print("[dim]Platform image (org-less, public; admins only)[/dim]")
+        elif config.team_id:
             console.print(f"[dim]Team: {config.team_id}[/dim]")
         console.print()
 
@@ -506,12 +526,17 @@ def push_image(
                     "dockerfile_path": PACKAGED_DOCKERFILE_PATH,
                     "platform": platform,
                 }
-                if config.team_id:
-                    build_payload["team_id"] = config.team_id
-                if public:
+                if platform_image:
+                    # Platform images are org-less: no team context, always public.
+                    build_payload["owner_scope"] = "platform"
                     build_payload["visibility"] = ImageVisibility.PUBLIC.value
-                elif private:
-                    build_payload["visibility"] = ImageVisibility.PRIVATE.value
+                else:
+                    if config.team_id:
+                        build_payload["team_id"] = config.team_id
+                    if public:
+                        build_payload["visibility"] = ImageVisibility.PUBLIC.value
+                    elif private:
+                        build_payload["visibility"] = ImageVisibility.PRIVATE.value
 
                 build_response = client.request(
                     "POST",
@@ -577,7 +602,9 @@ def push_image(
             console.print()
             console.print(f"[bold]Build ID:[/bold] {build_id}")
             console.print(f"[bold]Image:[/bold] {full_image_path}")
-            if public or private:
+            if platform_image:
+                console.print("[bold]Visibility:[/bold] PUBLIC (platform image)")
+            elif public or private:
                 requested_visibility = ImageVisibility.PUBLIC if public else ImageVisibility.PRIVATE
                 console.print(f"[bold]Visibility:[/bold] {requested_visibility.value}")
             else:

@@ -74,14 +74,13 @@ def test_build_image_response_allows_multi_transfer_without_full_image_path():
             "build_id": "build-123",
             "buildIds": ["build-123", "build-456"],
             "upload_url": None,
-            "fullImagePath": "team-team1/ubuntu:22.04",
             "visibility": "PRIVATE",
         }
     )
 
     assert response.build_id == "build-123"
     assert response.build_ids == ["build-123", "build-456"]
-    assert response.full_image_path == "team-team1/ubuntu:22.04"
+    assert response.full_image_path is None
 
 
 def test_image_client_transfer_image_accepts_bulk_transfer_response():

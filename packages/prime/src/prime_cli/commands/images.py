@@ -916,9 +916,9 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
     """Parse refs accepted by mutating image commands.
 
     Returns ``(image_name, image_tag, team_id)``. Personal image refs may use
-    ``name:tag``, ``{yourUsername}/name:tag`` (your user slug), or
-    ``{currentUserId}/name:tag``. Team image refs may use ``{teamSlug}/name:tag``
-    (your active team's slug) or ``team-{teamId}/name:tag``.
+    ``name:tag`` for the current context, ``{userSlug}/name:tag`` or
+    ``{userId}/name:tag`` for personal images, and ``{teamSlug}/name:tag``
+    (active team only) or ``team-{teamId}/name:tag`` for team images.
     """
     team_id: Optional[str] = config.team_id
     if "/" in image_reference:
@@ -943,9 +943,9 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
             console.print(
                 f"[red]Error: Unrecognized image namespace '{namespace}'. "
                 "Use 'imagename:tag' for the current context, "
-                "'<your-username>/imagename:tag' or '{userId}/imagename:tag' for "
-                "personal images, or '<team-slug>/imagename:tag' (your active team) "
-                "or 'team-{teamId}/imagename:tag' for team images.[/red]"
+                "'<user-slug>/imagename:tag' or '<user-id>/imagename:tag' for "
+                "personal images, and '<team-slug>/imagename:tag' (your active team) "
+                "or 'team-<team-id>/imagename:tag' for team images.[/red]"
             )
             raise typer.Exit(1)
 
@@ -981,20 +981,25 @@ def publish_image(
         ...,
         help=(
             "Image reference to make public "
-            "(e.g., 'myapp:v1.0.0', '<your-username>/myapp:v1.0.0', "
-            "'<team-slug>/myapp:v1.0.0', or 'team-{teamId}/myapp:v1.0.0')"
+            "(e.g., 'myapp:v1.0.0', '<user-slug>/myapp:v1.0.0', "
+            "'<user-id>/myapp:v1.0.0', '<team-slug>/myapp:v1.0.0', "
+            "or 'team-<team-id>/myapp:v1.0.0')"
         ),
     ),
 ):
     """
     Make an image public so other Prime users can run it.
 
+    Personal images can be referenced with your user slug or user ID. Team
+    images can be referenced with your active team slug or ``team-<team-id>``.
+
     \b
     Examples:
         prime images publish myapp:v1.0.0
         prime images publish alice/myapp:v1.0.0
+        prime images publish cmkrcib4x00004kjyxq48nltd/myapp:v1.0.0
         prime images publish acme/myapp:v1.0.0
-        prime images publish team-abc123/myapp:v1.0.0
+        prime images publish team-cmf0ohr9s0026ilerf3w68s6z/myapp:v1.0.0
     """
     try:
         _set_image_visibility(image_reference, ImageVisibility.PUBLIC)
@@ -1012,20 +1017,25 @@ def unpublish_image(
         ...,
         help=(
             "Image reference to make private "
-            "(e.g., 'myapp:v1.0.0', '<your-username>/myapp:v1.0.0', "
-            "'<team-slug>/myapp:v1.0.0', or 'team-{teamId}/myapp:v1.0.0')"
+            "(e.g., 'myapp:v1.0.0', '<user-slug>/myapp:v1.0.0', "
+            "'<user-id>/myapp:v1.0.0', '<team-slug>/myapp:v1.0.0', "
+            "or 'team-<team-id>/myapp:v1.0.0')"
         ),
     ),
 ):
     """
     Make a public image private again.
 
+    Personal images can be referenced with your user slug or user ID. Team
+    images can be referenced with your active team slug or ``team-<team-id>``.
+
     \b
     Examples:
         prime images unpublish myapp:v1.0.0
         prime images unpublish alice/myapp:v1.0.0
+        prime images unpublish cmkrcib4x00004kjyxq48nltd/myapp:v1.0.0
         prime images unpublish acme/myapp:v1.0.0
-        prime images unpublish team-abc123/myapp:v1.0.0
+        prime images unpublish team-cmf0ohr9s0026ilerf3w68s6z/myapp:v1.0.0
     """
     try:
         _set_image_visibility(image_reference, ImageVisibility.PRIVATE)
@@ -1043,8 +1053,9 @@ def delete_image(
         ...,
         help=(
             "Image reference to delete "
-            "(e.g., 'myapp:v1.0.0', '<your-username>/myapp:v1.0.0', "
-            "'<team-slug>/myapp:v1.0.0', or 'team-{teamId}/myapp:v1.0.0')"
+            "(e.g., 'myapp:v1.0.0', '<user-slug>/myapp:v1.0.0', "
+            "'<user-id>/myapp:v1.0.0', '<team-slug>/myapp:v1.0.0', "
+            "or 'team-<team-id>/myapp:v1.0.0')"
         ),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
@@ -1052,17 +1063,18 @@ def delete_image(
     """
     Delete an image from your registry.
 
-    For team images, you can use the team slug (your active team) or the
-    team-prefixed id format directly. Only the image creator or team admins can
-    delete team images.
+    Personal images can be referenced with your user slug or user ID. Team
+    images can be referenced with your active team slug or ``team-<team-id>``.
+    Only the image creator or team admins can delete team images.
 
     \b
     Examples:
         prime images delete myapp:v1.0.0
         prime images delete myapp:latest --yes
         prime images delete alice/myapp:v1.0.0
+        prime images delete cmkrcib4x00004kjyxq48nltd/myapp:v1.0.0
         prime images delete acme/myapp:v1.0.0
-        prime images delete team-abc123/myapp:v1.0.0
+        prime images delete team-cmf0ohr9s0026ilerf3w68s6z/myapp:v1.0.0
     """
     # Store original input for error messages
     original_reference = image_reference

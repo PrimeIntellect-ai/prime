@@ -14,6 +14,7 @@ from gitignore_parser import parse_gitignore
 from prime_sandboxes import (
     APIClient,
     APIError,
+    BulkImageTransferResponse,
     Config,
     ImageClient,
     ImageVisibility,
@@ -494,19 +495,43 @@ def push_image(
                 console.print(f"[red]Error: Failed to initiate transfer: {e}[/red]")
                 raise typer.Exit(1)
 
-            build_ids = response.build_ids or [response.build_id]
+            if isinstance(response, BulkImageTransferResponse):
+                successful_results = [result for result in response.results if result.build_id]
+                build_ids = [result.build_id for result in successful_results if result.build_id]
+                failed_results = response.failed
+                image_path = (
+                    successful_results[0].full_image_path if len(successful_results) == 1 else None
+                )
+            else:
+                build_ids = response.build_ids or [response.build_id]
+                failed_results = []
+                image_path = response.full_image_path
+
+            if not build_ids:
+                console.print("[red]Error: Failed to initiate image transfer[/red]")
+                for result in failed_results:
+                    console.print(f"[red]- {result.source_image}: {result.error}[/red]")
+                raise typer.Exit(1)
+
             console.print("[green]✓[/green] Transfer queued")
             console.print()
             if len(build_ids) == 1:
                 console.print("[bold green]Image transfer queued successfully![/bold green]")
                 console.print()
                 console.print(f"[bold]Build ID:[/bold] {build_ids[0]}")
-                console.print(f"[bold]Image:[/bold] {response.full_image_path}")
+                console.print(f"[bold]Image:[/bold] {image_path}")
             else:
                 console.print("[bold green]Image transfers queued successfully![/bold green]")
                 console.print()
                 console.print(f"[bold]Builds:[/bold] {len(build_ids)}")
                 console.print(f"[bold]Build IDs:[/bold] {', '.join(build_ids)}")
+            if failed_results:
+                console.print()
+                console.print(
+                    f"[yellow]Warning: {len(failed_results)} image transfer(s) failed:[/yellow]"
+                )
+                for result in failed_results:
+                    console.print(f"[yellow]- {result.source_image}: {result.error}[/yellow]")
             if public or private:
                 requested_visibility = ImageVisibility.PUBLIC if public else ImageVisibility.PRIVATE
                 console.print(f"[bold]Visibility:[/bold] {requested_visibility.value}")
@@ -521,6 +546,8 @@ def push_image(
             console.print("[bold]Check transfer status:[/bold]")
             console.print("  prime images list")
             console.print()
+            if failed_results:
+                raise typer.Exit(1)
             return
 
         console.print(

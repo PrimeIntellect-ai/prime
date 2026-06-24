@@ -32,6 +32,7 @@ from .models import (
     BuildImageResponse,
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
+    BulkImageTransferResponse,
     CommandRequest,
     CommandResponse,
     CreateSandboxRequest,
@@ -47,6 +48,7 @@ from .models import (
     SandboxListResponse,
     SandboxStatus,
     SSHSession,
+    TransferImageResult,
     UpdateSandboxRequest,
 )
 from .sandbox import AsyncSandboxClient, AsyncTemplateClient, SandboxClient, TemplateClient
@@ -87,6 +89,8 @@ __all__ = [
     "BackgroundJobStatus",
     "BuildImageRequest",
     "BuildImageResponse",
+    "BulkImageTransferResponse",
+    "TransferImageResult",
     "ImageVisibility",
     # Port Forwarding
     "ExposePortRequest",

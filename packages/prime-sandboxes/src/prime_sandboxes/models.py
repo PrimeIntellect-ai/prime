@@ -271,8 +271,31 @@ class BuildImageResponse(BaseModel):
     build_ids: List[str] = Field(default_factory=list, alias="buildIds")
     upload_url: Optional[str] = None
     expires_in: Optional[int] = None
+    full_image_path: str = Field(..., alias="fullImagePath")
+    visibility: Optional[ImageVisibility] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class TransferImageResult(BaseModel):
+    """Per-source result returned by bulk image transfer requests."""
+
+    source_image: str = Field(..., alias="sourceImage")
+    success: bool
+    build_id: Optional[str] = Field(default=None, alias="buildId")
     full_image_path: Optional[str] = Field(default=None, alias="fullImagePath")
     visibility: Optional[ImageVisibility] = None
+    error: Optional[str] = None
+    retryable: bool = False
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class BulkImageTransferResponse(BaseModel):
+    """Response returned for comma-separated image transfer requests."""
+
+    results: List[TransferImageResult] = Field(default_factory=list)
+    failed: List[TransferImageResult] = Field(default_factory=list)
 
     model_config = ConfigDict(populate_by_name=True)
 

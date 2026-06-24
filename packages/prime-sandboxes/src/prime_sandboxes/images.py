@@ -3,7 +3,12 @@
 from typing import Optional
 
 from .core import APIClient, AsyncAPIClient
-from .models import BuildImageRequest, BuildImageResponse, ImageVisibility
+from .models import (
+    BuildImageRequest,
+    BuildImageResponse,
+    BulkImageTransferResponse,
+    ImageVisibility,
+)
 
 
 class ImageClient:
@@ -12,9 +17,13 @@ class ImageClient:
     def __init__(self, api_client: Optional[APIClient] = None):
         self.client = api_client or APIClient()
 
-    def initiate_build(self, request: BuildImageRequest) -> BuildImageResponse:
+    def initiate_build(
+        self, request: BuildImageRequest
+    ) -> BuildImageResponse | BulkImageTransferResponse:
         payload = request.model_dump(by_alias=False, exclude_none=True)
         response = self.client.request("POST", "/images/build", json=payload)
+        if "results" in response:
+            return BulkImageTransferResponse.model_validate(response)
         return BuildImageResponse.model_validate(response)
 
     def transfer_image(
@@ -26,7 +35,7 @@ class ImageClient:
         platform: str = "linux/amd64",
         team_id: Optional[str] = None,
         visibility: Optional[ImageVisibility] = None,
-    ) -> BuildImageResponse:
+    ) -> BuildImageResponse | BulkImageTransferResponse:
         request = BuildImageRequest(
             image_name=image_name,
             image_tag=image_tag,
@@ -51,9 +60,13 @@ class AsyncImageClient:
     def __init__(self, api_client: Optional[AsyncAPIClient] = None):
         self.client = api_client or AsyncAPIClient()
 
-    async def initiate_build(self, request: BuildImageRequest) -> BuildImageResponse:
+    async def initiate_build(
+        self, request: BuildImageRequest
+    ) -> BuildImageResponse | BulkImageTransferResponse:
         payload = request.model_dump(by_alias=False, exclude_none=True)
         response = await self.client.request("POST", "/images/build", json=payload)
+        if "results" in response:
+            return BulkImageTransferResponse.model_validate(response)
         return BuildImageResponse.model_validate(response)
 
     async def transfer_image(
@@ -65,7 +78,7 @@ class AsyncImageClient:
         platform: str = "linux/amd64",
         team_id: Optional[str] = None,
         visibility: Optional[ImageVisibility] = None,
-    ) -> BuildImageResponse:
+    ) -> BuildImageResponse | BulkImageTransferResponse:
         request = BuildImageRequest(
             image_name=image_name,
             image_tag=image_tag,

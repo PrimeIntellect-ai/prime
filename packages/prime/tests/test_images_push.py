@@ -118,6 +118,105 @@ def test_push_image_public_sends_visibility(tmp_path, monkeypatch):
     assert "Visibility:" in result.output
 
 
+def test_push_image_source_image_queues_transfer_without_upload(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = json
+            return {
+                "build_id": "build-123",
+                "buildIds": ["build-123"],
+                "upload_url": None,
+                "fullImagePath": "cmk123/ubuntu:22.04",
+                "visibility": "PRIVATE",
+            }
+
+    def fake_put(*args, **kwargs):
+        raise AssertionError("transfer should not upload a build context")
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.commands.images.httpx.put", fake_put)
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "--source-image", "ubuntu:22.04"],
+        env={**TEST_ENV, "PRIME_USER_ID": "cmk123"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/images/build"
+    assert captured["json"] == {
+        "dockerfile_path": "Dockerfile",
+        "source_image": "ubuntu:22.04",
+        "platform": "linux/amd64",
+    }
+    assert "Transfer queued" in result.output
+    assert "build-123" in result.output
+
+
+def test_push_image_source_image_with_destination_override(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["json"] = json
+            return {
+                "build_id": "build-123",
+                "buildIds": ["build-123"],
+                "fullImagePath": "cmk123/myubuntu:22.04",
+                "visibility": "PUBLIC",
+            }
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "myubuntu:22.04", "--source-image", "ubuntu:22.04", "--public"],
+        env={**TEST_ENV, "PRIME_USER_ID": "cmk123"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["json"] == {
+        "image_name": "myubuntu",
+        "image_tag": "22.04",
+        "dockerfile_path": "Dockerfile",
+        "source_image": "ubuntu:22.04",
+        "platform": "linux/amd64",
+        "visibility": "PUBLIC",
+    }
+
+
+def test_push_image_source_image_multi_rejects_destination(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        [
+            "images",
+            "push",
+            "myubuntu:22.04",
+            "--source-image",
+            "ubuntu:22.04,ghcr.io/org/app:v1",
+        ],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "single-image transfers" in result.output
+
+
 def test_publish_image_calls_visibility_endpoint(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}

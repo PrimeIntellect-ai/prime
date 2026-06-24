@@ -23,10 +23,13 @@ from .exceptions import (
     SandboxTimeoutError,
     UploadTimeoutError,
 )
+from .images import AsyncImageClient, ImageClient
 from .models import (
     AdvancedConfigs,
     BackgroundJob,
     BackgroundJobStatus,
+    BuildImageRequest,
+    BuildImageResponse,
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
     CommandRequest,
@@ -36,6 +39,7 @@ from .models import (
     ExposedPort,
     ExposePortRequest,
     FileUploadResponse,
+    ImageVisibility,
     ListExposedPortsResponse,
     ReadFileResponse,
     RegistryCredentialSummary,
@@ -62,6 +66,8 @@ __all__ = [
     "AsyncSandboxClient",
     "TemplateClient",
     "AsyncTemplateClient",
+    "ImageClient",
+    "AsyncImageClient",
     # Models
     "Sandbox",
     "SandboxStatus",
@@ -79,6 +85,9 @@ __all__ = [
     "AdvancedConfigs",
     "BackgroundJob",
     "BackgroundJobStatus",
+    "BuildImageRequest",
+    "BuildImageResponse",
+    "ImageVisibility",
     # Port Forwarding
     "ExposePortRequest",
     "ExposedPort",

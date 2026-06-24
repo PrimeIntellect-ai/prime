@@ -25,6 +25,16 @@ from ..utils import (
 )
 from ..utils.display import get_eval_viewer_url
 from ..utils.env_metadata import find_environment_metadata
+from ..utils.eval_export import (
+    build_inspect_log,
+    build_verifiers_rows,
+    default_export_path,
+    filter_export_samples,
+    is_active_evaluation,
+    normalize_export_format,
+    write_inspect_eval,
+    write_verifiers_jsonl,
+)
 from ..utils.eval_push import load_results_jsonl
 from ..utils.hosted_eval import (
     EvalStatus,
@@ -79,6 +89,7 @@ HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 HOSTED_RUN_DEFAULT_POLL_INTERVAL_SECONDS = 10.0
 HOSTED_RUN_DEFAULT_NUM_EXAMPLES = 5
 HOSTED_RUN_DEFAULT_ROLLOUTS_PER_EXAMPLE = 3
+EVAL_EXPORT_PAGE_SIZE = 1000
 HOSTED_LOGS_RATE_LIMIT_THRESHOLD = 3
 HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS = 30
 HOSTED_LOGS_RETRY_WAIT_SECONDS = 10
@@ -912,6 +923,151 @@ def get_samples(
     client = EvalsClient(api_client)
     data = client.get_samples(eval_id, page=page, limit=num)
     format_output(data, output)
+
+
+def _resolve_eval_for_export(client: EvalsClient, config: Config, run_id: str) -> dict[str, Any]:
+    try:
+        return client.get_evaluation(run_id)
+    except APIError as exc:
+        if "HTTP 404" not in str(exc):
+            raise
+
+    skip = 0
+    while True:
+        data = client.list_evaluations(team_id=config.team_id, skip=skip, limit=100)
+        evaluations = data.get("evaluations", [])
+        if not isinstance(evaluations, list):
+            break
+
+        for evaluation in evaluations:
+            if not isinstance(evaluation, dict):
+                continue
+            if evaluation.get("run_id") == run_id or evaluation.get("runId") == run_id:
+                evaluation_id = evaluation.get("evaluation_id") or evaluation.get("id")
+                if evaluation_id:
+                    return client.get_evaluation(str(evaluation_id))
+
+        total = data.get("total")
+        if len(evaluations) < 100 or (isinstance(total, int) and skip + 100 >= total):
+            break
+        skip += 100
+
+    console.print(f"[red]Error:[/red] evaluation run '{run_id}' was not found")
+    raise typer.Exit(1)
+
+
+def _fetch_all_eval_samples(client: EvalsClient, evaluation_id: str) -> list[dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    page = 1
+    total: int | None = None
+
+    while True:
+        data = client.get_samples(evaluation_id, page=page, limit=EVAL_EXPORT_PAGE_SIZE)
+        page_samples = data.get("samples", [])
+        if not isinstance(page_samples, list):
+            console.print("[red]Error:[/red] evaluation samples response was invalid")
+            raise typer.Exit(1)
+
+        samples.extend(page_samples)
+        if total is None:
+            raw_total = data.get("total")
+            total = raw_total if isinstance(raw_total, int) else None
+
+        if total and total > 500:
+            console.print(f"[dim]Fetched {min(len(samples), total)}/{total} samples...[/dim]")
+
+        total_pages = data.get("total_pages")
+        if isinstance(total_pages, int) and page >= total_pages:
+            break
+        if not page_samples or (total is not None and len(samples) >= total):
+            break
+        page += 1
+
+    return samples
+
+
+@subcommands_app.command("export")
+@handle_errors
+def export_eval(
+    run_id: str = typer.Argument(..., help="The hosted eval run ID to export"),
+    export_format: str = typer.Option(
+        "verifiers",
+        "--format",
+        "-f",
+        help="Output format: verifiers|inspect",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file path",
+    ),
+    include_failed: bool = typer.Option(
+        False,
+        "--include-failed",
+        help="Include rollouts that errored or timed out",
+    ),
+    min_reward: Optional[float] = typer.Option(
+        None,
+        "--min-reward",
+        help="Filter to rollouts with reward >= threshold",
+    ),
+    max_reward: Optional[float] = typer.Option(
+        None,
+        "--max-reward",
+        help="Filter to rollouts with reward <= threshold",
+    ),
+    split: Optional[int] = typer.Option(
+        None,
+        "--split",
+        min=1,
+        help="Export only env config set N (1-indexed)",
+    ),
+) -> None:
+    """Export hosted evaluation rollouts."""
+    try:
+        normalized_format = normalize_export_format(export_format)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    if min_reward is not None and max_reward is not None and min_reward > max_reward:
+        console.print("[red]Error:[/red] --min-reward cannot be greater than --max-reward")
+        raise typer.Exit(1)
+    if split is not None and split != 1:
+        console.print("[red]Error:[/red] split exports are not available for this run")
+        raise typer.Exit(1)
+
+    config = Config()
+    client = EvalsClient(APIClient())
+    evaluation = _resolve_eval_for_export(client, config, run_id)
+    if is_active_evaluation(evaluation):
+        console.print(
+            "[red]Error:[/red] evaluation is still in progress; export after it completes"
+        )
+        raise typer.Exit(1)
+
+    evaluation_id = evaluation.get("evaluation_id") or evaluation.get("id") or run_id
+    samples = _fetch_all_eval_samples(client, str(evaluation_id))
+    filtered_samples = filter_export_samples(
+        samples,
+        include_failed=include_failed,
+        min_reward=min_reward,
+        max_reward=max_reward,
+    )
+    output_path = output or default_export_path(run_id, normalized_format)
+
+    if normalized_format == "verifiers":
+        rows = build_verifiers_rows(evaluation, filtered_samples, run_id)
+        write_verifiers_jsonl(output_path, rows)
+    else:
+        log = build_inspect_log(evaluation, filtered_samples, run_id)
+        write_inspect_eval(output_path, log)
+
+    console.print(
+        f"[green]Exported {len(filtered_samples)} rollout(s) to {output_path} "
+        f"({normalized_format})[/green]"
+    )
 
 
 def _load_eval_directory(directory: Path) -> dict:

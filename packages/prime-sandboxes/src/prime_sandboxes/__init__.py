@@ -30,6 +30,7 @@ from .models import (
     BackgroundJobStatus,
     BuildImageRequest,
     BuildImageResponse,
+    BuildImageResult,
     BulkDeleteSandboxRequest,
     BulkDeleteSandboxResponse,
     CommandRequest,
@@ -87,6 +88,7 @@ __all__ = [
     "BackgroundJobStatus",
     "BuildImageRequest",
     "BuildImageResponse",
+    "BuildImageResult",
     "ImageVisibility",
     # Port Forwarding
     "ExposePortRequest",

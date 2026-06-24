@@ -57,3 +57,48 @@ def test_build_image_response_allows_multi_transfer_without_full_image_path():
     assert response.build_id == "build-123"
     assert response.build_ids == ["build-123", "build-456"]
     assert response.full_image_path is None
+
+
+def test_build_image_response_accepts_batch_transfer_results():
+    response = BuildImageResponse.model_validate(
+        {
+            "results": [
+                {
+                    "sourceImage": "ubuntu:22.04",
+                    "buildId": "build-123",
+                    "fullImagePath": "team-team1/ubuntu:22.04",
+                },
+                {
+                    "sourceImage": "missing:notfound",
+                    "error": "source image not found",
+                    "retryable": False,
+                },
+            ]
+        }
+    )
+
+    assert response.build_id == "build-123"
+    assert response.build_ids == ["build-123"]
+    assert response.results[0].source_image == "ubuntu:22.04"
+    assert response.results[0].build_id == "build-123"
+    assert response.results[1].error == "source image not found"
+    assert response.results[1].retryable is False
+
+
+def test_image_client_transfer_image_accepts_batch_transfer_results_response():
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            return {
+                "results": [
+                    {
+                        "sourceImage": "ubuntu:22.04",
+                        "buildId": "build-123",
+                    }
+                ]
+            }
+
+    response = ImageClient(DummyAPIClient()).transfer_image("ubuntu:22.04")
+
+    assert response.build_id == "build-123"
+    assert response.build_ids == ["build-123"]
+    assert response.results[0].source_image == "ubuntu:22.04"

@@ -262,9 +262,26 @@ class BuildImageRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class BuildImageResult(BaseModel):
+    """Per-source result returned by multi-image transfer requests."""
+
+    source_image: Optional[str] = Field(default=None, alias="sourceImage")
+    build_id: Optional[str] = Field(
+        default=None,
+        alias="build_id",
+        validation_alias=AliasChoices("build_id", "buildId"),
+    )
+    full_image_path: Optional[str] = Field(default=None, alias="fullImagePath")
+    error: Optional[str] = None
+    retryable: Optional[bool] = None
+    success: Optional[bool] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class BuildImageResponse(BaseModel):
-    build_id: str = Field(
-        ...,
+    build_id: Optional[str] = Field(
+        default=None,
         alias="build_id",
         validation_alias=AliasChoices("build_id", "buildId"),
     )
@@ -273,8 +290,18 @@ class BuildImageResponse(BaseModel):
     expires_in: Optional[int] = None
     full_image_path: Optional[str] = Field(default=None, alias="fullImagePath")
     visibility: Optional[ImageVisibility] = None
+    results: List[BuildImageResult] = Field(default_factory=list)
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    def populate_build_ids_from_results(self) -> "BuildImageResponse":
+        """Support API responses shaped as {"results": [...]} for batch transfers."""
+        if not self.build_ids and self.results:
+            self.build_ids = [result.build_id for result in self.results if result.build_id]
+        if self.build_id is None and self.build_ids:
+            self.build_id = self.build_ids[0]
+        return self
 
 
 class ExposePortRequest(BaseModel):

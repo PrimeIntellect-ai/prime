@@ -4,6 +4,7 @@ from typing import List
 import pytest
 import typer
 from prime_cli.commands.rl import (
+    EnvConfig,
     RLConfig,
     _flatten_config_schema,
     _is_full_finetune,
@@ -189,6 +190,99 @@ def test_load_config_accepts_eval_sampling_reasoning_effort(tmp_path: Path) -> N
             "max_tokens": 2048,
         },
     }
+
+
+def test_load_config_accepts_v1_train_env_without_legacy_id(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "Qwen/Qwen3.5-0.8B"\n'
+        "[[env]]\n"
+        'name = "alphabet-sort"\n'
+        'taskset = { id = "alphabet-sort-v1", min_turns = 3, '
+        "max_turns = 5, power_per_turn = false }\n"
+        'harness = { id = "default", runtime = { type = "subprocess" } }\n'
+        "group_size = 8\n"
+        "ratio = 0.5\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    env = cfg.env[0]
+    assert env.id is None
+    assert env.display_name == "alphabet-sort"
+    assert env.to_api_dict() == {
+        "name": "alphabet-sort",
+        "taskset": {
+            "id": "alphabet-sort-v1",
+            "min_turns": 3,
+            "max_turns": 5,
+            "power_per_turn": False,
+        },
+        "harness": {"id": "default", "runtime": {"type": "subprocess"}},
+        "ratio": 0.5,
+        "group_size": 8,
+    }
+
+
+def test_load_config_rejects_env_without_legacy_id_or_taskset_id(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text('model = "Qwen/Qwen3.5-0.8B"\n[[env]]\nname = "missing-selector"\n')
+
+    with pytest.raises(typer.Exit):
+        load_config(str(config_path))
+
+
+def test_eval_env_accepts_v1_group_size_alias(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "Qwen/Qwen3.5-0.8B"\n'
+        "[[eval.env]]\n"
+        'taskset = { id = "alphabet-sort-v1", split = "test" }\n'
+        'harness = { id = "default" }\n'
+        "num_examples = 32\n"
+        "group_size = 4\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.eval.to_api_dict() == {
+        "environments": [
+            {
+                "taskset": {"id": "alphabet-sort-v1", "split": "test"},
+                "harness": {"id": "default"},
+                "group_size": 4,
+                "num_examples": 32,
+            }
+        ]
+    }
+
+
+def test_eval_env_emits_group_size_for_v1_rollouts_alias(tmp_path: Path) -> None:
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        'model = "Qwen/Qwen3.5-0.8B"\n'
+        "[[eval.env]]\n"
+        'taskset = { id = "alphabet-sort-v1" }\n'
+        "rollouts_per_example = 4\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    env_payload = cfg.eval.to_api_dict()["environments"][0]
+    assert env_payload["group_size"] == 4
+    assert "rollouts_per_example" not in env_payload
+
+
+def test_env_config_hub_refs_include_only_slash_shaped_ids() -> None:
+    env = EnvConfig.model_validate(
+        {
+            "taskset": {"id": "dev/alphabet-sort-taskset@0.1.0"},
+            "harness": {"id": "default"},
+        }
+    )
+
+    assert env.display_name == "dev/alphabet-sort-taskset@0.1.0"
+    assert env.hub_env_ids() == ["dev/alphabet-sort-taskset@0.1.0"]
 
 
 def test_load_config_rejects_eval_sampling_with_both_reasoning_controls(

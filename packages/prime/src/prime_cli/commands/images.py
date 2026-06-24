@@ -494,7 +494,7 @@ def push_image(
                 console.print(f"[red]Error: Failed to initiate transfer: {e}[/red]")
                 raise typer.Exit(1)
 
-            build_ids = response.build_ids or [response.build_id]
+            build_ids = response.build_ids or ([response.build_id] if response.build_id else [])
             console.print("[green]✓[/green] Transfer queued")
             console.print()
             if len(build_ids) == 1:

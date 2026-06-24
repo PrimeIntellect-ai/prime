@@ -1,11 +1,22 @@
-from prime_sandboxes import BuildImageResponse, ImageClient, ImageVisibility
+from typing import Any
+
+from prime_sandboxes import APIClient, BuildImageResponse, ImageClient, ImageVisibility
 
 
 def test_image_client_transfer_image_payload_and_response():
     captured = {}
 
-    class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
+    class DummyAPIClient(APIClient):
+        def __init__(self) -> None:
+            pass
+
+        def request(
+            self,
+            method: str,
+            path: str,
+            json: dict[str, Any] | None = None,
+            params: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
             captured["method"] = method
             captured["path"] = path
             captured["json"] = json
@@ -86,8 +97,17 @@ def test_build_image_response_accepts_batch_transfer_results():
 
 
 def test_image_client_transfer_image_accepts_batch_transfer_results_response():
-    class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
+    class DummyAPIClient(APIClient):
+        def __init__(self) -> None:
+            pass
+
+        def request(
+            self,
+            method: str,
+            path: str,
+            json: dict[str, Any] | None = None,
+            params: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
             return {
                 "results": [
                     {

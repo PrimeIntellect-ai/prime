@@ -382,3 +382,114 @@ def test_push_image_accepts_dockerfile_outside_context(tmp_path, monkeypatch):
         dockerfile_member = tar.extractfile(PACKAGED_DOCKERFILE_PATH)
         assert dockerfile_member is not None
         assert dockerfile_member.read().decode() == dockerfile_path.read_text()
+
+
+def test_push_image_source_image_result_shape_uses_full_image_path(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            return {
+                "results": [
+                    {
+                        "sourceImage": "ubuntu:jammy",
+                        "success": True,
+                        "buildId": "buildabc",
+                        "fullImagePath": "cmkabc/ubuntu:jammy",
+                    }
+                ],
+                "failed": [],
+            }
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "--source-image", "ubuntu:jammy"],
+        env={**TEST_ENV, "PRIME_USER_ID": "cmkabc"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "buildabc" in result.output
+    assert "cmkabc/ubuntu:jammy" in result.output
+
+
+def test_push_image_source_image_result_shape_reports_all_failures(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            return {
+                "results": [
+                    {
+                        "sourceImage": "missing:notfound",
+                        "success": False,
+                        "error": "source image not found",
+                        "retryable": False,
+                    }
+                ],
+                "failed": [
+                    {
+                        "sourceImage": "missing:notfound",
+                        "success": False,
+                        "error": "source image not found",
+                        "retryable": False,
+                    }
+                ],
+            }
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "--source-image", "missing:notfound"],
+        env={**TEST_ENV, "PRIME_USER_ID": "cmkabc"},
+    )
+
+    assert result.exit_code == 1
+    assert "Failed to initiate image transfer" in result.output
+    assert "missing:notfound: source image not found" in result.output
+    assert "Your image transfer is running" not in result.output
+
+
+def test_push_image_source_image_result_shape_reports_partial_failures(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
+
+    failed = {
+        "sourceImage": "missing:notfound",
+        "success": False,
+        "error": "source image not found",
+        "retryable": False,
+    }
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            return {
+                "results": [
+                    {
+                        "sourceImage": "ubuntu:jammy",
+                        "success": True,
+                        "buildId": "buildabc",
+                        "fullImagePath": "cmkabc/ubuntu:jammy",
+                    },
+                    failed,
+                ],
+                "failed": [failed],
+            }
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "--source-image", "ubuntu:jammy,missing:notfound"],
+        env={**TEST_ENV, "PRIME_USER_ID": "cmkabc"},
+    )
+
+    assert result.exit_code == 1
+    assert "buildabc" in result.output
+    assert "image transfer" in result.output
+    assert "failed" in result.output
+    assert "missing:notfound: source image not found" in result.output

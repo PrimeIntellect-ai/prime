@@ -271,7 +271,7 @@ class BuildImageResponse(BaseModel):
     build_ids: List[str] = Field(default_factory=list, alias="buildIds")
     upload_url: Optional[str] = None
     expires_in: Optional[int] = None
-    full_image_path: Optional[str] = Field(default=None, alias="fullImagePath")
+    full_image_path: str = Field(..., alias="fullImagePath")
     visibility: Optional[ImageVisibility] = None
 
     model_config = ConfigDict(populate_by_name=True)

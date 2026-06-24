@@ -33,6 +33,7 @@ def whoami() -> None:
         config = Config()
         if user_id:
             config.set_user_id(user_id)
+            config.set_user_slug(slug)
             config.update_current_environment_file()
 
         # Display account info table

@@ -57,6 +57,18 @@ class Config:
         return self.config.get("user_id") or None
 
     @property
+    def team_slug(self) -> Optional[str]:
+        """Get active team slug from config file (used to build image refs)."""
+        if os.getenv("PRIME_TEAM_ID") is not None:
+            return None
+        return self.config.get("team_slug") or None
+
+    @property
+    def user_slug(self) -> Optional[str]:
+        """Get user slug (username) from config file (used to build image refs)."""
+        return self.config.get("user_slug") or None
+
+    @property
     def base_url(self) -> str:
         """Get API base URL with precedence: env > file > default."""
         env_val = os.getenv("PRIME_API_BASE_URL") or os.getenv("PRIME_BASE_URL")

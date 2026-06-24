@@ -44,12 +44,13 @@ def _switch_to_team(config: Config, team: dict) -> None:
     team_id = team.get("teamId")
     team_name = team.get("name", "Unknown")
     team_role = team.get("role", "member")
+    team_slug = team.get("slug")
 
     if not team_id:
         console.print("[red]Error:[/red] Selected team is missing a team ID.")
         raise typer.Exit(1)
 
-    config.set_team(team_id, team_name=team_name, team_role=team_role)
+    config.set_team(team_id, team_name=team_name, team_role=team_role, team_slug=team_slug)
     config.update_current_environment_file()
     console.print(f"[green]Switched to team '{team_name}'.[/green]")
 

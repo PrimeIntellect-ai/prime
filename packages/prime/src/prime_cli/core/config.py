@@ -12,7 +12,9 @@ class ConfigModel(BaseModel):
     team_id: str | None = None
     team_name: str | None = None
     team_role: str | None = None
+    team_slug: str | None = None
     user_id: str | None = None
+    user_slug: str | None = None
     base_url: str = "https://api.primeintellect.ai"
     frontend_url: str = "https://app.primeintellect.ai"
     inference_url: str = "https://api.pinference.ai/api/v1"
@@ -111,13 +113,25 @@ class Config:
         """Get team role from config file (only valid if team_id not from env)."""
         return self.config.get("team_role") or None
 
+    @property
+    def team_slug(self) -> Optional[str]:
+        """Get active team slug from config file (only valid if team_id not from env)."""
+        if self.team_id_from_env:
+            return None
+        return self.config.get("team_slug") or None
+
     def set_team(
-        self, value: str | None, team_name: str | None = None, team_role: str | None = None
+        self,
+        value: str | None,
+        team_name: str | None = None,
+        team_role: str | None = None,
+        team_slug: str | None = None,
     ) -> None:
-        """Set team ID, name, and role in config file."""
+        """Set team ID, name, role, and slug in config file."""
         self.config["team_id"] = value or None
         self.config["team_name"] = team_name if value else None
         self.config["team_role"] = team_role if value else None
+        self.config["team_slug"] = team_slug if value else None
         self._save_config(self.config)
 
     @property
@@ -131,6 +145,16 @@ class Config:
     def set_user_id(self, value: str | None) -> None:
         """Set user ID in config file"""
         self.config["user_id"] = value if value else None
+        self._save_config(self.config)
+
+    @property
+    def user_slug(self) -> Optional[str]:
+        """Get user slug (username) from config file."""
+        return self.config.get("user_slug") or None
+
+    def set_user_slug(self, value: str | None) -> None:
+        """Set user slug (username) in config file."""
+        self.config["user_slug"] = value if value else None
         self._save_config(self.config)
 
     @property
@@ -253,7 +277,9 @@ class Config:
             "team_id": self.team_id,
             "team_name": None if self.team_id_from_env else self.team_name,
             "team_role": None if self.team_id_from_env else self.team_role,
+            "team_slug": None if self.team_id_from_env else self.team_slug,
             "user_id": self.user_id,
+            "user_slug": self.user_slug,
             "base_url": self.base_url,
             "frontend_url": self.frontend_url,
             "inference_url": self.inference_url,
@@ -303,6 +329,7 @@ class Config:
                 self.config["team_id"] = None
                 self.config["team_name"] = None
                 self.config["team_role"] = None
+                self.config["team_slug"] = None
                 self.config["current_environment"] = "production"
             return True
 
@@ -318,14 +345,16 @@ class Config:
                 if persist:
                     if "api_key" in env_config:
                         self.set_api_key(env_config["api_key"])
-                    # Set team_id, team_name, and team_role from environment
+                    # Set team_id, team_name, team_role, and team_slug from environment
                     self.set_team(
                         env_config.get("team_id", None),
                         team_name=env_config.get("team_name", None),
                         team_role=env_config.get("team_role", None),
+                        team_slug=env_config.get("team_slug", None),
                     )
-                    # Set user_id from environment
+                    # Set user_id and user_slug from environment
                     self.set_user_id(env_config.get("user_id", None))
+                    self.set_user_slug(env_config.get("user_slug", None))
                     self.set_base_url(env_config.get("base_url", self.DEFAULT_BASE_URL))
                     self.set_frontend_url(env_config.get("frontend_url", self.DEFAULT_FRONTEND_URL))
                     self.set_inference_url(
@@ -339,7 +368,9 @@ class Config:
                     self.config["team_id"] = env_config.get("team_id", None)
                     self.config["team_name"] = env_config.get("team_name", None)
                     self.config["team_role"] = env_config.get("team_role", None)
+                    self.config["team_slug"] = env_config.get("team_slug", None)
                     self.config["user_id"] = env_config.get("user_id", None)
+                    self.config["user_slug"] = env_config.get("user_slug", None)
                     # Normalize URLs the same way set_* methods do
                     base_url = env_config.get("base_url", self.DEFAULT_BASE_URL)
                     self.config["base_url"] = self._strip_api_v1(base_url)
@@ -367,7 +398,9 @@ class Config:
                         "team_id": self.team_id,
                         "team_name": None if self.team_id_from_env else self.team_name,
                         "team_role": None if self.team_id_from_env else self.team_role,
+                        "team_slug": None if self.team_id_from_env else self.team_slug,
                         "user_id": self.user_id,
+                        "user_slug": self.user_slug,
                         "base_url": self.base_url,
                         "frontend_url": self.frontend_url,
                         "inference_url": self.inference_url,

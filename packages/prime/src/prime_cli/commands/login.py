@@ -59,6 +59,7 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
                     team_id = selected_team.get("teamId")
                     team_name = selected_team.get("name", "Unknown")
                     team_role = selected_team.get("role", "member")
+                    team_slug = selected_team.get("slug")
 
                     if not team_id:
                         console.print("[yellow]Invalid team. Using personal account.[/yellow]")
@@ -66,7 +67,12 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
                         config.update_current_environment_file()
                         return
 
-                    config.set_team(team_id, team_name=team_name, team_role=team_role)
+                    config.set_team(
+                        team_id,
+                        team_name=team_name,
+                        team_role=team_role,
+                        team_slug=team_slug,
+                    )
                     config.update_current_environment_file()
                     console.print(f"[green]Using team '{team_name}'.[/green]")
                     return
@@ -219,6 +225,7 @@ def login(
                                 user_id = data.get("id")
                                 if user_id:
                                     config.set_user_id(user_id)
+                                    config.set_user_slug(data.get("slug"))
                                     config.update_current_environment_file()
                         except (APIError, Exception):
                             console.print("[yellow]Logged in, but failed to fetch user id[/yellow]")

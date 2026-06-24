@@ -120,6 +120,7 @@ def test_push_image_public_sends_visibility(tmp_path, monkeypatch):
 
 def test_push_image_source_image_queues_transfer_without_upload(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
     captured = {}
 
     class DummyAPIClient:
@@ -161,6 +162,7 @@ def test_push_image_source_image_queues_transfer_without_upload(monkeypatch):
 
 def test_push_image_source_image_with_destination_override(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
     captured = {}
 
     class DummyAPIClient:

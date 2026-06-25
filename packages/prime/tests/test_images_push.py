@@ -11,6 +11,7 @@ TEST_ENV = {
     "COLUMNS": "200",
     "LINES": "50",
     "PRIME_DISABLE_VERSION_CHECK": "1",
+    "PRIME_TEAM_ID": "",
 }
 
 
@@ -240,8 +241,8 @@ def test_publish_image_calls_visibility_endpoint(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PUBLIC", "teamId": "abc123"}
+    assert captured["path"] == "/images/team-abc123/rehl/latest/visibility"
+    assert captured["json"] == {"visibility": "PUBLIC"}
 
 
 def test_publish_image_accepts_owner_prefixed_personal_ref(monkeypatch):
@@ -269,23 +270,29 @@ def test_publish_image_accepts_owner_prefixed_personal_ref(monkeypatch):
     assert captured["json"] == {"visibility": "PUBLIC"}
 
 
-def test_publish_image_rejects_other_user_prefixed_personal_ref(monkeypatch):
+def test_publish_image_passes_slug_prefixed_ref_to_backend(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
 
     class DummyAPIClient:
         def request(self, method, path, json=None, params=None):
-            raise AssertionError(f"Unexpected request: {method} {path}")
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = json
+            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
 
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
 
     result = runner.invoke(
         app,
-        ["images", "publish", "other-user/rehl:latest"],
+        ["images", "publish", "alice/rehl:latest"],
         env={**TEST_ENV, "PRIME_USER_ID": "cmk123"},
     )
 
-    assert result.exit_code == 1
-    assert "Unrecognized image namespace 'other-user'" in result.output
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "PATCH"
+    assert captured["path"] == "/images/alice/rehl/latest/visibility"
+    assert captured["json"] == {"visibility": "PUBLIC"}
 
 
 def test_delete_image_accepts_owner_prefixed_personal_ref(monkeypatch):
@@ -310,6 +317,31 @@ def test_delete_image_accepts_owner_prefixed_personal_ref(monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["method"] == "DELETE"
     assert captured["path"] == "/images/rehl/latest"
+    assert captured["params"] is None
+
+
+def test_delete_image_passes_slug_prefixed_ref_to_backend(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["params"] = params
+            return {"success": True, "message": "ok"}
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "delete", "research/rehl:latest", "--yes"],
+        env={**TEST_ENV, "PRIME_USER_ID": "cmk123", "PRIME_TEAM_ID": "team-1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "DELETE"
+    assert captured["path"] == "/images/research/rehl/latest"
     assert captured["params"] is None
 
 

@@ -260,10 +260,10 @@ def _render_status_column(partition: PartitionMap) -> str:
 def _render_image_reference(img: ImageRow, *, is_team_listing: bool) -> str:
     """Render the user-facing image reference.
 
-    The owner prefix (``{userId}/`` or ``team-{teamId}/``) is **always**
+    The owner prefix (``{ownerSlug}/``, ``{userId}/``, or ``team-{teamId}/``) is **always**
     preserved so the full string is a valid reference that can be pasted
     directly into downstream commands (e.g. ``prime sandbox create``),
-    which require the fully-qualified ``<userId>/<imageName>:<tag>`` form.
+    which require a fully-qualified ``<owner>/<imageName>:<tag>`` form.
 
     Visual truncation (if any) is applied separately by
     :func:`_truncate_ref_left` so that when the terminal is too narrow the
@@ -483,7 +483,7 @@ def push_image(
                     image_name=image_name,
                     image_tag=image_tag,
                     platform=platform,
-                    team_id=config.team_id,
+                    team_id=config.team_id or None,
                     visibility=visibility,
                 )
             except UnauthorizedError:
@@ -943,33 +943,25 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
     """Parse refs accepted by mutating image commands.
 
     Returns ``(image_name, image_tag, team_id)``. Personal image refs may use
-    either ``name:tag`` or ``{currentUserId}/name:tag``. Team image refs may
-    use ``team-{teamId}/name:tag``.
+    either ``name:tag``, ``{currentUserId}/name:tag``, or ``{userSlug}/name:tag``.
+    Team image refs may use ``team-{teamId}/name:tag`` or ``{teamSlug}/name:tag``.
+    Owner-prefixed refs are otherwise passed through for server-side resolution
+    because only the backend can distinguish user slugs from team slugs.
     """
     team_id: Optional[str] = config.team_id
     if "/" in image_reference:
         namespace, rest = image_reference.split("/", 1)
-        if namespace.startswith("team-"):
-            extracted_team_id = namespace[5:]
-            if not extracted_team_id:
-                console.print(
-                    "[red]Error: Invalid team image reference. "
-                    "Expected format: team-{teamId}/imagename:tag[/red]"
-                )
-                raise typer.Exit(1)
-            team_id = extracted_team_id
-            image_reference = rest
-        elif namespace == config.user_id:
+        if namespace == "team-":
+            console.print(
+                "[red]Error: Invalid team image reference. "
+                "Expected format: team-{teamId}/imagename:tag[/red]"
+            )
+            raise typer.Exit(1)
+        if namespace == config.user_id:
             team_id = None
             image_reference = rest
         else:
-            console.print(
-                f"[red]Error: Unrecognized image namespace '{namespace}'. "
-                "Use 'imagename:tag' for personal images, "
-                "'{userId}/imagename:tag' with your current user ID, or "
-                "'team-{teamId}/imagename:tag' for team images.[/red]"
-            )
-            raise typer.Exit(1)
+            team_id = None
 
     if ":" not in image_reference:
         console.print("[red]Error: Image reference must include a tag (e.g., myapp:latest)[/red]")
@@ -1003,8 +995,8 @@ def publish_image(
         ...,
         help=(
             "Image reference to make public "
-            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
-            "or 'team-{teamId}/myapp:v1.0.0')"
+            "(e.g., 'myapp:v1.0.0', '<ownerSlug>/myapp:v1.0.0', "
+            "'<currentUserId>/myapp:v1.0.0', or 'team-{teamId}/myapp:v1.0.0')"
         ),
     ),
 ):
@@ -1014,6 +1006,7 @@ def publish_image(
     \b
     Examples:
         prime images publish myapp:v1.0.0
+        prime images publish alice/myapp:v1.0.0
         prime images publish cmk123/myapp:v1.0.0
         prime images publish team-abc123/myapp:v1.0.0
     """
@@ -1033,8 +1026,8 @@ def unpublish_image(
         ...,
         help=(
             "Image reference to make private "
-            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
-            "or 'team-{teamId}/myapp:v1.0.0')"
+            "(e.g., 'myapp:v1.0.0', '<ownerSlug>/myapp:v1.0.0', "
+            "'<currentUserId>/myapp:v1.0.0', or 'team-{teamId}/myapp:v1.0.0')"
         ),
     ),
 ):
@@ -1044,6 +1037,7 @@ def unpublish_image(
     \b
     Examples:
         prime images unpublish myapp:v1.0.0
+        prime images unpublish alice/myapp:v1.0.0
         prime images unpublish cmk123/myapp:v1.0.0
         prime images unpublish team-abc123/myapp:v1.0.0
     """
@@ -1063,8 +1057,8 @@ def delete_image(
         ...,
         help=(
             "Image reference to delete "
-            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
-            "or 'team-{teamId}/myapp:v1.0.0')"
+            "(e.g., 'myapp:v1.0.0', '<ownerSlug>/myapp:v1.0.0', "
+            "'<currentUserId>/myapp:v1.0.0', or 'team-{teamId}/myapp:v1.0.0')"
         ),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
@@ -1079,6 +1073,7 @@ def delete_image(
     Examples:
         prime images delete myapp:v1.0.0
         prime images delete myapp:latest --yes
+        prime images delete alice/myapp:v1.0.0
         prime images delete cmk123/myapp:v1.0.0
         prime images delete team-abc123/myapp:v1.0.0
     """

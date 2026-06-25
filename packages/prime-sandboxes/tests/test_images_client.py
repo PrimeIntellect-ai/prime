@@ -36,7 +36,7 @@ def test_image_client_transfer_image_payload_and_response():
                 "build_id": "build-123",
                 "buildIds": ["build-123"],
                 "upload_url": None,
-                "fullImagePath": "team-team1/ubuntu:22.04",
+                "fullImagePath": "research/ubuntu:22.04",
                 "visibility": "PUBLIC",
             },
             captured,
@@ -65,7 +65,7 @@ def test_image_client_transfer_image_payload_and_response():
     assert response.build_id == "build-123"
     assert response.build_ids == ["build-123"]
     assert response.upload_url is None
-    assert response.full_image_path == "team-team1/ubuntu:22.04"
+    assert response.full_image_path == "research/ubuntu:22.04"
 
 
 def test_build_image_response_allows_multi_transfer_without_full_image_path():
@@ -74,14 +74,14 @@ def test_build_image_response_allows_multi_transfer_without_full_image_path():
             "build_id": "build-123",
             "buildIds": ["build-123", "build-456"],
             "upload_url": None,
-            "fullImagePath": "team-team1/ubuntu:22.04",
+            "fullImagePath": "research/ubuntu:22.04",
             "visibility": "PRIVATE",
         }
     )
 
     assert response.build_id == "build-123"
     assert response.build_ids == ["build-123", "build-456"]
-    assert response.full_image_path == "team-team1/ubuntu:22.04"
+    assert response.full_image_path == "research/ubuntu:22.04"
 
 
 def test_image_client_transfer_image_accepts_bulk_transfer_response():
@@ -93,7 +93,7 @@ def test_image_client_transfer_image_accepts_bulk_transfer_response():
                         "sourceImage": "ubuntu:22.04",
                         "success": True,
                         "buildId": "build-123",
-                        "fullImagePath": "team-team1/ubuntu:22.04",
+                        "fullImagePath": "research/ubuntu:22.04",
                         "visibility": "PRIVATE",
                     },
                     {
@@ -118,6 +118,6 @@ def test_image_client_transfer_image_accepts_bulk_transfer_response():
     assert isinstance(response, BulkImageTransferResponse)
     assert response.results[0].source_image == "ubuntu:22.04"
     assert response.results[0].build_id == "build-123"
-    assert response.results[0].full_image_path == "team-team1/ubuntu:22.04"
+    assert response.results[0].full_image_path == "research/ubuntu:22.04"
     assert response.failed[0].source_image == "missing:notfound"
     assert response.failed[0].error == "source image not found"

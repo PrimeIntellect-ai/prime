@@ -16,7 +16,7 @@ from prime_cli.api.rl import RLClient
 from prime_cli.client import APIClient, APIError
 from prime_cli.core import Config
 from prime_cli.utils.time_utils import format_time_ago
-from prime_cli.verifiers_process import load_eval_artifact
+from prime_cli.verifiers_process import load_eval_config
 from prime_evals import EvalsClient
 
 from .cache import (
@@ -1020,7 +1020,6 @@ def discover_local_eval_runs(
         try:
             artifacts = sorted(
                 [
-                    *root.rglob("manifest.json"),
                     *root.rglob("config.toml"),
                     *root.rglob("metadata.json"),
                 ],
@@ -1035,7 +1034,7 @@ def discover_local_eval_runs(
                 continue
             if _safe_is_file(run_dir / "config.toml"):
                 try:
-                    manifest, config = load_eval_artifact(run_dir)
+                    config = load_eval_config(run_dir)
                 except ValueError:
                     continue
                 taskset = config.get("taskset")
@@ -1043,9 +1042,9 @@ def discover_local_eval_runs(
                     "id"
                 )
                 model = config.get("model")
-                run_id = manifest.get("run_id") if manifest else run_dir.name
+                run_id = run_dir.name
                 metadata = {
-                    **(manifest or {"run_id": run_id}),
+                    "run_id": run_id,
                     "num_examples": config.get("num_tasks"),
                     "rollouts_per_example": config.get("num_rollouts"),
                     "sampling_args": config.get("sampling", {}),

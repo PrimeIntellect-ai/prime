@@ -8,19 +8,13 @@ import subprocess
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import NoReturn
 
 import click
 
 from .verifiers_plugin import V1_EVAL_MODULE, resolve_workspace_python
 
-PROTOCOL_VERSIONS = (1, 1, 1)
-MANIFEST_SCHEMA = "verifiers.eval-run/v1"
-ARTIFACTS = {
-    "config": "config.toml",
-    "results": "results.jsonl",
-    "log": "eval.log",
-}
+PROTOCOL_VERSIONS = (1, 1)
 
 
 def exec_eval_process(
@@ -43,7 +37,6 @@ def exec_eval_process(
         versions = (
             protocol["protocol_version"],
             protocol["trace_schema_version"],
-            protocol["manifest_schema_version"],
         )
         compatible = versions == PROTOCOL_VERSIONS and {"run", "resolve"}.issubset(
             protocol["operations"]
@@ -65,23 +58,9 @@ def exec_eval_process(
     os.execvpe(command[0], command, env)
 
 
-def load_eval_artifact(run_dir: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Load a native V1 config and its optional versioned manifest."""
-    manifest_path = run_dir / "manifest.json"
+def load_eval_config(run_dir: Path) -> dict:
+    """Load a native V1 run's resolved config."""
     try:
-        manifest = None
-        config_path = run_dir / ARTIFACTS["config"]
-        if manifest_path.exists():
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            versions = (manifest["protocol_version"], manifest["trace_schema_version"])
-            if (
-                manifest["schema"] != MANIFEST_SCHEMA
-                or versions != PROTOCOL_VERSIONS[:2]
-                or manifest["artifacts"] != ARTIFACTS
-            ):
-                raise ValueError
-            config_path = run_dir / manifest["artifacts"]["config"]
-        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise ValueError(f"Invalid Verifiers run artifact: {run_dir}") from exc
-    return manifest, config
+        return tomllib.loads((run_dir / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Invalid Verifiers eval config: {run_dir / 'config.toml'}") from exc

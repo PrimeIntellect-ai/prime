@@ -8,7 +8,7 @@ the workspace interpreter's protocol and then replaces itself with:
 ```
 
 Prime forwards `<argv...>` unchanged for V1. Verifiers owns parsing, taskset/harness-specific
-help, execution, logging, signals, and the `verifiers.eval-run/v1` artifact.
+help, execution, logging, signals, and native run artifacts.
 
 The compatibility routes remain available:
 
@@ -27,14 +27,14 @@ the equivalent long-form `--shuffle` option shown by upstream help.
 Prime does not expose a speculative V1 submit command until `POST /hosted-evaluations` accepts a
 resolved V1 invocation. The existing `prime eval run ... --hosted` compatibility path remains
 operational. A native worker must execute Verifiers protocol version 1, preserve its `run_id`,
-and return `manifest.json`, `config.toml`, `results.jsonl`, and `eval.log`.
+and return `config.toml`, Trace `results.jsonl`, and `eval.log` for a normal run. A dry run returns
+only `config.toml`.
 
 The Prime Evals samples endpoint does not yet expose a schema-versioned Trace JSONL ingestion
 operation. `prime eval push` therefore performs one lossy projection into the sample view at
 that API boundary. A native endpoint should accept `trace_schema_version: 1` plus Trace JSONL and
-associate it with the run manifest/config without requiring that projection.
+associate it with the resolved config and run ID without requiring that projection.
 
-Prime Lab discovers and reads both native manifest/config/Trace artifacts and V0
+Prime Lab discovers and reads both native config/Trace artifacts and V0
 `metadata.json`/results artifacts. Its existing multi-eval config form continues to launch through
-the compatible hosted route. Pre-manifest V1 runs containing `config.toml` and `results.jsonl` are
-also discovered; their directory name is the run ID until Verifiers creates a manifest on resume.
+the compatible hosted route. The native run directory name is its run ID.

@@ -44,7 +44,7 @@ from ..verifiers_bridge import (
     run_eval_passthrough,
     run_eval_view,
 )
-from ..verifiers_process import ARTIFACTS, exec_eval_process, load_eval_artifact
+from ..verifiers_process import exec_eval_process, load_eval_config
 
 console = get_console()
 
@@ -919,14 +919,13 @@ def get_samples(
 
 def _load_eval_directory(directory: Path) -> dict:
     if (directory / "config.toml").is_file():
-        manifest, config = load_eval_artifact(directory)
-        artifacts = manifest["artifacts"] if manifest else ARTIFACTS
-        results_path = directory / artifacts["results"]
+        config = load_eval_config(directory)
+        results_path = directory / "results.jsonl"
         taskset = config.get("taskset")
         env_field = (taskset.get("id") if isinstance(taskset, dict) else None) or config.get("id")
         model = config.get("model")
         if not isinstance(env_field, str) or not isinstance(model, str):
-            raise ValueError(f"Missing taskset.id/id or model in {artifacts['config']}")
+            raise ValueError("Missing taskset.id/id or model in config.toml")
 
         results = convert_eval_results(load_results_jsonl(results_path))
         rewards = [row["reward"] for row in results if isinstance(row.get("reward"), (int, float))]
@@ -937,7 +936,7 @@ def _load_eval_directory(directory: Path) -> dict:
             "metrics": {"reward": sum(rewards) / len(rewards)} if rewards else {},
             "metadata": {
                 "framework": "verifiers",
-                **(manifest or {"run_id": directory.name}),
+                "run_id": directory.name,
                 "num_examples": config.get("num_tasks"),
                 "rollouts_per_example": config.get("num_rollouts"),
                 "resolved_config": config,
@@ -978,12 +977,10 @@ def _load_eval_directory(directory: Path) -> dict:
 def _has_eval_files(directory: Path) -> bool:
     if (directory / "config.toml").is_file():
         try:
-            manifest, _ = load_eval_artifact(directory)
+            load_eval_config(directory)
         except ValueError:
             return False
-        artifacts = manifest["artifacts"] if manifest else ARTIFACTS
-        required = ("config", "results", "log") if manifest else ("config", "results")
-        return all((directory / artifacts[name]).is_file() for name in required)
+        return (directory / "results.jsonl").is_file()
     return (directory / "metadata.json").exists() and (directory / "results.jsonl").exists()
 
 
@@ -994,7 +991,6 @@ def _validate_eval_path(path_str: str) -> Path:
     if path.is_file():
         # Auto-correct known artifact files to their run directory.
         if path.name in (
-            "manifest.json",
             "config.toml",
             "results.jsonl",
             "eval.log",
@@ -1003,7 +999,7 @@ def _validate_eval_path(path_str: str) -> Path:
             parent = path.parent
             if _has_eval_files(parent):
                 return parent
-            if (parent / "manifest.json").exists() or (parent / "config.toml").exists():
+            if (parent / "config.toml").exists():
                 raise ValueError(f"Directory '{parent}' is not a complete Verifiers run artifact")
             raise ValueError(
                 f"Directory '{parent}' must contain both metadata.json and results.jsonl"
@@ -1017,7 +1013,7 @@ def _validate_eval_path(path_str: str) -> Path:
         if _has_eval_files(path):
             return path
 
-        if (path / "manifest.json").exists() or (path / "config.toml").exists():
+        if (path / "config.toml").exists():
             raise ValueError(f"Directory '{path}' is not a complete Verifiers run artifact")
 
         has_metadata = (path / "metadata.json").exists()
@@ -1039,7 +1035,7 @@ def _discover_eval_outputs() -> list[Path]:
 
     candidates = {
         artifact.parent
-        for pattern in ("manifest.json", "config.toml", "metadata.json")
+        for pattern in ("config.toml", "metadata.json")
         for artifact in outputs_dir.rglob(pattern)
     }
     return sorted(directory for directory in candidates if _has_eval_files(directory))

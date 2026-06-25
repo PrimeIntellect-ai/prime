@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from prime_cli.utils.eval_push import convert_eval_results
-from prime_cli.verifiers_process import load_eval_artifact
+from prime_cli.verifiers_process import load_eval_config
 
 from .models import LabItem
 
@@ -46,9 +46,9 @@ class LocalEvalRun:
             self.metadata = loaded if isinstance(loaded, dict) else {}
             return self.metadata
         try:
-            manifest, config = load_eval_artifact(self.path)
+            config = load_eval_config(self.path)
             loaded = {
-                **(manifest or {"run_id": self.path.name}),
+                "run_id": self.path.name,
                 "num_examples": config.get("num_tasks"),
                 "rollouts_per_example": config.get("num_rollouts"),
                 "sampling_args": config.get("sampling", {}),

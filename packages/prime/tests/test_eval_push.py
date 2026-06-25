@@ -28,6 +28,7 @@ def test_convert_eval_results_supports_v1_and_legacy_samples():
                     "message": {"role": "user", "content": "What is 2 + 2?"},
                     "token_ids": [1, 2],
                     "mask": [False, False],
+                    "is_content": [True, True],
                 },
                 {
                     "parent": 0,
@@ -35,6 +36,7 @@ def test_convert_eval_results_supports_v1_and_legacy_samples():
                     "sampled": True,
                     "token_ids": [3, 4],
                     "mask": [False, True],
+                    "is_content": [False, True],
                     "logprobs": [-0.1],
                 },
             ],
@@ -74,6 +76,30 @@ def test_convert_eval_results_supports_v1_and_legacy_samples():
     assert v1["info"] == {"source": "test", "grader_note": "kept as metadata"}
 
 
+def test_convert_eval_results_uses_provider_token_counts_without_token_ids():
+    samples = [
+        {
+            "id": "trace-usage",
+            "task": {"idx": 1, "prompt": "Question"},
+            "nodes": [
+                {"message": {"role": "user", "content": "Question"}},
+                {
+                    "parent": 0,
+                    "message": {"role": "assistant", "content": "Answer"},
+                    "sampled": True,
+                    "usage": {"prompt_tokens": 11, "completion_tokens": 3},
+                },
+            ],
+            "rewards": {"correct": 1.0},
+        }
+    ]
+
+    (converted,) = convert_eval_results(samples)
+
+    assert converted["trajectory"][0]["num_input_tokens"] == 11
+    assert converted["trajectory"][0]["num_output_tokens"] == 3
+
+
 class TestHasEvalFiles:
     """Tests for _has_eval_files function"""
 
@@ -96,6 +122,24 @@ class TestHasEvalFiles:
     def test_empty_directory(self, tmp_path):
         """Empty directory returns False"""
         assert _has_eval_files(tmp_path) is False
+
+    def test_native_run_requires_valid_run_info(self, tmp_path):
+        (tmp_path / "config.toml").write_text('model = "test-model"\n')
+        (tmp_path / "results.jsonl").write_text("")
+
+        assert _has_eval_files(tmp_path) is False
+
+        (tmp_path / "run.json").write_text(
+            json.dumps(
+                {
+                    "schema": "verifiers.eval-run/v1",
+                    "protocol_version": 1,
+                    "trace_schema_version": 1,
+                    "run_id": "run-id",
+                }
+            )
+        )
+        assert _has_eval_files(tmp_path) is True
 
 
 class TestValidateEvalPath:
@@ -682,6 +726,26 @@ class TestLoadEvalDirectory:
 
         with pytest.raises(json.JSONDecodeError):
             _load_eval_directory(tmp_path)
+
+    def test_loads_native_run_id_from_run_info(self, tmp_path):
+        (tmp_path / "run.json").write_text(
+            json.dumps(
+                {
+                    "schema": "verifiers.eval-run/v1",
+                    "protocol_version": 1,
+                    "trace_schema_version": 1,
+                    "run_id": "persisted-run-id",
+                }
+            )
+        )
+        (tmp_path / "config.toml").write_text(
+            'model = "openai/gpt-4"\nnum_tasks = 2\n\n[taskset]\nid = "gsm8k-v1"\n'
+        )
+        (tmp_path / "results.jsonl").write_text("")
+
+        data = _load_eval_directory(tmp_path)
+
+        assert data["metadata"]["run_id"] == "persisted-run-id"
 
 
 if __name__ == "__main__":

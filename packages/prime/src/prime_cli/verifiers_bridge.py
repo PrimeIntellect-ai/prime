@@ -150,8 +150,8 @@ def _write_help(text: str) -> None:
 
 def _append_eval_options(help_text: str) -> str:
     extra_lines = [
-        "  --skip-upload               Skip uploading evaluation results to the platform.",
-        "  --env-path PATH             Explicit path for upstream environment metadata.",
+        "  --skip-upload               V0 only: skip uploading evaluation results.",
+        "  --env-path PATH             V0/hosted: path for environment metadata.",
         "  --hosted                    Run the evaluation on the platform instead of locally.",
         "  stop EVAL_ID                Cancel a running hosted evaluation.",
         "  --poll-interval FLOAT       Polling interval in seconds for hosted evaluations.",

@@ -55,6 +55,7 @@ def convert_eval_results(samples: list[dict]) -> list[dict]:
     """Convert v1 traces to the sample schema while preserving legacy results."""
     trace_type = None
     trace_fields = {}
+    node_fields = {}
     rollout_counts: dict[int, int] = {}
     converted = []
 
@@ -72,12 +73,17 @@ def convert_eval_results(samples: list[dict]) -> list[dict]:
 
         if trace_type is None:
             from verifiers.v1 import WireTrace
+            from verifiers.v1.graph import MessageNode
 
             trace_type = WireTrace
             trace_fields = trace_type.model_fields
-        trace = trace_type.model_validate(
-            {key: value for key, value in sample.items() if key in trace_fields}
-        )
+            node_fields = MessageNode.model_fields
+        trace_data = {key: value for key, value in sample.items() if key in trace_fields}
+        trace_data["nodes"] = [
+            {key: value for key, value in node.items() if key in node_fields}
+            for node in sample["nodes"]
+        ]
+        trace = trace_type.model_validate(trace_data)
         task = trace.task.model_dump(mode="json", exclude_none=True)
         branches = trace.branches
         main_messages = (
@@ -95,8 +101,8 @@ def convert_eval_results(samples: list[dict]) -> list[dict]:
                     for message in branch.messages
                 ],
                 "reward": trace.reward,
-                "num_input_tokens": branch.prompt_len,
-                "num_output_tokens": branch.completion_len,
+                "num_input_tokens": branch.prompt_len or branch.num_prompt_tokens,
+                "num_output_tokens": branch.completion_len or branch.num_completion_tokens,
             }
             for branch in branches
         ]

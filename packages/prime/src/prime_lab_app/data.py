@@ -16,7 +16,7 @@ from prime_cli.api.rl import RLClient
 from prime_cli.client import APIClient, APIError
 from prime_cli.core import Config
 from prime_cli.utils.time_utils import format_time_ago
-from prime_cli.verifiers_process import load_eval_config
+from prime_cli.verifiers_process import load_eval_artifacts
 from prime_evals import EvalsClient
 
 from .cache import (
@@ -1034,7 +1034,7 @@ def discover_local_eval_runs(
                 continue
             if _safe_is_file(run_dir / "config.toml"):
                 try:
-                    config = load_eval_config(run_dir)
+                    run_info, config = load_eval_artifacts(run_dir)
                 except ValueError:
                     continue
                 taskset = config.get("taskset")
@@ -1042,7 +1042,7 @@ def discover_local_eval_runs(
                     "id"
                 )
                 model = config.get("model")
-                run_id = run_dir.name
+                run_id = run_info["run_id"]
                 metadata = {
                     "run_id": run_id,
                     "num_examples": config.get("num_tasks"),
@@ -1251,7 +1251,7 @@ def _local_eval_item(run: dict[str, Any], idx: int, *, section: str = "local-eva
     reward_text = f"{reward:.4g}" if reward_is_numeric else "-"
     run_id = str(run.get("run_id") or idx)
     row_date = _local_path_time_ago(run.get("path"))
-    status = str(metadata.get("status") or "completed").upper()
+    status = str(metadata.get("status") or "local").upper()
 
     return LabItem(
         key=f"local-eval:{run_id}:{idx}",
@@ -1274,10 +1274,8 @@ def _local_eval_item(run: dict[str, Any], idx: int, *, section: str = "local-eva
             "type": "local_eval",
             "source": "local",
             "row_date": row_date,
-            "badges": [
-                {"label": "LOCAL", "style": STATUS_LOCAL},
-                {"label": status, "style": _status_style(status)},
-            ],
+            "badges": [{"label": "LOCAL", "style": STATUS_LOCAL}]
+            + ([{"label": status, "style": _status_style(status)}] if status != "LOCAL" else []),
         },
     )
 
@@ -1907,4 +1905,6 @@ def _status_style(status: str) -> str:
         return STATUS_WARNING
     if normalized in {"FAILED", "ERROR", "CANCELLED"}:
         return STATUS_ERROR
+    if normalized == "LOCAL":
+        return STATUS_LOCAL
     return "dim"

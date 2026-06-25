@@ -44,7 +44,7 @@ from ..verifiers_bridge import (
     run_eval_passthrough,
     run_eval_view,
 )
-from ..verifiers_process import exec_eval_process, load_eval_config
+from ..verifiers_process import exec_eval_process, load_eval_artifacts
 
 console = get_console()
 
@@ -86,7 +86,7 @@ HOSTED_LOGS_RATE_LIMIT_WAIT_SECONDS = 30
 HOSTED_LOGS_RETRY_WAIT_SECONDS = 10
 HOSTED_LOGS_STATUS_UPDATE_EVERY_POLLS = 6
 EVAL_TABLE_MAX_TEXT_WIDTH = 30
-EVAL_RUN_EXAMPLE_COMMAND = "prime eval run harbor_v1 -n 1"
+EVAL_RUN_EXAMPLE_COMMAND = "prime eval run harbor -n 1"
 EVAL_HOSTED_LABEL = "HOSTED"
 EVAL_LOCAL_LABEL = "LOCAL"
 # Legacy verifiers config fields/flags are accepted through the parser only so
@@ -919,7 +919,7 @@ def get_samples(
 
 def _load_eval_directory(directory: Path) -> dict:
     if (directory / "config.toml").is_file():
-        config = load_eval_config(directory)
+        run_info, config = load_eval_artifacts(directory)
         results_path = directory / "results.jsonl"
         taskset = config.get("taskset")
         env_field = (taskset.get("id") if isinstance(taskset, dict) else None) or config.get("id")
@@ -936,7 +936,7 @@ def _load_eval_directory(directory: Path) -> dict:
             "metrics": {"reward": sum(rewards) / len(rewards)} if rewards else {},
             "metadata": {
                 "framework": "verifiers",
-                "run_id": directory.name,
+                "run_id": run_info["run_id"],
                 "num_examples": config.get("num_tasks"),
                 "rollouts_per_example": config.get("num_rollouts"),
                 "resolved_config": config,
@@ -977,7 +977,7 @@ def _load_eval_directory(directory: Path) -> dict:
 def _has_eval_files(directory: Path) -> bool:
     if (directory / "config.toml").is_file():
         try:
-            load_eval_config(directory)
+            load_eval_artifacts(directory)
         except ValueError:
             return False
         return (directory / "results.jsonl").is_file()
@@ -992,6 +992,7 @@ def _validate_eval_path(path_str: str) -> Path:
         # Auto-correct known artifact files to their run directory.
         if path.name in (
             "config.toml",
+            "run.json",
             "results.jsonl",
             "eval.log",
             "metadata.json",
@@ -1530,10 +1531,7 @@ def run_eval_cmd(
         environment = resume_dir
         passthrough_args = [f"--resume={resume_dir}", *passthrough_args]
 
-    legacy_eval = any(arg in ("--save-results", "-s") for arg in passthrough_args) or any(
-        ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
-        for name in ("skip_upload", "env_path")
-    )
+    legacy_eval = "--save-results" in passthrough_args
     if is_help_request(environment or "", passthrough_args):
         if hosted or legacy_eval:
             print_eval_run_help(compatibility=True)
@@ -1543,30 +1541,25 @@ def run_eval_cmd(
             return
         print_eval_run_help(verifiers_args)
 
-    if environment is None:
-        if verifiers_args and not hosted:
-            print_eval_run_help(verifiers_args)
-        console.print("[red]Error:[/red] Missing argument 'ENVIRONMENT'.")
-        console.print(f"[dim]Example: {EVAL_RUN_EXAMPLE_COMMAND}[/dim]")
-        raise typer.Exit(2)
-
-    if environment.startswith("-"):
-        console.print("[red]Error:[/red] Environment/config must be the first argument.")
-        console.print(f"[dim]Example: {EVAL_RUN_EXAMPLE_COMMAND}[/dim]")
-        raise typer.Exit(2)
-
-    env_dir_path: Optional[str] = None
     poll_interval_was_provided = (
         ctx.get_parameter_source("poll_interval") == ParameterSource.COMMANDLINE
     )
-    local_passthrough_args = list(passthrough_args)
-
-    if not hosted:
-        if sampling_args is not None and legacy_eval:
-            local_passthrough_args.extend(["--sampling-args", sampling_args])
-        elif sampling_args is not None:
+    if not hosted and not legacy_eval and verifiers_args:
+        compatibility_options = [
+            flag
+            for flag, name in (("--skip-upload", "skip_upload"), ("--env-path", "env_path"))
+            if ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
+        ]
+        if compatibility_options:
             console.print(
-                "[red]Error:[/red] local v1 evals use --sampling.* options "
+                "[red]Error:[/red] V1 runs do not use "
+                + ", ".join(compatibility_options)
+                + "; use `prime eval push` after the run."
+            )
+            raise typer.Exit(2)
+        if sampling_args is not None:
+            console.print(
+                "[red]Error:[/red] local V1 evals use --sampling.* options "
                 "(for example, --sampling.temperature 0.7)"
             )
             raise typer.Exit(2)
@@ -1587,6 +1580,26 @@ def run_eval_cmd(
                 + ", ".join(used_hosted_only_args)
             )
             raise typer.Exit(1)
+        exec_eval_process(verifiers_args, plain=is_plain_mode())
+        return
+
+    if environment is None:
+        if verifiers_args and not hosted:
+            print_eval_run_help(verifiers_args)
+        console.print("[red]Error:[/red] Missing argument 'ENVIRONMENT'.")
+        console.print(f"[dim]Example: {EVAL_RUN_EXAMPLE_COMMAND}[/dim]")
+        raise typer.Exit(2)
+
+    if environment.startswith("-"):
+        console.print("[red]Error:[/red] Environment/config must be the first argument.")
+        console.print(f"[dim]Example: {EVAL_RUN_EXAMPLE_COMMAND}[/dim]")
+        raise typer.Exit(2)
+
+    env_dir_path: Optional[str] = None
+    local_passthrough_args = list(passthrough_args)
+
+    if not hosted and sampling_args is not None:
+        local_passthrough_args.extend(["--sampling-args", sampling_args])
 
     if hosted:
         _reject_legacy_unsupported_hosted_flags(passthrough_args)
@@ -1927,5 +1940,3 @@ def run_eval_cmd(
             env_path=env_path,
         )
         return
-
-    exec_eval_process(verifiers_args, plain=is_plain_mode())

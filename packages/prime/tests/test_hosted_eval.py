@@ -1312,66 +1312,56 @@ id = "gsm8k-v1"
 """.strip()
     )
 
-    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
-        captured["environment"] = environment
-        captured["passthrough_args"] = passthrough_args
-        captured["skip_upload"] = skip_upload
-        captured["env_path"] = env_path
+    def fake_exec_eval_process(args, plain):
+        captured["args"] = args
+        captured["plain"] = plain
 
-    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
+    monkeypatch.setattr("prime_cli.commands.evals.exec_eval_process", fake_exec_eval_process)
 
     result = runner.invoke(
         app,
-        ["eval", "run", "@", str(config_path), "--skip-upload"],
+        ["eval", "run", "@", str(config_path)],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
     assert result.exit_code == 0, result.output
     assert captured == {
-        "environment": str(config_path),
-        "passthrough_args": [],
-        "skip_upload": True,
-        "env_path": None,
+        "args": ["@", str(config_path)],
+        "plain": False,
     }
 
 
 def test_eval_run_resume_passthrough(monkeypatch, tmp_path):
     captured = {}
 
-    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
-        captured["environment"] = environment
-        captured["passthrough_args"] = passthrough_args
-        captured["skip_upload"] = skip_upload
-        captured["env_path"] = env_path
+    def fake_exec_eval_process(args, plain):
+        captured["args"] = args
+        captured["plain"] = plain
 
-    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
+    monkeypatch.setattr("prime_cli.commands.evals.exec_eval_process", fake_exec_eval_process)
     output_dir = tmp_path / "previous-run"
 
     result = runner.invoke(
         app,
-        ["eval", "run", "--resume", str(output_dir), "--skip-upload"],
+        ["eval", "run", "--resume", str(output_dir)],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
 
     assert result.exit_code == 0, result.output
     assert captured == {
-        "environment": str(output_dir),
-        "passthrough_args": ["--resume", str(output_dir)],
-        "skip_upload": True,
-        "env_path": None,
+        "args": ["--resume", str(output_dir)],
+        "plain": False,
     }
 
 
 def test_eval_run_local_v1_sampling_passthrough(monkeypatch):
     captured = {}
 
-    def fake_run_eval_passthrough(environment, passthrough_args, skip_upload, env_path):
-        captured["environment"] = environment
-        captured["passthrough_args"] = passthrough_args
-        captured["skip_upload"] = skip_upload
-        captured["env_path"] = env_path
+    def fake_exec_eval_process(args, plain):
+        captured["args"] = args
+        captured["plain"] = plain
 
-    monkeypatch.setattr("prime_cli.commands.evals.run_eval_passthrough", fake_run_eval_passthrough)
+    monkeypatch.setattr("prime_cli.commands.evals.exec_eval_process", fake_exec_eval_process)
 
     result = runner.invoke(
         app,
@@ -1381,11 +1371,60 @@ def test_eval_run_local_v1_sampling_passthrough(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured == {
-        "environment": "gsm8k-v1",
-        "passthrough_args": ["--sampling.temperature", "0.2"],
-        "skip_upload": False,
-        "env_path": None,
+        "args": ["gsm8k-v1", "--sampling.temperature", "0.2"],
+        "plain": False,
     }
+
+
+def test_eval_run_local_v1_accepts_option_first_argv(monkeypatch):
+    captured = {}
+
+    def fake_exec_eval_process(args, plain):
+        captured["args"] = args
+        captured["plain"] = plain
+
+    monkeypatch.setattr("prime_cli.commands.evals.exec_eval_process", fake_exec_eval_process)
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "--taskset.id", "gsm8k-v1", "--dry-run"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "args": ["--taskset.id", "gsm8k-v1", "--dry-run"],
+        "plain": False,
+    }
+
+
+def test_eval_run_local_v1_keeps_short_shuffle_flag(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.evals.exec_eval_process",
+        lambda args, plain: captured.update(args=args, plain=plain),
+    )
+
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k-v1", "-s", "--dry-run"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["args"] == ["gsm8k-v1", "-s", "--dry-run"]
+
+
+def test_eval_run_local_v1_rejects_old_upload_flags():
+    result = runner.invoke(
+        app,
+        ["eval", "run", "gsm8k-v1", "--skip-upload"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 2
+    assert "use `prime eval push` after the run" in result.output
 
 
 def test_eval_run_legacy_sampling_args_passthrough(monkeypatch):
@@ -1403,7 +1442,7 @@ def test_eval_run_legacy_sampling_args_passthrough(monkeypatch):
             "eval",
             "run",
             "legacy-env",
-            "-s",
+            "--save-results",
             "--sampling-args",
             '{"temperature":0.2}',
         ],
@@ -1414,7 +1453,7 @@ def test_eval_run_legacy_sampling_args_passthrough(monkeypatch):
     assert captured == {
         "environment": "legacy-env",
         "passthrough_args": [
-            "-s",
+            "--save-results",
             "--sampling-args",
             '{"temperature":0.2}',
         ],

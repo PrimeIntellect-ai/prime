@@ -220,7 +220,7 @@ def test_push_image_source_image_multi_rejects_destination(monkeypatch):
     assert "single-image transfers" in result.output
 
 
-def test_publish_image_calls_visibility_endpoint(monkeypatch):
+def test_publish_image_passes_team_prefixed_ref_to_backend(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
@@ -241,11 +241,11 @@ def test_publish_image_calls_visibility_endpoint(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PUBLIC", "teamId": "abc123"}
+    assert captured["path"] == "/images/team-abc123/rehl/latest/visibility"
+    assert captured["json"] == {"visibility": "PUBLIC"}
 
 
-def test_unpublish_image_parses_team_id_prefix(monkeypatch):
+def test_unpublish_image_passes_team_prefixed_ref_to_backend(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
@@ -266,8 +266,21 @@ def test_unpublish_image_parses_team_id_prefix(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PRIVATE", "teamId": "abc123"}
+    assert captured["path"] == "/images/team-abc123/rehl/latest/visibility"
+    assert captured["json"] == {"visibility": "PRIVATE"}
+
+
+def test_publish_image_rejects_empty_team_prefix(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(
+        app,
+        ["images", "publish", "team-/rehl:latest"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "Invalid team image reference" in result.output
 
 
 def test_publish_image_accepts_owner_prefixed_personal_ref(monkeypatch):
@@ -370,7 +383,7 @@ def test_delete_image_passes_slug_prefixed_ref_to_backend(monkeypatch):
     assert captured["params"] is None
 
 
-def test_delete_image_parses_team_id_prefix(monkeypatch):
+def test_delete_image_passes_team_prefixed_ref_to_backend(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
@@ -391,8 +404,8 @@ def test_delete_image_parses_team_id_prefix(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "DELETE"
-    assert captured["path"] == "/images/rehl/latest"
-    assert captured["params"] == {"teamId": "abc123"}
+    assert captured["path"] == "/images/team-abc123/rehl/latest"
+    assert captured["params"] is None
 
 
 def test_push_image_accepts_dockerfile_outside_context(tmp_path, monkeypatch):

@@ -8,11 +8,13 @@ import re
 import subprocess
 import sys
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import NoReturn, Optional
 
+import click
 import httpx
 import toml
 import typer
@@ -24,8 +26,12 @@ from .client import APIClient, APIError
 from .utils.env_metadata import find_environment_metadata, get_environment_metadata
 from .utils.eval_push import convert_eval_results, load_results_jsonl, push_eval_results_to_hub
 from .utils.plain import get_console, is_plain_mode
-from .verifiers_plugin import PrimeVerifiersPlugin, load_verifiers_prime_plugin
-from .verifiers_process import exec_eval_process
+from .verifiers_plugin import (
+    V1_EVAL_MODULE,
+    PrimeVerifiersPlugin,
+    load_verifiers_prime_plugin,
+    resolve_workspace_python,
+)
 
 console = get_console()
 
@@ -36,6 +42,7 @@ PRIME_SLUG = "primeintellect"
 INTERNAL_ENV_DISPLAY_HEADER = "X-Prime-Eval-Env-Display"
 LEGACY_EVAL_MODULE = "verifiers.cli.commands.eval"
 EVAL_PREFLIGHT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=60.0)
+PROTOCOL_VERSIONS = (1, 1)
 MODULE_TO_PRIME_COMMAND = {
     "verifiers.cli.commands.eval": "prime eval run",
     "verifiers.v1.cli.eval.main": "prime eval run",
@@ -73,6 +80,88 @@ class ResolvedEnvironment:
 class EndpointResolution:
     model: str
     base_url: str
+
+
+def exec_eval_process(
+    args: Sequence[str], *, cwd: Path | None = None, plain: bool = False
+) -> NoReturn:
+    workspace = (cwd or Path.cwd()).resolve()
+    command = [resolve_workspace_python(workspace), "-m", V1_EVAL_MODULE]
+    env = os.environ.copy()
+    if plain:
+        env.update(NO_COLOR="1", PYDANTIC_CONFIG_PLAIN="1")
+    result = subprocess.run(
+        [*command, "--protocol-version"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
+        raise click.ClickException(f"Verifiers exited with status {result.returncode}: {detail}")
+    try:
+        protocol = json.loads(result.stdout)
+        versions = (
+            protocol["protocol_version"],
+            protocol["trace_schema_version"],
+        )
+        compatible = versions == PROTOCOL_VERSIONS and {"run", "resolve"}.issubset(
+            protocol["operations"]
+        )
+    except (json.JSONDecodeError, KeyError, TypeError):
+        compatible = False
+        versions = None
+    if not compatible:
+        raise click.ClickException(
+            f"Unsupported Verifiers protocol {versions}; expected {PROTOCOL_VERSIONS}"
+        )
+
+    run_args = list(args)
+    if not any(arg in ("-h", "--help") for arg in run_args):
+        result = subprocess.run(
+            [*command, "resolve", "--format", "json", *run_args],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        if result.returncode:
+            detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
+            raise click.ClickException(
+                f"Verifiers resolve exited with status {result.returncode}: {detail}"
+            )
+        try:
+            resolved = json.loads(result.stdout)
+            versions = (
+                resolved["protocol_version"],
+                resolved["trace_schema_version"],
+            )
+            compatible = (
+                resolved["operation"] == "resolve"
+                and versions == PROTOCOL_VERSIONS
+                and isinstance(resolved["run_id"], str)
+                and bool(resolved["run_id"])
+                and isinstance(resolved["output_dir"], str)
+                and isinstance(resolved["resume"], bool)
+                and isinstance(resolved["config"], dict)
+            )
+        except (json.JSONDecodeError, KeyError, TypeError):
+            compatible = False
+            versions = None
+        if not compatible:
+            raise click.ClickException(
+                f"Unsupported Verifiers resolve response {versions}; expected {PROTOCOL_VERSIONS}"
+            )
+        if not resolved["resume"]:
+            run_args.extend(("--uuid", resolved["run_id"]))
+
+    command.extend(("run", *run_args))
+    if workspace != Path.cwd():
+        os.chdir(workspace)
+    os.execvpe(command[0], command, env)
 
 
 def is_help_request(primary_arg: str, passthrough_args: list[str]) -> bool:

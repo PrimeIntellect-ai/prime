@@ -26,7 +26,7 @@ from ..utils import (
 )
 from ..utils.display import get_eval_viewer_url
 from ..utils.env_metadata import find_environment_metadata
-from ..utils.eval_push import convert_eval_results, load_results_jsonl
+from ..utils.eval_push import convert_eval_results, load_eval_config, load_results_jsonl
 from ..utils.hosted_eval import (
     EvalStatus,
     HostedEvalConfig,
@@ -39,12 +39,12 @@ from ..verifiers_bridge import (
     _is_config_target,
     _resolve_environment_reference,
     _split_owner_and_name,
+    exec_eval_process,
     is_help_request,
     print_eval_run_help,
     run_eval_passthrough,
     run_eval_view,
 )
-from ..verifiers_process import exec_eval_process, load_eval_config
 
 console = get_console()
 

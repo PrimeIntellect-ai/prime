@@ -7,8 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from prime_cli.utils.eval_push import convert_eval_results
-from prime_cli.verifiers_process import load_eval_config
+from prime_cli.utils.eval_push import convert_eval_results, load_eval_config
 
 from .models import LabItem
 

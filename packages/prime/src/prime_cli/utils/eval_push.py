@@ -1,4 +1,5 @@
 import json
+import tomllib
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -12,6 +13,14 @@ from .env_metadata import find_environment_metadata
 from .plain import get_console
 
 console = get_console()
+
+
+def load_eval_config(run_dir: Path) -> dict:
+    """Load a native V1 run's resolved config."""
+    try:
+        return tomllib.loads((run_dir / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Invalid Verifiers eval config: {run_dir / 'config.toml'}") from exc
 
 
 def load_results_jsonl(path: Path) -> list[dict]:

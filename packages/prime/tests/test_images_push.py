@@ -133,7 +133,7 @@ def test_push_image_source_image_queues_transfer_without_upload(monkeypatch):
                 "build_id": "build-123",
                 "buildIds": ["build-123"],
                 "upload_url": None,
-                "fullImagePath": "cmk123/ubuntu:22.04",
+                "fullImagePath": "prime/cmk123/ubuntu:22.04",
                 "visibility": "PRIVATE",
             }
 
@@ -172,7 +172,7 @@ def test_push_image_source_image_with_destination_override(monkeypatch):
             return {
                 "build_id": "build-123",
                 "buildIds": ["build-123"],
-                "fullImagePath": "cmk123/myubuntu:22.04",
+                "fullImagePath": "prime/cmk123/myubuntu:22.04",
                 "visibility": "PUBLIC",
             }
 
@@ -220,7 +220,95 @@ def test_push_image_source_image_multi_rejects_destination(monkeypatch):
     assert "single-image transfers" in result.output
 
 
-def test_publish_image_passes_team_prefixed_ref_to_backend(monkeypatch):
+def test_publish_image_passes_prime_team_ref_to_backend(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = json
+            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "publish", "prime/team-abc123/rehl:latest"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "PATCH"
+    assert captured["path"] == "/images/prime/team-abc123/rehl/latest/visibility"
+    assert captured["json"] == {"visibility": "PUBLIC"}
+
+
+def test_unpublish_image_passes_prime_team_ref_to_backend(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = json
+            return {"success": True, "message": "ok", "visibility": "PRIVATE", "images": []}
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "unpublish", "prime/team-abc123/rehl:latest"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "PATCH"
+    assert captured["path"] == "/images/prime/team-abc123/rehl/latest/visibility"
+    assert captured["json"] == {"visibility": "PRIVATE"}
+
+
+def test_publish_image_rejects_empty_team_prefix(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(
+        app,
+        ["images", "publish", "prime/team-/rehl:latest"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "Invalid team image reference" in result.output
+
+
+def test_publish_image_passes_legacy_user_id_ref_to_backend(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = json
+            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "publish", "cmk123/rehl:latest"],
+        env={**TEST_ENV, "PRIME_USER_ID": "cmk123"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "PATCH"
+    assert captured["path"] == "/images/cmk123/rehl/latest/visibility"
+    assert captured["json"] == {"visibility": "PUBLIC"}
+
+
+def test_publish_image_passes_legacy_team_id_ref_to_backend(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
@@ -245,45 +333,7 @@ def test_publish_image_passes_team_prefixed_ref_to_backend(monkeypatch):
     assert captured["json"] == {"visibility": "PUBLIC"}
 
 
-def test_unpublish_image_passes_team_prefixed_ref_to_backend(monkeypatch):
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
-    captured = {}
-
-    class DummyAPIClient:
-        def request(self, method, path, json=None, params=None):
-            captured["method"] = method
-            captured["path"] = path
-            captured["json"] = json
-            return {"success": True, "message": "ok", "visibility": "PRIVATE", "images": []}
-
-    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
-
-    result = runner.invoke(
-        app,
-        ["images", "unpublish", "team-abc123/rehl:latest"],
-        env=TEST_ENV,
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/team-abc123/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PRIVATE"}
-
-
-def test_publish_image_rejects_empty_team_prefix(monkeypatch):
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
-
-    result = runner.invoke(
-        app,
-        ["images", "publish", "team-/rehl:latest"],
-        env=TEST_ENV,
-    )
-
-    assert result.exit_code == 1
-    assert "Invalid team image reference" in result.output
-
-
-def test_publish_image_accepts_owner_prefixed_personal_ref(monkeypatch):
+def test_publish_image_passes_prime_user_id_ref_to_backend(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
@@ -298,17 +348,17 @@ def test_publish_image_accepts_owner_prefixed_personal_ref(monkeypatch):
 
     result = runner.invoke(
         app,
-        ["images", "publish", "cmk123/rehl:latest"],
+        ["images", "publish", "prime/cmk123/rehl:latest"],
         env={**TEST_ENV, "PRIME_USER_ID": "cmk123"},
     )
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/rehl/latest/visibility"
+    assert captured["path"] == "/images/prime/cmk123/rehl/latest/visibility"
     assert captured["json"] == {"visibility": "PUBLIC"}
 
 
-def test_publish_image_passes_slug_prefixed_ref_to_backend(monkeypatch):
+def test_publish_image_passes_prime_slug_ref_to_backend(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
@@ -323,17 +373,17 @@ def test_publish_image_passes_slug_prefixed_ref_to_backend(monkeypatch):
 
     result = runner.invoke(
         app,
-        ["images", "publish", "alice/rehl:latest"],
+        ["images", "publish", "prime/alice/rehl:latest"],
         env={**TEST_ENV, "PRIME_USER_ID": "cmk123"},
     )
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/alice/rehl/latest/visibility"
+    assert captured["path"] == "/images/prime/alice/rehl/latest/visibility"
     assert captured["json"] == {"visibility": "PUBLIC"}
 
 
-def test_delete_image_accepts_owner_prefixed_personal_ref(monkeypatch):
+def test_delete_image_passes_prime_user_id_ref_to_backend(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
@@ -348,17 +398,17 @@ def test_delete_image_accepts_owner_prefixed_personal_ref(monkeypatch):
 
     result = runner.invoke(
         app,
-        ["images", "delete", "cmk123/rehl:latest", "--yes"],
+        ["images", "delete", "prime/cmk123/rehl:latest", "--yes"],
         env={**TEST_ENV, "PRIME_USER_ID": "cmk123"},
     )
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "DELETE"
-    assert captured["path"] == "/images/rehl/latest"
+    assert captured["path"] == "/images/prime/cmk123/rehl/latest"
     assert captured["params"] is None
 
 
-def test_delete_image_passes_slug_prefixed_ref_to_backend(monkeypatch):
+def test_delete_image_passes_prime_slug_ref_to_backend(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
@@ -373,17 +423,17 @@ def test_delete_image_passes_slug_prefixed_ref_to_backend(monkeypatch):
 
     result = runner.invoke(
         app,
-        ["images", "delete", "research/rehl:latest", "--yes"],
+        ["images", "delete", "prime/research/rehl:latest", "--yes"],
         env={**TEST_ENV, "PRIME_USER_ID": "cmk123", "PRIME_TEAM_ID": "team-1"},
     )
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "DELETE"
-    assert captured["path"] == "/images/research/rehl/latest"
+    assert captured["path"] == "/images/prime/research/rehl/latest"
     assert captured["params"] is None
 
 
-def test_delete_image_passes_team_prefixed_ref_to_backend(monkeypatch):
+def test_delete_image_passes_prime_team_ref_to_backend(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
@@ -398,13 +448,13 @@ def test_delete_image_passes_team_prefixed_ref_to_backend(monkeypatch):
 
     result = runner.invoke(
         app,
-        ["images", "delete", "team-abc123/rehl:latest", "--yes"],
+        ["images", "delete", "prime/team-abc123/rehl:latest", "--yes"],
         env=TEST_ENV,
     )
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "DELETE"
-    assert captured["path"] == "/images/team-abc123/rehl/latest"
+    assert captured["path"] == "/images/prime/team-abc123/rehl/latest"
     assert captured["params"] is None
 
 
@@ -491,7 +541,7 @@ def test_push_image_source_image_result_shape_uses_full_image_path(monkeypatch):
                         "sourceImage": "ubuntu:jammy",
                         "success": True,
                         "buildId": "buildabc",
-                        "fullImagePath": "cmkabc/ubuntu:jammy",
+                        "fullImagePath": "prime/cmkabc/ubuntu:jammy",
                     }
                 ],
                 "failed": [],
@@ -507,7 +557,7 @@ def test_push_image_source_image_result_shape_uses_full_image_path(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "buildabc" in result.output
-    assert "cmkabc/ubuntu:jammy" in result.output
+    assert "prime/cmkabc/ubuntu:jammy" in result.output
 
 
 def test_push_image_source_image_result_shape_reports_all_failures(monkeypatch):
@@ -568,7 +618,7 @@ def test_push_image_source_image_result_shape_reports_partial_failures(monkeypat
                         "sourceImage": "ubuntu:jammy",
                         "success": True,
                         "buildId": "buildabc",
-                        "fullImagePath": "cmkabc/ubuntu:jammy",
+                        "fullImagePath": "prime/cmkabc/ubuntu:jammy",
                     },
                     failed,
                 ],

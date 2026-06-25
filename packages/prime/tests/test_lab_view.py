@@ -1847,20 +1847,9 @@ def test_discover_local_eval_runs(tmp_path: Path) -> None:
     ]
 
 
-def test_discover_native_eval_uses_persisted_run_id(tmp_path: Path) -> None:
+def test_discover_native_eval_uses_directory_run_id(tmp_path: Path) -> None:
     run_dir = tmp_path / "outputs" / "custom-directory"
     run_dir.mkdir(parents=True)
-    (run_dir / "run.json").write_text(
-        json.dumps(
-            {
-                "schema": "verifiers.eval-run/v1",
-                "protocol_version": 1,
-                "trace_schema_version": 1,
-                "run_id": "persisted-run-id",
-            }
-        ),
-        encoding="utf-8",
-    )
     (run_dir / "config.toml").write_text(
         'model = "openai/gpt-4"\n\n[taskset]\nid = "gsm8k-v1"\n',
         encoding="utf-8",
@@ -1869,7 +1858,7 @@ def test_discover_native_eval_uses_persisted_run_id(tmp_path: Path) -> None:
 
     (run,) = discover_local_eval_runs(tmp_path)
 
-    assert run["run_id"] == "persisted-run-id"
+    assert run["run_id"] == "custom-directory"
 
 
 def test_discover_local_eval_runs_skips_unreadable_output_dirs(tmp_path: Path) -> None:

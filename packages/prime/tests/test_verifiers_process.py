@@ -3,11 +3,7 @@ import subprocess
 
 import click
 import pytest
-from prime_cli.verifiers_process import (
-    exec_eval_process,
-    load_eval_artifacts,
-    load_run_info,
-)
+from prime_cli.verifiers_process import exec_eval_process
 
 
 class ExecCalled(Exception):
@@ -139,39 +135,3 @@ def test_exec_eval_process_rejects_invalid_resolve_response(monkeypatch, tmp_pat
 
     with pytest.raises(click.ClickException, match="Unsupported Verifiers resolve response"):
         exec_eval_process(["gsm8k-v1"])
-
-
-def test_load_eval_artifacts_validates_run_info(tmp_path) -> None:
-    (tmp_path / "run.json").write_text(
-        json.dumps(
-            {
-                "schema": "verifiers.eval-run/v1",
-                "protocol_version": 1,
-                "trace_schema_version": 1,
-                "run_id": "persisted-run-id",
-            }
-        )
-    )
-    (tmp_path / "config.toml").write_text('model = "test-model"\n')
-
-    run_info, config = load_eval_artifacts(tmp_path)
-
-    assert run_info == load_run_info(tmp_path)
-    assert run_info["run_id"] == "persisted-run-id"
-    assert config == {"model": "test-model"}
-
-
-def test_load_run_info_rejects_schema_mismatch(tmp_path) -> None:
-    (tmp_path / "run.json").write_text(
-        json.dumps(
-            {
-                "schema": "verifiers.eval-run/v1",
-                "protocol_version": 1,
-                "trace_schema_version": 2,
-                "run_id": "run-id",
-            }
-        )
-    )
-
-    with pytest.raises(ValueError, match="Invalid Verifiers eval run info"):
-        load_run_info(tmp_path)

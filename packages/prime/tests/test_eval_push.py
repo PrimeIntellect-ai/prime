@@ -123,22 +123,10 @@ class TestHasEvalFiles:
         """Empty directory returns False"""
         assert _has_eval_files(tmp_path) is False
 
-    def test_native_run_requires_valid_run_info(self, tmp_path):
+    def test_native_run_uses_config_and_results(self, tmp_path):
         (tmp_path / "config.toml").write_text('model = "test-model"\n')
         (tmp_path / "results.jsonl").write_text("")
 
-        assert _has_eval_files(tmp_path) is False
-
-        (tmp_path / "run.json").write_text(
-            json.dumps(
-                {
-                    "schema": "verifiers.eval-run/v1",
-                    "protocol_version": 1,
-                    "trace_schema_version": 1,
-                    "run_id": "run-id",
-                }
-            )
-        )
         assert _has_eval_files(tmp_path) is True
 
 
@@ -727,17 +715,7 @@ class TestLoadEvalDirectory:
         with pytest.raises(json.JSONDecodeError):
             _load_eval_directory(tmp_path)
 
-    def test_loads_native_run_id_from_run_info(self, tmp_path):
-        (tmp_path / "run.json").write_text(
-            json.dumps(
-                {
-                    "schema": "verifiers.eval-run/v1",
-                    "protocol_version": 1,
-                    "trace_schema_version": 1,
-                    "run_id": "persisted-run-id",
-                }
-            )
-        )
+    def test_loads_native_run_id_from_directory(self, tmp_path):
         (tmp_path / "config.toml").write_text(
             'model = "openai/gpt-4"\nnum_tasks = 2\n\n[taskset]\nid = "gsm8k-v1"\n'
         )
@@ -745,7 +723,7 @@ class TestLoadEvalDirectory:
 
         data = _load_eval_directory(tmp_path)
 
-        assert data["metadata"]["run_id"] == "persisted-run-id"
+        assert data["metadata"]["run_id"] == tmp_path.name
 
 
 if __name__ == "__main__":

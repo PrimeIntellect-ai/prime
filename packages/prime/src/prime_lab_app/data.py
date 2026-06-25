@@ -16,7 +16,7 @@ from prime_cli.api.rl import RLClient
 from prime_cli.client import APIClient, APIError
 from prime_cli.core import Config
 from prime_cli.utils.time_utils import format_time_ago
-from prime_cli.verifiers_process import load_eval_artifacts
+from prime_cli.verifiers_process import load_eval_config
 from prime_evals import EvalsClient
 
 from .cache import (
@@ -1034,7 +1034,7 @@ def discover_local_eval_runs(
                 continue
             if _safe_is_file(run_dir / "config.toml"):
                 try:
-                    run_info, config = load_eval_artifacts(run_dir)
+                    config = load_eval_config(run_dir)
                 except ValueError:
                     continue
                 taskset = config.get("taskset")
@@ -1042,7 +1042,7 @@ def discover_local_eval_runs(
                     "id"
                 )
                 model = config.get("model")
-                run_id = run_info["run_id"]
+                run_id = run_dir.name
                 metadata = {
                     "run_id": run_id,
                     "num_examples": config.get("num_tasks"),

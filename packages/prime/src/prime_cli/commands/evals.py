@@ -44,7 +44,7 @@ from ..verifiers_bridge import (
     run_eval_passthrough,
     run_eval_view,
 )
-from ..verifiers_process import exec_eval_process, load_eval_artifacts
+from ..verifiers_process import exec_eval_process, load_eval_config
 
 console = get_console()
 
@@ -919,7 +919,7 @@ def get_samples(
 
 def _load_eval_directory(directory: Path) -> dict:
     if (directory / "config.toml").is_file():
-        run_info, config = load_eval_artifacts(directory)
+        config = load_eval_config(directory)
         results_path = directory / "results.jsonl"
         taskset = config.get("taskset")
         env_field = (taskset.get("id") if isinstance(taskset, dict) else None) or config.get("id")
@@ -936,7 +936,7 @@ def _load_eval_directory(directory: Path) -> dict:
             "metrics": {"reward": sum(rewards) / len(rewards)} if rewards else {},
             "metadata": {
                 "framework": "verifiers",
-                "run_id": run_info["run_id"],
+                "run_id": directory.name,
                 "num_examples": config.get("num_tasks"),
                 "rollouts_per_example": config.get("num_rollouts"),
                 "resolved_config": config,
@@ -977,7 +977,7 @@ def _load_eval_directory(directory: Path) -> dict:
 def _has_eval_files(directory: Path) -> bool:
     if (directory / "config.toml").is_file():
         try:
-            load_eval_artifacts(directory)
+            load_eval_config(directory)
         except ValueError:
             return False
         return (directory / "results.jsonl").is_file()
@@ -992,7 +992,6 @@ def _validate_eval_path(path_str: str) -> Path:
         # Auto-correct known artifact files to their run directory.
         if path.name in (
             "config.toml",
-            "run.json",
             "results.jsonl",
             "eval.log",
             "metadata.json",

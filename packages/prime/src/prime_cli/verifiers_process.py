@@ -15,7 +15,6 @@ import click
 from .verifiers_plugin import V1_EVAL_MODULE, resolve_workspace_python
 
 PROTOCOL_VERSIONS = (1, 1)
-RUN_SCHEMA = "verifiers.eval-run/v1"
 
 
 def exec_eval_process(
@@ -100,32 +99,9 @@ def exec_eval_process(
     os.execvpe(command[0], command, env)
 
 
-def load_run_info(run_dir: Path) -> dict:
-    """Load and validate the stable identity record for a native V1 run."""
-    run_path = run_dir / "run.json"
-    try:
-        info = json.loads(run_path.read_text(encoding="utf-8"))
-        versions = (info["protocol_version"], info["trace_schema_version"])
-        valid = (
-            info["schema"] == RUN_SCHEMA
-            and versions == PROTOCOL_VERSIONS
-            and isinstance(info["run_id"], str)
-            and bool(info["run_id"])
-        )
-    except (OSError, json.JSONDecodeError, KeyError, TypeError):
-        valid = False
-    if not valid:
-        raise ValueError(f"Invalid Verifiers eval run info: {run_path}")
-    return info
-
-
 def load_eval_config(run_dir: Path) -> dict:
     """Load a native V1 run's resolved config."""
     try:
         return tomllib.loads((run_dir / "config.toml").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ValueError(f"Invalid Verifiers eval config: {run_dir / 'config.toml'}") from exc
-
-
-def load_eval_artifacts(run_dir: Path) -> tuple[dict, dict]:
-    return load_run_info(run_dir), load_eval_config(run_dir)

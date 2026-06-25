@@ -1386,8 +1386,10 @@ def _ensure_uv_project(workspace: Path, emit: Emit, runner: Runner) -> None:
     else:
         emit("Found pyproject.toml\n")
 
-    emit("Adding verifiers dependency\n")
-    _check_command(["uv", "add", "verifiers"], workspace, emit, runner)
+    # verifiers provides the v1 eval entrypoint; tasksets/harnesses ship the built-in v1 plugins
+    # (e.g. the `default` harness) that `prime eval run` resolves.
+    emit("Adding verifiers, tasksets, and harnesses dependencies\n")
+    _check_command(["uv", "add", "verifiers", "tasksets", "harnesses"], workspace, emit, runner)
 
 
 def _post_setup_call_to_action(options: LabSetupOptions) -> Panel:

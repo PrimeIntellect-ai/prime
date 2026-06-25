@@ -7,6 +7,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from prime_cli.utils.v1_results import (
+    is_v1_eval_dir,
+    is_v1_trace,
+    load_config,
+    v1_run_metadata,
+    v1_trace_to_record,
+)
+
 from .models import LabItem
 
 
@@ -33,6 +41,9 @@ class LocalEvalRun:
 
     def load_metadata(self) -> dict[str, Any]:
         if self.metadata is not None:
+            return self.metadata
+        if is_v1_eval_dir(self.path):  # v1 has config.toml, not a precomputed metadata.json
+            self.metadata = v1_run_metadata(load_config(self.path), self.path / "results.jsonl")
             return self.metadata
         meta_path = self.path / "metadata.json"
         try:
@@ -176,6 +187,8 @@ class LazyRunResults:
         finally:
             self._fh.seek(position)
         data = data if isinstance(data, dict) else {}
+        if is_v1_trace(data):  # adapt a v1 Trace to the v0 record shape the viewer renders
+            data = v1_trace_to_record(data)
         self._cache[index] = data
         return data
 

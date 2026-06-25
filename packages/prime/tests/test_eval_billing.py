@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import httpx
 import pytest
 import typer
@@ -183,10 +185,15 @@ def test_eval_run_model_alias_uses_local_endpoint_registry(monkeypatch, tmp_path
             install_mode="local",
         ),
     )
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._run_command",
-        lambda command, env=None: captured.update({"command": command, "env": env}),
-    )
+
+    def fake_run_command(command, env=None):
+        # Read the temp v1 eval config (passed via `@ <file>`) before the bridge unlinks it.
+        config_path = command[command.index("@") + 1]
+        captured.update(
+            {"command": command, "env": env, "config": Path(config_path).read_text()}
+        )
+
+    monkeypatch.setattr("prime_cli.verifiers_bridge._run_command", fake_run_command)
 
     run_eval_passthrough(
         environment="goblin-questions",
@@ -196,12 +203,14 @@ def test_eval_run_model_alias_uses_local_endpoint_registry(monkeypatch, tmp_path
     )
 
     command = captured["command"]
-    assert command[:3] == ["verifiers.cli.commands.eval", "goblin-questions", "-m"]
-    assert "gpt-4.1-mini" in command
-    assert "-b" not in command
-    assert "--api-base-url" not in command
-    assert "-k" not in command
-    assert "--api-key-var" not in command
+    assert command[1] == "-c"
+    assert "verifiers.v1.cli.eval" in command[2]
+    config = captured["config"]
+    # The endpoint registry alias resolves the model to its base_url (and skips the Prime
+    # Inference preflight, which would raise above).
+    assert 'base_url = "https://api.openai.com/v1"' in config
+    assert 'id = "goblin-questions"' in config
+    assert 'model = "gpt-4.1-mini"' in config
     assert captured["env"]["PRIME_API_KEY"] == "test-api-key"
 
 
@@ -471,55 +480,6 @@ def test_eval_run_continues_when_billing_preflight_times_out(monkeypatch):
     assert exc_info.value.exit_code == 0
     assert len(seen_billing_timeouts) == 2
     assert seen_billing_timeouts[1].read == 300.0
-
-
-@pytest.mark.parametrize("env_id_field", ["env_id", "id"])
-def test_eval_config_job_id_uses_config_env_id(monkeypatch, tmp_path, env_id_field):
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin", lambda console: DummyPlugin()
-    )
-    monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
-    monkeypatch.setattr("prime_cli.verifiers_bridge._validate_model", lambda *args: None)
-    monkeypatch.setattr(
-        "prime_cli.verifiers_bridge._preflight_inference_billing",
-        lambda *args: None,
-    )
-
-    config_path = tmp_path / "reverse-text.toml"
-    config_path.write_text(
-        f"""
-model = "openai/gpt-4.1-mini"
-
-[[eval]]
-{env_id_field} = "primeintellect/wordle"
-""".strip(),
-        encoding="utf-8",
-    )
-
-    prepared = []
-    commands = []
-
-    def fake_prepare(_plugin, env_reference, env_dir_path):
-        prepared.append((env_reference, env_dir_path))
-
-    def fake_run_command(command, env=None):
-        commands.append(command)
-
-    monkeypatch.setattr("prime_cli.verifiers_bridge._prepare_single_environment", fake_prepare)
-    monkeypatch.setattr("prime_cli.verifiers_bridge._run_command", fake_run_command)
-
-    run_eval_passthrough(
-        environment=str(config_path),
-        passthrough_args=[],
-        skip_upload=True,
-        env_path=None,
-    )
-
-    assert prepared == [("primeintellect/wordle", "./environments")]
-    assert commands
-    assert commands[0][1] == str(config_path)
-    assert any(arg.startswith("X-PI-Job-Id: wordle_") for arg in commands[0]), commands[0]
-    assert not any(arg.startswith("X-PI-Job-Id: reverse_text_") for arg in commands[0]), commands[0]
 
 
 def test_eval_provider_short_flag_is_not_treated_as_env_dir(monkeypatch, tmp_path):

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
-import uuid
+import tempfile
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -20,10 +20,13 @@ from prime_cli.core import Config
 
 from .api.inference import InferenceAPIError, InferenceClient, InferencePaymentRequiredError
 from .client import APIClient, APIError
-from .utils.env_metadata import find_environment_metadata, get_environment_metadata
-from .utils.eval_push import push_eval_results_to_hub
+from .utils.env_metadata import get_environment_metadata
 from .utils.plain import get_console
-from .verifiers_plugin import PrimeVerifiersPlugin, load_verifiers_prime_plugin
+from .verifiers_plugin import (
+    PrimeVerifiersPlugin,
+    load_verifiers_prime_plugin,
+    resolve_workspace_python,
+)
 
 console = get_console()
 
@@ -235,15 +238,6 @@ def _parse_value_option(
     return None
 
 
-def _has_flag(args: list[str], long_flag: str, short_flag: str) -> bool:
-    for arg in args:
-        if arg == long_flag or arg == short_flag:
-            return True
-        if arg.startswith(f"{long_flag}="):
-            return True
-    return False
-
-
 def _resolve_endpoint_alias(args: list[str], model: str) -> Optional[EndpointResolution]:
     endpoints_path = _parse_value_option(args, "--endpoints-path", "-e") or DEFAULT_ENDPOINTS_PATH
     try:
@@ -265,9 +259,17 @@ def _resolve_endpoint_alias(args: list[str], model: str) -> Optional[EndpointRes
         return None
 
     endpoint = endpoint_group[0]
+    # v1 verifiers' load_endpoints returns pydantic EndpointConfig (`.base_url`); older builds
+    # returned plain dicts (`url`). Support both.
+    if isinstance(endpoint, dict):
+        endpoint_model = endpoint.get("model")
+        endpoint_url = endpoint.get("url") or endpoint.get("base_url")
+    else:
+        endpoint_model = getattr(endpoint, "model", None)
+        endpoint_url = getattr(endpoint, "base_url", None) or getattr(endpoint, "url", None)
     return EndpointResolution(
-        model=str(endpoint.get("model") or model),
-        base_url=str(endpoint.get("url") or "").rstrip("/"),
+        model=str(endpoint_model or model),
+        base_url=str(endpoint_url or "").rstrip("/"),
     )
 
 
@@ -788,11 +790,6 @@ def _collect_eval_config_envs(config_path: Path, fallback_env_dir: str) -> list[
     return resolved
 
 
-def _env_name_from_reference(env_reference: str) -> str:
-    base_ref, _version = _split_version(env_reference)
-    return base_ref.rsplit("/", 1)[-1]
-
-
 def _collect_gepa_config_env(config_path: Path, fallback_env_dir: str) -> Optional[tuple[str, str]]:
     try:
         raw = toml.load(config_path)
@@ -900,45 +897,167 @@ def _preflight_inference_billing(
         raise typer.Exit(1) from exc
 
 
-def _build_job_id(env_name: str, model: str) -> str:
-    eval_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    job_uuid = str(uuid.uuid4())[:8]
-    sanitized_env = env_name.replace("-", "_").replace("/", "_")
-    sanitized_model = model.replace("/", "_").replace("-", "_")
-    return f"{sanitized_env}_{sanitized_model}_{eval_timestamp}_{job_uuid}"
+@dataclass
+class _EvalArgs:
+    """A `prime eval run` arg list partitioned for the v1 `eval` entrypoint.
+
+    Convenience flags (the v0 `vf-eval` surface prime users know — `-m`, `-b`, `-k`,
+    `--sampling-args`, …) are captured into a temp config TOML; genuine v1 flags
+    (`--num-tasks`, `--harness.id`, `--client.*`, `@ file.toml`, …) are forwarded verbatim
+    and override the temp config."""
+
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+    provider: Optional[str] = None
+    api_key_var: Optional[str] = None
+    endpoints_path: Optional[str] = None
+    env_dir_path: Optional[str] = None
+    sampling: dict = None  # type: ignore[assignment]
+    headers: dict = None  # type: ignore[assignment]
+    forwarded: list[str] = None  # type: ignore[assignment]
+    native_taskset: bool = False
+    references_config: bool = False
 
 
-def _format_push_command(resolved: ResolvedEnvironment) -> str:
-    if resolved.local_env_path is not None:
-        base = f"prime env push --path {resolved.local_env_path}"
-    else:
-        base = "prime env push"
-    if resolved.platform_slug:
-        parts = _split_owner_and_name(resolved.platform_slug)
-        if parts is not None:
-            base += f" --owner {parts[0]}"
-    return base
+def _take_value_flag(
+    args: list[str], idx: int, long_flag: str, short_flag: Optional[str]
+) -> tuple[Optional[str], int]:
+    """If `args[idx]` is `long_flag`/`short_flag`, return its value and the number of tokens it
+    spans (`("--flag", "v")` → 2, `"--flag=v"` / `"-fv"` → 1); otherwise `(None, 0)`."""
+    tok = args[idx]
+    if tok == long_flag or (short_flag and tok == short_flag):
+        return (args[idx + 1] if idx + 1 < len(args) else None), 2
+    if tok.startswith(f"{long_flag}="):
+        return tok.split("=", 1)[1], 1
+    if short_flag and not tok.startswith("--") and tok.startswith(short_flag) and len(tok) > len(
+        short_flag
+    ):
+        return tok[len(short_flag) :], 1
+    return None, 0
 
 
-def _print_environment_source_footer(resolved: Optional[ResolvedEnvironment]) -> None:
-    if resolved is None:
-        return
-    if resolved.platform_url:
-        console.print(f"[dim]Environment URL: {resolved.platform_url}[/dim]")
-    if resolved.recommend_push:
-        if resolved.push_reason == "ahead" and resolved.platform_slug:
-            console.print(
-                f"[yellow]Local environment is ahead of {resolved.platform_slug}.[/yellow]"
-            )
-        elif resolved.push_reason == "local_only":
-            console.print("[yellow]Local environment is not linked to an upstream.[/yellow]")
-        else:
-            console.print(
-                "[yellow]Local environment differs from the current platform version.[/yellow]"
-            )
-        console.print(
-            f"[dim]Publish the current local version with:[/dim] {_format_push_command(resolved)}"
-        )
+def _partition_eval_args(raw_args: list[str]) -> _EvalArgs:
+    parsed = _EvalArgs(sampling={}, headers={}, forwarded=[])
+    captures = [
+        ("--model", "-m", "model"),
+        ("--api-base-url", "-b", "base_url"),
+        ("--provider", "-p", "provider"),
+        ("--api-key-var", "-k", "api_key_var"),
+        ("--endpoints-path", "-e", "endpoints_path"),
+        ("--env-dir-path", None, "env_dir_path"),
+    ]
+    # v0 vf-eval count flags → their v1 EvalConfig names.
+    translations = [
+        ("--num-examples", "-n", "--num-tasks"),
+        ("--rollouts-per-example", "-r", "--num-rollouts"),
+    ]
+
+    i = 0
+    while i < len(raw_args):
+        tok = raw_args[i]
+        if tok == "@" or tok.startswith("@"):  # a v1 `@ file.toml` config reference
+            parsed.references_config = True
+            parsed.forwarded.append(tok)
+            if tok == "@" and i + 1 < len(raw_args):
+                parsed.forwarded.append(raw_args[i + 1])
+                i += 1
+            i += 1
+            continue
+        if tok == "--taskset.id" or tok.startswith("--taskset."):  # opt in to a native v1 taskset
+            parsed.native_taskset = True
+            parsed.forwarded.append(tok)
+            i += 1
+            continue
+
+        value, used = _take_value_flag(raw_args, i, "--sampling-args", None)
+        if used:
+            if value:
+                parsed.sampling.update(json.loads(value))
+            i += used
+            continue
+        value, used = _take_value_flag(raw_args, i, "--header", None)
+        if used:
+            if value and ":" in value:
+                name, val = value.split(":", 1)
+                parsed.headers[name.strip()] = val.strip()
+            i += used
+            continue
+
+        matched = False
+        for long_flag, short_flag, attr in captures:
+            value, used = _take_value_flag(raw_args, i, long_flag, short_flag)
+            if used:
+                setattr(parsed, attr, value)
+                i += used
+                matched = True
+                break
+        if matched:
+            continue
+        for long_flag, short_flag, target in translations:
+            value, used = _take_value_flag(raw_args, i, long_flag, short_flag)
+            if used:
+                if value is not None:
+                    parsed.forwarded += [target, value]
+                i += used
+                matched = True
+                break
+        if matched:
+            continue
+        if tok == "--save-results":  # v0-only; v1 always writes results.jsonl
+            i += 1
+            continue
+        parsed.forwarded.append(tok)
+        i += 1
+    return parsed
+
+
+def _v1_client_value(forwarded: list[str], field: str) -> Optional[str]:
+    """A `--client.<field>` value the user passed through verbatim (overrides the temp config)."""
+    return _parse_value_option(forwarded, f"--client.{field}", None)
+
+
+def _write_temp_eval_config(
+    *,
+    legacy_id: Optional[str],
+    model: str,
+    base_url: Optional[str],
+    api_key_var: Optional[str],
+    headers: dict,
+    sampling: dict,
+) -> Path:
+    """Write prime's derived convenience config as a v1 eval `@ file.toml`. Nested values
+    (`client.headers`, `sampling.extra_body`) and dash-cased header names round-trip through TOML,
+    which dotted CLI flags mangle."""
+    data: dict = {"model": model}
+    if legacy_id:  # v0 env id → the bridge's legacy path (`is_legacy`)
+        data["id"] = legacy_id
+    client: dict = {}
+    if base_url:
+        client["base_url"] = base_url
+    if api_key_var:
+        client["api_key_var"] = api_key_var
+    if headers:
+        client["headers"] = headers
+    if client:
+        data["client"] = client
+    if sampling:
+        data["sampling"] = sampling
+
+    fd, path = tempfile.mkstemp(prefix="prime-eval-", suffix=".toml")
+    with os.fdopen(fd, "w") as handle:
+        toml.dump(data, handle)
+    return Path(path)
+
+
+def _v1_eval_command(args: list[str]) -> list[str]:
+    """Invoke the v1 `eval` entrypoint in the workspace venv. `verifiers.v1.cli.eval` has no
+    `__main__` guard, so call `main()` directly rather than `python -m`."""
+    return [
+        resolve_workspace_python(),
+        "-c",
+        "from verifiers.v1.cli.eval import main; main()",
+        *args,
+    ]
 
 
 def run_eval_passthrough(
@@ -958,107 +1077,104 @@ def run_eval_passthrough(
         )
         raise typer.Exit(1)
 
-    args, env, model, base_url = _add_default_inference_and_key_args(passthrough_args, config)
+    parsed = _partition_eval_args(passthrough_args)
+    env = os.environ.copy()
+
+    model = parsed.model or DEFAULT_MODEL
     configured_base_url = (config.inference_url or "").strip().rstrip("/")
+    model, base_url, api_key_var = _resolve_inference_target(parsed, config, env, model)
     _validate_model(model, base_url, configured_base_url)
     _preflight_inference_billing(model, base_url, configured_base_url)
 
-    env_dir_path = _env_dir_path_arg(args)
-    run_target = environment
-    upstream_slug: Optional[str] = None
-    env_name_for_upload: Optional[str] = None
-    resolved_env: Optional[ResolvedEnvironment] = None
-    config_envs: list[tuple[str, str]] = []
+    env_dir_path = parsed.env_dir_path or DEFAULT_ENV_DIR_PATH
 
+    # The v1 `eval` entrypoint runs a native taskset (`--taskset.id`) or, for prime's v0 hub/local
+    # environments, the v0 env via the bridge (`--id`); both write the same `results.jsonl` /
+    # `config.toml`. We default to the legacy `--id` path so existing environments keep working.
     if _is_config_target(environment):
-        config_envs = _collect_eval_config_envs(Path(environment), env_dir_path)
-        for env_ref, ref_env_dir in config_envs:
+        for env_ref, ref_env_dir in _collect_eval_config_envs(Path(environment), env_dir_path):
             _prepare_single_environment(plugin, env_ref, ref_env_dir)
-    else:
+        eval_args = ["@", environment, *parsed.forwarded]
+        _run_command(_v1_eval_command(eval_args), env=env)
+        _print_eval_complete()
+        return
+
+    legacy_id: Optional[str] = None
+    if not parsed.native_taskset:
         resolved_env = _prepare_single_environment(plugin, environment, env_dir_path)
-        run_target = resolved_env.env_name
-        upstream_slug = resolved_env.upstream_slug
-        env_name_for_upload = resolved_env.env_name
+        legacy_id = resolved_env.env_name
         if resolved_env.env_display_id:
-            args.extend(
-                ["--header", f"{INTERNAL_ENV_DISPLAY_HEADER}: {resolved_env.env_display_id}"]
-            )
-
-    if not skip_upload and not _has_flag(args, "--save-results", "-s"):
-        args.append("-s")
-
-    job_target = env_name_for_upload
-    if job_target is None and config_envs:
-        job_target = _env_name_from_reference(config_envs[0][0])
-    if job_target is None:
-        job_target = Path(environment).stem
-    job_id = _build_job_id(job_target, model)
-    args.extend(["--header", f"X-PI-Job-Id: {job_id}"])
+            parsed.headers.setdefault(INTERNAL_ENV_DISPLAY_HEADER, resolved_env.env_display_id)
 
     if config.team_id:
-        args.extend(["--header", f"X-Prime-Team-ID: {config.team_id}"])
+        parsed.headers.setdefault("X-Prime-Team-ID", config.team_id)
 
-    console.print(f"[dim]Eval job_id: {job_id}[/dim]")
-    command = plugin.build_module_command(plugin.eval_module, [run_target, *args])
-    _run_command(command, env=env)
-
+    tmp_config = _write_temp_eval_config(
+        legacy_id=legacy_id,
+        model=model,
+        base_url=base_url,
+        api_key_var=api_key_var,
+        headers=parsed.headers,
+        sampling=parsed.sampling,
+    )
     if skip_upload:
-        _print_environment_source_footer(resolved_env)
-        console.print("[dim]Skipped uploading evaluation results[/dim]")
-        return
-
-    if _is_config_target(environment):
         console.print(
-            "[yellow]Evaluation completed. Automatic upload is skipped for "
-            "config-driven runs.[/yellow]"
+            "[dim]--skip-upload has no effect: v1 eval results stay local until platform "
+            "push is supported.[/dim]"
         )
-        return
-
-    if resolved_env is not None and resolved_env.recommend_push:
-        _print_environment_source_footer(resolved_env)
-        console.print(
-            "[yellow]Evaluation completed. Automatic upload is skipped until the local "
-            "environment is published.[/yellow]"
-        )
-        return
-
-    upload_env_name = env_name_for_upload or environment
-    if upstream_slug is None:
-        check_path = Path(env_path) if env_path else Path.cwd()
-        metadata = find_environment_metadata(
-            env_name=upload_env_name,
-            env_path=check_path,
-            module_name=upload_env_name.replace("-", "_"),
-        )
-        if metadata and metadata.get("owner") and metadata.get("name"):
-            upstream_slug = f"{metadata.get('owner')}/{metadata.get('name')}"
-            console.print(f"[dim]Using upstream environment {upstream_slug}[/dim]")
-
-    if upstream_slug is None:
-        _print_environment_source_footer(resolved_env)
-        console.print(
-            "[dim]No upstream environment found. "
-            "Skipped uploading evaluation results to platform.\n"
-            "Use `prime env push` to set an upstream, or use `--env-path` to specify the "
-            "correct environment path.[/dim]"
-        )
-        return
-
-    if resolved_env is not None and resolved_env.platform_url:
-        console.print(f"[dim]Environment URL: {resolved_env.platform_url}[/dim]")
-
     try:
-        push_eval_results_to_hub(
-            env_name=upload_env_name,
-            model=model,
-            job_id=job_id,
-            env_path=Path(env_path) if env_path else None,
-            upstream_slug=upstream_slug,
+        _run_command(_v1_eval_command(["@", str(tmp_config), *parsed.forwarded]), env=env)
+    finally:
+        tmp_config.unlink(missing_ok=True)
+    _print_eval_complete()
+
+
+def _resolve_inference_target(
+    parsed: _EvalArgs, config: Config, env: dict[str, str], model: str
+) -> tuple[str, str, str]:
+    """Resolve (model, base_url, api_key_var) from prime's convenience flags, the configured
+    inference endpoint, or a user-supplied `--client.*` override. Defaults the key var to
+    `PRIME_API_KEY` and injects it into the child env."""
+    base = parsed.base_url
+    if base:
+        base = base.rstrip("/")
+    elif parsed.provider is not None:
+        base = _provider_base_url(parsed.provider) or ""
+    elif endpoint := _resolve_endpoint_alias(_endpoint_lookup_args(parsed), model):
+        model, base = endpoint.model, endpoint.base_url
+    elif user_base := _v1_client_value(parsed.forwarded, "base_url"):
+        base = user_base.rstrip("/")
+    elif config.inference_url:
+        base = config.inference_url.strip().rstrip("/")
+    else:
+        console.print(
+            "[red]Inference URL not configured.[/red] Check [bold]prime config view[/bold]."
         )
-    except Exception as exc:
-        console.print(f"[red]Failed to push results to hub:[/red] {exc}")
-        console.print("[yellow]Evaluation completed but results were not pushed.[/yellow]")
-        raise typer.Exit(1) from exc
+        raise typer.Exit(1)
+
+    api_key_var = parsed.api_key_var or _v1_client_value(parsed.forwarded, "api_key_var")
+    if api_key_var is None:
+        env["PRIME_API_KEY"] = config.api_key
+        api_key_var = "PRIME_API_KEY"
+    return model, base, api_key_var
+
+
+def _endpoint_lookup_args(parsed: _EvalArgs) -> list[str]:
+    """The minimal arg list `_resolve_endpoint_alias` needs to find the endpoints file."""
+    if parsed.endpoints_path:
+        return ["--endpoints-path", parsed.endpoints_path]
+    return []
+
+
+def _print_eval_complete() -> None:
+    console.print(
+        "\n[green]✓ Evaluation complete.[/green] "
+        "Inspect results with [bold]prime eval view[/bold]."
+    )
+    console.print(
+        "[dim]Pushing v1 eval results to the platform is not supported yet "
+        "(the platform isn't v1-aware).[/dim]"
+    )
 
 
 def run_gepa_passthrough(environment_or_config: str, passthrough_args: list[str]) -> None:

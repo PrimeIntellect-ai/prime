@@ -951,13 +951,16 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
     team_id: Optional[str] = config.team_id
     if "/" in image_reference:
         namespace, rest = image_reference.split("/", 1)
-        if namespace == "team-":
-            console.print(
-                "[red]Error: Invalid team image reference. "
-                "Expected format: team-{teamId}/imagename:tag[/red]"
-            )
-            raise typer.Exit(1)
-        if namespace == config.user_id:
+        if namespace.startswith("team-"):
+            team_id = namespace[5:]
+            if not team_id:
+                console.print(
+                    "[red]Error: Invalid team image reference. "
+                    "Expected format: team-{teamId}/imagename:tag[/red]"
+                )
+                raise typer.Exit(1)
+            image_reference = rest
+        elif namespace == config.user_id:
             team_id = None
             image_reference = rest
         else:

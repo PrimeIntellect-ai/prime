@@ -241,8 +241,33 @@ def test_publish_image_calls_visibility_endpoint(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
-    assert captured["path"] == "/images/team-abc123/rehl/latest/visibility"
-    assert captured["json"] == {"visibility": "PUBLIC"}
+    assert captured["path"] == "/images/rehl/latest/visibility"
+    assert captured["json"] == {"visibility": "PUBLIC", "teamId": "abc123"}
+
+
+def test_unpublish_image_parses_team_id_prefix(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = json
+            return {"success": True, "message": "ok", "visibility": "PRIVATE", "images": []}
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "unpublish", "team-abc123/rehl:latest"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "PATCH"
+    assert captured["path"] == "/images/rehl/latest/visibility"
+    assert captured["json"] == {"visibility": "PRIVATE", "teamId": "abc123"}
 
 
 def test_publish_image_accepts_owner_prefixed_personal_ref(monkeypatch):
@@ -343,6 +368,31 @@ def test_delete_image_passes_slug_prefixed_ref_to_backend(monkeypatch):
     assert captured["method"] == "DELETE"
     assert captured["path"] == "/images/research/rehl/latest"
     assert captured["params"] is None
+
+
+def test_delete_image_parses_team_id_prefix(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["params"] = params
+            return {"success": True, "message": "ok"}
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "delete", "team-abc123/rehl:latest", "--yes"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "DELETE"
+    assert captured["path"] == "/images/rehl/latest"
+    assert captured["params"] == {"teamId": "abc123"}
 
 
 def test_push_image_accepts_dockerfile_outside_context(tmp_path, monkeypatch):

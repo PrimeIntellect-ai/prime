@@ -509,6 +509,31 @@ def test_publish_image_passes_legacy_user_id_ref_to_backend(monkeypatch):
     assert captured["json"] == {"visibility": "PUBLIC"}
 
 
+def test_publish_image_passes_legacy_user_id_nested_ref_to_backend(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = json
+            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "publish", "cmk123/nested/rehl:latest"],
+        env={**TEST_ENV, "PRIME_USER_ID": "cmk123"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "PATCH"
+    assert captured["path"] == "/images/cmk123/nested/rehl/latest/visibility"
+    assert captured["json"] == {"visibility": "PUBLIC"}
+
+
 def test_publish_image_passes_legacy_team_id_ref_to_backend(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
@@ -531,6 +556,31 @@ def test_publish_image_passes_legacy_team_id_ref_to_backend(monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["method"] == "PATCH"
     assert captured["path"] == "/images/team-abc123/rehl/latest/visibility"
+    assert captured["json"] == {"visibility": "PUBLIC"}
+
+
+def test_publish_image_passes_legacy_team_id_nested_ref_to_backend(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = json
+            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "publish", "team-abc123/nested/rehl:latest"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "PATCH"
+    assert captured["path"] == "/images/team-abc123/nested/rehl/latest/visibility"
     assert captured["json"] == {"visibility": "PUBLIC"}
 
 
@@ -582,6 +632,50 @@ def test_publish_image_passes_prime_slug_ref_to_backend(monkeypatch):
     assert captured["method"] == "PATCH"
     assert captured["path"] == "/images/prime/alice/rehl/latest/visibility"
     assert captured["json"] == {"visibility": "PUBLIC"}
+
+
+def test_publish_image_passes_prime_slug_nested_ref_to_backend(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = json
+            return {"success": True, "message": "ok", "visibility": "PUBLIC", "images": []}
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "publish", "prime/alice/nested/rehl:latest"],
+        env={**TEST_ENV, "PRIME_USER_ID": "cmk123"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "PATCH"
+    assert captured["path"] == "/images/prime/alice/nested/rehl/latest/visibility"
+    assert captured["json"] == {"visibility": "PUBLIC"}
+
+
+def test_publish_image_rejects_external_registry_ref(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "publish", "docker.io/org/rehl:latest"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "Owner-prefixed image references" in result.output
 
 
 def test_delete_image_passes_prime_user_id_ref_to_backend(monkeypatch):

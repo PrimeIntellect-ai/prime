@@ -973,6 +973,11 @@ def list_images(
         raise typer.Exit(1)
 
 
+def _looks_like_registry_host(value: str) -> bool:
+    # Docker treats localhost as a registry host even without a dot or port.
+    return "." in value or ":" in value or value == "localhost"
+
+
 def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Optional[str]]:
     """Parse refs accepted by mutating image commands.
 
@@ -980,30 +985,30 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
     personal/team context. Owner-prefixed refs are passed through for
     server-side resolution because only the backend can distinguish user slugs
     from team slugs. New slug refs must use ``prime/<owner>/name:tag``; legacy
-    ``<userId>/name:tag`` and ``team-<teamId>/name:tag`` refs are still
+    ``<userId>/<imageName>:tag`` and ``team-<teamId>/<imageName>:tag`` refs are still
     accepted.
     """
     team_id: Optional[str] = config.team_id
     if "/" in image_reference:
         parts = image_reference.split("/")
-        if len(parts) == 3 and parts[0] == "prime":
+        if len(parts) >= 3 and parts[0] == "prime":
             namespace = parts[1]
-            repo_and_tag = parts[2]
-        elif len(parts) == 2:
+            repo_and_tag = "/".join(parts[2:])
+        elif len(parts) >= 2 and not _looks_like_registry_host(parts[0]):
             namespace = parts[0]
-            repo_and_tag = parts[1]
+            repo_and_tag = "/".join(parts[1:])
         else:
             console.print(
                 "[red]Error: Owner-prefixed image references must use "
-                "prime/<owner>/imagename:tag or legacy "
-                "<userId>/imagename:tag[/red]"
+                "prime/<owner>/<imageName>:tag or legacy "
+                "<userId>/<imageName>:tag[/red]"
             )
             raise typer.Exit(1)
         if not namespace or not repo_and_tag:
             console.print(
                 "[red]Error: Owner-prefixed image references must use "
-                "prime/<owner>/imagename:tag or legacy "
-                "<userId>/imagename:tag[/red]"
+                "prime/<owner>/<imageName>:tag or legacy "
+                "<userId>/<imageName>:tag[/red]"
             )
             raise typer.Exit(1)
         if namespace == "team-":

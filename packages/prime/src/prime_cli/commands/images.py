@@ -662,7 +662,7 @@ def push_image(
                 if config.team_id:
                     build_payload["team_id"] = config.team_id
                 if platform_image:
-                    build_payload["ownerScope"] = "platform"
+                    build_payload["owner_scope"] = "platform"
                     build_payload["visibility"] = ImageVisibility.PUBLIC.value
                 elif public:
                     build_payload["visibility"] = ImageVisibility.PUBLIC.value

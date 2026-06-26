@@ -166,7 +166,7 @@ def test_push_platform_image_forces_public_owner_scope(tmp_path, monkeypatch):
         "image_tag": "22.04",
         "dockerfile_path": PACKAGED_DOCKERFILE_PATH,
         "platform": "linux/amd64",
-        "ownerScope": "platform",
+        "owner_scope": "platform",
         "visibility": "PUBLIC",
     }
     assert "Building and pushing platform image" in result.output

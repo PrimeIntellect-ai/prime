@@ -484,6 +484,25 @@ def test_publish_image_rejects_empty_team_prefix(monkeypatch):
     assert "Invalid team image reference" in result.output
 
 
+def test_publish_image_rejects_prime_ref_without_owner(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "publish", "prime/rehl:latest"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "prime/<owner>/<imageName>:tag" in result.output
+
+
 def test_publish_image_passes_legacy_user_id_ref_to_backend(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}

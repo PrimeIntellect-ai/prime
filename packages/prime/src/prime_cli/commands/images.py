@@ -991,7 +991,14 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
     team_id: Optional[str] = config.team_id
     if "/" in image_reference:
         parts = image_reference.split("/")
-        if len(parts) >= 3 and parts[0] == "prime":
+        if parts[0] == "prime":
+            if len(parts) < 3:
+                console.print(
+                    "[red]Error: Owner-prefixed image references must use "
+                    "prime/<owner>/<imageName>:tag or legacy "
+                    "<userId>/<imageName>:tag[/red]"
+                )
+                raise typer.Exit(1)
             namespace = parts[1]
             repo_and_tag = "/".join(parts[2:])
         elif len(parts) >= 2 and not _looks_like_registry_host(parts[0]):

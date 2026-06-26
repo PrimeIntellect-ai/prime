@@ -514,6 +514,8 @@ def compute_run_overview_stats(run: LocalEvalRun) -> RunOverviewStats:
                 if not isinstance(record, dict):
                     continue
                 reward = numeric_reward(record.get("reward"))
+                if reward is None and "rewards" in record:
+                    reward = numeric_reward(sum(record["rewards"].values()))
                 if reward is not None:
                     rewards.append(reward)
                 for name, value in extract_numeric_metric_values(record).items():
@@ -1122,6 +1124,7 @@ def _thinking_block_to_text(block: Any) -> str:
 
 _STANDARD_NUMERIC_FIELDS = {
     "example_id",
+    "rollout_number",
     "prompt",
     "completion",
     "answer",

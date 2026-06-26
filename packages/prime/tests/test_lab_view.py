@@ -603,9 +603,9 @@ def test_lab_view_evaluation_rows_mark_source_and_keep_status_consistent(tmp_pat
 
     assert hosted.metadata[2] == ("Type", "hosted")
     assert [badge["label"] for badge in hosted.raw["badges"]] == ["HOSTED", "COMPLETED"]
-    assert local.status == "COMPLETED"
+    assert local.status == "LOCAL"
     assert local.metadata[2] == ("Type", "local")
-    assert [badge["label"] for badge in local.raw["badges"]] == ["LOCAL", "COMPLETED"]
+    assert [badge["label"] for badge in local.raw["badges"]] == ["LOCAL"]
 
 
 @pytest.mark.asyncio
@@ -1845,6 +1845,20 @@ def test_discover_local_eval_runs(tmp_path: Path) -> None:
             "metadata": {"avg_reward": 0.5, "num_examples": 1, "rollouts_per_example": 2},
         }
     ]
+
+
+def test_discover_native_eval_uses_directory_run_id(tmp_path: Path) -> None:
+    run_dir = tmp_path / "outputs" / "custom-directory"
+    run_dir.mkdir(parents=True)
+    (run_dir / "config.toml").write_text(
+        'model = "openai/gpt-4"\n\n[taskset]\nid = "gsm8k-v1"\n',
+        encoding="utf-8",
+    )
+    (run_dir / "results.jsonl").write_text("", encoding="utf-8")
+
+    (run,) = discover_local_eval_runs(tmp_path)
+
+    assert run["run_id"] == "custom-directory"
 
 
 def test_discover_local_eval_runs_skips_unreadable_output_dirs(tmp_path: Path) -> None:
@@ -5771,9 +5785,7 @@ async def test_prime_lab_app_chat_widget_launches_from_inline_config(
         command = launch_plan.command
         generated = tmp_path / ".prime" / "lab" / "configs" / "eval" / "reverse-text.toml"
         parsed = toml.loads(generated.read_text(encoding="utf-8"))
-        assert command == (
-            "prime eval run .prime/lab/configs/eval/reverse-text.toml --hosted --follow"
-        )
+        assert command == ("prime eval submit .prime/lab/configs/eval/reverse-text.toml --follow")
         assert parsed["model"] == "openai/gpt-4.1-mini"
         assert parsed["num_examples"] == 7
         assert parsed["rollouts_per_example"] == 4
@@ -6456,7 +6468,7 @@ async def test_prime_lab_app_chat_widget_launch_button_streams_inline_output(
         card = app.screen.query_one(AgentWidgetCard)
         launch_plan = card.current_launch_plan()
         assert launch_plan.command == (
-            "prime eval run .prime/lab/configs/eval/reverse-text.toml --hosted --follow"
+            "prime eval submit .prime/lab/configs/eval/reverse-text.toml --follow"
         )
         assert card._launch_running is False
         card.query_one(".agent-widget-action-launch", Button).press()
@@ -6465,9 +6477,7 @@ async def test_prime_lab_app_chat_widget_launch_button_streams_inline_output(
 
         log_text = _render_renderable(card.query_one(".agent-widget-log", Static).content)
         status_text = _render_renderable(card.query_one(".agent-widget-status", Static).content)
-        assert calls == [
-            "prime eval run .prime/lab/configs/eval/reverse-text.toml --hosted --follow"
-        ]
+        assert calls == ["prime eval submit .prime/lab/configs/eval/reverse-text.toml --follow"]
         assert "launching" in log_text
         assert "done" in log_text
         assert "Completed" in status_text
@@ -7331,9 +7341,8 @@ def test_launch_command_quotes_config_paths_with_spaces() -> None:
     assert shlex.split(launch_command_for_config("eval", "configs/eval/my eval.toml")) == [
         "prime",
         "eval",
-        "run",
+        "submit",
         "configs/eval/my eval.toml",
-        "--hosted",
     ]
     assert shlex.split(launch_command_for_config("gepa", "configs/gepa/my prompt.toml")) == [
         "prime",

@@ -94,7 +94,8 @@ def test_remote_script_compiles_and_keeps_cleanup_best_effort(tmp_path):
         "    installed_runtime_regression_checks()\n"
         "    write_smoke_environment()" in script
     )
-    assert script.index('"--save-results"') < script.index('"--skip-upload"')
+    assert '"--id"' in script
+    assert '"--save-results"' not in script
     assert 'ENV_DIR / "outputs"' in script
 
 

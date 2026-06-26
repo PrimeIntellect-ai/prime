@@ -10,10 +10,94 @@ from prime_cli.commands.evals import (
     _validate_eval_path,
 )
 from prime_cli.main import app
+from prime_cli.utils.eval_push import convert_eval_results
 from typer.testing import CliRunner
 from typing_extensions import cast
 
 runner = CliRunner()
+
+
+def test_convert_eval_results_supports_v1_and_legacy_samples():
+    samples = [
+        {"id": 3, "reward": 0.5, "completion": "legacy"},
+        {
+            "id": "trace-1",
+            "task": {"idx": 7, "prompt": "What is 2 + 2?", "answer": "4"},
+            "nodes": [
+                {
+                    "message": {"role": "user", "content": "What is 2 + 2?"},
+                    "token_ids": [1, 2],
+                    "mask": [False, False],
+                    "is_content": [True, True],
+                },
+                {
+                    "parent": 0,
+                    "message": {"role": "assistant", "content": "4"},
+                    "sampled": True,
+                    "token_ids": [3, 4],
+                    "mask": [False, True],
+                    "is_content": [False, True],
+                    "logprobs": [-0.1],
+                },
+            ],
+            "rewards": {"correct": 1.0},
+            "metrics": {"exact_match": 1.0},
+            "info": {"source": "test"},
+            "is_completed": True,
+            "grader_note": "kept as metadata",
+        },
+    ]
+
+    legacy, v1 = convert_eval_results(samples)
+
+    assert legacy == {
+        "id": 3,
+        "example_id": 3,
+        "reward": 0.5,
+        "completion": "legacy",
+    }
+    assert v1["sample_id"] == "trace-1"
+    assert v1["example_id"] == 7
+    assert v1["rollout_number"] == 1
+    assert v1["answer"] == "4"
+    assert v1["reward"] == 1.0
+    assert v1["completion"][-1] == {"role": "assistant", "content": "4"}
+    assert v1["trajectory"] == [
+        {
+            "messages": [
+                {"role": "user", "content": "What is 2 + 2?"},
+                {"role": "assistant", "content": "4"},
+            ],
+            "reward": 1.0,
+            "num_input_tokens": 3,
+            "num_output_tokens": 1,
+        }
+    ]
+    assert v1["info"] == {"source": "test", "grader_note": "kept as metadata"}
+
+
+def test_convert_eval_results_uses_provider_token_counts_without_token_ids():
+    samples = [
+        {
+            "id": "trace-usage",
+            "task": {"idx": 1, "prompt": "Question"},
+            "nodes": [
+                {"message": {"role": "user", "content": "Question"}},
+                {
+                    "parent": 0,
+                    "message": {"role": "assistant", "content": "Answer"},
+                    "sampled": True,
+                    "usage": {"prompt_tokens": 11, "completion_tokens": 3},
+                },
+            ],
+            "rewards": {"correct": 1.0},
+        }
+    ]
+
+    (converted,) = convert_eval_results(samples)
+
+    assert converted["trajectory"][0]["num_input_tokens"] == 11
+    assert converted["trajectory"][0]["num_output_tokens"] == 3
 
 
 class TestHasEvalFiles:
@@ -38,6 +122,12 @@ class TestHasEvalFiles:
     def test_empty_directory(self, tmp_path):
         """Empty directory returns False"""
         assert _has_eval_files(tmp_path) is False
+
+    def test_native_run_uses_config_and_results(self, tmp_path):
+        (tmp_path / "config.toml").write_text('model = "test-model"\n')
+        (tmp_path / "results.jsonl").write_text("")
+
+        assert _has_eval_files(tmp_path) is True
 
 
 class TestValidateEvalPath:
@@ -624,6 +714,16 @@ class TestLoadEvalDirectory:
 
         with pytest.raises(json.JSONDecodeError):
             _load_eval_directory(tmp_path)
+
+    def test_loads_native_run_id_from_directory(self, tmp_path):
+        (tmp_path / "config.toml").write_text(
+            'model = "openai/gpt-4"\nnum_tasks = 2\n\n[taskset]\nid = "gsm8k-v1"\n'
+        )
+        (tmp_path / "results.jsonl").write_text("")
+
+        data = _load_eval_directory(tmp_path)
+
+        assert data["metadata"]["run_id"] == tmp_path.name
 
 
 if __name__ == "__main__":

@@ -1,19 +1,31 @@
+import pytest
 from prime_cli.main import app
-from prime_cli.verifiers_bridge import _append_eval_options, _sanitize_help_text
+from prime_cli.verifiers_bridge import _sanitize_help_text, exec_eval_process
 from typer.testing import CliRunner
 
 runner = CliRunner()
 
 
-def test_eval_run_help_flags_use_backend_help(monkeypatch):
-    def fake_help() -> None:
-        print("BACKEND_HELP")
+class ExecCalled(Exception):
+    pass
 
-    monkeypatch.setattr("prime_cli.commands.evals.print_eval_run_help", fake_help)
+
+def test_eval_run_help_flags_are_forwarded(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        "prime_cli.commands.evals.exec_eval_process",
+        lambda args, plain: captured.append((list(args), plain)),
+    )
+
     for flag in ("-h", "--help"):
-        result = runner.invoke(app, ["eval", "run", flag], env={"PRIME_DISABLE_VERSION_CHECK": "1"})
+        result = runner.invoke(
+            app,
+            ["eval", "run", flag],
+            env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+        )
         assert result.exit_code == 0, result.output
-        assert "BACKEND_HELP" in result.output
+
+    assert captured == [(["-h"], False), (["--help"], False)]
 
 
 def test_lab_setup_help_flags_use_prime_owned_help():
@@ -42,10 +54,41 @@ def test_sanitize_help_removes_vf_eval_aliases():
     assert "env_id_or_config" not in help_text
 
 
-def test_append_eval_options_mentions_tunnel_access():
-    help_text = _append_eval_options("Usage: prime eval run [-h] environment\n")
+def test_sanitize_help_rewrites_v1_console_script():
+    raw = "usage: uv run eval [<taskset-id>]\nusage: main.py [-h] [@ FILE] [OPTIONS]\n"
 
-    assert "--allow-tunnel-access" in help_text
+    help_text = _sanitize_help_text(raw, "verifiers.v1.cli.eval.main", "prime eval run")
+
+    assert help_text.count("Usage: prime eval run") == 2
+    assert "uv run eval" not in help_text
+
+
+def test_exec_eval_process_forwards_once(monkeypatch):
+    captured = {}
+
+    def fake_exec(executable, command, env):
+        captured.update(executable=executable, command=command, env=env)
+        raise ExecCalled
+
+    monkeypatch.setattr(
+        "prime_cli.verifiers_bridge.resolve_workspace_python",
+        lambda: "python",
+    )
+    monkeypatch.setattr("prime_cli.verifiers_bridge.os.execvpe", fake_exec)
+
+    with pytest.raises(ExecCalled):
+        exec_eval_process(["gsm8k-v1", "--dry-run"], plain=True)
+
+    assert captured["executable"] == "python"
+    assert captured["command"] == [
+        "python",
+        "-c",
+        "from verifiers.v1.cli.eval.main import main; main()",
+        "gsm8k-v1",
+        "--dry-run",
+    ]
+    assert captured["env"]["NO_COLOR"] == "1"
+    assert captured["env"]["PYDANTIC_CONFIG_PLAIN"] == "1"
 
 
 def test_eval_view_uses_prime_viewer(monkeypatch):

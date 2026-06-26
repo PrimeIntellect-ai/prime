@@ -35,13 +35,14 @@ prime           = false
 prime-sandboxes = false
 prime-tunnel    = false
 prime-evals     = false
+prime-pydantic-config = false
 verifiers       = false
+renderers       = false
 tasksets        = false
 harnesses       = false
 
 [tool.uv.sources]
 prime-tunnel = { workspace = true }
-verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", tag = "v0.1.14" }
 
 [tool.pytest.ini_options]
 pythonpath = [

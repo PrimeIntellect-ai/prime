@@ -438,7 +438,7 @@ def remote_script(config: RemoteConfig) -> str:
                 (
                     path.parent
                     for output_root in output_roots
-                    for path in output_root.glob("evals/**/results.jsonl")
+                    for path in output_root.glob("**/results.jsonl")
                 ),
                 key=lambda path: path.stat().st_mtime,
             )
@@ -520,9 +520,8 @@ def remote_script(config: RemoteConfig) -> str:
                 [
                     "prime",
                     "eval",
-                    "run",
+                    "submit",
                     ENV_NAME,
-                    "--hosted",
                     "--env-path",
                     str(ENV_DIR),
                     "-m",
@@ -558,7 +557,7 @@ def remote_script(config: RemoteConfig) -> str:
                 env_args = {{ split = "eval", variant = "single" }}
                 ''',
             )
-            single = run(["prime", "eval", "run", str(single_config), "--hosted"], timeout=600)
+            single = run(["prime", "eval", "submit", str(single_config)], timeout=600)
             HOSTED_EVAL_IDS.extend(parse_hosted_eval_ids(single))
 
             multi_config = LAB_ROOT / "hosted-multi.toml"
@@ -585,7 +584,7 @@ def remote_script(config: RemoteConfig) -> str:
                 eval_name = "{ENV_NAME} multi config B"
                 ''',
             )
-            multi = run(["prime", "eval", "run", str(multi_config), "--hosted"], timeout=600)
+            multi = run(["prime", "eval", "submit", str(multi_config)], timeout=600)
             HOSTED_EVAL_IDS.extend(parse_hosted_eval_ids(multi))
 
             if not HOSTED_EVAL_IDS:
@@ -630,6 +629,7 @@ def remote_script(config: RemoteConfig) -> str:
                         "prime",
                         "eval",
                         "run",
+                        "--id",
                         ENV_NAME,
                         "-m",
                         CONFIG["model"],
@@ -637,10 +637,6 @@ def remote_script(config: RemoteConfig) -> str:
                         "1",
                         "-r",
                         "1",
-                        "--env-path",
-                        str(ENV_DIR),
-                        "--save-results",
-                        "--skip-upload",
                     ],
                     cwd=LAB_ROOT,
                     timeout=900,
@@ -668,6 +664,7 @@ def remote_script(config: RemoteConfig) -> str:
                         "prime",
                         "eval",
                         "run",
+                        "--id",
                         ENV_NAME,
                         "-m",
                         CONFIG["model"],
@@ -675,8 +672,6 @@ def remote_script(config: RemoteConfig) -> str:
                         "1",
                         "-r",
                         "1",
-                        "--env-path",
-                        str(ENV_DIR),
                     ],
                     cwd=LAB_ROOT,
                     timeout=900,

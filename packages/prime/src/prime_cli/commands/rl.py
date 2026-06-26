@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -936,14 +937,24 @@ def _dispatch_full_finetune_run(
     # so the JSON output path doesn't accidentally launch an expensive
     # training job without an explicit ack — matches confirm_or_skip
     # in the LoRA path.
-    if not yes:
-        if not typer.confirm("Dispatch full_finetune run on auto-picked PrimeCluster?"):
-            raise typer.Exit(0)
+    if not confirm_or_skip("Launch this Hosted Training run?", yes, default=True):
+        console.print("\nRun cancelled")
+        raise typer.Exit(0)
 
     api_client = APIClient()
     client = HostedTrainingClient(api_client)
+    # Skip the spinner for --output json: PrimeConsole.status() falls back
+    # to a plain print in --plain mode, which would emit "Creating Hosted
+    # Training run..." on stdout ahead of the JSON payload and break
+    # automation parsing of run_id.
+    status_ctx = (
+        console.status("[bold blue]Creating Hosted Training run...", spinner="dots")
+        if output != "json"
+        else nullcontext()
+    )
     try:
-        result = client.create_run(payload)
+        with status_ctx:
+            result = client.create_run(payload)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

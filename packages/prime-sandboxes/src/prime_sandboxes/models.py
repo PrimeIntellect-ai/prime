@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
@@ -258,6 +258,7 @@ class BuildImageRequest(BaseModel):
     platform: str = "linux/amd64"
     team_id: Optional[str] = Field(default=None, alias="teamId")
     visibility: Optional[ImageVisibility] = None
+    owner_scope: Optional[Literal["platform"]] = Field(default=None, alias="ownerScope")
 
     model_config = ConfigDict(populate_by_name=True)
 

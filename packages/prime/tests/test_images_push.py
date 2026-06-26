@@ -119,6 +119,147 @@ def test_push_image_public_sends_visibility(tmp_path, monkeypatch):
     assert "Visibility:" in result.output
 
 
+def test_push_platform_image_forces_public_owner_scope(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
+
+    context_path = tmp_path / "context"
+    context_path.mkdir()
+    (context_path / "Dockerfile").write_text("FROM ubuntu:22.04\n")
+
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            if method == "POST" and path == "/images/build":
+                captured["build_payload"] = json
+                return {
+                    "build_id": "build-123",
+                    "upload_url": "https://example.test/upload",
+                    "fullImagePath": "ubuntu:22.04",
+                }
+
+            if method == "POST" and path == "/images/build/build-123/start":
+                return {}
+
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    class DummyUploadResponse:
+        def raise_for_status(self):
+            return None
+
+    def fake_put(url, content, headers, timeout):
+        return DummyUploadResponse()
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.commands.images.httpx.put", fake_put)
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "ubuntu:22.04", "--context", "context", "--platform-image"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["build_payload"] == {
+        "image_name": "ubuntu",
+        "image_tag": "22.04",
+        "dockerfile_path": PACKAGED_DOCKERFILE_PATH,
+        "platform": "linux/amd64",
+        "owner_scope": "platform",
+        "visibility": "PUBLIC",
+    }
+    assert "Building and pushing platform image" in result.output
+    assert "Owner:" in result.output
+    assert "Platform" in result.output
+
+
+def test_push_platform_image_source_image_queues_platform_transfer(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["json"] = json
+            return {
+                "build_id": "build-123",
+                "buildIds": ["build-123"],
+                "upload_url": None,
+                "fullImagePath": "ubuntu:22.04",
+                "visibility": "PUBLIC",
+            }
+
+    def fake_put(*args, **kwargs):
+        raise AssertionError("transfer should not upload a build context")
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.commands.images.httpx.put", fake_put)
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "--source-image", "ubuntu:22.04", "--platform-image"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/images/build"
+    assert captured["json"] == {
+        "dockerfile_path": "Dockerfile",
+        "source_image": "ubuntu:22.04",
+        "platform": "linux/amd64",
+        "visibility": "PUBLIC",
+        "owner_scope": "platform",
+    }
+    assert "Transferring platform image" in result.output
+    assert "Owner:" in result.output
+    assert "Platform" in result.output
+    assert "Visibility:" in result.output
+    assert "PUBLIC" in result.output
+
+
+def test_push_platform_image_rejects_private(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "ubuntu:22.04", "--platform-image", "--private"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "Platform images must be public" in result.output
+
+
+def test_push_platform_image_rejects_team_context(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "ubuntu:22.04", "--platform-image"],
+        env={**TEST_ENV, "PRIME_TEAM_ID": "team-123"},
+    )
+
+    assert result.exit_code == 1
+    assert "Platform images cannot be pushed in a team context" in result.output
+
+
 def test_push_image_source_image_queues_transfer_without_upload(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     monkeypatch.delenv("PRIME_TEAM_ID", raising=False)

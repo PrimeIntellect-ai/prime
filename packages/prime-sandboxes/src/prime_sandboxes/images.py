@@ -1,6 +1,6 @@
 """Image build and transfer SDK client."""
 
-from typing import Optional
+from typing import Literal, Optional
 
 from .core import APIClient, AsyncAPIClient
 from .models import (
@@ -35,6 +35,7 @@ class ImageClient:
         platform: str = "linux/amd64",
         team_id: Optional[str] = None,
         visibility: Optional[ImageVisibility] = None,
+        owner_scope: Optional[Literal["platform"]] = None,
     ) -> BuildImageResponse | BulkImageTransferResponse:
         request = BuildImageRequest(
             image_name=image_name,
@@ -43,6 +44,7 @@ class ImageClient:
             platform=platform,
             team_id=team_id,
             visibility=visibility,
+            owner_scope=owner_scope,
         )
         return self.initiate_build(request)
 
@@ -78,6 +80,7 @@ class AsyncImageClient:
         platform: str = "linux/amd64",
         team_id: Optional[str] = None,
         visibility: Optional[ImageVisibility] = None,
+        owner_scope: Optional[Literal["platform"]] = None,
     ) -> BuildImageResponse | BulkImageTransferResponse:
         request = BuildImageRequest(
             image_name=image_name,
@@ -86,6 +89,7 @@ class AsyncImageClient:
             platform=platform,
             team_id=team_id,
             visibility=visibility,
+            owner_scope=owner_scope,
         )
         return await self.initiate_build(request)
 

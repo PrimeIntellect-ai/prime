@@ -130,7 +130,7 @@ def test_env_init_runs_lab_hygiene_preflight_inside_lab_workspace(tmp_path, monk
 
     monkeypatch.setattr(
         "prime_cli.commands.env.load_verifiers_prime_plugin",
-        lambda console: DummyPlugin(),
+        lambda: DummyPlugin(),
     )
 
     def fake_run(command, *args, **kwargs):

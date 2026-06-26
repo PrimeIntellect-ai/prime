@@ -1750,7 +1750,7 @@ def _workspace_config_command(config_kind: str, rel_path: str) -> str:
     if config_kind == "rl":
         return f"prime train run {rel_path} --yes"
     if config_kind == "eval":
-        return f"prime eval run {rel_path} --hosted"
+        return f"prime eval submit {rel_path}"
     return f"prime gepa run {rel_path}"
 
 

@@ -209,11 +209,11 @@ Run Verifiers evaluations and upload their native run artifacts.
 # Run through the workspace's Verifiers process
 prime eval run <taskset-id>
 
-# Run a V0 environment and keep the legacy upload behavior
-prime eval run <environment> --save-results
+# Run a V0 environment through the Verifiers compatibility bridge
+prime eval run --id <environment>
 
 # Submit through the current hosted-evaluation API
-prime eval run <environment-or-v0-config> --hosted
+prime eval submit <environment-or-v0-config>
 
 # Auto-discover and push completed artifacts below outputs/
 prime eval push

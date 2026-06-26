@@ -1,40 +1,36 @@
 # Verifiers V1 CLI boundary
 
-Prime treats Verifiers as a workspace process, not a Python plugin. `prime eval run` validates
-the workspace interpreter's protocol and then replaces itself with:
+Prime uses Typer for command routing and treats the local Verifiers evaluator as a workspace
+process. `prime eval run` forwards every argument unchanged and replaces itself with:
 
 ```text
-<workspace-python> -m verifiers.v1.cli.eval.main run <argv...>
+<workspace-python> -c 'from verifiers.v1.cli.eval.main import main; main()' <argv...>
 ```
 
-Prime forwards `<argv...>` unchanged for V1. Verifiers owns parsing, taskset/harness-specific
-help, execution, logging, signals, and native run artifacts.
+Verifiers parses the Pydantic configuration once, generates the run identity, executes the
+evaluation, and writes its native artifacts. Prime does not probe, pre-resolve, or reinterpret
+local evaluation options.
 
-The compatibility routes remain available:
+## Command ownership
 
-- `--save-results` / `-s` (and the associated `--skip-upload` / `--env-path` options) use the
-  existing V0 local adapter and metadata artifact.
-- `--hosted` uses the existing hosted parser and `/hosted-evaluations` payload, including V0 TOML
-  configs, environment resolution, access flags, secrets, grouping, logs, and cancellation.
-- Existing `push`, `get`, `stop`, and implicit `prime eval <target>` behavior remains available.
-  The existing `view`/deprecated `tui` behavior is unchanged.
+- `prime eval run` is the native local Verifiers CLI. A V1 taskset is positional or selected
+  with `--taskset.id`; a V0 environment is selected with `--id` and runs through Verifiers'
+  V0 adapter.
+- `prime eval submit` is the Prime-owned hosted V0 API command.
+- `prime eval push` uploads a completed native or legacy run.
+- Prime Lab discovers both native `config.toml` + Trace `results.jsonl` artifacts and legacy
+  `metadata.json` + `results.jsonl` artifacts.
 
-Prime therefore reserves the ambiguous short option `-s` for V0 compatibility; V1 callers use
-the equivalent long-form `--shuffle` option shown by upstream help.
+The Verifiers Prime plugin owns workspace interpreter selection and the other delegated command
+mappings; it also exports the V1 eval and init modules for consumers once released. Prime contains
+no fallback command map.
 
-## Native V1 platform blockers
+## Native artifacts
 
-Prime does not expose a speculative V1 submit command until `POST /hosted-evaluations` accepts a
-resolved V1 invocation. The existing `prime eval run ... --hosted` compatibility path remains
-operational. A native worker must execute Verifiers protocol version 1, preserve its `run_id`,
-and return `config.toml`, Trace `results.jsonl`, and `eval.log` for a normal run. A dry run returns
-only `config.toml`.
+A normal local run writes `config.toml`, append-only Trace `results.jsonl`, and `eval.log`.
+A dry run writes only `config.toml`. The native run directory name is the run ID; no additional
+manifest or sidecar is required.
 
-The Prime Evals samples endpoint does not yet expose a schema-versioned Trace JSONL ingestion
-operation. `prime eval push` therefore performs one lossy projection into the sample view at
-that API boundary. A native endpoint should accept `trace_schema_version: 1` plus Trace JSONL and
-associate it with the resolved config and run ID without requiring that projection.
-
-Prime Lab discovers and reads both native config/Trace artifacts and V0
-`metadata.json`/results artifacts. Its existing multi-eval config form continues to launch through
-the compatible hosted route. The native run directory name is its run ID.
+The Prime Evals samples endpoint does not yet accept schema-versioned Trace JSONL directly, so
+`prime eval push` performs the lossy projection into the platform sample view at that API
+boundary.

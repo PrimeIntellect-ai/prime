@@ -2,8 +2,8 @@
 
 import typer
 
-from ..utils import DefaultCommandGroup, PlainTyper, get_console
-from ..verifiers_bridge import is_help_request, print_gepa_run_help, run_gepa_passthrough
+from ..utils import DefaultCommandGroup, PlainTyper, get_console, is_plain_mode
+from ..verifiers_bridge import exec_verifiers_process, run_gepa_passthrough
 
 console = get_console()
 
@@ -42,9 +42,11 @@ def run_gepa_cmd(
     """Run optimization with local-first environment resolution."""
     passthrough_args = list(ctx.args)
 
-    if is_help_request(environment_or_config or "", passthrough_args):
-        print_gepa_run_help()
-        raise typer.Exit(0)
+    if environment_or_config in ("-h", "--help") or any(
+        arg in ("-h", "--help") for arg in passthrough_args
+    ):
+        args = ([environment_or_config] if environment_or_config else []) + passthrough_args
+        exec_verifiers_process("gepa", args, plain=is_plain_mode())
 
     if environment_or_config is None:
         console.print("[red]Error:[/red] Missing argument 'ENV_OR_CONFIG'.")

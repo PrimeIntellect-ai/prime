@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib import import_module
 from pathlib import Path
-from typing import NoReturn, Optional
+from typing import NoReturn, Optional, cast
 
 import toml
 import typer
@@ -19,11 +20,6 @@ from prime_cli.core import Config
 from .client import APIClient, APIError
 from .utils.env_metadata import get_environment_metadata
 from .utils.plain import get_console
-from .verifiers_plugin import (
-    PrimeVerifiersPlugin,
-    load_verifiers_prime_plugin,
-    resolve_workspace_python,
-)
 
 console = get_console()
 
@@ -31,24 +27,6 @@ DEFAULT_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_ENV_DIR_PATH = "./environments"
 DEFAULT_ENDPOINTS_PATH = "./configs/endpoints.toml"
 PRIME_SLUG = "primeintellect"
-V1_EVAL_MODULE = "verifiers.v1.cli.eval.main"
-V1_EVAL_ENTRYPOINT = f"from {V1_EVAL_MODULE} import main; main()"
-MODULE_TO_PRIME_COMMAND = {
-    "verifiers.cli.commands.eval": "prime eval run",
-    "verifiers.v1.cli.eval.main": "prime eval run",
-    "verifiers.cli.commands.gepa": "prime gepa run",
-    "verifiers.cli.commands.init": "prime env init",
-    "verifiers.v1.cli.init": "prime env init",
-    "verifiers.cli.commands.install": "prime env install",
-    "verifiers.cli.commands.build": "prime env build",
-    "verifiers.cli.commands.setup": "prime lab setup",
-    "verifiers.cli.tui": "prime eval view",
-}
-
-MODULE_TO_CONSOLE_SCRIPT = {
-    "verifiers.v1.cli.eval.main": "eval",
-    "verifiers.v1.cli.init": "init",
-}
 
 
 @dataclass(frozen=True)
@@ -72,133 +50,71 @@ class EndpointResolution:
     base_url: str
 
 
-def exec_eval_process(args: Sequence[str], *, plain: bool = False) -> NoReturn:
-    command = [resolve_workspace_python(), "-c", V1_EVAL_ENTRYPOINT, *args]
+def _venv_python(venv_root: Path) -> Path:
+    if os.name == "nt":
+        return venv_root / "Scripts" / "python.exe"
+    return venv_root / "bin" / "python"
+
+
+@lru_cache(maxsize=32)
+def _python_can_import_verifiers(python_executable: str, cwd: str) -> bool:
+    probe = "; ".join(
+        (
+            "import importlib.util",
+            "spec = importlib.util.find_spec('verifiers')",
+            "raise SystemExit(0 if spec else 1)",
+        )
+    )
+    result = subprocess.run(
+        [python_executable, "-c", probe],
+        cwd=cwd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def resolve_workspace_python(cwd: Path | None = None) -> str:
+    """Prefer a nearby project interpreter that can import Verifiers."""
+    workspace = (cwd or Path.cwd()).resolve()
+    candidates = [
+        *(
+            _venv_python(directory / ".venv")
+            for directory in [workspace, *workspace.parents]
+            if (directory / "pyproject.toml").is_file()
+        ),
+        *(
+            _venv_python(Path(value))
+            for value in (
+                os.environ.get("UV_PROJECT_ENVIRONMENT"),
+                os.environ.get("VIRTUAL_ENV"),
+            )
+            if value
+        ),
+    ]
+    for candidate in candidates:
+        if candidate.exists() and _python_can_import_verifiers(str(candidate), str(workspace)):
+            return str(candidate)
+    return sys.executable
+
+
+def _load_verifiers_cli_modules() -> Mapping[str, str]:
+    return cast(Mapping[str, str], getattr(import_module("verifiers.cli"), "CLI_MODULES"))
+
+
+def build_verifiers_command(name: str, args: Sequence[str] = ()) -> list[str]:
+    module = _load_verifiers_cli_modules()[name]
+    return [resolve_workspace_python(), "-m", module, *args]
+
+
+def exec_verifiers_process(name: str, args: Sequence[str], *, plain: bool = False) -> NoReturn:
+    """Replace Prime with a Verifiers-owned CLI process."""
+    command = build_verifiers_command(name, args)
     env = os.environ.copy()
     if plain:
         env.update(NO_COLOR="1", PYDANTIC_CONFIG_PLAIN="1")
     os.execvpe(command[0], command, env)
-
-
-def is_help_request(primary_arg: str, passthrough_args: list[str]) -> bool:
-    if primary_arg in ("-h", "--help"):
-        return True
-    return any(arg in ("-h", "--help") for arg in passthrough_args)
-
-
-def _sanitize_help_text(help_text: str, module_name: str, prime_command: str) -> str:
-    lines = help_text.splitlines()
-    console_script = MODULE_TO_CONSOLE_SCRIPT.get(module_name)
-    for idx, line in enumerate(lines):
-        if line.lower().startswith("usage:"):
-            suffix = line.split(":", 1)[1].strip()
-            python_module_prefix = re.compile(
-                rf"^python(?:\d+(?:\.\d+)?)?\s+-m\s+{re.escape(module_name)}(?:\s+|$)"
-            )
-            module_prefix = re.compile(rf"^{re.escape(module_name)}(?:\s+|$)")
-            console_prefix = f"uv run {console_script}" if console_script else None
-            match = python_module_prefix.match(suffix) or module_prefix.match(suffix)
-            if console_prefix and suffix.startswith(console_prefix):
-                suffix = suffix[len(console_prefix) :].lstrip()
-            elif match is not None:
-                suffix = suffix[match.end() :].lstrip()
-            else:
-                parts = suffix.split(maxsplit=1)
-                suffix = parts[1] if len(parts) > 1 else ""
-            lines[idx] = f"Usage: {prime_command}{(' ' + suffix) if suffix else ''}"
-            break
-
-    sanitized = "\n".join(lines)
-    alias_map = dict(MODULE_TO_PRIME_COMMAND)
-    alias_map[module_name] = prime_command
-    for module_alias, command_alias in sorted(
-        alias_map.items(), key=lambda pair: len(pair[0]), reverse=True
-    ):
-        sanitized = sanitized.replace(f"python -m {module_alias}", command_alias)
-        sanitized = sanitized.replace(module_alias, command_alias)
-
-    if console_script:
-        sanitized = sanitized.replace(f"uv run {console_script}", prime_command)
-        module_script = module_name.rsplit(".", 1)[-1] + ".py"
-        sanitized = re.sub(
-            rf"(?im)^usage: (?:{re.escape(console_script)}|{re.escape(module_script)})\b",
-            f"Usage: {prime_command}",
-            sanitized,
-        )
-
-    sanitized = re.sub(r"\bvf-[a-z0-9-]+\b", prime_command, sanitized)
-    if prime_command in {"prime eval run", "prime gepa run"}:
-        sanitized = re.sub(r"\benv_id_or_config\b", "environment", sanitized)
-    return sanitized.rstrip() + "\n"
-
-
-def _load_help_text(module_name: str, prime_command: str) -> str:
-    plugin = load_verifiers_prime_plugin()
-    command = plugin.build_module_command(module_name, ["--help"])
-    result = subprocess.run(command, capture_output=True, text=True)
-    help_text = result.stdout
-    if result.stderr:
-        if help_text and not help_text.endswith("\n"):
-            help_text += "\n"
-        help_text += result.stderr
-
-    if not help_text.strip():
-        raise RuntimeError(f"Unable to load help text from {module_name}")
-
-    return _sanitize_help_text(help_text, module_name, prime_command)
-
-
-def _write_help(text: str) -> None:
-    sys.stdout.write(text)
-    sys.stdout.flush()
-
-
-def print_gepa_run_help() -> None:
-    try:
-        help_text = _load_help_text(
-            load_verifiers_prime_plugin().gepa_module,
-            "prime gepa run",
-        )
-    except Exception as exc:
-        console.print(f"[red]Failed to load help for prime gepa run:[/red] {exc}")
-        raise typer.Exit(1) from exc
-    _write_help(help_text)
-
-
-def print_env_init_help() -> None:
-    try:
-        help_text = _load_help_text(
-            load_verifiers_prime_plugin().init_module,
-            "prime env init",
-        )
-    except Exception as exc:
-        console.print(f"[red]Failed to load help for prime env init:[/red] {exc}")
-        raise typer.Exit(1) from exc
-    _write_help(help_text)
-
-
-def print_env_build_help() -> None:
-    try:
-        help_text = _load_help_text(
-            load_verifiers_prime_plugin().build_module,
-            "prime env build",
-        )
-    except Exception as exc:
-        console.print(f"[red]Failed to load help for prime env build:[/red] {exc}")
-        raise typer.Exit(1) from exc
-    _write_help(help_text)
-
-
-def print_lab_setup_help() -> None:
-    try:
-        help_text = _load_help_text(
-            load_verifiers_prime_plugin().setup_module,
-            "prime lab setup",
-        )
-    except Exception as exc:
-        console.print(f"[red]Failed to load help for prime lab setup:[/red] {exc}")
-        raise typer.Exit(1) from exc
-    _write_help(help_text)
 
 
 def run_eval_view(env_dir: Optional[str], outputs_dir: Optional[str], limit: int = 50) -> None:
@@ -672,13 +588,17 @@ def _run_command(command: list[str], env: Optional[dict[str, str]] = None) -> No
         raise typer.Exit(result.returncode)
 
 
-def _install_local_environment(
-    plugin: PrimeVerifiersPlugin, env_name: str, env_dir_path: str
-) -> None:
-    command = plugin.build_module_command(
-        plugin.install_module,
-        [env_name, "--path", env_dir_path],
-    )
+def _install_local_environment(env_name: str, env_dir_path: str) -> None:
+    env_path = Path(env_dir_path) / env_name.replace("-", "_").lower()
+    command = [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        resolve_workspace_python(),
+        "-e",
+        str(env_path),
+    ]
     _run_command(command)
 
 
@@ -704,15 +624,13 @@ def _install_remote_environment(env_slug: str) -> None:
         raise typer.Exit(1)
 
 
-def _prepare_single_environment(
-    plugin: PrimeVerifiersPlugin, env_reference: str, env_dir_path: str
-) -> ResolvedEnvironment:
+def _prepare_single_environment(env_reference: str, env_dir_path: str) -> ResolvedEnvironment:
     resolved = _resolve_environment_reference(env_reference, env_dir_path)
     if resolved.install_mode == "local":
         console.print(f"[dim]Using local environment '{resolved.env_name}'[/dim]")
         if resolved.env_display_id:
             console.print(f"[dim]Resolved source: {resolved.env_display_id}[/dim]")
-        _install_local_environment(plugin, resolved.env_name, env_dir_path)
+        _install_local_environment(resolved.env_name, env_dir_path)
         return resolved
     if resolved.install_mode == "remote":
         if resolved.install_slug is None:
@@ -794,7 +712,6 @@ def _add_default_inference_and_key_args(
 
 
 def run_gepa_passthrough(environment_or_config: str, passthrough_args: list[str]) -> None:
-    plugin = load_verifiers_prime_plugin()
     config = Config()
 
     if not config.api_key:
@@ -811,10 +728,10 @@ def run_gepa_passthrough(environment_or_config: str, passthrough_args: list[str]
     if _is_config_target(environment_or_config):
         config_env = _collect_gepa_config_env(Path(environment_or_config), env_dir_path)
         if config_env is not None:
-            _prepare_single_environment(plugin, config_env[0], config_env[1])
+            _prepare_single_environment(config_env[0], config_env[1])
     else:
-        resolved = _prepare_single_environment(plugin, environment_or_config, env_dir_path)
+        resolved = _prepare_single_environment(environment_or_config, env_dir_path)
         run_target = resolved.env_name
 
-    command = plugin.build_module_command(plugin.gepa_module, [run_target, *args])
+    command = build_verifiers_command("gepa", [run_target, *args])
     _run_command(command, env=env)

@@ -1,6 +1,8 @@
+from types import SimpleNamespace
+
 import pytest
 from prime_cli.main import app
-from prime_cli.verifiers_bridge import _sanitize_help_text, exec_eval_process
+from prime_cli.verifiers_bridge import exec_verifiers_process
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -13,8 +15,8 @@ class ExecCalled(Exception):
 def test_eval_run_help_flags_are_forwarded(monkeypatch):
     captured = []
     monkeypatch.setattr(
-        "prime_cli.commands.evals.exec_eval_process",
-        lambda args, plain: captured.append((list(args), plain)),
+        "prime_cli.commands.evals.exec_verifiers_process",
+        lambda name, args, plain: captured.append((name, list(args), plain)),
     )
 
     for flag in ("-h", "--help"):
@@ -25,7 +27,10 @@ def test_eval_run_help_flags_are_forwarded(monkeypatch):
         )
         assert result.exit_code == 0, result.output
 
-    assert captured == [(["-h"], False), (["--help"], False)]
+    assert captured == [
+        ("eval", ["-h"], False),
+        ("eval", ["--help"], False),
+    ]
 
 
 def test_lab_setup_help_flags_use_prime_owned_help():
@@ -41,29 +46,7 @@ def test_lab_setup_help_flags_use_prime_owned_help():
         assert "--prime-rl" not in result.output
 
 
-def test_sanitize_help_removes_vf_eval_aliases():
-    raw = (
-        "usage: python -m verifiers.cli.commands.eval [-h] env_id_or_config\n"
-        "Run vf-eval with verifiers.cli.commands.eval\n"
-    )
-    help_text = _sanitize_help_text(raw, "verifiers.cli.commands.eval", "prime eval run")
-
-    assert "Usage: prime eval run [-h] environment" in help_text
-    assert "verifiers.cli.commands.eval" not in help_text
-    assert "vf-eval" not in help_text
-    assert "env_id_or_config" not in help_text
-
-
-def test_sanitize_help_rewrites_v1_console_script():
-    raw = "usage: uv run eval [<taskset-id>]\nusage: main.py [-h] [@ FILE] [OPTIONS]\n"
-
-    help_text = _sanitize_help_text(raw, "verifiers.v1.cli.eval.main", "prime eval run")
-
-    assert help_text.count("Usage: prime eval run") == 2
-    assert "uv run eval" not in help_text
-
-
-def test_exec_eval_process_forwards_once(monkeypatch):
+def test_exec_verifiers_process_forwards_once(monkeypatch):
     captured = {}
 
     def fake_exec(executable, command, env):
@@ -71,24 +54,80 @@ def test_exec_eval_process_forwards_once(monkeypatch):
         raise ExecCalled
 
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.resolve_workspace_python",
-        lambda: "python",
+        "prime_cli.verifiers_bridge.build_verifiers_command",
+        lambda name, args: ["python", "-m", f"verifiers.{name}", *args],
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.os.execvpe", fake_exec)
 
     with pytest.raises(ExecCalled):
-        exec_eval_process(["gsm8k-v1", "--dry-run"], plain=True)
+        exec_verifiers_process("eval", ["gsm8k-v1", "--dry-run"], plain=True)
 
     assert captured["executable"] == "python"
     assert captured["command"] == [
         "python",
-        "-c",
-        "from verifiers.v1.cli.eval.main import main; main()",
+        "-m",
+        "verifiers.eval",
         "gsm8k-v1",
         "--dry-run",
     ]
     assert captured["env"]["NO_COLOR"] == "1"
     assert captured["env"]["PYDANTIC_CONFIG_PLAIN"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("subcommand", "args"),
+    [
+        ("validate", ["gsm8k-v1", "--runtime.type", "subprocess"]),
+        ("serve", ["--id", "legacy-env", "--dry-run"]),
+    ],
+)
+def test_env_verifiers_commands_forward_argv(monkeypatch, subcommand, args):
+    captured = {}
+    monkeypatch.setattr(
+        "prime_cli.commands.env.exec_verifiers_process",
+        lambda name, forwarded, plain: captured.update(
+            name=name, args=list(forwarded), plain=plain
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["env", subcommand, *args],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"name": subcommand, "args": args, "plain": False}
+
+
+def test_env_init_forwards_argv_before_running_hygiene(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "prime_cli.commands.env.build_verifiers_command",
+        lambda name, args: captured.update(name=name, args=list(args)) or ["init"],
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.env.subprocess.run",
+        lambda command, env: captured.update(command=command) or SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.env._run_env_init_lab_hygiene_preflight",
+        lambda: captured.update(hygiene=True),
+    )
+
+    result = runner.invoke(
+        app,
+        ["env", "init", "demo-v1", "--add-tool", "--force"],
+        env={"PRIME_DISABLE_VERSION_CHECK": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "name": "init",
+        "args": ["demo-v1", "--add-tool", "--force"],
+        "command": ["init"],
+        "hygiene": True,
+    }
 
 
 def test_eval_view_uses_prime_viewer(monkeypatch):

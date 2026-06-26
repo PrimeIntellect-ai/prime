@@ -6,9 +6,11 @@ import pytest
 import typer
 from prime_cli.commands import env as env_command
 from prime_cli.commands.env import (
+    _build_environment,
     _environment_push_metadata,
     _environment_ref,
     _environment_resolve_data,
+    _resolve_build_target,
     _resolve_push_environment_path,
     _run_env_push_lab_hygiene_preflight,
 )
@@ -57,6 +59,24 @@ def test_respects_explicit_path_without_env_id(tmp_path):
     resolved = _resolve_push_environment_path(path=str(custom_path), env_id=None)
 
     assert resolved == custom_path.resolve()
+
+
+def test_build_target_appends_normalized_env_id(tmp_path):
+    base_dir = tmp_path / "workspace" / "environments"
+
+    env_name, env_path = _resolve_build_target("my-env", str(base_dir))
+
+    assert env_name == "my-env"
+    assert env_path == (base_dir / "my_env").resolve()
+
+
+def test_build_target_uses_explicit_environment_path(tmp_path):
+    env_dir = tmp_path / "workspace" / "environments" / "already_normalized"
+
+    env_name, env_path = _resolve_build_target(None, str(env_dir))
+
+    assert env_name == "already-normalized"
+    assert env_path == env_dir.resolve()
 
 
 def test_environment_resolve_data_uses_configured_team_id() -> None:
@@ -122,15 +142,9 @@ def test_env_init_runs_lab_hygiene_preflight_inside_lab_workspace(tmp_path, monk
         encoding="utf-8",
     )
 
-    class DummyPlugin:
-        init_module = "verifiers.v1.cli.init"
-
-        def build_module_command(self, module, args):
-            return ["verifiers-init", module, *args]
-
     monkeypatch.setattr(
-        "prime_cli.commands.env.load_verifiers_prime_plugin",
-        lambda: DummyPlugin(),
+        "prime_cli.commands.env.build_verifiers_command",
+        lambda name, args: ["verifiers-init", name, *args],
     )
 
     def fake_run(command, *args, **kwargs):
@@ -149,6 +163,35 @@ def test_env_init_runs_lab_hygiene_preflight_inside_lab_workspace(tmp_path, monk
     assert result.exit_code == 0
     assert "/AGENTS.md" in gitignore_lines
     assert "/.prime/" in gitignore_lines
+
+
+def test_env_build_owns_image_build_and_manifest(tmp_path, monkeypatch):
+    project = tmp_path / "environments" / "demo" / "proj"
+    server = project / "server"
+    server.mkdir(parents=True)
+    (project / "openenv.yaml").write_text("app: server.app:app\nport: 9000\n")
+    (project / "pyproject.toml").write_text("[project]\nname = 'demo'\nversion = '0.1.0'\n")
+    (server / "Dockerfile").write_text("FROM python:3.12-slim\n")
+    (server / "app.py").write_text(
+        "app = create_app(object(), CallToolAction, CallToolObservation)\n"
+    )
+
+    monkeypatch.setattr(
+        "prime_cli.commands.images.push_image",
+        lambda *args, **kwargs: "owner/demo:latest",
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.env._wait_for_build",
+        lambda image: "COMPLETED",
+    )
+
+    code = _build_environment("demo", str(tmp_path / "environments"))
+
+    assert code == 0
+    manifest = json.loads((project / ".build.json").read_text())
+    assert manifest["image"] == "owner/demo:latest"
+    assert manifest["port"] == 9000
+    assert manifest["contract"] == "mcp"
 
 
 def test_env_push_blocks_tracked_generated_lab_outputs(tmp_path, monkeypatch):

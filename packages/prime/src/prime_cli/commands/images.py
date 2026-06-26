@@ -390,7 +390,7 @@ def push_image(
         "--private",
         help="Make the image private when the build completes",
     ),
-):
+) -> str:
     """
     Build and push a Docker image to Prime Intellect registry.
 
@@ -599,6 +599,7 @@ def push_image(
                 f"prime sandbox create {full_image_path}[/dim]"
             )
             console.print()
+            return str(full_image_path)
 
         finally:
             # Clean up temporary tar file

@@ -38,7 +38,7 @@ from ..verifiers_bridge import (
     _is_config_target,
     _resolve_environment_reference,
     _split_owner_and_name,
-    exec_eval_process,
+    exec_verifiers_process,
     run_eval_view,
 )
 
@@ -1434,7 +1434,7 @@ def stop_cmd(
 )
 def run_eval_cmd(ctx: typer.Context) -> None:
     """Hand the untouched evaluation arguments to Verifiers."""
-    exec_eval_process(ctx.args, plain=is_plain_mode())
+    exec_verifiers_process("eval", ctx.args, plain=is_plain_mode())
 
 
 @app.command(

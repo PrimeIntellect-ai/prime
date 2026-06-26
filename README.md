@@ -144,6 +144,7 @@ prime env install <environment-name>
 
 # Create and push your own environment
 prime env init my-environment
+prime env validate my-environment
 prime env push my-environment
 ```
 

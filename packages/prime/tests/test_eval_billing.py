@@ -14,13 +14,6 @@ class DummyConfig:
     team_id = None
 
 
-class DummyPlugin:
-    gepa_module = "verifiers.cli.commands.gepa"
-
-    def build_module_command(self, module: str, args: list[str]) -> list[str]:
-        return [module, *args]
-
-
 def test_inference_client_maps_402_to_billing_error(monkeypatch):
     client = InferenceClient.__new__(InferenceClient)
     client.inference_url = "https://api.pinference.ai/api/v1"
@@ -58,14 +51,14 @@ def test_inference_client_maps_402_to_billing_error(monkeypatch):
 
 def test_gepa_run_provider_short_flag_does_not_override_env_dir_path(monkeypatch):
     monkeypatch.setattr(
-        "prime_cli.verifiers_bridge.load_verifiers_prime_plugin",
-        lambda: DummyPlugin(),
+        "prime_cli.verifiers_bridge.build_verifiers_command",
+        lambda name, args: [name, *args],
     )
     monkeypatch.setattr("prime_cli.verifiers_bridge.Config", lambda: DummyConfig())
     captured = {}
     monkeypatch.setattr(
         "prime_cli.verifiers_bridge._prepare_single_environment",
-        lambda _plugin, environment, env_dir_path: captured.update(
+        lambda environment, env_dir_path: captured.update(
             {"environment": environment, "env_dir_path": env_dir_path}
         )
         or ResolvedEnvironment(

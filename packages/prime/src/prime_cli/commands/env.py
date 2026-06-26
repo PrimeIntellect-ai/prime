@@ -1,3 +1,4 @@
+import ast
 import hashlib
 import json
 import os
@@ -20,7 +21,10 @@ from urllib.parse import urlparse
 import httpx
 import toml
 import typer
+import yaml
 from gitignore_parser import parse_gitignore
+from prime_sandboxes import APIClient as SandboxAPIClient
+from prime_sandboxes import Config as SandboxConfig
 from rich.table import Table
 from rich.text import Text
 
@@ -29,6 +33,7 @@ from ..lab_hygiene import LabHygieneOptions, find_lab_workspace, run_lab_hygiene
 from ..utils import (
     PlainTyper,
     get_console,
+    is_plain_mode,
     json_output_help,
     output_data_as_json,
     validate_output_format,
@@ -43,8 +48,11 @@ from ..utils.prompt import (
     validate_env_var_name,
 )
 from ..utils.time_utils import format_time_ago, iso_timestamp
-from ..verifiers_bridge import is_help_request, print_env_build_help, print_env_init_help
-from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
+from ..verifiers_bridge import (
+    build_verifiers_command,
+    exec_verifiers_process,
+    resolve_workspace_python,
+)
 from .config import TEAM_ID_PATTERN
 
 app = PlainTyper(help="Manage verifiers environments", no_args_is_help=True)
@@ -55,6 +63,8 @@ MAX_FILES_TO_SHOW = 10
 DEFAULT_HASH_LENGTH = 8
 DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
+DEFAULT_BUILD_WAIT_TIMEOUT_S = 1200
+DEFAULT_BUILD_WAIT_INTERVAL_S = 5.0
 
 # Action subcommand app
 action_app = PlainTyper(help="Manage environment actions (CI jobs)", no_args_is_help=True)
@@ -1659,7 +1669,6 @@ def push(
 
 
 @app.command(
-    no_args_is_help=True,
     rich_help_panel="Manage",
     context_settings={
         "allow_extra_args": True,
@@ -1667,72 +1676,290 @@ def push(
         "help_option_names": [],
     },
 )
-def init(
-    ctx: typer.Context,
-    name: Optional[str] = typer.Argument(None, help="Name of the new environment"),
-) -> None:
-    """Initialize a new environment."""
-    passthrough_args = list(ctx.args)
-
-    if is_help_request(name or "", passthrough_args):
-        print_env_init_help()
-        raise typer.Exit(0)
-
-    if name is None:
-        console.print("[red]Error:[/red] Missing argument 'NAME'.")
-        console.print("[dim]Example: prime env init my-env --path ./environments[/dim]")
-        raise typer.Exit(2)
-
-    if name.startswith("-"):
-        console.print("[red]Error:[/red] Environment name must be the first argument.")
-        console.print("[dim]Example: prime env init my-env --path ./environments[/dim]")
-        raise typer.Exit(2)
-
-    plugin = load_verifiers_prime_plugin()
-    command = plugin.build_module_command(plugin.init_module, [name, *passthrough_args])
-    result = subprocess.run(command)
+def init(ctx: typer.Context) -> None:
+    """Initialize a V1 or V0 environment with Verifiers."""
+    env = os.environ.copy()
+    if is_plain_mode():
+        env.update(NO_COLOR="1", PYDANTIC_CONFIG_PLAIN="1")
+    result = subprocess.run(build_verifiers_command("init", ctx.args), env=env)
     if result.returncode != 0:
         raise typer.Exit(result.returncode)
-    _run_env_init_lab_hygiene_preflight()
+    if ctx.args and not any(arg in ("-h", "--help") for arg in ctx.args):
+        _run_env_init_lab_hygiene_preflight()
 
 
-@app.command(
-    no_args_is_help=True,
-    rich_help_panel="Manage",
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-        "help_option_names": [],
-    },
-)
+def _resolve_build_project_dir(environments_root: Path, env_id_underscore: str) -> Path:
+    env_path = environments_root / env_id_underscore
+    if not env_path.is_dir():
+        raise FileNotFoundError(
+            f"Environment not found: {env_path}. Expected directory "
+            f"'{env_id_underscore}' under {environments_root}."
+        )
+
+    project_dir = env_path / "proj"
+    if not project_dir.is_dir():
+        raise FileNotFoundError(
+            f"Embedded project directory not found: {project_dir}. "
+            "Required structure: environments/<env_id_underscore>/proj/."
+        )
+
+    for required in (project_dir / "openenv.yaml", project_dir / "pyproject.toml"):
+        if not required.exists():
+            raise FileNotFoundError(
+                f"Required file missing: {required}. Expected project files under proj/."
+            )
+    return project_dir
+
+
+def _resolve_build_app_module(project_dir: Path, app_name: str) -> Path:
+    module = app_name.split(":", 1)[0].strip()
+    if not module:
+        raise RuntimeError(f"Invalid app entrypoint in openenv.yaml: {app_name}")
+    app_module = project_dir / Path(*module.split("."))
+    for candidate in (app_module.with_suffix(".py"), app_module / "__init__.py"):
+        if candidate.exists():
+            return candidate
+    raise RuntimeError(
+        f"Could not resolve app module from openenv.yaml app='{app_name}'. "
+        f"Expected {app_module.with_suffix('.py')} or {app_module / '__init__.py'}."
+    )
+
+
+def _build_ast_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return ""
+
+
+def _detect_build_contract(project_dir: Path, app_name: str) -> str:
+    """Detect the OpenEnv MCP or Gym contract from its create_app call."""
+    app_file = _resolve_build_app_module(project_dir, app_name)
+    tree = ast.parse(app_file.read_text(), filename=str(app_file))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or _build_ast_name(node.func) != "create_app":
+            continue
+        if len(node.args) < 3:
+            continue
+        action_name = _build_ast_name(node.args[1])
+        observation_name = _build_ast_name(node.args[2])
+        if action_name == "CallToolAction" and observation_name == "CallToolObservation":
+            return "mcp"
+        return "gym"
+    raise RuntimeError(
+        f"Could not detect OpenEnv contract: no supported create_app(...) call found in {app_file}."
+    )
+
+
+def _write_build_manifest(
+    project_dir: Path,
+    image: str,
+    port: int,
+    env_id: str,
+    status: str,
+    start_command: str,
+    app_name: str,
+    contract: str,
+) -> Path:
+    manifest = {
+        "schema_version": 1,
+        "environment_id": env_id,
+        "image": image,
+        "port": port,
+        "app": app_name,
+        "contract": contract,
+        "start_command": start_command,
+        "image_status": status,
+    }
+    manifest_path = project_dir / ".build.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return manifest_path
+
+
+def _extract_build_image_ref(item: dict[str, Any]) -> Optional[str]:
+    for key in ("displayRef", "fullImagePath"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+    image_name = item.get("imageName")
+    image_tag = item.get("imageTag")
+    if isinstance(image_name, str) and image_name:
+        return f"{image_name}:{image_tag}" if image_tag else image_name
+    for key in ("image", "image_reference", "image_ref", "name", "ref"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, dict) and isinstance(value.get("name"), str):
+            return f"{value['name']}:{value['tag']}" if value.get("tag") else value["name"]
+    return None
+
+
+def _wait_for_build(
+    image_ref: str,
+    timeout_s: int = DEFAULT_BUILD_WAIT_TIMEOUT_S,
+    interval_s: float = DEFAULT_BUILD_WAIT_INTERVAL_S,
+) -> Optional[str]:
+    start = time.time()
+    last_status = None
+    params = {"limit": "250", "offset": "0"}
+    team_id = SandboxConfig().team_id
+    if team_id:
+        params["teamId"] = team_id
+    client = SandboxAPIClient()
+    while time.time() - start < timeout_s:
+        response = client.request("GET", "/images", params=params)
+        items = response.get("data") or response.get("items") or response.get("images") or []
+        for item in items:
+            if not isinstance(item, dict) or _extract_build_image_ref(item) != image_ref:
+                continue
+            status = item.get("status") or item.get("state")
+            last_status = str(status) if status is not None else None
+            break
+        if last_status and last_status.lower() in {
+            "ready",
+            "succeeded",
+            "completed",
+            "failed",
+            "error",
+        }:
+            return last_status
+        time.sleep(interval_s)
+    return last_status
+
+
+def _resolve_build_target(raw_env_id: Optional[str], raw_path: str) -> tuple[str, Path]:
+    base_path = Path(raw_path).expanduser().resolve()
+    if raw_env_id is None:
+        env_dir = base_path
+        env_id_underscore = env_dir.name
+        if not env_id_underscore:
+            raise ValueError("Could not infer environment id from --path.")
+    else:
+        env_id_dash = raw_env_id.strip()
+        if not env_id_dash:
+            raise ValueError("Environment id cannot be empty.")
+        if "_" in env_id_dash:
+            raise ValueError(
+                "Environment id must use hyphens (e.g. openenv-echo), not underscores."
+            )
+        env_id_underscore = env_id_dash.replace("-", "_")
+        env_dir = base_path / env_id_underscore
+    return env_id_underscore.replace("_", "-"), env_dir
+
+
+def _build_environment(env_id: Optional[str], path: str) -> int:
+    try:
+        env_id_dash, env_path = _resolve_build_target(env_id, path)
+        project_dir = _resolve_build_project_dir(env_path.parent, env_path.name)
+        dockerfile = project_dir / "server" / "Dockerfile"
+        if not dockerfile.exists():
+            raise FileNotFoundError(
+                f"No Dockerfile found at {dockerfile}. "
+                "Expected enforced layout with proj/server/Dockerfile."
+            )
+    except (ValueError, FileNotFoundError) as exc:
+        console.print(str(exc), markup=False)
+        return 2
+
+    image = f"{env_id_dash}:latest"
+    openenv_config = yaml.safe_load((project_dir / "openenv.yaml").read_text())
+    if not isinstance(openenv_config, dict):
+        openenv_config = {}
+    port = int(openenv_config.get("port", 8000))
+    raw_app_name = openenv_config.get("app")
+    app_name = (
+        raw_app_name.strip()
+        if isinstance(raw_app_name, str) and raw_app_name.strip()
+        else "server.app:app"
+    )
+    contract = _detect_build_contract(project_dir, app_name)
+    start_command = (
+        f'sh -lc "cd /app/env && /app/.venv/bin/uvicorn {app_name} --host 0.0.0.0 --port {port}"'
+    )
+
+    from .images import push_image
+
+    resolved_image = push_image(
+        image,
+        context=str(project_dir),
+        dockerfile=str(dockerfile),
+        platform="linux/amd64",
+        public=False,
+        private=False,
+    )
+    status = _wait_for_build(resolved_image)
+    if status is None:
+        console.print(
+            "Timed out waiting for image status. Run `prime images list` to check progress."
+        )
+        return 1
+    if status.lower() not in {"ready", "succeeded", "completed"}:
+        console.print(f"Image build did not complete successfully (status={status}).")
+        return 1
+
+    manifest_path = _write_build_manifest(
+        project_dir,
+        resolved_image,
+        port,
+        env_id_dash,
+        status,
+        start_command,
+        app_name,
+        contract,
+    )
+    console.print(
+        f"Wrote {manifest_path} with image='{resolved_image}' port={port} app='{app_name}' "
+        f"contract='{contract}' start_command='{start_command}' status={status}",
+        markup=False,
+    )
+    return 0
+
+
+@app.command(no_args_is_help=True, rich_help_panel="Manage")
 def build(
-    ctx: typer.Context,
     env_id: Optional[str] = typer.Argument(
         None, help="Environment ID (hyphenated, e.g. openenv-echo)"
     ),
+    path: str = typer.Option(
+        "./environments",
+        "--path",
+        "-p",
+        help="Base environments path, or the environment path when ENV_ID is omitted",
+    ),
 ) -> None:
     """Build an OpenEnv-backed environment image."""
-    passthrough_args = list(ctx.args)
+    code = _build_environment(env_id, path)
+    if code != 0:
+        raise typer.Exit(code)
 
-    if is_help_request(env_id or "", passthrough_args):
-        print_env_build_help()
-        raise typer.Exit(0)
 
-    if env_id is None:
-        console.print("[red]Error:[/red] Missing argument 'ENV_ID'.")
-        console.print("[dim]Example: prime env build openenv-echo --path ./environments[/dim]")
-        raise typer.Exit(2)
+@app.command(
+    rich_help_panel="Manage",
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+        "help_option_names": [],
+    },
+)
+def validate(ctx: typer.Context) -> None:
+    """Run a taskset's model-free validation with Verifiers."""
+    exec_verifiers_process("validate", ctx.args, plain=is_plain_mode())
 
-    if env_id.startswith("-"):
-        console.print("[red]Error:[/red] Environment ID must be the first argument.")
-        console.print("[dim]Example: prime env build openenv-echo --path ./environments[/dim]")
-        raise typer.Exit(2)
 
-    plugin = load_verifiers_prime_plugin()
-    command = plugin.build_module_command(plugin.build_module, [env_id, *passthrough_args])
-    result = subprocess.run(command)
-    if result.returncode != 0:
-        raise typer.Exit(result.returncode)
+@app.command(
+    rich_help_panel="Manage",
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+        "help_option_names": [],
+    },
+)
+def serve(ctx: typer.Context) -> None:
+    """Serve a V1 or V0 environment with Verifiers."""
+    exec_verifiers_process("serve", ctx.args, plain=is_plain_mode())
 
 
 @app.command(no_args_is_help=True, rich_help_panel="Manage")
@@ -2400,8 +2627,6 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
     console.print(f"\n[cyan]Installing {env_id}@{version} with {tool}...[/cyan]")
 
     display_command = " ".join(cmd)
-    if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2].startswith("verifiers.cli.commands."):
-        display_command = f"prime env install {env_id}"
     console.print(f"[dim]Command: {display_command}[/dim]")
 
     process = subprocess.Popen(
@@ -2467,7 +2692,6 @@ def install(
     """
     try:
         client = APIClient(require_auth=False)
-        plugin = load_verifiers_prime_plugin()
 
         # Validate package manager
         if with_tool not in ["uv", "pip"]:
@@ -2505,10 +2729,7 @@ def install(
                 env_path = Path(path) / env_folder
                 if env_path.exists():
                     if with_tool == "uv":
-                        cmd_parts = plugin.build_module_command(
-                            plugin.install_module,
-                            [local_name, "--path", path],
-                        )
+                        cmd_parts = _uv_pip_command("install", "-e", str(env_path))
                     else:
                         cmd_parts = ["pip", "install", "-e", str(env_path)]
                     installable_envs.append((cmd_parts, local_name, "local", local_name))

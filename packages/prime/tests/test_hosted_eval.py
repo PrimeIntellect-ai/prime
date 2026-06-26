@@ -1303,11 +1303,14 @@ id = "gsm8k-v1"
 """.strip()
     )
 
-    def fake_exec_eval_process(args, plain):
+    def fake_exec_verifiers_process(name, args, plain):
+        captured["name"] = name
         captured["args"] = args
         captured["plain"] = plain
 
-    monkeypatch.setattr("prime_cli.commands.evals.exec_eval_process", fake_exec_eval_process)
+    monkeypatch.setattr(
+        "prime_cli.commands.evals.exec_verifiers_process", fake_exec_verifiers_process
+    )
 
     result = runner.invoke(
         app,
@@ -1317,6 +1320,7 @@ id = "gsm8k-v1"
 
     assert result.exit_code == 0, result.output
     assert captured == {
+        "name": "eval",
         "args": ["@", str(config_path)],
         "plain": False,
     }
@@ -1325,11 +1329,14 @@ id = "gsm8k-v1"
 def test_eval_run_resume_passthrough(monkeypatch, tmp_path):
     captured = {}
 
-    def fake_exec_eval_process(args, plain):
+    def fake_exec_verifiers_process(name, args, plain):
+        captured["name"] = name
         captured["args"] = args
         captured["plain"] = plain
 
-    monkeypatch.setattr("prime_cli.commands.evals.exec_eval_process", fake_exec_eval_process)
+    monkeypatch.setattr(
+        "prime_cli.commands.evals.exec_verifiers_process", fake_exec_verifiers_process
+    )
     output_dir = tmp_path / "previous-run"
 
     result = runner.invoke(
@@ -1340,6 +1347,7 @@ def test_eval_run_resume_passthrough(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert captured == {
+        "name": "eval",
         "args": ["--resume", str(output_dir)],
         "plain": False,
     }
@@ -1348,11 +1356,14 @@ def test_eval_run_resume_passthrough(monkeypatch, tmp_path):
 def test_eval_run_local_v1_sampling_passthrough(monkeypatch):
     captured = {}
 
-    def fake_exec_eval_process(args, plain):
+    def fake_exec_verifiers_process(name, args, plain):
+        captured["name"] = name
         captured["args"] = args
         captured["plain"] = plain
 
-    monkeypatch.setattr("prime_cli.commands.evals.exec_eval_process", fake_exec_eval_process)
+    monkeypatch.setattr(
+        "prime_cli.commands.evals.exec_verifiers_process", fake_exec_verifiers_process
+    )
 
     result = runner.invoke(
         app,
@@ -1362,6 +1373,7 @@ def test_eval_run_local_v1_sampling_passthrough(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured == {
+        "name": "eval",
         "args": ["gsm8k-v1", "--sampling.temperature", "0.2"],
         "plain": False,
     }
@@ -1370,11 +1382,14 @@ def test_eval_run_local_v1_sampling_passthrough(monkeypatch):
 def test_eval_run_local_v1_accepts_option_first_argv(monkeypatch):
     captured = {}
 
-    def fake_exec_eval_process(args, plain):
+    def fake_exec_verifiers_process(name, args, plain):
+        captured["name"] = name
         captured["args"] = args
         captured["plain"] = plain
 
-    monkeypatch.setattr("prime_cli.commands.evals.exec_eval_process", fake_exec_eval_process)
+    monkeypatch.setattr(
+        "prime_cli.commands.evals.exec_verifiers_process", fake_exec_verifiers_process
+    )
 
     result = runner.invoke(
         app,
@@ -1384,6 +1399,7 @@ def test_eval_run_local_v1_accepts_option_first_argv(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured == {
+        "name": "eval",
         "args": ["--taskset.id", "gsm8k-v1", "--dry-run"],
         "plain": False,
     }
@@ -1393,8 +1409,8 @@ def test_eval_run_local_v1_keeps_short_shuffle_flag(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(
-        "prime_cli.commands.evals.exec_eval_process",
-        lambda args, plain: captured.update(args=args, plain=plain),
+        "prime_cli.commands.evals.exec_verifiers_process",
+        lambda name, args, plain: captured.update(name=name, args=args, plain=plain),
     )
 
     result = runner.invoke(
@@ -1405,13 +1421,14 @@ def test_eval_run_local_v1_keeps_short_shuffle_flag(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["args"] == ["gsm8k-v1", "-s", "--dry-run"]
+    assert captured["name"] == "eval"
 
 
 def test_eval_run_forwards_unknown_options(monkeypatch):
     captured = {}
     monkeypatch.setattr(
-        "prime_cli.commands.evals.exec_eval_process",
-        lambda args, plain: captured.update(args=args, plain=plain),
+        "prime_cli.commands.evals.exec_verifiers_process",
+        lambda name, args, plain: captured.update(name=name, args=args, plain=plain),
     )
 
     result = runner.invoke(
@@ -1422,13 +1439,14 @@ def test_eval_run_forwards_unknown_options(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["args"] == ["gsm8k-v1", "--skip-upload"]
+    assert captured["name"] == "eval"
 
 
 def test_eval_run_v0_uses_native_id(monkeypatch):
     captured = {}
     monkeypatch.setattr(
-        "prime_cli.commands.evals.exec_eval_process",
-        lambda args, plain: captured.update(args=args, plain=plain),
+        "prime_cli.commands.evals.exec_verifiers_process",
+        lambda name, args, plain: captured.update(name=name, args=args, plain=plain),
     )
 
     result = runner.invoke(
@@ -1451,6 +1469,7 @@ def test_eval_run_v0_uses_native_id(monkeypatch):
         "--sampling.temperature",
         "0.2",
     ]
+    assert captured["name"] == "eval"
 
 
 @pytest.mark.parametrize(

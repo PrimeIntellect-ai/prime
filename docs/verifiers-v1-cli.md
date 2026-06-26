@@ -1,29 +1,29 @@
 # Verifiers V1 CLI boundary
 
-Prime uses Typer for command routing and treats the local Verifiers evaluator as a workspace
-process. `prime eval run` forwards every argument unchanged and replaces itself with:
+Prime uses Typer for command routing and treats Verifiers-owned commands as workspace processes.
+It forwards every argument unchanged and replaces itself with:
 
 ```text
-<workspace-python> -c 'from verifiers.v1.cli.eval.main import main; main()' <argv...>
+<workspace-python> -m <verifiers-module> <argv...>
 ```
 
-Verifiers parses the Pydantic configuration once, generates the run identity, executes the
-evaluation, and writes its native artifacts. Prime does not probe, pre-resolve, or reinterpret
-local evaluation options.
+The Verifiers command registry supplies the module. Prime selects the workspace interpreter but
+does not probe, pre-resolve, rewrite paths, render help, or reinterpret native options.
 
 ## Command ownership
 
 - `prime eval run` is the native local Verifiers CLI. A V1 taskset is positional or selected
   with `--taskset.id`; a V0 environment is selected with `--id` and runs through Verifiers'
   V0 adapter.
+- `prime env init` scaffolds a V1 environment, or a V0 environment with `--v0`.
+- `prime env validate` runs a V1 taskset's model-free validation hooks.
+- `prime env serve` serves a V1 taskset, or a V0 environment selected with `--id`.
 - `prime eval submit` is the Prime-owned hosted V0 API command.
 - `prime eval push` uploads a completed native or legacy run.
+- `prime env install`, `build`, `push`, and `pull` are Prime-owned package and platform workflows.
+- `prime gepa run` remains a V0 adapter until GEPA has a V1 CLI.
 - Prime Lab discovers both native `config.toml` + Trace `results.jsonl` artifacts and legacy
   `metadata.json` + `results.jsonl` artifacts.
-
-The Verifiers Prime plugin owns workspace interpreter selection and the other delegated command
-mappings; it also exports the V1 eval and init modules for consumers once released. Prime contains
-no fallback command map.
 
 ## Native artifacts
 

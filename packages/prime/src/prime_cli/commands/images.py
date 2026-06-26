@@ -397,6 +397,11 @@ def push_image(
         "--source-image",
         help="Copy an existing public image into Prime instead of uploading a build context",
     ),
+    platform_image: bool = typer.Option(
+        False,
+        "--platform-image",
+        help="Build an org-less platform image (admins only)",
+    ),
 ):
     """
     Build and push a Docker image to Prime Intellect registry.
@@ -419,6 +424,12 @@ def push_image(
             raise typer.Exit(1)
 
         is_transfer = source_image is not None
+        if platform_image and private:
+            console.print("[red]Error: Platform images must be public[/red]")
+            raise typer.Exit(1)
+        if platform_image and config.team_id:
+            console.print("[red]Error: Platform images cannot be pushed in a team context[/red]")
+            raise typer.Exit(1)
         if not is_transfer and image_reference is None:
             console.print(
                 "[red]Error: Image reference is required unless --source-image is used[/red]"
@@ -463,9 +474,14 @@ def push_image(
             destination_display = (
                 f"{image_name}:{image_tag}" if image_name and image_tag else "derived"
             )
-            console.print("[bold blue]Transferring image into Prime:[/bold blue]")
+            if platform_image:
+                console.print("[bold blue]Transferring platform image into Prime:[/bold blue]")
+            else:
+                console.print("[bold blue]Transferring image into Prime:[/bold blue]")
             console.print(f"[bold]Source:[/bold] {source_display}")
             console.print(f"[bold]Destination:[/bold] {destination_display}")
+            if platform_image:
+                console.print("[bold]Owner:[/bold] Platform")
             if config.team_id:
                 console.print(f"[dim]Team: {config.team_id}[/dim]")
             console.print()
@@ -476,6 +492,8 @@ def push_image(
                 visibility = ImageVisibility.PUBLIC
             elif private:
                 visibility = ImageVisibility.PRIVATE
+            if platform_image:
+                visibility = ImageVisibility.PUBLIC
 
             try:
                 response = client.transfer_image(
@@ -485,6 +503,7 @@ def push_image(
                     platform=platform,
                     team_id=config.team_id,
                     visibility=visibility,
+                    owner_scope="platform" if platform_image else None,
                 )
             except UnauthorizedError:
                 console.print(
@@ -532,7 +551,9 @@ def push_image(
                 )
                 for result in failed_results:
                     console.print(f"[yellow]- {result.source_image}: {result.error}[/yellow]")
-            if public or private:
+            if platform_image:
+                console.print(f"[bold]Visibility:[/bold] {ImageVisibility.PUBLIC.value}")
+            elif public or private:
                 requested_visibility = ImageVisibility.PUBLIC if public else ImageVisibility.PRIVATE
                 console.print(f"[bold]Visibility:[/bold] {requested_visibility.value}")
             else:
@@ -550,9 +571,15 @@ def push_image(
                 raise typer.Exit(1)
             return
 
-        console.print(
-            f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
-        )
+        if platform_image:
+            console.print(
+                f"[bold blue]Building and pushing platform image:[/bold blue] "
+                f"{image_name}:{image_tag}"
+            )
+        else:
+            console.print(
+                f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
+            )
         if config.team_id:
             console.print(f"[dim]Team: {config.team_id}[/dim]")
         console.print()
@@ -634,7 +661,10 @@ def push_image(
                 }
                 if config.team_id:
                     build_payload["team_id"] = config.team_id
-                if public:
+                if platform_image:
+                    build_payload["ownerScope"] = "platform"
+                    build_payload["visibility"] = ImageVisibility.PUBLIC.value
+                elif public:
                     build_payload["visibility"] = ImageVisibility.PUBLIC.value
                 elif private:
                     build_payload["visibility"] = ImageVisibility.PRIVATE.value
@@ -703,7 +733,10 @@ def push_image(
             console.print()
             console.print(f"[bold]Build ID:[/bold] {build_id}")
             console.print(f"[bold]Image:[/bold] {full_image_path}")
-            if public or private:
+            if platform_image:
+                console.print("[bold]Owner:[/bold] Platform")
+                console.print(f"[bold]Visibility:[/bold] {ImageVisibility.PUBLIC.value}")
+            elif public or private:
                 requested_visibility = ImageVisibility.PUBLIC if public else ImageVisibility.PRIVATE
                 console.print(f"[bold]Visibility:[/bold] {requested_visibility.value}")
             else:

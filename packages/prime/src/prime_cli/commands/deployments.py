@@ -2,26 +2,24 @@
 
 from typing import List, Optional
 
-import typer
 from rich.table import Table
+
+from prime_cli.leaves.deployments.create import Config as DeploymentsCreateConfig
+from prime_cli.leaves.deployments.delete import Config as DeploymentsDeleteConfig
+from prime_cli.leaves.deployments.list import Config as DeploymentsListConfig
 
 from ..api.deployments import DeploymentsClient
 from ..client import APIClient, APIError
 from ..core import Config
 from ..utils import (
-    PlainTyper,
     get_console,
     json_output_help,
     output_data_as_json,
     validate_output_format,
 )
+from ..utils.prompt import confirm
 
 console = get_console()
-
-app = PlainTyper(
-    help="Manage adapter deployments (experimental).",
-    no_args_is_help=True,
-)
 
 LIST_DEPLOYMENTS_JSON_HELP = json_output_help(
     ".models[] = {id, display_name, base_model, step, status, deployment_status, deployable?, ...}",
@@ -56,13 +54,7 @@ curl -X POST https://api.pinference.ai/api/v1/chat/completions \\
     )
 
 
-@app.command(name="list", epilog=LIST_DEPLOYMENTS_JSON_HELP)
-def list_deployments(
-    team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
-    num: int = typer.Option(20, "--num", "-n", help="Items per page"),
-    page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    output: str = typer.Option("table", "-o", "--output", help="Output format: table or json"),
-) -> None:
+def list_deployments(config: DeploymentsListConfig) -> None:
     """List adapters and their deployment status.
 
     Example:
@@ -77,18 +69,23 @@ def list_deployments(
 
         prime deployments list --team <team_id>
     """
+    team = config.team
+    num = config.num
+    page = config.page
+    output = config.output
+
     validate_output_format(output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         api_client = APIClient()
         deployments_client = DeploymentsClient(api_client)
-        config = Config()
+        prime_config = Config()
 
-        team_id = team or config.team_id
+        team_id = team or prime_config.team_id
         offset = (page - 1) * num
 
         models, total = deployments_client.list_adapters(team_id=team_id, limit=num, offset=offset)
@@ -165,15 +162,10 @@ def list_deployments(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(name="create")
-def create_deployment(
-    ctx: typer.Context,
-    model_id: Optional[str] = typer.Argument(None, help="Model ID to deploy"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-) -> None:
+def create_deployment(config: DeploymentsCreateConfig) -> None:
     """Deploy a model for inference.
 
     Makes the trained model available for inference requests.
@@ -185,9 +177,8 @@ def create_deployment(
 
         prime deployments create <model_id> --yes
     """
-    if model_id is None:
-        console.print(ctx.get_help())
-        raise typer.Exit(0)
+    model_id = config.model_id
+    yes = config.yes
 
     try:
         api_client = APIClient()
@@ -200,16 +191,16 @@ def create_deployment(
             console.print("[red]Error:[/red] Model is not ready for deployment.")
             console.print(f"Current status: [yellow]{model.status}[/yellow]")
             console.print("[dim]Only models with READY status can be deployed.[/dim]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if model.deployment_status == "DEPLOYED":
             console.print("[yellow]Model is already deployed.[/yellow]")
-            raise typer.Exit(0)
+            raise SystemExit(0)
 
         if model.deployment_status in ("DEPLOYING", "UNLOADING"):
             console.print("[yellow]Model deployment is in progress.[/yellow]")
             console.print(f"Current status: {model.deployment_status}")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         # Check if base model supports LoRA deployment
         try:
@@ -219,7 +210,7 @@ def create_deployment(
                     "[red]Error:[/red] Base model is not currently available for LoRA deployment."
                 )
                 console.print(f"  Base model: [yellow]{model.base_model}[/yellow]")
-                raise typer.Exit(1)
+                raise SystemExit(1)
         except APIError:
             console.print(
                 "[dim]Warning: Could not verify base model deployability. Proceeding anyway.[/dim]"
@@ -234,10 +225,10 @@ def create_deployment(
         console.print()
 
         if not yes:
-            confirm = typer.confirm("Are you sure you want to deploy this model?")
-            if not confirm:
+            confirmed = confirm("Are you sure you want to deploy this model?")
+            if not confirmed:
                 console.print("Cancelled.")
-                raise typer.Exit(0)
+                raise SystemExit(0)
 
         # Deploy the model
         updated_model = deployments_client.deploy_adapter(model_id)
@@ -251,14 +242,10 @@ def create_deployment(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(name="delete")
-def delete_deployment(
-    ctx: typer.Context,
-    model_id: Optional[str] = typer.Argument(None, help="Model ID to unload"),
-) -> None:
+def delete_deployment(config: DeploymentsDeleteConfig) -> None:
     """Unload a model from inference.
 
     Removes the model from serving. Model files remain stored
@@ -268,9 +255,7 @@ def delete_deployment(
 
         prime deployments delete <model_id>
     """
-    if model_id is None:
-        console.print(ctx.get_help())
-        raise typer.Exit(0)
+    model_id = config.model_id
 
     try:
         api_client = APIClient()
@@ -281,17 +266,17 @@ def delete_deployment(
 
         if model.deployment_status == "NOT_DEPLOYED":
             console.print("[yellow]Model is not deployed.[/yellow]")
-            raise typer.Exit(0)
+            raise SystemExit(0)
 
         if model.deployment_status in ("DEPLOYING", "UNLOADING"):
             console.print("[yellow]Model deployment is in progress.[/yellow]")
             console.print(f"Current status: {model.deployment_status}")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if model.deployment_status not in ("DEPLOYED", "DEPLOY_FAILED", "UNLOAD_FAILED"):
             console.print("[red]Error:[/red] Cannot unload model in current state.")
             console.print(f"Current status: {model.deployment_status}")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         # Unload the model
         updated_model = deployments_client.unload_adapter(model_id)
@@ -303,4 +288,4 @@ def delete_deployment(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)

@@ -18,23 +18,25 @@ from typing import Any, Callable
 import prime_lab_app.agent_widget_model as agent_widget_model
 import pytest
 import toml
+from click.testing import CliRunner
 from prime_cli.api.rl import RLClient
 from prime_cli.commands.env import _environment_fork_chain, _environment_ref
-from prime_cli.commands.lab import app as lab_cli_app
 from prime_cli.commands.rl import RLConfig as HostedRLConfig
 from prime_cli.lab_mcp import _serve_lab_mcp_stdio, lab_mcp_tool_definitions
 from prime_cli.lab_setup import (
     LabDoctorOptions,
+    LabDoctorResult,
     LabSetupOptions,
     LabSetupResult,
     LabSyncOptions,
-    parse_lab_doctor_args,
-    parse_lab_setup_args,
-    parse_lab_sync_args,
+    LabSyncResult,
+    resolve_explicit_agents,
     run_lab_doctor_service,
     run_lab_setup_service,
     run_lab_sync_service,
 )
+from prime_cli.leaves.lab.doctor import Config as LabDoctorConfig
+from prime_cli.main import app as prime_cli_app
 from prime_lab_app.agent_acp import (
     acp_lab_mcp_servers,
     acp_session_params,
@@ -213,11 +215,11 @@ from prime_lab_app.widgets import (
     HomeLaunchPanel,
     ScopeToggle,
 )
+from pydantic_config import cli
 from rich.console import Console
 from rich.panel import Panel
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Button, Label, OptionList, Select, Static, Tree
-from typer.testing import CliRunner
 from verifiers.utils import install_utils
 
 
@@ -2063,7 +2065,7 @@ def test_prime_lab_launches_viewer_by_default(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr("prime_lab_app.run_lab_view", fake_run_lab_view)
 
-    result = CliRunner().invoke(lab_cli_app, [])
+    result = CliRunner().invoke(prime_cli_app, ["lab", "view"])
 
     assert result.exit_code == 0
     assert calls
@@ -2078,59 +2080,59 @@ def test_prime_lab_app_launches_viewer(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("prime_lab_app.run_lab_view", fake_run_lab_view)
 
-    result = CliRunner().invoke(lab_cli_app, ["--limit", "7"])
+    result = CliRunner().invoke(prime_cli_app, ["lab", "view", "--limit", "7"])
 
     assert result.exit_code == 0
     assert calls[0]["limit"] == 7
 
 
 def test_prime_lab_setup_uses_setup_service(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[list[str]] = []
+    calls: list[LabSetupOptions] = []
 
-    def fake_run_lab_setup(args: list[str], **_kwargs: Any) -> int:
-        calls.append(args)
-        return 0
+    def fake_run_lab_setup(options: LabSetupOptions, **_kwargs: Any) -> LabSetupResult:
+        calls.append(options)
+        return LabSetupResult(exit_code=0, workspace=Path.cwd())
 
-    monkeypatch.setattr("prime_cli.lab_setup.run_lab_setup", fake_run_lab_setup)
+    monkeypatch.setattr("prime_cli.lab_setup.run_lab_setup_service", fake_run_lab_setup)
 
-    result = CliRunner().invoke(lab_cli_app, ["setup", "--agent", "codex"])
+    result = CliRunner().invoke(prime_cli_app, ["lab", "setup", "--agent", "codex"])
 
     assert result.exit_code == 0
-    assert calls == [["--agent", "codex"]]
+    assert calls[0].agents == ("codex",)
 
 
 def test_prime_lab_sync_uses_sync_service(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[list[str]] = []
+    calls: list[LabSyncOptions] = []
 
-    def fake_run_lab_sync(args: list[str], **_kwargs: Any) -> int:
-        calls.append(args)
-        return 0
+    def fake_run_lab_sync(options: LabSyncOptions, **_kwargs: Any) -> LabSyncResult:
+        calls.append(options)
+        return LabSyncResult(exit_code=0, workspace=Path.cwd())
 
-    monkeypatch.setattr("prime_cli.lab_setup.run_lab_sync", fake_run_lab_sync)
+    monkeypatch.setattr("prime_cli.lab_setup.run_lab_sync_service", fake_run_lab_sync)
 
-    result = CliRunner().invoke(lab_cli_app, ["sync", "--agent", "codex"])
+    result = CliRunner().invoke(prime_cli_app, ["lab", "sync", "--agent", "codex"])
 
     assert result.exit_code == 0
-    assert calls == [["--agent", "codex"]]
+    assert calls[0].agents == ("codex",)
 
 
 def test_prime_lab_doctor_uses_doctor_service(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[list[str]] = []
+    calls: list[LabDoctorOptions] = []
 
-    def fake_run_lab_doctor(args: list[str], **_kwargs: Any) -> int:
-        calls.append(args)
-        return 0
+    def fake_run_lab_doctor(options: LabDoctorOptions, **_kwargs: Any) -> LabDoctorResult:
+        calls.append(options)
+        return LabDoctorResult(exit_code=0, workspace=Path.cwd(), checks=())
 
-    monkeypatch.setattr("prime_cli.lab_setup.run_lab_doctor", fake_run_lab_doctor)
+    monkeypatch.setattr("prime_cli.lab_setup.run_lab_doctor_service", fake_run_lab_doctor)
 
-    result = CliRunner().invoke(lab_cli_app, ["doctor", "--fix"])
+    result = CliRunner().invoke(prime_cli_app, ["lab", "doctor", "--fix"])
 
     assert result.exit_code == 0
-    assert calls == [["--fix"]]
+    assert calls[0].fix is True
 
 
 def test_prime_lab_doctor_service_checks_and_fixes_workspace(tmp_path: Path) -> None:
-    assert parse_lab_doctor_args(["--fix"]).fix is True
+    assert cli(LabDoctorConfig, args=["--fix"]).fix is True
 
     result = run_lab_doctor_service(LabDoctorOptions(), workspace=tmp_path)
 
@@ -2315,8 +2317,7 @@ def test_prime_lab_sync_service_refreshes_agent_assets(
     )
     emitted: list[str] = []
 
-    assert parse_lab_sync_args(["--agent", "pi"]).agents == ("pi",)
-    assert parse_lab_sync_args([]).agents == ()
+    assert resolve_explicit_agents("pi") == ("pi",)
 
     result = run_lab_sync_service(
         LabSyncOptions(agents=("pi",)),
@@ -2393,7 +2394,7 @@ def test_prime_lab_setup_service_supports_pi_agent(
     )
     emitted: list[str] = []
 
-    assert parse_lab_setup_args(["--agent", "pi"]).agents == ("pi",)
+    assert resolve_explicit_agents("pi") == ("pi",)
 
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("pi",)),
@@ -2435,7 +2436,7 @@ def test_prime_lab_setup_service_supports_claude_code_agent(
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
     monkeypatch.setattr("prime_cli.lab_setup._download_json", _fake_lab_skill_download_json)
 
-    assert parse_lab_setup_args(["--agent", "claude-code"]).agents == ("claude",)
+    assert resolve_explicit_agents("claude-code") == ("claude",)
 
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("claude",)),
@@ -2473,7 +2474,7 @@ def test_prime_lab_setup_service_supports_hermes_agent(
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
     monkeypatch.setattr("prime_cli.lab_setup._download_json", _fake_lab_skill_download_json)
 
-    assert parse_lab_setup_args(["--agent", "hermes-agent"]).agents == ("hermes",)
+    assert resolve_explicit_agents("hermes-agent") == ("hermes",)
 
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("hermes",)),
@@ -2511,7 +2512,7 @@ def test_prime_lab_setup_service_supports_grok_build_agent(
     monkeypatch.setattr("prime_cli.lab_setup._download_file", fake_download)
     monkeypatch.setattr("prime_cli.lab_setup._download_json", _fake_lab_skill_download_json)
 
-    assert parse_lab_setup_args(["--agent", "grok"]).agents == ("grok",)
+    assert resolve_explicit_agents("grok") == ("grok",)
 
     result = run_lab_setup_service(
         LabSetupOptions(skip_install=True, skip_agents_md=True, agents=("grok",)),

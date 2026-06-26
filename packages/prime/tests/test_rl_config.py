@@ -2,7 +2,6 @@ from pathlib import Path
 from typing import List
 
 import pytest
-import typer
 from prime_cli.commands.rl import (
     RLConfig,
     _flatten_config_schema,
@@ -19,7 +18,7 @@ def test_load_config_rejects_removed_trajectory_strategy(tmp_path: Path) -> None
         'trajectory_strategy = "interleaved"\n'
     )
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -29,7 +28,7 @@ def test_load_config_still_rejects_other_unknown_keys(tmp_path: Path) -> None:
         'model = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"\nunknown_field = 123\n'
     )
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -191,7 +190,7 @@ def test_load_config_rejects_eval_sampling_with_both_reasoning_controls(
         'reasoning_effort = "low"\n'
     )
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -223,7 +222,7 @@ def test_load_config_rejects_max_inflight_and_oversampling(tmp_path: Path) -> No
         "max_inflight_rollouts = 96\n"
     )
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -309,7 +308,7 @@ def test_load_config_rejects_unknown_teacher_client_field(tmp_path: Path) -> Non
         'bogus = "value"\n'
     )
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -329,7 +328,7 @@ def test_load_config_rejects_teacher_temp_scheduler(tmp_path: Path) -> None:
         "end_temperature = 0.1\n"
     )
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -359,7 +358,7 @@ def test_load_config_rejects_teacher_client_without_base_url(tmp_path: Path) -> 
         'api_key_var = "PRIME_API_KEY"\n'
     )
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -374,7 +373,7 @@ def test_load_config_rejects_teacher_client_without_api_key_var(tmp_path: Path) 
         'base_url = "https://api.pinference.ai/api/v1"\n'
     )
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -382,7 +381,7 @@ def test_load_config_rejects_sft_without_teacher(tmp_path: Path) -> None:
     config_path = tmp_path / "sft.toml"
     config_path.write_text('model = "openai/gpt-oss-20b"\nloss = "sft"\n')
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -392,7 +391,7 @@ def test_load_config_rejects_opd_until_hosted_scoring_exists(tmp_path: Path) -> 
         'model = "openai/gpt-oss-20b"\nloss = "opd"\n[teacher]\nmodel = "openai/gpt-oss-120b"\n'
     )
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -400,7 +399,7 @@ def test_load_config_rejects_max_inflight_below_rollouts_per_example(tmp_path: P
     config_path = tmp_path / "rl.toml"
     config_path.write_text('model = "dummy"\nrollouts_per_example = 8\nmax_inflight_rollouts = 4\n')
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -408,7 +407,7 @@ def test_load_config_rejects_nonpositive_oversampling_factor(tmp_path: Path) -> 
     config_path = tmp_path / "rl.toml"
     config_path.write_text('model = "dummy"\noversampling_factor = 0\n')
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -421,7 +420,7 @@ def test_load_config_rejects_both_reasoning_controls(tmp_path: Path) -> None:
         'reasoning_effort = "low"\n'
     )
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -429,7 +428,7 @@ def test_load_config_rejects_top_level_reasoning_effort(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text('model = "openai/gpt-oss-20b"\nreasoning_effort = "high"\n')
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -468,14 +467,14 @@ def test_tailscale_extra_args_field_rejected(tmp_path: Path) -> None:
         'auth_key = "tskey-auth-abc"\n'
         'extra_args = "--ssh"\n'
     )
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
 def test_tailscale_enabled_without_auth_key_rejected(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text('model = "dummy"\n[tailscale]\nenabled = true\n')
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -488,7 +487,7 @@ def test_tailscale_invalid_hostname_prefix_rejected(tmp_path: Path) -> None:
         'auth_key = "tskey-auth-abc"\n'
         'hostname_prefix = "rft-"\n'
     )
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -497,7 +496,7 @@ def test_tailscale_invalid_auth_key_format_rejected(tmp_path: Path) -> None:
     config_path.write_text(
         'model = "dummy"\n[tailscale]\nenabled = true\nauth_key = "not-a-real-key"\n'
     )
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -509,7 +508,7 @@ def test_tailscale_oauth_client_secret_rejected(tmp_path: Path) -> None:
     config_path.write_text(
         'model = "dummy"\n[tailscale]\nenabled = true\nauth_key = "tskey-client-abc123"\n'
     )
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -535,7 +534,7 @@ def test_tailscale_env_auth_key_format_validated(tmp_path: Path, monkeypatch) ->
     monkeypatch.setenv("TAILSCALE_AUTH_KEY", "not-a-real-key")
     config_path = tmp_path / "rl.toml"
     config_path.write_text('model = "dummy"\n[tailscale]\nenabled = true\n')
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))
 
 
@@ -543,5 +542,5 @@ def test_tailscale_no_auth_key_anywhere_rejected(tmp_path: Path, monkeypatch) ->
     monkeypatch.delenv("TAILSCALE_AUTH_KEY", raising=False)
     config_path = tmp_path / "rl.toml"
     config_path.write_text('model = "dummy"\n[tailscale]\nenabled = true\n')
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         load_config(str(config_path))

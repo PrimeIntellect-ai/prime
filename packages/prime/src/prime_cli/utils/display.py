@@ -3,7 +3,6 @@
 import json
 from typing import Any, Dict, List, Tuple
 
-import typer
 from rich.console import Console
 from rich.table import Table
 
@@ -16,7 +15,7 @@ def validate_output_format(output: str, console: Console) -> None:
         console.print(
             f"[red]Error: Invalid output format '{output}'. Supported formats: table, json[/red]"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def output_data_as_json(data: Any, console: Console) -> None:

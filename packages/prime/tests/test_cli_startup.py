@@ -78,8 +78,10 @@ def test_prime_lab_setup_help_does_not_load_textual_or_verifiers() -> None:
         f"{_probe_expression()}\n"
     )
 
-    assert loaded["prime_cli.lab_setup"] is True
-    assert loaded["prime_lab_app"] is True
-    assert loaded["prime_lab_app.app"] is False
-    assert loaded["textual"] is False
-    assert loaded["verifiers"] is False
+    assert loaded == {
+        "prime_cli.lab_setup": False,
+        "prime_lab_app": False,
+        "prime_lab_app.app": False,
+        "textual": False,
+        "verifiers": False,
+    }

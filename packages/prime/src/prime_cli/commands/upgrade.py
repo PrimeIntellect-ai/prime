@@ -2,13 +2,11 @@ import shutil
 import subprocess
 import sys
 
-import typer
-
 from prime_cli import __version__
-from prime_cli.utils import PlainTyper, get_console
+from prime_cli.leaves.upgrade import Config as UpgradeConfig
+from prime_cli.utils import get_console
 from prime_cli.utils.version_check import get_latest_pypi_version
 
-app = PlainTyper(help="Upgrade the Prime CLI to the latest version", no_args_is_help=False)
 console = get_console()
 
 
@@ -68,30 +66,20 @@ def _run_upgrade(method: str) -> bool:
     return False
 
 
-@app.callback(invoke_without_command=True)
-def upgrade(
-    ctx: typer.Context,
-    check: bool = typer.Option(
-        False, "--check", "-c", help="Only check for updates, don't upgrade"
-    ),
-    force: bool = typer.Option(
-        False, "--force", "-f", help="Force upgrade even if already on latest version"
-    ),
-) -> None:
+def upgrade(config: UpgradeConfig) -> None:
     """Upgrade the Prime CLI to the latest version.
 
     Automatically detects how prime was installed (uv tool, pipx, or pip)
     and runs the appropriate upgrade command.
     """
-    # Skip if a subcommand is being invoked
-    if ctx.invoked_subcommand is not None:
-        return
+    check = config.check
+    force = config.force
 
     latest_version = get_latest_pypi_version()
 
     if latest_version is None:
         console.print("[red]Could not fetch latest version from PyPI[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     console.print(f"[cyan]Installed version:[/cyan] {__version__}")
     console.print(f"[cyan]Latest version:[/cyan]    {latest_version}")
@@ -103,7 +91,7 @@ def upgrade(
 
     if installed >= latest and not force:
         console.print("\n[green]✓ You are already on the latest version![/green]")
-        raise typer.Exit(0)
+        raise SystemExit(0)
 
     if installed < latest:
         console.print(f"\n[yellow]A newer version is available: {latest_version}[/yellow]")
@@ -111,7 +99,7 @@ def upgrade(
     if check:
         if installed < latest:
             console.print("\n[dim]Run 'prime upgrade' to upgrade[/dim]")
-        raise typer.Exit(0)
+        raise SystemExit(0)
 
     # Perform upgrade
     method = _detect_install_method()
@@ -124,4 +112,4 @@ def upgrade(
         console.print("  [dim]uv tool upgrade prime[/dim]")
         console.print("  [dim]pipx upgrade prime[/dim]")
         console.print("  [dim]pip install --upgrade prime[/dim]")
-        raise typer.Exit(1)
+        raise SystemExit(1)

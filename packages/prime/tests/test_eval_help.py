@@ -1,9 +1,9 @@
 from types import SimpleNamespace
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.main import app
 from prime_cli.verifiers_bridge import exec_verifiers_process
-from typer.testing import CliRunner
 
 runner = CliRunner()
 

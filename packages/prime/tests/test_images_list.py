@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.commands import images as images_cmd
 from prime_cli.commands.images import (
     ArtifactPartition,
@@ -21,7 +22,6 @@ from prime_cli.commands.images import (
     _truncate_ref_left,
 )
 from prime_cli.main import app
-from typer.testing import CliRunner
 
 USER_ID = "cmkrcib4x00004kjyxq48nltd"
 TEAM_ID = "team-abc123"
@@ -501,8 +501,7 @@ def run_images_list(monkeypatch) -> Callable[..., Any]:
                 assert path == "/images"
                 return {"data": payload}
 
-        monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
-        monkeypatch.setattr(images_cmd, "config", _StubConfig(team_id=team_id))
+        monkeypatch.setattr(images_cmd, "prime_config", _StubConfig(team_id=team_id))
         monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
         return runner.invoke(app, ["images", "list"], env=env or TEST_ENV)
 
@@ -663,8 +662,7 @@ def _run_list_capturing_params(
                 response["totalCount"] = len(rows)
             return response
 
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
-    monkeypatch.setattr(images_cmd, "config", _StubConfig(team_id=team_id))
+    monkeypatch.setattr(images_cmd, "prime_config", _StubConfig(team_id=team_id))
     monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
     result = CliRunner().invoke(app, ["images", "list", *args], env=TEST_ENV)
     return result, captured

@@ -1,14 +1,39 @@
 import re
 from typing import Any, Callable, Dict, List, Optional
 
-import typer
 from rich.markup import escape
+from rich.prompt import Confirm, Prompt
 
 from .plain import get_console
 
 console = get_console()
 
 _ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def prompt(
+    text: str,
+    *,
+    default: Any = None,
+    hide_input: bool = False,
+    type: Callable[[str], Any] = str,
+    show_default: bool = True,
+    prompt_suffix: str = ": ",
+) -> Any:
+    rich_prompt = Prompt(
+        text,
+        console=console,
+        password=hide_input,
+        show_default=show_default,
+    )
+    rich_prompt.prompt_suffix = prompt_suffix
+    value = rich_prompt() if default is None else rich_prompt(default=str(default))
+    converter: Callable[[str], Any] = type
+    return converter(value)
+
+
+def confirm(message: str, default: bool = False) -> bool:
+    return Confirm.ask(message, default=default, console=console)
 
 
 def validate_env_var_name(name: str, item_type: str = "secret") -> bool:
@@ -27,7 +52,7 @@ def confirm_or_skip(message: str, yes_flag: bool, default: bool = False) -> bool
     """Show confirmation prompt or skip if --yes flag is provided."""
     if yes_flag:
         return True
-    return bool(typer.confirm(message, default=default))
+    return confirm(message, default=default)
 
 
 def any_provided(*values: Any) -> bool:
@@ -51,14 +76,14 @@ def require_selection(
 ) -> Dict[str, Any]:
     if not items:
         console.print(f"[yellow]{empty_message}[/yellow]")
-        raise typer.Exit()
+        raise SystemExit(0)
 
     selected = select_item_interactive(
         items, action, item_type=item_type, display_fn=display_fn, page_size=page_size
     )
     if not selected:
         console.print("\n[dim]Cancelled.[/dim]")
-        raise typer.Exit()
+        raise SystemExit(0)
 
     return selected
 
@@ -99,7 +124,7 @@ def select_item_interactive(
 
     while True:
         try:
-            selection_str = typer.prompt("Select (empty to cancel)", default="")
+            selection_str = prompt("Select (empty to cancel)", default="")
             if not selection_str:
                 return None
             selection = int(selection_str)
@@ -146,7 +171,7 @@ def _select_item_paged(
         console.print(f"\n[dim]{escape('  '.join(nav))}[/dim]\n")
 
         try:
-            choice = typer.prompt("Select (empty to cancel)", default="").strip()
+            choice = prompt("Select (empty to cancel)", default="").strip()
         except KeyboardInterrupt:
             return None
 
@@ -194,7 +219,7 @@ def prompt_for_value(
     """
     try:
         suffix = " (empty to cancel)" if required else ""
-        value = typer.prompt(f"{prompt_text}{suffix}", default="", hide_input=hide_input)
+        value = prompt(f"{prompt_text}{suffix}", default="", hide_input=hide_input)
         if required and not value:
             return None
         return value

@@ -2,9 +2,9 @@ import json
 from typing import Any
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.api.availability import GPUAvailability
 from prime_cli.main import app
-from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -19,11 +19,6 @@ TEST_ENV = {
 @pytest.fixture
 def temp_home(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-
-
-@pytest.fixture
-def disable_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
 
 @pytest.fixture
@@ -60,7 +55,6 @@ class TestPodsCreate:
     def test_create_uses_context_environment_team_id(
         self,
         temp_home: None,
-        disable_update_check: None,
         mock_pod_availability: None,
         tmp_path: Any,
         monkeypatch: pytest.MonkeyPatch,
@@ -139,7 +133,6 @@ class TestPodsCreate:
     def test_create_rejects_conflicting_sharing_flags(
         self,
         temp_home: None,
-        disable_update_check: None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
@@ -179,7 +172,6 @@ class TestPodsCreate:
     def test_create_add_members_shares_only_with_selected_members(
         self,
         temp_home: None,
-        disable_update_check: None,
         mock_pod_availability: None,
         tmp_path: Any,
         monkeypatch: pytest.MonkeyPatch,

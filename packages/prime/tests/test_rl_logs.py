@@ -4,11 +4,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.api.rl import RLClient
 from prime_cli.client import APIError
 from prime_cli.commands import rl as rl_commands
 from prime_cli.main import app
-from typer.testing import CliRunner
 
 RUN_ID = "rl-run-123"
 

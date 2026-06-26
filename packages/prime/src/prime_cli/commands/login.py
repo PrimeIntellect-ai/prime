@@ -4,23 +4,22 @@ import webbrowser
 from typing import Optional
 
 import httpx
-import typer
-from click.exceptions import Abort
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from prime_cli.core import Config
+from prime_cli.core import Config as PrimeConfig
+from prime_cli.leaves.login import Config as LoginConfig
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import get_console
+from ..utils.prompt import prompt
 from .teams import fetch_teams
 
-app = PlainTyper(help="Login to Prime Intellect")
 console = get_console()
 
 
-def fetch_and_select_team(client: APIClient, config: Config) -> None:
+def fetch_and_select_team(client: APIClient, config: PrimeConfig) -> None:
     """Fetch user's teams and prompt for selection."""
     try:
         teams = fetch_teams(client)
@@ -46,7 +45,7 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
 
         while True:
             try:
-                selection = typer.prompt("Select", type=int, default=1)
+                selection = prompt("Select", type=int, default=1)
 
                 if selection == 1:
                     config.set_team(None)
@@ -72,12 +71,12 @@ def fetch_and_select_team(client: APIClient, config: Config) -> None:
                     return
 
                 console.print(f"[red]Invalid selection. Enter 1-{len(teams) + 1}.[/red]")
-            except Abort:
+            except (EOFError, KeyboardInterrupt):
                 config.set_team(None)
                 config.update_current_environment_file()
                 return
 
-    except Abort:
+    except (EOFError, KeyboardInterrupt):
         config.set_team(None)
         config.update_current_environment_file()
     except (APIError, Exception):
@@ -100,7 +99,7 @@ def generate_ephemeral_keypair() -> tuple[rsa.RSAPrivateKey, str]:
         return private_key, public_pem
     except Exception as e:
         console.print(f"[red]Error generating keypair: {str(e)}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def decrypt_challenge_response(
@@ -122,20 +121,19 @@ def decrypt_challenge_response(
         return None
 
 
-@app.callback(invoke_without_command=True)
-def login(
-    headless: bool = typer.Option(False, "--headless", help="Don't attempt to open browser"),
-) -> None:
+def login(config: LoginConfig) -> None:
     """Login to Prime Intellect"""
-    config = Config()
-    settings = config.view()
+    headless = config.headless
+
+    prime_config = PrimeConfig()
+    settings = prime_config.view()
 
     if not settings["base_url"]:
         console.print(
             "Base URL not configured.",
             "Please run 'prime config set-base-url' first.",
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     private_key = None
     try:
@@ -154,7 +152,7 @@ def login(
                 "[red]Failed to generate challenge:[/red]",
                 f"{response.json().get('detail', 'Unknown error')}",
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         challenge_response = response.json()
 
@@ -204,9 +202,9 @@ def login(
                     if decrypted_result:
                         # Update config with decrypted token
                         api_key = decrypted_result.decode()
-                        config.set_api_key(api_key)
+                        prime_config.set_api_key(api_key)
                         # Also update the current environment's saved file
-                        config.update_current_environment_file()
+                        prime_config.update_current_environment_file()
 
                         # Attempt to fetch the current user id
                         client = APIClient(api_key=api_key)
@@ -218,13 +216,13 @@ def login(
                             if isinstance(data, dict):
                                 user_id = data.get("id")
                                 if user_id:
-                                    config.set_user_id(user_id)
-                                    config.update_current_environment_file()
+                                    prime_config.set_user_id(user_id)
+                                    prime_config.update_current_environment_file()
                         except (APIError, Exception):
                             console.print("[yellow]Logged in, but failed to fetch user id[/yellow]")
 
                         console.print("[green]Successfully logged in![/green]")
-                        fetch_and_select_team(client, config)
+                        fetch_and_select_team(client, prime_config)
                     else:
                         console.print("[red]Failed to decrypt authentication token[/red]")
                     break
@@ -237,9 +235,9 @@ def login(
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Login cancelled by user[/yellow]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception:
-        raise typer.Exit(1)
+        raise SystemExit(1)
     finally:
         # Ensure private key is securely wiped
         if private_key:

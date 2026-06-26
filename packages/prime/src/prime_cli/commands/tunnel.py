@@ -2,11 +2,13 @@ import asyncio
 import signal
 from typing import Any, List, Optional
 
-import typer
 from rich.table import Table
 
+from prime_cli.leaves.tunnel.list import Config as TunnelListConfig
+from prime_cli.leaves.tunnel.start import Config as TunnelStartConfig
+from prime_cli.leaves.tunnel.status import Config as TunnelStatusConfig
+from prime_cli.leaves.tunnel.stop import Config as TunnelStopConfig
 from prime_cli.utils import (
-    PlainTyper,
     get_console,
     human_age,
     iso_timestamp,
@@ -15,7 +17,6 @@ from prime_cli.utils import (
 )
 from prime_cli.utils.prompt import confirm_or_skip
 
-app = PlainTyper(help="Manage tunnels for exposing local services", no_args_is_help=True)
 console = get_console()
 
 
@@ -44,29 +45,13 @@ def _format_tunnel_for_output(tunnel) -> dict:
     }
 
 
-@app.command("start")
-def start_tunnel(
-    port: int = typer.Option(8765, "--port", "-p", help="Local port to tunnel"),
-    name: Optional[str] = typer.Option(None, "--name", "-n", help="Friendly name for the tunnel"),
-    labels: Optional[List[str]] = typer.Option(
-        None,
-        "--label",
-        "-l",
-        help="Labels/tags for the tunnel. Can be specified multiple times.",
-    ),
-    team_id: Optional[str] = typer.Option(
-        None, "--team-id", help="Team ID for team tunnels (uses config team_id if not specified)"
-    ),
-    auth: Optional[str] = typer.Option(
-        None,
-        "--auth",
-        help=(
-            "Protect tunnel traffic with HTTP basic auth. Provide a username; "
-            "a strong password is auto-generated and shown once on start."
-        ),
-    ),
-) -> None:
+def start_tunnel(config: TunnelStartConfig) -> None:
     """Start a tunnel to expose a local port."""
+    port = config.port
+    name = config.name
+    labels = config.labels
+    team_id = config.team_id
+    auth = config.auth
 
     http_user: Optional[str] = None
     if auth is not None:
@@ -76,7 +61,7 @@ def start_tunnel(
                 "[red]Invalid --auth username:[/red] must be non-empty without spaces or ':'",
                 style="bold",
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
     async def run_tunnel():
         from prime_tunnel import Tunnel
@@ -142,17 +127,17 @@ def start_tunnel(
             console.print(f"\n[red]Tunnel error:[/red] {e}", style="bold")
             if e.tunnel_id:
                 console.print(f"[dim]Tunnel ID: {e.tunnel_id}[/dim]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
         except TunnelLimitReachedError as e:
             console.print(f"\n[red]Tunnel limit reached:[/red] {e}", style="bold")
             console.print("[dim]Delete an existing tunnel before creating a new one.[/dim]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
         except TunnelTimeoutError as e:
             console.print(f"\n[red]Connection timed out:[/red] {e}", style="bold")
-            raise typer.Exit(1)
+            raise SystemExit(1)
         except Exception as e:
             console.print(f"[red]Error:[/red] {e}", style="bold")
-            raise typer.Exit(1)
+            raise SystemExit(1)
         finally:
             await tunnel.stop()
             console.print("[green]Tunnel stopped[/green]")
@@ -161,42 +146,24 @@ def start_tunnel(
         asyncio.run(run_tunnel())
     except KeyboardInterrupt:
         pass
-    except typer.Exit:
+    except SystemExit:
         raise
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}", style="bold")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("list")
-def list_tunnels(
-    team_id: Optional[str] = typer.Option(
-        None,
-        "--team-id",
-        help="Team ID to list team tunnels (uses config team_id if not specified)",
-    ),
-    labels: Optional[List[str]] = typer.Option(
-        None,
-        "--label",
-        "-l",
-        help="Filter by labels. Can be specified multiple times.",
-    ),
-    status: Optional[str] = typer.Option(None, "--status", help="Filter by status"),
-    sort_by: str = typer.Option(
-        "createdAt",
-        "--sort-by",
-        help="Sort field: createdAt, status, name, expiresAt, connectedAt",
-    ),
-    sort_order: str = typer.Option(
-        "desc",
-        "--sort-order",
-        help="Sort order: asc or desc",
-    ),
-    page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    num: int = typer.Option(50, "--num", "-n", help="Items per page"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def list_tunnels(config: TunnelListConfig) -> None:
     """List active tunnels."""
+    team_id = config.team_id
+    labels = config.labels
+    status = config.status
+    sort_by = config.sort_by
+    sort_order = config.sort_order
+    page = config.page
+    num = config.num
+    output = config.output
+
     validate_output_format(output, console)
 
     async def fetch_tunnels():
@@ -218,7 +185,7 @@ def list_tunnels(
         page_result = asyncio.run(fetch_tunnels())
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}", style="bold")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     tunnels = page_result.tunnels
     total = page_result.total
@@ -282,11 +249,9 @@ def list_tunnels(
         console.print(f"[dim]Use --page {page + 1} to see more.[/dim]")
 
 
-@app.command("status")
-def tunnel_status(
-    tunnel_id: str = typer.Argument(..., help="Tunnel ID to check"),
-) -> None:
+def tunnel_status(config: TunnelStatusConfig) -> None:
     """Get status of a specific tunnel."""
+    tunnel_id = config.tunnel_id
 
     async def fetch_status():
         client = _create_tunnel_client()
@@ -299,11 +264,11 @@ def tunnel_status(
         tunnel = asyncio.run(fetch_status())
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}", style="bold")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     if not tunnel:
         console.print(f"[red]Tunnel not found:[/red] {tunnel_id}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     console.print(f"[bold]Tunnel ID:[/bold] {tunnel.tunnel_id}")
     console.print(f"[bold]URL:[/bold] {tunnel.url}")
@@ -314,89 +279,35 @@ def tunnel_status(
     console.print(f"[bold]Expires At:[/bold] {tunnel.expires_at}")
 
 
-@app.command("stop")
-def stop_tunnel(
-    tunnel_ids: Optional[List[str]] = typer.Argument(
-        None,
-        help=(
-            "Explicit tunnel ID(s) to stop, space- or comma-separated. "
-            "Cannot be combined with --all, --label, or --status (those select "
-            "tunnels by filter instead)."
-        ),
-    ),
-    all: bool = typer.Option(
-        False,
-        "--all",
-        "-a",
-        help=(
-            "Stop every tunnel in scope (your own by default; add --all-users "
-            "for all members of a team). Cannot be combined with tunnel IDs or "
-            "--label; may be narrowed with --status."
-        ),
-    ),
-    labels: Optional[List[str]] = typer.Option(
-        None,
-        "--label",
-        "-l",
-        help=(
-            "Stop tunnels carrying ALL of the given labels (AND match, not OR). "
-            "Repeatable, e.g. -l dev -l preview. Cannot be combined with tunnel "
-            "IDs or --all; may be narrowed with --status."
-        ),
-    ),
-    status: Optional[str] = typer.Option(
-        None,
-        "--status",
-        help=(
-            "Stop only tunnels currently in this status: pending, connected, or "
-            "disconnected (case-insensitive). Use alone to stop all tunnels in "
-            "that status, or combine with --all/--label to narrow further. "
-            "Cannot be combined with explicit tunnel IDs."
-        ),
-    ),
-    team_id: Optional[str] = typer.Option(
-        None,
-        "--team-id",
-        help=(
-            "Team whose tunnels to target for --all/--label/--status "
-            "(defaults to your configured team_id). Required when using "
-            "--all-users."
-        ),
-    ),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-    only_mine: bool = typer.Option(
-        True,
-        "--only-mine/--all-users",
-        "-m/-A",
-        help=(
-            "Scope for filter deletes (--all/--label/--status): --only-mine "
-            "(default) restricts to tunnels you own; --all-users targets every "
-            "team member's tunnels and requires a team."
-        ),
-        show_default=True,
-    ),
-) -> None:
+def stop_tunnel(config: TunnelStopConfig) -> None:
     """Stop and delete one or more tunnels.
 
     Select tunnels in exactly one of two ways: pass explicit tunnel IDs, or use
     the filter flags --all/--label/--status (which can be combined with each
-    other but not with explicit IDs). --only-mine/--all-users controls whether
-    filter deletes apply to just your tunnels or all members of a team.
+    other but not with explicit IDs). By default filters apply to your tunnels;
+    --all-users applies them to every member of a team.
     """
+    tunnel_ids = config.tunnel_ids
+    all = config.all
+    labels = config.labels
+    status = config.status
+    team_id = config.team_id
+    yes = config.yes
+    all_users = config.all_users
 
     if tunnel_ids and (all or labels or status):
         console.print(
             "[red]Error:[/red] Tunnel IDs cannot be combined with --all, --label, or --status"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     if all and labels:
         console.print("[red]Error:[/red] Use only one of --all or --label")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     if not all and not tunnel_ids and not labels and not status:
         console.print("[red]Error:[/red] Must specify tunnel IDs, --all, --label, or --status")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     if status is not None:
         status = status.strip().lower()
@@ -405,7 +316,7 @@ def stop_tunnel(
             console.print(
                 "[red]Error:[/red] --status must be one of: " + ", ".join(sorted(allowed_statuses))
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
     parsed_ids: List[str] = []
     if tunnel_ids:
@@ -424,7 +335,7 @@ def stop_tunnel(
 
         if not parsed_ids:
             console.print("[red]Error:[/red] No valid tunnel IDs provided")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
     is_filter_delete = bool(all or labels or status)
 
@@ -433,14 +344,14 @@ def stop_tunnel(
         async def validate_filter_scope() -> None:
             client = _create_tunnel_client()
             try:
-                scoped_user_id = client.config.user_id if only_mine else None
+                scoped_user_id = None if all_users else client.config.user_id
                 scoped_team_id = team_id if team_id is not None else client.config.team_id
-                if only_mine and not scoped_user_id:
+                if not all_users and not scoped_user_id:
                     raise ValueError(
                         "Cannot resolve current user ID for scoped bulk delete. "
                         "Run `prime login`, set PRIME_USER_ID, or delete explicit tunnel IDs."
                     )
-                if not only_mine and not scoped_team_id:
+                if all_users and not scoped_team_id:
                     raise ValueError("all_users requires a team ID")
             finally:
                 await client.close()
@@ -449,7 +360,7 @@ def stop_tunnel(
             asyncio.run(validate_filter_scope())
         except Exception as e:
             console.print(f"[red]Error:[/red] {e}", style="bold")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         filter_parts: List[str] = []
         if status:
@@ -458,11 +369,11 @@ def stop_tunnel(
             filter_parts.append(f"label(s) {', '.join(labels)}")
         subject = f"tunnels matching {' and '.join(filter_parts)}" if filter_parts else "tunnels"
 
-        if team_id and only_mine:
-            who = f"your {subject} in team {team_id}"
-        elif team_id and not only_mine:
+        if team_id and all_users:
             who = f"all {subject} in team {team_id}"
-        elif not only_mine:
+        elif team_id:
+            who = f"your {subject} in team {team_id}"
+        elif all_users:
             who = f"all {subject} (all users)"
         else:
             who = f"your {subject}"
@@ -490,8 +401,8 @@ def stop_tunnel(
                 result = await client.bulk_delete_tunnels(parsed_ids)
             else:
                 scoped_team_id = team_id if team_id is not None else client.config.team_id
-                scoped_user_id = client.config.user_id if only_mine else None
-                if only_mine and not scoped_user_id:
+                scoped_user_id = None if all_users else client.config.user_id
+                if not all_users and not scoped_user_id:
                     raise ValueError(
                         "Cannot resolve current user ID for scoped bulk delete. "
                         "Run `prime login`, set PRIME_USER_ID, or delete explicit tunnel IDs."
@@ -501,7 +412,7 @@ def stop_tunnel(
                     status=status,
                     team_id=scoped_team_id,
                     user_id=scoped_user_id,
-                    all_users=not only_mine,
+                    all_users=all_users,
                 )
             succeeded = result.get("succeeded", [])
             for failure in result.get("failed", []):
@@ -525,7 +436,7 @@ def stop_tunnel(
             succeeded, not_found, failed = asyncio.run(delete_tunnels())
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}", style="bold")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     if len(parsed_ids) == 1 and succeeded and not all:
         console.print(f"[green]Tunnel deleted:[/green] {parsed_ids[0]}")
@@ -553,7 +464,7 @@ def stop_tunnel(
             console.print(f"  ✗ {failure['tunnel_id']}: {failure['error']}")
 
     if total_failed > 0:
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     if parsed_ids:
         console.print("[green]All specified tunnels deleted successfully[/green]")

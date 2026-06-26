@@ -2,9 +2,9 @@ import json
 from typing import Any, Dict, List, Optional
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
-from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -571,11 +571,11 @@ class TestEnvSecretHelp:
         result = runner.invoke(app, ["env", "secret", "link", "--help"])
         assert result.exit_code == 0
         output = strip_ansi(result.output)
-        assert "GLOBAL_SECRET_ID" in output
+        assert "--global-secret-id" in output
 
     def test_env_secret_unlink_help(self) -> None:
         """Test that env secret unlink help shows arguments."""
         result = runner.invoke(app, ["env", "secret", "unlink", "--help"])
         assert result.exit_code == 0
         output = strip_ansi(result.output)
-        assert "GLOBAL_SECRET_ID" in output
+        assert "--global-secret-id" in output

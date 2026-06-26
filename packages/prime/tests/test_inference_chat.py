@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from click.testing import CliRunner
 from prime_cli.api.inference import InferenceAPIError
 from prime_cli.main import app
-from typer.testing import CliRunner
 
 TEST_ENV: Dict[str, str] = {
     "COLUMNS": "200",

@@ -4,9 +4,9 @@ import json
 from typing import Any, Dict, List, Optional
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.main import app
 from prime_cli.utils.formatters import strip_ansi
-from typer.testing import CliRunner
 
 
 @pytest.fixture(autouse=True)
@@ -201,7 +201,8 @@ def test_wallet_does_not_accept_team_flag() -> None:
     result = CliRunner().invoke(app, ["wallet", "--team", "team-1"])
 
     assert result.exit_code != 0
-    assert "No such option: --team" in result.output or "no such option" in result.output.lower()
+    assert "--team" in result.output
+    assert "Extra inputs are not permitted" in result.output
 
 
 def test_wallet_handles_empty_billings(monkeypatch: pytest.MonkeyPatch) -> None:

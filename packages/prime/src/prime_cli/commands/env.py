@@ -19,18 +19,42 @@ from urllib.parse import urlparse
 
 import httpx
 import toml
-import typer
 import yaml
 from prime_sandboxes import APIClient as SandboxAPIClient
 from prime_sandboxes import Config as SandboxConfig
 from rich.table import Table
 from rich.text import Text
 
+from prime_cli.leaves.env.action.list import Config as EnvActionListConfig
+from prime_cli.leaves.env.action.logs import Config as EnvActionLogsConfig
+from prime_cli.leaves.env.action.retry import Config as EnvActionRetryConfig
+from prime_cli.leaves.env.build import Config as EnvBuildConfig
+from prime_cli.leaves.env.delete import Config as EnvDeleteConfig
+from prime_cli.leaves.env.info import Config as EnvInfoConfig
+from prime_cli.leaves.env.inspect import Config as EnvInspectConfig
+from prime_cli.leaves.env.install import Config as EnvInstallConfig
+from prime_cli.leaves.env.list import Config as EnvListConfig
+from prime_cli.leaves.env.pull import Config as EnvPullConfig
+from prime_cli.leaves.env.push import Config as EnvPushConfig
+from prime_cli.leaves.env.secret.create import Config as EnvSecretCreateConfig
+from prime_cli.leaves.env.secret.delete import Config as EnvSecretDeleteConfig
+from prime_cli.leaves.env.secret.link import Config as EnvSecretLinkConfig
+from prime_cli.leaves.env.secret.list import Config as EnvSecretListConfig
+from prime_cli.leaves.env.secret.unlink import Config as EnvSecretUnlinkConfig
+from prime_cli.leaves.env.secret.update import Config as EnvSecretUpdateConfig
+from prime_cli.leaves.env.status import Config as EnvStatusConfig
+from prime_cli.leaves.env.uninstall import Config as EnvUninstallConfig
+from prime_cli.leaves.env.var.create import Config as EnvVarCreateConfig
+from prime_cli.leaves.env.var.delete import Config as EnvVarDeleteConfig
+from prime_cli.leaves.env.var.list import Config as EnvVarListConfig
+from prime_cli.leaves.env.var.update import Config as EnvVarUpdateConfig
+from prime_cli.leaves.env.version.delete import Config as EnvVersionDeleteConfig
+from prime_cli.leaves.env.version.list import Config as EnvVersionListConfig
+
 from ..client import APIClient, APIError
 from ..core import Config
 from ..lab_hygiene import LabHygieneOptions, find_lab_workspace, run_lab_hygiene_preflight
 from ..utils import (
-    PlainTyper,
     get_console,
     is_plain_mode,
     json_output_help,
@@ -46,6 +70,8 @@ from ..utils.formatters import format_file_size
 from ..utils.formatters import strip_ansi as _strip_ansi
 from ..utils.prompt import (
     any_provided,
+    confirm,
+    prompt,
     prompt_for_value,
     require_selection,
     validate_env_var_name,
@@ -59,7 +85,6 @@ from ..verifiers_bridge import (
 )
 from .config import TEAM_ID_PATTERN
 
-app = PlainTyper(help="Manage verifiers environments", no_args_is_help=True)
 console = get_console()
 
 # Constants
@@ -69,18 +94,6 @@ DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 DEFAULT_BUILD_WAIT_TIMEOUT_S = 1200
 DEFAULT_BUILD_WAIT_INTERVAL_S = 5.0
-
-# Action subcommand app
-action_app = PlainTyper(help="Manage environment actions (CI jobs)", no_args_is_help=True)
-app.add_typer(action_app, name="action", rich_help_panel="Manage")
-
-# Secret subcommand app
-secret_app = PlainTyper(help="Manage environment secrets", no_args_is_help=True)
-app.add_typer(secret_app, name="secret", rich_help_panel="Manage")
-
-# Variable subcommand app
-var_app = PlainTyper(help="Manage environment variables", no_args_is_help=True)
-app.add_typer(var_app, name="var", rich_help_panel="Manage")
 
 ACTION_LIST_JSON_HELP = json_output_help(
     ".actions[] = {id, name|job_type, status, version, trigger, created_at}",
@@ -146,10 +159,10 @@ def _parse_environment_slug(environment: str) -> Tuple[str, str]:
     except ValueError:
         console.print(f"[red]Invalid environment format: {environment}[/red]")
         console.print("[dim]Use format: owner/environment-name[/dim]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     if version is not None:
         console.print("[red]Environment versions are not accepted by this command[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     return owner, name
 
 
@@ -169,46 +182,22 @@ def _resolve_environment(environment: Optional[str]) -> Tuple[str, str]:
     console.print(
         "[red]Error: No environment specified and none detected in current directory[/red]"
     )
-    raise typer.Exit(1)
+    raise SystemExit(1)
 
 
-@action_app.command("list", epilog=ACTION_LIST_JSON_HELP)
-def actions_list(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
-    ),
-    version_id: Optional[str] = typer.Option(
-        None,
-        "--version-id",
-        "-v",
-        help="Filter by version ID",
-    ),
-    num: int = typer.Option(
-        20,
-        "--num",
-        "-n",
-        help="Items per page",
-    ),
-    page: int = typer.Option(
-        1,
-        "--page",
-        "-p",
-        help="Page number",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def actions_list(config: EnvActionListConfig) -> None:
     """List actions (CI jobs) for an environment."""
+    environment = config.environment
+    version_id = config.version_id
+    num = config.num
+    page = config.page
+    output = config.output
+
     validate_output_format(output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     owner, env_name = _parse_environment_slug(environment)
 
@@ -281,23 +270,16 @@ def actions_list(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@action_app.command("logs")
-def actions_logs(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
-    ),
-    action_id: str = typer.Argument(
-        ...,
-        help="Action/job ID to get logs for",
-    ),
-    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
-    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
-) -> None:
+def actions_logs(config: EnvActionLogsConfig) -> None:
     """Get logs for a specific action."""
+    environment = config.environment
+    action_id = config.action_id
+    tail = config.tail
+    follow = config.follow
+
     owner, env_name = _parse_environment_slug(environment)
 
     try:
@@ -364,30 +346,18 @@ def actions_logs(
         console.print("\n[dim]Stopped watching logs.[/dim]")
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@action_app.command("retry", epilog=ACTION_RETRY_JSON_HELP)
-def actions_retry(
-    environment: str = typer.Argument(
-        ...,
-        help="Environment slug (e.g., 'owner/environment-name')",
-    ),
-    action_id: Optional[str] = typer.Argument(
-        None,
-        help="Action ID to retry (retries latest action if not provided)",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def actions_retry(config: EnvActionRetryConfig) -> None:
     """Retry an action (integration test) for an environment.
 
     If no action ID is provided, retries the latest action.
     """
+    environment = config.environment
+    action_id = config.action_id
+    output = config.output
+
     validate_output_format(output, console)
 
     owner, env_name = _parse_environment_slug(environment)
@@ -418,11 +388,11 @@ def actions_retry(
             )
         else:
             console.print(f"[red]Retry failed:[/red] {data.get('message', 'Unknown error')}")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def display_upstream_environment_info(
@@ -598,34 +568,7 @@ def _print_env_inspect_examples(owner: str, name: str, version: str) -> None:
     console.print(f"  [green]$[/green] prime env inspect {owner}/{name}@{version} README.md")
 
 
-@app.command("list", rich_help_panel="Explore", epilog=ENV_LIST_JSON_HELP)
-def list_cmd(
-    num: int = typer.Option(DEFAULT_LIST_LIMIT, "--num", "-n", help="Items per page"),
-    page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    owner: Optional[str] = typer.Option(None, "--owner", help="Filter by owner name"),
-    visibility: Optional[str] = typer.Option(
-        None, "--visibility", help="Filter by visibility (PUBLIC/PRIVATE)"
-    ),
-    output: str = typer.Option("table", "--output", help="Output format: table or json"),
-    search: Optional[str] = typer.Option(
-        None, "--search", "-s", help="Search by name or description"
-    ),
-    tag: Optional[List[str]] = typer.Option(None, "--tag", "-t", help="Filter by tag (repeatable)"),
-    action_status: Optional[str] = typer.Option(
-        None, "--action-status", help="Filter by action status (SUCCESS/FAILED/RUNNING/PENDING)"
-    ),
-    sort: str = typer.Option(
-        "created_at", "--sort", help="Sort by: name, created_at, updated_at, stars"
-    ),
-    order: str = typer.Option("desc", "--order", help="Sort order: asc, desc"),
-    show_actions: bool = typer.Option(False, "--show-actions", help="Show action status column"),
-    starred: bool = typer.Option(
-        False, "--starred", help="Filter to only environments you have starred"
-    ),
-    mine: bool = typer.Option(
-        False, "--mine", help="Filter to only your own environments (personal + team)"
-    ),
-) -> None:
+def list_cmd(config: EnvListConfig) -> None:
     """List environments from the hub.
 
     By default, shows all public environments. If authenticated, also includes
@@ -639,21 +582,35 @@ def list_cmd(
         prime env list --search "math"       # Search by name/description
         prime env list --sort stars          # Sort by most starred
     """
+    num = config.num
+    page = config.page
+    owner = config.owner
+    visibility = config.visibility
+    output = config.output
+    search = config.search
+    tag = config.tag
+    action_status = config.action_status
+    sort = config.sort
+    order = config.order
+    show_actions = config.show_actions
+    starred = config.starred
+    mine = config.mine
+
     validate_output_format(output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     # Validate sort and order
     if sort not in ("name", "created_at", "updated_at", "stars"):
         console.print(
             "[red]Error: --sort must be one of: name, created_at, updated_at, stars[/red]"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
     if order.lower() not in ("asc", "desc"):
         console.print("[red]Error: --order must be one of: asc, desc[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         # Require auth if filtering by starred or mine
@@ -773,17 +730,13 @@ def list_cmd(
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("status", rich_help_panel="Explore", epilog=ENV_STATUS_JSON_HELP)
-def status_cmd(
-    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
-    output: str = typer.Option("table", "--output", help="Output format: table or json"),
-) -> None:
+def status_cmd(config: EnvStatusConfig) -> None:
     """Show action status for an environment.
 
     \b
@@ -791,6 +744,9 @@ def status_cmd(
         prime env status owner/my-env
         prime env status owner/my-env --output json
     """
+    env_id = config.env_id
+    output = config.output
+
     validate_output_format(output, console)
 
     # Parse env_id
@@ -843,10 +799,10 @@ def status_cmd(
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def _resolve_push_environment_path(path: Optional[str], env_id: Optional[str]) -> Path:
@@ -884,7 +840,7 @@ def _run_env_push_lab_hygiene_preflight(env_path: Path) -> None:
         emit=_emit_lab_hygiene_message,
     )
     if result.exit_code != 0:
-        raise typer.Exit(result.exit_code)
+        raise SystemExit(result.exit_code)
 
 
 def _environment_resolve_data(
@@ -923,50 +879,17 @@ def _resolve_pull_environment_path(target: Optional[str], env_name: str) -> Path
     return parent / env_folder
 
 
-@app.command(rich_help_panel="Manage")
-def push(
-    env_id: Optional[str] = typer.Argument(
-        None,
-        help="Optional environment ID used as the local folder name (hyphens map to underscores)",
-    ),
-    path: Optional[str] = typer.Option(
-        None,
-        "--path",
-        "-p",
-        help=(
-            "Path to environment directory. Defaults to '.' without env_id, "
-            "or './environments' as the parent directory with env_id."
-        ),
-    ),
-    name: Optional[str] = typer.Option(
-        None, "--name", "-n", help="Override environment name (defaults to pyproject.toml name)"
-    ),
-    owner: Optional[str] = typer.Option(
-        None,
-        "--owner",
-        "-o",
-        help="Owner slug (user or team) to push to (for collaborators with write access)",
-    ),
-    team: Optional[str] = typer.Option(
-        None,
-        "--team",
-        "-t",
-        help="Team slug for team ownership (uses config team_id if not provided)",
-    ),
-    visibility: Optional[str] = typer.Option(
-        None, "--visibility", "-v", help="Environment visibility (PUBLIC/PRIVATE)"
-    ),
-    auto_bump: bool = typer.Option(
-        False, "--auto-bump", help="Automatically bump patch version before push"
-    ),
-    rc: bool = typer.Option(False, "--rc", help="Bump or create a .rc pre-release (rc0 -> rc1)"),
-    post: bool = typer.Option(
-        False,
-        "--post",
-        help="Bump or create a .post release (post0 -> post1)",
-    ),
-) -> None:
+def push(config: EnvPushConfig) -> None:
     """Push environment to registry"""
+    env_id = config.env_id
+    path = config.path
+    name = config.name
+    owner = config.owner
+    team = config.team
+    visibility = config.visibility
+    auto_bump = config.auto_bump
+    rc = config.rc
+    post = config.post
 
     try:
         env_path = _resolve_push_environment_path(path, env_id)
@@ -979,7 +902,7 @@ def push(
         pyproject_path = env_path / "pyproject.toml"
         if not pyproject_path.exists():
             console.print("[red]Error: pyproject.toml not found[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         try:
             pyproject_data = toml.load(pyproject_path)
@@ -990,7 +913,7 @@ def push(
                 console.print(
                     "[red]Error: No name found in pyproject.toml and no --name provided[/red]"
                 )
-                raise typer.Exit(1)
+                raise SystemExit(1)
 
             # Auto-bump version if requested
             if auto_bump or rc or post:
@@ -999,13 +922,13 @@ def push(
                     console.print(
                         "[red]Error: --auto-bump, --rc, and --post are mutually exclusive[/red]"
                     )
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
                 current_version = project_info.get("version")
                 if not current_version:
                     console.print(
                         "[red]Error: No version found in pyproject.toml for auto-bump[/red]"
                     )
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
 
                 if auto_bump:
                     new_version = bump_version(current_version)
@@ -1024,13 +947,13 @@ def push(
                     console.print("[green]✓ Updated version in pyproject.toml[/green]")
                 except Exception as e:
                     console.print(f"[red]Failed to update version in pyproject.toml: {e}[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
 
             console.print(f"Environment name: {env_name}")
 
         except Exception as e:
             console.print(f"[red]Failed to parse pyproject.toml: {e}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         # Find any Python file in the environment
         has_env_file = False
@@ -1049,7 +972,7 @@ def push(
 
         if not has_env_file:
             console.print("[red]Error: No environment Python file found[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         console.print(f"Building environment package at {env_path}...")
 
@@ -1080,16 +1003,16 @@ def push(
         except subprocess.CalledProcessError as e:
             console.print("[red]Build failed![/red]")
             console.print(e.stderr)
-            raise typer.Exit(1)
+            raise SystemExit(1)
         except FileNotFoundError:
             console.print("[red]Build tool not found. Please install 'uv' or 'build'.[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         dist_dir = env_path / "dist"
         wheels = list(dist_dir.glob("*.whl"))
         if not wheels:
             console.print("[red]Error: No wheel file found after build[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         wheel_path = wheels[0]
         wheel_size = wheel_path.stat().st_size
@@ -1144,15 +1067,15 @@ def push(
                     while True:
                         try:
                             chosen = (
-                                typer.prompt(
+                                prompt(
                                     "Enter your desired username",
                                 )
                                 .strip()
                                 .lower()
                             )
-                        except typer.Abort:
+                        except KeyboardInterrupt:
                             console.print("[red]Cancelled by user[/red]")
-                            raise typer.Exit(1)
+                            raise SystemExit(1)
 
                         if not chosen:
                             console.print("[red]Username cannot be empty[/red]")
@@ -1179,7 +1102,7 @@ def push(
                                 continue
                             else:
                                 console.print(f"[red]Failed to set username: {se}[/red]")
-                                raise typer.Exit(1)
+                                raise SystemExit(1)
 
                     # Retry resolve after setting username
                     try:
@@ -1207,10 +1130,10 @@ def push(
                         console.print(
                             f"[red]Failed to resolve environment after setting username: {e2}[/red]"
                         )
-                        raise typer.Exit(1)
+                        raise SystemExit(1)
                 else:
                     console.print(f"[red]Failed to resolve environment: {e}[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
 
             console.print("Uploading wheel ...")
 
@@ -1219,7 +1142,7 @@ def push(
                     wheel_sha256 = hashlib.sha256(f.read()).hexdigest()
             except IOError as e:
                 console.print(f"[red]Failed to read wheel file: {e}[/red]")
-                raise typer.Exit(1)
+                raise SystemExit(1)
 
             project_metadata = project_info
 
@@ -1273,7 +1196,7 @@ def push(
                     )
                 else:
                     console.print(f"[red]Failed to prepare wheel upload: {e}[/red]")
-                raise typer.Exit(1)
+                raise SystemExit(1)
 
             if wheel_upload_url:
                 try:
@@ -1287,16 +1210,16 @@ def push(
                         upload_response.raise_for_status()
                 except httpx.RequestError as e:
                     console.print(f"[red]Failed to upload wheel: {e}[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
                 except IOError as e:
                     console.print(f"[red]Failed to read wheel file for upload: {e}[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
 
                 try:
                     client.post(f"/environmentshub/{env_id}/wheels/{wheel_id}/finalize")
                 except APIError as e:
                     console.print(f"[red]Failed to finalize wheel upload: {e}[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
 
             console.print("Creating source archive...")
             temp_file_path = None
@@ -1378,7 +1301,7 @@ def push(
                             )
                         else:
                             console.print(f"[red]Failed to prepare source upload: {e}[/red]")
-                        raise typer.Exit(1)
+                        raise SystemExit(1)
 
                     try:
                         with open(tmp.name, "rb") as f:
@@ -1391,10 +1314,10 @@ def push(
                             upload_response.raise_for_status()
                     except httpx.RequestError as e:
                         console.print(f"[red]Failed to upload source archive: {e}[/red]")
-                        raise typer.Exit(1)
+                        raise SystemExit(1)
                     except IOError as e:
                         console.print(f"[red]Failed to read source archive for upload: {e}[/red]")
-                        raise typer.Exit(1)
+                        raise SystemExit(1)
 
                     # Finalize
                     try:
@@ -1406,11 +1329,11 @@ def push(
 
                     except APIError as e:
                         console.print(f"[red]Failed to finalize source upload: {e}[/red]")
-                        raise typer.Exit(1)
+                        raise SystemExit(1)
 
             except (tarfile.TarError, OSError) as e:
                 console.print(f"[red]Failed to create source archive: {e}[/red]")
-                raise typer.Exit(1)
+                raise SystemExit(1)
             finally:
                 # Clean up temporary file if it was created
                 if temp_file_path and Path(temp_file_path).exists():
@@ -1482,46 +1405,38 @@ def push(
                 console.print(f"  prime env install {owner_name}/{env_name}")
             else:
                 console.print(f"[red]Error finalizing: {finalize_response.get('message')}[/red]")
-                raise typer.Exit(1)
+                raise SystemExit(1)
 
         except APIError as e:
             console.print(f"[red]API Error: {e}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
         except Exception as e:
             console.print(f"[red]Upload failed: {e}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Build error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except FileNotFoundError as e:
         console.print(f"[red]File not found: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except PermissionError as e:
         console.print(f"[red]Permission error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(
-    rich_help_panel="Manage",
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-        "help_option_names": [],
-    },
-)
-def init(ctx: typer.Context) -> None:
+def init(argv: list[str]) -> None:
     """Initialize a V1 or V0 environment with Verifiers."""
     result = subprocess.run(
-        build_verifiers_command("init", ctx.args),
+        build_verifiers_command("init", argv),
         env=verifiers_environment(plain=is_plain_mode()),
     )
     if result.returncode != 0:
-        raise typer.Exit(result.returncode)
-    if ctx.args and not any(arg in ("-h", "--help") for arg in ctx.args):
+        raise SystemExit(result.returncode)
+    if argv and not any(arg in ("-h", "--help") for arg in argv):
         _run_env_init_lab_hygiene_preflight()
 
 
@@ -1717,15 +1632,16 @@ def _build_environment(env_id: Optional[str], path: str) -> int:
         f'sh -lc "cd /app/env && /app/.venv/bin/uvicorn {app_name} --host 0.0.0.0 --port {port}"'
     )
 
+    from ..leaves.images.push import Config as ImagesPushConfig
     from .images import push_image
 
     resolved_image = push_image(
-        image,
-        context=str(project_dir),
-        dockerfile=str(dockerfile),
-        platform="linux/amd64",
-        public=False,
-        private=False,
+        ImagesPushConfig(
+            image_reference=image,
+            context=str(project_dir),
+            dockerfile=str(dockerfile),
+            platform="linux/amd64",
+        )
     )
     status = _wait_for_build(resolved_image)
     if status is None:
@@ -1755,57 +1671,32 @@ def _build_environment(env_id: Optional[str], path: str) -> int:
     return 0
 
 
-@app.command(no_args_is_help=True, rich_help_panel="Manage")
-def build(
-    env_id: Optional[str] = typer.Argument(
-        None, help="Environment ID (hyphenated, e.g. openenv-echo)"
-    ),
-    path: str = typer.Option(
-        "./environments",
-        "--path",
-        "-p",
-        help="Base environments path, or the environment path when ENV_ID is omitted",
-    ),
-) -> None:
+def build(config: EnvBuildConfig) -> None:
     """Build an OpenEnv-backed environment image."""
+    env_id = config.env_id
+    path = config.path
+
     code = _build_environment(env_id, path)
     if code != 0:
-        raise typer.Exit(code)
+        raise SystemExit(code)
 
 
-@app.command(
-    rich_help_panel="Manage",
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-        "help_option_names": [],
-    },
-)
-def validate(ctx: typer.Context) -> None:
+def validate(argv: list[str]) -> None:
     """Run a taskset's model-free validation with Verifiers."""
-    exec_verifiers_process("validate", ctx.args, plain=is_plain_mode())
+    exec_verifiers_process("validate", argv, plain=is_plain_mode())
 
 
-@app.command(
-    rich_help_panel="Manage",
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-        "help_option_names": [],
-    },
-)
-def serve(ctx: typer.Context) -> None:
+def serve(argv: list[str]) -> None:
     """Serve a V1 or V0 environment with Verifiers."""
-    exec_verifiers_process("serve", ctx.args, plain=is_plain_mode())
+    exec_verifiers_process("serve", argv, plain=is_plain_mode())
 
 
-@app.command(no_args_is_help=True, rich_help_panel="Manage")
-def pull(
-    env_id: str = typer.Argument(..., help="Environment ID (owner/name or owner/name@version)"),
-    target: Optional[str] = typer.Option(None, "--target", "-t", help="Target directory"),
-    version: str = typer.Option("latest", "--version", "-v", help="Version to pull"),
-) -> None:
+def pull(config: EnvPullConfig) -> None:
     """Pull environment for local inspection"""
+    env_id = config.env_id
+    target = config.target
+    version = config.version
+
     try:
         client = APIClient(require_auth=False)
 
@@ -1815,7 +1706,7 @@ def pull(
             owner, name, parsed_version = parse_env_id(env_id)
         except ValueError as exc:
             console.print(f"[red]Error: {exc}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
         version = parsed_version or version
         env_id = f"{owner}/{name}"
 
@@ -1826,7 +1717,7 @@ def pull(
             details = response["data"]
         except APIError as e:
             console.print(f"[red]Failed to get environment details: {e}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         base_dir = _resolve_pull_environment_path(target, name)
         target_dir = base_dir
@@ -1847,7 +1738,7 @@ def pull(
             download_environment_source(details, target_dir, api_key=client.api_key)
         except (OSError, ValueError, httpx.HTTPError) as exc:
             console.print(f"[red]Download failed: {exc}[/red]")
-            raise typer.Exit(1) from exc
+            raise SystemExit(1) from exc
 
         console.print(f"[green]✓ Environment pulled to {target_dir}[/green]")
 
@@ -1904,10 +1795,10 @@ def pull(
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def extract_requires_dist_from_wheel(wheel_path: Path) -> List[str]:
@@ -2030,12 +1921,11 @@ def update_pyproject_version(pyproject_path: Path, new_version: str) -> None:
         f.write(updated_content)
 
 
-@app.command(no_args_is_help=True, rich_help_panel="Explore")
-def info(
-    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
-    version: str = typer.Option("latest", "--version", "-v", help="Version to show"),
-) -> None:
+def info(config: EnvInfoConfig) -> None:
     """Show environment details and installation commands"""
+    env_id = config.env_id
+    version = config.version
+
     try:
         client = APIClient(require_auth=False)
 
@@ -2045,7 +1935,7 @@ def info(
             owner, name, parsed_version = parse_env_id(env_id)
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
         env_id = f"{owner}/{name}"
         target_version = parsed_version or version
 
@@ -2057,7 +1947,7 @@ def info(
             details = response.get("data", response)
         except APIError as e:
             console.print(f"[red]Failed to get environment details: {e}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         # Process wheel URL
         raw_wheel_url = details.get("wheel_url")
@@ -2086,9 +1976,8 @@ def info(
         _print_env_inspect_examples(owner, name, target_version)
         console.print()
 
-        from verifiers.utils.install_utils import environment_package_url
-
-        if wheel_url or simple_index_url or environment_package_url(details):
+        package_url = details.get("tracked_package_url") or details.get("package_url")
+        if wheel_url or simple_index_url or package_url:
             reference = f"{owner}/{name}@{target_version}"
             console.print("[bold yellow]Install[/bold yellow]")
             console.print(f"  [green]$[/green] prime env install {reference}")
@@ -2103,34 +1992,22 @@ def info(
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
-    except typer.Exit:
+        raise SystemExit(1)
+    except SystemExit:
         raise
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(
-    "inspect", no_args_is_help=True, rich_help_panel="Explore", epilog=ENV_INSPECT_JSON_HELP
-)
-def inspect_cmd(
-    env_id: str = typer.Argument(..., help="Environment ID (owner/name or owner/name@version)"),
-    source_path: Optional[str] = typer.Argument(
-        None,
-        help="Optional file or directory path inside the environment source",
-    ),
-    version: str = typer.Option("latest", "--version", "-v", help="Version to inspect"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-    max_bytes: int = typer.Option(
-        100000,
-        "--max-bytes",
-        min=1,
-        max=500000,
-        help="Maximum file bytes to return when inspecting a file",
-    ),
-) -> None:
+def inspect_cmd(config: EnvInspectConfig) -> None:
     """Inspect environment source without downloading the archive locally."""
+    env_id = config.env_id
+    source_path = config.source_path
+    version = config.version
+    output = config.output
+    max_bytes = config.max_bytes
+
     validate_output_format(output, console)
 
     from verifiers.utils.install_utils import parse_env_id
@@ -2140,7 +2017,7 @@ def inspect_cmd(
             owner, name, parsed_version = parse_env_id(env_id)
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
         target_version = parsed_version or version
         client = APIClient(require_auth=False)
         params: Dict[str, Any] = {"max_bytes": max_bytes}
@@ -2211,31 +2088,15 @@ def inspect_cmd(
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
-    except typer.Exit:
+        raise SystemExit(1)
+    except SystemExit:
         raise
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(no_args_is_help=True, rich_help_panel="Manage")
-def install(
-    env_ids: List[str] = typer.Argument(
-        ..., help="Environment ID(s) to install (owner/name or local name)"
-    ),
-    path: str = typer.Option(
-        "./environments",
-        "--path",
-        "-p",
-        help="Path to local environments directory (for local installs)",
-    ),
-    prerelease: bool = typer.Option(
-        False,
-        "--prerelease",
-        help="Allow pre-release versions (e.g., verifiers>=0.1.12.dev3).",
-    ),
-) -> None:
+def install(config: EnvInstallConfig) -> None:
     """Install a verifiers environment.
 
     \b
@@ -2246,21 +2107,25 @@ def install(
         prime env install owner/environment@0.2.3  # specific version
         prime env install env1 env2 env3           # install multiple
     """
+    env_ids = config.env_ids
+    path = config.path
+    prerelease = config.prerelease
+
     from verifiers.utils.install_utils import install_from_hub
 
     if not shutil.which("uv"):
         console.print("[red]Error: uv is not installed.[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
-    config = Config()
+    prime_config = Config()
     failed: list[tuple[str, str]] = []
     for env_id in dict.fromkeys(env_ids):
         try:
             if "/" in env_id:
                 install_from_hub(
                     env_id,
-                    api_key=config.api_key,
-                    base_url=config.base_url,
+                    api_key=prime_config.api_key,
+                    base_url=prime_config.base_url,
                     python_executable=resolve_workspace_python(),
                     prerelease=prerelease,
                 )
@@ -2277,14 +2142,13 @@ def install(
             console.print(f"[red]✗ {env_id}: {exc}[/red]")
 
     if failed:
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(no_args_is_help=True, rich_help_panel="Manage")
-def uninstall(
-    env_name: str = typer.Argument(..., help="Environment name to uninstall"),
-) -> None:
+def uninstall(config: EnvUninstallConfig) -> None:
     """Uninstall an environment distribution with uv."""
+    env_name = config.env_name
+
     from verifiers.utils.install_utils import normalize_package_name
 
     package = normalize_package_name(env_name.rsplit("/", 1)[-1].split("@", 1)[0])
@@ -2292,29 +2156,22 @@ def uninstall(
         subprocess.run(_uv_pip_command("uninstall", package), check=True)
     except (OSError, subprocess.CalledProcessError) as exc:
         console.print(f"[red]Uninstall failed: {exc}[/red]")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc
     console.print(f"[green]✓ Uninstalled {package}[/green]")
 
 
-version_app = PlainTyper(help="Manage environment versions", no_args_is_help=True)
-app.add_typer(version_app, name="version", rich_help_panel="Manage")
-
-
-@version_app.command("list", no_args_is_help=True)
-def list_versions(
-    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
-    full_hashes: bool = typer.Option(
-        False, "--full-hashes", help="Show full content hashes instead of shortened ones"
-    ),
-) -> None:
+def list_versions(config: EnvVersionListConfig) -> None:
     """List all versions of an environment"""
+    env_id = config.env_id
+    full_hashes = config.full_hashes
+
     try:
         client = APIClient(require_auth=False)
 
         parts = env_id.split("/")
         if len(parts) != 2:
             console.print("[red]Error: Invalid environment ID format. Expected: owner/name[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         owner, name = parts
 
@@ -2330,7 +2187,7 @@ def list_versions(
 
         except APIError as e:
             console.print(f"[red]Failed to get environment versions: {e}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if not versions_data:
             console.print("No versions found.")
@@ -2380,19 +2237,18 @@ def list_versions(
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@version_app.command("delete", no_args_is_help=True)
-def delete_version(
-    env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
-    content_hash: str = typer.Argument(..., help="Content hash of the version to delete"),
-    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
-) -> None:
+def delete_version(config: EnvVersionDeleteConfig) -> None:
     """Delete a specific environment version from the environments hub using its content hash"""
+    env_id = config.env_id
+    content_hash = config.content_hash
+    force = config.force
+
     try:
         # Validate that we have a proper content hash (basic validation)
         if len(content_hash) < 8:
@@ -2402,7 +2258,7 @@ def delete_version(
             console.print(
                 "[yellow]Use 'prime env version list' to see available content hashes[/yellow]"
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if not force:
             try:
@@ -2410,20 +2266,20 @@ def delete_version(
                     f"Are you sure you want to permanently delete version with content "
                     f"hash '{content_hash}' from '{env_id}' on the environments hub?"
                 )
-                confirm = typer.confirm(confirm_msg)
-                if not confirm:
+                confirmed = confirm(confirm_msg)
+                if not confirmed:
                     console.print("Deletion cancelled.")
-                    raise typer.Exit()
-            except typer.Abort:
+                    raise SystemExit(0)
+            except KeyboardInterrupt:
                 console.print("Deletion cancelled.")
-                raise typer.Exit()
+                raise SystemExit(0)
 
         client = APIClient()
 
         parts = env_id.split("/")
         if len(parts) != 2:
             console.print("[red]Error: Invalid environment ID format. Expected: owner/name[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         owner, name = parts
         console.print(f"Deleting version {content_hash} from {env_id}...")
@@ -2442,22 +2298,21 @@ def delete_version(
                 )
             else:
                 console.print(f"[red]Failed to delete version: {e}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(no_args_is_help=True, rich_help_panel="Manage")
-def delete(
-    env_id: str = typer.Argument(..., help="Environment ID to delete"),
-    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
-) -> None:
+def delete(config: EnvDeleteConfig) -> None:
     """Delete an entire environment from the environments hub"""
+    env_id = config.env_id
+    force = config.force
+
     try:
         if not force:
             try:
@@ -2465,13 +2320,13 @@ def delete(
                     f"Are you sure you want to permanently delete entire environment "
                     f"'{env_id}' and ALL its versions from the environments hub?"
                 )
-                confirm = typer.confirm(delete_msg)
-                if not confirm:
+                confirmed = confirm(delete_msg)
+                if not confirmed:
                     console.print("Deletion cancelled.")
-                    raise typer.Exit()
-            except typer.Abort:
+                    raise SystemExit(0)
+            except KeyboardInterrupt:
                 console.print("Deletion cancelled.")
-                raise typer.Exit()
+                raise SystemExit(0)
 
         client = APIClient()
         console.print(f"Deleting {env_id} from remote hub...")
@@ -2481,14 +2336,14 @@ def delete(
             console.print(f"[green]✓ Environment {env_id} deleted successfully[/green]")
         except APIError as e:
             console.print(f"[red]Failed to delete environment: {e}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def _get_environment_id(client: APIClient, owner: str, env_name: str) -> str:
@@ -2507,20 +2362,11 @@ def _fetch_env_secrets(client: APIClient, env_id: str) -> List[Dict[str, Any]]:
     return response.get("data", [])
 
 
-@secret_app.command("list", epilog=ENV_SECRET_LIST_JSON_HELP)
-def env_secret_list(
-    environment: Optional[str] = typer.Argument(
-        None,
-        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def env_secret_list(config: EnvSecretListConfig) -> None:
     """List all secrets for an environment."""
+    environment = config.environment
+    output = config.output
+
     validate_output_format(output, console)
     owner, env_name = _resolve_environment(environment)
 
@@ -2558,41 +2404,17 @@ def env_secret_list(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@secret_app.command("create", epilog=ENV_SECRET_DETAIL_JSON_HELP)
-def env_secret_create(
-    environment: Optional[str] = typer.Argument(
-        None,
-        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
-    ),
-    name: Optional[str] = typer.Option(
-        None,
-        "--name",
-        "-n",
-        help="Secret name (must be uppercase with underscores, e.g., MY_SECRET)",
-    ),
-    value: Optional[str] = typer.Option(
-        None,
-        "--value",
-        "-v",
-        help="Secret value",
-    ),
-    description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        "-d",
-        help="Secret description",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def env_secret_create(config: EnvSecretCreateConfig) -> None:
     """Create an environment-specific secret."""
+    environment = config.environment
+    name = config.name
+    value = config.value
+    description = config.description
+    output = config.output
+
     validate_output_format(output, console)
     owner, env_name = _resolve_environment(environment)
 
@@ -2601,16 +2423,16 @@ def env_secret_create(
             name = prompt_for_value("Secret name")
             if not name:
                 console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
+                raise SystemExit(0)
 
         if not validate_env_var_name(name, "secret"):
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if not value:
             value = prompt_for_value("Secret value", hide_input=True)
             if not value:
                 console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
+                raise SystemExit(0)
 
         with console.status("[bold blue]Creating secret...", spinner="dots"):
             client = APIClient()
@@ -2632,49 +2454,21 @@ def env_secret_create(
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
-        raise typer.Exit()
+        raise SystemExit(0)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@secret_app.command("update", epilog=ENV_SECRET_DETAIL_JSON_HELP)
-def env_secret_update(
-    environment: Optional[str] = typer.Argument(
-        None,
-        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
-    ),
-    secret_id: Optional[str] = typer.Option(
-        None,
-        "--id",
-        help="Secret ID to update (interactive selection if not provided)",
-    ),
-    name: Optional[str] = typer.Option(
-        None,
-        "--name",
-        "-n",
-        help="New secret name",
-    ),
-    value: Optional[str] = typer.Option(
-        None,
-        "--value",
-        "-v",
-        help="New secret value",
-    ),
-    description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        "-d",
-        help="New secret description",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def env_secret_update(config: EnvSecretUpdateConfig) -> None:
     """Update an environment-specific secret."""
+    environment = config.environment
+    secret_id = config.secret_id
+    name = config.name
+    value = config.value
+    description = config.description
+    output = config.output
+
     validate_output_format(output, console)
     owner, env_name = _resolve_environment(environment)
 
@@ -2697,10 +2491,10 @@ def env_secret_update(
 
             if not value:
                 console.print("\n[dim]No changes made.[/dim]")
-                raise typer.Exit()
+                raise SystemExit(0)
 
         if name is not None and not validate_env_var_name(name, "secret"):
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         payload: Dict[str, Any] = {}
         if name is not None:
@@ -2723,31 +2517,18 @@ def env_secret_update(
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
-        raise typer.Exit()
+        raise SystemExit(0)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@secret_app.command("delete")
-def env_secret_delete(
-    environment: Optional[str] = typer.Argument(
-        None,
-        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
-    ),
-    secret_id: Optional[str] = typer.Option(
-        None,
-        "--id",
-        help="Secret ID to delete (interactive selection if not provided)",
-    ),
-    yes: bool = typer.Option(
-        False,
-        "--yes",
-        "-y",
-        help="Skip confirmation prompt",
-    ),
-) -> None:
+def env_secret_delete(config: EnvSecretDeleteConfig) -> None:
     """Delete an environment-specific secret."""
+    environment = config.environment
+    secret_id = config.secret_id
+    yes = config.yes
+
     owner, env_name = _resolve_environment(environment)
 
     try:
@@ -2767,40 +2548,28 @@ def env_secret_delete(
             secret_name = secret_data.get("name") if secret_data else secret_id
 
         if not yes:
-            confirm = typer.confirm(f"Delete secret '{secret_name}' from {owner}/{env_name}?")
-            if not confirm:
+            confirmed = confirm(f"Delete secret '{secret_name}' from {owner}/{env_name}?")
+            if not confirmed:
                 console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
+                raise SystemExit(0)
 
         client.delete(f"/environmentshub/{env_id}/secrets/{secret_id}")
         console.print(f"[green]✓ Deleted secret '{secret_name}' from {owner}/{env_name}[/green]")
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
-        raise typer.Exit()
+        raise SystemExit(0)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@secret_app.command("link", epilog=ENV_SECRET_LINK_JSON_HELP)
-def env_secret_link(
-    global_secret_id: str = typer.Argument(
-        ...,
-        help="Global secret ID to link",
-    ),
-    environment: Optional[str] = typer.Argument(
-        None,
-        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def env_secret_link(config: EnvSecretLinkConfig) -> None:
     """Link a global secret to an environment."""
+    global_secret_id = config.global_secret_id
+    environment = config.environment
+    output = config.output
+
     validate_output_format(output, console)
     owner, env_name = _resolve_environment(environment)
 
@@ -2825,37 +2594,23 @@ def env_secret_link(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@secret_app.command("unlink")
-def env_secret_unlink(
-    global_secret_id: str = typer.Argument(
-        ...,
-        help="Global secret ID to unlink",
-    ),
-    environment: Optional[str] = typer.Argument(
-        None,
-        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
-    ),
-    yes: bool = typer.Option(
-        False,
-        "--yes",
-        "-y",
-        help="Skip confirmation prompt",
-    ),
-) -> None:
+def env_secret_unlink(config: EnvSecretUnlinkConfig) -> None:
     """Unlink a global secret from an environment."""
+    global_secret_id = config.global_secret_id
+    environment = config.environment
+    yes = config.yes
+
     owner, env_name = _resolve_environment(environment)
 
     try:
         if not yes:
-            confirm = typer.confirm(
-                f"Unlink global secret {global_secret_id} from {owner}/{env_name}?"
-            )
-            if not confirm:
+            confirmed = confirm(f"Unlink global secret {global_secret_id} from {owner}/{env_name}?")
+            if not confirmed:
                 console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
+                raise SystemExit(0)
 
         client = APIClient()
         env_id = _get_environment_id(client, owner, env_name)
@@ -2864,26 +2619,17 @@ def env_secret_unlink(
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
-        raise typer.Exit()
+        raise SystemExit(0)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@var_app.command("list", epilog=ENV_VAR_LIST_JSON_HELP)
-def var_list(
-    environment: Optional[str] = typer.Argument(
-        None,
-        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def var_list(config: EnvVarListConfig) -> None:
     """List all variables for an environment."""
+    environment = config.environment
+    output = config.output
+
     validate_output_format(output, console)
     owner, env_name = _resolve_environment(environment)
 
@@ -2924,41 +2670,17 @@ def var_list(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@var_app.command("create", epilog=ENV_VAR_DETAIL_JSON_HELP)
-def var_create(
-    environment: Optional[str] = typer.Argument(
-        None,
-        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
-    ),
-    name: Optional[str] = typer.Option(
-        None,
-        "--name",
-        "-n",
-        help="Variable name (must be uppercase with underscores, e.g., MY_VAR)",
-    ),
-    value: Optional[str] = typer.Option(
-        None,
-        "--value",
-        "-v",
-        help="Variable value",
-    ),
-    description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        "-d",
-        help="Variable description",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def var_create(config: EnvVarCreateConfig) -> None:
     """Create an environment variable."""
+    environment = config.environment
+    name = config.name
+    value = config.value
+    description = config.description
+    output = config.output
+
     validate_output_format(output, console)
     owner, env_name = _resolve_environment(environment)
 
@@ -2967,16 +2689,16 @@ def var_create(
             name = prompt_for_value("Variable name")
             if not name:
                 console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
+                raise SystemExit(0)
 
         if not validate_env_var_name(name, "variable"):
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if not value:
             value = prompt_for_value("Variable value")
             if not value:
                 console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
+                raise SystemExit(0)
 
         with console.status("[bold blue]Creating variable...", spinner="dots"):
             client = APIClient()
@@ -2998,55 +2720,28 @@ def var_create(
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
-        raise typer.Exit()
+        raise SystemExit(0)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@var_app.command("update", epilog=ENV_VAR_DETAIL_JSON_HELP)
-def var_update(
-    var_id: str = typer.Argument(
-        ...,
-        help="Variable ID to update",
-    ),
-    environment: Optional[str] = typer.Argument(
-        None,
-        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
-    ),
-    name: Optional[str] = typer.Option(
-        None,
-        "--name",
-        "-n",
-        help="New variable name",
-    ),
-    value: Optional[str] = typer.Option(
-        None,
-        "--value",
-        "-v",
-        help="New variable value",
-    ),
-    description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        "-d",
-        help="New variable description",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def var_update(config: EnvVarUpdateConfig) -> None:
     """Update an environment variable."""
+    var_id = config.var_id
+    environment = config.environment
+    name = config.name
+    value = config.value
+    description = config.description
+    output = config.output
+
     validate_output_format(output, console)
 
     if not any_provided(name, value, description):
         console.print(
             "[red]Error: At least one of --name, --value, or --description is required[/red]"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     owner, env_name = _resolve_environment(environment)
 
@@ -3055,7 +2750,7 @@ def var_update(
         env_id = _get_environment_id(client, owner, env_name)
 
         if name is not None and not validate_env_var_name(name, "variable"):
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         payload: Dict[str, Any] = {}
         if name is not None:
@@ -3079,35 +2774,23 @@ def var_update(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@var_app.command("delete")
-def var_delete(
-    var_id: str = typer.Argument(
-        ...,
-        help="Variable ID to delete",
-    ),
-    environment: Optional[str] = typer.Argument(
-        None,
-        help="Environment slug (e.g., 'owner/environment-name'). Auto-detected if not provided.",
-    ),
-    yes: bool = typer.Option(
-        False,
-        "--yes",
-        "-y",
-        help="Skip confirmation prompt",
-    ),
-) -> None:
+def var_delete(config: EnvVarDeleteConfig) -> None:
     """Delete an environment variable."""
+    var_id = config.var_id
+    environment = config.environment
+    yes = config.yes
+
     owner, env_name = _resolve_environment(environment)
 
     try:
         if not yes:
-            confirm = typer.confirm(f"Delete variable {var_id} from {owner}/{env_name}?")
-            if not confirm:
+            confirmed = confirm(f"Delete variable {var_id} from {owner}/{env_name}?")
+            if not confirmed:
                 console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
+                raise SystemExit(0)
 
         client = APIClient()
         env_id = _get_environment_id(client, owner, env_name)
@@ -3116,7 +2799,7 @@ def var_delete(
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
-        raise typer.Exit()
+        raise SystemExit(0)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)

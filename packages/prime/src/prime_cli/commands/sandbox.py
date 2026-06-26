@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import httpx
-import typer
 from prime_sandboxes import (
     APIClient,
     APIError,
@@ -29,8 +28,21 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from prime_cli.leaves.sandbox.create import Config as SandboxCreateConfig
+from prime_cli.leaves.sandbox.delete import Config as SandboxDeleteConfig
+from prime_cli.leaves.sandbox.download import Config as SandboxDownloadConfig
+from prime_cli.leaves.sandbox.expose import Config as SandboxExposeConfig
+from prime_cli.leaves.sandbox.get import Config as SandboxGetConfig
+from prime_cli.leaves.sandbox.list import Config as SandboxListConfig
+from prime_cli.leaves.sandbox.list_ports import Config as SandboxListPortsConfig
+from prime_cli.leaves.sandbox.logs import Config as SandboxLogsConfig
+from prime_cli.leaves.sandbox.reset_cache import Config as SandboxResetCacheConfig
+from prime_cli.leaves.sandbox.run import Config as SandboxRunConfig
+from prime_cli.leaves.sandbox.ssh import Config as SandboxSshConfig
+from prime_cli.leaves.sandbox.unexpose import Config as SandboxUnexposeConfig
+from prime_cli.leaves.sandbox.upload import Config as SandboxUploadConfig
+
 from ..utils import (
-    PlainTyper,
     build_table,
     confirm_or_skip,
     format_resources,
@@ -47,13 +59,13 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.display import SANDBOX_STATUS_COLORS
+from ..utils.prompt import confirm
 from ..utils.time_utils import now_utc, to_utc
 
-app = PlainTyper(help="Manage sandboxes", no_args_is_help=True)
 console = get_console()
 
 
-config = Config()
+prime_config = Config()
 
 LIST_SANDBOXES_JSON_HELP = json_output_help(
     ".sandboxes[] = {id, name, image, status, resources, labels[], created_at, "
@@ -199,7 +211,7 @@ def _format_sandbox_for_details(sandbox: Sandbox) -> Dict[str, Any]:
 def _guard_vm_unsupported(sandbox: Sandbox, feature_name: str) -> None:
     if sandbox.vm:
         console.print(f"[red]Error:[/red] {feature_name} is not yet supported for VM sandboxes.")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def _ssh_sandbox_display(item: Dict[str, Any]) -> str:
@@ -239,29 +251,21 @@ def _select_sandbox_for_ssh(sandbox_client: SandboxClient) -> str:
     return str(selected.get("id"))
 
 
-@app.command("list", epilog=LIST_SANDBOXES_JSON_HELP)
-def list_sandboxes_cmd(
-    team_id: Optional[str] = typer.Option(
-        None, help="Filter by team ID (uses config team_id if not specified)"
-    ),
-    status: Optional[str] = typer.Option(None, help="Filter by status"),
-    labels: Optional[List[str]] = typer.Option(
-        None,
-        "--label",
-        "-l",
-        help="Filter by labels (can specify multiple, sandboxes must have ALL)",
-    ),
-    page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    num: int = typer.Option(50, "--num", "-n", help="Items per page"),
-    all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """List your sandboxes (shortcut: ls)"""
+def list_sandboxes_cmd(config: SandboxListConfig) -> None:
+    """List your sandboxes."""
+    team_id = config.team_id
+    status = config.status
+    labels = config.labels
+    page = config.page
+    num = config.num
+    all = config.all
+    output = config.output
+
     validate_output_format(output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         base_client = APIClient()
@@ -350,29 +354,28 @@ def list_sandboxes_cmd(
                     f"Use --page {page + 1} to see more.[/yellow]"
                 )
 
-    except typer.Exit:
+    except SystemExit:
         raise
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except PaymentRequiredError as e:
         console.print(f"[red]Payment Required:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(no_args_is_help=True, epilog=SANDBOX_DETAIL_JSON_HELP)
-def get(
-    sandbox_id: str,
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def get(config: SandboxGetConfig) -> None:
     """Get detailed information about a specific sandbox"""
+    sandbox_id = config.sandbox_id
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
@@ -455,102 +458,46 @@ def get(
 
             console.print(table)
 
-    except typer.Exit:
+    except SystemExit:
         raise
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except PaymentRequiredError as e:
         console.print(f"[red]Payment Required:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(no_args_is_help=True)
-def create(
-    docker_image: Optional[str] = typer.Argument(
-        None,
-        help="Image to run. When using --vm, provide the VM image reference.",
-    ),
-    name: Optional[str] = typer.Option(
-        None, help="Name for the sandbox (auto-generated if not provided)"
-    ),
-    start_command: Optional[str] = typer.Option(
-        "tail -f /dev/null", help="Command to run in the container"
-    ),
-    cpu_cores: float = typer.Option(1.0, help="Number of CPU cores"),
-    memory_gb: float = typer.Option(2.0, help="Memory in GB"),
-    disk_size_gb: float = typer.Option(10.0, help="Disk size in GB"),
-    gpu_count: int = typer.Option(0, help="Number of GPUs"),
-    gpu_type: Optional[str] = typer.Option(
-        None,
-        "--gpu-type",
-        help="GPU type/model (e.g. H100_80GB, A100_80GB). Required when --gpu-count > 0",
-    ),
-    vm: bool = typer.Option(
-        False,
-        "--vm",
-        help="Create a VM-backed sandbox on the VM sandbox infra. Required when requesting GPUs.",
-    ),
-    network_access: bool = typer.Option(
-        True,
-        "--network-access/--no-network-access",
-        help="Allow outbound internet access (enabled by default)",
-    ),
-    timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
-    idle_timeout_minutes: Optional[int] = typer.Option(
-        None,
-        "--idle-timeout-minutes",
-        help=(
-            "Terminate the sandbox if no /exec, /upload, /download, or "
-            "/read-file request is seen for this many minutes. Disabled by default."
-        ),
-    ),
-    team_id: Optional[str] = typer.Option(
-        None, help="Team ID (uses config team_id if not specified)"
-    ),
-    region: Optional[str] = typer.Option(
-        None,
-        "--region",
-        help="Sandbox cluster region (for example: us, eu-west). Uses backend default if omitted.",
-    ),
-    registry_credentials_id: Optional[str] = typer.Option(
-        None,
-        "--registry-credentials-id",
-        help="Registry credentials ID for pulling private images",
-    ),
-    env: Optional[List[str]] = typer.Option(
-        None,
-        help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
-    ),
-    secret: Optional[List[str]] = typer.Option(
-        None,
-        help="Secrets in KEY=VALUE format. Can be specified multiple times.",
-    ),
-    labels: Optional[List[str]] = typer.Option(
-        None,
-        "--label",
-        "-l",
-        help="Labels/tags for the sandbox. Can be specified multiple times.",
-    ),
-    guaranteed: bool = typer.Option(
-        False,
-        "--guaranteed",
-        help=(
-            "Admin/manager only. Schedule with CPU/memory requests equal to limits "
-            "(Guaranteed QoS), bypassing the default oversubscription. Not supported "
-            "with --vm."
-        ),
-    ),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-) -> None:
+def create(config: SandboxCreateConfig) -> None:
     """Create a new sandbox"""
+    docker_image = config.docker_image
+    name = config.name
+    start_command = config.start_command
+    cpu_cores = config.cpu_cores
+    memory_gb = config.memory_gb
+    disk_size_gb = config.disk_size_gb
+    gpu_count = config.gpu_count
+    gpu_type = config.gpu_type
+    vm = config.vm
+    network_access = config.network_access
+    timeout_minutes = config.timeout_minutes
+    idle_timeout_minutes = config.idle_timeout_minutes
+    team_id = config.team_id
+    region = config.region
+    registry_credentials_id = config.registry_credentials_id
+    env = config.env
+    secret = config.secret
+    labels = config.labels
+    guaranteed = config.guaranteed
+    yes = config.yes
+
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
@@ -560,7 +507,7 @@ def create(
             for env_var in env:
                 if "=" not in env_var:
                     console.print("[red]Environment variables must be in KEY=VALUE format[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
                 key, value = env_var.split("=", 1)
                 env_vars[key] = value
 
@@ -569,7 +516,7 @@ def create(
             for secret_var in secret:
                 if "=" not in secret_var:
                     console.print("[red]Secrets must be in KEY=VALUE format[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
                 key, value = secret_var.split("=", 1)
                 secrets_vars[key] = value
 
@@ -578,44 +525,44 @@ def create(
                 "[red]GPU type is required when requesting GPUs.[/red] "
                 "Provide --gpu-type with --gpu-count > 0."
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if gpu_count > 0 and not vm:
             console.print(
                 "[red]GPUs require VM sandboxes.[/red] Pass --vm whenever using --gpu-count."
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if gpu_count == 0 and gpu_type:
             console.print(
                 "[red]GPU type provided without GPUs.[/red] "
                 "Set --gpu-count > 0 when using --gpu-type."
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if guaranteed and vm:
             console.print(
                 "[red]--guaranteed is not supported for VM sandboxes.[/red] "
                 "Drop --vm or drop --guaranteed."
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if idle_timeout_minutes is not None:
             if idle_timeout_minutes < 1:
                 console.print("[red]--idle-timeout-minutes must be at least 1.[/red]")
-                raise typer.Exit(1)
+                raise SystemExit(1)
             if timeout_minutes > 0 and idle_timeout_minutes > timeout_minutes:
                 console.print(
                     "[red]--idle-timeout-minutes must be <= --timeout-minutes "
                     f"(got idle={idle_timeout_minutes}, lifetime={timeout_minutes}).[/red]"
                 )
-                raise typer.Exit(1)
+                raise SystemExit(1)
 
         if not docker_image:
             console.print(
                 "[red]Docker image is required.[/red] Provide a DOCKER_IMAGE positional argument."
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         # Auto-generate name if not provided
         if not name:
@@ -717,21 +664,21 @@ def create(
             console.print("\nSandbox creation cancelled")
             return
 
-    except typer.Exit:
+    except SystemExit:
         raise
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except PaymentRequiredError as e:
         console.print(f"[red]Payment Required:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def _preview_bulk_delete_count(
@@ -818,38 +765,7 @@ def _bulk_delete_and_display(
     )
 
 
-@app.command(no_args_is_help=True)
-def delete(
-    sandbox_ids: Optional[List[str]] = typer.Argument(
-        None, help="Sandbox ID(s) to delete (space or comma-separated)"
-    ),
-    all: bool = typer.Option(False, "--all", "-a", help="Delete all sandboxes"),
-    labels: Optional[List[str]] = typer.Option(
-        None, "--label", "-l", help="Delete all sandboxes with ALL these labels"
-    ),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-    only_mine: bool = typer.Option(
-        True,
-        "--only-mine/--all-users",
-        "-m/-A",
-        help=(
-            "Restrict '--all' and '--label' deletes to your own sandboxes."
-            " --all-users deletes across every user in the team and requires"
-            " team admin role."
-        ),
-        show_default=True,
-    ),
-    target_user_id: Optional[str] = typer.Option(
-        None,
-        "--user",
-        "-u",
-        help=(
-            "Scope '--all' and '--label' deletes to this teammate's sandboxes."
-            " Requires team admin role and a configured team_id. Cannot be"
-            " combined with --all-users."
-        ),
-    ),
-) -> None:
+def delete(config: SandboxDeleteConfig) -> None:
     """Delete one or more sandboxes by ID, by label, or all sandboxes with --all
 
     '--all' and '--label' perform a single server-side scoped delete: by
@@ -857,6 +773,13 @@ def delete(
     Pass '--all-users' to delete across the whole team (team admin only), or
     '--user <user_id>' to target a single teammate's sandboxes (team admin only).
     """
+    sandbox_ids = config.sandbox_ids
+    all = config.all
+    labels = config.labels
+    yes = config.yes
+    all_users = config.all_users
+    target_user_id = config.target_user_id
+
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
@@ -865,13 +788,13 @@ def delete(
             console.print(
                 "[red]Error:[/red] Cannot specify more than one of: sandbox IDs, --all, or --label"
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if not all and not sandbox_ids and not labels:
             console.print(
                 "[red]Error:[/red] Must specify either sandbox IDs, --all flag, or --label"
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if target_user_id and not (all or labels):
             console.print(
@@ -880,17 +803,17 @@ def delete(
                 " IDs directly (team admins can already delete any sandbox in"
                 " their team by ID)."
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if all or labels:
-            team_id = config.team_id
+            team_id = prime_config.team_id
 
-            if target_user_id and not only_mine:
+            if target_user_id and all_users:
                 console.print(
                     "[red]Error:[/red] Cannot combine --user with --all-users."
                     " Use one or the other."
                 )
-                raise typer.Exit(1)
+                raise SystemExit(1)
 
             if target_user_id:
                 if not team_id:
@@ -898,11 +821,11 @@ def delete(
                         "[red]Error:[/red] --user requires a team_id."
                         " Configure one with 'prime config set-team-id <id>'."
                     )
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
                 scope_user_id = target_user_id
                 all_users_flag = False
-            elif only_mine:
-                scope_user_id = config.user_id
+            elif not all_users:
+                scope_user_id = prime_config.user_id
                 all_users_flag = False
                 if not scope_user_id:
                     console.print(
@@ -911,7 +834,7 @@ def delete(
                         " sandboxes across the team (requires team admin), or"
                         " configure your user_id."
                     )
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
             else:
                 scope_user_id = None
                 all_users_flag = True
@@ -930,7 +853,7 @@ def delete(
                         f"\n[dim]Note: no active sandboxes for user"
                         f" {target_user_id} in this team.[/dim]"
                     )
-                elif only_mine:
+                elif not all_users:
                     console.print(
                         "\n[dim]Note: --all/--label only deletes your own"
                         " sandboxes by default. Use --all-users to delete"
@@ -942,7 +865,7 @@ def delete(
 
             if target_user_id:
                 scope_suffix = f" for user {target_user_id}"
-            elif only_mine:
+            elif not all_users:
                 scope_suffix = ""
             else:
                 scope_suffix = " across ALL users"
@@ -1016,26 +939,27 @@ def delete(
 
         _bulk_delete_and_display(sandbox_client, sandbox_ids)
 
-    except typer.Exit:
+    except SystemExit:
         raise
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except PaymentRequiredError as e:
         console.print(f"[red]Payment Required:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(no_args_is_help=True)
-def logs(sandbox_id: str) -> None:
+def logs(config: SandboxLogsConfig) -> None:
     """Get logs from a sandbox"""
+    sandbox_id = config.sandbox_id
+
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
@@ -1049,53 +973,24 @@ def logs(sandbox_id: str) -> None:
         else:
             console.print(f"[yellow]No logs available for sandbox {sandbox_id}[/yellow]")
 
-    except typer.Exit:
+    except SystemExit:
         raise
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except PaymentRequiredError as e:
         console.print(f"[red]Payment Required:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(no_args_is_help=True)
-def run(
-    sandbox_id: str,
-    command: List[str] = typer.Argument(
-        ...,
-        help="Command to execute. Use -- before commands with options "
-        "(e.g., -- bash -c 'echo hello')",
-    ),
-    working_dir: Optional[str] = typer.Option(
-        None, "-w", "--working-dir", help="Working directory"
-    ),
-    env: Optional[List[str]] = typer.Option(
-        None,
-        "-e",
-        "--env",
-        help="Environment variables in KEY=VALUE format. Can be specified multiple times.",
-    ),
-    timeout: Optional[int] = typer.Option(
-        None,
-        "--timeout",
-        help="Timeout for the command in seconds",
-    ),
-    user: Optional[str] = typer.Option(
-        None,
-        "-u",
-        "--user",
-        help="Run the command as this user (username or UID, optionally USER:GROUP), "
-        "like 'docker exec -u'. Container sandboxes only.",
-    ),
-) -> None:
+def run(config: SandboxRunConfig) -> None:
     """Execute a command in a sandbox.
 
     Use -- to separate sandbox run options from the command arguments when
@@ -1103,6 +998,13 @@ def run(
 
         prime sandbox run <id> -- bash -c "echo hello"
     """
+    sandbox_id = config.sandbox_id
+    command = config.command
+    working_dir = config.working_dir
+    env = config.env
+    timeout = config.timeout
+    user = config.user
+
     try:
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
@@ -1113,7 +1015,7 @@ def run(
             for env_var in env:
                 if "=" not in env_var:
                     console.print("[red]Environment variables must be in KEY=VALUE format[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
                 key, value = env_var.split("=", 1)
                 env_vars[key] = value
 
@@ -1167,48 +1069,47 @@ def run(
 
         if result.exit_code != 0:
             console.print(f"\n[bold yellow]Exit code:[/bold yellow] {result.exit_code}")
-            raise typer.Exit(result.exit_code)
+            raise SystemExit(result.exit_code)
 
-    except typer.Exit:
+    except SystemExit:
         raise
     except SandboxNotRunningError as e:
         console.print(f"[red]Sandbox Not Running:[/red] {str(e)}")
         console.print(
             f"[yellow]Tip:[/yellow] Check sandbox status with: prime sandbox get {sandbox_id}"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except CommandTimeoutError as e:
         console.print(f"[red]Command Timeout:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except PaymentRequiredError as e:
         console.print(f"[red]Payment Required:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("upload", no_args_is_help=True)
-def upload_file(
-    sandbox_id: str = typer.Argument(..., help="Sandbox ID to upload file to"),
-    local_file: str = typer.Argument(..., help="Path to local file to upload"),
-    remote_path: str = typer.Argument(..., help="Path where file should be stored in sandbox"),
-) -> None:
+def upload_file(config: SandboxUploadConfig) -> None:
     """Upload a file to a sandbox"""
+    sandbox_id = config.sandbox_id
+    local_file = config.local_file
+    remote_path = config.remote_path
+
     import os
 
     try:
         # Check if local file exists
         if not os.path.exists(local_file):
             console.print(f"[red]Error:[/red] Local file not found: {local_file}")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         # Get file size for display
         file_size = os.path.getsize(local_file)
@@ -1236,30 +1137,29 @@ def upload_file(
         console.print(f"[bold green]Size:[/bold green] {response.size:,} bytes")
         console.print(f"[bold green]Timestamp:[/bold green] {response.timestamp}")
 
-    except typer.Exit:
+    except SystemExit:
         raise
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except PaymentRequiredError as e:
         console.print(f"[red]Payment Required:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("download", no_args_is_help=True)
-def download_file(
-    sandbox_id: str = typer.Argument(..., help="Sandbox ID to download file from"),
-    remote_path: str = typer.Argument(..., help="Path to file in sandbox"),
-    local_file: str = typer.Argument(..., help="Path where file should be saved locally"),
-) -> None:
+def download_file(config: SandboxDownloadConfig) -> None:
     """Download a file from a sandbox"""
+    sandbox_id = config.sandbox_id
+    remote_path = config.remote_path
+    local_file = config.local_file
+
     import os
 
     try:
@@ -1271,7 +1171,7 @@ def download_file(
 
         # Check if local file already exists
         if os.path.exists(local_file):
-            if not typer.confirm(f"File {local_file} already exists. Overwrite?"):
+            if not confirm(f"File {local_file} already exists. Overwrite?"):
                 console.print("Download cancelled.")
                 return
 
@@ -1294,32 +1194,31 @@ def download_file(
         console.print(f"[bold green]Local path:[/bold green] {local_file}")
         console.print(f"[bold green]Size:[/bold green] {file_size:,} bytes")
 
-    except typer.Exit:
+    except SystemExit:
         raise
     except FileNotFoundError as e:
         console.print(f"[red]File not found:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except PaymentRequiredError as e:
         console.print(f"[red]Payment Required:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("reset-cache")
-def reset_cache(
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-) -> None:
+def reset_cache(config: SandboxResetCacheConfig) -> None:
     """Reset sandbox authentication cache"""
-    if yes or typer.confirm("Are you sure you want to clear the sandbox auth cache?"):
+    yes = config.yes
+
+    if yes or confirm("Are you sure you want to clear the sandbox auth cache?"):
         try:
             client = APIClient()
             sandbox_client = SandboxClient(client)
@@ -1327,30 +1226,24 @@ def reset_cache(
             console.print("[green]Sandbox authentication cache cleared successfully![/green]")
         except Exception as e:
             console.print(f"[red]Error clearing cache: {e}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
 
-@app.command("expose", no_args_is_help=True, epilog=SANDBOX_EXPOSURE_JSON_HELP)
-def expose_port(
-    sandbox_id: str = typer.Argument(..., help="Sandbox ID to expose port from"),
-    port: int = typer.Argument(..., help="Port number to expose"),
-    name: Optional[str] = typer.Option(None, help="Optional name for the exposed port"),
-    protocol: str = typer.Option(
-        "HTTP",
-        "--protocol",
-        "-p",
-        help="Protocol: HTTP or TCP",
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def expose_port(config: SandboxExposeConfig) -> None:
     """Expose a port from a sandbox."""
+    sandbox_id = config.sandbox_id
+    port = config.port
+    name = config.name
+    protocol = config.protocol
+    output = config.output
+
     validate_output_format(output, console)
 
     # Validate protocol
     protocol = protocol.upper()
     if protocol not in ("HTTP", "TCP"):
         console.print(f"[red]Error:[/red] Invalid protocol '{protocol}'. Use HTTP or TCP.")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         base_client = APIClient()
@@ -1385,30 +1278,29 @@ def expose_port(
             else:
                 console.print(f"[bold green]TLS Socket:[/bold green] {exposed.tls_socket}")
 
-    except typer.Exit:
+    except SystemExit:
         raise
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("unexpose", no_args_is_help=True)
-def unexpose_port(
-    sandbox_id: str = typer.Argument(..., help="Sandbox ID"),
-    exposure_id: str = typer.Argument(..., help="Exposure ID to remove"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-) -> None:
+def unexpose_port(config: SandboxUnexposeConfig) -> None:
     """Unexpose a port from a sandbox"""
+    sandbox_id = config.sandbox_id
+    exposure_id = config.exposure_id
+    yes = config.yes
+
     try:
         if not confirm_or_skip(
             f"Are you sure you want to unexpose {exposure_id}?", yes, default=True
         ):
             console.print("Unexpose cancelled")
-            raise typer.Exit(0)
+            raise SystemExit(0)
 
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
@@ -1422,25 +1314,22 @@ def unexpose_port(
 
         console.print(f"[green]✓ Successfully unexposed {exposure_id}[/green]")
 
-    except typer.Exit:
+    except SystemExit:
         raise
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("list-ports", epilog=LIST_SANDBOX_PORTS_JSON_HELP)
-def list_ports(
-    sandbox_id: Optional[str] = typer.Argument(
-        None, help="Sandbox ID (omit to list all exposed ports across all sandboxes)"
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def list_ports(config: SandboxListPortsConfig) -> None:
     """List exposed ports for a sandbox, or all sandboxes if no ID is provided"""
+    sandbox_id = config.sandbox_id
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
@@ -1528,32 +1417,18 @@ def list_ports(
 
                     console.print(table)
 
-    except typer.Exit:
+    except SystemExit:
         raise
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("ssh")
-def ssh_connect(
-    sandbox_id: Optional[str] = typer.Argument(
-        None, help="Sandbox ID to SSH into (interactive selection if not provided)"
-    ),
-    ssh_args: Optional[List[str]] = typer.Argument(
-        None, help="Additional SSH arguments (e.g., -- -v for verbose)"
-    ),
-    shell: Optional[str] = typer.Option(
-        None,
-        "--shell",
-        "-s",
-        help="Shell to use (e.g., bash, zsh, sh). Auto-detected if not specified.",
-    ),
-) -> None:
+def ssh_connect(config: SandboxSshConfig) -> None:
     """Connect to a sandbox via SSH.
 
     This command creates a SSH session with an ephemeral key and cleans up on disconnect.
@@ -1566,6 +1441,10 @@ def ssh_connect(
         prime sandbox ssh sb_abc123 --shell bash
         prime sandbox ssh sb_abc123 -- -L 3000:localhost:3000
     """
+    sandbox_id = config.sandbox_id
+    ssh_args = config.ssh_args
+    shell = config.shell
+
     session_id: Optional[str] = None
     sandbox_client: Optional[SandboxClient] = None
     temp_dir: Optional[str] = None
@@ -1587,10 +1466,10 @@ def ssh_connect(
         # Check if ssh and ssh-keygen commands are available
         if not shutil.which("ssh"):
             console.print("[red]Error:[/red] SSH client not found. Please install OpenSSH.")
-            raise typer.Exit(1)
+            raise SystemExit(1)
         if not shutil.which("ssh-keygen"):
             console.print("[red]Error:[/red] ssh-keygen not found. Please install OpenSSH.")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
@@ -1610,7 +1489,7 @@ def ssh_connect(
             console.print(
                 f"[yellow]Tip:[/yellow] Check sandbox status with: prime sandbox get {sandbox_id}"
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         # Generate ephemeral SSH key
         temp_dir = tempfile.mkdtemp(prefix="prime-ssh-")
@@ -1645,7 +1524,7 @@ def ssh_connect(
         except Exception as e:
             console.print(f"[red]Error:[/red] Failed to authorize SSH key: {e}")
             cleanup()
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         ssh_host = session.host
         ssh_port = session.port
@@ -1698,15 +1577,15 @@ def ssh_connect(
     except KeyboardInterrupt:
         console.print("\n[yellow]SSH connection interrupted[/yellow]")
         cleanup()
-        raise typer.Exit(130)
+        raise SystemExit(130)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         cleanup()
-        raise typer.Exit(1)
-    except typer.Exit:
+        raise SystemExit(1)
+    except SystemExit:
         raise
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=True)
         cleanup()
-        raise typer.Exit(1)
+        raise SystemExit(1)

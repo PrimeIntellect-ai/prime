@@ -1,18 +1,17 @@
-import typer
 from rich.table import Table
 
 from prime_cli.core import Config
+from prime_cli.leaves.teams.list import Config as TeamsListConfig
+from prime_cli.leaves.teams.members import Config as TeamsMembersConfig
 
 from ..client import APIClient, APIError
 from ..utils import (
-    PlainTyper,
     get_console,
     json_output_help,
     output_data_as_json,
     validate_output_format,
 )
 
-app = PlainTyper(help="List your teams", no_args_is_help=True)
 console = get_console()
 
 LIST_TEAMS_JSON_HELP = json_output_help(
@@ -47,13 +46,12 @@ def fetch_team_members(client: APIClient, team_id: str) -> list[dict]:
     return response.get("data", []) if isinstance(response, dict) else []
 
 
-@app.command(name="list", epilog=LIST_TEAMS_JSON_HELP)
-def list_teams(
-    limit: int = typer.Option(100, help="Maximum number of teams to list"),
-    offset: int = typer.Option(0, help="Number of teams to skip"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def list_teams(config: TeamsListConfig) -> None:
     """List teams for the current user."""
+    limit = config.limit
+    offset = config.offset
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
@@ -105,31 +103,28 @@ def list_teams(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(name="members")
-def list_members(
-    team_id: str = typer.Option(
-        None, "--team-id", help="Team ID (uses config team_id if not specified)"
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def list_members(config: TeamsMembersConfig) -> None:
     """List members of a team."""
+    team_id = config.team_id
+    output = config.output
+
     validate_output_format(output, console)
 
-    config = Config()
-    resolved_team_id = team_id or config.team_id
+    prime_config = Config()
+    resolved_team_id = team_id or prime_config.team_id
 
     if not resolved_team_id:
         console.print(
             "[red]Error: No team selected. "
             "Use --team-id or set a team with 'prime config set-team-id'[/red]"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         client = APIClient()
@@ -159,7 +154,7 @@ def list_members(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)

@@ -8,13 +8,13 @@ live polling so an agent can monitor a run's running cost.
 
 import time
 
-import typer
 from rich.live import Live
 from rich.markup import escape as rich_escape
 from rich.table import Table
 
 from prime_cli.api.billing import BillingClient, RunUsage
 from prime_cli.core import APIClient, APIError
+from prime_cli.leaves.train.usage import Config as TrainUsageConfig
 from prime_cli.utils import (
     build_table,
     get_console,
@@ -136,20 +136,7 @@ def _build_run_usage_table(usage: RunUsage) -> Table:
     return table
 
 
-def run_usage_command(
-    run_id: str = typer.Argument(..., help="RFT run ID (e.g. rft_..."),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-    watch: bool = typer.Option(
-        False, "--watch", "-w", help="Poll continuously and update in place"
-    ),
-    interval: int = typer.Option(
-        30,
-        "--interval",
-        "-n",
-        min=2,
-        help="Seconds between polls when --watch is set",
-    ),
-) -> None:
+def run_usage_command(config: TrainUsageConfig) -> None:
     """Show token usage and price for a single training run.
 
     Example:
@@ -160,6 +147,11 @@ def run_usage_command(
 
         prime train usage <run_id> --output json
     """
+    run_id = config.run_id
+    output = config.output
+    watch = config.watch
+    interval = config.interval
+
     validate_output_format(output, console)
 
     billing = BillingClient(APIClient())
@@ -173,7 +165,7 @@ def run_usage_command(
             usage = billing.get_run_usage(run_id)
         except APIError as exc:
             err_console.print(f"[red]Error: {exc}[/red]")
-            raise typer.Exit(1) from exc
+            raise SystemExit(1) from exc
 
         if output == "json":
             output_data_as_json(_run_usage_json(usage), console)
@@ -203,7 +195,7 @@ def _watch_live(fetch, run_id, interval, render):
         console.print("\n[dim]Stopped.[/dim]")
     except APIError as exc:
         console.print(f"[red]Error during watch: {exc}[/red]")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc
 
 
 def _watch_plain(fetch, run_id, interval, render):
@@ -215,7 +207,7 @@ def _watch_plain(fetch, run_id, interval, render):
         console.print("\nStopped.")
     except APIError as exc:
         console.print(f"[red]Error during watch: {exc}[/red]")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc
 
 
 def _watch_json(fetch, run_id, interval, to_json):
@@ -231,4 +223,4 @@ def _watch_json(fetch, run_id, interval, to_json):
         return
     except APIError as exc:
         err_console.print(f"[red]Error during watch: {exc}[/red]")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc

@@ -1,9 +1,9 @@
 import io
 import tarfile
 
+from click.testing import CliRunner
 from prime_cli.commands.images import PACKAGED_DOCKERFILE_PATH
 from prime_cli.main import app
-from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -16,7 +16,6 @@ TEST_ENV = {
 
 def test_push_image_defaults_dockerfile_to_context(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
     context_path = tmp_path / "context"
     context_path.mkdir()
@@ -74,7 +73,6 @@ def test_push_image_defaults_dockerfile_to_context(tmp_path, monkeypatch):
 
 def test_push_image_public_sends_visibility(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
     context_path = tmp_path / "context"
     context_path.mkdir()
@@ -119,7 +117,6 @@ def test_push_image_public_sends_visibility(tmp_path, monkeypatch):
 
 
 def test_publish_image_calls_visibility_endpoint(monkeypatch):
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
     class DummyAPIClient:
@@ -144,7 +141,6 @@ def test_publish_image_calls_visibility_endpoint(monkeypatch):
 
 
 def test_publish_image_accepts_owner_prefixed_personal_ref(monkeypatch):
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
     class DummyAPIClient:
@@ -169,8 +165,6 @@ def test_publish_image_accepts_owner_prefixed_personal_ref(monkeypatch):
 
 
 def test_publish_image_rejects_other_user_prefixed_personal_ref(monkeypatch):
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
-
     class DummyAPIClient:
         def request(self, method, path, json=None, params=None):
             raise AssertionError(f"Unexpected request: {method} {path}")
@@ -188,7 +182,6 @@ def test_publish_image_rejects_other_user_prefixed_personal_ref(monkeypatch):
 
 
 def test_delete_image_accepts_owner_prefixed_personal_ref(monkeypatch):
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
     class DummyAPIClient:
@@ -214,7 +207,6 @@ def test_delete_image_accepts_owner_prefixed_personal_ref(monkeypatch):
 
 def test_push_image_accepts_dockerfile_outside_context(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
     context_path = tmp_path / "context"
     context_path.mkdir()

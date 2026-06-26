@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -157,151 +156,6 @@ ENVS_AGENTS_MD_SRC = (
     "/assets/lab/environments/AGENTS.md"
 )
 SKILL_SOURCES: tuple[SkillSource, ...] = (SkillSource(repo=VERIFIERS_REPO, ref=VERIFIERS_REF),)
-
-
-def run_lab_setup(passthrough_args: list[str], *, console: Console | None = None) -> int:
-    """Run the Lab workspace setup workflow from the CLI."""
-
-    console = console or Console()
-    try:
-        options = parse_lab_setup_args(passthrough_args)
-    except SystemExit as exc:
-        return int(exc.code or 0)
-    except ValueError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        return 2
-
-    result = run_lab_setup_service(
-        options,
-        workspace=Path.cwd(),
-        emit=lambda item: _emit_to_console(console, item),
-    )
-    return result.exit_code
-
-
-def run_lab_sync(passthrough_args: list[str], *, console: Console | None = None) -> int:
-    """Refresh Lab skills and local agent guidance from the CLI."""
-
-    console = console or Console()
-    try:
-        options = parse_lab_sync_args(passthrough_args)
-    except SystemExit as exc:
-        return int(exc.code or 0)
-    except ValueError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        return 2
-
-    result = run_lab_sync_service(
-        options,
-        workspace=Path.cwd(),
-        emit=lambda item: _emit_to_console(console, item),
-    )
-    return result.exit_code
-
-
-def run_lab_doctor(passthrough_args: list[str], *, console: Console | None = None) -> int:
-    """Check a Lab workspace from the CLI."""
-
-    console = console or Console()
-    try:
-        options = parse_lab_doctor_args(passthrough_args)
-    except SystemExit as exc:
-        return int(exc.code or 0)
-    except ValueError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        return 2
-
-    result = run_lab_doctor_service(options, workspace=Path.cwd())
-    _print_lab_doctor_result(result, console)
-    return result.exit_code
-
-
-def parse_lab_setup_args(args: list[str]) -> LabSetupOptions:
-    parser = argparse.ArgumentParser(
-        prog="prime lab setup",
-        description="Set up a Lab workspace.",
-    )
-    parser.add_argument(
-        "--skip-agents-md",
-        action="store_true",
-        help="Skip AGENTS.md, CLAUDE.md, CLAUDE.local.md, and environments/AGENTS.md.",
-    )
-    parser.add_argument(
-        "--skip-install",
-        action="store_true",
-        help="Skip uv project initialization and verifiers installation.",
-    )
-    parser.add_argument(
-        "--agents",
-        "--agent",
-        dest="agents",
-        help=(
-            "Comma-separated coding agents to scaffold, or 'all' for diagnostics. "
-            f"Supported: {', '.join((*SUPPORTED_AGENTS, 'all'))}."
-        ),
-    )
-    parser.add_argument(
-        "--no-interactive",
-        action="store_true",
-        help="Use setup defaults without prompts.",
-    )
-    namespace = parser.parse_args(args)
-    return LabSetupOptions(
-        skip_agents_md=bool(namespace.skip_agents_md),
-        skip_install=bool(namespace.skip_install),
-        agents=_resolve_setup_agents(
-            namespace.agents,
-            no_interactive=bool(namespace.no_interactive),
-        ),
-    )
-
-
-def parse_lab_sync_args(args: list[str]) -> LabSyncOptions:
-    parser = argparse.ArgumentParser(
-        prog="prime lab sync",
-        description="Refresh Lab skills and local agent guidance.",
-    )
-    parser.add_argument(
-        "--agents",
-        "--agent",
-        dest="agents",
-        help=(
-            "Comma-separated coding agents to refresh, or 'all' for diagnostics. "
-            f"Supported: {', '.join((*SUPPORTED_AGENTS, 'all'))}."
-        ),
-    )
-    parser.add_argument(
-        "--skip-docs",
-        action="store_true",
-        help="Skip AGENTS.md, CLAUDE.md, CLAUDE.local.md, and environments/AGENTS.md refresh.",
-    )
-    parser.add_argument(
-        "--no-agent",
-        action="store_true",
-        help="Refresh shared Lab assets without configuring coding-agent skill roots.",
-    )
-    namespace = parser.parse_args(args)
-    if namespace.agents is not None and namespace.no_agent:
-        raise ValueError("--agent and --no-agent cannot be used together.")
-    return LabSyncOptions(
-        agents=_resolve_explicit_agents(namespace.agents) if namespace.agents is not None else (),
-        skip_docs=bool(namespace.skip_docs),
-        no_agent=bool(namespace.no_agent),
-    )
-
-
-def parse_lab_doctor_args(args: list[str]) -> LabDoctorOptions:
-    parser = argparse.ArgumentParser(
-        prog="prime lab doctor",
-        description="Check a Lab workspace and report deterministic remediation steps.",
-    )
-    parser.add_argument(
-        "--fix",
-        action="store_true",
-        help="Apply safe local remediations such as creating standard dirs and gitignore entries.",
-    )
-    namespace = parser.parse_args(args)
-    return LabDoctorOptions(fix=bool(namespace.fix))
 
 
 def run_lab_setup_service(
@@ -1410,7 +1264,7 @@ def _post_setup_call_to_action(options: LabSetupOptions) -> Panel:
         "[bold green]$[/bold green]", "prime eval run my-env -m openai/gpt-5.4-nano -n 5"
     )
     command_table.add_row("[bold green]$[/bold green]", "prime eval view")
-    command_table.add_row("[bold green]$[/bold green]", "prime train <training-config.toml>")
+    command_table.add_row("[bold green]$[/bold green]", "prime train run <training-config.toml>")
     command_table.add_row(
         "[bold green]$[/bold green]", "prime gepa run my-env --model openai/gpt-5.4-nano"
     )
@@ -1449,7 +1303,7 @@ def _post_setup_call_to_action(options: LabSetupOptions) -> Panel:
     )
 
 
-def _emit_to_console(console: Console, item: str | RenderableType) -> None:
+def emit_to_console(console: Console, item: str | RenderableType) -> None:
     if isinstance(item, str):
         console.print(item.rstrip("\n"), markup=False)
     else:
@@ -1653,9 +1507,9 @@ def _check_command(command: Sequence[str], cwd: Path, emit: Emit, runner: Runner
         raise RuntimeError(f"{' '.join(command)} exited with {code}")
 
 
-def _resolve_setup_agents(value: str | None, *, no_interactive: bool) -> tuple[str, ...]:
+def resolve_setup_agents(value: str | None, *, no_interactive: bool) -> tuple[str, ...]:
     if value is not None:
-        return _resolve_explicit_agents(value)
+        return resolve_explicit_agents(value)
     if no_interactive:
         return ("codex",)
     if sys.stdin.isatty():
@@ -1704,7 +1558,7 @@ def _prompt_input(prompt: str) -> str:
     return input(prompt)
 
 
-def _resolve_explicit_agents(value: str) -> tuple[str, ...]:
+def resolve_explicit_agents(value: str) -> tuple[str, ...]:
     parsed = _parse_agents(value)
     if parsed:
         return tuple(parsed)
@@ -1836,7 +1690,7 @@ def _remove_if_exists(path: Path) -> None:
         return
 
 
-def _print_lab_doctor_result(result: LabDoctorResult, console: Console) -> None:
+def print_lab_doctor_result(result: LabDoctorResult, console: Console) -> None:
     table = Table(title=f"Lab workspace check: {result.workspace}")
     table.add_column("Status", no_wrap=True)
     table.add_column("Check", no_wrap=True)
@@ -1866,13 +1720,11 @@ __all__ = [
     "LabSyncOptions",
     "LabSyncResult",
     "SUPPORTED_AGENTS",
-    "parse_lab_doctor_args",
-    "parse_lab_setup_args",
-    "parse_lab_sync_args",
-    "run_lab_doctor",
+    "emit_to_console",
     "run_lab_doctor_service",
-    "run_lab_setup",
     "run_lab_setup_service",
-    "run_lab_sync",
     "run_lab_sync_service",
+    "print_lab_doctor_result",
+    "resolve_explicit_agents",
+    "resolve_setup_agents",
 ]

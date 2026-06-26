@@ -1,5 +1,5 @@
 import pytest
-import typer
+from click.testing import CliRunner
 from prime_cli.client import APIError
 from prime_cli.commands.evals import (
     _create_hosted_evaluations,
@@ -14,7 +14,6 @@ from prime_cli.utils.hosted_eval import (
     filter_progress_bars,
     strip_ansi,
 )
-from typer.testing import CliRunner
 
 runner = CliRunner()
 CLI_ENV = {"PRIME_DISABLE_VERSION_CHECK": "1"}
@@ -160,9 +159,8 @@ def test_eval_submit_parses_runtime_options(submit_capture):
             "100",
             "--max-retries",
             "3",
-            "--state-column",
+            "--state-columns",
             "turn",
-            "--state-column",
             "timing",
             "--independent-scoring",
             "--verbose",
@@ -267,7 +265,7 @@ def test_load_hosted_eval_configs_rejects_unknown_fields(tmp_path, capsys):
     path = tmp_path / "hosted.toml"
     path.write_text('env_id = "owner/gsm8k"\ndebug = true\n', encoding="utf-8")
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         _load_hosted_eval_configs(path)
 
     assert "Extra inputs are not permitted" in capsys.readouterr().out
@@ -349,7 +347,7 @@ def test_resolve_hosted_environment_uses_explicit_slug(monkeypatch, capsys):
 
 
 def test_resolve_hosted_environment_rejects_version(capsys):
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         _resolve_hosted_environment("owner/gsm8k@1.2.3", env_path=None)
 
     assert "only unversioned slugs" in capsys.readouterr().out
@@ -376,7 +374,7 @@ def test_resolve_hosted_environment_uses_local_metadata(monkeypatch, tmp_path):
 
 
 def test_resolve_hosted_environment_requires_upstream(capsys):
-    with pytest.raises(typer.Exit):
+    with pytest.raises(SystemExit):
         _resolve_hosted_environment("not-published", env_path=None)
 
     assert "require an upstream environment" in capsys.readouterr().out

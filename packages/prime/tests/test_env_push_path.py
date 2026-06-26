@@ -3,8 +3,7 @@ import subprocess
 from types import SimpleNamespace
 
 import pytest
-import typer
-from prime_cli.commands import env as env_command
+from click.testing import CliRunner
 from prime_cli.commands.env import (
     _build_environment,
     _environment_push_metadata,
@@ -14,7 +13,7 @@ from prime_cli.commands.env import (
     _resolve_push_environment_path,
     _run_env_push_lab_hygiene_preflight,
 )
-from typer.testing import CliRunner
+from prime_cli.main import app
 
 
 def _git_init(path):
@@ -157,7 +156,7 @@ def test_env_init_runs_lab_hygiene_preflight_inside_lab_workspace(tmp_path, monk
         fake_run,
     )
 
-    result = CliRunner().invoke(env_command.app, ["init", "demo"])
+    result = CliRunner().invoke(app, ["env", "init", "demo"])
 
     gitignore_lines = set((tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines())
     assert result.exit_code == 0
@@ -213,10 +212,10 @@ def test_env_push_blocks_tracked_generated_lab_outputs(tmp_path, monkeypatch):
         capture_output=True,
     )
 
-    with pytest.raises(typer.Exit) as exc_info:
+    with pytest.raises(SystemExit) as exc_info:
         _run_env_push_lab_hygiene_preflight(env_dir)
 
-    assert exc_info.value.exit_code == 1
+    assert exc_info.value.code == 1
 
 
 def test_env_push_allows_explicit_path_outside_current_lab_workspace(tmp_path, monkeypatch):

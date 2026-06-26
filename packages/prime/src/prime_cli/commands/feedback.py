@@ -1,18 +1,12 @@
 from typing import Literal
 
-import typer
-from click.exceptions import Abort
-
 from prime_cli import __version__
+from prime_cli.leaves.feedback import Config as FeedbackConfig
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import get_console
+from ..utils.prompt import prompt
 
-app = PlainTyper(
-    help="Submit feedback about Prime Intellect.",
-    no_args_is_help=False,
-    invoke_without_command=True,
-)
 console = get_console()
 
 FeedbackCategory = Literal["bug", "feature", "general"]
@@ -31,7 +25,7 @@ def _prompt_category() -> FeedbackCategory:
         console.print(f"  [cyan]({idx})[/cyan] {label}")
 
     while True:
-        selection = typer.prompt("Select", type=int, default=3)
+        selection = prompt("Select", type=int, default=3)
         if 1 <= selection <= len(_CATEGORY_CHOICES):
             return _CATEGORY_CHOICES[selection - 1][0]
         console.print(f"[red]Invalid selection. Enter 1-{len(_CATEGORY_CHOICES)}.[/red]")
@@ -40,14 +34,14 @@ def _prompt_category() -> FeedbackCategory:
 def _prompt_message() -> str:
     console.print("\n[bold]Your feedback[/bold] [dim](required)[/dim]")
     while True:
-        message = typer.prompt("", prompt_suffix="> ").strip()
+        message = prompt("", prompt_suffix="> ").strip()
         if message:
             return message
         console.print("[red]Feedback cannot be empty.[/red]")
 
 
 def _prompt_run_id() -> str | None:
-    run_id = typer.prompt(
+    run_id = prompt(
         "Related run ID (optional)",
         default="",
         show_default=False,
@@ -72,12 +66,8 @@ def submit_feedback(
         APIClient().post("/feedback", json=payload)
 
 
-@app.callback(invoke_without_command=True)
-def feedback(ctx: typer.Context) -> None:
+def feedback(config: FeedbackConfig) -> None:
     """Submit feedback (bug, feature request, or general) to the Prime team."""
-    if ctx.invoked_subcommand is not None:
-        return
-
     console.print("[bold]Prime Feedback[/bold]")
     console.print("[dim]Share bugs, feature ideas, or general thoughts.[/dim]")
 
@@ -85,14 +75,14 @@ def feedback(ctx: typer.Context) -> None:
         category = _prompt_category()
         run_id = _prompt_run_id()
         message = _prompt_message()
-    except Abort:
+    except (EOFError, KeyboardInterrupt):
         console.print("\n[yellow]Cancelled[/yellow]")
-        raise typer.Exit(0)
+        raise SystemExit(0)
 
     try:
         submit_feedback(message=message, category=category, run_id=run_id)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     console.print("[green]Feedback submitted. Thanks![/green]")

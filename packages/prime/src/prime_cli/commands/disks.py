@@ -3,19 +3,22 @@ import json
 import os
 import time
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-import typer
 from rich.table import Table
 from rich.text import Text
 
 from prime_cli.api.availability import AvailabilityClient
-from prime_cli.core import APIClient, APIError, Config
+from prime_cli.core import APIClient, APIError
 from prime_cli.helper.short_id import generate_short_id_disk
+from prime_cli.leaves.disks.create import Config as DisksCreateConfig
+from prime_cli.leaves.disks.get import Config as DisksGetConfig
+from prime_cli.leaves.disks.list import Config as DisksListConfig
+from prime_cli.leaves.disks.terminate import Config as DisksTerminateConfig
+from prime_cli.leaves.disks.update import Config as DisksUpdateConfig
 
 from ..api.disks import Disk, DisksClient
 from ..utils import (
-    PlainTyper,
     confirm_or_skip,
     get_console,
     human_age,
@@ -28,9 +31,7 @@ from ..utils import (
 )
 from ..utils.display import DISK_STATUS_COLORS
 
-app = PlainTyper(help="Manage storage", no_args_is_help=True)
 console = get_console()
-config = Config()
 
 LIST_DISKS_JSON_HELP = json_output_help(
     ".disks[] = {id, name, size, status, provider, location, created_at, price_hr}",
@@ -104,19 +105,18 @@ def _format_disk_for_detail(disk: Disk) -> Dict[str, Any]:
     }
 
 
-@app.command(epilog=LIST_DISKS_JSON_HELP)
-def list(
-    limit: int = typer.Option(100, help="Maximum number of disks to list"),
-    offset: int = typer.Option(0, help="Number of disks to skip"),
-    watch: bool = typer.Option(False, "--watch", "-w", help="Watch disks list in real-time"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def list(config: DisksListConfig) -> None:
     """List your persistent disks"""
+    limit = config.limit
+    offset = config.offset
+    watch = config.watch
+    output = config.output
+
     validate_output_format(output, console)
 
     if watch and output == "json":
         console.print("[red]Error: --watch mode is not compatible with --output=json[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         # Create API clients
@@ -243,21 +243,20 @@ def list(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         import traceback
 
         traceback.print_exc()
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(no_args_is_help=True, epilog=DISK_DETAIL_JSON_HELP)
-def get(
-    disk_id: str,
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def get(config: DisksGetConfig) -> None:
     """Get detailed information about a specific disk"""
+    disk_id = config.disk_id
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
@@ -326,30 +325,27 @@ def get(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         import traceback
 
         traceback.print_exc()
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command()
-def create(
-    id: Optional[str] = typer.Option(None, help="Short ID from availability list"),
-    size: int = typer.Option(..., help="Size of the disk in GB"),
-    name: Optional[str] = typer.Option(None, help="Name for the disk"),
-    country: Optional[str] = typer.Option(None, help="Country location"),
-    cloud_id: Optional[str] = typer.Option(None, help="Cloud ID from availability"),
-    data_center_id: Optional[str] = typer.Option(None, help="Data center ID"),
-    team_id: Optional[str] = typer.Option(
-        None, help="Team ID to use for the disk (uses config team_id if not specified)"
-    ),
-    provider_type: Optional[str] = typer.Option(None, help="Provider type (e.g., lambda, runpod)"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-) -> None:
+def create(config: DisksCreateConfig) -> None:
     """Create a new storage disk"""
+    id = config.id
+    size = config.size
+    name = config.name
+    country = config.country
+    cloud_id = config.cloud_id
+    data_center_id = config.data_center_id
+    team_id = config.team_id
+    provider_type = config.provider_type
+    yes = config.yes
+
     try:
         base_client = APIClient()
         availability_client = AvailabilityClient(base_client)
@@ -360,7 +356,7 @@ def create(
         # Validate size
         if size <= 0:
             console.print("[red]Error: Disk size must be greater than 0[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         with console.status("[bold blue]Loading available disks...", spinner="dots"):
             available_disks = availability_client.get_disks()
@@ -396,7 +392,7 @@ def create(
 
         if not disk_config or not disk_config.get("disk") or not disk_config.get("provider"):
             console.print("[red]Error: Invalid disk configuration[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         # Show configuration summary
         console.print("\n[bold]Disk Configuration Summary:[/bold]")
@@ -434,28 +430,27 @@ def create(
                 console.print(
                     "[red]Error: Failed to create disk - invalid API client configuration[/red]"
                 )
-                raise typer.Exit(1)
+                raise SystemExit(1)
         else:
             console.print("\nDisk creation cancelled")
-            raise typer.Exit(0)
+            raise SystemExit(0)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         import traceback
 
         traceback.print_exc()
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(no_args_is_help=True)
-def update(
-    disk_id: str,
-    name: str = typer.Option(..., help="New name for the disk"),
-) -> None:
+def update(config: DisksUpdateConfig) -> None:
     """Update a disk's name"""
+    disk_id = config.disk_id
+    name = config.name
+
     try:
         base_client = APIClient()
         disks_client = DisksClient(base_client)
@@ -468,21 +463,20 @@ def update(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         import traceback
 
         traceback.print_exc()
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(no_args_is_help=True)
-def terminate(
-    disk_id: str,
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-) -> None:
+def terminate(config: DisksTerminateConfig) -> None:
     """Terminate a disk"""
+    disk_id = config.disk_id
+    yes = config.yes
+
     try:
         base_client = APIClient()
         disks_client = DisksClient(base_client)
@@ -490,7 +484,7 @@ def terminate(
         # Confirm deletion
         if not confirm_or_skip(f"Are you sure you want to delete disk {disk_id}?", yes):
             console.print("Deletion cancelled")
-            raise typer.Exit(0)
+            raise SystemExit(0)
 
         with console.status("[bold blue]Deleting disk...", spinner="dots"):
             response = disks_client.delete(disk_id)
@@ -500,10 +494,10 @@ def terminate(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         import traceback
 
         traceback.print_exc()
-        raise typer.Exit(1)
+        raise SystemExit(1)

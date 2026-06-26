@@ -1,6 +1,6 @@
 from typing import Dict, Optional, Tuple
 
-import typer
+from prime_cli.leaves.fork import Config as ForkConfig
 
 from ..client import APIClient, APIError
 from ..utils import get_console, json_output_help, output_data_as_json, validate_output_format
@@ -33,32 +33,19 @@ def _build_fork_payload(client: APIClient, team: Optional[str]) -> Dict[str, str
     return {}
 
 
-def fork(
-    environment: str = typer.Argument(
-        ...,
-        help="Public environment to fork, in owner/name format",
-    ),
-    team: Optional[str] = typer.Option(
-        None,
-        "--team",
-        "-t",
-        help="Team slug to fork into (uses configured team ID if omitted)",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def fork(config: ForkConfig) -> None:
     """Fork a public environment into your Prime Intellect namespace."""
+    environment = config.environment
+    team = config.team
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
         owner, name = _parse_fork_source(environment)
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         client = APIClient()
@@ -84,7 +71,7 @@ def fork(
         )
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)

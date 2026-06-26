@@ -4,9 +4,9 @@ from typing import Any, Dict
 
 import httpx
 import pytest
+from click.testing import CliRunner
 from prime_cli.api.inference import InferenceAPIError, InferenceClient
 from prime_cli.main import app
-from typer.testing import CliRunner
 
 TEST_ENV: Dict[str, str] = {
     "COLUMNS": "200",

@@ -2,8 +2,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.main import app
-from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -17,7 +17,6 @@ TEST_ENV = {
 @pytest.fixture
 def temp_home(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     return tmp_path
 
 

@@ -8,22 +8,25 @@ from typing import Any
 from urllib.error import URLError
 
 import pytest
+from click.testing import CliRunner
 from prime_cli import lab_setup
-from prime_cli.commands.lab import app as lab_cli_app
 from prime_cli.lab_agents import AgentCapability, known_agent_names
 from prime_cli.lab_setup import (
     LabDoctorOptions,
     LabSetupOptions,
     LabSyncOptions,
     SkillSource,
-    parse_lab_setup_args,
-    parse_lab_sync_args,
+    resolve_explicit_agents,
+    resolve_setup_agents,
     run_lab_doctor_service,
     run_lab_setup_service,
     run_lab_sync_service,
 )
+from prime_cli.leaves.lab.setup import Config as LabSetupConfig
+from prime_cli.leaves.lab.sync import Config as LabSyncConfig
+from prime_cli.main import app as prime_cli_app
+from pydantic_config import ConfigFileError, cli
 from rich.console import Console
-from typer.testing import CliRunner
 
 AGENT_WHICH = "prime_lab_app.agent_capabilities.shutil.which"
 REAL_DOWNLOAD_FILE = lab_setup._download_file
@@ -134,7 +137,7 @@ def _is_pinned_ref(ref: str) -> bool:
 def _render_emitted(items: list[Any]) -> str:
     console = Console(file=StringIO(), record=True, width=120)
     for item in items:
-        lab_setup._emit_to_console(console, item)
+        lab_setup.emit_to_console(console, item)
     return console.export_text()
 
 
@@ -149,37 +152,41 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_lab_setup_parses_selected_agents_and_all() -> None:
-    selected = parse_lab_setup_args(
-        ["--agent", "factory-droid,amp-code,claude-code,letta-code,grok"]
+    selected = cli(
+        LabSetupConfig,
+        args=["--agent", "factory-droid,amp-code,claude-code,letta-code,grok"],
     )
-    all_agents = parse_lab_sync_args(["--agents", "all"])
+    all_agents = cli(LabSyncConfig, args=["--agents", "all"])
 
-    assert selected.agents == ("droid", "amp", "claude", "letta", "grok")
-    assert all_agents.agents == known_agent_names()
+    assert resolve_setup_agents(selected.agents, no_interactive=False) == (
+        "droid",
+        "amp",
+        "claude",
+        "letta",
+        "grok",
+    )
+    assert resolve_explicit_agents(all_agents.agents or "") == known_agent_names()
 
 
 def test_lab_setup_no_interactive_uses_codex_default() -> None:
-    options = parse_lab_setup_args(["--no-interactive"])
+    config = cli(LabSetupConfig, args=["--no-interactive"])
 
-    assert options.agents == ("codex",)
+    assert resolve_setup_agents(config.agents, no_interactive=config.no_interactive) == ("codex",)
 
 
 def test_lab_setup_help_lists_supported_agents(capsys: Any) -> None:
     with pytest.raises(SystemExit) as exc_info:
-        parse_lab_setup_args(["--help"])
+        cli(LabSetupConfig, args=["--help"], prog="prime lab setup")
 
     assert exc_info.value.code == 0
     output = capsys.readouterr().out
-    assert "Supported:" in output
-    for agent in (*known_agent_names(), "all"):
-        assert agent in output
+    assert "--agents" in output
+    assert "Comma-separated coding agents" in output
 
 
 def test_lab_setup_rejects_prime_rl_flag() -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        parse_lab_setup_args(["--prime-rl", "--no-interactive"])
-
-    assert exc_info.value.code == 2
+    with pytest.raises(ConfigFileError):
+        cli(LabSetupConfig, args=["--prime-rl", "--no-interactive"])
 
 
 def test_lab_register_github_writes_hygiene_workflow(
@@ -188,7 +195,7 @@ def test_lab_register_github_writes_hygiene_workflow(
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
-    result = CliRunner().invoke(lab_cli_app, ["register-github"])
+    result = CliRunner().invoke(prime_cli_app, ["lab", "register-github"])
 
     workflow = tmp_path / ".github" / "workflows" / "prime-lab-hygiene.yml"
     content = workflow.read_text(encoding="utf-8")
@@ -209,9 +216,9 @@ def test_lab_setup_prompts_for_agent_when_interactive(monkeypatch: Any) -> None:
     monkeypatch.setattr(lab_setup.sys, "stdin", FakeStdin())
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
-    options = parse_lab_setup_args([])
+    agents = resolve_setup_agents(None, no_interactive=False)
 
-    assert options.agents == ("droid", "amp", "claude")
+    assert agents == ("droid", "amp", "claude")
 
 
 def test_lab_setup_interactive_agent_prompt_retries_invalid_input(
@@ -226,9 +233,9 @@ def test_lab_setup_interactive_agent_prompt_retries_invalid_input(
     monkeypatch.setattr(lab_setup.sys, "stdin", FakeStdin())
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
-    options = parse_lab_setup_args([])
+    agents = resolve_setup_agents(None, no_interactive=False)
 
-    assert options.agents == ("droid", "amp", "claude")
+    assert agents == ("droid", "amp", "claude")
     output = capsys.readouterr().out
     assert "Unsupported coding agent 'codx'" in output
 
@@ -241,12 +248,12 @@ def test_lab_setup_non_interactive_requires_explicit_agent(monkeypatch: Any) -> 
     monkeypatch.setattr(lab_setup.sys, "stdin", FakeStdin())
 
     with pytest.raises(ValueError, match="No --agent provided"):
-        parse_lab_setup_args([])
+        resolve_setup_agents(None, no_interactive=False)
 
 
 def test_lab_sync_rejects_agent_with_no_agent() -> None:
-    with pytest.raises(ValueError, match="--agent and --no-agent"):
-        parse_lab_sync_args(["--agent", "codex", "--no-agent"])
+    with pytest.raises(ConfigFileError, match="--agent and --no-agent"):
+        cli(LabSyncConfig, args=["--agent", "codex", "--no-agent"])
 
 
 def test_lab_setup_service_downloads_upstream_assets_without_agent_installs(
@@ -348,7 +355,7 @@ def test_lab_setup_service_emits_post_setup_call_to_action(
     assert "I want to train a model for <my task domain>" in output
     assert "prime env init my-env" in output
     assert "prime eval run my-env -m openai/gpt-5.4-nano -n 5" in output
-    assert "prime train <training-config.toml>" in output
+    assert "prime train run <training-config.toml>" in output
     assert "prime gepa run my-env --model openai/gpt-5.4-nano" in output
 
 

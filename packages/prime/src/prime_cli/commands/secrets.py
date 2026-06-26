@@ -1,13 +1,16 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-import typer
 from rich.table import Table
 
-from prime_cli.core import Config
+from prime_cli.core import Config as PrimeConfig
+from prime_cli.leaves.secret.create import Config as SecretCreateConfig
+from prime_cli.leaves.secret.delete import Config as SecretDeleteConfig
+from prime_cli.leaves.secret.get import Config as SecretGetConfig
+from prime_cli.leaves.secret.list import Config as SecretListConfig
+from prime_cli.leaves.secret.update import Config as SecretUpdateConfig
 
 from ..client import APIClient, APIError
 from ..utils import (
-    PlainTyper,
     get_console,
     json_output_help,
     optional_team_params,
@@ -16,13 +19,13 @@ from ..utils import (
 )
 from ..utils.prompt import (
     any_provided,
+    confirm,
     prompt_for_value,
     require_selection,
     validate_env_var_name,
 )
 from ..utils.time_utils import format_time_ago
 
-app = PlainTyper(help="Manage global secrets", no_args_is_help=True)
 console = get_console()
 
 SECRET_LIST_JSON_HELP = json_output_help(
@@ -34,39 +37,33 @@ SECRET_DETAIL_JSON_HELP = json_output_help(
 )
 
 
-def _fetch_secrets(client: APIClient, config: Config) -> List[Dict[str, Any]]:
+def _fetch_secrets(client: APIClient, config: PrimeConfig) -> List[Dict[str, Any]]:
     """Fetch secrets for the current user/team context."""
     response = client.get("/secrets/", params=optional_team_params(config))
     return response.get("data", [])
 
 
-@app.command("list", epilog=SECRET_LIST_JSON_HELP)
-def secret_list(
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def secret_list(config: SecretListConfig) -> None:
     """List your global secrets."""
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
         client = APIClient()
-        config = Config()
-        secrets = _fetch_secrets(client, config)
+        prime_config = PrimeConfig()
+        secrets = _fetch_secrets(client, prime_config)
 
         if output == "json":
             output_data_as_json({"secrets": secrets}, console)
             return
 
         if not secrets:
-            scope = "team" if config.team_id else "personal"
+            scope = "team" if prime_config.team_id else "personal"
             console.print(f"[yellow]No {scope} secrets found.[/yellow]")
             return
 
-        title = "Team Secrets" if config.team_id else "Personal Secrets"
+        title = "Team Secrets" if prime_config.team_id else "Personal Secrets"
         table = Table(title=title)
         table.add_column("ID", style="dim", no_wrap=True)
         table.add_column("Name", style="cyan")
@@ -86,43 +83,17 @@ def secret_list(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("create", epilog=SECRET_DETAIL_JSON_HELP)
-def secret_create(
-    name: Optional[str] = typer.Option(
-        None,
-        "--name",
-        "-n",
-        help="Secret name (used as environment variable name)",
-    ),
-    value: Optional[str] = typer.Option(
-        None,
-        "--value",
-        "-v",
-        help="Secret value",
-    ),
-    description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        "-d",
-        help="Secret description",
-    ),
-    is_file: bool = typer.Option(
-        False,
-        "--file",
-        "-f",
-        help="Treat value as file content (base64 encoded)",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def secret_create(config: SecretCreateConfig) -> None:
     """Create a new global secret."""
+    name = config.name
+    value = config.value
+    description = config.description
+    is_file = config.file
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
@@ -130,27 +101,27 @@ def secret_create(
             name = prompt_for_value("Secret name")
             if not name:
                 console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
+                raise SystemExit(0)
 
         if not validate_env_var_name(name, "secret"):
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if not value:
             value = prompt_for_value("Secret value", hide_input=True)
             if not value:
                 console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
+                raise SystemExit(0)
 
         client = APIClient()
-        config = Config()
+        prime_config = PrimeConfig()
 
         payload: Dict[str, Any] = {"name": name, "value": value}
         if description:
             payload["description"] = description
         if is_file:
             payload["isFile"] = True
-        if config.team_id:
-            payload["teamId"] = config.team_id
+        if prime_config.team_id:
+            payload["teamId"] = prime_config.team_id
 
         response = client.post("/secrets/", json=payload)
         secret = response.get("data", {})
@@ -159,59 +130,35 @@ def secret_create(
             output_data_as_json(secret, console)
             return
 
-        scope = "team" if config.team_id else "personal"
+        scope = "team" if prime_config.team_id else "personal"
         console.print(f"[green]✓ Created {scope} secret '{name}'[/green]")
         console.print(f"[dim]ID: {secret.get('id')}[/dim]")
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
-        raise typer.Exit()
+        raise SystemExit(0)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("update", epilog=SECRET_DETAIL_JSON_HELP)
-def secret_update(
-    secret_id: Optional[str] = typer.Argument(
-        None,
-        help="Secret ID to update (interactive selection if not provided)",
-    ),
-    name: Optional[str] = typer.Option(
-        None,
-        "--name",
-        "-n",
-        help="New secret name",
-    ),
-    value: Optional[str] = typer.Option(
-        None,
-        "--value",
-        "-v",
-        help="New secret value",
-    ),
-    description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        "-d",
-        help="New secret description",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def secret_update(config: SecretUpdateConfig) -> None:
     """Update an existing global secret."""
+    secret_id = config.secret_id
+    name = config.name
+    value = config.value
+    description = config.description
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
         client = APIClient()
-        config = Config()
+        prime_config = PrimeConfig()
 
         if not secret_id:
-            secrets = _fetch_secrets(client, config)
-            scope = "team" if config.team_id else "personal"
+            secrets = _fetch_secrets(client, prime_config)
+            scope = "team" if prime_config.team_id else "personal"
             selected = require_selection(secrets, "update", f"No {scope} secrets to update.")
             secret_id = selected.get("id")
 
@@ -223,10 +170,10 @@ def secret_update(
 
             if not value:
                 console.print("\n[dim]No changes made.[/dim]")
-                raise typer.Exit()
+                raise SystemExit(0)
 
         if name is not None and not validate_env_var_name(name, "secret"):
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         payload: Dict[str, Any] = {}
         if name is not None:
@@ -239,7 +186,7 @@ def secret_update(
         response = client.patch(
             f"/secrets/{secret_id}",
             json=payload,
-            params=optional_team_params(config),
+            params=optional_team_params(prime_config),
         )
         secret = response.get("data", {})
 
@@ -251,79 +198,63 @@ def secret_update(
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
-        raise typer.Exit()
+        raise SystemExit(0)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("delete")
-def secret_delete(
-    secret_id: Optional[str] = typer.Argument(
-        None,
-        help="Secret ID to delete (interactive selection if not provided)",
-    ),
-    yes: bool = typer.Option(
-        False,
-        "--yes",
-        "-y",
-        help="Skip confirmation prompt",
-    ),
-) -> None:
+def secret_delete(config: SecretDeleteConfig) -> None:
     """Delete a global secret."""
+    secret_id = config.secret_id
+    yes = config.yes
+
     try:
         client = APIClient()
-        config = Config()
+        prime_config = PrimeConfig()
 
         if not secret_id:
-            secrets = _fetch_secrets(client, config)
-            scope = "team" if config.team_id else "personal"
+            secrets = _fetch_secrets(client, prime_config)
+            scope = "team" if prime_config.team_id else "personal"
             selected = require_selection(secrets, "delete", f"No {scope} secrets to delete.")
             secret_id = selected.get("id")
             secret_name = selected.get("name")
         else:
-            response = client.get(f"/secrets/{secret_id}", params=optional_team_params(config))
+            response = client.get(
+                f"/secrets/{secret_id}", params=optional_team_params(prime_config)
+            )
             secret_data = response.get("data", {})
             secret_name = secret_data.get("name", secret_id)
 
         if not yes:
-            confirm = typer.confirm(f"Delete secret '{secret_name}'?")
-            if not confirm:
+            confirmed = confirm(f"Delete secret '{secret_name}'?")
+            if not confirmed:
                 console.print("\n[dim]Cancelled.[/dim]")
-                raise typer.Exit()
+                raise SystemExit(0)
 
-        client.delete(f"/secrets/{secret_id}", params=optional_team_params(config))
+        client.delete(f"/secrets/{secret_id}", params=optional_team_params(prime_config))
         console.print(f"[green]✓ Deleted secret '{secret_name}'[/green]")
 
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
-        raise typer.Exit()
+        raise SystemExit(0)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("get", epilog=SECRET_DETAIL_JSON_HELP)
-def secret_get(
-    secret_id: str = typer.Argument(
-        ...,
-        help="Secret ID to get",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
-) -> None:
+def secret_get(config: SecretGetConfig) -> None:
     """Get details of a specific secret."""
+    secret_id = config.secret_id
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
         client = APIClient()
-        config = Config()
+        prime_config = PrimeConfig()
 
-        response = client.get(f"/secrets/{secret_id}", params=optional_team_params(config))
+        response = client.get(f"/secrets/{secret_id}", params=optional_team_params(prime_config))
         secret = response.get("data", {})
 
         if output == "json":
@@ -340,4 +271,4 @@ def secret_get(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)

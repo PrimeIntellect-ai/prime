@@ -6,11 +6,16 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import typer
 from rich.table import Table
 from rich.text import Text
 
-from prime_cli.core import Config
+from prime_cli.core import Config as PrimeConfig
+from prime_cli.leaves.pods.create import Config as PodsCreateConfig
+from prime_cli.leaves.pods.history import Config as PodsHistoryConfig
+from prime_cli.leaves.pods.list import Config as PodsListConfig
+from prime_cli.leaves.pods.ssh import Config as PodsSshConfig
+from prime_cli.leaves.pods.status import Config as PodsStatusConfig
+from prime_cli.leaves.pods.terminate import Config as PodsTerminateConfig
 
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..api.pods import HistoryObj, Pod, PodsClient, PodStatus
@@ -18,7 +23,6 @@ from ..client import APIClient, APIError
 from ..commands.teams import fetch_team_members
 from ..helper.short_id import generate_short_id
 from ..utils import (
-    PlainTyper,
     confirm_or_skip,
     format_ip_display,
     get_console,
@@ -31,8 +35,8 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.display import POD_STATUS_COLORS
+from ..utils.prompt import prompt
 
-app = PlainTyper(help="Manage compute pods", no_args_is_help=True)
 console = get_console()
 
 LIST_PODS_JSON_HELP = json_output_help(
@@ -145,19 +149,18 @@ def _format_pod_for_list(pod: Pod) -> Dict[str, Any]:
     }
 
 
-@app.command(epilog=LIST_PODS_JSON_HELP)
-def list(
-    limit: int = typer.Option(100, help="Maximum number of pods to list"),
-    offset: int = typer.Option(0, help="Number of pods to skip"),
-    watch: bool = typer.Option(False, "--watch", "-w", help="Watch pods list in real-time"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def list(config: PodsListConfig) -> None:
     """List your running pods"""
+    limit = config.limit
+    offset = config.offset
+    watch = config.watch
+    output = config.output
+
     validate_output_format(output, console)
 
     if watch and output == "json":
         console.print("[red]Error: --watch mode is not compatible with --output=json[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         # Create API clients
@@ -271,21 +274,20 @@ def list(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         import traceback
 
         traceback.print_exc()
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(no_args_is_help=True, epilog=POD_STATUS_JSON_HELP)
-def status(
-    pod_id: str,
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def status(config: PodsStatusConfig) -> None:
     """Get detailed status of a specific pod"""
+    pod_id = config.pod_id
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
@@ -299,7 +301,7 @@ def status(
 
         if not statuses:
             console.print(f"[red]No status found for pod {pod_id}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         status = statuses[0]
 
@@ -388,55 +390,35 @@ def status(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         import traceback
 
         traceback.print_exc()
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command()
-def create(
-    id: Optional[str] = typer.Option(None, help="Short ID from availability list"),
-    cloud_id: Optional[str] = typer.Option(None, help="Cloud ID from cloud provider"),
-    gpu_type: Optional[str] = typer.Option(None, help="GPU type (e.g. A100, V100)"),
-    gpu_count: Optional[int] = typer.Option(None, help="Number of GPUs"),
-    name: Optional[str] = typer.Option(None, help="Name for the pod"),
-    disk_size: Optional[int] = typer.Option(None, help="Disk size in GB"),
-    vcpus: Optional[int] = typer.Option(None, help="Number of vCPUs"),
-    memory: Optional[int] = typer.Option(None, help="Memory in GB"),
-    image: Optional[str] = typer.Option(
-        None, help="Image name or 'custom_template' when using custom template ID"
-    ),
-    custom_template_id: Optional[str] = typer.Option(None, help="Custom template ID"),
-    team_id: Optional[str] = typer.Option(
-        None, help="Team ID to use for the pod (uses config team_id if not specified)"
-    ),
-    disks: Optional[List[str]] = typer.Option(
-        None,
-        help="Attach existing disk IDs to the pod. Repeat option for multiple disks.",
-    ),
-    env: Optional[List[str]] = typer.Option(
-        None,
-        help="Environment variables to set in the pod. Can be specified multiple times "
-        "using --env KEY=value --env KEY2=value2",
-    ),
-    share_with_team: bool = typer.Option(
-        False,
-        "--share-with-team",
-        help="Share the pod with all team members",
-    ),
-    add_members: bool = typer.Option(
-        False,
-        "--add-members",
-        help="Interactively select team members to share the pod with",
-    ),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-) -> None:
+def create(config: PodsCreateConfig) -> None:
     """Create a new pod with an interactive setup process"""
-    config = Config()
+    id = config.id
+    cloud_id = config.cloud_id
+    gpu_type = config.gpu_type
+    gpu_count = config.gpu_count
+    name = config.name
+    disk_size = config.disk_size
+    vcpus = config.vcpus
+    memory = config.memory
+    image = config.image
+    custom_template_id = config.custom_template_id
+    team_id = config.team_id
+    disks = config.disks
+    env = config.env
+    share_with_team = config.share_with_team
+    add_members = config.add_members
+    yes = config.yes
+
+    prime_config = PrimeConfig()
     env_vars = []
     if env:
         for env_var in env:
@@ -444,14 +426,14 @@ def create(
             env_vars.append({"key": key, "value": value})
 
     # Resolve team_id
-    resolved_team_id = team_id or config.team_id
+    resolved_team_id = team_id or prime_config.team_id
 
     if share_with_team and add_members:
         console.print(
             "[red]Error: --share-with-team and --add-members are mutually exclusive. "
             "Use only one of them.[/red]"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     # Error if user explicitly passed sharing flags without a team
     if (share_with_team or add_members) and not resolved_team_id:
@@ -459,7 +441,7 @@ def create(
             "[red]Error: --share-with-team and --add-members require a team. "
             "Use --team-id or set a team with 'prime config set-team-id'[/red]"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         # Validate custom template usage
@@ -467,12 +449,12 @@ def create(
             console.print(
                 "[red]Error: Must set image='custom_template' when using custom_template_id[/red]"  # noqa: E501
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
         if image == "custom_template" and not custom_template_id:
             console.print(
                 "[red]Error: Must provide custom_template_id when image='custom_template'[/red]"  # noqa: E501
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         base_client = APIClient()
         availability_client = AvailabilityClient(base_client)
@@ -528,10 +510,10 @@ def create(
                 for idx, gpu_type_option in enumerate(gpu_types, 1):
                     console.print(f"{idx}. {gpu_type_option}")
 
-                gpu_type_idx = typer.prompt("Select GPU type number", type=int, default=1)
+                gpu_type_idx = prompt("Select GPU type number", type=int, default=1)
                 if gpu_type_idx < 1 or gpu_type_idx > len(gpu_types):
                     console.print("[red]Invalid GPU type selection[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
                 gpu_type = gpu_types[gpu_type_idx - 1]
 
             def select_provider_from_configs(
@@ -562,7 +544,7 @@ def create(
                         spot_display = " (spot)" if gpu.is_spot else ""
                         console.print(f"{idx}. {gpu.provider}{spot_display} ({price_display})")
 
-                    provider_idx = typer.prompt(
+                    provider_idx = prompt(
                         "Select provider number",
                         type=int,
                         default=1,
@@ -570,7 +552,7 @@ def create(
                     )
                     if provider_idx < 1 or provider_idx > len(unique_configs):
                         console.print("[red]Invalid provider selection[/red]")
-                        raise typer.Exit(1)
+                        raise SystemExit(1)
                     selected_gpu = unique_configs[provider_idx - 1]
                     if not isinstance(selected_gpu, GPUAvailability):
                         raise TypeError("Selected GPU is not of type GPUAvailability")
@@ -606,7 +588,7 @@ def create(
                     )
                     console.print(f"{idx}. {count}x {gpu_type} ({price_display})")
 
-                config_idx = typer.prompt(
+                config_idx = prompt(
                     "Select configuration number",
                     type=int,
                     default=1,
@@ -614,7 +596,7 @@ def create(
                 )
                 if config_idx < 1 or config_idx > len(config_list):
                     console.print("[red]Invalid configuration selection[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
 
                 # Find all providers for selected configuration
                 selected_count = config_list[config_idx - 1][0]
@@ -631,20 +613,20 @@ def create(
                 ]
                 if not matching_configs:
                     console.print(f"[red]No configuration found for {gpu_count}x {gpu_type}[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
 
                 selected_gpu = select_provider_from_configs(matching_configs)
                 cloud_id = selected_gpu.cloud_id
 
         if not selected_gpu:
             console.print("[red]No valid GPU configuration found[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if not name:
             while True:
                 gpu_name = selected_gpu.gpu_type.lower().split("_")[0]
                 default_name = f"{gpu_name}-{selected_gpu.gpu_count}"
-                name = typer.prompt(
+                name = prompt(
                     "Pod name (alphanumeric and dashes only, must contain at least 1 letter)",
                     default=default_name,
                 )
@@ -669,17 +651,17 @@ def create(
             if min_disk is None or max_disk is None:
                 disk_size = default_disk
             else:
-                disk_size = typer.prompt(
+                disk_size = prompt(
                     f"Disk size in GB (min: {min_disk}, max: {max_disk})",
                     default=default_disk or min_disk,
                     type=int,
                 )
                 if min_disk is not None and disk_size is not None and disk_size < min_disk:
                     console.print(f"[red]Disk size must be at least {min_disk}GB[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
                 if max_disk is not None and disk_size is not None and disk_size > max_disk:
                     console.print(f"[red]Disk size must be at most {max_disk}GB[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
 
         if not vcpus:
             min_vcpus = selected_gpu.vcpu.min_count
@@ -688,7 +670,7 @@ def create(
             if min_vcpus is None or max_vcpus is None or default_vcpus is None:
                 vcpus = default_vcpus
             else:
-                vcpus = typer.prompt(
+                vcpus = prompt(
                     f"Number of vCPUs (min: {min_vcpus}, max: {max_vcpus})",
                     default=default_vcpus,
                     type=int,
@@ -697,7 +679,7 @@ def create(
                     console.print(
                         f"[red]vCPU count must be between {min_vcpus} and {max_vcpus}[/red]"
                     )
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
 
         if not memory:
             min_memory = selected_gpu.memory.min_count
@@ -707,7 +689,7 @@ def create(
             if min_memory is None or max_memory is None:
                 memory = default_memory
             else:
-                memory = typer.prompt(
+                memory = prompt(
                     f"Memory in GB (min: {min_memory}, max: {max_memory})",
                     default=default_memory,
                     type=int,
@@ -716,7 +698,7 @@ def create(
                     console.print(
                         f"[red]Memory must be between {min_memory}GB and {max_memory}GB[/red]"
                     )
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
 
         available_images = selected_gpu.images
 
@@ -731,13 +713,11 @@ def create(
                     console.print(f"{idx + 1}. {img}")
 
                 # Prompt for image selection
-                image_idx = typer.prompt(
-                    "Select image number", type=int, default=1, show_default=False
-                )
+                image_idx = prompt("Select image number", type=int, default=1, show_default=False)
 
                 if image_idx < 1 or image_idx > len(available_images):
                     console.print("[red]Invalid image selection[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
 
                 image = available_images[image_idx - 1]
 
@@ -751,7 +731,7 @@ def create(
             members = fetch_team_members(base_client, resolved_team_id)
 
             # Exclude the current user from the selection list
-            current_user_id = config.user_id
+            current_user_id = prime_config.user_id
             selectable_members = [m for m in members if m.get("userId") != current_user_id]
 
             if not selectable_members:
@@ -764,7 +744,7 @@ def create(
                     role = m.get("role", "")
                     console.print(f"  {idx}. {member_name} ({email}) - {role}")
 
-                selection = typer.prompt(
+                selection = prompt(
                     "\nSelect members (comma-separated numbers, or 'all' for everyone)",
                     default="all",
                 )
@@ -786,10 +766,10 @@ def create(
                                     f"Must be between 1 and "
                                     f"{len(selectable_members)}[/red]"
                                 )
-                                raise typer.Exit(1)
+                                raise SystemExit(1)
                         else:
                             console.print(f"[red]Invalid input: {part}[/red]")
-                            raise typer.Exit(1)
+                            raise SystemExit(1)
 
                     selected_members = [selectable_members[i] for i in selected_indices]
                     team_member_ids = [m["userId"] for m in selected_members]
@@ -798,7 +778,7 @@ def create(
 
         elif not share_with_team and not add_members:
             # Check config default — only apply when a team is actually set
-            if resolved_team_id and config.share_resources_with_team:
+            if resolved_team_id and prime_config.share_resources_with_team:
                 shared_with_team = True
                 sharing_display = "All team members (from config default)"
 
@@ -873,31 +853,30 @@ def create(
                 console.print(
                     "[red]Error: Failed to create pod - invalid API client configuration[/red]"
                 )
-                raise typer.Exit(1)
+                raise SystemExit(1)
         else:
             console.print("\nPod creation cancelled")
-            raise typer.Exit(0)
+            raise SystemExit(0)
 
-    except typer.Abort:
+    except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled[/yellow]")
-        raise typer.Exit(0)
+        raise SystemExit(0)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         import traceback
 
         traceback.print_exc()
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(no_args_is_help=True)
-def terminate(
-    pod_id: str,
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-) -> None:
+def terminate(config: PodsTerminateConfig) -> None:
     """Terminate a pod"""
+    pod_id = config.pod_id
+    yes = config.yes
+
     try:
         base_client = APIClient()
         pods_client = PodsClient(base_client)
@@ -905,7 +884,7 @@ def terminate(
         # Confirm termination
         if not confirm_or_skip(f"Are you sure you want to terminate pod {pod_id}?", yes):
             console.print("Termination cancelled")
-            raise typer.Exit(0)
+            raise SystemExit(0)
 
         with console.status("[bold blue]Terminating pod...", spinner="dots"):
             pods_client.delete(pod_id)
@@ -914,13 +893,13 @@ def terminate(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         import traceback
 
         traceback.print_exc()
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def _format_history_for_display(history_item: HistoryObj) -> Dict[str, Any]:
@@ -961,13 +940,12 @@ def _format_history_for_display(history_item: HistoryObj) -> Dict[str, Any]:
     }
 
 
-@app.command(epilog=POD_HISTORY_JSON_HELP)
-def history(
-    limit: int = typer.Option(100, help="Maximum number of history items to list"),
-    offset: int = typer.Option(0, help="Number of history items to skip"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def history(config: PodsHistoryConfig) -> None:
     """List your pods history (terminated pods)"""
+    limit = config.limit
+    offset = config.offset
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
@@ -1034,19 +1012,19 @@ def history(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         import traceback
 
         traceback.print_exc()
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(name="connect", no_args_is_help=True)
-@app.command(name="ssh", no_args_is_help=True)
-def connect(pod_id: str) -> None:
+def connect(config: PodsSshConfig) -> None:
     """SSH / connect to a pod using configured SSH key"""
+    pod_id = config.pod_id
+
     try:
         base_client = APIClient()
         pods_client = PodsClient(base_client)
@@ -1059,7 +1037,7 @@ def connect(pod_id: str) -> None:
                 statuses = pods_client.get_status([pod_id])
                 if not statuses:
                     console.print(f"[red]No status found for pod {pod_id}[/red]")
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
 
                 status = statuses[0]
                 if status.ssh_connection:
@@ -1069,10 +1047,10 @@ def connect(pod_id: str) -> None:
                 time.sleep(5)  # Wait 5 seconds before retrying
 
         # Get SSH key path from config
-        ssh_key_path = Config().ssh_key_path
+        ssh_key_path = PrimeConfig().ssh_key_path
         if not os.path.exists(ssh_key_path):
             console.print(f"[red]SSH key not found at {ssh_key_path}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         console.print(f"[blue]Using SSH key:[/blue] {ssh_key_path}")
         console.print("[dim]To change SSH key path, use: prime config set-ssh-key-path[/dim]")
@@ -1088,7 +1066,7 @@ def connect(pod_id: str) -> None:
 
         if not connections:
             console.print("[red]No valid SSH connections available[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         # If multiple connections available, let user choose
         connection_str: str
@@ -1097,11 +1075,11 @@ def connect(pod_id: str) -> None:
             for idx, conn in enumerate(connections):
                 console.print(f"[blue]{idx + 1}[/blue]) {conn}")
 
-            choice = typer.prompt("Enter node number", type=int, default=1, show_default=False)
+            choice = prompt("Enter node number", type=int, default=1, show_default=False)
 
             if choice < 1 or choice > len(connections):
                 console.print("[red]Invalid selection[/red]")
-                raise typer.Exit(1)
+                raise SystemExit(1)
 
             connection_str = connections[choice - 1]
         else:
@@ -1127,17 +1105,17 @@ def connect(pod_id: str) -> None:
             subprocess.run(ssh_command)
         except subprocess.CalledProcessError as e:
             console.print(f"[red]SSH connection failed: {str(e)}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
-    except typer.Abort:
+    except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled[/yellow]")
-        raise typer.Exit(0)
+        raise SystemExit(0)
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         import traceback
 
         traceback.print_exc()
-        raise typer.Exit(1)
+        raise SystemExit(1)

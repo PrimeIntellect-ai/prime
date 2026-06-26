@@ -5,11 +5,11 @@ audit of the billing flow: "balance dropped by exactly $X after run R logged
 the charge in the Billing table".
 """
 
-import typer
 from rich.markup import escape as rich_escape
 
 from prime_cli.api.wallet import BillingEntry, Wallet, WalletClient
 from prime_cli.core import APIClient, APIError, Config
+from prime_cli.leaves.wallet import Config as WalletConfig
 from prime_cli.utils import (
     build_table,
     get_console,
@@ -77,17 +77,7 @@ def _build_billings_table(wallet: Wallet) -> object:
     return table
 
 
-def wallet_command(
-    limit: int = typer.Option(
-        20,
-        "--limit",
-        "-n",
-        min=1,
-        max=100,
-        help="Number of recent billing rows to fetch (max 100)",
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def wallet_command(config: WalletConfig) -> None:
     """Show wallet balance and most recent billing rows.
 
     Follows the team configured via ``prime switch`` / ``prime config``
@@ -101,19 +91,22 @@ def wallet_command(
 
         prime wallet --limit 50 --output json
     """
+    limit = config.limit
+    output = config.output
+
     validate_output_format(output, console)
 
-    config = Config()
+    prime_config = Config()
     client = WalletClient(APIClient())
 
     # In JSON mode, errors must go to stderr so stdout stays strictly JSON
     # for agents piping through `jq`.
     err_console = get_console(stderr=True) if output == "json" else console
     try:
-        wallet = client.get(limit=limit, team_id=config.team_id)
+        wallet = client.get(limit=limit, team_id=prime_config.team_id)
     except APIError as exc:
         err_console.print(f"[red]Error: {exc}[/red]")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc
 
     if output == "json":
         # mode="json" emits ISO-8601 datetime strings rather than the
@@ -121,12 +114,12 @@ def wallet_command(
         output_data_as_json(wallet.model_dump(mode="json"), console)
         return
 
-    if config.team_id:
+    if prime_config.team_id:
         # When PRIME_TEAM_ID env var overrides the configured team, the file's
         # team_name is for a different team — fall back to the id so the
         # header doesn't lie about which wallet we're showing.
-        display_name = None if config.team_id_from_env else config.team_name
-        team_label = f"team {rich_escape(display_name or config.team_id)}"
+        display_name = None if prime_config.team_id_from_env else prime_config.team_name
+        team_label = f"team {rich_escape(display_name or prime_config.team_id)}"
     else:
         team_label = "personal"
     _print_header(wallet, team_label)

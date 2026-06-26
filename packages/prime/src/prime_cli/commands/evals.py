@@ -7,18 +7,24 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
 
-import typer
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
 from pydantic import ValidationError
 from rich.progress import Progress
 from rich.syntax import Syntax
 from rich.table import Table
 
+from prime_cli.leaves.eval.get import Config as EvalGetConfig
+from prime_cli.leaves.eval.list import Config as EvalListConfig
+from prime_cli.leaves.eval.logs import Config as EvalLogsConfig
+from prime_cli.leaves.eval.push import Config as EvalPushConfig
+from prime_cli.leaves.eval.samples import Config as EvalSamplesConfig
+from prime_cli.leaves.eval.stop import Config as EvalStopConfig
+from prime_cli.leaves.eval.submit import Config as EvalSubmitConfig
+from prime_cli.leaves.eval.view import Config as EvalViewConfig
+
 from ..client import APIClient, APIError
 from ..core import Config
 from ..utils import (
-    DefaultCommandGroup,
-    PlainTyper,
     get_console,
     is_plain_mode,
     json_output_help,
@@ -81,30 +87,19 @@ EVAL_HOSTED_LABEL = "HOSTED"
 EVAL_LOCAL_LABEL = "LOCAL"
 
 
-class DefaultGroup(DefaultCommandGroup):
-    def format_usage(self, ctx, formatter):
-        formatter.write_usage(
-            ctx.command_path,
-            "[OPTIONS] ENVIRONMENT [ARGS]... | COMMAND [ARGS]...",
-        )
-
-
-subcommands_app = PlainTyper()
-
-
 def handle_errors(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
-        except typer.Exit:
+        except SystemExit:
             raise
         except EvalsAPIError as e:
             console.print(f"[red]Error:[/red] {e}")
-            raise typer.Exit(1)
+            raise SystemExit(1)
         except Exception as e:
             console.print(f"[red]Unexpected error:[/red] {e}")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
     return wrapper
 
@@ -112,7 +107,7 @@ def handle_errors(func):
 def _validate_output_format(output: str, allowed: list[str]) -> None:
     if output not in allowed:
         console.print(f"[red]Error:[/red] output must be one of: {', '.join(allowed)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def format_output(data: dict, output: str) -> None:
@@ -130,11 +125,11 @@ def _parse_json_object_option(raw: Optional[str], option_name: str) -> Optional[
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
         console.print(f"[red]Error:[/red] invalid {option_name}: {exc}")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc
 
     if type(parsed) is not dict:
         console.print(f"[red]Error:[/red] {option_name} must be a JSON object")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     return parsed
 
@@ -149,7 +144,7 @@ def _parse_string_map_option(raw: Optional[str], option_name: str) -> Optional[d
             console.print(
                 f"[red]Error:[/red] {option_name} must contain only string keys and values"
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
     return parsed
 
@@ -160,7 +155,7 @@ def _load_hosted_eval_configs(config_path: Path) -> list[HostedEvalConfig]:
         raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         console.print(f"[red]Error:[/red] invalid hosted eval config: {exc}")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc
     entries = raw.pop("eval", None)
     if entries is None:
         entries = [raw]
@@ -169,12 +164,12 @@ def _load_hosted_eval_configs(config_path: Path) -> list[HostedEvalConfig]:
         defaults = raw
     else:
         console.print("[red]Error:[/red] hosted config requires one or more [[eval]] tables")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     try:
         return [HostedEvalConfig.model_validate({**defaults, **entry}) for entry in entries]
     except (TypeError, ValidationError) as exc:
         console.print(f"[red]Error:[/red] invalid hosted eval config: {exc}")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc
 
 
 def _fetch_eval_status(client: APIClient, eval_id: str) -> dict[str, Any]:
@@ -289,7 +284,7 @@ def _parse_eval_status(eval_data: dict[str, Any]) -> tuple[str, EvalStatus | Non
 def _handle_log_poll_error(eval_id: str, exc: APIError, consecutive_errors: int) -> None:
     if "404" in str(exc):
         console.print(f"\n[red]Evaluation {eval_id} not found.[/red]")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc
 
     if "429" not in str(exc):
         raise exc
@@ -325,7 +320,7 @@ def _display_logs_follow(eval_id: str, poll_interval: float) -> None:
                 console.print()
                 _print_eval_status(eval_data)
                 if status != EvalStatus.COMPLETED:
-                    raise typer.Exit(1)
+                    raise SystemExit(1)
                 return
 
             raw_logs = _fetch_logs(client, eval_id)
@@ -379,11 +374,11 @@ def _display_logs(
             _display_logs_once(eval_id, tail)
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped watching logs. Evaluation continues running.[/dim]")
-    except typer.Exit:
+    except SystemExit:
         raise
     except APIError as exc:
         console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc
 
 
 def _resolve_hosted_environment(
@@ -400,10 +395,10 @@ def _resolve_hosted_environment(
             owner, name, version = parse_env_id(environment)
         except ValueError as exc:
             console.print(f"[red]Error:[/red] {exc}")
-            raise typer.Exit(1) from exc
+            raise SystemExit(1) from exc
         if version is not None:
             console.print("[red]Error:[/red] hosted evaluations accept only unversioned slugs")
-            raise typer.Exit(1)
+            raise SystemExit(1)
         platform_slug = f"{owner}/{name}"
     if platform_slug is None:
         module_name = environment.replace("-", "_")
@@ -425,7 +420,7 @@ def _resolve_hosted_environment(
             "[yellow]Use an environment slug or publish the local environment "
             "with `prime env push`.[/yellow]"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     owner, env_name = platform_slug.split("/")
     api_client = APIClient()
@@ -439,14 +434,14 @@ def _resolve_hosted_environment(
                 "that is published to the platform"
             )
             console.print(f"[yellow]Publish {platform_slug} with `prime env push` first.[/yellow]")
-            raise typer.Exit(1) from exc
+            raise SystemExit(1) from exc
         raise
 
     details = response.get("data", response)
     environment_id = details.get("id")
     if not environment_id:
         console.print(f"[red]Error:[/red] could not resolve environment id for {platform_slug}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     console.print(
         f"[dim]Hosted evaluations always use the latest published version of {platform_slug}.[/dim]"
@@ -455,36 +450,28 @@ def _resolve_hosted_environment(
     return platform_slug, str(environment_id)
 
 
-@subcommands_app.command("list", epilog=LIST_EVALS_JSON_HELP)
-@handle_errors
-def list_evals(
-    output: str = typer.Option("table", "--output", "-o", help="table|json"),
-    num: int = typer.Option(20, "--num", "-n", help="Items per page"),
-    page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    env: Optional[str] = typer.Option(
-        None,
-        "--env",
-        "--env-name",
-        "-e",
-        help="Filter by environment (e.g., 'gsm8k' or 'owner/gsm8k')",
-    ),
-) -> None:
+def list_evals(config: EvalListConfig) -> None:
     """List evaluations."""
+    output = config.output
+    num = config.num
+    page = config.page
+    env = config.env
+
     _validate_output_format(output, ["table", "json"])
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         api_client = APIClient()
-        config = Config()
+        prime_config = Config()
         client = EvalsClient(api_client)
 
         skip = (page - 1) * num
         data = client.list_evaluations(
             env_name=env,
-            team_id=config.team_id,
+            team_id=prime_config.team_id,
             skip=skip,
             limit=num,
         )
@@ -547,23 +534,21 @@ def list_evals(
 
     except EvalsAPIError as e:
         console.print(f"[red]API Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         console.print(
             "[yellow]Response may contain invalid data. "
             "Try --output json to see raw response.[/yellow]"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@subcommands_app.command("get", epilog=EVAL_DETAIL_JSON_HELP)
-@handle_errors
-def get_eval(
-    eval_id: str = typer.Argument(..., help="The ID of the evaluation to retrieve"),
-    output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
-) -> None:
+def get_eval(config: EvalGetConfig) -> None:
     """Show evaluation details."""
+    eval_id = config.eval_id
+    output = config.output
+
     _validate_output_format(output, ["json", "pretty"])
 
     api_client = APIClient()
@@ -572,14 +557,12 @@ def get_eval(
     format_output(data, output)
 
 
-@subcommands_app.command("samples", epilog=EVAL_SAMPLES_JSON_HELP)
-@handle_errors
-def get_samples(
-    eval_id: str = typer.Argument(..., help="The ID of the evaluation"),
-    page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    num: int = typer.Option(100, "--num", "-n", help="Items per page"),
-    output: str = typer.Option("json", "--output", "-o", help="json|pretty"),
-) -> None:
+def get_samples(config: EvalSamplesConfig) -> None:
+    eval_id = config.eval_id
+    page = config.page
+    num = config.num
+    output = config.output
+
     _validate_output_format(output, ["json", "pretty"])
 
     api_client = APIClient()
@@ -755,7 +738,7 @@ def _require_published_environment_for_eval_push(env_name: str, eval_path: Path)
     console.print("[dim]Then retry with an owner-qualified environment:[/dim]")
     console.print(f"[dim]  --env <owner>/{env_name}[/dim]")
     console.print(f"[dim]Example: prime eval push {eval_path} --env <owner>/{env_name}[/dim]")
-    raise typer.Exit(1)
+    raise SystemExit(1)
 
 
 def _push_single_eval(
@@ -854,67 +837,19 @@ def _push_single_eval(
     return eval_id
 
 
-@subcommands_app.command("view")
-def view_cmd(
-    limit: int = typer.Option(50, "--limit", "-n", help="Max evaluation rows to load"),
-    env_dir: Optional[str] = typer.Option(
-        None, "--env-dir", "-e", help="Path to environments directory"
-    ),
-    outputs_dir: Optional[str] = typer.Option(
-        None, "--outputs-dir", "-o", help="Path to outputs directory"
-    ),
-) -> None:
+def view_cmd(config: EvalViewConfig) -> None:
     """Launch the interactive evaluation viewer."""
+    limit = config.limit
+    env_dir = config.env_dir
+    outputs_dir = config.outputs_dir
+
     if limit < 1:
         console.print("[red]Error:[/red] --limit must be at least 1")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     run_eval_view(env_dir=env_dir, outputs_dir=outputs_dir, limit=limit)
 
 
-@subcommands_app.command("push", epilog=PUSH_EVAL_JSON_HELP)
-@handle_errors
-def push_eval(
-    config_path: Optional[str] = typer.Argument(
-        None,
-        help=(
-            "Path to a native V1 run or legacy metadata.json/results.jsonl directory. "
-            "If not provided, auto-discovers below outputs/."
-        ),
-    ),
-    env_id: Optional[str] = typer.Option(
-        None,
-        "--env",
-        "--env-id",
-        "-e",
-        help=(
-            "Published environment slug (owner/name). "
-            "Push local environments with `prime env push` first."
-        ),
-    ),
-    run_id: Optional[str] = typer.Option(
-        None,
-        "--run-id",
-        "-r",
-        help="Link to existing training run id",
-    ),
-    eval_id: Optional[str] = typer.Option(
-        None,
-        "--eval",
-        "--eval-id",
-        help="Push to existing evaluation id",
-    ),
-    name: Optional[str] = typer.Option(
-        None,
-        "--name",
-        help="Explicit evaluation name override",
-    ),
-    output: str = typer.Option("pretty", "--output", "-o", help="json|pretty"),
-    is_public: bool = typer.Option(
-        False,
-        "--public",
-        help="Make the pushed evaluation public. Evaluations are private by default.",
-    ),
-) -> None:
+def push_eval(config: EvalPushConfig) -> None:
     """Push native or legacy evaluation data to Prime Evals.
 
     Both Verifiers V1 run artifacts and V0 metadata.json/results.jsonl outputs are accepted.
@@ -928,13 +863,21 @@ def push_eval(
         prime eval push --public                           # Create a public evaluation
         prime eval push --eval xyz789 --name "rerun"      # Update an existing evaluation name
     """
+    config_path = config.config_path
+    env_id = config.env_id
+    run_id = config.run_id
+    eval_id = config.eval_id
+    name = config.name
+    output = config.output
+    is_public = config.is_public
+
     try:
         if eval_id and is_public:
             console.print(
                 "[red]Error:[/red] The --public flag cannot be used with --eval-id. "
                 "Visibility can only be set when creating a new evaluation."
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if config_path is None and eval_id:
             console.print("[red]Error:[/red] Cannot use --eval-id with auto-discovery")
@@ -942,7 +885,7 @@ def push_eval(
             console.print("[yellow]Tip:[/yellow] Specify an explicit path when using --eval-id:")
             console.print("  prime eval push /path/to/eval/data --eval-id <eval-id>")
             console.print("  prime eval push outputs/evals/env--model/run-id --eval-id <eval-id>")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if config_path is None:
             current_dir = Path(".")
@@ -960,7 +903,7 @@ def push_eval(
                     "[yellow]Hint:[/yellow] Run from a directory with "
                     "metadata.json and results.jsonl, or from a directory containing outputs/evals/"
                 )
-                raise typer.Exit(1)
+                raise SystemExit(1)
 
             console.print(f"[blue]Found {len(eval_dirs)} evaluation(s) to push:[/blue]")
             for eval_dir in eval_dirs:
@@ -991,7 +934,7 @@ def push_eval(
                 output_data_as_json({"results": results}, console)
 
             if success_count < len(eval_dirs):
-                raise typer.Exit(1)
+                raise SystemExit(1)
 
             return
 
@@ -1003,13 +946,13 @@ def push_eval(
 
     except FileNotFoundError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except json.JSONDecodeError as e:
         console.print(f"[red]Error:[/red] Invalid JSON in metadata.json: {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except ValueError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except InvalidEvaluationError as e:
         console.print(f"[red]Error:[/red] {e}")
         console.print()
@@ -1018,58 +961,35 @@ def push_eval(
         console.print("  --run-id <run_id>    (to link to an existing training run)")
         console.print("  --env <env>          (published environment slug, e.g., 'owner/gsm8k')")
         console.print("  [or ensure owner/name 'env' or 'env_id' is set in metadata.json]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except KeyError as e:
         console.print(f"[red]Error:[/red] Missing required field: {e}")
         console.print(
             "[yellow]Hint:[/yellow] metadata.json must contain 'env' (or 'env_id') and 'model'"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except EvalsAPIError as e:
         console.print(f"[red]API Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-app = PlainTyper(
-    cls=DefaultGroup,
-    help=(
-        "Run local V1/V0 evaluations, submit hosted evaluations, or manage results.\n\n"
-        "By default, 'prime eval <environment>' runs 'prime eval run <environment>'."
-    ),
-    no_args_is_help=True,
-)
-
-app.add_typer(subcommands_app, name="")
-
-
-@app.command("logs", no_args_is_help=True)
-def logs_cmd(
-    eval_id: str = typer.Argument(..., help="Evaluation id to get logs for"),
-    tail: int = typer.Option(
-        HOSTED_LOGS_DEFAULT_TAIL_LINES,
-        "--tail",
-        "-n",
-        help="Number of lines to show",
-    ),
-    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
-    poll_interval: float = typer.Option(
-        HOSTED_LOGS_DEFAULT_POLL_INTERVAL_SECONDS,
-        "--poll-interval",
-        help="Polling interval in seconds when following logs",
-    ),
-) -> None:
+def logs_cmd(config: EvalLogsConfig) -> None:
     """Get logs for a hosted evaluation."""
+    eval_id = config.eval_id
+    tail = config.tail
+    follow = config.follow
+    poll_interval = config.poll_interval
+
     _display_logs(eval_id, tail, follow, poll_interval=poll_interval)
 
 
-@app.command("stop", no_args_is_help=True)
-def stop_cmd(
-    eval_id: str = typer.Argument(..., help="Evaluation id to stop"),
-) -> None:
+def stop_cmd(config: EvalStopConfig) -> None:
     """Stop a running hosted evaluation."""
+    eval_id = config.eval_id
+
     try:
         client = APIClient()
         result = client.patch(f"/hosted-evaluations/{eval_id}/cancel")
@@ -1078,135 +998,46 @@ def stop_cmd(
         console.print(f"[dim]View results:[/dim] {get_eval_viewer_url(eval_id)}")
     except APIError as exc:
         console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc
 
 
-@app.command(
-    "run",
-    help="Run a local V1 or V0 evaluation with Verifiers",
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-        "help_option_names": [],
-    },
-)
-def run_eval_cmd(ctx: typer.Context) -> None:
+def run_eval_cmd(argv: list[str]) -> None:
     """Hand the untouched evaluation arguments to Verifiers."""
-    exec_verifiers_process("eval", ctx.args, plain=is_plain_mode())
+    exec_verifiers_process("eval", argv, plain=is_plain_mode())
 
 
-@app.command(
-    "submit",
-    help="Submit a hosted V0 evaluation",
-    no_args_is_help=True,
-)
-def submit_eval_cmd(
-    environment: Optional[str] = typer.Argument(
-        None,
-        help="Environment name/slug or V0 TOML config path",
-    ),
-    env_path: Optional[str] = typer.Option(
-        None,
-        "--env-path",
-        help=(
-            "Path to the environment directory "
-            "(used to locate .prime/.env-metadata.json for upstream resolution)"
-        ),
-    ),
-    poll_interval: float = typer.Option(
-        HOSTED_RUN_DEFAULT_POLL_INTERVAL_SECONDS,
-        "--poll-interval",
-        help="Polling interval in seconds for hosted evaluation status",
-    ),
-    follow: bool = typer.Option(
-        False,
-        "--follow",
-        help="Follow hosted evaluation status and stream logs until completion",
-    ),
-    model: Optional[str] = typer.Option(None, "--model", "-m", help="Inference model"),
-    num_examples: Optional[int] = typer.Option(
-        None, "--num-examples", "-n", help="Examples per environment"
-    ),
-    rollouts_per_example: Optional[int] = typer.Option(
-        None, "--rollouts-per-example", "-r", help="Rollouts per example"
-    ),
-    env_args: Optional[str] = typer.Option(
-        None, "--env-args", help="V0 load_environment arguments as JSON"
-    ),
-    extra_env_kwargs: Optional[str] = typer.Option(
-        None, "--extra-env-kwargs", help="V0 post-load environment arguments as JSON"
-    ),
-    timeout_minutes: Optional[int] = typer.Option(
-        None,
-        "--timeout-minutes",
-        help="Timeout in minutes for hosted evaluation",
-    ),
-    allow_sandbox_access: Optional[bool] = typer.Option(
-        None,
-        "--allow-sandbox-access/--no-sandbox-access",
-        help="Allow sandbox read/write access for hosted evaluations",
-    ),
-    allow_instances_access: Optional[bool] = typer.Option(
-        None,
-        "--allow-instances-access/--no-instances-access",
-        help="Allow instance creation and management for hosted evaluations",
-    ),
-    allow_tunnel_access: Optional[bool] = typer.Option(
-        None,
-        "--allow-tunnel-access/--no-tunnel-access",
-        help="Allow tunnel creation and management for hosted evaluations",
-    ),
-    custom_secrets: Optional[str] = typer.Option(
-        None,
-        "--custom-secrets",
-        help='Custom secrets for hosted eval as JSON (e.g. \'{"API_KEY":"xxx"}\')',
-    ),
-    sampling_args: Optional[str] = typer.Option(
-        None,
-        "--sampling-args",
-        help=(
-            "Sampling arguments as JSON. "
-            'Example: {"temperature": 0.7, "extra_body": {"provider": {"order": ["azure"]}}}'
-        ),
-    ),
-    eval_name: Optional[str] = typer.Option(
-        None,
-        "--eval-name",
-        help="Custom name for the hosted evaluation",
-    ),
-    max_concurrent: Optional[int] = typer.Option(
-        None, "--max-concurrent", help="Maximum concurrent rollouts"
-    ),
-    max_retries: Optional[int] = typer.Option(None, "--max-retries", help="Retries per rollout"),
-    state_columns: Optional[list[str]] = typer.Option(
-        None, "--state-column", help="State column to retain; repeat as needed"
-    ),
-    independent_scoring: Optional[bool] = typer.Option(
-        None,
-        "--independent-scoring/--group-scoring",
-        help="Score rollouts independently",
-    ),
-    verbose: Optional[bool] = typer.Option(
-        None, "--verbose/--no-verbose", help="Enable verbose evaluator logs"
-    ),
-    header: Optional[list[str]] = typer.Option(
-        None, "--header", help="Extra HTTP header as 'Name: Value'; repeat as needed"
-    ),
-    api_client_type: Optional[str] = typer.Option(
-        None, "--api-client-type", help="V0 model client type"
-    ),
-    api_base_url: Optional[str] = typer.Option(
-        None, "--api-base-url", help="V0 model API base URL"
-    ),
-    api_key_var: Optional[str] = typer.Option(
-        None, "--api-key-var", help="Environment variable containing the model API key"
-    ),
-) -> None:
+def submit_eval_cmd(config: EvalSubmitConfig) -> None:
     """Submit one environment or a strict ``[[eval]]`` TOML file to the hosted V0 API."""
+    environment = config.environment
+    env_path = config.env_path
+    poll_interval = config.poll_interval
+    follow = config.follow
+    model = config.model
+    num_examples = config.num_examples
+    rollouts_per_example = config.rollouts_per_example
+    env_args = config.env_args
+    extra_env_kwargs = config.extra_env_kwargs
+    timeout_minutes = config.timeout_minutes
+    allow_sandbox_access = config.allow_sandbox_access
+    allow_instances_access = config.allow_instances_access
+    allow_tunnel_access = config.allow_tunnel_access
+    custom_secrets = config.custom_secrets
+    sampling_args = config.sampling_args
+    eval_name = config.eval_name
+    max_concurrent = config.max_concurrent
+    max_retries = config.max_retries
+    state_columns = config.state_columns
+    independent_scoring = config.independent_scoring
+    verbose = config.verbose
+    header = config.header
+    api_client_type = config.api_client_type
+    api_base_url = config.api_base_url
+    api_key_var = config.api_key_var
+
     if environment is None:
         console.print("[red]Error:[/red] Missing argument 'ENVIRONMENT'.")
         console.print(f"[dim]Example: {EVAL_SUBMIT_EXAMPLE_COMMAND}[/dim]")
-        raise typer.Exit(2)
+        raise SystemExit(2)
 
     targets = (
         _load_hosted_eval_configs(Path(environment))
@@ -1244,13 +1075,13 @@ def submit_eval_cmd(
         ]
     except ValidationError as exc:
         console.print(f"[red]Error:[/red] invalid hosted evaluation: {exc}")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc
 
     if follow and len(targets) > 1:
         console.print(
             "[red]Error:[/red] `--follow` is only supported for a single hosted evaluation"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     grouped_targets: dict[str, dict[str, Any]] = {}
     target_order: list[str] = []
@@ -1278,7 +1109,7 @@ def submit_eval_cmd(
                 group["environment_ids"].append(environment_id)
     except APIError as exc:
         console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc
 
     all_platform_slugs: list[str] = []
     all_evaluation_ids: list[str] = []
@@ -1294,7 +1125,7 @@ def submit_eval_cmd(
             all_evaluation_ids.extend(result.get("evaluation_ids") or [result["evaluation_id"]])
     except APIError as exc:
         console.print(f"[red]Hosted evaluation failed:[/red] {exc}")
-        raise typer.Exit(1) from exc
+        raise SystemExit(1) from exc
 
     if follow:
         console.print("[green]✓ Hosted evaluation started[/green]")

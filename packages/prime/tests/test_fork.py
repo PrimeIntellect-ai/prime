@@ -1,8 +1,8 @@
 import json
 from types import SimpleNamespace
 
+from click.testing import CliRunner
 from prime_cli.main import app
-from typer.testing import CliRunner
 
 runner = CliRunner()
 

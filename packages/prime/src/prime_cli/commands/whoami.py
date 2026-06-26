@@ -1,19 +1,17 @@
 from typing import Any, Dict
 
-import typer
 from rich.table import Table
 
 from prime_cli.core import Config
+from prime_cli.leaves.whoami import Config as WhoamiConfig
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import get_console
 
-app = PlainTyper(help="Show current authenticated user and update config", no_args_is_help=False)
 console = get_console()
 
 
-@app.callback(invoke_without_command=True)
-def whoami() -> None:
+def whoami(config: WhoamiConfig) -> None:
     """Fetch identity from the API and set user_id in config."""
     try:
         client = APIClient()
@@ -21,7 +19,7 @@ def whoami() -> None:
         data = response.get("data") if isinstance(response, dict) else None
         if not isinstance(data, dict):
             console.print("[red]Unexpected response from whoami endpoint[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         user_id = data.get("id")
         email = data.get("email")
@@ -30,10 +28,10 @@ def whoami() -> None:
         scope = data.get("scope", {})
 
         # Update config
-        config = Config()
+        prime_config = Config()
         if user_id:
-            config.set_user_id(user_id)
-            config.update_current_environment_file()
+            prime_config.set_user_id(user_id)
+            prime_config.update_current_environment_file()
 
         # Display account info table
         table = Table(title="Account")
@@ -41,13 +39,13 @@ def whoami() -> None:
         table.add_column("Value", style="green")
 
         # Account type (Team or Personal) - shown first
-        if config.team_id:
+        if prime_config.team_id:
             table.add_row("Type", "Team")
             table.add_section()
-            table.add_row("Team ID", config.team_id)
-            table.add_row("Team Name", config.team_name or "[dim]Unknown[/dim]")
-            if config.team_role:
-                table.add_row("Role", config.team_role)
+            table.add_row("Team ID", prime_config.team_id)
+            table.add_row("Team Name", prime_config.team_name or "[dim]Unknown[/dim]")
+            if prime_config.team_role:
+                table.add_row("Role", prime_config.team_role)
         else:
             table.add_row("Type", "Personal")
 
@@ -82,7 +80,7 @@ def whoami() -> None:
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)

@@ -9,20 +9,33 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 import toml
-import typer
-from click.exceptions import Abort
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic import ValidationError as PydanticValidationError
 from rich.markup import escape as rich_escape
 from rich.table import Table
 
 from prime_cli.core import Config
+from prime_cli.leaves.train.checkpoints import Config as TrainCheckpointsConfig
+from prime_cli.leaves.train.components import Config as TrainComponentsConfig
+from prime_cli.leaves.train.configs import Config as TrainConfigsConfig
+from prime_cli.leaves.train.delete import Config as TrainDeleteConfig
+from prime_cli.leaves.train.distributions import Config as TrainDistributionsConfig
+from prime_cli.leaves.train.get import Config as TrainGetConfig
+from prime_cli.leaves.train.init import Config as TrainInitConfig
+from prime_cli.leaves.train.list import Config as TrainListConfig
+from prime_cli.leaves.train.logs import Config as TrainLogsConfig
+from prime_cli.leaves.train.metrics import Config as TrainMetricsConfig
+from prime_cli.leaves.train.models import Config as TrainModelsConfig
+from prime_cli.leaves.train.progress import Config as TrainProgressConfig
+from prime_cli.leaves.train.request import Config as TrainRequestConfig
+from prime_cli.leaves.train.restart import Config as TrainRestartConfig
+from prime_cli.leaves.train.rollouts import Config as TrainRolloutsConfig
+from prime_cli.leaves.train.run import Config as TrainRunConfig
+from prime_cli.leaves.train.stop import Config as TrainStopConfig
 
 from ..api.rl import EnvServerInfo, RLClient, RLRun
 from ..client import APIClient, APIError, ValidationError
 from ..utils import (
-    DefaultCommandGroup,
-    PlainTyper,
     get_console,
     json_help,
     json_output_help,
@@ -36,9 +49,8 @@ from ..utils.formatters import (
     format_promo_price,
     strip_ansi,
 )
-from ..utils.prompt import confirm_or_skip
+from ..utils.prompt import confirm, confirm_or_skip, prompt
 from .feedback import submit_feedback
-from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
 console = get_console()
 
@@ -733,7 +745,7 @@ def _dispatch_full_finetune_run(
         )
     except EnvParseError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     secrets = secrets or {}
 
     # The full-FT backend schema only knows about WANDB_API_KEY and
@@ -756,7 +768,7 @@ def _dispatch_full_finetune_run(
             "[dim]Drop these from --env-var/--env-file, or wait for "
             "generic secret forwarding on the dedicated training endpoint.[/dim]"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     # `image_tag` is chart-level — it picks which prime-rl container build
     # the run pulls. Two ways to set it: `--image-tag` (CLI flag, useful
@@ -772,7 +784,7 @@ def _dispatch_full_finetune_run(
             f"[red]Error:[/red] image_tag in {config_path} must be a string, "
             f"got {type(config_image_tag).__name__}."
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
     resolved_image_tag = image_tag or config_image_tag
 
     # Strip CLI-only secret-loading keys before shipping the TOML to the
@@ -802,8 +814,8 @@ def _dispatch_full_finetune_run(
     # training job without an explicit ack — matches confirm_or_skip
     # in the LoRA path.
     if not yes:
-        if not typer.confirm("Dispatch full_finetune run on auto-picked PrimeCluster?"):
-            raise typer.Exit(0)
+        if not confirm("Dispatch full_finetune run on auto-picked PrimeCluster?"):
+            raise SystemExit(0)
 
     api_client = APIClient()
     client = HostedTrainingClient(api_client)
@@ -811,7 +823,7 @@ def _dispatch_full_finetune_run(
         result = client.create_run(payload)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     if output == "json":
         # Don't expose token_value in JSON output either — the chart
@@ -835,12 +847,12 @@ def load_config(path: str) -> RLConfig:
     p = Path(path)
     if not p.exists():
         console.print(f"[red]Error:[/red] Config file not found: {path}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     try:
         data = toml.load(p)
     except toml.TomlDecodeError as e:
         console.print(f"[red]Error:[/red] Invalid TOML in {path}: {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         return RLConfig.model_validate(data)
@@ -849,7 +861,7 @@ def load_config(path: str) -> RLConfig:
         for msg in _format_validation_errors(e.errors()):
             console.print(f"  [red]•[/red] {msg}")
         console.print()
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 # Status color mapping
@@ -914,92 +926,21 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     }
 
 
-class DefaultGroup(DefaultCommandGroup):
-    """Makes 'run' the default command when a config file is passed."""
-
-    def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
-        super().__init__(*args, default_cmd_name=default_cmd_name, **kwargs)
-        self._show_default_command_params = False
-
-    def format_usage(self, ctx, formatter):
-        formatter.write_usage(
-            ctx.command_path,
-            "[OPTIONS] CONFIG_PATH [ARGS]... | COMMAND [ARGS]...",
-        )
-
-    def get_params(self, ctx):
-        params = super().get_params(ctx)
-        if not self._show_default_command_params:
-            return params
-
-        default_command = self.commands.get(self.default_cmd_name)
-        if default_command is None:
-            return params
-
-        seen = {p.name for p in default_command.params}
-        return [*default_command.params, *(p for p in params if p.name not in seen)]
-
-    def format_help(self, ctx, formatter):
-        self._show_default_command_params = True
-        try:
-            return super().format_help(ctx, formatter)
-        finally:
-            self._show_default_command_params = False
-
-
-app = PlainTyper(
-    cls=DefaultGroup,
-    help=(
-        "Launch and manage Hosted Training runs. Pass a config path directly to start a new run."
-    ),
-    no_args_is_help=True,
-)
-
-
-@app.command("run", rich_help_panel="Commands", hidden=True, epilog=RL_RUN_JSON_HELP)
-def create_run(
-    config_path: str = typer.Argument(
-        ...,
-        help="Path to a TOML config file to launch as a Hosted Training run.",
-    ),
-    env: Optional[List[str]] = typer.Option(
-        None,
-        "-e",
-        "--env-var",
-        help=(
-            "Environment variable/secret to pass to the training container. "
-            "Accepts: KEY=VALUE (direct value), KEY (reads from $KEY), "
-            "or path/to/file.env (loads env file)."
-        ),
-    ),
-    env_file: Optional[List[str]] = typer.Option(
-        None,
-        "--env-file",
-        help="Path to .env file containing secrets. Supports ${VAR} expansion from local env.",
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-    skip_action_check: bool = typer.Option(
-        False,
-        "--skip-action-check",
-        help="Skip action status check and run even if environment action failed.",
-    ),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-    image_tag: Optional[str] = typer.Option(
-        None,
-        "--image-tag",
-        help=(
-            "prime-rl container image tag for the run (full-FT only). "
-            'Falls back to a top-level `image_tag = "..."` in the TOML '
-            "if unset, then to the backend default."
-        ),
-    ),
-) -> None:
+def create_run(config: TrainRunConfig) -> None:
     """Launch a Hosted Training run from a config file.
 
     Example:
 
-        prime train config.toml
+        prime train run config.toml
     """
+    config_path = config.config_path
+    env = config.env
+    env_file = config.env_file
+    output = config.output
+    skip_action_check = config.skip_action_check
+    yes = config.yes
+    image_tag = config.image_tag
+
     validate_output_format(output, console)
 
     # The explicit discriminator selects one of the platform's two training APIs.
@@ -1017,7 +958,7 @@ def create_run(
         return
     if raw_cfg.get("type") != "lora":
         console.print("[red]Error:[/red] training config requires type = 'lora' or 'full_finetune'")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     console.print(f"[dim]Loading config from {config_path}[/dim]\n")
     cfg = load_config(config_path)
@@ -1041,7 +982,7 @@ def create_run(
         )
     except EnvParseError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     # Validate WANDB_API_KEY is present when W&B monitoring is configured
     wandb_configured = cfg.wandb.entity or cfg.wandb.project
@@ -1054,9 +995,10 @@ def create_run(
         console.print("  - CLI flag: --env-file secrets.env")
         console.print("  - CLI flag: -e WANDB_API_KEY=your-key")
         console.print(
-            "  - Environment variable: export WANDB_API_KEY=... && prime train ... -e WANDB_API_KEY"
+            "  - Environment variable: export WANDB_API_KEY=... && "
+            "prime train run ... -e WANDB_API_KEY"
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         api_client = APIClient()
@@ -1248,7 +1190,7 @@ def create_run(
                     "will fail.[/yellow]"
                 )
                 console.print("[dim]To proceed anyway, use --skip-action-check[/dim]")
-                raise typer.Exit(1)
+                raise SystemExit(1)
 
             console.print()
 
@@ -1343,25 +1285,24 @@ def create_run(
                 console.print(f"  [yellow]{path}[/yellow]: {msg}")
             else:
                 console.print(f"  {msg}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("models", rich_help_panel="Commands", epilog=RL_MODELS_JSON_HELP)
-def list_models(
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def list_models(config: TrainModelsConfig) -> None:
     """List available models for Hosted Training."""
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
-        config = Config()
+        prime_config = Config()
 
-        models = rl_client.list_models(team_id=config.team_id)
+        models = rl_client.list_models(team_id=prime_config.team_id)
 
         if output == "json":
             output_data_as_json({"models": [m.model_dump() for m in models]}, console)
@@ -1414,14 +1355,14 @@ def list_models(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:
     console.print(f"\n[bold]{label}[/bold] [dim](required)[/dim]")
     console.print(f"[dim]{help_text}[/dim]")
     while True:
-        value = typer.prompt("", prompt_suffix="> ").strip()
+        value = prompt("", prompt_suffix="> ").strip()
         if value:
             return value
         console.print(f"[red]{empty_error}[/red]")
@@ -1430,7 +1371,7 @@ def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:
 def _prompt_optional_text(label: str, help_text: str) -> str | None:
     console.print(f"\n[bold]{label}[/bold] [dim](optional)[/dim]")
     console.print(f"[dim]{help_text}[/dim]")
-    value = typer.prompt("", default="", show_default=False, prompt_suffix="> ").strip()
+    value = prompt("", default="", show_default=False, prompt_suffix="> ").strip()
     return value or None
 
 
@@ -1441,8 +1382,7 @@ def _format_model_request_feedback(models: str, context: str | None) -> str:
     return message
 
 
-@app.command("request", rich_help_panel="Commands")
-def request_models() -> None:
+def request_models(config: TrainRequestConfig) -> None:
     """Request models for Hosted Training."""
     console.print("[bold]Hosted Training Model Request[/bold]")
     console.print("[dim]Tell us which models you want available for training.[/dim]")
@@ -1457,9 +1397,9 @@ def request_models() -> None:
             "Use case or context",
             "Share what you want to train or why this model matters.",
         )
-    except Abort:
+    except (EOFError, KeyboardInterrupt):
         console.print("\n[yellow]Cancelled[/yellow]")
-        raise typer.Exit(0)
+        raise SystemExit(0)
 
     try:
         submit_feedback(
@@ -1468,7 +1408,7 @@ def request_models() -> None:
         )
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     console.print("[green]Request submitted. Thanks![/green]")
 
@@ -1567,11 +1507,10 @@ RL_CONFIGS_JSON_HELP = json_output_help(
 )
 
 
-@app.command("configs", rich_help_panel="Commands", epilog=RL_CONFIGS_JSON_HELP)
-def list_configs(
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def list_configs(config: TrainConfigsConfig) -> None:
     """List available configuration options for Hosted Training."""
+    output = config.output
+
     validate_output_format(output, console)
 
     schema = RLConfig.model_json_schema()
@@ -1625,7 +1564,7 @@ def _list_runs_impl(
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         api_client = APIClient()
@@ -1643,7 +1582,7 @@ def _list_runs_impl(
                     "[red]Error:[/red] Cannot filter by user - no user_id configured. "
                     "Run [bold]prime whoami[/bold] to refresh your config."
                 )
-                raise typer.Exit(1)
+                raise SystemExit(1)
             all_runs = [r for r in all_runs if r.user_id == current_user_id]
 
         total_count = len(all_runs)
@@ -1704,28 +1643,21 @@ def _list_runs_impl(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("list", rich_help_panel="Commands", epilog=RL_LIST_JSON_HELP)
-def list_runs(
-    team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
-    mine: bool = typer.Option(
-        False, "--mine", help="Filter to only your own runs (useful for admin accounts)"
-    ),
-    num: int = typer.Option(20, "--num", "-n", help="Items per page"),
-    page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
-    """List your runs (alias: ls)."""
+def list_runs(config: TrainListConfig) -> None:
+    """List your runs."""
+    team = config.team
+    mine = config.mine
+    num = config.num
+    page = config.page
+    output = config.output
+
     _list_runs_impl(team, num, page, output, mine=mine)
 
 
-@app.command("get", rich_help_panel="Commands", epilog=RL_RUN_JSON_HELP)
-def get_run(
-    run_id: str = typer.Argument(..., help="Run ID to get details for"),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def get_run(config: TrainGetConfig) -> None:
     """Get details of a specific run.
 
     Example:
@@ -1734,6 +1666,9 @@ def get_run(
 
         prime train get <run_id> -o json
     """
+    run_id = config.run_id
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
@@ -1780,21 +1715,20 @@ def get_run(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("stop", rich_help_panel="Commands")
-def stop_run(
-    run_id: str = typer.Argument(..., help="Run ID to stop"),
-    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
-) -> None:
+def stop_run(config: TrainStopConfig) -> None:
     """Stop a run."""
+    run_id = config.run_id
+    force = config.force
+
     try:
         if not force:
-            confirm = typer.confirm(f"Are you sure you want to stop run {run_id}?")
-            if not confirm:
+            confirmed = confirm(f"Are you sure you want to stop run {run_id}?")
+            if not confirmed:
                 console.print("Cancelled.")
-                raise typer.Exit(0)
+                raise SystemExit(0)
 
         api_client = APIClient()
         rl_client = RLClient(api_client)
@@ -1806,20 +1740,19 @@ def stop_run(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("delete", rich_help_panel="Commands")
-def delete_run(
-    run_id: str = typer.Argument(..., help="Run ID to delete"),
-    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
-) -> None:
+def delete_run(config: TrainDeleteConfig) -> None:
     """Delete a run."""
+    run_id = config.run_id
+    force = config.force
+
     if not force:
-        confirm = typer.confirm(f"Are you sure you want to permanently delete run {run_id}?")
-        if not confirm:
+        confirmed = confirm(f"Are you sure you want to permanently delete run {run_id}?")
+        if not confirmed:
             console.print("Cancelled.")
-            raise typer.Exit(0)
+            raise SystemExit(0)
 
     api_client = APIClient()
 
@@ -1840,14 +1773,10 @@ def delete_run(
         console.print(f"[green]✓ Run {run_id} deleted successfully[/green]")
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("restart", rich_help_panel="Commands")
-def restart_run(
-    run_id: str = typer.Argument(..., help="Run ID to restart"),
-    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
-) -> None:
+def restart_run(config: TrainRestartConfig) -> None:
     """Restart a running run from its latest checkpoint.
 
     Only RUNNING runs can be restarted (checkpoints still on PVC).
@@ -1857,14 +1786,17 @@ def restart_run(
 
         prime train restart <run_id>
     """
+    run_id = config.run_id
+    force = config.force
+
     try:
         if not force:
-            confirm = typer.confirm(
+            confirmed = confirm(
                 f"Are you sure you want to restart run {run_id} from its latest checkpoint?"
             )
-            if not confirm:
+            if not confirmed:
                 console.print("Cancelled.")
-                raise typer.Exit(0)
+                raise SystemExit(0)
 
         api_client = APIClient()
         rl_client = RLClient(api_client)
@@ -1876,7 +1808,7 @@ def restart_run(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def _print_new_lines(last_lines: list[str], current_lines: list[str]) -> None:
@@ -1930,7 +1862,7 @@ def _fetch_logs_with_startup_poll(fetch_fn: Any, tail: int, label: str) -> str:
                     "[yellow]Hosted Training run has not started yet. "
                     "Logs will be available once it is running.[/yellow]"
                 )
-                raise typer.Exit(0)
+                raise SystemExit(0)
             time.sleep(HOSTED_TRAINING_LOG_STARTUP_POLL_SECONDS)
 
     raise AssertionError("unreachable")
@@ -1994,9 +1926,9 @@ def _handle_logs_api_error(e: APIError) -> None:
     if _is_log_startup_error(e):
         msg = "Hosted Training run has not started yet. Logs will be available once running."
         console.print(f"[yellow]{msg}[/yellow]")
-        raise typer.Exit(0)
+        raise SystemExit(0)
     console.print(f"[red]Error:[/red] {e}")
-    raise typer.Exit(1)
+    raise SystemExit(1)
 
 
 _SINCE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86_400}
@@ -2017,14 +1949,12 @@ def _parse_since(since: Optional[str]) -> Optional[int]:
     elif raw.isdigit():
         seconds = int(raw)
     else:
-        raise typer.BadParameter(
+        raise ValueError(
             f"Invalid --since value '{since}'. Use e.g. '15m', '1h', '6h', '24h', or seconds.",
-            param_hint="--since",
         )
     if seconds < 60 or seconds > 86_400:
-        raise typer.BadParameter(
+        raise ValueError(
             "--since must be between 60s and 24h (86400s).",
-            param_hint="--since",
         )
     return seconds
 
@@ -2037,59 +1967,7 @@ def _parse_env_qualifier_with_index(env: str) -> tuple[str, int, bool]:
     return env, 0, False
 
 
-@app.command("logs", rich_help_panel="Monitoring")
-def get_logs(
-    run_id: str = typer.Argument(..., help="Run ID to get logs for"),
-    component: Optional[str] = typer.Option(
-        None,
-        "--component",
-        "-c",
-        help=(
-            "Pod to read logs from: 'orchestrator' (default), 'trainer', "
-            "'inference', or 'env-server'. trainer/inference apply only "
-            "to dedicated full-FT runs. Inferred from --env when omitted."
-        ),
-    ),
-    env: Optional[str] = typer.Option(
-        None,
-        "--env",
-        help=(
-            "Env-server name. Implies --component=env-server. "
-            "Use 'name/N' to disambiguate when multiple env-servers share a name. "
-            "List with 'prime train components <run_id>'."
-        ),
-    ),
-    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
-    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
-    raw: bool = typer.Option(False, "--raw", "-r", help="Show raw logs without formatting"),
-    search: Optional[str] = typer.Option(
-        None,
-        "--search",
-        help=(
-            "Filter to lines containing this text. "
-            "Combine with --regex to use a regular expression instead of a substring."
-        ),
-    ),
-    regex: bool = typer.Option(
-        False,
-        "--regex",
-        help="Treat --search as a regex (RE2 syntax).",
-    ),
-    level: Optional[str] = typer.Option(
-        None,
-        "--level",
-        help="Filter to one log level: ERROR | WARNING | SUCCESS | INFO | DEBUG.",
-    ),
-    since: Optional[str] = typer.Option(
-        None,
-        "--since",
-        help=(
-            "Time window for filtered queries. Accepts e.g. '15m', '1h', '6h', "
-            "'24h', or a raw integer seconds value. Default 15m. "
-            "Applies when --search or --level is set."
-        ),
-    ),
-) -> None:
+def get_logs(config: TrainLogsConfig) -> None:
     """Get logs for a run.
 
     Defaults to the orchestrator pod. Use ``--component`` to pick one of
@@ -2116,39 +1994,45 @@ def get_logs(
         prime train logs <run_id> --env reverse-text
         prime train logs <run_id> --env reverse-text/1 -f
     """
+    run_id = config.run_id
+    component = config.component
+    env = config.env
+    tail = config.tail
+    follow = config.follow
+    raw = config.raw
+    search = config.search
+    regex = config.regex
+    level = config.level
+    since = config.since
+
     valid_components = ("orchestrator", "trainer", "inference", "env-server")
     if component is None:
         component = "env-server" if env is not None else "orchestrator"
     elif component not in valid_components:
-        raise typer.BadParameter(
+        raise ValueError(
             f"Invalid component '{component}'. Use one of: {', '.join(valid_components)}.",
-            param_hint="--component",
         )
     if env is not None and component != "env-server":
-        raise typer.BadParameter(
+        raise ValueError(
             f"--env applies only to env-server logs. Drop --component={component} or drop --env.",
-            param_hint="--env",
         )
     if component == "env-server" and env is None:
-        raise typer.BadParameter(
+        raise ValueError(
             "--env is required when reading env-server logs. "
             "Run 'prime train components <run_id>' to list available env-servers.",
-            param_hint="--env",
         )
 
     normalized_level: Optional[str] = None
     if level:
         normalized_level = level.upper()
         if normalized_level not in {"ERROR", "WARNING", "SUCCESS", "INFO", "DEBUG"}:
-            raise typer.BadParameter(
+            raise ValueError(
                 f"Invalid level '{level}'. Use ERROR, WARNING, SUCCESS, INFO, or DEBUG.",
-                param_hint="--level",
             )
 
     if regex and not search:
-        raise typer.BadParameter(
+        raise ValueError(
             "--regex has no effect without --search. Pass --search <pattern> too.",
-            param_hint="--regex",
         )
 
     since_seconds = _parse_since(since)
@@ -2248,10 +2132,7 @@ def get_logs(
         _handle_logs_api_error(e)
 
 
-@app.command("components", rich_help_panel="Monitoring")
-def list_components(
-    run_id: str = typer.Argument(..., help="Run ID to list components for"),
-) -> None:
+def list_components(config: TrainComponentsConfig) -> None:
     """List pods (orchestrator + env-servers) for a run.
 
     Use the env name shown here with
@@ -2263,6 +2144,8 @@ def list_components(
 
         prime train components <run_id>
     """
+    run_id = config.run_id
+
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
@@ -2270,7 +2153,7 @@ def list_components(
         env_servers: List[EnvServerInfo] = rl_client.list_env_servers(run_id)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     table = Table(title=f"Components for {run_id}")
     table.add_column("Component", style="cyan")
@@ -2299,14 +2182,7 @@ def list_components(
         )
 
 
-@app.command("init", rich_help_panel="Commands")
-def init_config(
-    output_path: str = typer.Argument(
-        "rl.toml",
-        help="Output path for the config file",
-    ),
-    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing file"),
-) -> None:
+def init_config(config: TrainInitConfig) -> None:
     """Generate a template config file for a Hosted Training run.
 
     Example:
@@ -2315,11 +2191,14 @@ def init_config(
 
         prime train init my-config.toml
     """
+    output_path = config.output_path
+    force = config.force
+
     path = Path(output_path)
 
     if path.exists() and not force:
         console.print(f"[red]Error:[/red] {output_path} already exists. Use --force to overwrite.")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     # Auto-detect environment
     environment: str | None = None
@@ -2337,16 +2216,10 @@ def init_config(
     path.write_text(template)
 
     console.print(f"[green]✓[/green] Created {output_path}")
-    console.print(f"\n[dim]Run with:[/dim] prime train {output_path}")
+    console.print(f"\n[dim]Run with:[/dim] prime train run {output_path}")
 
 
-@app.command("metrics", rich_help_panel="Monitoring", epilog=RL_METRICS_JSON_HELP)
-def get_metrics(
-    run_id: str = typer.Argument(..., help="Run ID to get metrics for"),
-    min_step: Optional[int] = typer.Option(None, "--min-step", help="Minimum step (inclusive)"),
-    max_step: Optional[int] = typer.Option(None, "--max-step", help="Maximum step (inclusive)"),
-    limit: Optional[int] = typer.Option(None, "--limit", "-n", help="Maximum number of records"),
-) -> None:
+def get_metrics(config: TrainMetricsConfig) -> None:
     """Get Hosted Training metrics for a run.
 
     Example:
@@ -2357,6 +2230,11 @@ def get_metrics(
 
         prime train metrics <run_id> | jq '.metrics[0]'
     """
+    run_id = config.run_id
+    min_step = config.min_step
+    max_step = config.max_step
+    limit = config.limit
+
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
@@ -2372,16 +2250,10 @@ def get_metrics(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("rollouts", rich_help_panel="Monitoring", epilog=RL_ROLLOUTS_JSON_HELP)
-def get_rollouts(
-    run_id: str = typer.Argument(..., help="Run ID to get rollouts for"),
-    step: int = typer.Option(..., "--step", "-s", help="Step number to get rollouts for"),
-    page: int = typer.Option(1, "--page", "-p", help="Page number (1-indexed)"),
-    num: int = typer.Option(100, "--num", "-n", help="Items per page"),
-) -> None:
+def get_rollouts(config: TrainRolloutsConfig) -> None:
     """Get rollout samples for a run.
 
     Example:
@@ -2390,6 +2262,11 @@ def get_rollouts(
 
         prime train rollouts <run_id> -s 50 --num 100 | jq '.samples[0]'
     """
+    run_id = config.run_id
+    step = config.step
+    page = config.page
+    num = config.num
+
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
@@ -2405,13 +2282,10 @@ def get_rollouts(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("progress", rich_help_panel="Monitoring", epilog=RL_PROGRESS_JSON_HELP)
-def get_progress(
-    run_id: str = typer.Argument(..., help="Run ID to get progress for"),
-) -> None:
+def get_progress(config: TrainProgressConfig) -> None:
     """Get progress information, including which steps have samples and distributions.
 
     Example:
@@ -2420,6 +2294,8 @@ def get_progress(
 
         prime train progress <run_id> | jq '.latest_step'
     """
+    run_id = config.run_id
+
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
@@ -2430,19 +2306,10 @@ def get_progress(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("distributions", rich_help_panel="Monitoring", epilog=RL_DISTRIBUTIONS_JSON_HELP)
-def get_distributions(
-    run_id: str = typer.Argument(..., help="Run ID to get distributions for"),
-    distribution_type: Optional[str] = typer.Option(
-        None, "--type", "-t", help="Distribution type (defaults to all)"
-    ),
-    step: Optional[int] = typer.Option(
-        None, "--step", "-s", help="Step number (defaults to latest)"
-    ),
-) -> None:
+def get_distributions(config: TrainDistributionsConfig) -> None:
     """Get reward/advantage distribution histogram for a run.
 
     Example:
@@ -2451,6 +2318,10 @@ def get_distributions(
 
         prime train distributions <run_id> --type rewards --step 50
     """
+    run_id = config.run_id
+    distribution_type = config.distribution_type
+    step = config.step
+
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
@@ -2465,17 +2336,10 @@ def get_distributions(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("checkpoints", rich_help_panel="Monitoring", epilog=RL_CHECKPOINTS_JSON_HELP)
-def list_checkpoints(
-    run_id: str = typer.Argument(..., help="Run ID to list checkpoints for"),
-    status_filter: Optional[str] = typer.Option(
-        None, "--status", "-s", help="Filter by status (READY, PENDING, UPLOADING, FAILED)"
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def list_checkpoints(config: TrainCheckpointsConfig) -> None:
     """List checkpoints for a run.
 
     Example:
@@ -2484,6 +2348,10 @@ def list_checkpoints(
 
         prime train checkpoints <run_id> --status READY
     """
+    run_id = config.run_id
+    status_filter = config.status_filter
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
@@ -2528,10 +2396,4 @@ def list_checkpoints(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
-
-
-# `prime train usage` — token usage and price for one run; lives next to the
-# other run-scoped monitoring commands. Implemented in commands/usage.py and
-# also re-exposed as the top-level `prime usage` summary command.
-app.command("usage", rich_help_panel="Monitoring", epilog=RUN_USAGE_JSON_HELP)(run_usage_command)
+        raise SystemExit(1)

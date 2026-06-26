@@ -8,27 +8,30 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
-import click
 import httpx
-import typer
 from gitignore_parser import parse_gitignore
 from prime_sandboxes import APIClient, APIError, Config, UnauthorizedError
 from rich.table import Table
 
+from prime_cli.leaves.images.delete import Config as ImagesDeleteConfig
+from prime_cli.leaves.images.list import Config as ImagesListConfig
+from prime_cli.leaves.images.publish import Config as ImagesPublishConfig
+from prime_cli.leaves.images.push import Config as ImagesPushConfig
+from prime_cli.leaves.images.unpublish import Config as ImagesUnpublishConfig
+
 from ..utils import (
-    PlainTyper,
     get_console,
     json_output_help,
     output_data_as_json,
     validate_output_format,
 )
+from ..utils.prompt import confirm
 
-app = PlainTyper(help="Manage Docker images in Prime Intellect registry", no_args_is_help=True)
 console = get_console()
 # Use a synthetic archive path to avoid collisions with Dockerfiles already in the context.
 PACKAGED_DOCKERFILE_PATH = ".__prime_dockerfile__"
 
-config = Config()
+prime_config = Config()
 
 
 class ImageVisibility(str, Enum):
@@ -361,36 +364,7 @@ def _group_sort_key(partition: PartitionMap) -> datetime:
     return ts if ts is not None else datetime.min.replace(tzinfo=timezone.utc)
 
 
-@app.command("push")
-def push_image(
-    image_reference: str = typer.Argument(
-        ..., help="Image reference (e.g., 'myapp:v1.0.0' or 'myapp:latest')"
-    ),
-    context: str = typer.Option(".", "--context", "-c", help="Build context directory"),
-    dockerfile: Optional[str] = typer.Option(
-        None,
-        "--dockerfile",
-        "-f",
-        help="Path to Dockerfile",
-        show_default="<context>/Dockerfile",
-    ),
-    platform: str = typer.Option(
-        "linux/amd64",
-        "--platform",
-        click_type=click.Choice(["linux/amd64", "linux/arm64"]),
-        help="Target platform (defaults to linux/amd64 for Kubernetes compatibility)",
-    ),
-    public: bool = typer.Option(
-        False,
-        "--public",
-        help="Make the image public when the build completes",
-    ),
-    private: bool = typer.Option(
-        False,
-        "--private",
-        help="Make the image private when the build completes",
-    ),
-) -> str:
+def push_image(config: ImagesPushConfig) -> str:
     """
     Build and push a Docker image to Prime Intellect registry.
 
@@ -404,10 +378,17 @@ def push_image(
         prime images push myapp:v1 --platform linux/arm64
         prime images push myapp:v1 --public
     """
+    image_reference = config.image_reference
+    context = config.context
+    dockerfile = config.dockerfile
+    platform = config.platform
+    public = config.public
+    private = config.private
+
     try:
         if public and private:
             console.print("[red]Error: --public and --private cannot be used together[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         # Parse image reference
         if ":" in image_reference:
@@ -422,13 +403,13 @@ def push_image(
                 "[red]Error: Image name cannot contain '/'. "
                 "Use simple names like 'myapp:v1.0.0'.[/red]"
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         console.print(
             f"[bold blue]Building and pushing image:[/bold blue] {image_name}:{image_tag}"
         )
-        if config.team_id:
-            console.print(f"[dim]Team: {config.team_id}[/dim]")
+        if prime_config.team_id:
+            console.print(f"[dim]Team: {prime_config.team_id}[/dim]")
         console.print()
 
         # Initialize API client
@@ -439,19 +420,19 @@ def push_image(
 
         if not context_path.exists():
             console.print(f"[red]Error: Build context not found at {context_path}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if not context_path.is_dir():
             console.print(f"[red]Error: Build context must be a directory: {context_path}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if not dockerfile_path.exists():
             console.print(f"[red]Error: Dockerfile not found at {dockerfile_path}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         if not dockerfile_path.is_file():
             console.print(f"[red]Error: Dockerfile must be a file: {dockerfile_path}[/red]")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
         # Create tar.gz of build context
         console.print("[cyan]Preparing build context...[/cyan]")
@@ -506,8 +487,8 @@ def push_image(
                     "dockerfile_path": PACKAGED_DOCKERFILE_PATH,
                     "platform": platform,
                 }
-                if config.team_id:
-                    build_payload["team_id"] = config.team_id
+                if prime_config.team_id:
+                    build_payload["team_id"] = prime_config.team_id
                 if public:
                     build_payload["visibility"] = ImageVisibility.PUBLIC.value
                 elif private:
@@ -522,10 +503,10 @@ def push_image(
                 console.print(
                     "[red]Error: Not authenticated. Please run 'prime login' first.[/red]"
                 )
-                raise typer.Exit(1)
+                raise SystemExit(1)
             except APIError as e:
                 console.print(f"[red]Error: Failed to initiate build: {e}[/red]")
-                raise typer.Exit(1)
+                raise SystemExit(1)
 
             build_id = build_response.get("build_id")
             upload_url = build_response.get("upload_url")
@@ -534,7 +515,7 @@ def push_image(
                     "[red]Error: Invalid response from server "
                     "(missing build_id or upload_url)[/red]"
                 )
-                raise typer.Exit(1)
+                raise SystemExit(1)
             full_image_path = build_response.get("fullImagePath") or f"{image_name}:{image_tag}"
 
             console.print("[green]✓[/green] Build initiated")
@@ -553,7 +534,7 @@ def push_image(
                     upload_response.raise_for_status()
             except httpx.HTTPError as e:
                 console.print(f"[red]Upload failed: {e}[/red]")
-                raise typer.Exit(1)
+                raise SystemExit(1)
 
             console.print("[green]✓[/green] Build context uploaded")
             console.print()
@@ -568,7 +549,7 @@ def push_image(
                 )
             except APIError as e:
                 console.print(f"[red]Error: Failed to start build: {e}[/red]")
-                raise typer.Exit(1)
+                raise SystemExit(1)
 
             console.print("[green]✓[/green] Build started")
             console.print()
@@ -610,24 +591,10 @@ def push_image(
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled by user[/yellow]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("list", epilog=LIST_IMAGES_JSON_HELP)
-def list_images(
-    output: str = typer.Option("table", "--output", "-o", help="Output format (table or json)"),
-    search: Optional[str] = typer.Option(
-        None,
-        "--search",
-        "-q",
-        help="Case-insensitive substring match on image name, tag, or reference",
-    ),
-    all_images: bool = typer.Option(
-        False, "--all", "-a", help="[Deprecated] Show all accessible images (personal + team)"
-    ),
-    page: int = typer.Option(1, "--page", "-p", help="Page number"),
-    num: int = typer.Option(50, "--num", "-n", help="Items per page (max 250)"),
-):
+def list_images(config: ImagesListConfig):
     """
     List all images you've pushed to Prime Intellect registry.
 
@@ -645,21 +612,20 @@ def list_images(
         prime images list --page 2
         prime images list --output json
     """
+    output = config.output
+    search = config.search
+    page = config.page
+    num = config.num
+
     validate_output_format(output, console)
 
     if num < 1 or page < 1:
         console.print("[red]Error:[/red] --num and --page must be at least 1")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     if num > 250:
         console.print("[red]Error:[/red] --num cannot exceed 250")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
-    if all_images and output != "json":
-        console.print(
-            "[yellow]Warning: --all flag is deprecated and will be removed in a future release. "
-            "Images are now scoped to your current context (personal or team).[/yellow]"
-        )
-        console.print()
     try:
         client = APIClient()
 
@@ -667,8 +633,8 @@ def list_images(
 
         # Build query params
         params: dict[str, str] = {"limit": str(num), "offset": str(offset)}
-        if config.team_id:
-            params["teamId"] = config.team_id
+        if prime_config.team_id:
+            params["teamId"] = prime_config.team_id
         if search:
             params["search"] = search
 
@@ -708,10 +674,10 @@ def list_images(
             return
 
         # Table output
-        is_team_listing: bool = bool(config.team_id)
+        is_team_listing: bool = bool(prime_config.team_id)
         title: str
         if is_team_listing:
-            title = f"Team Docker Images (team: {config.team_id})"
+            title = f"Team Docker Images (team: {prime_config.team_id})"
         else:
             title = "Personal Docker Images"
 
@@ -808,10 +774,10 @@ def list_images(
 
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Optional[str]]:
@@ -821,7 +787,7 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
     either ``name:tag`` or ``{currentUserId}/name:tag``. Team image refs may
     use ``team-{teamId}/name:tag``.
     """
-    team_id: Optional[str] = config.team_id
+    team_id: Optional[str] = prime_config.team_id
     if "/" in image_reference:
         namespace, rest = image_reference.split("/", 1)
         if namespace.startswith("team-"):
@@ -831,10 +797,10 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
                     "[red]Error: Invalid team image reference. "
                     "Expected format: team-{teamId}/imagename:tag[/red]"
                 )
-                raise typer.Exit(1)
+                raise SystemExit(1)
             team_id = extracted_team_id
             image_reference = rest
-        elif namespace == config.user_id:
+        elif namespace == prime_config.user_id:
             team_id = None
             image_reference = rest
         else:
@@ -844,11 +810,11 @@ def _parse_mutable_image_reference(image_reference: str) -> tuple[str, str, Opti
                 "'{userId}/imagename:tag' with your current user ID, or "
                 "'team-{teamId}/imagename:tag' for team images.[/red]"
             )
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
     if ":" not in image_reference:
         console.print("[red]Error: Image reference must include a tag (e.g., myapp:latest)[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     image_name, image_tag = image_reference.rsplit(":", 1)
     return image_name, image_tag, team_id
@@ -872,17 +838,7 @@ def _set_image_visibility(image_reference: str, visibility: ImageVisibility) -> 
     )
 
 
-@app.command("publish")
-def publish_image(
-    image_reference: str = typer.Argument(
-        ...,
-        help=(
-            "Image reference to make public "
-            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
-            "or 'team-{teamId}/myapp:v1.0.0')"
-        ),
-    ),
-):
+def publish_image(config: ImagesPublishConfig):
     """
     Make an image public so other Prime users can run it.
 
@@ -892,27 +848,19 @@ def publish_image(
         prime images publish cmk123/myapp:v1.0.0
         prime images publish team-abc123/myapp:v1.0.0
     """
+    image_reference = config.image_reference
+
     try:
         _set_image_visibility(image_reference, ImageVisibility.PUBLIC)
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("unpublish")
-def unpublish_image(
-    image_reference: str = typer.Argument(
-        ...,
-        help=(
-            "Image reference to make private "
-            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
-            "or 'team-{teamId}/myapp:v1.0.0')"
-        ),
-    ),
-):
+def unpublish_image(config: ImagesUnpublishConfig):
     """
     Make a public image private again.
 
@@ -922,28 +870,19 @@ def unpublish_image(
         prime images unpublish cmk123/myapp:v1.0.0
         prime images unpublish team-abc123/myapp:v1.0.0
     """
+    image_reference = config.image_reference
+
     try:
         _set_image_visibility(image_reference, ImageVisibility.PRIVATE)
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except APIError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command("delete")
-def delete_image(
-    image_reference: str = typer.Argument(
-        ...,
-        help=(
-            "Image reference to delete "
-            "(e.g., 'myapp:v1.0.0', '<currentUserId>/myapp:v1.0.0', "
-            "or 'team-{teamId}/myapp:v1.0.0')"
-        ),
-    ),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-):
+def delete_image(config: ImagesDeleteConfig):
     """
     Delete an image from your registry.
 
@@ -957,6 +896,9 @@ def delete_image(
         prime images delete cmk123/myapp:v1.0.0
         prime images delete team-abc123/myapp:v1.0.0
     """
+    image_reference = config.image_reference
+    yes = config.yes
+
     # Store original input for error messages
     original_reference = image_reference
 
@@ -966,10 +908,10 @@ def delete_image(
         context = f" (team: {team_id})" if team_id else ""
         if not yes:
             msg = f"Are you sure you want to delete {image_name}:{image_tag}{context}?"
-            confirm = typer.confirm(msg)
-            if not confirm:
+            confirmed = confirm(msg)
+            if not confirmed:
                 console.print("[yellow]Cancelled[/yellow]")
-                raise typer.Exit(0)
+                raise SystemExit(0)
 
         client = APIClient()
 
@@ -980,7 +922,7 @@ def delete_image(
 
     except UnauthorizedError:
         console.print("[red]Error: Not authenticated. Please run 'prime login' first.[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except APIError as e:
         if "404" in str(e):
             console.print(f"[red]Error: Image {original_reference} not found[/red]")
@@ -991,4 +933,4 @@ def delete_image(
             )
         else:
             console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)

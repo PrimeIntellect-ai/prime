@@ -4,9 +4,9 @@ import json
 from typing import Any, Dict, List, Optional
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.main import app
 from prime_cli.utils.formatters import strip_ansi
-from typer.testing import CliRunner
 
 
 @pytest.fixture(autouse=True)

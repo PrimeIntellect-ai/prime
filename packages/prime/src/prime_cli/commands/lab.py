@@ -2,95 +2,81 @@
 
 from pathlib import Path
 
-import typer
 from rich.console import Console
 
-app = typer.Typer(
-    help="Lab platform commands",
-    invoke_without_command=True,
-    no_args_is_help=False,
-)
+from prime_cli.leaves.lab.doctor import Config as LabDoctorConfig
+from prime_cli.leaves.lab.hygiene import Config as LabHygieneConfig
+from prime_cli.leaves.lab.mcp import Config as LabMcpConfig
+from prime_cli.leaves.lab.register_github import Config as LabRegisterGithubConfig
+from prime_cli.leaves.lab.setup import Config as LabSetupConfig
+from prime_cli.leaves.lab.sync import Config as LabSyncConfig
+from prime_cli.leaves.lab.view import Config as LabViewConfig
+
 console = Console()
 
 
-@app.callback()
-def lab(
-    ctx: typer.Context,
-    limit: int = typer.Option(1000, "--limit", "-n", help="Max rows to load per section"),
-    env_dir: str = typer.Option(
-        "./environments",
-        "--env-dir",
-        help="Local environments directory for discovering eval outputs",
-    ),
-    outputs_dir: str = typer.Option(
-        "./outputs",
-        "--outputs-dir",
-        help="Local outputs directory for discovering eval outputs",
-    ),
-) -> None:
-    """Launch the interactive Lab viewer."""
-    if ctx.invoked_subcommand is not None:
-        return
-    _launch_view(limit=limit, env_dir=env_dir, outputs_dir=outputs_dir)
-
-
-@app.command(
-    add_help_option=False,
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-    },
-)
-def setup(ctx: typer.Context) -> None:
+def setup(config: LabSetupConfig) -> None:
     """Set up a Lab workspace."""
-    from ..lab_setup import run_lab_setup
+    from ..lab_setup import (
+        LabSetupOptions,
+        emit_to_console,
+        resolve_setup_agents,
+        run_lab_setup_service,
+    )
 
-    code = run_lab_setup(list(ctx.args), console=console)
-    if code != 0:
-        raise typer.Exit(code)
+    options = LabSetupOptions(
+        skip_agents_md=config.skip_agents_md,
+        skip_install=config.skip_install,
+        agents=resolve_setup_agents(config.agents, no_interactive=config.no_interactive),
+    )
+    result = run_lab_setup_service(
+        options,
+        workspace=Path.cwd(),
+        emit=lambda item: emit_to_console(console, item),
+    )
+    if result.exit_code != 0:
+        raise SystemExit(result.exit_code)
 
 
-@app.command(
-    add_help_option=False,
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-    },
-)
-def sync(ctx: typer.Context) -> None:
+def sync(config: LabSyncConfig) -> None:
     """Refresh Lab skills and local agent guidance."""
-    from ..lab_setup import run_lab_sync
+    from ..lab_setup import (
+        LabSyncOptions,
+        emit_to_console,
+        resolve_explicit_agents,
+        run_lab_sync_service,
+    )
 
-    code = run_lab_sync(list(ctx.args), console=console)
-    if code != 0:
-        raise typer.Exit(code)
+    agents = resolve_explicit_agents(config.agents) if config.agents is not None else ()
+    result = run_lab_sync_service(
+        LabSyncOptions(agents=agents, skip_docs=config.skip_docs, no_agent=config.no_agent),
+        workspace=Path.cwd(),
+        emit=lambda item: emit_to_console(console, item),
+    )
+    if result.exit_code != 0:
+        raise SystemExit(result.exit_code)
 
 
-@app.command(
-    add_help_option=False,
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-    },
-)
-def doctor(ctx: typer.Context) -> None:
+def doctor(config: LabDoctorConfig) -> None:
     """Check a Lab workspace."""
-    from ..lab_setup import run_lab_doctor
+    from ..lab_setup import (
+        LabDoctorOptions,
+        print_lab_doctor_result,
+        run_lab_doctor_service,
+    )
 
-    code = run_lab_doctor(list(ctx.args), console=console)
-    if code != 0:
-        raise typer.Exit(code)
+    result = run_lab_doctor_service(
+        LabDoctorOptions(fix=config.fix),
+        workspace=Path.cwd(),
+    )
+    print_lab_doctor_result(result, console)
+    if result.exit_code != 0:
+        raise SystemExit(result.exit_code)
 
 
-@app.command("hygiene")
-def hygiene(
-    fix: bool = typer.Option(
-        False,
-        "--fix",
-        help="Apply safe local remediations such as dirs and gitignore entries.",
-    ),
-) -> None:
+def hygiene(config: LabHygieneConfig) -> None:
     """Check cheap Lab git hygiene."""
+    fix = config.fix
 
     from ..lab_hygiene import LabHygieneOptions, run_lab_hygiene_preflight
 
@@ -100,11 +86,10 @@ def hygiene(
         emit=lambda message: console.print(message, markup=False),
     )
     if result.exit_code != 0:
-        raise typer.Exit(result.exit_code)
+        raise SystemExit(result.exit_code)
 
 
-@app.command("register-github")
-def register_github() -> None:
+def register_github(config: LabRegisterGithubConfig) -> None:
     """Write the GitHub workflow for Lab git hygiene."""
 
     from ..lab_hygiene import write_lab_github_workflow
@@ -113,25 +98,23 @@ def register_github() -> None:
     console.print(f"Wrote {path}", markup=False)
 
 
-@app.command("mcp")
-def mcp(
-    workspace: Path | None = typer.Option(
-        None,
-        "--workspace",
-        help="Workspace whose running Lab TUI should receive MCP tool calls.",
-    ),
-) -> None:
+def mcp(config: LabMcpConfig) -> None:
     """Run the Lab MCP server over stdio."""
+    workspace = config.workspace
 
     from ..lab_mcp import run_lab_mcp_server
 
     run_lab_mcp_server(workspace or Path.cwd())
 
 
-def _launch_view(*, limit: int, env_dir: str, outputs_dir: str) -> None:
+def _launch_view(config: LabViewConfig) -> None:
+    limit = config.limit
+    env_dir = config.env_dir
+    outputs_dir = config.outputs_dir
+
     if limit < 1:
         console.print("[red]Error:[/red] --limit must be at least 1")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     from prime_lab_app import run_lab_view
 

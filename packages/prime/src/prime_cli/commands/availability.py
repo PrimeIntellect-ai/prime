@@ -1,14 +1,16 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-import typer
 from rich.table import Table
 from rich.text import Text
+
+from prime_cli.leaves.availability.disks import Config as AvailabilityDisksConfig
+from prime_cli.leaves.availability.gpu_types import Config as AvailabilityGpuTypesConfig
+from prime_cli.leaves.availability.list import Config as AvailabilityListConfig
 
 from ..api.availability import AvailabilityClient, GPUAvailability
 from ..client import APIClient, APIError
 from ..helper.short_id import generate_short_id, generate_short_id_disk
 from ..utils import (
-    PlainTyper,
     get_console,
     json_output_help,
     output_data_as_json,
@@ -17,7 +19,6 @@ from ..utils import (
 )
 from ..utils.display import STOCK_STATUS_COLORS
 
-app = PlainTyper(help="Check GPU availability and pricing", no_args_is_help=True)
 console = get_console()
 
 LIST_GPU_JSON_HELP = json_output_help(
@@ -78,11 +79,10 @@ def _format_disk_for_display(disk_entry: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-@app.command(epilog=LIST_GPU_TYPES_JSON_HELP)
-def gpu_types(
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def gpu_types(config: AvailabilityGpuTypesConfig) -> None:
     """List available GPU types"""
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
@@ -112,35 +112,26 @@ def gpu_types(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         import traceback
 
         traceback.print_exc()
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(epilog=LIST_GPU_JSON_HELP)
-def list(
-    gpu_type: Optional[str] = typer.Option(None, help="GPU type (e.g., H100_80GB)"),
-    gpu_count: Optional[int] = typer.Option(None, help="Number of GPUs required"),
-    regions: Optional[List[str]] = typer.Option(
-        None, help="Filter by regions (e.g., united_states)"
-    ),
-    socket: Optional[str] = typer.Option(
-        None, help="Filter by socket type (e.g., PCIe, SXM5, SXM4)"
-    ),
-    provider: Optional[str] = typer.Option(
-        None, help="Filter by provider (e.g., aws, azure, google)"
-    ),
-    disks: Optional[List[str]] = typer.Option(None, help="Filter by disk ids"),
-    group_similar: bool = typer.Option(
-        True, help="Group similar configurations from same provider"
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def list(config: AvailabilityListConfig) -> None:
     """List available GPU resources"""
+    gpu_type = config.gpu_type
+    gpu_count = config.gpu_count
+    regions = config.regions
+    socket = config.socket
+    provider = config.provider
+    disks = config.disks
+    group_similar = config.group_similar
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
@@ -307,26 +298,21 @@ def list(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {str(e)}")
         import traceback
 
         traceback.print_exc()
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(epilog=LIST_AVAILABILITY_DISKS_JSON_HELP)
-def disks(
-    regions: Optional[List[str]] = typer.Option(
-        None, help="Filter by regions (e.g., united_states)"
-    ),
-    data_center_id: Optional[str] = typer.Option(
-        None, help="Filter by data center ID (e.g., US-1)"
-    ),
-    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
-) -> None:
+def disks(config: AvailabilityDisksConfig) -> None:
     """List available disks"""
+    regions = config.regions
+    data_center_id = config.data_center_id
+    output = config.output
+
     validate_output_format(output, console)
 
     try:
@@ -413,4 +399,4 @@ def disks(
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)

@@ -1,8 +1,8 @@
 from typing import Any, Dict, Optional
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.main import app
-from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -23,13 +23,13 @@ class TestConfigSetTeamId:
         result = runner.invoke(app, ["config", "set-team-id"], env=TEST_ENV)
 
         assert result.exit_code != 0
-        assert "Missing argument 'TEAM_ID'" in result.output
+        assert "--team-id" in result.output
+        assert "Field required" in result.output
 
     def test_set_team_id_populates_name_from_paginated_team_lookup(
         self, temp_home: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("PRIME_API_KEY", "test-key")
-        monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
         target_team = {
             "teamId": "cmf0ohr9s0026ilerf3w68s6z",

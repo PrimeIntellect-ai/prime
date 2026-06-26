@@ -2,6 +2,7 @@ from typing import Any
 
 from prime_cli.commands import env as env_commands
 from prime_cli.commands.env import _resolve_pull_environment_path
+from prime_cli.leaves.env.pull import Config as EnvPullConfig
 from verifiers.utils import install_utils
 
 
@@ -61,7 +62,7 @@ def test_pull_uses_shared_source_downloader(tmp_path, monkeypatch):
     monkeypatch.setattr(env_commands, "APIClient", FakeAPIClient)
     monkeypatch.setattr(install_utils, "download_environment_source", fake_download, raising=False)
 
-    env_commands.pull("alice/demo", target=str(target), version="latest")
+    env_commands.pull(EnvPullConfig(env_id="alice/demo", target=str(target), version="latest"))
 
     assert (target / "README.md").read_text(encoding="utf-8") == "# Demo\n"
     assert captured["details"]["tracked_package_url"] == "https://example.test/tracked"

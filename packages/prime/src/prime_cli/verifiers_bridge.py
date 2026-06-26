@@ -1,4 +1,4 @@
-"""Process boundary between Prime's Typer CLI and Verifiers-owned commands."""
+"""Process boundary between Prime's router and Verifiers-owned commands."""
 
 from __future__ import annotations
 

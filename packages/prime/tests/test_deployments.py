@@ -1,9 +1,9 @@
 from types import SimpleNamespace
 from typing import Any
 
+from click.testing import CliRunner
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
-from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -12,7 +12,6 @@ def test_deployments_create_prints_chat_and_api_key_commands(monkeypatch) -> Non
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
     monkeypatch.setenv("COLUMNS", "200")
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
     model = SimpleNamespace(
         id="adapter-123",

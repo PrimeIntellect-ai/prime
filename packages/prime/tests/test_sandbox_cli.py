@@ -3,10 +3,10 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
-from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -332,7 +332,7 @@ def test_sandbox_delete_by_label_scopes_to_caller(
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.bulk_delete", mock_bulk_delete)
 
-    result = runner.invoke(app, ["sandbox", "delete", "--label", "keep", "--yes"])
+    result = runner.invoke(app, ["sandbox", "delete", "--labels", "keep", "--yes"])
 
     output = strip_ansi(result.output)
     assert result.exit_code == 0, f"Failed: {result.output}"
@@ -385,7 +385,9 @@ def test_sandbox_delete_by_label_all_users_passes_admin_scope(
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.bulk_delete", mock_bulk_delete)
 
-    result = runner.invoke(app, ["sandbox", "delete", "--label", "archive", "--all-users", "--yes"])
+    result = runner.invoke(
+        app, ["sandbox", "delete", "--labels", "archive", "--all-users", "--yes"]
+    )
 
     output = strip_ansi(result.output)
     assert result.exit_code == 0, f"Failed: {result.output}"

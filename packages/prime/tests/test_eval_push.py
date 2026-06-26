@@ -1,7 +1,7 @@
 import json
 
 import pytest
-import typer
+from click.testing import CliRunner
 from prime_cli.commands.evals import (
     _has_eval_files,
     _load_eval_directory,
@@ -11,7 +11,6 @@ from prime_cli.commands.evals import (
 )
 from prime_cli.main import app
 from prime_cli.utils.eval_push import convert_eval_results
-from typer.testing import CliRunner
 from typing_extensions import cast
 
 runner = CliRunner()
@@ -220,7 +219,6 @@ class TestValidateEvalPath:
 
 def test_push_eval_rejects_public_with_eval_id(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
     (tmp_path / "metadata.json").write_text(json.dumps({"env": "gsm8k", "model": "gpt-4"}))
     (tmp_path / "results.jsonl").write_text("")
@@ -237,7 +235,6 @@ def test_push_eval_rejects_public_with_eval_id(monkeypatch, tmp_path):
 
 def test_push_eval_forwards_name_override(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
     captured = {}
 
@@ -301,7 +298,6 @@ def test_push_samples_with_progress_supports_old_prime_evals_client(monkeypatch)
 
 def test_push_eval_cli_supports_old_prime_evals_client(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     captured = {}
 
     class TerminalConsole:
@@ -407,10 +403,10 @@ class TestPushSingleEval:
         (tmp_path / "metadata.json").write_text(json.dumps(metadata))
         (tmp_path / "results.jsonl").write_text("")
 
-        with pytest.raises(typer.Exit) as exc_info:
+        with pytest.raises(SystemExit) as exc_info:
             _push_single_eval(str(tmp_path), None, None, None)
 
-        assert cast(typer.Exit, exc_info.value).exit_code == 1
+        assert cast(SystemExit, exc_info.value).code == 1
         output = capsys.readouterr().out
         assert "Evaluation uploads require a pushed environment" in output
         assert "prime env push gsm8k" in output

@@ -11,9 +11,9 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
     import tomli as tomllib
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.commands.tunnel import _format_tunnel_for_output
 from prime_cli.main import app
-from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -75,7 +75,7 @@ def test_tunnel_start_cli_passes_labels_to_sdk(monkeypatch: pytest.MonkeyPatch) 
 
     result = runner.invoke(
         app,
-        ["tunnel", "start", "--port", "8765", "--label", "dev", "--label", "preview"],
+        ["tunnel", "start", "--port", "8765", "--labels", "dev", "preview"],
     )
 
     assert result.exit_code == 0, result.output
@@ -217,7 +217,7 @@ def test_tunnel_list_passes_label_filters(monkeypatch: pytest.MonkeyPatch) -> No
 
     result = runner.invoke(
         app,
-        ["tunnel", "list", "--label", "dev", "--sort-by", "name", "--output", "json"],
+        ["tunnel", "list", "--labels", "dev", "--sort-by", "name", "--output", "json"],
     )
 
     assert result.exit_code == 0, result.output
@@ -267,7 +267,7 @@ def test_tunnel_stop_by_label_uses_bulk_delete(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr("prime_tunnel.core.client.TunnelClient", FakeTunnelClient)
 
-    result = runner.invoke(app, ["tunnel", "stop", "--label", "dev", "--yes"])
+    result = runner.invoke(app, ["tunnel", "stop", "--labels", "dev", "--yes"])
 
     assert result.exit_code == 0, result.output
     assert captured["labels"] == ["dev"]
@@ -293,7 +293,7 @@ def test_tunnel_stop_by_label_validates_scope_before_prompt(
 
     # No --yes: if the scope check ran after the prompt we'd see the confirmation
     # text; instead it must fail fast with a clean error and never prompt.
-    result = runner.invoke(app, ["tunnel", "stop", "--label", "dev"])
+    result = runner.invoke(app, ["tunnel", "stop", "--labels", "dev"])
 
     assert result.exit_code == 1
     assert "Cannot resolve current user ID" in result.output
@@ -412,7 +412,7 @@ def test_tunnel_stop_status_combines_with_label(
 
     result = runner.invoke(
         app,
-        ["tunnel", "stop", "--label", "dev", "--status", "disconnected", "--yes"],
+        ["tunnel", "stop", "--labels", "dev", "--status", "disconnected", "--yes"],
     )
 
     assert result.exit_code == 0, result.output

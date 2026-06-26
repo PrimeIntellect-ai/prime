@@ -3,12 +3,13 @@ from __future__ import annotations
 import sys
 from typing import Any, Dict, Iterable, List, Optional, cast
 
-import typer
 from rich.table import Table
+
+from prime_cli.leaves.inference.chat import Config as InferenceChatConfig
+from prime_cli.leaves.inference.models import Config as InferenceModelsConfig
 
 from ..api.inference import InferenceAPIError, InferenceClient
 from ..utils import (
-    PlainTyper,
     get_console,
     json_output_help,
     output_data_as_json,
@@ -16,11 +17,6 @@ from ..utils import (
 )
 from ..utils.formatters import format_price_per_mtok
 
-app = PlainTyper(
-    help="Run and manage Prime Inference\n\n"
-    "Use `prime eval run` for environment evals with Prime Inference.",
-    no_args_is_help=True,
-)
 console = get_console()
 
 MODELS_JSON_HELP = json_output_help(
@@ -60,23 +56,20 @@ def _sort_models(models: List[Dict[str, Any]], sort: str, order: str) -> List[Di
     return sorted(models, key=key)
 
 
-@app.command("models", epilog=MODELS_JSON_HELP)
-def list_models(
-    output: str = typer.Option("table", "--output", "-o", help="table|json"),
-    search: Optional[str] = typer.Option(
-        None, "--search", "-q", help="Case-insensitive substring match on model id"
-    ),
-    sort: str = typer.Option("id", "--sort", "-s", help="Sort by: id, input, output"),
-    order: str = typer.Option("asc", "--order", "-d", help="Sort order (direction): asc, desc"),
-) -> None:
+def list_models(config: InferenceModelsConfig) -> None:
     """List available models from Prime Inference (/v1/models)."""
+    output = config.output
+    search = config.search
+    sort = config.sort
+    order = config.order
+
     validate_output_format(output, console)
     if sort not in _SORT_KEYS:
         console.print(f"[red]Error:[/red] --sort must be one of: {', '.join(_SORT_KEYS)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     if order not in _ORDER_KEYS:
         console.print(f"[red]Error:[/red] --order must be one of: {', '.join(_ORDER_KEYS)}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         client = InferenceClient(require_auth=False)
@@ -137,10 +130,10 @@ def list_models(
 
     except InferenceAPIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 CHAT_JSON_HELP = json_output_help(
@@ -171,22 +164,7 @@ def _print_stream(chunks: Iterable[Dict[str, Any]]) -> None:
     sys.stdout.flush()
 
 
-@app.command("chat", epilog=CHAT_JSON_HELP)
-def chat(
-    model: str = typer.Argument(..., help="Model id (see `prime inference models`)"),
-    message: Optional[str] = typer.Argument(
-        None, help="User message. If omitted, reads from stdin."
-    ),
-    system: Optional[str] = typer.Option(None, "--system", "-s", help="System prompt"),
-    stream: bool = typer.Option(False, "--stream", help="Stream tokens as they arrive"),
-    temperature: Optional[float] = typer.Option(
-        None, "--temperature", "-t", help="Sampling temperature"
-    ),
-    max_tokens: Optional[int] = typer.Option(
-        None, "--max-tokens", help="Maximum tokens to generate"
-    ),
-    output: str = typer.Option("text", "--output", "-o", help="text|json"),
-) -> None:
+def chat(config: InferenceChatConfig) -> None:
     """Send a one-shot chat message to a Prime Inference model.
 
     Examples:
@@ -194,22 +172,30 @@ def chat(
       echo "explain RL in one line" | prime inference chat <model-id>
       prime inference chat <model-id> "hi" --stream
     """
+    model = config.model
+    message = config.message
+    system = config.system
+    stream = config.stream
+    temperature = config.temperature
+    max_tokens = config.max_tokens
+    output = config.output
+
     if output not in ("text", "json"):
         console.print(f"[red]Error:[/red] invalid output format '{output}'. Supported: text, json")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     if stream and output == "json":
         console.print("[red]Error:[/red] --stream is not supported with --output json.")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     if message is None:
         if sys.stdin.isatty():
             console.print("[red]Error:[/red] no message provided (pass as arg or via stdin).")
-            raise typer.Exit(1)
+            raise SystemExit(1)
         message = sys.stdin.read().strip()
         if not message:
             console.print("[red]Error:[/red] empty message from stdin.")
-            raise typer.Exit(1)
+            raise SystemExit(1)
 
     payload: Dict[str, Any] = {
         "model": model,
@@ -233,7 +219,7 @@ def chat(
             raw = client.chat_completion(payload)
         if not isinstance(raw, dict):
             console.print("[red]Error:[/red] unexpected non-JSON response from inference.")
-            raise typer.Exit(1)
+            raise SystemExit(1)
         result = cast(Dict[str, Any], raw)
 
         if output == "json":
@@ -250,11 +236,11 @@ def chat(
             sys.stdout.write("\n")
         sys.stdout.flush()
 
-    except typer.Exit:
+    except SystemExit:
         raise
     except InferenceAPIError as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {e}")
-        raise typer.Exit(1)
+        raise SystemExit(1)

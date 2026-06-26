@@ -2,24 +2,27 @@ import json
 from pathlib import Path
 from typing import Any
 
+from click.testing import CliRunner
 from prime_cli.main import app
-from typer.testing import CliRunner
 
 runner = CliRunner()
 
 TEST_ENV = {"PRIME_DISABLE_VERSION_CHECK": "1"}
 
 
-def test_train_help_promotes_config_run_path() -> None:
+def test_train_help_promotes_explicit_run_command() -> None:
     result = runner.invoke(app, ["train", "--help"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
-    assert "prime train [OPTIONS] CONFIG_PATH [ARGS]... | COMMAND [ARGS]..." in result.output
+    assert "prime train [OPTIONS] COMMAND [ARGS]..." in result.output
     assert "Launch and manage Hosted Training runs." in result.output
-    assert "Path to a TOML config file to launch as a" in result.output
-    assert "Hosted Training run." in result.output
+    assert "run" in result.output
     assert "logs" in result.output
     assert "request" in result.output
+
+    run_help = runner.invoke(app, ["train", "run", "--help"], env=TEST_ENV)
+    assert run_help.exit_code == 0, run_help.output
+    assert "--config-path" in run_help.output
 
 
 def test_removed_rl_alias_is_absent_from_root_help() -> None:
@@ -36,7 +39,7 @@ def test_train_init_writes_requested_path(tmp_path: Path) -> None:
     result = runner.invoke(app, ["train", "init", str(output_path)], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
-    assert "Run with: prime train" in result.output
+    assert "Run with: prime train run" in result.output
     assert output_path.exists()
 
 
@@ -55,7 +58,7 @@ def test_train_init_defaults_to_rl_toml() -> None:
 
         assert result.exit_code == 0, result.output
         assert "Created rl.toml" in result.output
-        assert "Run with: prime train rl.toml" in result.output
+        assert "Run with: prime train run rl.toml" in result.output
         assert Path("rl.toml").exists()
 
 

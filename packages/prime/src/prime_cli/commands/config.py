@@ -1,17 +1,31 @@
 import os
 import re
-from typing import Optional
 
-import typer
 from rich.table import Table
 
-from prime_cli.core import Config
+from prime_cli.core import Config as PrimeConfig
+from prime_cli.leaves.config.delete import Config as ConfigDeleteConfig
+from prime_cli.leaves.config.envs import Config as ConfigEnvsConfig
+from prime_cli.leaves.config.remove_team_id import Config as ConfigRemoveTeamIdConfig
+from prime_cli.leaves.config.reset import Config as ConfigResetConfig
+from prime_cli.leaves.config.save import Config as ConfigSaveConfig
+from prime_cli.leaves.config.set_api_key import Config as ConfigSetApiKeyConfig
+from prime_cli.leaves.config.set_base_url import Config as ConfigSetBaseUrlConfig
+from prime_cli.leaves.config.set_frontend_url import Config as ConfigSetFrontendUrlConfig
+from prime_cli.leaves.config.set_inference_url import Config as ConfigSetInferenceUrlConfig
+from prime_cli.leaves.config.set_share_resources_with_team import (
+    Config as ConfigSetShareResourcesWithTeamConfig,
+)
+from prime_cli.leaves.config.set_ssh_key_path import Config as ConfigSetSshKeyPathConfig
+from prime_cli.leaves.config.set_team_id import Config as ConfigSetTeamIdConfig
+from prime_cli.leaves.config.use import Config as ConfigUseConfig
+from prime_cli.leaves.config.view import Config as ConfigViewConfig
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import get_console
+from ..utils.prompt import confirm, prompt
 from .teams import fetch_teams
 
-app = PlainTyper(help="Configure the CLI", no_args_is_help=True)
 console = get_console()
 
 # Team ID validation pattern: CUID (v1)
@@ -32,11 +46,9 @@ def validate_team_id(team_id: str) -> bool:
     return bool(TEAM_ID_PATTERN.match(team_id))
 
 
-@app.command()
-def view() -> None:
+def view(config: ConfigViewConfig) -> None:
     """View current configuration"""
-    config = Config()
-    settings = config.view()
+    settings = PrimeConfig().view()
 
     table = Table(title="Prime CLI Configuration")
     table.add_column("Setting", style="cyan")
@@ -108,25 +120,20 @@ def view() -> None:
     console.print(table)
 
 
-@app.command()
-def set_api_key(
-    api_key: Optional[str] = typer.Argument(
-        None,
-        help="Your Prime Intellect API key. If not provided, you'll be prompted securely.",
-    ),
-) -> None:
+def set_api_key(config: ConfigSetApiKeyConfig) -> None:
     """Set your API key (prompts securely if not provided)"""
+    api_key = config.api_key
+
     if api_key is None:
         # Interactive mode with secure prompt
-        api_key = typer.prompt(
+        api_key = prompt(
             "Enter your Prime Intellect API key (or press Enter to clear)",
             hide_input=True,
-            confirmation_prompt=False,
             default="",
         )
 
-    config = Config()
-    config.set_api_key(api_key)
+    prime_config = PrimeConfig()
+    prime_config.set_api_key(api_key)
 
     if api_key:
         masked_key = f"{api_key[:6]}***{api_key[-4:]}" if len(api_key) > 10 else "***"
@@ -139,8 +146,8 @@ def set_api_key(
             if isinstance(data, dict):
                 user_id = data.get("id")
                 if user_id:
-                    config.set_user_id(user_id)
-                    config.update_current_environment_file()
+                    prime_config.set_user_id(user_id)
+                    prime_config.update_current_environment_file()
         except (APIError, Exception):
             pass
 
@@ -153,15 +160,11 @@ def set_api_key(
         console.print("[green]API key cleared successfully![/green]")
 
 
-@app.command()
-def set_team_id(
-    team_id: str = typer.Argument(
-        ...,
-        help="Your Prime Intellect team ID.",
-    ),
-) -> None:
+def set_team_id(config: ConfigSetTeamIdConfig) -> None:
     """Set your team ID."""
-    config = Config()
+    team_id = config.team_id
+
+    prime_config = PrimeConfig()
 
     # Validate team ID format
     if not validate_team_id(team_id):
@@ -170,7 +173,7 @@ def set_team_id(
             "Team ID must be a CUID v1 (start with 'c' followed by 24 lowercase "
             "alphanumeric characters).[/red]"
         )
-        raise typer.Exit(code=1)
+        raise SystemExit(1)
 
     team_name = None
     team_role = None
@@ -186,7 +189,7 @@ def set_team_id(
         except (APIError, Exception):
             pass
 
-    config.set_team(team_id, team_name=team_name, team_role=team_role)
+    prime_config.set_team(team_id, team_name=team_name, team_role=team_role)
     if team_id:
         if team_name:
             console.print(f"[green]Team '{team_name}' ({team_id}) configured successfully![/green]")
@@ -196,80 +199,63 @@ def set_team_id(
         console.print("[green]Team ID cleared. Using personal account.[/green]")
 
 
-@app.command()
-def remove_team_id() -> None:
+def remove_team_id(config: ConfigRemoveTeamIdConfig) -> None:
     """Remove team ID to use personal account"""
-    config = Config()
-    config.set_team(None)
+    PrimeConfig().set_team(None)
     console.print("[green]Team ID removed. Using personal account.[/green]")
 
 
-@app.command()
-def set_base_url(
-    url: Optional[str] = typer.Argument(
-        None,
-        help="Base URL for the Prime Intellect API. If not provided, you'll be prompted.",
-    ),
-) -> None:
+def set_base_url(config: ConfigSetBaseUrlConfig) -> None:
     """Set the API base URL (prompts if not provided)"""
+    url = config.url
+
     if not url:
-        config = Config()
-        url = typer.prompt(
+        prime_config = PrimeConfig()
+        url = prompt(
             "Enter the base URL for the Prime Intellect API",
-            default=config.base_url,
+            default=prime_config.base_url,
         )
         if not url:
             console.print("[red]Base URL is required[/red]")
             return
 
-    config = Config()
-    config.set_base_url(url)
+    PrimeConfig().set_base_url(url)
     console.print(f"[green]Base URL set to: {url}[/green]")
 
 
-@app.command()
-def set_frontend_url(
-    url: Optional[str] = typer.Argument(
-        None,
-        help="Frontend URL for the Prime Intellect web app. If not provided, you'll be prompted.",
-    ),
-) -> None:
+def set_frontend_url(config: ConfigSetFrontendUrlConfig) -> None:
     """Set the frontend URL (prompts if not provided)"""
+    url = config.url
+
     if not url:
-        config = Config()
-        url = typer.prompt(
+        prime_config = PrimeConfig()
+        url = prompt(
             "Enter the frontend URL for the Prime Intellect web app",
-            default=config.frontend_url,
+            default=prime_config.frontend_url,
         )
         if not url:
             console.print("[red]Frontend URL is required[/red]")
             return
 
-    config = Config()
-    config.set_frontend_url(url)
+    PrimeConfig().set_frontend_url(url)
     console.print(f"[green]Frontend URL set to: {url}[/green]")
 
 
-@app.command()
-def set_inference_url(
-    url: Optional[str] = typer.Argument(
-        None,
-        help="Inference URL for Prime Inference API. If not provided, you'll be prompted.",
-    ),
-) -> None:
+def set_inference_url(config: ConfigSetInferenceUrlConfig) -> None:
     """Set the inference URL (prompts if not provided)"""
+    url = config.url
+
     if not url:
-        config = Config()
-        url = typer.prompt(
+        prime_config = PrimeConfig()
+        url = prompt(
             "Enter the inference URL for Prime Inference API",
-            default=config.inference_url,
+            default=prime_config.inference_url,
         )
         if not url:
             console.print("[red]Inference URL is required[/red]")
             return
 
-    config = Config()
-    config.set_inference_url(url)
+    PrimeConfig().set_inference_url(url)
     console.print(f"[green]Inference URL set to: {url}[/green]")
 
 
@@ -278,7 +264,7 @@ def _set_environment(
     env: str,
 ) -> None:
     """Set URLs for a specific environment"""
-    config = Config()
+    config = PrimeConfig()
 
     # Try to load the environment (handles both built-in and custom)
     try:
@@ -289,10 +275,10 @@ def _set_environment(
             console.print("[yellow]Available environments:[/yellow]")
             for env_name in config.list_environments():
                 console.print(f"  - {env_name}")
-            raise typer.Exit(1)
+            raise SystemExit(1)
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     console.print("[blue]Run 'prime config view' to see the current configuration[/blue]")
 
@@ -302,19 +288,19 @@ def _save_environment(
 ) -> None:
     """Save current configuration as a named environment (including API key)"""
     try:
-        config = Config()
+        config = PrimeConfig()
         config.save_environment(name)
         console.print(f"[green]Saved current configuration as environment '{name}'![/green]")
         console.print("[yellow]Note: This includes your API key and team ID[/yellow]")
         console.print(f"[blue]Use 'prime config use {name}' to load it later[/blue]")
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
 def _list_environments() -> None:
     """List all available environments"""
-    config = Config()
+    config = PrimeConfig()
     environments = config.list_environments()
 
     table = Table(title="Available Environments")
@@ -333,85 +319,72 @@ def _delete_environment(
 ) -> None:
     """Delete a named saved environment."""
     try:
-        config = Config()
+        config = PrimeConfig()
         config.delete_environment(name)
         console.print(f"[green]Deleted environment '{name}'![/green]")
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
 
-@app.command(no_args_is_help=True)
-def set_share_resources_with_team(
-    enabled: str = typer.Argument(
-        ...,
-        help="Enable or disable auto-sharing with team: true or false",
-    ),
-) -> None:
+def set_share_resources_with_team(config: ConfigSetShareResourcesWithTeamConfig) -> None:
     """Set whether to automatically share new resources with all team members"""
+    enabled = config.enabled
+
     value = enabled.lower()
     if value not in ("true", "false"):
         console.print("[red]Error: Value must be 'true' or 'false'[/red]")
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
-    config = Config()
-    config.set_share_resources_with_team(value == "true")
+    PrimeConfig().set_share_resources_with_team(value == "true")
     console.print(f"[green]Share resources with team set to: {value}[/green]")
 
 
-@app.command(no_args_is_help=True)
-def set_ssh_key_path(
-    path: str = typer.Argument(
-        ...,
-        help="Path to your SSH private key file",
-    ),
-) -> None:
+def set_ssh_key_path(config: ConfigSetSshKeyPathConfig) -> None:
     """Set the SSH private key path"""
-    config = Config()
-    config.set_ssh_key_path(path)
+    path = config.path
+
+    PrimeConfig().set_ssh_key_path(path)
     console.print("[green]SSH key path configured successfully![/green]")
 
 
-@app.command()
-def reset(
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-) -> None:
+def reset(config: ConfigResetConfig) -> None:
     """Reset configuration to defaults"""
-    if yes or typer.confirm("Are you sure you want to reset all settings?"):
-        config = Config()
-        config.set_api_key("")
-        config.set_team(None)
-        config.set_base_url(Config.DEFAULT_BASE_URL)
-        config.set_frontend_url(Config.DEFAULT_FRONTEND_URL)
-        config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
-        config.set_current_environment("production")
+    yes = config.yes
+
+    if yes or confirm("Are you sure you want to reset all settings?"):
+        prime_config = PrimeConfig()
+        prime_config.set_api_key("")
+        prime_config.set_team(None)
+        prime_config.set_base_url(PrimeConfig.DEFAULT_BASE_URL)
+        prime_config.set_frontend_url(PrimeConfig.DEFAULT_FRONTEND_URL)
+        prime_config.set_ssh_key_path(PrimeConfig.DEFAULT_SSH_KEY_PATH)
+        prime_config.set_current_environment("production")
         console.print("[green]Configuration reset to defaults![/green]")
 
 
 # Environment commands
-@app.command(name="use", no_args_is_help=True)
-def use_environment(
-    env: str = typer.Argument(
-        ..., help="Environment name: 'production' or a custom saved environment"
-    ),
-) -> None:
+def use_environment(config: ConfigUseConfig) -> None:
     """Switch to a different environment"""
+    env = config.env
+
     _set_environment(env)
 
 
-@app.command(name="save", no_args_is_help=True)
-def save_env(name: str = typer.Argument(..., help="Name for the environment")) -> None:
+def save_env(config: ConfigSaveConfig) -> None:
     """Save current config as environment (including API key)"""
+    name = config.name
+
     _save_environment(name)
 
 
-@app.command(name="delete", no_args_is_help=True)
-def delete_env(name: str = typer.Argument(..., help="Name of the saved environment")) -> None:
+def delete_env(config: ConfigDeleteConfig) -> None:
     """Delete a saved environment"""
+    name = config.name
+
     _delete_environment(name)
 
 
-@app.command(name="envs")
-def list_envs() -> None:
+def list_envs(config: ConfigEnvsConfig) -> None:
     """List available environments"""
     _list_environments()

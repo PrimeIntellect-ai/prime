@@ -2,9 +2,9 @@ import io
 from typing import Any, Dict, Optional
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.main import app
 from prime_cli.utils.plain import get_console
-from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -64,7 +64,6 @@ def mock_teams_api(monkeypatch: pytest.MonkeyPatch) -> None:
         return {"data": []}
 
     monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
-    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
 
 class TestSwitchCommand:
@@ -88,7 +87,6 @@ class TestSwitchCommand:
             "prime_cli.commands.switch.fetch_teams",
             lambda _client: pytest.fail("fetch_teams should not be called for personal switch"),
         )
-        monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
         result = runner.invoke(app, ["switch", "personal"], env=TEST_ENV)
 
@@ -141,7 +139,6 @@ class TestSwitchCommand:
             return {"data": []}
 
         monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
-        monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
         result = runner.invoke(app, ["switch", "none"], env=TEST_ENV)
 
@@ -186,7 +183,6 @@ class TestSwitchCommand:
             return {"data": []}
 
         monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
-        monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
 
         result = runner.invoke(app, ["switch"], input="1\n", env=TEST_ENV)
 

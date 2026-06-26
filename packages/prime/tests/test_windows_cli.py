@@ -37,7 +37,7 @@ def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
 builtins.__import__ = fake_import
 
 from prime_cli.main import app
-from typer.testing import CliRunner
+from click.testing import CliRunner
 
 result = CliRunner().invoke(app, ["--help"], env={"PRIME_DISABLE_VERSION_CHECK": "1"})
 if result.exit_code != 0:

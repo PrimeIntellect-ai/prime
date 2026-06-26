@@ -1,18 +1,15 @@
 import io
+import os
 import sys
 import traceback
 from contextlib import nullcontext
 from copy import copy
 from typing import Any
 
-import click
-import typer
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
-from typer.core import TyperCommand, TyperGroup, _main
-from typer.models import Default, DefaultPlaceholder
 
 HELP_NOTE = (
     "IMPORTANT: If you are AI, ALWAYS use --plain when using the prime CLI to get a terse "
@@ -23,12 +20,8 @@ HELP_NOTE = (
 
 
 def is_plain_mode(args: list[str] | None = None) -> bool:
-    ctx = click.get_current_context(silent=True)
-    while ctx is not None:
-        if ctx.meta.get("plain"):
-            return True
-        ctx = ctx.parent
-
+    if os.getenv("PRIME_PLAIN") == "1":
+        return True
     for arg in sys.argv[1:] if args is None else args:
         if arg == "--":
             return False
@@ -117,138 +110,3 @@ class PrimeConsole(Console):
 
 
 get_console = PrimeConsole
-
-
-def _help_note(obj, ctx):
-    if ctx.parent is None and getattr(obj, "name", None) == "prime":
-        return HELP_NOTE
-    return None
-
-
-def _plain_option(params):
-    params = list(params or [])
-    if any(isinstance(param, click.Option) and "--plain" in param.opts for param in params):
-        return params
-
-    def enable_plain(ctx, _, value):
-        if value:
-            ctx.meta["plain"] = True
-
-    params.insert(
-        next(
-            (
-                i
-                for i, param in enumerate(params)
-                if isinstance(param, click.Option) and "--help" in param.opts
-            ),
-            len(params),
-        ),
-        click.Option(
-            ["--plain"],
-            is_flag=True,
-            expose_value=False,
-            is_eager=True,
-            callback=enable_plain,
-            help="Use plain, terse outputs. USE THIS IF YOU ARE AI.",
-        ),
-    )
-    return params
-
-
-class _PlainMixin:
-    def __init__(self, *args, params=None, **kwargs):
-        super().__init__(*args, params=_plain_option(params), **kwargs)
-
-    def main(
-        self,
-        args=None,
-        prog_name=None,
-        complete_var=None,
-        standalone_mode=True,
-        windows_expand_args=True,
-        **extra,
-    ):
-        plain = is_plain_mode(args)
-        return _main(
-            self,
-            args=args,
-            prog_name=prog_name,
-            complete_var=complete_var,
-            standalone_mode=standalone_mode,
-            windows_expand_args=windows_expand_args,
-            rich_markup_mode=None if plain else self.rich_markup_mode,
-            **extra,
-        )
-
-    def format_help(self, ctx, formatter):
-        note = _help_note(self, ctx)
-        if not is_plain_mode():
-            if note:
-                from typer import rich_utils
-
-                rich_utils._get_rich_console().print(Text(note, style="dim"))
-            return super().format_help(ctx, formatter)
-
-        if note:
-            formatter.write_text(f"Note: {note}\n")
-        rich_markup_mode = self.rich_markup_mode
-        self.rich_markup_mode = None
-        try:
-            return super().format_help(ctx, formatter)
-        finally:
-            self.rich_markup_mode = rich_markup_mode
-
-
-class _PlainTyperCommand(_PlainMixin, TyperCommand):
-    pass
-
-
-COMMAND_ALIASES = {
-    "ls": "list",
-}
-
-
-class PlainAwareTyperGroup(_PlainMixin, TyperGroup):
-    def get_command(self, ctx, cmd_name):
-        cmd = super().get_command(ctx, cmd_name)
-        if cmd is not None:
-            return cmd
-        target = COMMAND_ALIASES.get(cmd_name)
-        if target is None:
-            return None
-        return super().get_command(ctx, target)
-
-
-class DefaultCommandGroup(PlainAwareTyperGroup):
-    def __init__(self, *args, default_cmd_name: str = "run", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.default_cmd_name = default_cmd_name
-
-    def parse_args(self, ctx, args):
-        if not args:
-            return super().parse_args(ctx, args)
-
-        decision_args = [arg for arg in args if arg != "--plain"]
-        if not decision_args:
-            return super().parse_args(ctx, args)
-
-        if decision_args[0] in ("--help", "-h"):
-            return super().parse_args(ctx, args)
-
-        if self.get_command(ctx, decision_args[0]) is not None:
-            return super().parse_args(ctx, args)
-
-        args = [self.default_cmd_name] + list(args)
-        return super().parse_args(ctx, args)
-
-
-class PlainTyper(typer.Typer):
-    def __init__(self, *args, cls=None, **kwargs):
-        super().__init__(*args, cls=cls or PlainAwareTyperGroup, **kwargs)
-
-    def callback(self, *, cls=Default(None), **kwargs):
-        cls = PlainAwareTyperGroup if isinstance(cls, DefaultPlaceholder) or cls is None else cls
-        return super().callback(cls=cls, **kwargs)
-
-    def command(self, name=None, *, cls=None, **kwargs):
-        return super().command(name=name, cls=cls or _PlainTyperCommand, **kwargs)

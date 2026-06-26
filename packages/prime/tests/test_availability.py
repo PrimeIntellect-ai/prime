@@ -3,9 +3,9 @@ import os
 from typing import Any, Dict
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.core import APIClient
 from prime_cli.main import app
-from typer.testing import CliRunner
 
 
 @pytest.fixture

@@ -2,9 +2,9 @@ import json
 from typing import Any, Dict, Optional
 
 import pytest
+from click.testing import CliRunner
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
-from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -451,7 +451,7 @@ class TestSecretsHelp:
 
         assert result.exit_code == 0
         output = strip_ansi(result.output)
-        assert "SECRET_ID" in output
+        assert "--secret-id" in output
 
 
 class TestSecretsTeamContext:

@@ -1,14 +1,19 @@
 # Verifiers V1 CLI boundary
 
-Prime uses Typer for command routing and treats Verifiers-owned commands as workspace processes.
-It forwards every argument unchanged and replaces itself with:
+Prime's registry router treats Verifiers-owned commands as workspace processes. It forwards
+every argument unchanged and replaces itself with:
 
 ```text
 <workspace-python> -m <verifiers-module> <argv...>
 ```
 
-The Verifiers command registry supplies the module. Prime selects the workspace interpreter but
-does not probe, pre-resolve, rewrite paths, render help, or reinterpret native options.
+The Verifiers command registry supplies the module. Prime selects the workspace interpreter,
+materializes the selected account as environment variables, and otherwise does not probe,
+pre-resolve, rewrite paths, render help, or reinterpret native options.
+
+Hub references are Prime-owned. Install `owner/name[@version]` with `prime env install`, then
+pass the resulting local module name to `prime eval run`, `prime env validate`, or
+`prime env serve`. Verifiers never reads Prime profile files or downloads packages.
 
 ## Command ownership
 

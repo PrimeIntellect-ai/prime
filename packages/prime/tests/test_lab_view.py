@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import prime_lab_app.agent_widget_model as agent_widget_model
+import prime_lab_app.cache as lab_cache
 import pytest
 import toml
 from click.testing import CliRunner
@@ -220,7 +221,6 @@ from rich.console import Console
 from rich.panel import Panel
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Button, Label, OptionList, Select, Static, Tree
-from verifiers.utils import install_utils
 
 
 class FakeConfig:
@@ -795,19 +795,14 @@ def test_lab_environment_cache_downloads_source_and_writes_manifest(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    def fake_download(details: dict, destination: Path) -> None:
+    def fake_download(details: dict, destination: Path, **_kwargs: Any) -> None:
         assert details == {"package_url": "https://example.test/tracked-env.tar.gz"}
         destination.mkdir(parents=True)
         (destination / "README.md").write_text("# Cached Env\n", encoding="utf-8")
         (destination / "env.py").write_text("VALUE = 1\n", encoding="utf-8")
 
-    monkeypatch.setattr("verifiers.utils.install_utils.download_environment_source", fake_download)
-    monkeypatch.setattr(
-        install_utils,
-        "environment_package_url",
-        lambda details: details.get("tracked_package_url") or details.get("package_url"),
-        raising=False,
-    )
+    monkeypatch.setattr(lab_cache, "Config", FakeConfig)
+    monkeypatch.setattr(lab_cache, "download_environment_source", fake_download)
 
     cached = ensure_environment_source(
         {

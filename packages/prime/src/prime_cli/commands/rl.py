@@ -42,7 +42,7 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
-from ..utils.env_metadata import find_environment_metadata
+from ..utils.env_metadata import find_environment_metadata, parse_env_id
 from ..utils.env_vars import EnvParseError, collect_env_vars
 from ..utils.formatters import (
     format_file_size,
@@ -322,9 +322,7 @@ class EnvConfig(BaseModel):
 
     @model_validator(mode="after")
     def parse_version_from_id(self) -> "EnvConfig":
-        """Normalize a hosted environment reference with Verifiers' parser."""
-        from verifiers.utils.install_utils import parse_env_id
-
+        """Normalize a hosted environment reference."""
         if "/" not in self.id:
             return self
         owner, name, version = parse_env_id(self.id)

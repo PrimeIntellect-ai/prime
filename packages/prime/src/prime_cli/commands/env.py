@@ -52,7 +52,6 @@ from prime_cli.leaves.env.version.delete import Config as EnvVersionDeleteConfig
 from prime_cli.leaves.env.version.list import Config as EnvVersionListConfig
 
 from ..client import APIClient, APIError
-from ..core import Config
 from ..lab_hygiene import LabHygieneOptions, find_lab_workspace, run_lab_hygiene_preflight
 from ..utils import (
     get_console,
@@ -64,7 +63,11 @@ from ..utils import (
 from ..utils.env_metadata import (
     collect_archive_files,
     compute_content_hash,
+    download_environment_source,
     find_environment_metadata,
+    install_environment_from_hub,
+    normalize_package_name,
+    parse_env_id,
 )
 from ..utils.formatters import format_file_size
 from ..utils.formatters import strip_ansi as _strip_ansi
@@ -152,8 +155,6 @@ def _uv_pip_command(subcommand: str, *args: str) -> List[str]:
 
 def _parse_environment_slug(environment: str) -> Tuple[str, str]:
     """Parse an unversioned owner/name Hub slug."""
-    from verifiers.utils.install_utils import parse_env_id
-
     try:
         owner, name, version = parse_env_id(environment)
     except ValueError:
@@ -1700,8 +1701,6 @@ def pull(config: EnvPullConfig) -> None:
     try:
         client = APIClient(require_auth=False)
 
-        from verifiers.utils.install_utils import parse_env_id
-
         try:
             owner, name, parsed_version = parse_env_id(env_id)
         except ValueError as exc:
@@ -1733,9 +1732,12 @@ def pull(config: EnvPullConfig) -> None:
 
         console.print(f"Downloading to {target_dir}...")
         try:
-            from verifiers.utils.install_utils import download_environment_source
-
-            download_environment_source(details, target_dir, api_key=client.api_key)
+            download_environment_source(
+                details,
+                target_dir,
+                api_key=client.api_key,
+                base_url=client.base_url,
+            )
         except (OSError, ValueError, httpx.HTTPError) as exc:
             console.print(f"[red]Download failed: {exc}[/red]")
             raise SystemExit(1) from exc
@@ -1929,8 +1931,6 @@ def info(config: EnvInfoConfig) -> None:
     try:
         client = APIClient(require_auth=False)
 
-        from verifiers.utils.install_utils import parse_env_id
-
         try:
             owner, name, parsed_version = parse_env_id(env_id)
         except ValueError as e:
@@ -1979,12 +1979,13 @@ def info(config: EnvInfoConfig) -> None:
         package_url = details.get("tracked_package_url") or details.get("package_url")
         if wheel_url or simple_index_url or package_url:
             reference = f"{owner}/{name}@{target_version}"
+            module = normalize_package_name(name)
             console.print("[bold yellow]Install[/bold yellow]")
             console.print(f"  [green]$[/green] prime env install {reference}")
             console.print()
             console.print("[bold yellow]Run[/bold yellow]")
-            console.print(f"  [green]$[/green] prime eval run {reference}       # V1")
-            console.print(f"  [green]$[/green] prime eval run --id {reference}  # V0")
+            console.print(f"  [green]$[/green] prime eval run {module}       # V1")
+            console.print(f"  [green]$[/green] prime eval run --id {module}  # V0")
         else:
             console.print("[yellow]No installable artifact is available for this version[/yellow]")
 
@@ -2009,8 +2010,6 @@ def inspect_cmd(config: EnvInspectConfig) -> None:
     max_bytes = config.max_bytes
 
     validate_output_format(output, console)
-
-    from verifiers.utils.install_utils import parse_env_id
 
     try:
         try:
@@ -2111,21 +2110,25 @@ def install(config: EnvInstallConfig) -> None:
     path = config.path
     prerelease = config.prerelease
 
-    from verifiers.utils.install_utils import install_from_hub
-
     if not shutil.which("uv"):
         console.print("[red]Error: uv is not installed.[/red]")
         raise SystemExit(1)
 
-    prime_config = Config()
     failed: list[tuple[str, str]] = []
     for env_id in dict.fromkeys(env_ids):
         try:
             if "/" in env_id:
-                install_from_hub(
+                owner, name, version = parse_env_id(env_id)
+                client = APIClient(require_auth=False)
+                response = client.get(f"/environmentshub/{owner}/{name}/@{version or 'latest'}")
+                details = response.get("data", response)
+                if not isinstance(details, dict):
+                    raise ValueError(f"Invalid Environments Hub response for {env_id!r}")
+                module = install_environment_from_hub(
                     env_id,
-                    api_key=prime_config.api_key,
-                    base_url=prime_config.base_url,
+                    details,
+                    api_key=client.api_key,
+                    base_url=client.base_url,
                     python_executable=resolve_workspace_python(),
                     prerelease=prerelease,
                 )
@@ -2134,10 +2137,11 @@ def install(config: EnvInstallConfig) -> None:
                 if not env_path.is_dir():
                     raise FileNotFoundError(f"Local environment not found: {env_path}")
                 subprocess.run(_uv_pip_command("install", "-e", str(env_path)), check=True)
+                module = normalize_package_name(env_id)
             console.print(f"[green]✓ Installed {env_id}[/green]")
-            console.print(f"[dim]V1: prime eval run {env_id}[/dim]")
-            console.print(f"[dim]V0: prime eval run --id {env_id}[/dim]")
-        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            console.print(f"[dim]V1: prime eval run {module}[/dim]")
+            console.print(f"[dim]V0: prime eval run --id {module}[/dim]")
+        except (APIError, OSError, ValueError, subprocess.CalledProcessError) as exc:
             failed.append((env_id, str(exc)))
             console.print(f"[red]✗ {env_id}: {exc}[/red]")
 
@@ -2148,8 +2152,6 @@ def install(config: EnvInstallConfig) -> None:
 def uninstall(config: EnvUninstallConfig) -> None:
     """Uninstall an environment distribution with uv."""
     env_name = config.env_name
-
-    from verifiers.utils.install_utils import normalize_package_name
 
     package = normalize_package_name(env_name.rsplit("/", 1)[-1].split("@", 1)[0])
     try:

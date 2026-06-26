@@ -1,12 +1,204 @@
-"""Utilities for reading and managing environment metadata."""
+"""Prime-owned environment metadata and Hub package operations."""
 
 import hashlib
+import importlib
 import json
 import os
+import re
+import shutil
+import subprocess
+import tarfile
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlparse
 
+import httpx
 from gitignore_parser import parse_gitignore
+
+
+def normalize_package_name(name: str) -> str:
+    """Return the importable spelling used by environment packages."""
+    return name.replace("-", "_").lower()
+
+
+def parse_env_id(env_id: str) -> tuple[str, str, str | None]:
+    """Parse a Prime Hub reference into owner, name, and optional version."""
+    version = None
+    if "@" in env_id:
+        env_id, version = env_id.rsplit("@", 1)
+
+    parts = env_id.split("/")
+    valid_parts = len(parts) == 2 and all(
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", part) for part in parts
+    )
+    valid_version = version is None or bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+_-]*", version))
+    if not valid_parts or not valid_version:
+        raise ValueError(
+            f"Invalid environment ID: {env_id!r}. Expected 'owner/name' or 'owner/name@version'."
+        )
+    return parts[0], parts[1], version
+
+
+def _safe_extract(tar: tarfile.TarFile, destination: Path) -> None:
+    """Extract a source archive without links, absolute paths, or traversal."""
+    destination = destination.resolve()
+    for member in tar.getmembers():
+        path = Path(member.name)
+        if member.issym() or member.islnk():
+            raise ValueError(f"Refusing to extract archive link: {member.name}")
+        if not member.isfile() and not member.isdir():
+            raise ValueError(f"Refusing to extract special archive entry: {member.name}")
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"Refusing to extract unsafe path: {member.name}")
+        if not (destination / path).resolve().is_relative_to(destination):
+            raise ValueError(f"Archive path escapes destination: {member.name}")
+    tar.extractall(destination, filter="data")
+
+
+def download_environment_source(
+    details: dict[str, Any],
+    destination: Path,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> Path:
+    """Download and safely extract a Hub source package."""
+    package_url = details.get("tracked_package_url") or details.get("package_url")
+    parsed = urlparse(package_url or "")
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Environment has no valid downloadable source package")
+    assert package_url is not None
+
+    api_host = urlparse(base_url or "").netloc
+    headers = (
+        {"Authorization": f"Bearer {api_key}"} if api_key and parsed.netloc == api_host else {}
+    )
+    destination = destination.expanduser().absolute()
+    if destination.is_symlink() or destination == Path(destination.anchor):
+        raise ValueError(f"Unsafe extraction destination: {destination}")
+
+    with tempfile.TemporaryDirectory(prefix="prime-env-source-") as directory:
+        archive = Path(directory) / "environment.tar.gz"
+        extracted = Path(directory) / "extracted"
+        extracted.mkdir()
+        with httpx.stream(
+            "GET", package_url, headers=headers, timeout=60.0, follow_redirects=True
+        ) as response:
+            response.raise_for_status()
+            with archive.open("wb") as handle:
+                for chunk in response.iter_bytes(chunk_size=8192):
+                    handle.write(chunk)
+        with tarfile.open(archive, "r:gz") as tar:
+            _safe_extract(tar, extracted)
+
+        entries = list(extracted.iterdir())
+        source = extracted
+        if (
+            not (extracted / "pyproject.toml").is_file()
+            and len(entries) == 1
+            and entries[0].is_dir()
+        ):
+            source = entries[0]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, destination, dirs_exist_ok=True)
+    return destination
+
+
+def _build_environment_wheel(source: Path, cache_dir: Path) -> Path:
+    with tempfile.TemporaryDirectory(prefix="prime-env-wheel-") as directory:
+        dist = Path(directory) / "dist"
+        subprocess.run(
+            ["uv", "build", "--wheel", "--out-dir", str(dist)],
+            cwd=source,
+            check=True,
+        )
+        wheels = list(dist.glob("*.whl"))
+        if len(wheels) != 1:
+            raise RuntimeError(f"Expected one built wheel for {source}, found {len(wheels)}")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached = cache_dir / wheels[0].name
+        temporary = cache_dir / f".{wheels[0].name}.{os.getpid()}"
+        shutil.copy2(wheels[0], temporary)
+        temporary.replace(cached)
+    return cached
+
+
+def install_environment_from_hub(
+    env_id: str,
+    details: dict[str, Any],
+    *,
+    python_executable: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    prerelease: bool = False,
+) -> str:
+    """Install resolved Hub details and return the local importable module name."""
+    owner, name, version = parse_env_id(env_id)
+    simple_index_url = details.get("simple_index_url")
+    wheel_url = details.get("wheel_url")
+    url_dependencies = details.get("url_dependencies") or []
+    package = normalize_package_name(name)
+    pinned_version = version if version not in (None, "latest") else None
+    command = [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        python_executable,
+        "-P",
+        package,
+    ]
+
+    if isinstance(simple_index_url, str) and simple_index_url:
+        command.append(f"{package}=={pinned_version}" if pinned_version else package)
+        command.extend(str(dependency) for dependency in url_dependencies)
+        command.extend(["--extra-index-url", simple_index_url])
+    elif isinstance(wheel_url, str) and wheel_url:
+        parsed = urlparse(wheel_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(f"Invalid wheel URL for {env_id!r}: {wheel_url}")
+        command.append(wheel_url)
+        command.extend(str(dependency) for dependency in url_dependencies)
+    else:
+        version_data = details.get("latest_version")
+        content_hash = details.get("content_hash") or details.get("sha256")
+        if not content_hash and isinstance(version_data, dict):
+            content_hash = version_data.get("content_hash") or version_data.get("sha256")
+        valid_hash = (
+            isinstance(content_hash, str)
+            and len(content_hash) == 64
+            and all(character in "0123456789abcdef" for character in content_hash.lower())
+        )
+        cache_root = Path.home() / ".cache" / "prime" / "environments" / owner / name
+        cache_dir = cache_root / str(content_hash) if valid_hash else None
+        wheels = list(cache_dir.glob("*.whl")) if cache_dir else []
+        if wheels:
+            wheel = wheels[0]
+        else:
+            with tempfile.TemporaryDirectory(prefix="prime-env-build-") as directory:
+                source = download_environment_source(
+                    details,
+                    Path(directory) / "source",
+                    api_key=api_key,
+                    base_url=base_url,
+                )
+                if cache_dir is None:
+                    digest = hashlib.sha256()
+                    for path in sorted(item for item in source.rglob("*") if item.is_file()):
+                        digest.update(path.relative_to(source).as_posix().encode())
+                        digest.update(b"\0")
+                        digest.update(path.read_bytes())
+                    cache_dir = cache_root / digest.hexdigest()
+                cached = list(cache_dir.glob("*.whl"))
+                wheel = cached[0] if cached else _build_environment_wheel(source, cache_dir)
+        command.append(str(wheel))
+
+    if prerelease:
+        command.append("--prerelease=allow")
+    subprocess.run(command, check=True)
+    importlib.invalidate_caches()
+    return package
 
 
 def collect_archive_files(env_path: Path) -> List[Path]:

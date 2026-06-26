@@ -31,7 +31,7 @@ from ..utils import (
     output_data_as_json,
 )
 from ..utils.display import get_eval_viewer_url
-from ..utils.env_metadata import find_environment_metadata
+from ..utils.env_metadata import find_environment_metadata, parse_env_id
 from ..utils.eval_push import convert_eval_results, load_eval_config, load_results_jsonl
 from ..utils.hosted_eval import (
     EvalStatus,
@@ -389,8 +389,6 @@ def _resolve_hosted_environment(
     """Resolve an explicit slug or a local package's recorded upstream."""
     platform_slug = None
     if "/" in environment:
-        from verifiers.utils.install_utils import parse_env_id
-
         try:
             owner, name, version = parse_env_id(environment)
         except ValueError as exc:

@@ -139,8 +139,9 @@ prime env info <environment-name>
 # Inspect environment source without downloading the archive
 prime env inspect <environment-name>
 
-# Install an environment locally
-prime env install <environment-name>
+# Install a Hub environment, then run its local module with Verifiers
+prime env install <owner>/<environment-name>
+prime eval run <environment_name>
 
 # Create and push your own environment
 prime env init my-environment

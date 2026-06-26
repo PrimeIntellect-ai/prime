@@ -10,7 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from prime_cli.utils.env_metadata import compute_content_hash
+from prime_cli.core import Config
+from prime_cli.utils.env_metadata import (
+    compute_content_hash,
+    download_environment_source,
+)
 
 from .models import LabItem, LabSection
 
@@ -316,18 +320,13 @@ def ensure_environment_source(raw: dict[str, Any]) -> CachedEnvironmentSource | 
     if cached is not None:
         return cached
 
-    from verifiers.utils.install_utils import (
-        download_environment_source,
-        environment_package_url,
-    )
-
     slug = str(raw.get("slug") or raw.get("id") or "")
     if "/" not in slug:
         return None
     owner, name = slug.split("/", 1)
 
     detail = _platform_detail(raw)
-    package_url = environment_package_url(detail)
+    package_url = detail.get("tracked_package_url") or detail.get("package_url")
     version = (
         detail.get("semanticVersion")
         or detail.get("semantic_version")
@@ -342,7 +341,13 @@ def ensure_environment_source(raw: dict[str, Any]) -> CachedEnvironmentSource | 
     cache_path = environment_source_cache_path(owner, name, str(version))
     manifest_path = cache_path / ".prime" / "lab-cache.json"
 
-    download_environment_source({"package_url": package_url}, cache_path)
+    config = Config()
+    download_environment_source(
+        {"package_url": package_url},
+        cache_path,
+        api_key=config.api_key,
+        base_url=config.base_url,
+    )
     content_hash = compute_content_hash(cache_path)
     manifest = {
         "cache_version": 1,

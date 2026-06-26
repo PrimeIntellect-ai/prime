@@ -463,7 +463,7 @@ def push_image(
             image_tag = "latest"
 
         # Validate image name doesn't contain slashes
-        if image_name is not None and "/" in image_name:
+        if image_name is not None and "/" in image_name and not platform_image:
             console.print(
                 "[red]Error: Image name cannot contain '/'. "
                 "Use simple names like 'myapp:v1.0.0'.[/red]"

@@ -175,6 +175,66 @@ def test_push_platform_image_forces_public_owner_scope(tmp_path, monkeypatch):
     assert "Platform" in result.output
 
 
+def test_push_platform_image_allows_namespaced_image_reference(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
+
+    context_path = tmp_path / "context"
+    context_path.mkdir()
+    (context_path / "Dockerfile").write_text("FROM ubuntu:22.04\n")
+
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            if method == "POST" and path == "/images/build":
+                captured["build_payload"] = json
+                return {
+                    "build_id": "build-123",
+                    "upload_url": "https://example.test/upload",
+                    "fullImagePath": "namanjain12/orange3_final:tag",
+                }
+
+            if method == "POST" and path == "/images/build/build-123/start":
+                return {}
+
+            raise AssertionError(f"Unexpected request: {method} {path}")
+
+    class DummyUploadResponse:
+        def raise_for_status(self):
+            return None
+
+    def fake_put(url, content, headers, timeout):
+        return DummyUploadResponse()
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+    monkeypatch.setattr("prime_cli.commands.images.httpx.put", fake_put)
+
+    result = runner.invoke(
+        app,
+        [
+            "images",
+            "push",
+            "namanjain12/orange3_final:tag",
+            "--context",
+            "context",
+            "--platform-image",
+        ],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["build_payload"] == {
+        "image_name": "namanjain12/orange3_final",
+        "image_tag": "tag",
+        "dockerfile_path": PACKAGED_DOCKERFILE_PATH,
+        "platform": "linux/amd64",
+        "owner_scope": "platform",
+        "visibility": "PUBLIC",
+    }
+
+
 def test_push_platform_image_source_image_queues_platform_transfer(monkeypatch):
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
     monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
